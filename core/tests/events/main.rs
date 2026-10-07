@@ -232,7 +232,8 @@ fn test_compare_and_set_stale_revision_rejected() -> Result<()> {
         "Item revision should be 1 after first event"
     );
 
-    let event2 = make_cancellation_event("evt-2", "item-1", 1);
+    // Try to save event2 with revision 0 (stale) expecting item revision 0 (stale)
+    let event2 = make_cancellation_event("evt-2", "item-1", 0);
     let result = save_event(&mut db, &event2, 0);
 
     assert!(result.is_err());
@@ -332,6 +333,16 @@ fn test_user_corrections_separate_from_source() -> Result<()> {
     insert_test_item(&tx, "item-1")?;
     tx.commit()?;
 
+    // Verify original capture text
+    let tx = db.transaction()?;
+    let original_text: String = tx.query_row(
+        "SELECT text FROM captures WHERE capture_id = (SELECT capture_id FROM items WHERE item_id = ?)",
+        ["item-1"],
+        |row| row.get(0),
+    )?;
+    assert_eq!(original_text, "test");
+    tx.commit()?;
+
     let correction = make_correction_event(
         "evt-correct",
         "item-1",
@@ -358,6 +369,14 @@ fn test_user_corrections_separate_from_source() -> Result<()> {
     assert_eq!(corrections_row.1, "text");
     assert_eq!(corrections_row.2, Some("old text".to_string()));
     assert_eq!(corrections_row.3, "new text");
+
+    // Verify original capture text is unchanged
+    let capture_text: String = tx.query_row(
+        "SELECT text FROM captures WHERE capture_id = (SELECT capture_id FROM items WHERE item_id = ?)",
+        ["item-1"],
+        |row| row.get(0),
+    )?;
+    assert_eq!(capture_text, "test");
 
     let _ = std::fs::remove_file(&path);
     Ok(())
@@ -401,22 +420,55 @@ fn test_notes_ideas_actions_distinct() -> Result<()> {
     insert_test_item(&tx, "item-1")?;
     tx.commit()?;
 
-    let correction =
-        make_correction_event("evt-correct", "item-1", 0, "note", None, "this is a note");
-    let completion = make_completion_event("evt-done", "item-1", 1);
-    let cancellation = make_cancellation_event("evt-cancel", "item-1", 2);
+    let note = make_correction_event("evt-note", "item-1", 0, "note", None, "this is a note");
+    let idea = make_correction_event("evt-idea", "item-1", 1, "idea", None, "this is an idea");
+    let action = make_correction_event(
+        "evt-action",
+        "item-1",
+        2,
+        "action",
+        None,
+        "this is an action",
+    );
+    let broad = make_correction_event(
+        "evt-broad",
+        "item-1",
+        3,
+        "broad_intention",
+        None,
+        "this is a broad intention",
+    );
 
-    save_event(&mut db, &correction, 0)?;
-    save_event(&mut db, &completion, 1)?;
-    save_event(&mut db, &cancellation, 2)?;
+    save_event(&mut db, &note, 0)?;
+    save_event(&mut db, &idea, 1)?;
+    save_event(&mut db, &action, 2)?;
+    save_event(&mut db, &broad, 3)?;
 
     let tx = db.transaction()?;
     let events = get_events_for_item(&tx, "item-1")?;
 
-    assert_eq!(events.len(), 3);
+    assert_eq!(events.len(), 4);
     assert_eq!(events[0].event_type, EventType::Correction);
-    assert_eq!(events[1].event_type, EventType::Completion);
-    assert_eq!(events[2].event_type, EventType::Cancellation);
+    if let EventPayload::Correction(c) = &events[0].payload {
+        assert_eq!(c.kind, "note");
+    } else {
+        panic!("Expected Correction payload");
+    }
+    if let EventPayload::Correction(c) = &events[1].payload {
+        assert_eq!(c.kind, "idea");
+    } else {
+        panic!("Expected Correction payload");
+    }
+    if let EventPayload::Correction(c) = &events[2].payload {
+        assert_eq!(c.kind, "action");
+    } else {
+        panic!("Expected Correction payload");
+    }
+    if let EventPayload::Correction(c) = &events[3].payload {
+        assert_eq!(c.kind, "broad_intention");
+    } else {
+        panic!("Expected Correction payload");
+    }
 
     let _ = std::fs::remove_file(&path);
     Ok(())
@@ -525,9 +577,10 @@ fn test_get_events_for_item_ordered() -> Result<()> {
     insert_test_item(&tx, "item-1")?;
     tx.commit()?;
 
-    let evt0 = make_correction_event("evt-0", "item-1", 0, "text", None, "val");
-    let evt1 = make_cancellation_event("evt-1", "item-1", 1);
-    let evt2 = make_completion_event("evt-2", "item-1", 2);
+    // Create three non-terminal events that preserve ordering
+    let evt0 = make_correction_event("evt-0", "item-1", 0, "text", None, "val0");
+    let evt1 = make_correction_event("evt-1", "item-1", 1, "type", None, "val1");
+    let evt2 = make_correction_event("evt-2", "item-1", 2, "scope", None, "val2");
 
     save_event(&mut db, &evt0, 0)?;
     save_event(&mut db, &evt1, 1)?;
@@ -702,6 +755,114 @@ fn test_concurrent_saves_idempotent() -> Result<()> {
     for (i, result) in results.iter().enumerate() {
         assert_eq!(result, &event, "Thread {} got different event", i);
     }
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn test_invalid_event_type_payload_combination() -> Result<()> {
+    // Completion event with Correction payload should be rejected
+    let result = Event::new(
+        "evt-1".to_string(),
+        "item-1".to_string(),
+        0,
+        EventType::Completion,
+        EventPayload::Correction(Correction {
+            kind: "text".to_string(),
+            old_value: None,
+            new_value: "test".to_string(),
+        }),
+        "2026-01-15T10:30:00Z".to_string(),
+    );
+
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("Invalid event type and payload combination"));
+
+    Ok(())
+}
+
+#[test]
+fn test_no_transitions_after_completion() -> Result<()> {
+    let path = temp_db_path("completion_terminal");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let tx = db.transaction()?;
+    insert_test_item(&tx, "item-1")?;
+    tx.commit()?;
+
+    let completion = make_completion_event("evt-1", "item-1", 0);
+    save_event(&mut db, &completion, 0)?;
+
+    // Attempt to apply another event after completion should fail
+    let cancellation = make_cancellation_event("evt-2", "item-1", 1);
+    let result = save_event(&mut db, &cancellation, 1);
+
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("terminal lifecycle state"));
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn test_no_transitions_after_cancellation() -> Result<()> {
+    let path = temp_db_path("cancellation_terminal");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let tx = db.transaction()?;
+    insert_test_item(&tx, "item-1")?;
+    tx.commit()?;
+
+    let cancellation = make_cancellation_event("evt-1", "item-1", 0);
+    save_event(&mut db, &cancellation, 0)?;
+
+    // Attempt to apply another event after cancellation should fail
+    let completion = make_completion_event("evt-2", "item-1", 1);
+    let result = save_event(&mut db, &completion, 1);
+
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("terminal lifecycle state"));
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn test_event_revision_must_match_expected() -> Result<()> {
+    let path = temp_db_path("revision_mismatch");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let tx = db.transaction()?;
+    insert_test_item(&tx, "item-1")?;
+    tx.commit()?;
+
+    // Create event with revision 9999 but expected revision 0
+    let event = Event::new(
+        "evt-1".to_string(),
+        "item-1".to_string(),
+        9999,
+        EventType::Completion,
+        EventPayload::Completion,
+        "2026-01-15T10:30:00Z".to_string(),
+    )?;
+
+    let result = save_event(&mut db, &event, 0);
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("Event revision"));
 
     let _ = std::fs::remove_file(&path);
     Ok(())

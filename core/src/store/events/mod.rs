@@ -88,6 +88,7 @@ impl Event {
         if revision < 0 {
             return Err(anyhow!("revision must be non-negative"));
         }
+        Self::validate_event_type_payload_match(&event_type, &payload)?;
         Ok(Event {
             event_id,
             item_id,
@@ -96,6 +97,23 @@ impl Event {
             payload,
             happened_at,
         })
+    }
+
+    fn validate_event_type_payload_match(
+        event_type: &EventType,
+        payload: &EventPayload,
+    ) -> Result<()> {
+        match (event_type, payload) {
+            (EventType::Correction, EventPayload::Correction(_)) => Ok(()),
+            (EventType::SuggestionControl, EventPayload::SuggestionControl(_)) => Ok(()),
+            (EventType::Completion, EventPayload::Completion) => Ok(()),
+            (EventType::Cancellation, EventPayload::Cancellation) => Ok(()),
+            _ => Err(anyhow!(
+                "Invalid event type and payload combination: {:?} with {:?}",
+                event_type,
+                payload
+            )),
+        }
     }
 }
 
@@ -181,11 +199,21 @@ pub fn save_event(db: &mut Database, event: &Event, expected_item_revision: i32)
 ///
 /// Compare-and-set semantics against items.revision: conflicting stale updates are rejected
 /// with the current item state returned in the error.
+/// Event.revision must equal expected_item_revision (the authoritative CAS value).
 pub fn save_event_in_tx(
     tx: &Transaction<'_>,
     event: &Event,
     expected_item_revision: i32,
 ) -> Result<Event> {
+    // Event revision must match the CAS (expected) revision
+    if event.revision != expected_item_revision {
+        return Err(anyhow!(
+            "Event revision {} does not match expected item revision {}",
+            event.revision,
+            expected_item_revision
+        ));
+    }
+
     // Check if event with same ID already exists (idempotent retry)
     let existing: Option<Event> = tx
         .query_row(
@@ -208,12 +236,12 @@ pub fn save_event_in_tx(
         ));
     }
 
-    // Read the item's current revision (authoritative source for compare-and-set)
-    let current_item_revision: i32 = tx
+    // Read the item's current revision and lifecycle state
+    let (current_item_revision, current_lifecycle_state): (i32, String) = tx
         .query_row(
-            "SELECT revision FROM items WHERE item_id = ?",
+            "SELECT revision, lifecycle_state FROM items WHERE item_id = ?",
             [event.item_id.as_str()],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?
         .ok_or_else(|| anyhow!("Item {} not found", event.item_id))?;
@@ -225,6 +253,18 @@ pub fn save_event_in_tx(
             event.item_id,
             expected_item_revision,
             current_item_revision
+        ));
+    }
+
+    // Reject lifecycle transitions on terminal states
+    if matches!(
+        current_lifecycle_state.as_str(),
+        "completed" | "cancelled" | "deleted"
+    ) {
+        return Err(anyhow!(
+            "Cannot apply event to item {} in terminal lifecycle state '{}'",
+            event.item_id,
+            current_lifecycle_state
         ));
     }
 
