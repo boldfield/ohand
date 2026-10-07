@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the Rust core library for iOS simulator and device architectures
-# Invoked by Xcode build phase
+# and generate the C FFI header. Invoked by Xcode build phase.
 set -euo pipefail
 
 RUST_PROJECT_DIR="$(cd "$(dirname "$0")/../../core" && pwd)"
@@ -24,16 +24,16 @@ case "${SDKNAME}" in
     ;;
 esac
 
-# Cross-compile for each target
+# Cross-compile for each target and collect libraries
 LIBS=()
 for target in "${TARGETS[@]}"; do
   output="${CORE_BUILD}/libohand_core-${target}.a"
   echo "Building ohand_core for ${target}..."
 
-  # Add the target if not already installed
+  # Ensure target is installed
   rustup target add "${target}" 2>/dev/null || true
 
-  # Build the library
+  # Build the library with locked dependencies
   cd "${RUST_PROJECT_DIR}"
   cargo build \
     --release \
@@ -41,22 +41,22 @@ for target in "${TARGETS[@]}"; do
     --lib \
     --locked
 
-  # Copy the artifact
+  # Copy the built artifact
   cp "target/${target}/release/libohand_core.a" "${output}"
   LIBS+=("${output}")
 done
 
-# Create a universal library if multiple targets
+# Create a universal library for multi-architecture support
 if [ ${#LIBS[@]} -gt 1 ]; then
   universal_lib="${CORE_BUILD}/libohand_core.a"
-  echo "Creating universal library..."
+  echo "Creating universal library with lipo..."
   lipo -create "${LIBS[@]}" -output "${universal_lib}"
-  # Keep only the universal library
+  # Clean up individual architecture libraries
   for lib in "${LIBS[@]}"; do
     rm "${lib}"
   done
 else
-  # Single target case
+  # Single target case (unlikely for iOS but handled)
   cp "${LIBS[0]}" "${CORE_BUILD}/libohand_core.a"
   rm "${LIBS[0]}"
 fi

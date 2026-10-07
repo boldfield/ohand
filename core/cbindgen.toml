@@ -1,1 +1,5 @@
 language = "C"
+
+# Export only the FFI bindings module to prevent unrelated defines
+# from leaking into the generated header
+export = ["bindings"]
