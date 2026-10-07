@@ -96,7 +96,7 @@ impl Database {
             .iter()
             .filter(|step| step.target_version > current_version)
         {
-            Self::apply_step(&mut conn, step, &clock)?;
+            Self::apply_step(&mut conn, step, steps, &clock)?;
         }
 
         Ok(Database { conn })
@@ -123,6 +123,7 @@ impl Database {
     fn apply_step(
         conn: &mut Connection,
         step: &MigrationStep,
+        steps: &[MigrationStep],
         clock: &Arc<dyn Clock>,
     ) -> Result<()> {
         let tx = conn.transaction()?;
@@ -139,6 +140,9 @@ impl Database {
             "INSERT INTO _schema_metadata (version, created_at, upgraded_at) VALUES (?, ?, ?)",
             rusqlite::params![step.target_version, now.clone(), now],
         )?;
+        // The same check later opens apply, run before commit so a database that cannot pass
+        // it (for example a pre-existing non-canonical ledger) is never stamped.
+        validate_schema_shape(&tx, steps, step.target_version)?;
         tx.commit()?;
         Ok(())
     }
@@ -217,15 +221,23 @@ fn snapshot_schema(conn: &Connection) -> Result<SchemaSnapshot> {
         .collect::<Result<Vec<_>, _>>()?;
     let mut snapshot = SchemaSnapshot::new();
     for (kind, name, table_name, sql) in rows {
-        let normalized_sql = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+        let normalized_sql = sql
+            .replace('(', " ( ")
+            .replace(')', " ) ")
+            .replace(',', " , ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         snapshot.insert(format!("{}:{}", kind, name), (table_name, normalized_sql));
     }
     Ok(snapshot)
 }
 
-/// Verify that the database really contains the schema its version row claims, by comparing
-/// every object definition (including `_schema_metadata`) against a reference built in memory
-/// from the same steps up to `version`.
+/// Verify that the database holds exactly the schema its version claims: every object
+/// definition (including `_schema_metadata`) must match a reference built in memory from the
+/// same steps up to `version`, and no extra table, index, trigger or view may exist. Extra
+/// objects are rejected because a trigger or index on a source table can silently change what
+/// is stored or enforced.
 fn validate_schema_shape(conn: &Connection, steps: &[MigrationStep], version: u32) -> Result<()> {
     let mut reference = Connection::open_in_memory()?;
     for step in steps.iter().filter(|step| step.target_version <= version) {
@@ -254,6 +266,13 @@ fn validate_schema_shape(conn: &Connection, steps: &[MigrationStep], version: u3
             }
             Some(_) => {}
         }
+    }
+    if let Some(object) = actual.keys().find(|object| !expected.contains_key(*object)) {
+        return Err(anyhow!(
+            "Database claims schema version {} but contains unexpected {}",
+            version,
+            object
+        ));
     }
     Ok(())
 }

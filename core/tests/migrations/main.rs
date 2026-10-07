@@ -854,3 +854,116 @@ fn test_provider_profiles_versioning() -> Result<()> {
     let _ = std::fs::remove_file(&path);
     Ok(())
 }
+
+fn instant_for_tests() -> Result<DateTime<Utc>> {
+    Ok(DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc))
+}
+
+fn assert_first_open_of_version_zero_fails_unchanged(ledger_sql: &str, label: &str) -> Result<()> {
+    let path = temp_db_path(label);
+    {
+        let conn = Connection::open(&path)?;
+        conn.execute(ledger_sql, [])?;
+        conn.execute("CREATE TABLE legacy_notes (note TEXT)", [])?;
+        conn.execute("INSERT INTO legacy_notes VALUES ('keep me')", [])?;
+    }
+
+    let result = make_test_db(&path, instant_for_tests()?);
+    assert!(
+        result.is_err(),
+        "non-canonical ledger must fail on the first open"
+    );
+
+    let conn = Connection::open(&path)?;
+    assert!(!table_exists(&conn, "captures")?);
+    let ledger_rows: i64 = conn.query_row("SELECT COUNT(*) FROM _schema_metadata", [], |row| {
+        row.get(0)
+    })?;
+    assert_eq!(ledger_rows, 0, "no version row may be recorded");
+    let kept: i64 = conn.query_row("SELECT COUNT(*) FROM legacy_notes", [], |row| row.get(0))?;
+    assert_eq!(kept, 1);
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn test_version_zero_with_extra_column_ledger_fails_first_open() -> Result<()> {
+    assert_first_open_of_version_zero_fails_unchanged(
+        "CREATE TABLE _schema_metadata (version INTEGER PRIMARY KEY, created_at TEXT NOT NULL, upgraded_at TEXT NOT NULL, note TEXT)",
+        "ledger_extra_column",
+    )
+}
+
+#[test]
+fn test_version_zero_with_wrong_constraint_ledger_fails_first_open() -> Result<()> {
+    assert_first_open_of_version_zero_fails_unchanged(
+        "CREATE TABLE _schema_metadata (version INTEGER PRIMARY KEY, created_at TEXT, upgraded_at TEXT)",
+        "ledger_wrong_constraint",
+    )
+}
+
+#[test]
+fn test_ledger_whitespace_differences_do_not_brick_database() -> Result<()> {
+    let path = temp_db_path("ledger_whitespace");
+    {
+        let conn = Connection::open(&path)?;
+        conn.execute(
+            "CREATE TABLE _schema_metadata(version INTEGER PRIMARY KEY,created_at TEXT NOT NULL,upgraded_at TEXT NOT NULL)",
+            [],
+        )?;
+    }
+    let instant = instant_for_tests()?;
+    drop(make_test_db(&path, instant)?);
+    let reopened = make_test_db(&path, instant)?;
+    assert_eq!(reopened.schema_version()?, 1);
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+fn assert_unexpected_object_rejected(extra_sql: &str, label: &str) -> Result<()> {
+    let path = temp_db_path(label);
+    let instant = instant_for_tests()?;
+    {
+        let db = make_test_db(&path, instant)?;
+        insert_source_capture(db.conn(), "capture-1")?;
+        db.conn().execute(extra_sql, [])?;
+    }
+
+    let error = make_test_db(&path, instant).expect_err("unexpected schema object must be refused");
+    assert!(
+        error.to_string().contains("unexpected"),
+        "unexpected error: {}",
+        error
+    );
+
+    let conn = Connection::open(&path)?;
+    assert_eq!(capture_count(&conn, "capture-1")?, 1);
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn test_unexpected_trigger_on_source_table_rejected() -> Result<()> {
+    assert_unexpected_object_rejected(
+        "CREATE TRIGGER drop_captures AFTER INSERT ON captures BEGIN DELETE FROM captures; END",
+        "extra_trigger",
+    )
+}
+
+#[test]
+fn test_unexpected_view_rejected() -> Result<()> {
+    assert_unexpected_object_rejected(
+        "CREATE VIEW extra_view AS SELECT capture_id FROM captures",
+        "extra_view",
+    )
+}
+
+#[test]
+fn test_unexpected_index_and_table_rejected() -> Result<()> {
+    assert_unexpected_object_rejected(
+        "CREATE INDEX idx_extra_captures ON captures(locale)",
+        "extra_index",
+    )?;
+    assert_unexpected_object_rejected("CREATE TABLE stray_table (id TEXT)", "extra_table")
+}
