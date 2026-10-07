@@ -59,11 +59,15 @@ xcodebuild -project OhAnd.xcodeproj \
 
 ## Project Structure
 
+The project follows the F01 ownership map for deterministic, concurrent development:
+
 - `project.yml` - XcodeGen configuration file (reproducible project definition)
-- `Sources/App` - Main application target (OhAndApp)
-- `Sources/Core` - Core framework (minimal Swift stubs, Rust bindings added by P01)
-- `Sources/Services` - Services framework (extensible by concurrent M1 tasks)
-- `Probes/*/Sources` - Probe applications for M1 validation
+- `AppAssembly/` - Main application target source (OhAndApp)
+- `OhAndCoreBridge/` - Core framework and Rust bindings bridge
+- `Services/` - Service modules (ProtectedStorage, Authentication, Credentials, ProviderTransport, Notifications, Ingress, Transcription, ShadowReview, NotificationPermission, Permissions, Health, Metrics, JobRunner, Deletion, AudioRetention, Export, Reset, NotificationActions, BackgroundCompletion, TimeChangeCoordinator, Assembly, OptionalCapabilities)
+- `Capture/` - UI capture modules (Text, Voice, Entry, Acknowledgment)
+- `Tests/` - Unit and integration tests (organized by service/module)
+- `<X>Probe/` - Probe applications (BridgeProbe, NotificationProbe, AudioProbe, TranscriptionProbe, CredentialProbe, CaptureProbe)
 
 ## Module Ownership
 
@@ -82,12 +86,9 @@ After the first `xcodegen generate`, subsequent project changes can be applied b
 2. Running `xcodegen generate` again
 3. No manual Xcode configuration is required
 
-## Simulator Compatibility
+## Proof of Reproducibility
 
-Current probes build and run on:
-- iPhone 16 Pro simulator
-- iOS 16.0+ deployment target
-- SwiftUI framework
+Simulator build validation and CI integration are established by F05. This documentation defines the build interface and directory structure; F05 will demonstrate that clean checkouts generate identical XcodeGen output and link real CI evidence.
 
 ## SDK and Deployment Baseline
 
@@ -96,3 +97,13 @@ Current probes build and run on:
 - **Xcode Version**: 15.4
 
 These can be updated by editing `project.yml` and regenerating the project.
+
+## Expected Target Probes
+
+The following probe targets are reserved by F03 and supported by the structure above:
+- `BridgeProbe`: Round-trip boundary validation
+- `NotificationProbe`: Native scheduling/list/cancel primitives
+- `AudioProbe`: Recording interruption and partial-audio recovery
+- `TranscriptionProbe`: On-device transcription availability
+- `CredentialProbe`: Keychain accessibility and lock behavior
+- `CaptureProbe`: System-control handoff and entry validation
