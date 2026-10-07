@@ -60,7 +60,7 @@ fn test_smoke_serde_json() {
 
 #[test]
 fn test_smoke_core_interface() {
-    use ohand_core::{domain, interpretation, store, CORE_VERSION};
+    use ohand_core::{CORE_VERSION, domain, interpretation, store};
 
     // Verify that the core crate exports a meaningful public interface.
     // This test confirms the version contract and module accessibility.
@@ -70,7 +70,8 @@ fn test_smoke_core_interface() {
         "CORE_VERSION should match the M1 contract"
     );
 
-    // Verify that core modules are importable. As downstream feature tasks
-    // fill F02-owned modules, they will exercise concrete types in these paths.
-    let _ = (domain, interpretation, store);
+    // Verify that core modules are importable. The use statement above
+    // confirms domain, interpretation, and store are accessible.
+    // As downstream feature tasks fill F02-owned modules, they will
+    // exercise concrete types in these paths.
 }
