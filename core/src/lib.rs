@@ -7,9 +7,9 @@
 /// Core crate version marker for schema and API contracts.
 pub const CORE_VERSION: &str = "0.1.0-m1";
 
+pub mod bindings;
 pub mod domain;
 pub mod export;
-pub mod ffi;
 pub mod ingress;
 pub mod interpretation;
 pub mod jobs;
@@ -23,3 +23,8 @@ pub mod review;
 pub mod store;
 pub mod suggestions;
 pub mod time;
+
+/// Re-export bindings module as ffi for backward compatibility.
+pub mod ffi {
+    pub use crate::bindings::*;
+}

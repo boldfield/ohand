@@ -189,7 +189,15 @@ pub extern "C" fn ohand_capture_new(
         created_at_str,
         session_topic_str,
     ) {
-        Ok(capture) => Box::into_raw(Box::new(capture_to_c(&capture))),
+        Ok(capture) => match capture_to_c(&capture) {
+            Ok(c_capture) => Box::into_raw(Box::new(c_capture)),
+            Err(e) => {
+                unsafe {
+                    *out_error = create_ffi_error(e);
+                }
+                ptr::null_mut()
+            }
+        },
         Err(e) => {
             unsafe {
                 *out_error = create_ffi_error(e);
@@ -200,22 +208,23 @@ pub extern "C" fn ohand_capture_new(
 }
 
 /// Convert a Rust Capture to a C-compatible OhAndCapture.
-fn capture_to_c(capture: &Capture) -> OhAndCapture {
-    OhAndCapture {
-        capture_id: string_to_c(&capture.capture_id),
-        text: string_to_c_option(&capture.text),
-        audio_reference: string_to_c_option(&capture.audio_reference),
-        capture_instant: string_to_c(&capture.capture_instant),
-        timezone_id: string_to_c(&capture.timezone_id),
+/// This function is fallible due to NUL byte checking in string conversion.
+fn capture_to_c(capture: &Capture) -> Result<OhAndCapture, anyhow::Error> {
+    Ok(OhAndCapture {
+        capture_id: string_to_c(&capture.capture_id)?,
+        text: string_to_c_option(&capture.text)?,
+        audio_reference: string_to_c_option(&capture.audio_reference)?,
+        capture_instant: string_to_c(&capture.capture_instant)?,
+        timezone_id: string_to_c(&capture.timezone_id)?,
         utc_offset_minutes: capture.utc_offset_minutes,
-        locale: string_to_c(&capture.locale),
-        calendar: string_to_c(&capture.calendar),
-        item_scope: string_to_c(&capture.item_scope),
-        route_id: string_to_c(&capture.route_id),
+        locale: string_to_c(&capture.locale)?,
+        calendar: string_to_c(&capture.calendar)?,
+        item_scope: string_to_c(&capture.item_scope)?,
+        route_id: string_to_c(&capture.route_id)?,
         entry_locked: if capture.entry_locked { 1 } else { 0 },
-        created_at: string_to_c(&capture.created_at),
-        session_topic: string_to_c_option(&capture.session_topic),
-    }
+        created_at: string_to_c(&capture.created_at)?,
+        session_topic: string_to_c_option(&capture.session_topic)?,
+    })
 }
 
 /// Convert a Rust Capture from C-compatible representation.
@@ -276,16 +285,17 @@ pub extern "C" fn ohand_capture_free(capture: *mut OhAndCapture) {
 // Helper functions for string conversion
 
 #[allow(dead_code)]
-fn string_to_c(s: &str) -> *mut c_char {
-    let c_string = std::ffi::CString::new(s).expect("String contains null byte");
-    c_string.into_raw()
+fn string_to_c(s: &str) -> Result<*mut c_char, anyhow::Error> {
+    std::ffi::CString::new(s)
+        .map(|c_string| c_string.into_raw())
+        .map_err(|e| anyhow::anyhow!("String contains interior NUL byte: {}", e))
 }
 
 #[allow(dead_code)]
-fn string_to_c_option(s: &Option<String>) -> *mut c_char {
+fn string_to_c_option(s: &Option<String>) -> Result<*mut c_char, anyhow::Error> {
     match s {
         Some(s) => string_to_c(s),
-        None => ptr::null_mut(),
+        None => Ok(ptr::null_mut()),
     }
 }
 
@@ -320,7 +330,7 @@ fn free_c_string(ptr: *mut c_char) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ffi::ohand_error_free;
+    use crate::ffi::{ohand_error_free, ohand_error_message};
     use std::ffi::CString;
 
     #[test]
@@ -485,6 +495,121 @@ mod tests {
             let c_capture = &*result;
             assert_eq!(c_capture.entry_locked, 1);
             ohand_capture_free(result);
+        }
+    }
+
+    #[test]
+    fn test_capture_large_input() {
+        let capture_id = CString::new("test-large").unwrap();
+        let large_text = "x".repeat(1_000_000); // 1 MB
+        let text = CString::new(large_text).unwrap();
+        let capture_instant = CString::new("2024-01-01T12:00:00Z").unwrap();
+        let timezone_id = CString::new("UTC").unwrap();
+        let locale = CString::new("en-US").unwrap();
+        let calendar = CString::new("gregorian").unwrap();
+        let item_scope = CString::new("personal").unwrap();
+        let route_id = CString::new("local").unwrap();
+        let created_at = CString::new("2024-01-01T12:00:00Z").unwrap();
+
+        let mut out_error: *mut OhAndError = ptr::null_mut();
+        let result = ohand_capture_new(
+            capture_id.as_ptr(),
+            text.as_ptr(),
+            ptr::null(),
+            capture_instant.as_ptr(),
+            timezone_id.as_ptr(),
+            0,
+            locale.as_ptr(),
+            calendar.as_ptr(),
+            item_scope.as_ptr(),
+            route_id.as_ptr(),
+            0,
+            created_at.as_ptr(),
+            ptr::null(),
+            &mut out_error,
+        );
+
+        assert!(!result.is_null(), "Large capture creation failed");
+        assert!(out_error.is_null(), "Error should be null on success");
+        unsafe {
+            let c_capture = &*result;
+            let retrieved_text = CStr::from_ptr(c_capture.text).to_str().unwrap();
+            assert_eq!(retrieved_text.len(), 1_000_000);
+            ohand_capture_free(result);
+        }
+    }
+
+    #[test]
+    fn test_capture_error_memory_cleanup() {
+        let capture_id = CString::new("test-error").unwrap();
+        let text = CString::new("Test error").unwrap();
+        let capture_instant = CString::new("2024-01-01T12:00:00Z").unwrap();
+        let timezone_id = CString::new("UTC").unwrap();
+        let locale = CString::new("en-US").unwrap();
+        let calendar = CString::new("gregorian").unwrap();
+        let item_scope = CString::new("personal").unwrap();
+        let route_id = CString::new("local").unwrap();
+        let created_at = CString::new("2024-01-01T12:00:00Z").unwrap();
+
+        // Simulate error by passing null error output (invalid)
+        let result = ohand_capture_new(
+            capture_id.as_ptr(),
+            text.as_ptr(),
+            ptr::null(),
+            capture_instant.as_ptr(),
+            timezone_id.as_ptr(),
+            0,
+            locale.as_ptr(),
+            calendar.as_ptr(),
+            item_scope.as_ptr(),
+            route_id.as_ptr(),
+            0,
+            created_at.as_ptr(),
+            ptr::null(),
+            ptr::null_mut(), // Invalid: null error output
+        );
+
+        assert!(result.is_null(), "Should fail with null error output");
+    }
+
+    #[test]
+    fn test_error_message_lifetime() {
+        let capture_id = CString::new("test-error-msg").unwrap();
+        let capture_instant = CString::new("2024-01-01T12:00:00Z").unwrap();
+        let timezone_id = CString::new("UTC").unwrap();
+        let locale = CString::new("en-US").unwrap();
+        let calendar = CString::new("gregorian").unwrap();
+        let item_scope = CString::new("personal").unwrap();
+        let route_id = CString::new("local").unwrap();
+        let created_at = CString::new("2024-01-01T12:00:00Z").unwrap();
+
+        let mut out_error: *mut OhAndError = ptr::null_mut();
+        let result = ohand_capture_new(
+            capture_id.as_ptr(),
+            ptr::null(), // No text - should fail
+            ptr::null(),
+            capture_instant.as_ptr(),
+            timezone_id.as_ptr(),
+            0,
+            locale.as_ptr(),
+            calendar.as_ptr(),
+            item_scope.as_ptr(),
+            route_id.as_ptr(),
+            0,
+            created_at.as_ptr(),
+            ptr::null(),
+            &mut out_error,
+        );
+
+        assert!(result.is_null(), "Should fail without text");
+        assert!(!out_error.is_null(), "Error should be set");
+
+        unsafe {
+            let error_msg = ohand_error_message(out_error);
+            assert!(!error_msg.is_null(), "Error message should not be null");
+            let msg = CStr::from_ptr(error_msg).to_str().unwrap();
+            assert!(!msg.is_empty(), "Error message should not be empty");
+            ohand_error_free(out_error);
         }
     }
 }

@@ -5,6 +5,7 @@
 //! appropriate destructor to prevent memory leaks.
 
 use anyhow::Error;
+use std::ffi::CString;
 use std::os::raw::c_char;
 use std::ptr;
 
@@ -18,14 +19,15 @@ pub use error::*;
 /// Created by FFI functions that can fail and must be freed with
 /// `ohand_error_free`.
 pub struct OhAndError {
-    message: String,
+    message: CString,
 }
 
 impl OhAndError {
     fn new(err: Error) -> Self {
-        OhAndError {
-            message: err.to_string(),
-        }
+        let msg = err.to_string();
+        let c_string = CString::new(msg)
+            .unwrap_or_else(|_| CString::new("Error message contains NUL byte").unwrap());
+        OhAndError { message: c_string }
     }
 }
 
@@ -48,5 +50,5 @@ pub extern "C" fn ohand_error_message(err: *const OhAndError) -> *const c_char {
     if err.is_null() {
         return ptr::null();
     }
-    unsafe { (*err).message.as_ptr() as *const c_char }
+    unsafe { (*err).message.as_ptr() }
 }
