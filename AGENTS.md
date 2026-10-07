@@ -34,4 +34,22 @@ Credentials, account enrollment/legal actions, and genuine device experiences ar
 - Required CI and independent review remain gates even though human approval is not one. Use standard hosted runners and bounded artifact retention; paid capacity requires separate authorization.
 - Runtime adversarial review follows DESIGN.md and is not a substitute for independent code review.
 
+## Required checks for Linux Odonian workers
+
+This section documents the canonical build, test, and lint checks that must pass on all PRs affecting the Rust core. Each check runs on a clean checkout with pinned dependencies (Cargo.lock) and fails on test/lint failure. No placeholder success conditions are acceptable.
+
+Rust core checks are executed via the Makefile:
+
+- `make check` — Validate contract correctness, compile, format, and lint:
+  - `contract-check` — Python contract validation
+  - `cargo-check --all --all-targets --locked` — Compilation with locked dependencies
+  - `cargo fmt --all -- --check` — Code format validation (no in-place changes)
+  - `cargo clippy --all-targets --locked -- -D warnings` — Lint pass with warnings-as-errors
+
+- `make test` — Run contract and Rust test suites:
+  - `contract-test` — Python contract tests
+  - `cargo test --all --locked` — Full Rust test suite with locked dependencies
+
+These checks are wired into `.github/workflows/core.yml` on Linux runners (ubuntu-latest) via GitHub Actions. The workflow runs on all pull requests to main and validates that the change compiles, passes tests, and meets lint standards with locked dependencies. Evidence collection is separate from CI: device/simulator results, live trial data, and provider integration tests are distinct artifacts and do not gate the Linux checks.
+
 The first repository commit contains documentation and license material only. It is a bootstrap operation, not an application implementation or proof of completed milestones.
