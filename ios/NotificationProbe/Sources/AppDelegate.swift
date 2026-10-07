@@ -221,11 +221,24 @@ class NotificationProbeViewController: UIViewController {
             let request2 = UNNotificationRequest(identifier: "duplicate-test", content: content2, trigger: trigger)
 
             self?.notificationCenter.add(request2) { error in
-                DispatchQueue.main.async {
-                    if let error = error {
+                if let error = error {
+                    DispatchQueue.main.async {
                         self?.statusLabel.text = "Duplicate ID causes error: \(error.localizedDescription)"
-                    } else {
-                        self?.statusLabel.text = "Duplicate ID: Second request accepted (replaces first)"
+                    }
+                } else {
+                    self?.notificationCenter.getPendingNotificationRequests { requests in
+                        DispatchQueue.main.async {
+                            let pending = requests.first(where: { $0.identifier == "duplicate-test" })
+                            if let pending = pending {
+                                if pending.content.title == "Duplicate ID Test (Second)" {
+                                    self?.statusLabel.text = "Duplicate ID verified: Second request replaced first (content: '\(pending.content.title)')"
+                                } else {
+                                    self?.statusLabel.text = "Duplicate ID error: Found '\(pending.content.title)' instead of second request"
+                                }
+                            } else {
+                                self?.statusLabel.text = "Duplicate ID error: Request not found after second add"
+                            }
+                        }
                     }
                 }
             }
@@ -233,7 +246,7 @@ class NotificationProbeViewController: UIViewController {
     }
 
     @objc private func testTimezoneBehavior() {
-        var calendar = Calendar.current
+        let calendar = Calendar.current
         let timezone = TimeZone.current
 
         var components = DateComponents()
@@ -273,9 +286,10 @@ class NotificationProbeViewController: UIViewController {
     }
 
     @objc private func testCapacity() {
-        var added = 0
+        let group = DispatchGroup()
 
         for i in 0..<100 {
+            group.enter()
             let content = UNMutableNotificationContent()
             content.title = "Capacity Test \(i)"
             content.body = "Testing pending request capacity"
@@ -283,14 +297,12 @@ class NotificationProbeViewController: UIViewController {
             let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 60 + Double(i), repeats: false)
             let request = UNNotificationRequest(identifier: "capacity-\(i)", content: content, trigger: trigger)
 
-            notificationCenter.add(request) { error in
-                if error == nil {
-                    added += 1
-                }
+            notificationCenter.add(request) { _ in
+                group.leave()
             }
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+        group.notify(queue: .main) { [weak self] in
             self?.notificationCenter.getPendingNotificationRequests { requests in
                 DispatchQueue.main.async {
                     self?.statusLabel.text = "Attempted 100, got \(requests.count) total pending"
