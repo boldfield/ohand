@@ -1,0 +1,15 @@
+[package]
+name = "ohand-core"
+version = "0.1.0"
+edition = "2021"
+description = "Oh And core domain logic and storage"
+publish = false
+
+[dependencies]
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
