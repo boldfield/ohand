@@ -41,7 +41,7 @@ Examples are synthetic:
 | The roof quote expires Friday | Preserve dated information; do not invent a notification time. |
 | Remind me Friday at 3 p.m. to call the roofer | Resolve and echo the date/time; schedule when unambiguous. |
 | Bring this up in therapy | Preserve a private session topic, not a diagnosis or self-improvement task. |
-| Done with the roofer call | Complete the clearly referenced item; clarify if the target is ambiguous. |
+| Done with the roofer call | M2 target: complete the clearly referenced item; clarify ambiguity. In M1 preserve this source without mutating another item; use the explicit completion control. |
 | Maybe I should quit this project | Preserve exploratory thought; do not cancel a project. |
 
 Broad intentions remain findable even without a well-formed next step. Clear natural-language intent remains usable without magic phrasing. Clarify only material ambiguity; approved defaults may reduce repeated questions.
@@ -125,7 +125,7 @@ Exit evidence:
 - Forced pipeline failure leaves save/sync/scheduling state honest and independently detectable.
 - A two-week observation window with enough captures, retrievals, and resurfacing encounters to judge usefulness, allowing nonuse and a multi-day gap without cleanup.
 - Configuration-based switching between two different supported AI backends without changing stored captures or domain rules. Verify the actual self-hosted API before claiming its support.
-- Interpreter contracts, adversarial fixtures, optional shadow-review instrumentation, standard-runner CI, and an open-source repository without private fixture data.
+- Interpreter contracts, adversarial fixtures, standard-runner CI, and an open-source repository without private fixture data. Optional shadow-review instrumentation can land independently of the base trial; it remains disabled until its capability checks pass.
 
 If people avoid capture or mute the only prompt, revise the loop before adding features. Cut Mac conveniences and sophisticated classification before weakening phone capture or the complete return/update loop. Temporary explicit markers are not proof of frictionless automatic classification. Two weeks proves initial feasibility, not sustained adoption; observation continues.
 

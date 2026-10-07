@@ -143,7 +143,8 @@
       "file_scope": [
         ".github/workflows/ios.yml",
         "Makefile",
-        "AGENTS.md"
+        "AGENTS.md",
+        "ios/project.yml"
       ],
       "intent": "Add reproducible native simulator build/tests on standard macOS runners without requiring signing secrets.",
       "acceptance": [
@@ -438,8 +439,7 @@
       "intent": "Store provider secrets in native Keychain behind opaque references and expose only approved operations across the core/UI boundary.",
       "acceptance": [
         "Add/update/delete handles invalidated keys and storage errors; webview, control extensions, logs, exports and synced profile data never receive secret values.",
-        "Use appropriate accessibility class and verify lock/relaunch behavior with synthetic secrets; do not grant broad shared credential access just to simplify a probe.",
-        "For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient."
+        "Use appropriate accessibility class and verify lock/relaunch behavior with synthetic secrets; do not grant broad shared credential access just to simplify a probe."
       ],
       "external_input": false
     },
@@ -568,45 +568,6 @@
       "external_input": false
     },
     {
-      "key": "V05",
-      "title": "Implement bounded native HTTP transport for providers",
-      "depends_on": [
-        "V02",
-        "V04"
-      ],
-      "file_scope": [
-        "ios/Services/ProviderTransport/",
-        "ios/Tests/ProviderTransport/"
-      ],
-      "intent": "Create the native request transport used by adapters, with authorization enforcement before any request and Keychain resolution at dispatch.",
-      "acceptance": [
-        "Timeout, cancellation, response bounds, error normalization, redacted diagnostics and endpoint/TLS validation are tested through a controlled fixture server.",
-        "Reject cross-origin redirect credential forwarding and silent cleartext/certificate bypass; user-configured private endpoints work only under explicitly documented supported transport.",
-        "For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient."
-      ],
-      "external_input": false
-    },
-    {
-      "key": "C01",
-      "title": "Implement native data protection and private-read authentication",
-      "depends_on": [
-        "P02",
-        "V04",
-        "D02"
-      ],
-      "file_scope": [
-        "ios/Services/ProtectedStorage/",
-        "ios/Services/Authentication/"
-      ],
-      "intent": "Apply native file/keychain protection and a session-scoped read-auth boundary across capture storage and private views.",
-      "acceptance": [
-        "Document accessibility before/after first unlock, app-switcher redaction and OS backup inclusion/exclusion; locked capture never grants private-history access.",
-        "Tests cover denied/cancelled authentication and relock/foreground transitions. Failed unlock does not erase or disclose stored content.",
-        "For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient."
-      ],
-      "external_input": false
-    },
-    {
       "key": "P04",
       "title": "Probe offline on-device transcription capabilities",
       "depends_on": [
@@ -626,7 +587,7 @@
     },
     {
       "key": "I03",
-      "title": "Implement the narrow offline reminder-command fast path",
+      "title": "Implement narrow offline reminder and session-topic recognition",
       "depends_on": [
         "I01",
         "I02"
@@ -638,7 +599,8 @@
       "intent": "Recognize a documented limited set of explicit reminder commands and abstain on ambiguous or unsupported utterances.",
       "acceptance": [
         "Minimal pairs test negation, quotations, hypothetical/reported speech, already-completed work, missing times and repeats; starts-with-remind-me is not sufficient.",
-        "A fully supported command produces a sourced candidate offline; other clear language remains available to the interpreter instead of being permanently discarded or silently scheduled."
+        "A fully supported command produces a sourced candidate offline; other clear language remains available to the interpreter instead of being permanently discarded or silently scheduled.",
+        "Recognize a bounded documented set of explicit session-topic phrases locally, such as Bring this up in therapy, with negated/quoted minimal pairs and abstention. This sets a derived session-topic facet only, never privacy scope or upload permission."
       ],
       "external_input": false
     },
@@ -695,7 +657,8 @@
       "intent": "Return source-linked text matches under type, date, status and processing/privacy-route filters.",
       "acceptance": [
         "Enforce scope before searching/ranking/results; work-only requests cannot leak private text through snippets, counts or errors.",
-        "Stable pagination/order and honest no-match behavior are tested using synthetic mixed-domain records; no generated answer or embedding dependency."
+        "Stable pagination/order and honest no-match behavior are tested using synthetic mixed-domain records; no generated answer or embedding dependency.",
+        "Support session-topic and explicit privacy/read scope filters together; a local-only session note remains retrievable without a configured provider."
       ],
       "external_input": false
     },
@@ -736,64 +699,51 @@
       "acceptance": [
         "Generate and verify simulator/device bindings in documented builds; keep ABI ownership, cancellation, threading and error conversion explicit.",
         "Exercise actual persistence and status calls through Swift; test repeated initialization, invalid input and background-thread callbacks without UI-thread violations.",
+        "For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient.",
+        "Each owned module declares its exports through the reserved interface mechanism; generated bindings are reproducible build output, not shared committed files. Native consumers depend on this bridge before adding effects."
+      ],
+      "external_input": false
+    },
+    {
+      "key": "V05",
+      "title": "Implement bounded native HTTP transport for providers",
+      "depends_on": [
+        "V02",
+        "V04",
+        "B01"
+      ],
+      "file_scope": [
+        "ios/Services/ProviderTransport/",
+        "ios/Tests/ProviderTransport/"
+      ],
+      "intent": "Create the native request transport used by adapters, with authorization enforcement before any request and Keychain resolution at dispatch.",
+      "acceptance": [
+        "Timeout, cancellation, response bounds, error normalization, redacted diagnostics and endpoint/TLS validation are tested through a controlled fixture server.",
+        "Reject cross-origin redirect credential forwarding and silent cleartext/certificate bypass; user-configured private endpoints work only under explicitly documented supported transport.",
         "For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient."
       ],
       "external_input": false
     },
     {
-      "key": "V06",
-      "title": "Implement the Anthropic interpretation adapter",
+      "key": "C01",
+      "title": "Implement native data protection and private-read authentication",
       "depends_on": [
-        "V01",
-        "V05"
+        "P02",
+        "V04",
+        "D02",
+        "B01"
       ],
       "file_scope": [
-        "core/src/providers/anthropic/",
-        "core/tests/providers_anthropic/"
+        "ios/Services/ProtectedStorage/",
+        "ios/Services/Authentication/"
       ],
-      "intent": "Implement the documented Anthropic protocol for the M1 structured interpretation capability.",
+      "intent": "Apply native file/keychain protection and a session-scoped read-auth boundary across capture storage and private views.",
       "acceptance": [
-        "Synthetic protocol fixtures cover valid/invalid structured output, auth failure, rate limit, timeout and cancellation through shared contracts.",
-        "Model and account come from the profile; no embedded service keys, protocol-specific types in domain state, or unsupported speech capability claims."
+        "Document accessibility before/after first unlock, app-switcher redaction and OS backup inclusion/exclusion; locked capture never grants private-history access.",
+        "Tests cover denied/cancelled authentication and relock/foreground transitions. Failed unlock does not erase or disclose stored content.",
+        "For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient."
       ],
       "external_input": false
-    },
-    {
-      "key": "V07",
-      "title": "Implement the OpenAI interpretation adapter",
-      "depends_on": [
-        "V01",
-        "V05"
-      ],
-      "file_scope": [
-        "core/src/providers/openai/",
-        "core/tests/providers_openai/"
-      ],
-      "intent": "Implement the documented OpenAI protocol for the same provider-independent M1 interpretation capability.",
-      "acceptance": [
-        "Pass the same semantic/protocol contract fixtures, including malformed output, refusal, rate limit, auth failure and cancellation.",
-        "Use configured supported API credentials; do not assume a chat subscription is an API credential. Source capture storage and domain contracts remain unchanged."
-      ],
-      "external_input": false
-    },
-    {
-      "key": "V09",
-      "title": "Implement the verified self-hosted provider adapter",
-      "depends_on": [
-        "V05",
-        "V08"
-      ],
-      "file_scope": [
-        "core/src/providers/self_hosted/",
-        "core/tests/providers_self_hosted/"
-      ],
-      "intent": "Support precisely the protocol established by V08, reusing transport without requiring public exposure of the server.",
-      "acceptance": [
-        "Configured model/endpoint/auth passes recorded contract fixtures plus the verified endpoint smoke test; unsupported capabilities are explicit.",
-        "Away-from-network failure keeps captures queued and never falls back to a cloud provider; report the exact verified compatibility boundary.",
-        "Every observed result cites a named sanitized evidence artifact, build/revision and collection time; preserve raw private evidence locally with an auditable reference. Missing evidence blocks the check; prose assertions alone cannot pass review."
-      ],
-      "external_input": true
     },
     {
       "key": "R03",
@@ -880,6 +830,79 @@
       "external_input": true
     },
     {
+      "key": "I07",
+      "title": "Define versioned interpretation instructions and provider-neutral mapping",
+      "depends_on": [
+        "I01",
+        "I04"
+      ],
+      "file_scope": [
+        "core/src/interpretation/instructions/",
+        "core/tests/interpretation_instructions/"
+      ],
+      "intent": "Own the actual instructions, request context and response mapping used by interpretation adapters.",
+      "acceptance": [
+        "Instructions and output contract are versioned, source text is treated as untrusted data, and capture/profile/time context is explicit.",
+        "Synthetic golden request/mapping fixtures cover negation, mixed intents, session topics and abstention; instructions cannot confer disclosure permissions or authorize unsupported existing-item updates."
+      ],
+      "external_input": false
+    },
+    {
+      "key": "V06",
+      "title": "Implement the Anthropic interpretation adapter",
+      "depends_on": [
+        "V01",
+        "V05"
+      ],
+      "file_scope": [
+        "core/src/providers/anthropic/",
+        "core/tests/providers_anthropic/"
+      ],
+      "intent": "Implement the documented Anthropic protocol for the M1 structured interpretation capability.",
+      "acceptance": [
+        "Synthetic protocol fixtures cover valid/invalid structured output, auth failure, rate limit, timeout and cancellation through shared contracts.",
+        "Model and account come from the profile; no embedded service keys, protocol-specific types in domain state, or unsupported speech capability claims."
+      ],
+      "external_input": false
+    },
+    {
+      "key": "V07",
+      "title": "Implement the OpenAI interpretation adapter",
+      "depends_on": [
+        "V01",
+        "V05"
+      ],
+      "file_scope": [
+        "core/src/providers/openai/",
+        "core/tests/providers_openai/"
+      ],
+      "intent": "Implement the documented OpenAI protocol for the same provider-independent M1 interpretation capability.",
+      "acceptance": [
+        "Pass the same semantic/protocol contract fixtures, including malformed output, refusal, rate limit, auth failure and cancellation.",
+        "Use configured supported API credentials; do not assume a chat subscription is an API credential. Source capture storage and domain contracts remain unchanged."
+      ],
+      "external_input": false
+    },
+    {
+      "key": "V09",
+      "title": "Implement the verified self-hosted provider adapter",
+      "depends_on": [
+        "V05",
+        "V08"
+      ],
+      "file_scope": [
+        "core/src/providers/self_hosted/",
+        "core/tests/providers_self_hosted/"
+      ],
+      "intent": "Support precisely the protocol established by V08, reusing transport without requiring public exposure of the server.",
+      "acceptance": [
+        "Configured model/endpoint/auth passes recorded contract fixtures plus the verified endpoint smoke test; unsupported capabilities are explicit.",
+        "Away-from-network failure keeps captures queued and never falls back to a cloud provider; report the exact verified compatibility boundary.",
+        "Every observed result cites a named sanitized evidence artifact, build/revision and collection time; preserve raw private evidence locally with an auditable reference. Missing evidence blocks the check; prose assertions alone cannot pass review."
+      ],
+      "external_input": true
+    },
+    {
       "key": "C02",
       "title": "Implement durable native ingress and core import",
       "depends_on": [
@@ -899,24 +922,6 @@
         "Test atomic file/DB ownership, malformed/partial ingress, recovery and cleanup after confirmed import inside protected storage.",
         "Any later independent extension writer needs a separate task and proven concurrency/protection contract; it is not part of this task.",
         "For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient."
-      ],
-      "external_input": false
-    },
-    {
-      "key": "I07",
-      "title": "Define versioned interpretation instructions and provider-neutral mapping",
-      "depends_on": [
-        "I01",
-        "I04"
-      ],
-      "file_scope": [
-        "core/src/interpretation/instructions/",
-        "core/tests/interpretation_instructions/"
-      ],
-      "intent": "Own the actual instructions, request context and response mapping used by interpretation adapters.",
-      "acceptance": [
-        "Instructions and output contract are versioned, source text is treated as untrusted data, and capture/profile/time context is explicit.",
-        "Synthetic golden request/mapping fixtures cover negation, mixed intents, session topics and abstention; instructions cannot confer disclosure permissions or authorize unsupported existing-item updates."
       ],
       "external_input": false
     },
@@ -944,7 +949,8 @@
       "depends_on": [
         "V03",
         "E01",
-        "V04"
+        "V04",
+        "B01"
       ],
       "file_scope": [
         "core/src/review/shadow/",
@@ -1065,7 +1071,6 @@
       "intent": "Execute and reconcile deletion effects across audio, ingress, caches, jobs and notifications.",
       "acceptance": [
         "Reopen after each injected cleanup interruption converges without private remnants becoming searchable or notifications remaining active.",
-        "Delete-all uses the same semantics, removes credential references/secrets when requested, and clearly states the OS backup/export lifecycle rather than claiming unprovable physical erasure.",
         "This task covers per-item cleanup only; delete-all generation fencing and optional credential reset belong to L05."
       ],
       "external_input": false
@@ -1076,7 +1081,8 @@
       "depends_on": [
         "J01",
         "V03",
-        "I06"
+        "I06",
+        "B01"
       ],
       "file_scope": [
         "core/src/jobs/runner/",
@@ -1132,6 +1138,25 @@
       "external_input": false
     },
     {
+      "key": "L04",
+      "title": "Implement portable export with consistent source state",
+      "depends_on": [
+        "D04",
+        "L02",
+        "V04"
+      ],
+      "file_scope": [
+        "core/src/export/",
+        "ios/Services/Export/"
+      ],
+      "intent": "Export a consistent versioned snapshot of source/correction/current state and minimal provenance through a native user-selected destination.",
+      "acceptance": [
+        "Export contains no credentials, internal endpoint secrets, deleted content or private data outside the authenticated requested scope; optional audio inclusion is explicit.",
+        "A test-only reader reconstructs equivalent item state and detects malformed/truncated export; native share/temp files are protected and cleaned. M1 does not claim full backup/restore sync."
+      ],
+      "external_input": false
+    },
+    {
       "key": "C05",
       "title": "Integrate offline transcription into saved captures",
       "depends_on": [
@@ -1154,30 +1179,12 @@
       "external_input": false
     },
     {
-      "key": "L04",
-      "title": "Implement portable export with consistent source state",
-      "depends_on": [
-        "D04",
-        "L02",
-        "V04"
-      ],
-      "file_scope": [
-        "core/src/export/",
-        "ios/Services/Export/"
-      ],
-      "intent": "Export a consistent versioned snapshot of source/correction/current state and minimal provenance through a native user-selected destination.",
-      "acceptance": [
-        "Export contains no credentials, internal endpoint secrets, deleted content or private data outside the authenticated requested scope; optional audio inclusion is explicit.",
-        "A test-only reader reconstructs equivalent item state and detects malformed/truncated export; native share/temp files are protected and cleaned. M1 does not claim full backup/restore sync."
-      ],
-      "external_input": false
-    },
-    {
       "key": "J03",
       "title": "Expose bounded processing health and recoverable errors",
       "depends_on": [
         "J02",
-        "D05"
+        "D05",
+        "B01"
       ],
       "file_scope": [
         "core/src/jobs/health/",
@@ -1390,7 +1397,8 @@
         "C06",
         "S03",
         "L03",
-        "L04"
+        "L04",
+        "J03"
       ],
       "file_scope": [
         "ios/Services/Assembly/CompositionRoot.swift",
@@ -1438,7 +1446,8 @@
       "intent": "Register verified self-hosted and opt-in shadow capabilities through the production composition extension seam.",
       "acceptance": [
         "The base app constructs and captures when neither optional feature is configured. Feature registration uses the same routing/credential rules and adds no hidden default endpoint.",
-        "Synthetic end-to-end checks exercise both registrations; real self-hosted claims link V08/V09 evidence. No edits to concurrent shell or root files are needed."
+        "Synthetic end-to-end checks exercise both registrations; real self-hosted claims link V08/V09 evidence. No edits to concurrent shell or root files are needed.",
+        "Own routing/credential-isolation canaries for both optional integrations, including denied routes, revoked profiles and shadow verdicts unable to mutate authoritative state; absent or unverified capability stays disabled."
       ],
       "external_input": false
     },
@@ -1497,7 +1506,8 @@
       "acceptance": [
         "Search returns original/corrected text with date/type/source and honest no-result state; private reads require authentication.",
         "Literal fallback and private topics since a date work offline; no generated answer is shown as quotation.",
-        "Offer playback only for retained source audio with the same private-read authentication; expired/deleted audio is honestly unavailable and cannot leave a broken playback control."
+        "Offer playback only for retained source audio with the same private-read authentication; expired/deleted audio is honestly unavailable and cannot leave a broken playback control.",
+        "Expose session-topic filtering and since-date retrieval with original source text in the private authenticated view."
       ],
       "external_input": false
     },
@@ -1515,7 +1525,8 @@
       "acceptance": [
         "Each action updates actual stored state and survives relaunch/reprocessing; stale revision conflicts are visible and do not silently overwrite.",
         "Not-now and stop-suggesting behavior are explained; actions do not turn an idea into an obligation without explicit user intent.",
-        "Allow source/transcript correction as an explicit authoritative revision while preserving original provenance; later transcription/model output cannot overwrite the correction."
+        "Allow source/transcript correction as an explicit authoritative revision while preserving original provenance; later transcription/model output cannot overwrite the correction.",
+        "Provide an explicit session-topic facet toggle independently of note/action/idea and privacy scope; correction survives later reprocessing."
       ],
       "external_input": false
     },
@@ -1629,6 +1640,23 @@
       "external_input": false
     },
     {
+      "key": "T04",
+      "title": "Test processing-boundary and private-read isolation",
+      "depends_on": [
+        "U07"
+      ],
+      "file_scope": [
+        "tests/privacy/"
+      ],
+      "intent": "Verify the complete UI-to-routing/transport/export/search/notification boundary with synthetic canary content.",
+      "acceptance": [
+        "Unapproved routes, cross-origin redirects, stale jobs and reviewer profiles cannot disclose canaries; private-source queries/snippets and lock-screen payloads respect read scope.",
+        "Assert no raw credentials/content in logs or exports and verify revocation while a job is in flight; record authorized remote processing accurately.",
+        "This base privacy suite does not depend on optional Spark, shadow or preview features. T11/S04 own their capability canaries, which must pass before those capabilities are enabled or claimed in a candidate."
+      ],
+      "external_input": false
+    },
+    {
       "key": "U09",
       "title": "Add honest status and minimal recovery views",
       "depends_on": [
@@ -1665,26 +1693,6 @@
         "Default remains generic. Preview opt-in states lock-screen exposure clearly and applies only to explicitly non-private, suggestion-eligible items.",
         "Reclassify/delete/stop-suggesting cancels and reconciles pending previews; never promise recall of already delivered OS banners. Private content and identifiers conveying meaning never enter payloads.",
         "Preview content requires an explicitly preview-safe route configured by the user. The universal/default route is not preview-safe; classification can only remove eligibility, never grant preview permission. End-to-end tests inspect every scheduled payload."
-      ],
-      "external_input": false
-    },
-    {
-      "key": "T04",
-      "title": "Test processing-boundary and private-read isolation",
-      "depends_on": [
-        "V09",
-        "U07",
-        "E03",
-        "T11",
-        "S04"
-      ],
-      "file_scope": [
-        "tests/privacy/"
-      ],
-      "intent": "Verify the complete UI-to-routing/transport/export/search/notification boundary with synthetic canary content.",
-      "acceptance": [
-        "Unapproved routes, cross-origin redirects, stale jobs and reviewer profiles cannot disclose canaries; private-source queries/snippets and lock-screen payloads respect read scope.",
-        "Assert no raw credentials/content in logs or exports and verify revocation while a job is in flight; record authorized remote processing accurately."
       ],
       "external_input": false
     },
@@ -1741,7 +1749,8 @@
       "intent": "Add one maintained simulator test suite across actual production wiring, rather than isolated module fakes.",
       "acceptance": [
         "Exercise silent capture, saved-source retrieval, classification, correction, completion, explicit reminder scheduling and notification action with deterministic provider/clock/OS boundaries.",
-        "Run the happy-path suite in macOS CI on the submitted revision; provider and OS boundaries are deterministic while app/service wiring is real. Failure journeys belong to T12."
+        "Run the happy-path suite in macOS CI on the submitted revision; provider and OS boundaries are deterministic while app/service wiring is real. Failure journeys belong to T12.",
+        "With no provider configured, capture an explicit session topic, correct its facet, and retrieve original words using session-topic plus since-date filters without any network request."
       ],
       "external_input": false
     },
@@ -1807,7 +1816,8 @@
       "acceptance": [
         "Verify cold/locked/permission paths, offline recording/text, process interruption, local reminders UI closed, pipeline faults and Mac asleep with actual build/device identifiers.",
         "Attach sanitized results and exact reproduction of failures; every functional criterion must pass or the task remains blocked for remediation. Do not certify a probe build as the production app.",
-        "Every observed result cites a named sanitized evidence artifact, build/revision and collection time; preserve raw private evidence locally with an auditable reference. Missing evidence blocks the check; prose assertions alone cannot pass review."
+        "Every observed result cites a named sanitized evidence artifact, build/revision and collection time; preserve raw private evidence locally with an auditable reference. Missing evidence blocks the check; prose assertions alone cannot pass review.",
+        "Test every capability claimed by the exact candidate. Spark, shadow and preview capabilities may be absent/disabled for the base trial; enabling one requires its owning task canaries and affected device checks first."
       ],
       "external_input": true
     },

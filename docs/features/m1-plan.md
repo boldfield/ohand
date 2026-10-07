@@ -54,7 +54,7 @@ The trial must assess capture avoidance, retrieval success and resurfacing usefu
 
 Versioned interpretation instructions are owned by I07. Session-topic is a source-linked, user-correctable facet; personal/work/session scopes and processing permissions are distinct. Spoken mutation of existing items is deferred in M1; source is retained and UI changes remain supported. U03 owns explicit transcript correction, U02 owns retained-audio playback.
 
-The management shell and base composition do not wait for Spark access or optional shadow review. T11 integrates those capabilities afterward; S04 adds explicitly authorized previews afterward. The physical exit matrix still verifies every capability claimed for the trial. Missing inputs never certify compatibility. Actual probe/evaluation/device results must link named sanitized artifacts and exact build identifiers, not just authored results prose.
+The management shell and base composition do not wait for Spark access or optional shadow review. T11 integrates those capabilities afterward; S04 adds explicitly authorized previews afterward. The physical exit matrix verifies every capability claimed for the trial. Spark, shadow review and preview features may remain disabled without holding up the base signed build or trial; their own canaries must pass before enablement. Those tasks still start READY and run when dependencies and real inputs permit. Missing inputs never certify compatibility. Actual probe/evaluation/device results must link named sanitized artifacts and exact build identifiers, not just authored results prose.
 
 Native work is validated by standard macOS CI for the exact submitted revision; Linux workers may author native code but cannot substitute Linux checks for a successful native build. F05 establishes and demonstrates that result-collection path. T10 produces a signed candidate, T05 tests it, and T06 distributes that same candidate. A two-week trial requires a signing lifetime or tested renewal plan covering its duration.
 
@@ -179,7 +179,7 @@ Acceptance and verification:
 
 Dependencies: F03, F04.
 
-Owned paths: `.github/workflows/ios.yml`, `Makefile`, `AGENTS.md`.
+Owned paths: `.github/workflows/ios.yml`, `Makefile`, `AGENTS.md`, `ios/project.yml`.
 
 Add reproducible native simulator build/tests on standard macOS runners without requiring signing secrets.
 
@@ -436,7 +436,6 @@ Acceptance and verification:
 
 - Add/update/delete handles invalidated keys and storage errors; webview, control extensions, logs, exports and synced profile data never receive secret values.
 - Use appropriate accessibility class and verify lock/relaunch behavior with synthetic secrets; do not grant broad shared credential access just to simplify a probe.
-- For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient.
 
 ### P03
 
@@ -545,38 +544,6 @@ Acceptance and verification:
 - Not-now uses a stated cooldown, stop-suggesting is durable pull-only, and nonresponse never completes/cancels an intention or manufactures importance.
 - Uninterpreted records and unsupported/ambiguous intent are searchable but never eligible as inferred actions.
 
-### V05
-
-**Implement bounded native HTTP transport for providers**
-
-Dependencies: V02, V04.
-
-Owned paths: `ios/Services/ProviderTransport/`, `ios/Tests/ProviderTransport/`.
-
-Create the native request transport used by adapters, with authorization enforcement before any request and Keychain resolution at dispatch.
-
-Acceptance and verification:
-
-- Timeout, cancellation, response bounds, error normalization, redacted diagnostics and endpoint/TLS validation are tested through a controlled fixture server.
-- Reject cross-origin redirect credential forwarding and silent cleartext/certificate bypass; user-configured private endpoints work only under explicitly documented supported transport.
-- For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient.
-
-### C01
-
-**Implement native data protection and private-read authentication**
-
-Dependencies: P02, V04, D02.
-
-Owned paths: `ios/Services/ProtectedStorage/`, `ios/Services/Authentication/`.
-
-Apply native file/keychain protection and a session-scoped read-auth boundary across capture storage and private views.
-
-Acceptance and verification:
-
-- Document accessibility before/after first unlock, app-switcher redaction and OS backup inclusion/exclusion; locked capture never grants private-history access.
-- Tests cover denied/cancelled authentication and relock/foreground transitions. Failed unlock does not erase or disclose stored content.
-- For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient.
-
 ### P04
 
 **Probe offline on-device transcription capabilities**
@@ -595,7 +562,7 @@ Acceptance and verification:
 
 ### I03
 
-**Implement the narrow offline reminder-command fast path**
+**Implement narrow offline reminder and session-topic recognition**
 
 Dependencies: I01, I02.
 
@@ -607,6 +574,7 @@ Acceptance and verification:
 
 - Minimal pairs test negation, quotations, hypothetical/reported speech, already-completed work, missing times and repeats; starts-with-remind-me is not sufficient.
 - A fully supported command produces a sourced candidate offline; other clear language remains available to the interpreter instead of being permanently discarded or silently scheduled.
+- Recognize a bounded documented set of explicit session-topic phrases locally, such as Bring this up in therapy, with negated/quoted minimal pairs and abstention. This sets a derived session-topic facet only, never privacy scope or upload permission.
 
 ### I04
 
@@ -654,6 +622,7 @@ Acceptance and verification:
 
 - Enforce scope before searching/ranking/results; work-only requests cannot leak private text through snippets, counts or errors.
 - Stable pagination/order and honest no-match behavior are tested using synthetic mixed-domain records; no generated answer or embedding dependency.
+- Support session-topic and explicit privacy/read scope filters together; a local-only session note remains retrievable without a configured provider.
 
 ### L01
 
@@ -685,54 +654,39 @@ Acceptance and verification:
 - Generate and verify simulator/device bindings in documented builds; keep ABI ownership, cancellation, threading and error conversion explicit.
 - Exercise actual persistence and status calls through Swift; test repeated initialization, invalid input and background-thread callbacks without UI-thread violations.
 - For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient.
+- Each owned module declares its exports through the reserved interface mechanism; generated bindings are reproducible build output, not shared committed files. Native consumers depend on this bridge before adding effects.
 
-### V06
+### V05
 
-**Implement the Anthropic interpretation adapter**
+**Implement bounded native HTTP transport for providers**
 
-Dependencies: V01, V05.
+Dependencies: V02, V04, B01.
 
-Owned paths: `core/src/providers/anthropic/`, `core/tests/providers_anthropic/`.
+Owned paths: `ios/Services/ProviderTransport/`, `ios/Tests/ProviderTransport/`.
 
-Implement the documented Anthropic protocol for the M1 structured interpretation capability.
-
-Acceptance and verification:
-
-- Synthetic protocol fixtures cover valid/invalid structured output, auth failure, rate limit, timeout and cancellation through shared contracts.
-- Model and account come from the profile; no embedded service keys, protocol-specific types in domain state, or unsupported speech capability claims.
-
-### V07
-
-**Implement the OpenAI interpretation adapter**
-
-Dependencies: V01, V05.
-
-Owned paths: `core/src/providers/openai/`, `core/tests/providers_openai/`.
-
-Implement the documented OpenAI protocol for the same provider-independent M1 interpretation capability.
+Create the native request transport used by adapters, with authorization enforcement before any request and Keychain resolution at dispatch.
 
 Acceptance and verification:
 
-- Pass the same semantic/protocol contract fixtures, including malformed output, refusal, rate limit, auth failure and cancellation.
-- Use configured supported API credentials; do not assume a chat subscription is an API credential. Source capture storage and domain contracts remain unchanged.
+- Timeout, cancellation, response bounds, error normalization, redacted diagnostics and endpoint/TLS validation are tested through a controlled fixture server.
+- Reject cross-origin redirect credential forwarding and silent cleartext/certificate bypass; user-configured private endpoints work only under explicitly documented supported transport.
+- For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient.
 
-### V09
+### C01
 
-**Implement the verified self-hosted provider adapter**
+**Implement native data protection and private-read authentication**
 
-Dependencies: V05, V08.
+Dependencies: P02, V04, D02, B01.
 
-Owned paths: `core/src/providers/self_hosted/`, `core/tests/providers_self_hosted/`.
+Owned paths: `ios/Services/ProtectedStorage/`, `ios/Services/Authentication/`.
 
-Support precisely the protocol established by V08, reusing transport without requiring public exposure of the server.
+Apply native file/keychain protection and a session-scoped read-auth boundary across capture storage and private views.
 
 Acceptance and verification:
 
-- Configured model/endpoint/auth passes recorded contract fixtures plus the verified endpoint smoke test; unsupported capabilities are explicit.
-- Away-from-network failure keeps captures queued and never falls back to a cloud provider; report the exact verified compatibility boundary.
-- Every observed result cites a named sanitized evidence artifact, build/revision and collection time; preserve raw private evidence locally with an auditable reference. Missing evidence blocks the check; prose assertions alone cannot pass review.
-
-External evidence/input is required. Missing access is a concrete execution block, not a reason to fabricate completion.
+- Document accessibility before/after first unlock, app-switcher redaction and OS backup inclusion/exclusion; locked capture never grants private-history access.
+- Tests cover denied/cancelled authentication and relock/foreground transitions. Failed unlock does not erase or disclose stored content.
+- For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient.
 
 ### R03
 
@@ -802,6 +756,69 @@ Acceptance and verification:
 
 External evidence/input is required. Missing access is a concrete execution block, not a reason to fabricate completion.
 
+### I07
+
+**Define versioned interpretation instructions and provider-neutral mapping**
+
+Dependencies: I01, I04.
+
+Owned paths: `core/src/interpretation/instructions/`, `core/tests/interpretation_instructions/`.
+
+Own the actual instructions, request context and response mapping used by interpretation adapters.
+
+Acceptance and verification:
+
+- Instructions and output contract are versioned, source text is treated as untrusted data, and capture/profile/time context is explicit.
+- Synthetic golden request/mapping fixtures cover negation, mixed intents, session topics and abstention; instructions cannot confer disclosure permissions or authorize unsupported existing-item updates.
+
+### V06
+
+**Implement the Anthropic interpretation adapter**
+
+Dependencies: V01, V05.
+
+Owned paths: `core/src/providers/anthropic/`, `core/tests/providers_anthropic/`.
+
+Implement the documented Anthropic protocol for the M1 structured interpretation capability.
+
+Acceptance and verification:
+
+- Synthetic protocol fixtures cover valid/invalid structured output, auth failure, rate limit, timeout and cancellation through shared contracts.
+- Model and account come from the profile; no embedded service keys, protocol-specific types in domain state, or unsupported speech capability claims.
+
+### V07
+
+**Implement the OpenAI interpretation adapter**
+
+Dependencies: V01, V05.
+
+Owned paths: `core/src/providers/openai/`, `core/tests/providers_openai/`.
+
+Implement the documented OpenAI protocol for the same provider-independent M1 interpretation capability.
+
+Acceptance and verification:
+
+- Pass the same semantic/protocol contract fixtures, including malformed output, refusal, rate limit, auth failure and cancellation.
+- Use configured supported API credentials; do not assume a chat subscription is an API credential. Source capture storage and domain contracts remain unchanged.
+
+### V09
+
+**Implement the verified self-hosted provider adapter**
+
+Dependencies: V05, V08.
+
+Owned paths: `core/src/providers/self_hosted/`, `core/tests/providers_self_hosted/`.
+
+Support precisely the protocol established by V08, reusing transport without requiring public exposure of the server.
+
+Acceptance and verification:
+
+- Configured model/endpoint/auth passes recorded contract fixtures plus the verified endpoint smoke test; unsupported capabilities are explicit.
+- Away-from-network failure keeps captures queued and never falls back to a cloud provider; report the exact verified compatibility boundary.
+- Every observed result cites a named sanitized evidence artifact, build/revision and collection time; preserve raw private evidence locally with an auditable reference. Missing evidence blocks the check; prose assertions alone cannot pass review.
+
+External evidence/input is required. Missing access is a concrete execution block, not a reason to fabricate completion.
+
 ### C02
 
 **Implement durable native ingress and core import**
@@ -818,21 +835,6 @@ Acceptance and verification:
 - Test atomic file/DB ownership, malformed/partial ingress, recovery and cleanup after confirmed import inside protected storage.
 - Any later independent extension writer needs a separate task and proven concurrency/protection contract; it is not part of this task.
 - For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient.
-
-### I07
-
-**Define versioned interpretation instructions and provider-neutral mapping**
-
-Dependencies: I01, I04.
-
-Owned paths: `core/src/interpretation/instructions/`, `core/tests/interpretation_instructions/`.
-
-Own the actual instructions, request context and response mapping used by interpretation adapters.
-
-Acceptance and verification:
-
-- Instructions and output contract are versioned, source text is treated as untrusted data, and capture/profile/time context is explicit.
-- Synthetic golden request/mapping fixtures cover negation, mixed intents, session topics and abstention; instructions cannot confer disclosure permissions or authorize unsupported existing-item updates.
 
 ### N03
 
@@ -853,7 +855,7 @@ Acceptance and verification:
 
 **Add optional budgeted shadow-review instrumentation**
 
-Dependencies: V03, E01, V04.
+Dependencies: V03, E01, V04, B01.
 
 Owned paths: `core/src/review/shadow/`, `ios/Services/ShadowReview/`.
 
@@ -952,14 +954,13 @@ Execute and reconcile deletion effects across audio, ingress, caches, jobs and n
 Acceptance and verification:
 
 - Reopen after each injected cleanup interruption converges without private remnants becoming searchable or notifications remaining active.
-- Delete-all uses the same semantics, removes credential references/secrets when requested, and clearly states the OS backup/export lifecycle rather than claiming unprovable physical erasure.
 - This task covers per-item cleanup only; delete-all generation fencing and optional credential reset belong to L05.
 
 ### J02
 
 **Implement the foreground lifecycle job runner**
 
-Dependencies: J01, V03, I06.
+Dependencies: J01, V03, I06, B01.
 
 Owned paths: `core/src/jobs/runner/`, `core/tests/job_runner/`, `ios/Services/JobRunner/`, `ios/Tests/JobRunner/`.
 
@@ -1005,6 +1006,21 @@ Acceptance and verification:
 - Off by default, bounded horizon and capacity below explicit reminders; disabling prompting cancels only prompts.
 - Refill the bounded daily prompt horizon only on app open; re-entry/time changes do not replay missed prompts, and default generic payloads contain no private content.
 
+### L04
+
+**Implement portable export with consistent source state**
+
+Dependencies: D04, L02, V04.
+
+Owned paths: `core/src/export/`, `ios/Services/Export/`.
+
+Export a consistent versioned snapshot of source/correction/current state and minimal provenance through a native user-selected destination.
+
+Acceptance and verification:
+
+- Export contains no credentials, internal endpoint secrets, deleted content or private data outside the authenticated requested scope; optional audio inclusion is explicit.
+- A test-only reader reconstructs equivalent item state and detects malformed/truncated export; native share/temp files are protected and cleaned. M1 does not claim full backup/restore sync.
+
 ### C05
 
 **Integrate offline transcription into saved captures**
@@ -1022,26 +1038,11 @@ Acceptance and verification:
 - Register the real native transcription handler with the job runner through the reserved capability seam and verify a queued saved recording actually executes through that path.
 - For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient.
 
-### L04
-
-**Implement portable export with consistent source state**
-
-Dependencies: D04, L02, V04.
-
-Owned paths: `core/src/export/`, `ios/Services/Export/`.
-
-Export a consistent versioned snapshot of source/correction/current state and minimal provenance through a native user-selected destination.
-
-Acceptance and verification:
-
-- Export contains no credentials, internal endpoint secrets, deleted content or private data outside the authenticated requested scope; optional audio inclusion is explicit.
-- A test-only reader reconstructs equivalent item state and detects malformed/truncated export; native share/temp files are protected and cleaned. M1 does not claim full backup/restore sync.
-
 ### J03
 
 **Expose bounded processing health and recoverable errors**
 
-Dependencies: J02, D05.
+Dependencies: J02, D05, B01.
 
 Owned paths: `core/src/jobs/health/`, `ios/Services/Health/`.
 
@@ -1212,7 +1213,7 @@ Acceptance and verification:
 
 **Assemble the production service composition root**
 
-Dependencies: B01, C06, S03, L03, L04.
+Dependencies: B01, C06, S03, L03, L04, J03.
 
 Owned paths: `ios/Services/Assembly/CompositionRoot.swift`, `ios/Tests/Services/CompositionRootTests.swift`.
 
@@ -1255,6 +1256,7 @@ Acceptance and verification:
 
 - The base app constructs and captures when neither optional feature is configured. Feature registration uses the same routing/credential rules and adds no hidden default endpoint.
 - Synthetic end-to-end checks exercise both registrations; real self-hosted claims link V08/V09 evidence. No edits to concurrent shell or root files are needed.
+- Own routing/credential-isolation canaries for both optional integrations, including denied routes, revoked profiles and shadow verdicts unable to mutate authoritative state; absent or unverified capability stays disabled.
 
 ### U01
 
@@ -1302,6 +1304,7 @@ Acceptance and verification:
 - Search returns original/corrected text with date/type/source and honest no-result state; private reads require authentication.
 - Literal fallback and private topics since a date work offline; no generated answer is shown as quotation.
 - Offer playback only for retained source audio with the same private-read authentication; expired/deleted audio is honestly unavailable and cannot leave a broken playback control.
+- Expose session-topic filtering and since-date retrieval with original source text in the private authenticated view.
 
 ### U03
 
@@ -1318,6 +1321,7 @@ Acceptance and verification:
 - Each action updates actual stored state and survives relaunch/reprocessing; stale revision conflicts are visible and do not silently overwrite.
 - Not-now and stop-suggesting behavior are explained; actions do not turn an idea into an obligation without explicit user intent.
 - Allow source/transcript correction as an explicit authoritative revision while preserving original provenance; later transcription/model output cannot overwrite the correction.
+- Provide an explicit session-topic facet toggle independently of note/action/idea and privacy scope; correction survives later reprocessing.
 
 ### U04
 
@@ -1409,6 +1413,22 @@ Acceptance and verification:
 - Opt-in is required, prompt horizon/cooldown are understandable, and no private item is revealed before authenticated open.
 - Off/not-now/stop/done affect correct stored policy without disabling explicit reminders; empty eligible set is calm and does not solicit inbox cleanup.
 
+### T04
+
+**Test processing-boundary and private-read isolation**
+
+Dependencies: U07.
+
+Owned paths: `tests/privacy/`.
+
+Verify the complete UI-to-routing/transport/export/search/notification boundary with synthetic canary content.
+
+Acceptance and verification:
+
+- Unapproved routes, cross-origin redirects, stale jobs and reviewer profiles cannot disclose canaries; private-source queries/snippets and lock-screen payloads respect read scope.
+- Assert no raw credentials/content in logs or exports and verify revocation while a job is in flight; record authorized remote processing accurately.
+- This base privacy suite does not depend on optional Spark, shadow or preview features. T11/S04 own their capability canaries, which must pass before those capabilities are enabled or claimed in a candidate.
+
 ### U09
 
 **Add honest status and minimal recovery views**
@@ -1439,21 +1459,6 @@ Acceptance and verification:
 - Default remains generic. Preview opt-in states lock-screen exposure clearly and applies only to explicitly non-private, suggestion-eligible items.
 - Reclassify/delete/stop-suggesting cancels and reconciles pending previews; never promise recall of already delivered OS banners. Private content and identifiers conveying meaning never enter payloads.
 - Preview content requires an explicitly preview-safe route configured by the user. The universal/default route is not preview-safe; classification can only remove eligibility, never grant preview permission. End-to-end tests inspect every scheduled payload.
-
-### T04
-
-**Test processing-boundary and private-read isolation**
-
-Dependencies: V09, U07, E03, T11, S04.
-
-Owned paths: `tests/privacy/`.
-
-Verify the complete UI-to-routing/transport/export/search/notification boundary with synthetic canary content.
-
-Acceptance and verification:
-
-- Unapproved routes, cross-origin redirects, stale jobs and reviewer profiles cannot disclose canaries; private-source queries/snippets and lock-screen payloads respect read scope.
-- Assert no raw credentials/content in logs or exports and verify revocation while a job is in flight; record authorized remote processing accurately.
 
 ### U10
 
@@ -1502,6 +1507,7 @@ Acceptance and verification:
 
 - Exercise silent capture, saved-source retrieval, classification, correction, completion, explicit reminder scheduling and notification action with deterministic provider/clock/OS boundaries.
 - Run the happy-path suite in macOS CI on the submitted revision; provider and OS boundaries are deterministic while app/service wiring is real. Failure journeys belong to T12.
+- With no provider configured, capture an explicit session topic, correct its facet, and retrieve original words using session-topic plus since-date filters without any network request.
 
 ### T10
 
@@ -1552,6 +1558,7 @@ Acceptance and verification:
 - Verify cold/locked/permission paths, offline recording/text, process interruption, local reminders UI closed, pipeline faults and Mac asleep with actual build/device identifiers.
 - Attach sanitized results and exact reproduction of failures; every functional criterion must pass or the task remains blocked for remediation. Do not certify a probe build as the production app.
 - Every observed result cites a named sanitized evidence artifact, build/revision and collection time; preserve raw private evidence locally with an auditable reference. Missing evidence blocks the check; prose assertions alone cannot pass review.
+- Test every capability claimed by the exact candidate. Spark, shadow and preview capabilities may be absent/disabled for the base trial; enabling one requires its owning task canaries and affected device checks first.
 
 External evidence/input is required. Missing access is a concrete execution block, not a reason to fabricate completion.
 
