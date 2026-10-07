@@ -433,7 +433,61 @@ fn test_malformed_table_at_claimed_version_rejected() -> Result<()> {
     }
 
     let error = make_test_db(&path, instant).unwrap_err().to_string();
-    assert!(error.contains("unexpected shape"), "Got: {}", error);
+    assert!(error.contains("unexpected definition"), "Got: {}", error);
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn test_same_name_weaker_index_at_claimed_version_rejected() -> Result<()> {
+    let path = temp_db_path("weak_index");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+
+    {
+        let db = make_test_db(&path, instant)?;
+        db.conn()
+            .execute("DROP INDEX idx_proposals_applied_per_revision", [])?;
+        db.conn().execute(
+            "CREATE INDEX idx_proposals_applied_per_revision ON proposals(item_id)",
+            [],
+        )?;
+    }
+
+    let error = make_test_db(&path, instant).unwrap_err().to_string();
+    assert!(
+        error.contains("index:idx_proposals_applied_per_revision")
+            && error.contains("unexpected definition"),
+        "Got: {}",
+        error
+    );
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn test_malformed_metadata_table_at_claimed_version_rejected() -> Result<()> {
+    let path = temp_db_path("bad_metadata");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+
+    {
+        let db = make_test_db(&path, instant)?;
+        db.conn().execute("DROP TABLE _schema_metadata", [])?;
+        db.conn().execute(
+            "CREATE TABLE _schema_metadata (version INTEGER PRIMARY KEY)",
+            [],
+        )?;
+        db.conn()
+            .execute("INSERT INTO _schema_metadata (version) VALUES (1)", [])?;
+    }
+
+    let error = make_test_db(&path, instant).unwrap_err().to_string();
+    assert!(
+        error.contains("table:_schema_metadata") && error.contains("unexpected definition"),
+        "Got: {}",
+        error
+    );
 
     let _ = std::fs::remove_file(&path);
     Ok(())

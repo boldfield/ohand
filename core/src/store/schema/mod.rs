@@ -126,14 +126,7 @@ impl Database {
         clock: &Arc<dyn Clock>,
     ) -> Result<()> {
         let tx = conn.transaction()?;
-        tx.execute(
-            "CREATE TABLE IF NOT EXISTS _schema_metadata (
-                version INTEGER PRIMARY KEY,
-                created_at TEXT NOT NULL,
-                upgraded_at TEXT NOT NULL
-            )",
-            [],
-        )?;
+        tx.execute(METADATA_TABLE_SQL, [])?;
         (step.apply)(&tx).map_err(|error| {
             anyhow!(
                 "Migration to version {} failed: {}",
@@ -193,52 +186,57 @@ fn validate_step_list(steps: &[MigrationStep]) -> Result<()> {
     Ok(())
 }
 
-type SchemaSnapshot = BTreeMap<String, Vec<(String, String, i64, i64)>>;
+/// Definition of the migration ledger table, created inside every step's transaction.
+const METADATA_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS _schema_metadata (
+    version INTEGER PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    upgraded_at TEXT NOT NULL
+)";
 
-/// Tables (with column name/type/notnull/pk) and indexes (empty column list) in the database.
+/// Object key (`type:name`) to its owning table and whitespace-normalized definition.
+type SchemaSnapshot = BTreeMap<String, (String, String)>;
+
+/// Every table, index, trigger and view definition stored in `sqlite_master`, which captures
+/// column types, constraints, foreign keys, index uniqueness, indexed columns and partial
+/// predicates exactly as written by the migration steps.
 fn snapshot_schema(conn: &Connection) -> Result<SchemaSnapshot> {
-    let mut snapshot = SchemaSnapshot::new();
-    let mut objects = conn.prepare(
-        "SELECT type, name FROM sqlite_master
-         WHERE type IN ('table', 'index') AND name NOT LIKE 'sqlite_%'",
+    let mut statement = conn.prepare(
+        "SELECT type, name, tbl_name, sql FROM sqlite_master
+         WHERE type IN ('table', 'index', 'trigger', 'view')
+           AND name NOT LIKE 'sqlite_%' AND sql IS NOT NULL",
     )?;
-    let object_rows = objects
+    let rows = statement
         .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    for (kind, name) in object_rows {
-        let mut columns = Vec::new();
-        if kind == "table" {
-            let mut info = conn.prepare(&format!("PRAGMA table_info(\"{}\")", name))?;
-            columns = info
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, i64>(5)?,
-                    ))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-        }
-        snapshot.insert(format!("{}:{}", kind, name), columns);
+    let mut snapshot = SchemaSnapshot::new();
+    for (kind, name, table_name, sql) in rows {
+        let normalized_sql = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+        snapshot.insert(format!("{}:{}", kind, name), (table_name, normalized_sql));
     }
     Ok(snapshot)
 }
 
 /// Verify that the database really contains the schema its version row claims, by comparing
-/// against a reference built in memory from the same steps up to `version`.
+/// every object definition (including `_schema_metadata`) against a reference built in memory
+/// from the same steps up to `version`.
 fn validate_schema_shape(conn: &Connection, steps: &[MigrationStep], version: u32) -> Result<()> {
     let mut reference = Connection::open_in_memory()?;
     for step in steps.iter().filter(|step| step.target_version <= version) {
         let tx = reference.transaction()?;
+        tx.execute(METADATA_TABLE_SQL, [])?;
         (step.apply)(&tx)?;
         tx.commit()?;
     }
     let expected = snapshot_schema(&reference)?;
     let actual = snapshot_schema(conn)?;
-    for (object, expected_columns) in &expected {
+    for (object, expected_definition) in &expected {
         match actual.get(object) {
             None => {
                 return Err(anyhow!(
@@ -247,9 +245,9 @@ fn validate_schema_shape(conn: &Connection, steps: &[MigrationStep], version: u3
                     object
                 ))
             }
-            Some(actual_columns) if actual_columns != expected_columns => {
+            Some(actual_definition) if actual_definition != expected_definition => {
                 return Err(anyhow!(
-                    "Database claims schema version {} but {} has an unexpected shape",
+                    "Database claims schema version {} but {} has an unexpected definition",
                     version,
                     object
                 ))
