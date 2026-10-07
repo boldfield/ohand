@@ -25,6 +25,14 @@ targets:
       PRODUCT_NAME: OhAndCoreBridge
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.corebridge
       GENERATE_INFOPLIST_FILE: YES
+      MODULEMAP_FILE: $(SRCROOT)/OhAndCoreBridge/module.modulemap
+      SWIFT_INCLUDE_PATHS: $(SRCROOT)/OhAndCoreBridge
+      OTHER_LDFLAGS: -lohand_core
+      LIBRARY_SEARCH_PATHS: $(BUILT_PRODUCTS_DIR)/rust-core
+    buildPhases:
+      - type: shell
+        name: Build Rust Core
+        script: exec "$(SRCROOT)/scripts/build-rust-core.sh"
 
   OhAndServices:
     type: framework
