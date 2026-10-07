@@ -1,0 +1,243 @@
+name: OhAnd
+options:
+  bundleIdPrefix: com.boldfield.ohand
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "16.4"
+
+settings:
+  PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.app
+  IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+  SWIFT_VERSION: "5.0"
+
+configFiles:
+  Debug: Config/Base.xcconfig
+  Release: Config/Base.xcconfig
+
+targets:
+  OhAndCoreBridge:
+    type: framework
+    platform: iOS
+    sources:
+      - path: OhAndCoreBridge
+        createIntermediateGroups: true
+    settings:
+      PRODUCT_NAME: OhAndCoreBridge
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.corebridge
+      GENERATE_INFOPLIST_FILE: YES
+
+  OhAndServices:
+    type: framework
+    platform: iOS
+    sources:
+      - path: Services
+        createIntermediateGroups: true
+        optional: true
+        excludes:
+          - "**/.placeholder"
+    settings:
+      PRODUCT_NAME: OhAndServices
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.services
+      GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - target: OhAndCoreBridge
+
+  OhAndApp:
+    type: application
+    platform: iOS
+    sources:
+      - path: AppAssembly
+        createIntermediateGroups: true
+        excludes:
+          - "**/.placeholder"
+      - path: Capture
+        createIntermediateGroups: true
+        optional: true
+        excludes:
+          - "**/.placeholder"
+          - "Entry/Control/**"
+    settings:
+      PRODUCT_NAME: OhAnd
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.app
+      INFOPLIST_FILE: AppAssembly/Info.plist
+    dependencies:
+      - target: OhAndServices
+      - target: OhAndCaptureControl
+
+  OhAndTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+        createIntermediateGroups: true
+        optional: true
+        excludes:
+          - "**/.placeholder"
+    settings:
+      PRODUCT_NAME: OhAndTests
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.tests
+      GENERATE_INFOPLIST_FILE: YES
+      TEST_HOST: $(BUILT_PRODUCTS_DIR)/OhAnd.app/OhAnd
+      BUNDLE_LOADER: $(TEST_HOST)
+    dependencies:
+      - target: OhAndApp
+      - target: OhAndServices
+        embed: false
+      - target: OhAndCoreBridge
+        embed: false
+
+  OhAndCaptureControl:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Capture/Entry/Control
+        createIntermediateGroups: true
+        excludes:
+          - Info.plist
+      - path: Capture/Entry/Shared
+        createIntermediateGroups: true
+        optional: true
+        excludes:
+          - "**/.placeholder"
+    settings:
+      PRODUCT_NAME: OhAndCaptureControl
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.app.capture-control
+      INFOPLIST_FILE: Capture/Entry/Control/Info.plist
+
+  BridgeProbe:
+    type: application
+    platform: iOS
+    sources:
+      - path: BridgeProbe
+        createIntermediateGroups: true
+        excludes:
+          - Info.plist
+    settings:
+      PRODUCT_NAME: BridgeProbe
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.bridge
+      INFOPLIST_FILE: BridgeProbe/Info.plist
+    dependencies:
+      - target: OhAndCoreBridge
+
+  NotificationProbe:
+    type: application
+    platform: iOS
+    sources:
+      - path: NotificationProbe
+        createIntermediateGroups: true
+        excludes:
+          - Info.plist
+    settings:
+      PRODUCT_NAME: NotificationProbe
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.notification
+      INFOPLIST_FILE: NotificationProbe/Info.plist
+
+  AudioProbe:
+    type: application
+    platform: iOS
+    sources:
+      - path: AudioProbe
+        createIntermediateGroups: true
+        excludes:
+          - Info.plist
+    settings:
+      PRODUCT_NAME: AudioProbe
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.audio
+      INFOPLIST_FILE: AudioProbe/Info.plist
+
+  TranscriptionProbe:
+    type: application
+    platform: iOS
+    sources:
+      - path: TranscriptionProbe
+        createIntermediateGroups: true
+        excludes:
+          - Info.plist
+    settings:
+      PRODUCT_NAME: TranscriptionProbe
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.transcription
+      INFOPLIST_FILE: TranscriptionProbe/Info.plist
+
+  CredentialProbe:
+    type: application
+    platform: iOS
+    sources:
+      - path: CredentialProbe
+        createIntermediateGroups: true
+        excludes:
+          - Info.plist
+    settings:
+      PRODUCT_NAME: CredentialProbe
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.credential
+      INFOPLIST_FILE: CredentialProbe/Info.plist
+
+  CaptureProbe:
+    type: application
+    platform: iOS
+    sources:
+      - path: CaptureProbe
+        createIntermediateGroups: true
+        excludes:
+          - Info.plist
+          - "Control/**"
+    settings:
+      PRODUCT_NAME: CaptureProbe
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.capture
+      INFOPLIST_FILE: CaptureProbe/Info.plist
+    dependencies:
+      - target: CaptureProbeControl
+
+  CaptureProbeControl:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: CaptureProbe/Control
+        createIntermediateGroups: true
+        excludes:
+          - Info.plist
+      - path: CaptureProbe/Shared
+        createIntermediateGroups: true
+        optional: true
+        excludes:
+          - "**/.placeholder"
+    settings:
+      PRODUCT_NAME: CaptureProbeControl
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.capture.control
+      INFOPLIST_FILE: CaptureProbe/Control/Info.plist
+
+schemes:
+  OhAndApp:
+    build:
+      targets:
+        OhAndApp: all
+  OhAndTests:
+    build:
+      targets:
+        OhAndTests: all
+    test:
+      targets:
+        - OhAndTests
+  BridgeProbe:
+    build:
+      targets:
+        BridgeProbe: all
+  NotificationProbe:
+    build:
+      targets:
+        NotificationProbe: all
+  AudioProbe:
+    build:
+      targets:
+        AudioProbe: all
+  TranscriptionProbe:
+    build:
+      targets:
+        TranscriptionProbe: all
+  CredentialProbe:
+    build:
+      targets:
+        CredentialProbe: all
+  CaptureProbe:
+    build:
+      targets:
+        CaptureProbe: all

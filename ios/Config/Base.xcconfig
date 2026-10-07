@@ -1,0 +1,9 @@
+// Shared build settings. No signing material lives in the repository.
+// Simulator builds are unsigned. Device builds need a team: copy
+// Local.xcconfig.example to Local.xcconfig (git-ignored) and set
+// DEVELOPMENT_TEAM, or pass DEVELOPMENT_TEAM=<id> to xcodebuild.
+CODE_SIGNING_ALLOWED[sdk=iphonesimulator*] = NO
+CODE_SIGNING_REQUIRED[sdk=iphonesimulator*] = NO
+CODE_SIGN_STYLE = Automatic
+
+#include? "Local.xcconfig"
