@@ -23,6 +23,9 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 anyhow = "1.0"
 thiserror = "1.0"
 
+# FFI support
+libc = "0.2"
+
 
 [profile.dev]
 opt-level = 0
