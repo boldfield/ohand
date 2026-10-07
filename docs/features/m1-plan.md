@@ -18,13 +18,13 @@ F02/F03 reserve core module registrations and native target inclusion so paralle
 
 - One installed iPhone app; Rust domain core, SQLite durable state, native Swift capture and system services. Tauri versus SwiftUI management shell is decided by P10 from measured probes. Mac and sync wait for M2; state says sync is not configured.
 - Target physical evidence: iPhone 16 Pro, user-reported iOS 26.6.2. Record the actual OS build during testing. Do not infer platform API behavior from that version string.
-- Foreground native capture is the default. Add a separate shared-container ingress only if a verified selected entry point executes outside the app process. Voice explicitly opens the supported recording surface; no always-listening or background-microphone promise.
+- Production capture uses a foreground native surface. Independent extension writers are outside M1; feasibility probes may evaluate handoff restrictions. Voice explicitly opens the supported recording surface; no always-listening or background-microphone promise.
 - Offline on-device transcription only. Unsupported language/model availability preserves durable audio with visible retry/delete options. Raw audio expires seven days after successful transcription; sole untranscribed source remains until explicit resolution. Source text and corrections remain authoritative.
-- Provider requests execute on the phone in the foreground with durable retry state. Background completion is not guaranteed. Anthropic, OpenAI and the actual verified self-hosted API use configuration profiles and native credential storage. Spark hardware alone establishes no protocol. No credential or endpoint is committed publicly.
+- Provider protocol adapters and domain orchestration live in Rust behind native transport/effect interfaces. Requests execute on the phone with durable retry state. Bounded native background time is best-effort and expiry preserves honest pending state; background completion is not guaranteed. Anthropic, OpenAI and the actual verified self-hosted API use configuration profiles and native credential storage. Spark hardware alone establishes no protocol. No credential or endpoint is committed publicly.
 - Each capability destination is authorized before dispatch, including optional review. No automatic vendor fallback. Profile versions prevent queued work from silently changing destination. Single-user owner scoping preserves inexpensive future hosted seams without building a multi-tenant service.
 - Original-text FTS and deterministic date/scope filters provide retrieval. No embeddings or generated answers in M1. Query parsing itself never uploads private query text. Uninterpreted or abstaining records remain searchable and do not become suggestion-eligible actions.
 - Explicit one-shot reminders use deterministic date resolution and durable reconciliation with native local notifications. Unsupported recurrence is saved as not scheduled and clearly explained; recurring reminders are a candidate for early M2. Clock passage is not delivery evidence. Acknowledge and complete remain distinct.
-- Optional daily prompting is off until configured, bounded and independent of explicit reminders. Generic notification text is the default, with current eligible content selected on authenticated open. Explicit opt-in may show non-private eligible item previews; private routes never qualify, and already delivered OS banners cannot be recalled. Measure whether either mode is actually useful.
+- Optional daily prompting is off until configured, bounded and independent of explicit reminders. Generic notification text is the default, with current eligible content selected on authenticated open. Explicit opt-in may show eligible item previews from a user-designated preview-safe route (never the universal route by default); private routes never qualify, and already delivered OS banners cannot be recalled. Measure whether either mode is actually useful.
 - File protection, credential isolation, private read authentication, backup exclusions/lifecycle, deletion reconciliation and portable export are M1 requirements. Export is not a tested full restore mechanism; device restoration and sync hardening remain M3. Do not describe logical deletion as guaranteed physical flash erasure.
 - Runtime review is optional, sampled, bounded and diagnostic. Its failure cannot delay durable capture or mutate authoritative state. Evaluate errors against fixtures and real corrections, not a second model's agreement.
 
@@ -39,16 +39,26 @@ The trial must assess capture avoidance, retrieval success and resurfacing usefu
 | Requirement | Tasks |
 | --- | --- |
 | Build, CI, file ownership and privacy-safe fixtures | F01–F07 |
-| Actual native/Tauri feasibility and shell choice | P01–P10 |
+| Actual native/Tauri feasibility and shell choice | P01–P11 |
 | Durable authoritative source, corrections and statuses | D01–D05, C01–C06 |
 | Durable queue, configuration, providers and privacy routes | J01–J03, V01–V09 |
-| Interpretation, abstention, deterministic time and retrieval | I01–I06, R01–R03 |
+| Interpretation, abstention, deterministic time and retrieval | I01–I07, R01–R03 |
 | Explicit reminders and bounded proactive return | N01–N07, S01–S04 |
-| Export, deletion and source-safe retention | L01–L04 |
+| Export, deletion and source-safe retention | L01–L05 |
 | Semantic evaluation and optional shadow review | E01–E03 |
-| Production bridge, composition and lifecycle | B01–B03 |
+| Production bridge, composition and lifecycle | B01–B05 |
 | Management, permissions, privacy and accessibility | U01–U11 |
-| Faults, live device, upgrades, distribution and trial | T01–T10 |
+| Faults, live device, upgrades, distribution and trial | T01–T12 |
+
+## Review resolutions
+
+Versioned interpretation instructions are owned by I07. Session-topic is a source-linked, user-correctable facet; personal/work/session scopes and processing permissions are distinct. Spoken mutation of existing items is deferred in M1; source is retained and UI changes remain supported. U03 owns explicit transcript correction, U02 owns retained-audio playback.
+
+The management shell and base composition do not wait for Spark access or optional shadow review. T11 integrates those capabilities afterward; S04 adds explicitly authorized previews afterward. The physical exit matrix still verifies every capability claimed for the trial. Missing inputs never certify compatibility. Actual probe/evaluation/device results must link named sanitized artifacts and exact build identifiers, not just authored results prose.
+
+Native work is validated by standard macOS CI for the exact submitted revision; Linux workers may author native code but cannot substitute Linux checks for a successful native build. F05 establishes and demonstrates that result-collection path. T10 produces a signed candidate, T05 tests it, and T06 distributes that same candidate. A two-week trial requires a signing lifetime or tested renewal plan covering its duration.
+
+Native effect tasks require a simulator integration check against the real core. By default, the save acknowledgment explicitly distinguishes saved-but-unprocessed from a confirmed installed reminder; an interrupted transcript must never imply reminder success.
 
 ## Task specifications
 
@@ -67,6 +77,8 @@ Acceptance and verification:
 - Define stable capture/item IDs, per-item revision, source versus correction/derived state, privacy routes, proposal/job/profile versions, time context and distinct save/sync/schedule/delivery states.
 - Define native-to-core ownership and error/lifetime contracts, ingress handoff, provider capabilities, notification identifiers, data protection and backup policy; list fields and invariants without implementation snippets.
 - Map every implementation area to an owned module; shared schema/registration edits must be ordered or reserved for an integration task. Record supported one-shot reminders and honest unsupported repeats.
+- Keep this to a bounded prose contract and ownership map, not application implementation. Define privacy scopes (personal/work/session), a user-correctable session-topic facet independent of note/action/idea, and preview-safe route permission which classification can only narrow.
+- Record these settled choices rather than redesign them: Rust + SQLite owns domain state, provider adapters and orchestration; Swift owns protected storage/credentials, audio, native transport, notification effects and lifecycle; phone-only M1; foreground capture; on-device transcription; original-text FTS; one-shot reminders; no AI disclosure gate; no sync or hosted tenancy. Define injectable transport/effect interfaces for these boundaries.
 
 ### F02
 
@@ -82,6 +94,7 @@ Acceptance and verification:
 
 - Linux clean checkout builds, lints and runs a meaningful interface/serialization smoke test using pinned dependencies.
 - Core has no Tauri/webview dependency; future modules can be filled without concurrent edits to one shared root. Document command behavior and fail on real test failures.
+- Declare the initial M1 dependencies and module inclusion strategy up front, including SQLite/time/serialization; parallel tasks must not independently mutate Cargo.toml/Cargo.lock. Later additions require serialized dependency work.
 
 ### F03
 
@@ -97,6 +110,7 @@ Acceptance and verification:
 
 - Document a reproducible unsigned simulator build and selected provisional SDK/deployment baseline; a clean checkout generates the same targets.
 - Use a unique project bundle identifier under the intended domain and configurable signing team. No certificates, provisioning profiles or credentials are committed.
+- Reserve probe/control targets and relevant usage strings; use deterministic directory-based source inclusion so concurrent native tasks do not edit project.yml. Production capture uses a foreground native surface.
 
 ### F07
 
@@ -142,6 +156,7 @@ Acceptance and verification:
 
 - Empty database migrates atomically; interrupted migration recovers or fails visibly without losing source records.
 - Schema/version validation and injected clock tests run on Linux; forward-incompatible database versions cannot be silently opened writable.
+- Own the initial table/migration envelope for all M1 modules from F01; subsequent feature tasks use those seams. New schema changes need ordered follow-up migration tasks, not concurrent edits here.
 
 ### I02
 
@@ -172,6 +187,7 @@ Acceptance and verification:
 
 - A real simulator launch/smoke test runs in CI and its logs identify toolchain/device versions.
 - Fork PRs require no credentials; use least-privilege workflow permissions and bounded artifacts. Document meaningful native check commands and evidence consumption by Linux reviewers.
+- Linux workers must trigger and await the standard macOS runner checks for the exact submitted commit, link its run and artifacts before review, and block if unavailable. Demonstrate this remote validation path with one probe PR; Linux-only validation cannot certify Swift.
 
 ### D02
 
@@ -278,6 +294,8 @@ Acceptance and verification:
 - Unsigned simulator path remains credential-free; signing inputs come only from secure local/CI injection, never command output or repository files.
 - With supplied inputs, produce and install a signed probe build and record content-free build/device identifiers; absent inputs leave actual signing evidence blocked, not claimed.
 - Document temporary keychain cleanup and account-holder enrollment steps without requiring per-build human approval.
+- Choose a signing/distribution route whose actual install validity covers the two-week trial, or explicitly plan and test renewal without data loss. Do not promise an unverified enrollment or expiry duration.
+- Every observed result cites a named sanitized evidence artifact, build/revision and collection time; preserve raw private evidence locally with an auditable reference. Missing evidence blocks the check; prose assertions alone cannot pass review.
 
 External evidence/input is required. Missing access is a concrete execution block, not a reason to fabricate completion.
 
@@ -340,8 +358,24 @@ Acceptance and verification:
 
 - Record a sanitized compatibility matrix and reproducible probe with secrets/addresses supplied externally; no private address or credential is published.
 - Verify reachability from the intended phone context, authentication/TLS and structured-response behavior. Missing endpoint access leaves this evidence task blocked, not generically declared OpenAI-compatible.
+- Every observed result cites a named sanitized evidence artifact, build/revision and collection time; preserve raw private evidence locally with an auditable reference. Missing evidence blocks the check; prose assertions alone cannot pass review.
 
 External evidence/input is required. Missing access is a concrete execution block, not a reason to fabricate completion.
+
+### P11
+
+**Probe credential protection independently of the core**
+
+Dependencies: F03, F05.
+
+Owned paths: `ios/CredentialProbe/`, `docs/validation/credential-probe.md`.
+
+Use synthetic Keychain entries to establish credential accessibility and native isolation before the shell decision.
+
+Acceptance and verification:
+
+- Probe can build without production schema/bridge dependencies; document accessibility choices and lock/relaunch tests for P09.
+- Record simulator results honestly and leave hardware-only checks for P09; never put a credential into a webview or public evidence.
 
 ### P02
 
@@ -387,6 +421,22 @@ Acceptance and verification:
 
 - Switching the default provider never silently dispatches old queued content to a new destination; explicit requeue is inspectable.
 - Revocation stops future dispatch and makes late results ineligible where required; credentials are resolved at execution without being persisted into the job payload.
+
+### V04
+
+**Implement native credential storage and redaction**
+
+Dependencies: P01, V01.
+
+Owned paths: `ios/Services/Credentials/`, `ios/Tests/Credentials/`.
+
+Store provider secrets in native Keychain behind opaque references and expose only approved operations across the core/UI boundary.
+
+Acceptance and verification:
+
+- Add/update/delete handles invalidated keys and storage errors; webview, control extensions, logs, exports and synced profile data never receive secret values.
+- Use appropriate accessibility class and verify lock/relaunch behavior with synthetic secrets; do not grant broad shared credential access just to simplify a probe.
+- For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient.
 
 ### P03
 
@@ -447,6 +497,7 @@ Acceptance and verification:
 
 - Each candidate references capture ID/revision, source spans and processing version; reject unknown fields/IDs, invalid bounds and unsupported operations.
 - Represent abstention and uncertain targets/times explicitly; schema validity alone is never treated as proof of semantic intent.
+- Session-topic is an independent derived facet with source evidence and user correction. Privacy/read scope is explicit policy, never a classifier-created authorization. Unsupported spoken changes to existing items abstain in M1; UI corrections/completion remain supported.
 
 ### R01
 
@@ -494,6 +545,38 @@ Acceptance and verification:
 - Not-now uses a stated cooldown, stop-suggesting is durable pull-only, and nonresponse never completes/cancels an intention or manufactures importance.
 - Uninterpreted records and unsupported/ambiguous intent are searchable but never eligible as inferred actions.
 
+### V05
+
+**Implement bounded native HTTP transport for providers**
+
+Dependencies: V02, V04.
+
+Owned paths: `ios/Services/ProviderTransport/`, `ios/Tests/ProviderTransport/`.
+
+Create the native request transport used by adapters, with authorization enforcement before any request and Keychain resolution at dispatch.
+
+Acceptance and verification:
+
+- Timeout, cancellation, response bounds, error normalization, redacted diagnostics and endpoint/TLS validation are tested through a controlled fixture server.
+- Reject cross-origin redirect credential forwarding and silent cleartext/certificate bypass; user-configured private endpoints work only under explicitly documented supported transport.
+- For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient.
+
+### C01
+
+**Implement native data protection and private-read authentication**
+
+Dependencies: P02, V04, D02.
+
+Owned paths: `ios/Services/ProtectedStorage/`, `ios/Services/Authentication/`.
+
+Apply native file/keychain protection and a session-scoped read-auth boundary across capture storage and private views.
+
+Acceptance and verification:
+
+- Document accessibility before/after first unlock, app-switcher redaction and OS backup inclusion/exclusion; locked capture never grants private-history access.
+- Tests cover denied/cancelled authentication and relock/foreground transitions. Failed unlock does not erase or disclose stored content.
+- For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient.
+
 ### P04
 
 **Probe offline on-device transcription capabilities**
@@ -508,6 +591,7 @@ Acceptance and verification:
 
 - Recognize synthetic audio with network unavailable; verify the API is required to stay on device rather than silently use cloud fallback.
 - Unsupported device/language, missing model and revoked permission preserve audio with a visible pending/unavailable state. Document setup requirements and evidence limits.
+- Build and API availability may be checked in a simulator, but actual offline recognition and language/model availability are certified only by P09. Measure transcription duration and lock/background interruption on-device before making timing claims.
 
 ### I03
 
@@ -538,6 +622,7 @@ Acceptance and verification:
 
 - Cover DESIGN examples, mixed note/task captures, corrections, ambiguity, broad intentions, quotes/negation, prompt injection, dates/timezones and dropped-ASR-word scenarios.
 - Each fixture states expected and forbidden mutations and its provenance; a second LLM is not the sole oracle. Label cases where the transcript lacks enough information to recover truth.
+- Spoken existing-item updates such as Done with the roofer call are explicitly unsupported in M1: preserve the source and expect no target mutation. Label every recorded-provider fixture synthetic; do not imply it came from live account traffic.
 
 ### I05
 
@@ -599,21 +684,55 @@ Acceptance and verification:
 
 - Generate and verify simulator/device bindings in documented builds; keep ABI ownership, cancellation, threading and error conversion explicit.
 - Exercise actual persistence and status calls through Swift; test repeated initialization, invalid input and background-thread callbacks without UI-thread violations.
+- For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient.
 
-### V04
+### V06
 
-**Implement native credential storage and redaction**
+**Implement the Anthropic interpretation adapter**
 
-Dependencies: P01, V01, B01.
+Dependencies: V01, V05.
 
-Owned paths: `ios/Services/Credentials/`, `ios/Tests/Credentials/`.
+Owned paths: `core/src/providers/anthropic/`, `core/tests/providers_anthropic/`.
 
-Store provider secrets in native Keychain behind opaque references and expose only approved operations across the core/UI boundary.
+Implement the documented Anthropic protocol for the M1 structured interpretation capability.
 
 Acceptance and verification:
 
-- Add/update/delete handles invalidated keys and storage errors; webview, control extensions, logs, exports and synced profile data never receive secret values.
-- Use appropriate accessibility class and verify lock/relaunch behavior with synthetic secrets; do not grant broad shared credential access just to simplify a probe.
+- Synthetic protocol fixtures cover valid/invalid structured output, auth failure, rate limit, timeout and cancellation through shared contracts.
+- Model and account come from the profile; no embedded service keys, protocol-specific types in domain state, or unsupported speech capability claims.
+
+### V07
+
+**Implement the OpenAI interpretation adapter**
+
+Dependencies: V01, V05.
+
+Owned paths: `core/src/providers/openai/`, `core/tests/providers_openai/`.
+
+Implement the documented OpenAI protocol for the same provider-independent M1 interpretation capability.
+
+Acceptance and verification:
+
+- Pass the same semantic/protocol contract fixtures, including malformed output, refusal, rate limit, auth failure and cancellation.
+- Use configured supported API credentials; do not assume a chat subscription is an API credential. Source capture storage and domain contracts remain unchanged.
+
+### V09
+
+**Implement the verified self-hosted provider adapter**
+
+Dependencies: V05, V08.
+
+Owned paths: `core/src/providers/self_hosted/`, `core/tests/providers_self_hosted/`.
+
+Support precisely the protocol established by V08, reusing transport without requiring public exposure of the server.
+
+Acceptance and verification:
+
+- Configured model/endpoint/auth passes recorded contract fixtures plus the verified endpoint smoke test; unsupported capabilities are explicit.
+- Away-from-network failure keeps captures queued and never falls back to a cloud provider; report the exact verified compatibility boundary.
+- Every observed result cites a named sanitized evidence artifact, build/revision and collection time; preserve raw private evidence locally with an auditable reference. Missing evidence blocks the check; prose assertions alone cannot pass review.
+
+External evidence/input is required. Missing access is a concrete execution block, not a reason to fabricate completion.
 
 ### R03
 
@@ -643,7 +762,8 @@ Implement schedule/cancel/list and event ingestion behind the core notification 
 Acceptance and verification:
 
 - Stable identifiers round-trip, errors are normalized, and notification content contains only generic wording plus an opaque item/action identifier.
-- Validate notification/deep-link identifiers before reading or mutating any item, require appropriate read authentication, and never expose provider credentials.
+- Bridge transports opaque validated identifiers only; authenticated reads and user mutations are owned by N07. Credentials never enter payloads.
+- For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient.
 
 ### E01
 
@@ -659,12 +779,13 @@ Acceptance and verification:
 
 - Report false actions/deadlines/completions, abstentions, unsupported claims and class-level failures separately; no agreement-as-accuracy score.
 - CI requires zero forbidden authoritative mutations in the synthetic safety corpus; record corpus version and avoid scoring unavailable live backends as passed.
+- Recorded response fixtures are synthetic authored scenarios unless a specific authorized live-run provenance is attached; reports distinguish fake/recorded/live execution and never infer live quality from synthetic passing.
 
 ### P09
 
 **Collect actual-device feasibility evidence**
 
-Dependencies: P03, P04, P05, P07, P08, F07, V04.
+Dependencies: P03, P04, P05, P07, P08, F07, P11.
 
 Owned paths: `docs/validation/device-feasibility.md`.
 
@@ -676,23 +797,42 @@ Acceptance and verification:
 - Measure trigger-to-ready and end-of-input-to-durable-save separately. Physical-device evidence cannot be substituted by simulator or a blank checklist.
 - If access or capabilities are missing, record the precise unmet check and block rather than certify the matrix.
 - Baseline target is iPhone 16 Pro, user-reported iOS 26.6.2; record the actually observed OS build, signing and credential-lock behavior in sanitized evidence.
+- Offline speech availability and time-to-transcript are physical-device checks, including immediate screen lock; logs must distinguish saved audio from successful transcription and installed reminders.
+- Every observed result cites a named sanitized evidence artifact, build/revision and collection time; preserve raw private evidence locally with an auditable reference. Missing evidence blocks the check; prose assertions alone cannot pass review.
 
 External evidence/input is required. Missing access is a concrete execution block, not a reason to fabricate completion.
 
-### V05
+### C02
 
-**Implement bounded native HTTP transport for providers**
+**Implement durable native ingress and core import**
 
-Dependencies: V02, V04.
+Dependencies: P01, C01, D02, B01.
 
-Owned paths: `ios/Services/ProviderTransport/`, `ios/Tests/ProviderTransport/`.
+Owned paths: `ios/Services/Ingress/`, `core/src/ingress/`, `ios/Tests/Ingress/`.
 
-Create the native request transport used by adapters, with authorization enforcement before any request and Keychain resolution at dispatch.
+Implement durable native foreground save and core ingestion for the verified entry-point handoff. Production M1 opens the foreground native capture surface; do not add a separate extension writer.
 
 Acceptance and verification:
 
-- Timeout, cancellation, response bounds, error normalization, redacted diagnostics and endpoint/TLS validation are tested through a controlled fixture server.
-- Reject cross-origin redirect credential forwarding and silent cleartext/certificate bypass; user-configured private endpoints work only under explicitly documented supported transport.
+- Durable acknowledgement follows committed source persistence. Repeated delivery, interruption and restart produce neither duplicate items nor missing acknowledged captures.
+- Test atomic file/DB ownership, malformed/partial ingress, recovery and cleanup after confirmed import inside protected storage.
+- Any later independent extension writer needs a separate task and proven concurrency/protection contract; it is not part of this task.
+- For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient.
+
+### I07
+
+**Define versioned interpretation instructions and provider-neutral mapping**
+
+Dependencies: I01, I04.
+
+Owned paths: `core/src/interpretation/instructions/`, `core/tests/interpretation_instructions/`.
+
+Own the actual instructions, request context and response mapping used by interpretation adapters.
+
+Acceptance and verification:
+
+- Instructions and output contract are versioned, source text is treated as untrusted data, and capture/profile/time context is explicit.
+- Synthetic golden request/mapping fixtures cover negation, mixed intents, session topics and abstention; instructions cannot confer disclosure permissions or authorize unsupported existing-item updates.
 
 ### N03
 
@@ -708,21 +848,6 @@ Acceptance and verification:
 
 - Crash between OS success and local acknowledgment does not duplicate requests; changed/cancelled/completed/deleted items remove stale requests.
 - Late OS callbacks cannot resurrect a cancelled reminder; use explicit revision/effect identities and tests for duplicate/out-of-order completion.
-
-### C01
-
-**Implement native data protection and private-read authentication**
-
-Dependencies: P02, V04, D02.
-
-Owned paths: `ios/Services/ProtectedStorage/`, `ios/Services/Authentication/`.
-
-Apply native file/keychain protection and a session-scoped read-auth boundary across capture storage and private views.
-
-Acceptance and verification:
-
-- Document accessibility before/after first unlock, app-switcher redaction and OS backup inclusion/exclusion; locked capture never grants private-history access.
-- Tests cover denied/cancelled authentication and relock/foreground transitions. Failed unlock does not erase or disclose stored content.
 
 ### E03
 
@@ -754,91 +879,13 @@ Acceptance and verification:
 - State measured reasons, source paths to retain, integration/build implications and any remediation; choose one production shell, not two maintained implementations.
 - Do not pass a failed capture/accessibility/privacy requirement by weakening it. Required unresolved blockers prevent this decision task from completing.
 
-### V06
-
-**Implement the Anthropic interpretation adapter**
-
-Dependencies: V01, V05.
-
-Owned paths: `ios/Providers/Anthropic/`, `ios/Tests/Anthropic/`.
-
-Implement the documented Anthropic protocol for the M1 structured interpretation capability.
-
-Acceptance and verification:
-
-- Synthetic protocol fixtures cover valid/invalid structured output, auth failure, rate limit, timeout and cancellation through shared contracts.
-- Model and account come from the profile; no embedded service keys, protocol-specific types in domain state, or unsupported speech capability claims.
-
-### V07
-
-**Implement the OpenAI interpretation adapter**
-
-Dependencies: V01, V05.
-
-Owned paths: `ios/Providers/OpenAI/`, `ios/Tests/OpenAI/`.
-
-Implement the documented OpenAI protocol for the same provider-independent M1 interpretation capability.
-
-Acceptance and verification:
-
-- Pass the same semantic/protocol contract fixtures, including malformed output, refusal, rate limit, auth failure and cancellation.
-- Use configured supported API credentials; do not assume a chat subscription is an API credential. Source capture storage and domain contracts remain unchanged.
-
-### V09
-
-**Implement the verified self-hosted provider adapter**
-
-Dependencies: V05, V08.
-
-Owned paths: `ios/Providers/SelfHosted/`, `ios/Tests/SelfHosted/`.
-
-Support precisely the protocol established by V08, reusing transport without requiring public exposure of the server.
-
-Acceptance and verification:
-
-- Configured model/endpoint/auth passes recorded contract fixtures plus the verified endpoint smoke test; unsupported capabilities are explicit.
-- Away-from-network failure keeps captures queued and never falls back to a cloud provider; report the exact verified compatibility boundary.
-
-External evidence/input is required. Missing access is a concrete execution block, not a reason to fabricate completion.
-
-### N04
-
-**Implement notification capacity and permission reconciliation**
-
-Dependencies: N03, D05.
-
-Owned paths: `core/src/reminders/capacity/`, `ios/Services/NotificationPermission/`.
-
-Respect actual pending-request capacity and changed permission states, with explicit reminders taking precedence over optional prompts.
-
-Acceptance and verification:
-
-- Boundary tests prove no silent loss when the cap is reached; expose unscheduled/undeliverable state and a documented horizon/refill strategy.
-- Permission changes, Focus-related uncertainty and elapsed due times do not falsely mark delivery or user attention; reconcile again on supported foreground events.
-
-### C02
-
-**Implement durable native ingress and core import**
-
-Dependencies: P01, C01, D02, B01.
-
-Owned paths: `ios/Services/Ingress/`, `core/src/ingress/`, `ios/Tests/Ingress/`.
-
-Implement native durable save and core ingestion using the simplest verified foreground path. A separate shared-container ingress is required only if the chosen system entry point actually executes outside the app process.
-
-Acceptance and verification:
-
-- The acknowledgment boundary is durable; interrupted import and app/extension races create neither duplicates nor missing acknowledged captures.
-- Test atomic file/DB ownership, malformed or partial ingress, recovery and cleanup after confirmed import; private data remains inside protected storage.
-- Do not introduce a second process or shared container for a foreground-only handoff; if an extension is selected, prove concurrent ingestion, protection and duplicate recovery for that boundary.
-
 ### I06
 
 **Implement the interpretation dispatcher across provider adapters**
 
-Dependencies: V06, V07, I03, I05.
+Dependencies: V06, V07, I03, I05, I07.
 
-Owned paths: `ios/Services/Interpretation/`, `ios/Tests/Interpretation/`.
+Owned paths: `core/src/interpretation/dispatch/`, `core/tests/interpretation_dispatch/`.
 
 Wire raw saved captures through fast-path handling or approved-provider interpretation into the existing validation/apply boundary.
 
@@ -846,21 +893,6 @@ Acceptance and verification:
 
 - A capture actually produces the supported annotations/action/reminder candidate using a selected adapter; no provider call bypasses routing or blocks raw save.
 - Model failure preserves source/prior state; clear free-form intent remains usable, and processing unavailability is surfaced honestly. Add integration fixtures covering the complete dispatcher path.
-
-### S02
-
-**Implement the bounded optional daily prompt schedule**
-
-Dependencies: N04, S01.
-
-Owned paths: `core/src/suggestions/schedule/`, `core/tests/prompt_schedule/`.
-
-Schedule one generic daily local prompt only after a time is chosen, with a short documented horizon and no endless backlog.
-
-Acceptance and verification:
-
-- Off by default, bounded horizon and capacity below explicit reminders; disabling prompting cancels only prompts.
-- Re-entry/relaunch/time changes never burst missed prompts; no private item content is embedded in a pending notification and lack of engagement may reduce optional prompting.
 
 ### C03
 
@@ -892,6 +924,21 @@ Acceptance and verification:
 - Microphone denied/interrupted/locked/terminated paths preserve recoverable audio or an honest failure; re-entry shows resumable/recoverable source without a maintenance queue.
 - Recording duration/size limits and cancellation are explicit, no always-listening behavior, and no network request occurs for raw recording.
 
+### N04
+
+**Implement notification capacity and permission reconciliation**
+
+Dependencies: N03, D05.
+
+Owned paths: `core/src/reminders/capacity/`, `ios/Services/NotificationPermission/`.
+
+Respect actual pending-request capacity and changed permission states, with explicit reminders taking precedence over optional prompts.
+
+Acceptance and verification:
+
+- Boundary tests prove no silent loss when the cap is reached; expose unscheduled/undeliverable state and a documented horizon/refill strategy.
+- Permission changes, Focus-related uncertainty and elapsed due times do not falsely mark delivery or user attention; reconcile again on supported foreground events.
+
 ### L02
 
 **Implement native deletion cleanup reconciliation**
@@ -906,6 +953,7 @@ Acceptance and verification:
 
 - Reopen after each injected cleanup interruption converges without private remnants becoming searchable or notifications remaining active.
 - Delete-all uses the same semantics, removes credential references/secrets when requested, and clearly states the OS backup/export lifecycle rather than claiming unprovable physical erasure.
+- This task covers per-item cleanup only; delete-all generation fencing and optional credential reset belong to L05.
 
 ### J02
 
@@ -913,7 +961,7 @@ Acceptance and verification:
 
 Dependencies: J01, V03, I06.
 
-Owned paths: `ios/Services/JobRunner/`, `ios/Tests/JobRunner/`.
+Owned paths: `core/src/jobs/runner/`, `core/tests/job_runner/`, `ios/Services/JobRunner/`, `ios/Tests/JobRunner/`.
 
 Drain eligible jobs when the native app has supported execution time; background execution is opportunistic, not promised.
 
@@ -921,51 +969,7 @@ Acceptance and verification:
 
 - Launch/foreground/network-return resume work without duplicate application; suspend/termination cancels or checkpoints safely.
 - An interpretation completed after its requested reminder time cannot silently backdate or substitute a new deadline; captured and scheduled status remain separate.
-
-### S03
-
-**Connect prompt activation to current eligible content**
-
-Dependencies: S02, N02.
-
-Owned paths: `ios/Services/SuggestionCoordinator/`, `ios/Tests/Suggestions/`.
-
-On authenticated prompt activation, resolve current eligibility and offer one item with simple response actions.
-
-Acceptance and verification:
-
-- Deleted/completed/snoozed items preselected earlier are never shown as current; no eligible item produces a calm empty result.
-- Not-now/stop-suggesting/done use existing revisioned operations; muting optional help leaves explicit reminders unchanged.
-
-### C05
-
-**Integrate offline transcription into saved captures**
-
-Dependencies: P04, C04, J01.
-
-Owned paths: `ios/Services/Transcription/`, `ios/Tests/Transcription/`.
-
-Attach on-device transcript revisions and provenance to durable audio captures and queue interpretation when permitted.
-
-Acceptance and verification:
-
-- Available on-device model yields text offline; unsupported/missing-model/failed jobs retain source and remain intelligibly pending.
-- Late transcripts cannot overwrite a user correction; save, transcript and interpretation completion are distinct and tested with interruption/retry.
-
-### L04
-
-**Implement portable export with consistent source state**
-
-Dependencies: D04, L02, V04.
-
-Owned paths: `core/src/export/`, `ios/Services/Export/`.
-
-Export a consistent versioned snapshot of source/correction/current state and minimal provenance through a native user-selected destination.
-
-Acceptance and verification:
-
-- Export contains no credentials, internal endpoint secrets, deleted content or private data outside the authenticated requested scope; optional audio inclusion is explicit.
-- A test-only reader reconstructs equivalent item state and detects malformed/truncated export; native share/temp files are protected and cleaned. M1 does not claim full backup/restore sync.
+- Rust owns dispatch/retry orchestration against injected effects; Swift owns only platform lifecycle/execution hooks. Transcription is an injected capability registered by C05, not an assumed handler.
 
 ### E02
 
@@ -981,8 +985,57 @@ Acceptance and verification:
 
 - Report provider/model/config versions, semantic outcomes, latency and cost; raw captures remain unchanged when switching.
 - Exercise unavailable/invalid response and revoked-credential behavior. Absent API credentials leaves live proof blocked, never replaced by fixtures alone.
+- For each claimed live backend require zero forbidden mutations over the named contrastive suite, with observed counts and model/prompt versions. A failed backend is not certified by another model agreeing with it.
+- Every observed result cites a named sanitized evidence artifact, build/revision and collection time; preserve raw private evidence locally with an auditable reference. Missing evidence blocks the check; prose assertions alone cannot pass review.
 
 External evidence/input is required. Missing access is a concrete execution block, not a reason to fabricate completion.
+
+### S02
+
+**Implement the bounded optional daily prompt schedule**
+
+Dependencies: N04, S01.
+
+Owned paths: `core/src/suggestions/schedule/`, `core/tests/prompt_schedule/`.
+
+Schedule one generic daily local prompt only after a time is chosen, with a short documented horizon and no endless backlog.
+
+Acceptance and verification:
+
+- Off by default, bounded horizon and capacity below explicit reminders; disabling prompting cancels only prompts.
+- Refill the bounded daily prompt horizon only on app open; re-entry/time changes do not replay missed prompts, and default generic payloads contain no private content.
+
+### C05
+
+**Integrate offline transcription into saved captures**
+
+Dependencies: P04, C04, J01, J02.
+
+Owned paths: `ios/Services/Transcription/`, `ios/Tests/Transcription/`.
+
+Attach on-device transcript revisions and provenance to durable audio captures and queue interpretation when permitted.
+
+Acceptance and verification:
+
+- Available on-device model yields text offline; unsupported/missing-model/failed jobs retain source and remain intelligibly pending.
+- Late transcripts cannot overwrite a user correction; save, transcript and interpretation completion are distinct and tested with interruption/retry.
+- Register the real native transcription handler with the job runner through the reserved capability seam and verify a queued saved recording actually executes through that path.
+- For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient.
+
+### L04
+
+**Implement portable export with consistent source state**
+
+Dependencies: D04, L02, V04.
+
+Owned paths: `core/src/export/`, `ios/Services/Export/`.
+
+Export a consistent versioned snapshot of source/correction/current state and minimal provenance through a native user-selected destination.
+
+Acceptance and verification:
+
+- Export contains no credentials, internal endpoint secrets, deleted content or private data outside the authenticated requested scope; optional audio inclusion is explicit.
+- A test-only reader reconstructs equivalent item state and detects malformed/truncated export; native share/temp files are protected and cleaned. M1 does not claim full backup/restore sync.
 
 ### J03
 
@@ -1005,7 +1058,7 @@ Acceptance and verification:
 
 Dependencies: I06, J02, N04.
 
-Owned paths: `ios/Services/ReminderCoordinator/`, `ios/Tests/ReminderCoordinator/`.
+Owned paths: `core/src/reminders/coordinator/`, `core/tests/reminders_coordinator/`.
 
 Complete the durable capture-to-installed-notification path and the cancellation/edit path.
 
@@ -1013,6 +1066,21 @@ Acceptance and verification:
 
 - Supported offline commands schedule without a remote AI call; approved asynchronous results schedule only within a valid opportunity and captured time context.
 - Acknowledge scheduled only after OS installation success; edit/completion retries and app restart preserve one desired reminder and truthful status.
+
+### S03
+
+**Connect prompt activation to current eligible content**
+
+Dependencies: S02, N02.
+
+Owned paths: `core/src/suggestions/coordinator/`, `core/tests/suggestions_coordinator/`.
+
+On authenticated prompt activation, resolve current eligibility and offer one item with simple response actions.
+
+Acceptance and verification:
+
+- Deleted/completed/snoozed items preselected earlier are never shown as current; no eligible item produces a calm empty result.
+- Not-now/stop-suggesting/done use existing revisioned operations; muting optional help leaves explicit reminders unchanged.
 
 ### L03
 
@@ -1061,11 +1129,28 @@ Acceptance and verification:
 - User acknowledgment is explicit and repeat intent remains distinct; returning after a lapse does not replay old notification history as a digest.
 - Use unacknowledged for elapsed reminders without observed delivery evidence; never infer fired, missed or noticed from the clock alone.
 
+### B04
+
+**Bound native work when capture backgrounds**
+
+Dependencies: J02, C05, N04.
+
+Owned paths: `ios/Services/BackgroundCompletion/`, `ios/Tests/BackgroundCompletion/`.
+
+Request supported finite native background execution at capture end and handle expiry without losing acknowledged source.
+
+Acceptance and verification:
+
+- Verify current Apple-supported mechanism and record its constraints; expiration cancels/checkpoints work safely and never relies on perpetual processing.
+- A pending transcript or interpretation remains saved-but-unprocessed, with any reminder explicitly not scheduled. Optional configured generic pending-reminder alerts are bounded, separately identified, and never represented as the requested reminder.
+- Exercise lock immediately after recording and expire the execution window; no lost source, invented schedule success or endless retry alerts. Actual-device timing belongs in T05.
+- For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient.
+
 ### C06
 
 **Wire production system entry points and save acknowledgment**
 
-Dependencies: C03, C05, N05.
+Dependencies: C03, C05, N05, B04.
 
 Owned paths: `ios/Capture/Entry/`, `ios/Capture/Acknowledgment/`, `ios/Tests/CaptureEntry/`.
 
@@ -1075,6 +1160,38 @@ Acceptance and verification:
 
 - Cold/warm/locked handoff honors the measured authentication limits and never waits for a webview to persist input.
 - Acknowledgment distinguishes saved audio/text, pending transcription, not-scheduled and installed reminder with resolved time; no unsolicited suggestions appear during capture.
+- Default save acknowledgment distinguishes saved-but-not-yet-processed and explicitly says no reminder has been confirmed while transcription/interpretation is pending. Background interruption must never leave a bare success signal implying a reminder exists.
+
+### N07
+
+**Handle notification actions and authenticated deep links**
+
+Dependencies: N06, C01.
+
+Owned paths: `ios/Services/NotificationActions/ActionHandler.swift`, `ios/Tests/NotificationActions/ActionHandlerTests.swift`.
+
+Route notification taps and allowed actions into existing revisioned user events.
+
+Acceptance and verification:
+
+- Acknowledge and complete are distinct operations; stale identifiers, deleted items and duplicate callbacks never resurrect or double-mutate records.
+- Private reads and mutations requiring authentication are deferred until unlock; action callback ingestion persists or reports failure and subsequent launch reconciles it.
+- For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient.
+
+### L05
+
+**Implement delete-all reset orchestration**
+
+Dependencies: L02, L03, L04.
+
+Owned paths: `ios/Services/Reset/`, `ios/Tests/Reset/`.
+
+Coordinate explicit delete-all across existing per-item cleanup and optional credential/profile reset.
+
+Acceptance and verification:
+
+- A durable reset generation fences in-flight processing and new effects; retries after crashes cannot restore deleted content or leave reminders scheduled.
+- Test populated mixed-route data, indexes, audio, export/share temporaries, pending jobs and optional credential removal. New captures after completed reset belong to a fresh generation.
 
 ### T01
 
@@ -1095,9 +1212,9 @@ Acceptance and verification:
 
 **Assemble the production service composition root**
 
-Dependencies: B01, C06, V09, S03, L03, L04, E03.
+Dependencies: B01, C06, S03, L03, L04.
 
-Owned paths: `ios/OhAndServices/CompositionRoot.swift`, `ios/OhAndServicesTests/CompositionRootTests.swift`.
+Owned paths: `ios/Services/Assembly/CompositionRoot.swift`, `ios/Tests/Services/CompositionRootTests.swift`.
 
 Connect the existing core, providers, authorized native transport, jobs, credentials and reminder services through one injectable composition root.
 
@@ -1105,21 +1222,8 @@ Acceptance and verification:
 
 - Production construction selects real adapters from versioned configuration; fake dependencies require an explicit test build path.
 - A composition integration test saves, dispatches a fake response, reads the resulting item, and observes a scheduler request through actual service interfaces.
-
-### N07
-
-**Handle notification actions and authenticated deep links**
-
-Dependencies: N06, C01.
-
-Owned paths: `ios/OhAndNotifications/ActionHandler.swift`, `ios/OhAndNotificationsTests/ActionHandlerTests.swift`.
-
-Route notification taps and allowed actions into existing revisioned user events.
-
-Acceptance and verification:
-
-- Acknowledge and complete are distinct operations; stale identifiers, deleted items and duplicate callbacks never resurrect or double-mutate records.
-- Private reads and mutations requiring authentication are deferred until unlock; action callback ingestion persists or reports failure and subsequent launch reconciles it.
+- Provide typed extension seams for optional capabilities so later integration can add owned modules without concurrent edits to this composition root.
+- For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient.
 
 ### B03
 
@@ -1127,14 +1231,30 @@ Acceptance and verification:
 
 Dependencies: B02.
 
-Owned paths: `ios/OhAndServices/LifecycleCoordinator.swift`, `ios/OhAndServicesTests/LifecycleCoordinatorTests.swift`.
+Owned paths: `ios/Services/Assembly/LifecycleCoordinator.swift`, `ios/Tests/Services/LifecycleCoordinatorTests.swift`.
 
 Order recovery and foreground work without making capture wait for network or cleanup.
 
 Acceptance and verification:
 
 - Reconcile ingress, expired job leases, deletion, reminder desired state, retention, prompt eligibility and health with bounded idempotent work; serialize overlapping launches.
-- Test process interruption at each boundary, repeated activation and time/zone changes; approved absolute reminder instants remain stable and daily local-time prompts use the chosen zone policy.
+- Test process interruption at each recovery boundary and repeated activation. Provide an injectable trigger for separately owned system clock/zone-change handling.
+- For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient.
+
+### T11
+
+**Integrate optional provider and shadow capabilities**
+
+Dependencies: B02, V09, E03.
+
+Owned paths: `ios/Services/OptionalCapabilities/`, `ios/Tests/OptionalCapabilities/`.
+
+Register verified self-hosted and opt-in shadow capabilities through the production composition extension seam.
+
+Acceptance and verification:
+
+- The base app constructs and captures when neither optional feature is configured. Feature registration uses the same routing/credential rules and adds no hidden default endpoint.
+- Synthetic end-to-end checks exercise both registrations; real self-hosted claims link V08/V09 evidence. No edits to concurrent shell or root files are needed.
 
 ### U01
 
@@ -1151,6 +1271,22 @@ Acceptance and verification:
 - App launches to capture; retrieval/settings are secondary and no backlog count or catch-up wizard is introduced.
 - Dependency injection resolves real services rather than probe stubs, including lifecycle job runner and reminder/suggestion/deletion reconciliation; remove or isolate probes from the release target.
 
+### B05
+
+**Reconcile wall-clock and timezone changes**
+
+Dependencies: B03, N06, S03.
+
+Owned paths: `ios/Services/TimeChangeCoordinator/`, `ios/Tests/TimeChangeCoordinator/`.
+
+Handle system time/zone changes through existing reminder and prompt reconciliation.
+
+Acceptance and verification:
+
+- Preserve explicitly resolved absolute reminder instants; implement documented local-time daily prompt semantics through DST gaps/folds and zone travel.
+- Test repeated callbacks, clock jumps forward/backward and overdue pending work without duplicate delivery requests or burst catch-up.
+- For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient.
+
 ### U02
 
 **Build original-text search and source detail views**
@@ -1165,6 +1301,7 @@ Acceptance and verification:
 
 - Search returns original/corrected text with date/type/source and honest no-result state; private reads require authentication.
 - Literal fallback and private topics since a date work offline; no generated answer is shown as quotation.
+- Offer playback only for retained source audio with the same private-read authentication; expired/deleted audio is honestly unavailable and cannot leave a broken playback control.
 
 ### U03
 
@@ -1180,6 +1317,7 @@ Acceptance and verification:
 
 - Each action updates actual stored state and survives relaunch/reprocessing; stale revision conflicts are visible and do not silently overwrite.
 - Not-now and stop-suggesting behavior are explained; actions do not turn an idea into an obligation without explicit user intent.
+- Allow source/transcript correction as an explicit authoritative revision while preserving original provenance; later transcription/model output cannot overwrite the correction.
 
 ### U04
 
@@ -1200,7 +1338,7 @@ Acceptance and verification:
 
 **Add provider profile and credential setup UI**
 
-Dependencies: U04, V06, V07, V09, V04.
+Dependencies: U04, V06, V07, V04.
 
 Owned paths: `app/provider-settings/`.
 
@@ -1230,7 +1368,7 @@ Acceptance and verification:
 
 **Add retention, export and deletion controls**
 
-Dependencies: U06, L03, L04.
+Dependencies: U06, L03, L04, L05.
 
 Owned paths: `app/data-settings/`.
 
@@ -1247,7 +1385,7 @@ Acceptance and verification:
 
 Dependencies: U06, C06.
 
-Owned paths: `app/settings/permissions/`, `ios/OhAndPermissions/`.
+Owned paths: `app/settings/permissions/`, `ios/Services/Permissions/`.
 
 Request microphone, speech and notification access only at the corresponding feature boundary and explain denial recovery.
 
@@ -1271,21 +1409,6 @@ Acceptance and verification:
 - Opt-in is required, prompt horizon/cooldown are understandable, and no private item is revealed before authenticated open.
 - Off/not-now/stop/done affect correct stored policy without disabling explicit reminders; empty eligible set is calm and does not solicit inbox cleanup.
 
-### T04
-
-**Test processing-boundary and private-read isolation**
-
-Dependencies: V09, U07, E03.
-
-Owned paths: `tests/privacy/`.
-
-Verify the complete UI-to-routing/transport/export/search/notification boundary with synthetic canary content.
-
-Acceptance and verification:
-
-- Unapproved routes, cross-origin redirects, stale jobs and reviewer profiles cannot disclose canaries; private-source queries/snippets and lock-screen payloads respect read scope.
-- Assert no raw credentials/content in logs or exports and verify revocation while a job is in flight; record authorized remote processing accurately.
-
 ### U09
 
 **Add honest status and minimal recovery views**
@@ -1307,7 +1430,7 @@ Acceptance and verification:
 
 Dependencies: S03, U08.
 
-Owned paths: `core/src/suggestions/preview.rs`, `app/settings/prompt-preview/`, `ios/OhAndNotifications/PreviewPolicy.swift`.
+Owned paths: `core/src/suggestions/preview.rs`, `app/settings/prompt-preview/`, `ios/Services/NotificationActions/PreviewPolicy.swift`.
 
 Offer a useful item-specific prompt as an explicit alternative to the generic default, without disclosing private routes.
 
@@ -1315,6 +1438,22 @@ Acceptance and verification:
 
 - Default remains generic. Preview opt-in states lock-screen exposure clearly and applies only to explicitly non-private, suggestion-eligible items.
 - Reclassify/delete/stop-suggesting cancels and reconciles pending previews; never promise recall of already delivered OS banners. Private content and identifiers conveying meaning never enter payloads.
+- Preview content requires an explicitly preview-safe route configured by the user. The universal/default route is not preview-safe; classification can only remove eligibility, never grant preview permission. End-to-end tests inspect every scheduled payload.
+
+### T04
+
+**Test processing-boundary and private-read isolation**
+
+Dependencies: V09, U07, E03, T11, S04.
+
+Owned paths: `tests/privacy/`.
+
+Verify the complete UI-to-routing/transport/export/search/notification boundary with synthetic canary content.
+
+Acceptance and verification:
+
+- Unapproved routes, cross-origin redirects, stale jobs and reviewer profiles cannot disclose canaries; private-source queries/snippets and lock-screen payloads respect read scope.
+- Assert no raw credentials/content in logs or exports and verify revocation while a job is in flight; record authorized remote processing accurately.
 
 ### U10
 
@@ -1330,6 +1469,7 @@ Acceptance and verification:
 
 - Automated audits plus a documented actual-device pass cover focus, labels, error announcements, large text and no inaccessible authentication dead ends.
 - Record measured issues and fixes; simulator-only results cannot certify physical assistive interaction. Keep fixes limited to named UI accessibility behavior.
+- Every observed result cites a named sanitized evidence artifact, build/revision and collection time; preserve raw private evidence locally with an auditable reference. Missing evidence blocks the check; prose assertions alone cannot pass review.
 
 External evidence/input is required. Missing access is a concrete execution block, not a reason to fabricate completion.
 
@@ -1352,16 +1492,16 @@ Acceptance and verification:
 
 **Exercise the full simulator loop with fake providers**
 
-Dependencies: U11, U09, B03, N07, S04.
+Dependencies: U11, U09, B03, N07.
 
-Owned paths: `ios/OhAndEndToEndTests/`.
+Owned paths: `ios/Tests/EndToEnd/`.
 
 Add one maintained simulator test suite across actual production wiring, rather than isolated module fakes.
 
 Acceptance and verification:
 
 - Exercise silent capture, saved-source retrieval, classification, correction, completion, explicit reminder scheduling and notification action with deterministic provider/clock/OS boundaries.
-- Run provider outage, permission denial and restart journeys; assert source durability and distinct save/process/schedule state through visible UI and persisted state.
+- Run the happy-path suite in macOS CI on the submitted revision; provider and OS boundaries are deterministic while app/service wiring is real. Failure journeys belong to T12.
 
 ### T10
 
@@ -1377,14 +1517,31 @@ Acceptance and verification:
 
 - Upgrade a prior seeded install without uninstalling; sources, corrections, tombstones, profile references and scheduled reminder identity survive. Verify simulator automatically and collect a real-device upgrade result.
 - Build metadata and exported content-free metrics identify the tested revision; signing material and personal records never enter artifacts or repository.
+- Produce the actual signed candidate artifact for T05, recording revision, version/build, checksum and signing route/validity metadata. T06 distributes this same tested candidate; any rebuilt binary requires repeated affected device checks.
+- Every observed result cites a named sanitized evidence artifact, build/revision and collection time; preserve raw private evidence locally with an auditable reference. Missing evidence blocks the check; prose assertions alone cannot pass review.
 
 External evidence/input is required. Missing access is a concrete execution block, not a reason to fabricate completion.
+
+### T12
+
+**Exercise simulator failure journeys through the app**
+
+Dependencies: T09, L05, B04, B05.
+
+Owned paths: `ios/Tests/FailureJourneys/`.
+
+Verify failures through production UI and service wiring, complementing the happy-path simulator suite.
+
+Acceptance and verification:
+
+- Exercise provider outage, denied/revoked permissions, interrupted transcription, expired background execution, restart and deletion during processing.
+- Assert source durability, recovery without mandatory triage, no stale scheduled effects, and independently honest save/processing/scheduling state.
 
 ### T05
 
 **Run the actual-device M1 functional exit matrix**
 
-Dependencies: U10, T01, T02, T03, T04, E02, P08, T09, T10, S04.
+Dependencies: U10, T01, T02, T03, T04, E02, P08, T09, T10, T12, B05.
 
 Owned paths: `docs/validation/m1-device-results.md`.
 
@@ -1394,6 +1551,7 @@ Acceptance and verification:
 
 - Verify cold/locked/permission paths, offline recording/text, process interruption, local reminders UI closed, pipeline faults and Mac asleep with actual build/device identifiers.
 - Attach sanitized results and exact reproduction of failures; every functional criterion must pass or the task remains blocked for remediation. Do not certify a probe build as the production app.
+- Every observed result cites a named sanitized evidence artifact, build/revision and collection time; preserve raw private evidence locally with an auditable reference. Missing evidence blocks the check; prose assertions alone cannot pass review.
 
 External evidence/input is required. Missing access is a concrete execution block, not a reason to fabricate completion.
 
@@ -1411,6 +1569,8 @@ Acceptance and verification:
 
 - Artifact corresponds to reviewed source and passed checks, with secrets injected securely and no private data bundled.
 - Verify installation and launch on the target phone; public README makes no broader distribution claim than the actual signed route. Account-holder restrictions/inputs are explicit.
+- Use the exact candidate identifier/checksum certified by T10 and T05; do not rebuild and claim the new binary has inherited device validation.
+- Every observed result cites a named sanitized evidence artifact, build/revision and collection time; preserve raw private evidence locally with an auditable reference. Missing evidence blocks the check; prose assertions alone cannot pass review.
 
 External evidence/input is required. Missing access is a concrete execution block, not a reason to fabricate completion.
 
@@ -1445,6 +1605,7 @@ Acceptance and verification:
 - No source/private session contents are committed. If capture is avoided or the only prompt is muted, define a concrete loop revision; do not declare M1 complete based on code alone.
 - Missing time/device observations or failed exit criteria leave this task blocked with precise evidence needs; continue independent work and create bounded corrective follow-ups through the coordinator.
 - Record whether generic versus explicitly enabled non-private previews actually help retrieval and whether prompts are muted or ignored; usefulness and capture burden outweigh notification open rates. If the loop fails, record M1 as unmet and propose focused repair tasks.
+- Every observed result cites a named sanitized evidence artifact, build/revision and collection time; preserve raw private evidence locally with an auditable reference. Missing evidence blocks the check; prose assertions alone cannot pass review.
 
 External evidence/input is required. Missing access is a concrete execution block, not a reason to fabricate completion.
 

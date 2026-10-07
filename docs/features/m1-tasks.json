@@ -21,7 +21,9 @@
       "acceptance": [
         "Define stable capture/item IDs, per-item revision, source versus correction/derived state, privacy routes, proposal/job/profile versions, time context and distinct save/sync/schedule/delivery states.",
         "Define native-to-core ownership and error/lifetime contracts, ingress handoff, provider capabilities, notification identifiers, data protection and backup policy; list fields and invariants without implementation snippets.",
-        "Map every implementation area to an owned module; shared schema/registration edits must be ordered or reserved for an integration task. Record supported one-shot reminders and honest unsupported repeats."
+        "Map every implementation area to an owned module; shared schema/registration edits must be ordered or reserved for an integration task. Record supported one-shot reminders and honest unsupported repeats.",
+        "Keep this to a bounded prose contract and ownership map, not application implementation. Define privacy scopes (personal/work/session), a user-correctable session-topic facet independent of note/action/idea, and preview-safe route permission which classification can only narrow.",
+        "Record these settled choices rather than redesign them: Rust + SQLite owns domain state, provider adapters and orchestration; Swift owns protected storage/credentials, audio, native transport, notification effects and lifecycle; phone-only M1; foreground capture; on-device transcription; original-text FTS; one-shot reminders; no AI disclosure gate; no sync or hosted tenancy. Define injectable transport/effect interfaces for these boundaries."
       ],
       "external_input": false
     },
@@ -40,7 +42,8 @@
       "intent": "Create the minimal framework-independent Rust core workspace, module skeletons defined by F01, and real build/lint/test commands. No product features.",
       "acceptance": [
         "Linux clean checkout builds, lints and runs a meaningful interface/serialization smoke test using pinned dependencies.",
-        "Core has no Tauri/webview dependency; future modules can be filled without concurrent edits to one shared root. Document command behavior and fail on real test failures."
+        "Core has no Tauri/webview dependency; future modules can be filled without concurrent edits to one shared root. Document command behavior and fail on real test failures.",
+        "Declare the initial M1 dependencies and module inclusion strategy up front, including SQLite/time/serialization; parallel tasks must not independently mutate Cargo.toml/Cargo.lock. Later additions require serialized dependency work."
       ],
       "external_input": false
     },
@@ -57,7 +60,8 @@
       "intent": "Create a generated native Swift project with a minimal SwiftUI probe screen and native module skeletons; keep generated project files out of parallel leaf edits.",
       "acceptance": [
         "Document a reproducible unsigned simulator build and selected provisional SDK/deployment baseline; a clean checkout generates the same targets.",
-        "Use a unique project bundle identifier under the intended domain and configurable signing team. No certificates, provisioning profiles or credentials are committed."
+        "Use a unique project bundle identifier under the intended domain and configurable signing team. No certificates, provisioning profiles or credentials are committed.",
+        "Reserve probe/control targets and relevant usage strings; use deterministic directory-based source inclusion so concurrent native tasks do not edit project.yml. Production capture uses a foreground native surface."
       ],
       "external_input": false
     },
@@ -107,7 +111,8 @@
       "intent": "Create the versioned schema for source records, item revisions, events, derived results, jobs, profiles and reminder/suggestion metadata from F01.",
       "acceptance": [
         "Empty database migrates atomically; interrupted migration recovers or fails visibly without losing source records.",
-        "Schema/version validation and injected clock tests run on Linux; forward-incompatible database versions cannot be silently opened writable."
+        "Schema/version validation and injected clock tests run on Linux; forward-incompatible database versions cannot be silently opened writable.",
+        "Own the initial table/migration envelope for all M1 modules from F01; subsequent feature tasks use those seams. New schema changes need ordered follow-up migration tasks, not concurrent edits here."
       ],
       "external_input": false
     },
@@ -143,7 +148,8 @@
       "intent": "Add reproducible native simulator build/tests on standard macOS runners without requiring signing secrets.",
       "acceptance": [
         "A real simulator launch/smoke test runs in CI and its logs identify toolchain/device versions.",
-        "Fork PRs require no credentials; use least-privilege workflow permissions and bounded artifacts. Document meaningful native check commands and evidence consumption by Linux reviewers."
+        "Fork PRs require no credentials; use least-privilege workflow permissions and bounded artifacts. Document meaningful native check commands and evidence consumption by Linux reviewers.",
+        "Linux workers must trigger and await the standard macOS runner checks for the exact submitted commit, link its run and artifacts before review, and block if unavailable. Demonstrate this remote validation path with one probe PR; Linux-only validation cannot certify Swift."
       ],
       "external_input": false
     },
@@ -272,7 +278,9 @@
       "acceptance": [
         "Unsigned simulator path remains credential-free; signing inputs come only from secure local/CI injection, never command output or repository files.",
         "With supplied inputs, produce and install a signed probe build and record content-free build/device identifiers; absent inputs leave actual signing evidence blocked, not claimed.",
-        "Document temporary keychain cleanup and account-holder enrollment steps without requiring per-build human approval."
+        "Document temporary keychain cleanup and account-holder enrollment steps without requiring per-build human approval.",
+        "Choose a signing/distribution route whose actual install validity covers the two-week trial, or explicitly plan and test renewal without data loss. Do not promise an unverified enrollment or expiry duration.",
+        "Every observed result cites a named sanitized evidence artifact, build/revision and collection time; preserve raw private evidence locally with an auditable reference. Missing evidence blocks the check; prose assertions alone cannot pass review."
       ],
       "external_input": true
     },
@@ -341,9 +349,28 @@
       "intent": "Inspect the actual user-controlled endpoint with authorized synthetic requests; identify serving software, protocol, model and supported capabilities.",
       "acceptance": [
         "Record a sanitized compatibility matrix and reproducible probe with secrets/addresses supplied externally; no private address or credential is published.",
-        "Verify reachability from the intended phone context, authentication/TLS and structured-response behavior. Missing endpoint access leaves this evidence task blocked, not generically declared OpenAI-compatible."
+        "Verify reachability from the intended phone context, authentication/TLS and structured-response behavior. Missing endpoint access leaves this evidence task blocked, not generically declared OpenAI-compatible.",
+        "Every observed result cites a named sanitized evidence artifact, build/revision and collection time; preserve raw private evidence locally with an auditable reference. Missing evidence blocks the check; prose assertions alone cannot pass review."
       ],
       "external_input": true
+    },
+    {
+      "key": "P11",
+      "title": "Probe credential protection independently of the core",
+      "depends_on": [
+        "F03",
+        "F05"
+      ],
+      "file_scope": [
+        "ios/CredentialProbe/",
+        "docs/validation/credential-probe.md"
+      ],
+      "intent": "Use synthetic Keychain entries to establish credential accessibility and native isolation before the shell decision.",
+      "acceptance": [
+        "Probe can build without production schema/bridge dependencies; document accessibility choices and lock/relaunch tests for P09.",
+        "Record simulator results honestly and leave hardware-only checks for P09; never put a credential into a webview or public evidence."
+      ],
+      "external_input": false
     },
     {
       "key": "P02",
@@ -394,6 +421,25 @@
       "acceptance": [
         "Switching the default provider never silently dispatches old queued content to a new destination; explicit requeue is inspectable.",
         "Revocation stops future dispatch and makes late results ineligible where required; credentials are resolved at execution without being persisted into the job payload."
+      ],
+      "external_input": false
+    },
+    {
+      "key": "V04",
+      "title": "Implement native credential storage and redaction",
+      "depends_on": [
+        "P01",
+        "V01"
+      ],
+      "file_scope": [
+        "ios/Services/Credentials/",
+        "ios/Tests/Credentials/"
+      ],
+      "intent": "Store provider secrets in native Keychain behind opaque references and expose only approved operations across the core/UI boundary.",
+      "acceptance": [
+        "Add/update/delete handles invalidated keys and storage errors; webview, control extensions, logs, exports and synced profile data never receive secret values.",
+        "Use appropriate accessibility class and verify lock/relaunch behavior with synthetic secrets; do not grant broad shared credential access just to simplify a probe.",
+        "For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient."
       ],
       "external_input": false
     },
@@ -463,7 +509,8 @@
       "intent": "Represent note/action/idea annotations, reminder proposals and updates as validated, source-linked candidates rather than unrestricted state writes.",
       "acceptance": [
         "Each candidate references capture ID/revision, source spans and processing version; reject unknown fields/IDs, invalid bounds and unsupported operations.",
-        "Represent abstention and uncertain targets/times explicitly; schema validity alone is never treated as proof of semantic intent."
+        "Represent abstention and uncertain targets/times explicitly; schema validity alone is never treated as proof of semantic intent.",
+        "Session-topic is an independent derived facet with source evidence and user correction. Privacy/read scope is explicit policy, never a classifier-created authorization. Unsupported spoken changes to existing items abstain in M1; UI corrections/completion remain supported."
       ],
       "external_input": false
     },
@@ -521,6 +568,45 @@
       "external_input": false
     },
     {
+      "key": "V05",
+      "title": "Implement bounded native HTTP transport for providers",
+      "depends_on": [
+        "V02",
+        "V04"
+      ],
+      "file_scope": [
+        "ios/Services/ProviderTransport/",
+        "ios/Tests/ProviderTransport/"
+      ],
+      "intent": "Create the native request transport used by adapters, with authorization enforcement before any request and Keychain resolution at dispatch.",
+      "acceptance": [
+        "Timeout, cancellation, response bounds, error normalization, redacted diagnostics and endpoint/TLS validation are tested through a controlled fixture server.",
+        "Reject cross-origin redirect credential forwarding and silent cleartext/certificate bypass; user-configured private endpoints work only under explicitly documented supported transport.",
+        "For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient."
+      ],
+      "external_input": false
+    },
+    {
+      "key": "C01",
+      "title": "Implement native data protection and private-read authentication",
+      "depends_on": [
+        "P02",
+        "V04",
+        "D02"
+      ],
+      "file_scope": [
+        "ios/Services/ProtectedStorage/",
+        "ios/Services/Authentication/"
+      ],
+      "intent": "Apply native file/keychain protection and a session-scoped read-auth boundary across capture storage and private views.",
+      "acceptance": [
+        "Document accessibility before/after first unlock, app-switcher redaction and OS backup inclusion/exclusion; locked capture never grants private-history access.",
+        "Tests cover denied/cancelled authentication and relock/foreground transitions. Failed unlock does not erase or disclose stored content.",
+        "For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient."
+      ],
+      "external_input": false
+    },
+    {
       "key": "P04",
       "title": "Probe offline on-device transcription capabilities",
       "depends_on": [
@@ -533,7 +619,8 @@
       "intent": "Determine an actually supported on-device transcription path and its model/language/download constraints.",
       "acceptance": [
         "Recognize synthetic audio with network unavailable; verify the API is required to stay on device rather than silently use cloud fallback.",
-        "Unsupported device/language, missing model and revoked permission preserve audio with a visible pending/unavailable state. Document setup requirements and evidence limits."
+        "Unsupported device/language, missing model and revoked permission preserve audio with a visible pending/unavailable state. Document setup requirements and evidence limits.",
+        "Build and API availability may be checked in a simulator, but actual offline recognition and language/model availability are certified only by P09. Measure transcription duration and lock/background interruption on-device before making timing claims."
       ],
       "external_input": false
     },
@@ -569,7 +656,8 @@
       "intent": "Create privacy-safe contrastive fixtures for the whole M1 interpretation contract before live model testing.",
       "acceptance": [
         "Cover DESIGN examples, mixed note/task captures, corrections, ambiguity, broad intentions, quotes/negation, prompt injection, dates/timezones and dropped-ASR-word scenarios.",
-        "Each fixture states expected and forbidden mutations and its provenance; a second LLM is not the sole oracle. Label cases where the transcript lacks enough information to recover truth."
+        "Each fixture states expected and forbidden mutations and its provenance; a second LLM is not the sole oracle. Label cases where the transcript lacks enough information to recover truth.",
+        "Spoken existing-item updates such as Done with the roofer call are explicitly unsupported in M1: preserve the source and expect no target mutation. Label every recorded-provider fixture synthetic; do not imply it came from live account traffic."
       ],
       "external_input": false
     },
@@ -647,28 +735,65 @@
       "intent": "Turn the proven boundary into a reproducible, maintained typed bridge used by production native services.",
       "acceptance": [
         "Generate and verify simulator/device bindings in documented builds; keep ABI ownership, cancellation, threading and error conversion explicit.",
-        "Exercise actual persistence and status calls through Swift; test repeated initialization, invalid input and background-thread callbacks without UI-thread violations."
+        "Exercise actual persistence and status calls through Swift; test repeated initialization, invalid input and background-thread callbacks without UI-thread violations.",
+        "For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient."
       ],
       "external_input": false
     },
     {
-      "key": "V04",
-      "title": "Implement native credential storage and redaction",
+      "key": "V06",
+      "title": "Implement the Anthropic interpretation adapter",
       "depends_on": [
-        "P01",
         "V01",
-        "B01"
+        "V05"
       ],
       "file_scope": [
-        "ios/Services/Credentials/",
-        "ios/Tests/Credentials/"
+        "core/src/providers/anthropic/",
+        "core/tests/providers_anthropic/"
       ],
-      "intent": "Store provider secrets in native Keychain behind opaque references and expose only approved operations across the core/UI boundary.",
+      "intent": "Implement the documented Anthropic protocol for the M1 structured interpretation capability.",
       "acceptance": [
-        "Add/update/delete handles invalidated keys and storage errors; webview, control extensions, logs, exports and synced profile data never receive secret values.",
-        "Use appropriate accessibility class and verify lock/relaunch behavior with synthetic secrets; do not grant broad shared credential access just to simplify a probe."
+        "Synthetic protocol fixtures cover valid/invalid structured output, auth failure, rate limit, timeout and cancellation through shared contracts.",
+        "Model and account come from the profile; no embedded service keys, protocol-specific types in domain state, or unsupported speech capability claims."
       ],
       "external_input": false
+    },
+    {
+      "key": "V07",
+      "title": "Implement the OpenAI interpretation adapter",
+      "depends_on": [
+        "V01",
+        "V05"
+      ],
+      "file_scope": [
+        "core/src/providers/openai/",
+        "core/tests/providers_openai/"
+      ],
+      "intent": "Implement the documented OpenAI protocol for the same provider-independent M1 interpretation capability.",
+      "acceptance": [
+        "Pass the same semantic/protocol contract fixtures, including malformed output, refusal, rate limit, auth failure and cancellation.",
+        "Use configured supported API credentials; do not assume a chat subscription is an API credential. Source capture storage and domain contracts remain unchanged."
+      ],
+      "external_input": false
+    },
+    {
+      "key": "V09",
+      "title": "Implement the verified self-hosted provider adapter",
+      "depends_on": [
+        "V05",
+        "V08"
+      ],
+      "file_scope": [
+        "core/src/providers/self_hosted/",
+        "core/tests/providers_self_hosted/"
+      ],
+      "intent": "Support precisely the protocol established by V08, reusing transport without requiring public exposure of the server.",
+      "acceptance": [
+        "Configured model/endpoint/auth passes recorded contract fixtures plus the verified endpoint smoke test; unsupported capabilities are explicit.",
+        "Away-from-network failure keeps captures queued and never falls back to a cloud provider; report the exact verified compatibility boundary.",
+        "Every observed result cites a named sanitized evidence artifact, build/revision and collection time; preserve raw private evidence locally with an auditable reference. Missing evidence blocks the check; prose assertions alone cannot pass review."
+      ],
+      "external_input": true
     },
     {
       "key": "R03",
@@ -703,7 +828,8 @@
       "intent": "Implement schedule/cancel/list and event ingestion behind the core notification contract.",
       "acceptance": [
         "Stable identifiers round-trip, errors are normalized, and notification content contains only generic wording plus an opaque item/action identifier.",
-        "Validate notification/deep-link identifiers before reading or mutating any item, require appropriate read authentication, and never expose provider credentials."
+        "Bridge transports opaque validated identifiers only; authenticated reads and user mutations are owned by N07. Credentials never enter payloads.",
+        "For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient."
       ],
       "external_input": false
     },
@@ -722,7 +848,8 @@
       "intent": "Run fixture expectations through the actual fast path/application guard and recorded provider responses with reproducible reports.",
       "acceptance": [
         "Report false actions/deadlines/completions, abstentions, unsupported claims and class-level failures separately; no agreement-as-accuracy score.",
-        "CI requires zero forbidden authoritative mutations in the synthetic safety corpus; record corpus version and avoid scoring unavailable live backends as passed."
+        "CI requires zero forbidden authoritative mutations in the synthetic safety corpus; record corpus version and avoid scoring unavailable live backends as passed.",
+        "Recorded response fixtures are synthetic authored scenarios unless a specific authorized live-run provenance is attached; reports distinguish fake/recorded/live execution and never infer live quality from synthetic passing."
       ],
       "external_input": false
     },
@@ -736,7 +863,7 @@
         "P07",
         "P08",
         "F07",
-        "V04"
+        "P11"
       ],
       "file_scope": [
         "docs/validation/device-feasibility.md"
@@ -746,25 +873,50 @@
         "Record measured cold/warm/locked/unlocked capture, permission states, interruptions, offline ASR, notifications with UI closed, handoff, accessibility and secure credential behavior.",
         "Measure trigger-to-ready and end-of-input-to-durable-save separately. Physical-device evidence cannot be substituted by simulator or a blank checklist.",
         "If access or capabilities are missing, record the precise unmet check and block rather than certify the matrix.",
-        "Baseline target is iPhone 16 Pro, user-reported iOS 26.6.2; record the actually observed OS build, signing and credential-lock behavior in sanitized evidence."
+        "Baseline target is iPhone 16 Pro, user-reported iOS 26.6.2; record the actually observed OS build, signing and credential-lock behavior in sanitized evidence.",
+        "Offline speech availability and time-to-transcript are physical-device checks, including immediate screen lock; logs must distinguish saved audio from successful transcription and installed reminders.",
+        "Every observed result cites a named sanitized evidence artifact, build/revision and collection time; preserve raw private evidence locally with an auditable reference. Missing evidence blocks the check; prose assertions alone cannot pass review."
       ],
       "external_input": true
     },
     {
-      "key": "V05",
-      "title": "Implement bounded native HTTP transport for providers",
+      "key": "C02",
+      "title": "Implement durable native ingress and core import",
       "depends_on": [
-        "V02",
-        "V04"
+        "P01",
+        "C01",
+        "D02",
+        "B01"
       ],
       "file_scope": [
-        "ios/Services/ProviderTransport/",
-        "ios/Tests/ProviderTransport/"
+        "ios/Services/Ingress/",
+        "core/src/ingress/",
+        "ios/Tests/Ingress/"
       ],
-      "intent": "Create the native request transport used by adapters, with authorization enforcement before any request and Keychain resolution at dispatch.",
+      "intent": "Implement durable native foreground save and core ingestion for the verified entry-point handoff. Production M1 opens the foreground native capture surface; do not add a separate extension writer.",
       "acceptance": [
-        "Timeout, cancellation, response bounds, error normalization, redacted diagnostics and endpoint/TLS validation are tested through a controlled fixture server.",
-        "Reject cross-origin redirect credential forwarding and silent cleartext/certificate bypass; user-configured private endpoints work only under explicitly documented supported transport."
+        "Durable acknowledgement follows committed source persistence. Repeated delivery, interruption and restart produce neither duplicate items nor missing acknowledged captures.",
+        "Test atomic file/DB ownership, malformed/partial ingress, recovery and cleanup after confirmed import inside protected storage.",
+        "Any later independent extension writer needs a separate task and proven concurrency/protection contract; it is not part of this task.",
+        "For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient."
+      ],
+      "external_input": false
+    },
+    {
+      "key": "I07",
+      "title": "Define versioned interpretation instructions and provider-neutral mapping",
+      "depends_on": [
+        "I01",
+        "I04"
+      ],
+      "file_scope": [
+        "core/src/interpretation/instructions/",
+        "core/tests/interpretation_instructions/"
+      ],
+      "intent": "Own the actual instructions, request context and response mapping used by interpretation adapters.",
+      "acceptance": [
+        "Instructions and output contract are versioned, source text is treated as untrusted data, and capture/profile/time context is explicit.",
+        "Synthetic golden request/mapping fixtures cover negation, mixed intents, session topics and abstention; instructions cannot confer disclosure permissions or authorize unsupported existing-item updates."
       ],
       "external_input": false
     },
@@ -783,25 +935,6 @@
       "acceptance": [
         "Crash between OS success and local acknowledgment does not duplicate requests; changed/cancelled/completed/deleted items remove stale requests.",
         "Late OS callbacks cannot resurrect a cancelled reminder; use explicit revision/effect identities and tests for duplicate/out-of-order completion."
-      ],
-      "external_input": false
-    },
-    {
-      "key": "C01",
-      "title": "Implement native data protection and private-read authentication",
-      "depends_on": [
-        "P02",
-        "V04",
-        "D02"
-      ],
-      "file_scope": [
-        "ios/Services/ProtectedStorage/",
-        "ios/Services/Authentication/"
-      ],
-      "intent": "Apply native file/keychain protection and a session-scoped read-auth boundary across capture storage and private views.",
-      "acceptance": [
-        "Document accessibility before/after first unlock, app-switcher redaction and OS backup inclusion/exclusion; locked capture never grants private-history access.",
-        "Tests cover denied/cancelled authentication and relock/foreground transitions. Failed unlock does not erase or disclose stored content."
       ],
       "external_input": false
     },
@@ -841,134 +974,23 @@
       "external_input": false
     },
     {
-      "key": "V06",
-      "title": "Implement the Anthropic interpretation adapter",
-      "depends_on": [
-        "V01",
-        "V05"
-      ],
-      "file_scope": [
-        "ios/Providers/Anthropic/",
-        "ios/Tests/Anthropic/"
-      ],
-      "intent": "Implement the documented Anthropic protocol for the M1 structured interpretation capability.",
-      "acceptance": [
-        "Synthetic protocol fixtures cover valid/invalid structured output, auth failure, rate limit, timeout and cancellation through shared contracts.",
-        "Model and account come from the profile; no embedded service keys, protocol-specific types in domain state, or unsupported speech capability claims."
-      ],
-      "external_input": false
-    },
-    {
-      "key": "V07",
-      "title": "Implement the OpenAI interpretation adapter",
-      "depends_on": [
-        "V01",
-        "V05"
-      ],
-      "file_scope": [
-        "ios/Providers/OpenAI/",
-        "ios/Tests/OpenAI/"
-      ],
-      "intent": "Implement the documented OpenAI protocol for the same provider-independent M1 interpretation capability.",
-      "acceptance": [
-        "Pass the same semantic/protocol contract fixtures, including malformed output, refusal, rate limit, auth failure and cancellation.",
-        "Use configured supported API credentials; do not assume a chat subscription is an API credential. Source capture storage and domain contracts remain unchanged."
-      ],
-      "external_input": false
-    },
-    {
-      "key": "V09",
-      "title": "Implement the verified self-hosted provider adapter",
-      "depends_on": [
-        "V05",
-        "V08"
-      ],
-      "file_scope": [
-        "ios/Providers/SelfHosted/",
-        "ios/Tests/SelfHosted/"
-      ],
-      "intent": "Support precisely the protocol established by V08, reusing transport without requiring public exposure of the server.",
-      "acceptance": [
-        "Configured model/endpoint/auth passes recorded contract fixtures plus the verified endpoint smoke test; unsupported capabilities are explicit.",
-        "Away-from-network failure keeps captures queued and never falls back to a cloud provider; report the exact verified compatibility boundary."
-      ],
-      "external_input": true
-    },
-    {
-      "key": "N04",
-      "title": "Implement notification capacity and permission reconciliation",
-      "depends_on": [
-        "N03",
-        "D05"
-      ],
-      "file_scope": [
-        "core/src/reminders/capacity/",
-        "ios/Services/NotificationPermission/"
-      ],
-      "intent": "Respect actual pending-request capacity and changed permission states, with explicit reminders taking precedence over optional prompts.",
-      "acceptance": [
-        "Boundary tests prove no silent loss when the cap is reached; expose unscheduled/undeliverable state and a documented horizon/refill strategy.",
-        "Permission changes, Focus-related uncertainty and elapsed due times do not falsely mark delivery or user attention; reconcile again on supported foreground events."
-      ],
-      "external_input": false
-    },
-    {
-      "key": "C02",
-      "title": "Implement durable native ingress and core import",
-      "depends_on": [
-        "P01",
-        "C01",
-        "D02",
-        "B01"
-      ],
-      "file_scope": [
-        "ios/Services/Ingress/",
-        "core/src/ingress/",
-        "ios/Tests/Ingress/"
-      ],
-      "intent": "Implement native durable save and core ingestion using the simplest verified foreground path. A separate shared-container ingress is required only if the chosen system entry point actually executes outside the app process.",
-      "acceptance": [
-        "The acknowledgment boundary is durable; interrupted import and app/extension races create neither duplicates nor missing acknowledged captures.",
-        "Test atomic file/DB ownership, malformed or partial ingress, recovery and cleanup after confirmed import; private data remains inside protected storage.",
-        "Do not introduce a second process or shared container for a foreground-only handoff; if an extension is selected, prove concurrent ingestion, protection and duplicate recovery for that boundary."
-      ],
-      "external_input": false
-    },
-    {
       "key": "I06",
       "title": "Implement the interpretation dispatcher across provider adapters",
       "depends_on": [
         "V06",
         "V07",
         "I03",
-        "I05"
+        "I05",
+        "I07"
       ],
       "file_scope": [
-        "ios/Services/Interpretation/",
-        "ios/Tests/Interpretation/"
+        "core/src/interpretation/dispatch/",
+        "core/tests/interpretation_dispatch/"
       ],
       "intent": "Wire raw saved captures through fast-path handling or approved-provider interpretation into the existing validation/apply boundary.",
       "acceptance": [
         "A capture actually produces the supported annotations/action/reminder candidate using a selected adapter; no provider call bypasses routing or blocks raw save.",
         "Model failure preserves source/prior state; clear free-form intent remains usable, and processing unavailability is surfaced honestly. Add integration fixtures covering the complete dispatcher path."
-      ],
-      "external_input": false
-    },
-    {
-      "key": "S02",
-      "title": "Implement the bounded optional daily prompt schedule",
-      "depends_on": [
-        "N04",
-        "S01"
-      ],
-      "file_scope": [
-        "core/src/suggestions/schedule/",
-        "core/tests/prompt_schedule/"
-      ],
-      "intent": "Schedule one generic daily local prompt only after a time is chosen, with a short documented horizon and no endless backlog.",
-      "acceptance": [
-        "Off by default, bounded horizon and capacity below explicit reminders; disabling prompting cancels only prompts.",
-        "Re-entry/relaunch/time changes never burst missed prompts; no private item content is embedded in a pending notification and lack of engagement may reduce optional prompting."
       ],
       "external_input": false
     },
@@ -1011,6 +1033,24 @@
       "external_input": false
     },
     {
+      "key": "N04",
+      "title": "Implement notification capacity and permission reconciliation",
+      "depends_on": [
+        "N03",
+        "D05"
+      ],
+      "file_scope": [
+        "core/src/reminders/capacity/",
+        "ios/Services/NotificationPermission/"
+      ],
+      "intent": "Respect actual pending-request capacity and changed permission states, with explicit reminders taking precedence over optional prompts.",
+      "acceptance": [
+        "Boundary tests prove no silent loss when the cap is reached; expose unscheduled/undeliverable state and a documented horizon/refill strategy.",
+        "Permission changes, Focus-related uncertainty and elapsed due times do not falsely mark delivery or user attention; reconcile again on supported foreground events."
+      ],
+      "external_input": false
+    },
+    {
       "key": "L02",
       "title": "Implement native deletion cleanup reconciliation",
       "depends_on": [
@@ -1025,7 +1065,8 @@
       "intent": "Execute and reconcile deletion effects across audio, ingress, caches, jobs and notifications.",
       "acceptance": [
         "Reopen after each injected cleanup interruption converges without private remnants becoming searchable or notifications remaining active.",
-        "Delete-all uses the same semantics, removes credential references/secrets when requested, and clearly states the OS backup/export lifecycle rather than claiming unprovable physical erasure."
+        "Delete-all uses the same semantics, removes credential references/secrets when requested, and clearly states the OS backup/export lifecycle rather than claiming unprovable physical erasure.",
+        "This task covers per-item cleanup only; delete-all generation fencing and optional credential reset belong to L05."
       ],
       "external_input": false
     },
@@ -1038,31 +1079,55 @@
         "I06"
       ],
       "file_scope": [
+        "core/src/jobs/runner/",
+        "core/tests/job_runner/",
         "ios/Services/JobRunner/",
         "ios/Tests/JobRunner/"
       ],
       "intent": "Drain eligible jobs when the native app has supported execution time; background execution is opportunistic, not promised.",
       "acceptance": [
         "Launch/foreground/network-return resume work without duplicate application; suspend/termination cancels or checkpoints safely.",
-        "An interpretation completed after its requested reminder time cannot silently backdate or substitute a new deadline; captured and scheduled status remain separate."
+        "An interpretation completed after its requested reminder time cannot silently backdate or substitute a new deadline; captured and scheduled status remain separate.",
+        "Rust owns dispatch/retry orchestration against injected effects; Swift owns only platform lifecycle/execution hooks. Transcription is an injected capability registered by C05, not an assumed handler."
       ],
       "external_input": false
     },
     {
-      "key": "S03",
-      "title": "Connect prompt activation to current eligible content",
+      "key": "E02",
+      "title": "Verify live interchangeable backends end to end",
       "depends_on": [
-        "S02",
-        "N02"
+        "V06",
+        "V07",
+        "I06",
+        "E01"
       ],
       "file_scope": [
-        "ios/Services/SuggestionCoordinator/",
-        "ios/Tests/Suggestions/"
+        "docs/validation/live-providers.md"
       ],
-      "intent": "On authenticated prompt activation, resolve current eligibility and offer one item with simple response actions.",
+      "intent": "Run authorized synthetic captures through two genuinely different live backends selected by configuration, including adapter and apply behavior.",
       "acceptance": [
-        "Deleted/completed/snoozed items preselected earlier are never shown as current; no eligible item produces a calm empty result.",
-        "Not-now/stop-suggesting/done use existing revisioned operations; muting optional help leaves explicit reminders unchanged."
+        "Report provider/model/config versions, semantic outcomes, latency and cost; raw captures remain unchanged when switching.",
+        "Exercise unavailable/invalid response and revoked-credential behavior. Absent API credentials leaves live proof blocked, never replaced by fixtures alone.",
+        "For each claimed live backend require zero forbidden mutations over the named contrastive suite, with observed counts and model/prompt versions. A failed backend is not certified by another model agreeing with it.",
+        "Every observed result cites a named sanitized evidence artifact, build/revision and collection time; preserve raw private evidence locally with an auditable reference. Missing evidence blocks the check; prose assertions alone cannot pass review."
+      ],
+      "external_input": true
+    },
+    {
+      "key": "S02",
+      "title": "Implement the bounded optional daily prompt schedule",
+      "depends_on": [
+        "N04",
+        "S01"
+      ],
+      "file_scope": [
+        "core/src/suggestions/schedule/",
+        "core/tests/prompt_schedule/"
+      ],
+      "intent": "Schedule one generic daily local prompt only after a time is chosen, with a short documented horizon and no endless backlog.",
+      "acceptance": [
+        "Off by default, bounded horizon and capacity below explicit reminders; disabling prompting cancels only prompts.",
+        "Refill the bounded daily prompt horizon only on app open; re-entry/time changes do not replay missed prompts, and default generic payloads contain no private content."
       ],
       "external_input": false
     },
@@ -1072,7 +1137,8 @@
       "depends_on": [
         "P04",
         "C04",
-        "J01"
+        "J01",
+        "J02"
       ],
       "file_scope": [
         "ios/Services/Transcription/",
@@ -1081,7 +1147,9 @@
       "intent": "Attach on-device transcript revisions and provenance to durable audio captures and queue interpretation when permitted.",
       "acceptance": [
         "Available on-device model yields text offline; unsupported/missing-model/failed jobs retain source and remain intelligibly pending.",
-        "Late transcripts cannot overwrite a user correction; save, transcript and interpretation completion are distinct and tested with interruption/retry."
+        "Late transcripts cannot overwrite a user correction; save, transcript and interpretation completion are distinct and tested with interruption/retry.",
+        "Register the real native transcription handler with the job runner through the reserved capability seam and verify a queued saved recording actually executes through that path.",
+        "For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient."
       ],
       "external_input": false
     },
@@ -1103,25 +1171,6 @@
         "A test-only reader reconstructs equivalent item state and detects malformed/truncated export; native share/temp files are protected and cleaned. M1 does not claim full backup/restore sync."
       ],
       "external_input": false
-    },
-    {
-      "key": "E02",
-      "title": "Verify live interchangeable backends end to end",
-      "depends_on": [
-        "V06",
-        "V07",
-        "I06",
-        "E01"
-      ],
-      "file_scope": [
-        "docs/validation/live-providers.md"
-      ],
-      "intent": "Run authorized synthetic captures through two genuinely different live backends selected by configuration, including adapter and apply behavior.",
-      "acceptance": [
-        "Report provider/model/config versions, semantic outcomes, latency and cost; raw captures remain unchanged when switching.",
-        "Exercise unavailable/invalid response and revoked-credential behavior. Absent API credentials leaves live proof blocked, never replaced by fixtures alone."
-      ],
-      "external_input": true
     },
     {
       "key": "J03",
@@ -1150,13 +1199,31 @@
         "N04"
       ],
       "file_scope": [
-        "ios/Services/ReminderCoordinator/",
-        "ios/Tests/ReminderCoordinator/"
+        "core/src/reminders/coordinator/",
+        "core/tests/reminders_coordinator/"
       ],
       "intent": "Complete the durable capture-to-installed-notification path and the cancellation/edit path.",
       "acceptance": [
         "Supported offline commands schedule without a remote AI call; approved asynchronous results schedule only within a valid opportunity and captured time context.",
         "Acknowledge scheduled only after OS installation success; edit/completion retries and app restart preserve one desired reminder and truthful status."
+      ],
+      "external_input": false
+    },
+    {
+      "key": "S03",
+      "title": "Connect prompt activation to current eligible content",
+      "depends_on": [
+        "S02",
+        "N02"
+      ],
+      "file_scope": [
+        "core/src/suggestions/coordinator/",
+        "core/tests/suggestions_coordinator/"
+      ],
+      "intent": "On authenticated prompt activation, resolve current eligibility and offer one item with simple response actions.",
+      "acceptance": [
+        "Deleted/completed/snoozed items preselected earlier are never shown as current; no eligible item produces a calm empty result.",
+        "Not-now/stop-suggesting/done use existing revisioned operations; muting optional help leaves explicit reminders unchanged."
       ],
       "external_input": false
     },
@@ -1217,12 +1284,34 @@
       "external_input": false
     },
     {
+      "key": "B04",
+      "title": "Bound native work when capture backgrounds",
+      "depends_on": [
+        "J02",
+        "C05",
+        "N04"
+      ],
+      "file_scope": [
+        "ios/Services/BackgroundCompletion/",
+        "ios/Tests/BackgroundCompletion/"
+      ],
+      "intent": "Request supported finite native background execution at capture end and handle expiry without losing acknowledged source.",
+      "acceptance": [
+        "Verify current Apple-supported mechanism and record its constraints; expiration cancels/checkpoints work safely and never relies on perpetual processing.",
+        "A pending transcript or interpretation remains saved-but-unprocessed, with any reminder explicitly not scheduled. Optional configured generic pending-reminder alerts are bounded, separately identified, and never represented as the requested reminder.",
+        "Exercise lock immediately after recording and expire the execution window; no lost source, invented schedule success or endless retry alerts. Actual-device timing belongs in T05.",
+        "For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient."
+      ],
+      "external_input": false
+    },
+    {
       "key": "C06",
       "title": "Wire production system entry points and save acknowledgment",
       "depends_on": [
         "C03",
         "C05",
-        "N05"
+        "N05",
+        "B04"
       ],
       "file_scope": [
         "ios/Capture/Entry/",
@@ -1232,7 +1321,46 @@
       "intent": "Connect the validated system control/shortcut entry to production native voice or silent capture and return promptly after saving.",
       "acceptance": [
         "Cold/warm/locked handoff honors the measured authentication limits and never waits for a webview to persist input.",
-        "Acknowledgment distinguishes saved audio/text, pending transcription, not-scheduled and installed reminder with resolved time; no unsolicited suggestions appear during capture."
+        "Acknowledgment distinguishes saved audio/text, pending transcription, not-scheduled and installed reminder with resolved time; no unsolicited suggestions appear during capture.",
+        "Default save acknowledgment distinguishes saved-but-not-yet-processed and explicitly says no reminder has been confirmed while transcription/interpretation is pending. Background interruption must never leave a bare success signal implying a reminder exists."
+      ],
+      "external_input": false
+    },
+    {
+      "key": "N07",
+      "title": "Handle notification actions and authenticated deep links",
+      "depends_on": [
+        "N06",
+        "C01"
+      ],
+      "file_scope": [
+        "ios/Services/NotificationActions/ActionHandler.swift",
+        "ios/Tests/NotificationActions/ActionHandlerTests.swift"
+      ],
+      "intent": "Route notification taps and allowed actions into existing revisioned user events.",
+      "acceptance": [
+        "Acknowledge and complete are distinct operations; stale identifiers, deleted items and duplicate callbacks never resurrect or double-mutate records.",
+        "Private reads and mutations requiring authentication are deferred until unlock; action callback ingestion persists or reports failure and subsequent launch reconciles it.",
+        "For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient."
+      ],
+      "external_input": false
+    },
+    {
+      "key": "L05",
+      "title": "Implement delete-all reset orchestration",
+      "depends_on": [
+        "L02",
+        "L03",
+        "L04"
+      ],
+      "file_scope": [
+        "ios/Services/Reset/",
+        "ios/Tests/Reset/"
+      ],
+      "intent": "Coordinate explicit delete-all across existing per-item cleanup and optional credential/profile reset.",
+      "acceptance": [
+        "A durable reset generation fences in-flight processing and new effects; retries after crashes cannot restore deleted content or leave reminders scheduled.",
+        "Test populated mixed-route data, indexes, audio, export/share temporaries, pending jobs and optional credential removal. New captures after completed reset belong to a fresh generation."
       ],
       "external_input": false
     },
@@ -1260,38 +1388,20 @@
       "depends_on": [
         "B01",
         "C06",
-        "V09",
         "S03",
         "L03",
-        "L04",
-        "E03"
+        "L04"
       ],
       "file_scope": [
-        "ios/OhAndServices/CompositionRoot.swift",
-        "ios/OhAndServicesTests/CompositionRootTests.swift"
+        "ios/Services/Assembly/CompositionRoot.swift",
+        "ios/Tests/Services/CompositionRootTests.swift"
       ],
       "intent": "Connect the existing core, providers, authorized native transport, jobs, credentials and reminder services through one injectable composition root.",
       "acceptance": [
         "Production construction selects real adapters from versioned configuration; fake dependencies require an explicit test build path.",
-        "A composition integration test saves, dispatches a fake response, reads the resulting item, and observes a scheduler request through actual service interfaces."
-      ],
-      "external_input": false
-    },
-    {
-      "key": "N07",
-      "title": "Handle notification actions and authenticated deep links",
-      "depends_on": [
-        "N06",
-        "C01"
-      ],
-      "file_scope": [
-        "ios/OhAndNotifications/ActionHandler.swift",
-        "ios/OhAndNotificationsTests/ActionHandlerTests.swift"
-      ],
-      "intent": "Route notification taps and allowed actions into existing revisioned user events.",
-      "acceptance": [
-        "Acknowledge and complete are distinct operations; stale identifiers, deleted items and duplicate callbacks never resurrect or double-mutate records.",
-        "Private reads and mutations requiring authentication are deferred until unlock; action callback ingestion persists or reports failure and subsequent launch reconciles it."
+        "A composition integration test saves, dispatches a fake response, reads the resulting item, and observes a scheduler request through actual service interfaces.",
+        "Provide typed extension seams for optional capabilities so later integration can add owned modules without concurrent edits to this composition root.",
+        "For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient."
       ],
       "external_input": false
     },
@@ -1302,13 +1412,33 @@
         "B02"
       ],
       "file_scope": [
-        "ios/OhAndServices/LifecycleCoordinator.swift",
-        "ios/OhAndServicesTests/LifecycleCoordinatorTests.swift"
+        "ios/Services/Assembly/LifecycleCoordinator.swift",
+        "ios/Tests/Services/LifecycleCoordinatorTests.swift"
       ],
       "intent": "Order recovery and foreground work without making capture wait for network or cleanup.",
       "acceptance": [
         "Reconcile ingress, expired job leases, deletion, reminder desired state, retention, prompt eligibility and health with bounded idempotent work; serialize overlapping launches.",
-        "Test process interruption at each boundary, repeated activation and time/zone changes; approved absolute reminder instants remain stable and daily local-time prompts use the chosen zone policy."
+        "Test process interruption at each recovery boundary and repeated activation. Provide an injectable trigger for separately owned system clock/zone-change handling.",
+        "For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient."
+      ],
+      "external_input": false
+    },
+    {
+      "key": "T11",
+      "title": "Integrate optional provider and shadow capabilities",
+      "depends_on": [
+        "B02",
+        "V09",
+        "E03"
+      ],
+      "file_scope": [
+        "ios/Services/OptionalCapabilities/",
+        "ios/Tests/OptionalCapabilities/"
+      ],
+      "intent": "Register verified self-hosted and opt-in shadow capabilities through the production composition extension seam.",
+      "acceptance": [
+        "The base app constructs and captures when neither optional feature is configured. Feature registration uses the same routing/credential rules and adds no hidden default endpoint.",
+        "Synthetic end-to-end checks exercise both registrations; real self-hosted claims link V08/V09 evidence. No edits to concurrent shell or root files are needed."
       ],
       "external_input": false
     },
@@ -1332,6 +1462,26 @@
       "external_input": false
     },
     {
+      "key": "B05",
+      "title": "Reconcile wall-clock and timezone changes",
+      "depends_on": [
+        "B03",
+        "N06",
+        "S03"
+      ],
+      "file_scope": [
+        "ios/Services/TimeChangeCoordinator/",
+        "ios/Tests/TimeChangeCoordinator/"
+      ],
+      "intent": "Handle system time/zone changes through existing reminder and prompt reconciliation.",
+      "acceptance": [
+        "Preserve explicitly resolved absolute reminder instants; implement documented local-time daily prompt semantics through DST gaps/folds and zone travel.",
+        "Test repeated callbacks, clock jumps forward/backward and overdue pending work without duplicate delivery requests or burst catch-up.",
+        "For the native effect boundary, run at least one simulator integration check against the real Rust core on the exact submitted revision; an isolated Swift mock alone is insufficient."
+      ],
+      "external_input": false
+    },
+    {
       "key": "U02",
       "title": "Build original-text search and source detail views",
       "depends_on": [
@@ -1346,7 +1496,8 @@
       "intent": "Expose local original-text retrieval, supported conversational filters and source provenance in the selected UI.",
       "acceptance": [
         "Search returns original/corrected text with date/type/source and honest no-result state; private reads require authentication.",
-        "Literal fallback and private topics since a date work offline; no generated answer is shown as quotation."
+        "Literal fallback and private topics since a date work offline; no generated answer is shown as quotation.",
+        "Offer playback only for retained source audio with the same private-read authentication; expired/deleted audio is honestly unavailable and cannot leave a broken playback control."
       ],
       "external_input": false
     },
@@ -1363,7 +1514,8 @@
       "intent": "Wire type correction, done/cancel and suggestion controls to revisioned domain operations.",
       "acceptance": [
         "Each action updates actual stored state and survives relaunch/reprocessing; stale revision conflicts are visible and do not silently overwrite.",
-        "Not-now and stop-suggesting behavior are explained; actions do not turn an idea into an obligation without explicit user intent."
+        "Not-now and stop-suggesting behavior are explained; actions do not turn an idea into an obligation without explicit user intent.",
+        "Allow source/transcript correction as an explicit authoritative revision while preserving original provenance; later transcription/model output cannot overwrite the correction."
       ],
       "external_input": false
     },
@@ -1391,7 +1543,6 @@
         "U04",
         "V06",
         "V07",
-        "V09",
         "V04"
       ],
       "file_scope": [
@@ -1428,7 +1579,8 @@
       "depends_on": [
         "U06",
         "L03",
-        "L04"
+        "L04",
+        "L05"
       ],
       "file_scope": [
         "app/data-settings/"
@@ -1449,7 +1601,7 @@
       ],
       "file_scope": [
         "app/settings/permissions/",
-        "ios/OhAndPermissions/"
+        "ios/Services/Permissions/"
       ],
       "intent": "Request microphone, speech and notification access only at the corresponding feature boundary and explain denial recovery.",
       "acceptance": [
@@ -1473,24 +1625,6 @@
       "acceptance": [
         "Opt-in is required, prompt horizon/cooldown are understandable, and no private item is revealed before authenticated open.",
         "Off/not-now/stop/done affect correct stored policy without disabling explicit reminders; empty eligible set is calm and does not solicit inbox cleanup."
-      ],
-      "external_input": false
-    },
-    {
-      "key": "T04",
-      "title": "Test processing-boundary and private-read isolation",
-      "depends_on": [
-        "V09",
-        "U07",
-        "E03"
-      ],
-      "file_scope": [
-        "tests/privacy/"
-      ],
-      "intent": "Verify the complete UI-to-routing/transport/export/search/notification boundary with synthetic canary content.",
-      "acceptance": [
-        "Unapproved routes, cross-origin redirects, stale jobs and reviewer profiles cannot disclose canaries; private-source queries/snippets and lock-screen payloads respect read scope.",
-        "Assert no raw credentials/content in logs or exports and verify revocation while a job is in flight; record authorized remote processing accurately."
       ],
       "external_input": false
     },
@@ -1524,12 +1658,33 @@
       "file_scope": [
         "core/src/suggestions/preview.rs",
         "app/settings/prompt-preview/",
-        "ios/OhAndNotifications/PreviewPolicy.swift"
+        "ios/Services/NotificationActions/PreviewPolicy.swift"
       ],
       "intent": "Offer a useful item-specific prompt as an explicit alternative to the generic default, without disclosing private routes.",
       "acceptance": [
         "Default remains generic. Preview opt-in states lock-screen exposure clearly and applies only to explicitly non-private, suggestion-eligible items.",
-        "Reclassify/delete/stop-suggesting cancels and reconciles pending previews; never promise recall of already delivered OS banners. Private content and identifiers conveying meaning never enter payloads."
+        "Reclassify/delete/stop-suggesting cancels and reconciles pending previews; never promise recall of already delivered OS banners. Private content and identifiers conveying meaning never enter payloads.",
+        "Preview content requires an explicitly preview-safe route configured by the user. The universal/default route is not preview-safe; classification can only remove eligibility, never grant preview permission. End-to-end tests inspect every scheduled payload."
+      ],
+      "external_input": false
+    },
+    {
+      "key": "T04",
+      "title": "Test processing-boundary and private-read isolation",
+      "depends_on": [
+        "V09",
+        "U07",
+        "E03",
+        "T11",
+        "S04"
+      ],
+      "file_scope": [
+        "tests/privacy/"
+      ],
+      "intent": "Verify the complete UI-to-routing/transport/export/search/notification boundary with synthetic canary content.",
+      "acceptance": [
+        "Unapproved routes, cross-origin redirects, stale jobs and reviewer profiles cannot disclose canaries; private-source queries/snippets and lock-screen payloads respect read scope.",
+        "Assert no raw credentials/content in logs or exports and verify revocation while a job is in flight; record authorized remote processing accurately."
       ],
       "external_input": false
     },
@@ -1548,7 +1703,8 @@
       "intent": "Validate voice/silent capture, retrieval, item actions and settings with VoiceOver, Dynamic Type and keyboard/accessibility navigation.",
       "acceptance": [
         "Automated audits plus a documented actual-device pass cover focus, labels, error announcements, large text and no inaccessible authentication dead ends.",
-        "Record measured issues and fixes; simulator-only results cannot certify physical assistive interaction. Keep fixes limited to named UI accessibility behavior."
+        "Record measured issues and fixes; simulator-only results cannot certify physical assistive interaction. Keep fixes limited to named UI accessibility behavior.",
+        "Every observed result cites a named sanitized evidence artifact, build/revision and collection time; preserve raw private evidence locally with an auditable reference. Missing evidence blocks the check; prose assertions alone cannot pass review."
       ],
       "external_input": true
     },
@@ -1577,16 +1733,15 @@
         "U11",
         "U09",
         "B03",
-        "N07",
-        "S04"
+        "N07"
       ],
       "file_scope": [
-        "ios/OhAndEndToEndTests/"
+        "ios/Tests/EndToEnd/"
       ],
       "intent": "Add one maintained simulator test suite across actual production wiring, rather than isolated module fakes.",
       "acceptance": [
         "Exercise silent capture, saved-source retrieval, classification, correction, completion, explicit reminder scheduling and notification action with deterministic provider/clock/OS boundaries.",
-        "Run provider outage, permission denial and restart journeys; assert source durability and distinct save/process/schedule state through visible UI and persisted state."
+        "Run the happy-path suite in macOS CI on the submitted revision; provider and OS boundaries are deterministic while app/service wiring is real. Failure journeys belong to T12."
       ],
       "external_input": false
     },
@@ -1604,9 +1759,30 @@
       "intent": "Produce reproducible trial version/build identifiers and an upgrade procedure before the physical exit matrix.",
       "acceptance": [
         "Upgrade a prior seeded install without uninstalling; sources, corrections, tombstones, profile references and scheduled reminder identity survive. Verify simulator automatically and collect a real-device upgrade result.",
-        "Build metadata and exported content-free metrics identify the tested revision; signing material and personal records never enter artifacts or repository."
+        "Build metadata and exported content-free metrics identify the tested revision; signing material and personal records never enter artifacts or repository.",
+        "Produce the actual signed candidate artifact for T05, recording revision, version/build, checksum and signing route/validity metadata. T06 distributes this same tested candidate; any rebuilt binary requires repeated affected device checks.",
+        "Every observed result cites a named sanitized evidence artifact, build/revision and collection time; preserve raw private evidence locally with an auditable reference. Missing evidence blocks the check; prose assertions alone cannot pass review."
       ],
       "external_input": true
+    },
+    {
+      "key": "T12",
+      "title": "Exercise simulator failure journeys through the app",
+      "depends_on": [
+        "T09",
+        "L05",
+        "B04",
+        "B05"
+      ],
+      "file_scope": [
+        "ios/Tests/FailureJourneys/"
+      ],
+      "intent": "Verify failures through production UI and service wiring, complementing the happy-path simulator suite.",
+      "acceptance": [
+        "Exercise provider outage, denied/revoked permissions, interrupted transcription, expired background execution, restart and deletion during processing.",
+        "Assert source durability, recovery without mandatory triage, no stale scheduled effects, and independently honest save/processing/scheduling state."
+      ],
+      "external_input": false
     },
     {
       "key": "T05",
@@ -1621,7 +1797,8 @@
         "P08",
         "T09",
         "T10",
-        "S04"
+        "T12",
+        "B05"
       ],
       "file_scope": [
         "docs/validation/m1-device-results.md"
@@ -1629,7 +1806,8 @@
       "intent": "Install the production M1 build and execute the full device matrix with synthetic/authorized local data.",
       "acceptance": [
         "Verify cold/locked/permission paths, offline recording/text, process interruption, local reminders UI closed, pipeline faults and Mac asleep with actual build/device identifiers.",
-        "Attach sanitized results and exact reproduction of failures; every functional criterion must pass or the task remains blocked for remediation. Do not certify a probe build as the production app."
+        "Attach sanitized results and exact reproduction of failures; every functional criterion must pass or the task remains blocked for remediation. Do not certify a probe build as the production app.",
+        "Every observed result cites a named sanitized evidence artifact, build/revision and collection time; preserve raw private evidence locally with an auditable reference. Missing evidence blocks the check; prose assertions alone cannot pass review."
       ],
       "external_input": true
     },
@@ -1646,7 +1824,9 @@
       "intent": "Package the verified build for the selected supported Apple distribution route and document a reproducible installation/update path.",
       "acceptance": [
         "Artifact corresponds to reviewed source and passed checks, with secrets injected securely and no private data bundled.",
-        "Verify installation and launch on the target phone; public README makes no broader distribution claim than the actual signed route. Account-holder restrictions/inputs are explicit."
+        "Verify installation and launch on the target phone; public README makes no broader distribution claim than the actual signed route. Account-holder restrictions/inputs are explicit.",
+        "Use the exact candidate identifier/checksum certified by T10 and T05; do not rebuild and claim the new binary has inherited device validation.",
+        "Every observed result cites a named sanitized evidence artifact, build/revision and collection time; preserve raw private evidence locally with an auditable reference. Missing evidence blocks the check; prose assertions alone cannot pass review."
       ],
       "external_input": true
     },
@@ -1685,7 +1865,8 @@
         "Evidence is sufficient to judge useful return and burden, not merely launch counts or a streak. Include separate latency distributions, errors and no-cleanup lapse recovery.",
         "No source/private session contents are committed. If capture is avoided or the only prompt is muted, define a concrete loop revision; do not declare M1 complete based on code alone.",
         "Missing time/device observations or failed exit criteria leave this task blocked with precise evidence needs; continue independent work and create bounded corrective follow-ups through the coordinator.",
-        "Record whether generic versus explicitly enabled non-private previews actually help retrieval and whether prompts are muted or ignored; usefulness and capture burden outweigh notification open rates. If the loop fails, record M1 as unmet and propose focused repair tasks."
+        "Record whether generic versus explicitly enabled non-private previews actually help retrieval and whether prompts are muted or ignored; usefulness and capture burden outweigh notification open rates. If the loop fails, record M1 as unmet and propose focused repair tasks.",
+        "Every observed result cites a named sanitized evidence artifact, build/revision and collection time; preserve raw private evidence locally with an auditable reference. Missing evidence blocks the check; prose assertions alone cannot pass review."
       ],
       "external_input": true
     }
