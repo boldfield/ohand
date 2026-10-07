@@ -1,12 +1,12 @@
 PYTHON ?= python3
 export PYTHONDONTWRITEBYTECODE := 1
 
-.PHONY: check test contract-check contract-test ios-check
+.PHONY: check test contract-check contract-test ios-check hygiene-check
 
 # check: Validate contract correctness, compile, format, and lint.
 # F01 establishes contract-check and contract-test. F02 adds cargo targets and lint.
-# F05 adds native targets and documentation.
-check: contract-check cargo-check cargo-fmt-check cargo-clippy ios-check
+# F05 adds native targets and documentation. F06 adds hygiene checks.
+check: contract-check cargo-check cargo-fmt-check cargo-clippy ios-check hygiene-check
 
 # test: Run contract validation tests and cargo test suite.
 test: contract-test cargo-test
@@ -44,3 +44,9 @@ contract-test:
 ios-check:
 	$(PYTHON) ios/scripts/check_project_config.py
 	$(PYTHON) -m unittest discover --start-directory ios/scripts --pattern 'test_*.py' --verbose
+
+# hygiene-check: Check for secret leaks and private-capture policy violations.
+# Ensures no credentials, keys, or private recordings are committed to the public repository.
+hygiene-check:
+	$(PYTHON) tools/hygiene/check_hygiene.py
+	$(PYTHON) -m unittest discover --start-directory tools/hygiene --pattern 'test_*.py' --verbose
