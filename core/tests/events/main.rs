@@ -5,7 +5,8 @@ use std::thread;
 
 use ohand_core::store::events::{
     delete_events_for_item, get_event, get_events_for_item, save_event, save_event_in_tx,
-    Correction, Event, EventPayload, EventType, SuggestionControlPayload,
+    Correction, CorrectionKind, Event, EventPayload, EventType, SuggestionControlKind,
+    SuggestionControlPayload,
 };
 use ohand_core::store::schema::{Clock, Database};
 
@@ -61,7 +62,7 @@ fn make_correction_event(
     event_id: &str,
     item_id: &str,
     revision: i32,
-    kind: &str,
+    kind: CorrectionKind,
     old_value: Option<&str>,
     new_value: &str,
 ) -> Event {
@@ -71,7 +72,7 @@ fn make_correction_event(
         revision,
         EventType::Correction,
         EventPayload::Correction(Correction {
-            kind: kind.to_string(),
+            kind,
             old_value: old_value.map(|s| s.to_string()),
             new_value: new_value.to_string(),
         }),
@@ -84,16 +85,14 @@ fn make_suggestion_control_event(
     event_id: &str,
     item_id: &str,
     revision: i32,
-    kind: &str,
+    kind: SuggestionControlKind,
 ) -> Event {
     Event::new(
         event_id.to_string(),
         item_id.to_string(),
         revision,
         EventType::SuggestionControl,
-        EventPayload::SuggestionControl(SuggestionControlPayload {
-            kind: kind.to_string(),
-        }),
+        EventPayload::SuggestionControl(SuggestionControlPayload { kind }),
         "2026-01-15T10:30:00Z".to_string(),
     )
     .unwrap()
@@ -347,7 +346,7 @@ fn test_user_corrections_separate_from_source() -> Result<()> {
         "evt-correct",
         "item-1",
         0,
-        "text",
+        CorrectionKind::Text,
         Some("old text"),
         "new text",
     );
@@ -392,7 +391,14 @@ fn test_correction_with_no_old_value() -> Result<()> {
     insert_test_item(&tx, "item-1")?;
     tx.commit()?;
 
-    let correction = make_correction_event("evt-correct", "item-1", 0, "text", None, "new text");
+    let correction = make_correction_event(
+        "evt-correct",
+        "item-1",
+        0,
+        CorrectionKind::Text,
+        None,
+        "new text",
+    );
     save_event(&mut db, &correction, 0)?;
 
     let tx = db.transaction()?;
@@ -420,55 +426,75 @@ fn test_notes_ideas_actions_distinct() -> Result<()> {
     insert_test_item(&tx, "item-1")?;
     tx.commit()?;
 
-    let note = make_correction_event("evt-note", "item-1", 0, "note", None, "this is a note");
-    let idea = make_correction_event("evt-idea", "item-1", 1, "idea", None, "this is an idea");
-    let action = make_correction_event(
+    // Create type corrections to demonstrate distinct item types
+    let note_correction =
+        make_correction_event("evt-note", "item-1", 0, CorrectionKind::Type, None, "note");
+    let idea_correction =
+        make_correction_event("evt-idea", "item-1", 1, CorrectionKind::Type, None, "idea");
+    let action_correction = make_correction_event(
         "evt-action",
         "item-1",
         2,
-        "action",
+        CorrectionKind::Type,
         None,
-        "this is an action",
+        "action",
     );
-    let broad = make_correction_event(
+    let broad_correction = make_correction_event(
         "evt-broad",
         "item-1",
         3,
-        "broad_intention",
+        CorrectionKind::Type,
         None,
-        "this is a broad intention",
+        "broad_intention",
     );
 
-    save_event(&mut db, &note, 0)?;
-    save_event(&mut db, &idea, 1)?;
-    save_event(&mut db, &action, 2)?;
-    save_event(&mut db, &broad, 3)?;
+    save_event(&mut db, &note_correction, 0)?;
+    save_event(&mut db, &idea_correction, 1)?;
+    save_event(&mut db, &action_correction, 2)?;
+    save_event(&mut db, &broad_correction, 3)?;
 
     let tx = db.transaction()?;
     let events = get_events_for_item(&tx, "item-1")?;
 
     assert_eq!(events.len(), 4);
+
+    // Verify all events are Correction type with Type kind
     assert_eq!(events[0].event_type, EventType::Correction);
     if let EventPayload::Correction(c) = &events[0].payload {
-        assert_eq!(c.kind, "note");
+        assert_eq!(c.kind, CorrectionKind::Type);
+        assert_eq!(c.new_value, "note");
     } else {
         panic!("Expected Correction payload");
     }
+
     if let EventPayload::Correction(c) = &events[1].payload {
-        assert_eq!(c.kind, "idea");
+        assert_eq!(c.kind, CorrectionKind::Type);
+        assert_eq!(c.new_value, "idea");
     } else {
         panic!("Expected Correction payload");
     }
+
     if let EventPayload::Correction(c) = &events[2].payload {
-        assert_eq!(c.kind, "action");
+        assert_eq!(c.kind, CorrectionKind::Type);
+        assert_eq!(c.new_value, "action");
     } else {
         panic!("Expected Correction payload");
     }
+
     if let EventPayload::Correction(c) = &events[3].payload {
-        assert_eq!(c.kind, "broad_intention");
+        assert_eq!(c.kind, CorrectionKind::Type);
+        assert_eq!(c.new_value, "broad_intention");
     } else {
         panic!("Expected Correction payload");
     }
+
+    // Verify the original capture text is unchanged after all corrections
+    let capture_text: String = tx.query_row(
+        "SELECT text FROM captures WHERE capture_id = (SELECT capture_id FROM items WHERE item_id = ?)",
+        ["item-1"],
+        |row| row.get(0),
+    )?;
+    assert_eq!(capture_text, "test");
 
     let _ = std::fs::remove_file(&path);
     Ok(())
@@ -484,7 +510,8 @@ fn test_suggestion_control_not_now_kind() -> Result<()> {
     insert_test_item(&tx, "item-1")?;
     tx.commit()?;
 
-    let control = make_suggestion_control_event("evt-control", "item-1", 0, "not_now");
+    let control =
+        make_suggestion_control_event("evt-control", "item-1", 0, SuggestionControlKind::NotNow);
     save_event(&mut db, &control, 0)?;
 
     let tx = db.transaction()?;
@@ -494,7 +521,7 @@ fn test_suggestion_control_not_now_kind() -> Result<()> {
     let evt = retrieved.unwrap();
     assert_eq!(evt.event_type, EventType::SuggestionControl);
     if let EventPayload::SuggestionControl(payload) = evt.payload {
-        assert_eq!(payload.kind, "not_now");
+        assert_eq!(payload.kind, SuggestionControlKind::NotNow);
     } else {
         panic!("Expected SuggestionControl payload");
     }
@@ -513,7 +540,12 @@ fn test_suggestion_control_stop_suggesting_kind() -> Result<()> {
     insert_test_item(&tx, "item-1")?;
     tx.commit()?;
 
-    let control = make_suggestion_control_event("evt-control", "item-1", 0, "stop_suggesting");
+    let control = make_suggestion_control_event(
+        "evt-control",
+        "item-1",
+        0,
+        SuggestionControlKind::StopSuggesting,
+    );
     save_event(&mut db, &control, 0)?;
 
     let tx = db.transaction()?;
@@ -522,7 +554,7 @@ fn test_suggestion_control_stop_suggesting_kind() -> Result<()> {
     assert!(retrieved.is_some());
     let evt = retrieved.unwrap();
     if let EventPayload::SuggestionControl(payload) = evt.payload {
-        assert_eq!(payload.kind, "stop_suggesting");
+        assert_eq!(payload.kind, SuggestionControlKind::StopSuggesting);
     } else {
         panic!("Expected SuggestionControl payload");
     }
@@ -542,7 +574,14 @@ fn test_delete_events_for_item() -> Result<()> {
     insert_test_item(&tx, "item-2")?;
     tx.commit()?;
 
-    let evt1 = make_correction_event("evt-1", "item-1", 0, "text", Some("old"), "new");
+    let evt1 = make_correction_event(
+        "evt-1",
+        "item-1",
+        0,
+        CorrectionKind::Text,
+        Some("old"),
+        "new",
+    );
     let evt2 = make_completion_event("evt-2", "item-1", 1);
     let evt3 = make_cancellation_event("evt-3", "item-2", 0);
 
@@ -578,9 +617,9 @@ fn test_get_events_for_item_ordered() -> Result<()> {
     tx.commit()?;
 
     // Create three non-terminal events that preserve ordering
-    let evt0 = make_correction_event("evt-0", "item-1", 0, "text", None, "val0");
-    let evt1 = make_correction_event("evt-1", "item-1", 1, "type", None, "val1");
-    let evt2 = make_correction_event("evt-2", "item-1", 2, "scope", None, "val2");
+    let evt0 = make_correction_event("evt-0", "item-1", 0, CorrectionKind::Text, None, "val0");
+    let evt1 = make_correction_event("evt-1", "item-1", 1, CorrectionKind::Type, None, "val1");
+    let evt2 = make_correction_event("evt-2", "item-1", 2, CorrectionKind::Scope, None, "val2");
 
     save_event(&mut db, &evt0, 0)?;
     save_event(&mut db, &evt1, 1)?;
@@ -639,7 +678,7 @@ fn test_save_event_in_transaction() -> Result<()> {
     insert_test_item(&tx, "item-1")?;
     tx.commit()?;
 
-    let event = make_correction_event("evt-tx", "item-1", 0, "text", None, "val");
+    let event = make_correction_event("evt-tx", "item-1", 0, CorrectionKind::Text, None, "val");
 
     {
         let tx = db.transaction()?;
@@ -769,7 +808,7 @@ fn test_invalid_event_type_payload_combination() -> Result<()> {
         0,
         EventType::Completion,
         EventPayload::Correction(Correction {
-            kind: "text".to_string(),
+            kind: CorrectionKind::Text,
             old_value: None,
             new_value: "test".to_string(),
         }),

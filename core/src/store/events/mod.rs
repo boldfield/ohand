@@ -41,15 +41,78 @@ impl FromStr for EventType {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CorrectionKind {
+    Text,
+    Type,
+    Scope,
+    SessionTopic,
+}
+
+impl CorrectionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CorrectionKind::Text => "text",
+            CorrectionKind::Type => "type",
+            CorrectionKind::Scope => "scope",
+            CorrectionKind::SessionTopic => "session_topic",
+        }
+    }
+}
+
+impl FromStr for CorrectionKind {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "text" => Ok(CorrectionKind::Text),
+            "type" => Ok(CorrectionKind::Type),
+            "scope" => Ok(CorrectionKind::Scope),
+            "session_topic" => Ok(CorrectionKind::SessionTopic),
+            _ => Err(anyhow!("Unknown correction kind: {}", s)),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SuggestionControlKind {
+    NotNow,
+    Cooldown,
+    StopSuggesting,
+}
+
+impl SuggestionControlKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SuggestionControlKind::NotNow => "not_now",
+            SuggestionControlKind::Cooldown => "cooldown",
+            SuggestionControlKind::StopSuggesting => "stop_suggesting",
+        }
+    }
+}
+
+impl FromStr for SuggestionControlKind {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "not_now" => Ok(SuggestionControlKind::NotNow),
+            "cooldown" => Ok(SuggestionControlKind::Cooldown),
+            "stop_suggesting" => Ok(SuggestionControlKind::StopSuggesting),
+            _ => Err(anyhow!("Unknown suggestion control kind: {}", s)),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Correction {
-    pub kind: String,
+    pub kind: CorrectionKind,
     pub old_value: Option<String>,
     pub new_value: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SuggestionControlPayload {
-    pub kind: String, // "not_now", "cooldown", "stop_suggesting"
+    pub kind: SuggestionControlKind,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -148,20 +211,34 @@ fn event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
 
     let payload = match event_type {
         EventType::Correction => {
-            let kind: Option<String> = row.get(5)?;
+            let kind_str: Option<String> = row.get(5)?;
+            let kind = kind_str
+                .ok_or_else(|| {
+                    rusqlite::Error::InvalidParameterName(
+                        "correction kind must not be null".to_string(),
+                    )
+                })?
+                .parse::<CorrectionKind>()
+                .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
             let old_value: Option<String> = row.get(6)?;
             let new_value: Option<String> = row.get(7)?;
             EventPayload::Correction(Correction {
-                kind: kind.unwrap_or_default(),
+                kind,
                 old_value,
                 new_value: new_value.unwrap_or_default(),
             })
         }
         EventType::SuggestionControl => {
-            let kind: Option<String> = row.get(8)?;
-            EventPayload::SuggestionControl(SuggestionControlPayload {
-                kind: kind.unwrap_or_default(),
-            })
+            let kind_str: Option<String> = row.get(8)?;
+            let kind = kind_str
+                .ok_or_else(|| {
+                    rusqlite::Error::InvalidParameterName(
+                        "suggestion_control kind must not be null".to_string(),
+                    )
+                })?
+                .parse::<SuggestionControlKind>()
+                .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
+            EventPayload::SuggestionControl(SuggestionControlPayload { kind })
         }
         EventType::Completion => EventPayload::Completion,
         EventType::Cancellation => EventPayload::Cancellation,
@@ -205,6 +282,9 @@ pub fn save_event_in_tx(
     event: &Event,
     expected_item_revision: i32,
 ) -> Result<Event> {
+    // Validate event type/payload match (defensive: should be caught by Event::new, but validate before any write)
+    Event::validate_event_type_payload_match(&event.event_type, &event.payload)?;
+
     // Event revision must match the CAS (expected) revision
     if event.revision != expected_item_revision {
         return Err(anyhow!(
@@ -256,11 +336,12 @@ pub fn save_event_in_tx(
         ));
     }
 
-    // Reject lifecycle transitions on terminal states
+    // Reject lifecycle transitions on terminal states (but allow corrections on terminal items)
     if matches!(
         current_lifecycle_state.as_str(),
         "completed" | "cancelled" | "deleted"
-    ) {
+    ) && !matches!(event.event_type, EventType::Correction)
+    {
         return Err(anyhow!(
             "Cannot apply event to item {} in terminal lifecycle state '{}'",
             event.item_id,
@@ -272,12 +353,12 @@ pub fn save_event_in_tx(
     let (correction_kind, correction_old_value, correction_new_value, suggestion_control_kind) =
         match &event.payload {
             EventPayload::Correction(c) => (
-                Some(c.kind.clone()),
+                Some(c.kind.as_str()),
                 c.old_value.clone(),
                 Some(c.new_value.clone()),
                 None,
             ),
-            EventPayload::SuggestionControl(s) => (None, None, None, Some(s.kind.clone())),
+            EventPayload::SuggestionControl(s) => (None, None, None, Some(s.kind.as_str())),
             EventPayload::Completion => (None, None, None, None),
             EventPayload::Cancellation => (None, None, None, None),
         };
@@ -310,7 +391,7 @@ pub fn save_event_in_tx(
                 &correction_id,
                 &event.item_id,
                 event.revision,
-                &corr.kind,
+                corr.kind.as_str(),
                 &corr.old_value,
                 &corr.new_value,
                 &event.happened_at,
@@ -377,6 +458,7 @@ pub fn get_events_for_item(tx: &Transaction<'_>, item_id: &str) -> Result<Vec<Ev
 
 /// Delete all events for an item.
 pub fn delete_events_for_item(tx: &Transaction<'_>, item_id: &str) -> Result<usize> {
+    tx.execute("DELETE FROM corrections WHERE item_id = ?", [item_id])?;
     tx.execute("DELETE FROM events WHERE item_id = ?", [item_id])
         .map_err(|e| anyhow!(e))
 }

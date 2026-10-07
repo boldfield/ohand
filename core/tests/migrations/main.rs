@@ -975,8 +975,8 @@ fn test_v1_to_v2_migration_preserves_data() -> Result<()> {
 
     // Create a v1 database with source data
     {
-        let db = make_test_db(&path, instant)?;
-        assert_eq!(db.schema_version()?, 2);
+        let db = open_with(&path, instant, &MIGRATIONS[..1])?;
+        assert_eq!(db.schema_version()?, 1);
 
         insert_source_capture(db.conn(), "cap-1")?;
         db.conn().execute(
@@ -991,7 +991,7 @@ fn test_v1_to_v2_migration_preserves_data() -> Result<()> {
         )?;
     }
 
-    // Reopen the database: should auto-upgrade to v2
+    // Reopen the database with full migration list: should upgrade from v1 to v2
     {
         let db = make_test_db(&path, instant)?;
         assert_eq!(db.schema_version()?, 2);
