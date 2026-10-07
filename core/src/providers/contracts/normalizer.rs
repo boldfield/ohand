@@ -205,7 +205,12 @@ mod tests {
 
         // Create a JSON string that's over the limit
         let over_limit = r#"{"action":"test","field":"value","extra":"this is a much longer data string to pad it to well over 100 bytes so it will definitely be rejected"}"#;
-        assert!(over_limit.len() > limit, "over_limit.len() = {}, limit = {}", over_limit.len(), limit);
+        assert!(
+            over_limit.len() > limit,
+            "over_limit.len() = {}, limit = {}",
+            over_limit.len(),
+            limit
+        );
 
         let response_over = InterpretationResponse {
             request_id: "test-2".to_string(),
