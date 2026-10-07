@@ -116,6 +116,7 @@ fn test_enqueue_and_retrieve_job() -> Result<()> {
     assert_eq!(job.attempt_count, 0);
     assert!(job.next_attempt_at.is_none());
     assert!(job.lease_expires_at.is_none());
+    assert!(job.lease_id.is_none());
 
     let retrieved = get_job(&db, job_id)?.expect("Job not found");
     assert_eq!(retrieved.job_id, job_id);
@@ -183,15 +184,79 @@ fn test_claim_job_with_lease() -> Result<()> {
     assert_eq!(claimed.status, JobStatus::Running);
     assert_eq!(claimed.attempt_count, 1);
     assert!(claimed.lease_expires_at.is_some());
+    assert!(claimed.lease_id.is_some());
 
     let lease_at = claimed.lease_expires_at.unwrap();
     assert!(lease_at > now);
-    assert!(lease_at <= now + lease_duration + Duration::seconds(1)); // 1s tolerance for test timing
+    assert!(lease_at <= now + lease_duration + Duration::seconds(1));
 
     // Verify it's stored in database
     let stored = get_job(&db, "job-1")?.expect("Job not found");
     assert_eq!(stored.status, JobStatus::Running);
     assert_eq!(stored.attempt_count, 1);
+    assert!(stored.lease_id.is_some());
+
+    Ok(())
+}
+
+#[test]
+fn test_early_retry_denial() -> Result<()> {
+    // AC1: backoff is bounded - claim should not return job before next_attempt_at
+    let mock_clock = Arc::new(MockClock::new(Utc::now()));
+    let (mut db, item_id) = setup_db_with_item(&mock_clock)?;
+
+    let now = mock_clock.now();
+    enqueue_job(
+        &mut db,
+        "job-1".to_string(),
+        item_id.clone(),
+        "interpretation".to_string(),
+        0,
+        None,
+        None,
+        1,
+    )?;
+
+    // First claim and fail with backoff
+    let claimed1 =
+        claim_job_with_lease(&mut db, Duration::seconds(1), now)?.expect("First claim failed");
+    let lease_id = claimed1.lease_id.as_ref().unwrap().clone();
+    fail_job_with_backoff(
+        &mut db,
+        "job-1",
+        "error".to_string(),
+        10,
+        60,
+        now,
+        &lease_id,
+    )?;
+
+    // Job should have next_attempt_at set to 20 seconds from now (10 * 2^1)
+    let job = get_job(&db, "job-1")?.expect("Job not found");
+    assert!(job.next_attempt_at.is_some());
+    let next_at = job.next_attempt_at.unwrap();
+    assert_eq!((next_at - now).num_seconds(), 20);
+
+    // Try to claim at same time - should not return job
+    let claimed2 = claim_job_with_lease(&mut db, Duration::seconds(1), now)?;
+    assert!(
+        claimed2.is_none(),
+        "Job should not be claimable before next_attempt_at"
+    );
+
+    // Advance to just before next_attempt_at - still shouldn't claim
+    mock_clock.advance(Duration::seconds(9));
+    let claimed3 = claim_job_with_lease(&mut db, Duration::seconds(1), mock_clock.now())?;
+    assert!(
+        claimed3.is_none(),
+        "Job should not be claimable before next_attempt_at"
+    );
+
+    // Advance to exactly next_attempt_at - should claim now
+    mock_clock.advance(Duration::seconds(1));
+    let claimed4 = claim_job_with_lease(&mut db, Duration::seconds(1), mock_clock.now())?
+        .expect("Job should be claimable at next_attempt_at");
+    assert_eq!(claimed4.attempt_count, 2);
 
     Ok(())
 }
@@ -237,10 +302,12 @@ fn test_expired_lease_recovery() -> Result<()> {
 }
 
 #[test]
-fn test_complete_job() -> Result<()> {
+fn test_stale_lease_completion_rejected() -> Result<()> {
+    // AC1: duplicate delivery cannot apply twice - stale lease holder rejected
     let mock_clock = Arc::new(MockClock::new(Utc::now()));
     let (mut db, item_id) = setup_db_with_item(&mock_clock)?;
 
+    let now = mock_clock.now();
     enqueue_job(
         &mut db,
         "job-1".to_string(),
@@ -252,11 +319,63 @@ fn test_complete_job() -> Result<()> {
         1,
     )?;
 
-    complete_job(&mut db, "job-1")?;
+    let lease_duration = Duration::seconds(10);
+
+    // Worker 1: claim job
+    let claimed1 = claim_job_with_lease(&mut db, lease_duration, now)?.expect("First claim failed");
+    let lease_id_1 = claimed1.lease_id.as_ref().unwrap().clone();
+
+    // Advance past worker 1's lease expiry
+    mock_clock.advance(Duration::seconds(15));
+
+    // Worker 2: claim and complete the same job
+    let claimed2 = claim_job_with_lease(&mut db, lease_duration, mock_clock.now())?
+        .expect("Second claim failed");
+    let lease_id_2 = claimed2.lease_id.as_ref().unwrap().clone();
+
+    // Worker 2 completes with their lease
+    complete_job(&mut db, "job-1", &lease_id_2)?;
+    let job = get_job(&db, "job-1")?.expect("Job not found");
+    assert_eq!(job.status, JobStatus::Completed);
+
+    // Worker 1 tries to complete with stale lease - should fail
+    let result = complete_job(&mut db, "job-1", &lease_id_1);
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .to_lowercase()
+        .contains("already completed"));
+
+    Ok(())
+}
+
+#[test]
+fn test_complete_job() -> Result<()> {
+    let mock_clock = Arc::new(MockClock::new(Utc::now()));
+    let (mut db, item_id) = setup_db_with_item(&mock_clock)?;
+
+    let now = mock_clock.now();
+    enqueue_job(
+        &mut db,
+        "job-1".to_string(),
+        item_id.clone(),
+        "interpretation".to_string(),
+        0,
+        None,
+        None,
+        1,
+    )?;
+
+    let claimed = claim_job_with_lease(&mut db, Duration::seconds(30), now)?.expect("Claim failed");
+    let lease_id = claimed.lease_id.unwrap();
+
+    complete_job(&mut db, "job-1", &lease_id)?;
 
     let job = get_job(&db, "job-1")?.expect("Job not found");
     assert_eq!(job.status, JobStatus::Completed);
     assert!(job.lease_expires_at.is_none());
+    assert!(job.lease_id.is_none());
 
     Ok(())
 }
@@ -279,8 +398,17 @@ fn test_bounded_exponential_backoff() -> Result<()> {
     )?;
 
     // Claim and fail multiple times
-    claim_job_with_lease(&mut db, Duration::seconds(1), now)?;
-    fail_job_with_backoff(&mut db, "job-1", "error 1".to_string(), 2, 60, now)?;
+    let claimed1 =
+        claim_job_with_lease(&mut db, Duration::seconds(1), now)?.expect("First claim failed");
+    fail_job_with_backoff(
+        &mut db,
+        "job-1",
+        "error 1".to_string(),
+        2,
+        60,
+        now,
+        &claimed1.lease_id.unwrap(),
+    )?;
 
     let job1 = get_job(&db, "job-1")?.expect("Job not found");
     let next_at_1 = job1.next_attempt_at.unwrap();
@@ -289,7 +417,8 @@ fn test_bounded_exponential_backoff() -> Result<()> {
     assert_eq!(backoff_1, 4); // 2 * 2^1
 
     mock_clock.set_to(next_at_1);
-    claim_job_with_lease(&mut db, Duration::seconds(1), mock_clock.now())?;
+    let claimed2 = claim_job_with_lease(&mut db, Duration::seconds(1), mock_clock.now())?
+        .expect("Second claim failed");
     fail_job_with_backoff(
         &mut db,
         "job-1",
@@ -297,6 +426,7 @@ fn test_bounded_exponential_backoff() -> Result<()> {
         2,
         60,
         mock_clock.now(),
+        &claimed2.lease_id.unwrap(),
     )?;
 
     let job2 = get_job(&db, "job-1")?.expect("Job not found");
@@ -306,8 +436,10 @@ fn test_bounded_exponential_backoff() -> Result<()> {
 
     // Test max backoff
     for _ in 0..6 {
-        mock_clock.set_to(get_job(&db, "job-1")?.unwrap().next_attempt_at.unwrap());
-        claim_job_with_lease(&mut db, Duration::seconds(1), mock_clock.now())?;
+        let job = get_job(&db, "job-1")?.expect("Job not found");
+        mock_clock.set_to(job.next_attempt_at.unwrap());
+        let claimed = claim_job_with_lease(&mut db, Duration::seconds(1), mock_clock.now())?
+            .expect("Claim failed");
         fail_job_with_backoff(
             &mut db,
             "job-1",
@@ -315,6 +447,7 @@ fn test_bounded_exponential_backoff() -> Result<()> {
             2,
             60,
             mock_clock.now(),
+            &claimed.lease_id.unwrap(),
         )?;
     }
 
@@ -322,6 +455,58 @@ fn test_bounded_exponential_backoff() -> Result<()> {
     let final_next_at = final_job.next_attempt_at.unwrap();
     let final_backoff = (final_next_at - mock_clock.now()).num_seconds();
     assert_eq!(final_backoff, 60); // Should be capped at max (60)
+
+    Ok(())
+}
+
+#[test]
+fn test_cancellation_is_terminal() -> Result<()> {
+    // AC2: cancellation is durable - cannot be overwritten by fail or complete
+    let mock_clock = Arc::new(MockClock::new(Utc::now()));
+    let (mut db, item_id) = setup_db_with_item(&mock_clock)?;
+
+    let now = mock_clock.now();
+    enqueue_job(
+        &mut db,
+        "job-1".to_string(),
+        item_id.clone(),
+        "interpretation".to_string(),
+        0,
+        None,
+        None,
+        1,
+    )?;
+
+    // Claim and cancel
+    let claimed = claim_job_with_lease(&mut db, Duration::seconds(30), now)?.expect("Claim failed");
+    let lease_id = claimed.lease_id.unwrap();
+    cancel_job(&mut db, "job-1")?;
+
+    let job = get_job(&db, "job-1")?.expect("Job not found");
+    assert_eq!(job.status, JobStatus::Cancelled);
+
+    // Try to fail the cancelled job - should fail
+    let result =
+        fail_job_with_backoff(&mut db, "job-1", "error".to_string(), 2, 60, now, &lease_id);
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .to_lowercase()
+        .contains("cancelled"));
+
+    // Try to complete the cancelled job - should fail
+    let result2 = complete_job(&mut db, "job-1", &lease_id);
+    assert!(result2.is_err());
+    assert!(result2
+        .unwrap_err()
+        .to_string()
+        .to_lowercase()
+        .contains("cancelled"));
+
+    // Job should still be cancelled
+    let job = get_job(&db, "job-1")?.expect("Job not found");
+    assert_eq!(job.status, JobStatus::Cancelled);
 
     Ok(())
 }
@@ -352,6 +537,150 @@ fn test_cancel_job() -> Result<()> {
 }
 
 #[test]
+fn test_deleted_item_job_skipped() -> Result<()> {
+    // AC2: deleted/stale targets cannot be claimed for mutation - skip them
+    let mock_clock = Arc::new(MockClock::new(Utc::now()));
+    let (mut db, item_id) = setup_db_with_item(&mock_clock)?;
+
+    enqueue_job(
+        &mut db,
+        "job-1".to_string(),
+        item_id.clone(),
+        "interpretation".to_string(),
+        0,
+        None,
+        None,
+        1,
+    )?;
+
+    // Create a second item and job
+    let item_id_2 = "item-test-2";
+    let capture_id_2 = "capture-test-2";
+    let tx = db.transaction()?;
+    tx.execute(
+        "INSERT INTO captures (
+            capture_id, text, audio_reference, capture_instant, timezone_id,
+            utc_offset_minutes, locale, calendar, item_scope, route_id, entry_locked, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rusqlite::params![
+            capture_id_2,
+            Some("test text 2"),
+            None::<String>,
+            "2026-01-01T00:00:00Z",
+            "UTC",
+            0,
+            "en",
+            "gregorian",
+            "private",
+            "route-2",
+            0,
+            "2026-01-01T00:00:00Z"
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO items (
+            item_id, capture_id, revision, lifecycle_state, save_state,
+            sync_state, processing_state, transcription_state, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rusqlite::params![
+            item_id_2,
+            capture_id_2,
+            0,
+            "active",
+            "saved",
+            "not_configured",
+            "uninterpreted",
+            "none",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z"
+        ],
+    )?;
+    tx.commit()?;
+
+    let mut db = db;
+    enqueue_job(
+        &mut db,
+        "job-2".to_string(),
+        item_id_2.to_string(),
+        "interpretation".to_string(),
+        0,
+        None,
+        None,
+        1,
+    )?;
+
+    // Delete the first item
+    let tx = db.transaction()?;
+    tx.execute(
+        "UPDATE items SET lifecycle_state = 'deleted' WHERE item_id = ?",
+        [&item_id],
+    )?;
+    tx.commit()?;
+
+    let now = mock_clock.now();
+    // Claim should skip job-1 (deleted item) and return job-2
+    let claimed =
+        claim_job_with_lease(&mut db, Duration::seconds(30), now)?.expect("Should claim job-2");
+
+    assert_eq!(claimed.job_id, "job-2");
+
+    // job-1 should be cancelled now
+    let job1 = get_job(&db, "job-1")?.expect("Job not found");
+    assert_eq!(job1.status, JobStatus::Cancelled);
+
+    Ok(())
+}
+
+#[test]
+fn test_stale_revision_not_claimed() -> Result<()> {
+    // AC2: stale targets cannot be claimed - revision mismatch
+    let mock_clock = Arc::new(MockClock::new(Utc::now()));
+    let (mut db, item_id) = setup_db_with_item(&mock_clock)?;
+
+    let now = mock_clock.now();
+    // Create job with item at revision 0
+    enqueue_job(
+        &mut db,
+        "job-1".to_string(),
+        item_id.clone(),
+        "interpretation".to_string(),
+        0,
+        None,
+        None,
+        1,
+    )?;
+
+    // Update item to revision 1
+    let tx = db.transaction()?;
+    tx.execute(
+        "UPDATE items SET revision = 1 WHERE item_id = ?",
+        [&item_id],
+    )?;
+    tx.commit()?;
+
+    let mut db = db;
+    // Create another job with new revision
+    enqueue_job(
+        &mut db,
+        "job-2".to_string(),
+        item_id.clone(),
+        "interpretation".to_string(),
+        1,
+        None,
+        None,
+        1,
+    )?;
+
+    // Claim should skip job-1 (stale revision) and return job-2
+    let claimed =
+        claim_job_with_lease(&mut db, Duration::seconds(30), now)?.expect("Should claim job-2");
+
+    assert_eq!(claimed.job_id, "job-2");
+
+    Ok(())
+}
+
+#[test]
 fn test_cannot_claim_deleted_item() -> Result<()> {
     let mock_clock = Arc::new(MockClock::new(Utc::now()));
     let (mut db, item_id) = setup_db_with_item(&mock_clock)?;
@@ -375,15 +704,16 @@ fn test_cannot_claim_deleted_item() -> Result<()> {
     )?;
     tx.commit()?;
 
-    // Attempt to claim should fail
+    let mut db = db;
+    // Attempt to claim should skip and cancel the job
     let now = mock_clock.now();
-    let result = claim_job_with_lease(&mut db, Duration::seconds(30), now);
+    let result = claim_job_with_lease(&mut db, Duration::seconds(30), now)?;
 
-    assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("deleted or does not exist"));
+    assert!(result.is_none());
+
+    // Job should be cancelled
+    let job = get_job(&db, "job-1")?.expect("Job not found");
+    assert_eq!(job.status, JobStatus::Cancelled);
 
     Ok(())
 }
@@ -417,8 +747,9 @@ fn test_get_jobs_by_status() -> Result<()> {
 
     // Claim and complete one
     let now = mock_clock.now();
-    claim_job_with_lease(&mut db, Duration::seconds(30), now)?;
-    complete_job(&mut db, "job-1")?;
+    let claimed = claim_job_with_lease(&mut db, Duration::seconds(30), now)?.expect("Claim failed");
+    let lease_id = claimed.lease_id.unwrap();
+    complete_job(&mut db, "job-1", &lease_id)?;
 
     let queued = get_jobs_by_status(&db, JobStatus::Queued)?;
     assert_eq!(queued.len(), 1);
@@ -577,6 +908,42 @@ fn test_get_expired_lease_jobs() -> Result<()> {
     let expired = get_expired_lease_jobs(&db, mock_clock.now())?;
     assert_eq!(expired.len(), 1);
     assert_eq!(expired[0].job_id, "job-1");
+
+    Ok(())
+}
+
+#[test]
+fn test_unsupported_job_version() -> Result<()> {
+    // AC2: unsupported job schema versions are rejected
+    let mock_clock = Arc::new(MockClock::new(Utc::now()));
+    let (mut db, item_id) = setup_db_with_item(&mock_clock)?;
+
+    let now = mock_clock.now();
+    // Enqueue with unsupported version
+    enqueue_job(
+        &mut db,
+        "job-1".to_string(),
+        item_id.clone(),
+        "interpretation".to_string(),
+        0,
+        None,
+        None,
+        2, // Unsupported version
+    )?;
+
+    let claimed =
+        claim_job_with_lease(&mut db, Duration::seconds(30), now)?.expect("Should claim job");
+    let lease_id = claimed.lease_id.unwrap();
+
+    // Try to fail with unsupported version - should error
+    let result =
+        fail_job_with_backoff(&mut db, "job-1", "error".to_string(), 2, 60, now, &lease_id);
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .to_lowercase()
+        .contains("unsupported"));
 
     Ok(())
 }

@@ -42,10 +42,16 @@ pub struct MigrationStep {
 }
 
 /// Ordered migration steps. Target versions must start at 1 and increase by exactly 1.
-pub const MIGRATIONS: &[MigrationStep] = &[MigrationStep {
-    target_version: 1,
-    apply: create_tables_v1,
-}];
+pub const MIGRATIONS: &[MigrationStep] = &[
+    MigrationStep {
+        target_version: 1,
+        apply: create_tables_v1,
+    },
+    MigrationStep {
+        target_version: 2,
+        apply: add_job_lease_id_v2,
+    },
+];
 
 /// Database handle with schema validation.
 pub struct Database {
@@ -636,5 +642,11 @@ fn create_tables_v1(tx: &Transaction<'_>) -> Result<()> {
         [],
     )?;
 
+    Ok(())
+}
+
+fn add_job_lease_id_v2(tx: &Transaction<'_>) -> Result<()> {
+    // Add lease_id column to jobs table for lease fencing
+    tx.execute("ALTER TABLE jobs ADD COLUMN lease_id TEXT", [])?;
     Ok(())
 }
