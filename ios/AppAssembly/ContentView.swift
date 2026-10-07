@@ -2,16 +2,21 @@ import SwiftUI
 
 struct ContentView: View {
     let bundleIdentifier = Bundle.main.bundleIdentifier ?? "unknown"
-    let isControlTarget = Bundle.main.bundleIdentifier?.contains(".control") ?? false
 
     var buildTargetName: String {
-        isControlTarget ? "OhAndControl" : "OhAndApp"
+        #if OHAND_BUILD_TARGET_CONTROL
+        "OhAndControl"
+        #else
+        "OhAndApp"
+        #endif
     }
 
     var buildTargetDescription: String {
-        isControlTarget
-            ? "Control target for testing capture control flow"
-            : "Production application with capture and management UI"
+        #if OHAND_BUILD_TARGET_CONTROL
+        "Control-entry build variant reserved for system-control handoff"
+        #else
+        "Production application with capture and management UI"
+        #endif
     }
 
     var body: some View {

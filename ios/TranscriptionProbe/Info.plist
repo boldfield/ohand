@@ -36,7 +36,7 @@
                     <key>UISceneConfigurationName</key>
                     <string>Default Configuration</string>
                     <key>UISceneDelegateClassName</key>
-                    <string>TranscriptionProbeSceneDelegate</string>
+                    <string>$(PRODUCT_MODULE_NAME).TranscriptionProbeSceneDelegate</string>
                 </dict>
             </array>
         </dict>

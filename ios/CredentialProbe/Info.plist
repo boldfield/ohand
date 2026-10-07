@@ -32,7 +32,7 @@
                     <key>UISceneConfigurationName</key>
                     <string>Default Configuration</string>
                     <key>UISceneDelegateClassName</key>
-                    <string>CredentialProbeSceneDelegate</string>
+                    <string>$(PRODUCT_MODULE_NAME).CredentialProbeSceneDelegate</string>
                 </dict>
             </array>
         </dict>

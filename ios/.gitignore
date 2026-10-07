@@ -21,3 +21,7 @@ xcuserdata/
 *.swp
 *~
 .*.swp
+
+# Local signing configuration (never committed)
+Config/Local.xcconfig
+__pycache__/

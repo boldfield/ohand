@@ -9,9 +9,10 @@ settings:
   PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.app
   IPHONEOS_DEPLOYMENT_TARGET: "16.0"
   SWIFT_VERSION: "5.9"
-  CODE_SIGN_IDENTITY: iPhone Developer
-  CODE_SIGNING_REQUIRED: "NO"
-  AD_HOC_CODE_SIGNING_ALLOWED: "YES"
+
+configFiles:
+  Debug: Config/Base.xcconfig
+  Release: Config/Base.xcconfig
 
 targets:
   OhAndCoreBridge:
@@ -23,6 +24,7 @@ targets:
     settings:
       PRODUCT_NAME: OhAndCoreBridge
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.corebridge
+      GENERATE_INFOPLIST_FILE: YES
 
   OhAndServices:
     type: framework
@@ -36,6 +38,7 @@ targets:
     settings:
       PRODUCT_NAME: OhAndServices
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.services
+      GENERATE_INFOPLIST_FILE: YES
     dependencies:
       - target: OhAndCoreBridge
 
@@ -76,7 +79,7 @@ targets:
       PRODUCT_NAME: OhAndControl
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.control
       INFOPLIST_FILE: AppAssembly/Info.plist
-      SWIFT_ACTIVE_COMPILATION_CONDITIONS: OHAND_BUILD_TARGET_CONTROL=1
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) OHAND_BUILD_TARGET_CONTROL"
     dependencies:
       - target: OhAndServices
 
@@ -92,6 +95,7 @@ targets:
     settings:
       PRODUCT_NAME: OhAndTests
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.tests
+      GENERATE_INFOPLIST_FILE: YES
       TEST_HOST: $(BUILT_PRODUCTS_DIR)/OhAnd.app/OhAnd
       BUNDLE_LOADER: $(TEST_HOST)
     dependencies:
