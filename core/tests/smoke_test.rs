@@ -59,18 +59,17 @@ fn test_smoke_serde_json() {
 }
 
 #[test]
+#[allow(unused_imports)]
 fn test_smoke_core_interface() {
-    // Verify that the core crate exports its public interface modules.
-    // This test documents the contract surface and confirms the workspace
-    // compiles the full module tree defined by F01 and F02.
+    use ohand_core::domain;
+    use ohand_core::interpretation;
+    use ohand_core::store;
+
+    // Verify that core modules are importable and the public API surface is accessible.
+    // This test confirms the full module tree defined by F01 and F02 compiles and
+    // public interface exports from domain, interpretation, and store are reachable.
     //
-    // A successful compilation of the full module tree proves each module
-    // defined in lib.rs is reachable. This test confirms the public API
-    // surface is usable from external tests.
-    #[allow(unused_imports)]
-    {
-        use ohand_core::domain;
-        use ohand_core::interpretation;
-        use ohand_core::store;
-    }
+    // Each module is accessible as part of the core workspace contract.
+    // As downstream feature tasks fill F02-owned modules, this interface will grow
+    // with concrete types and functions exercised by their own acceptance tests.
 }
