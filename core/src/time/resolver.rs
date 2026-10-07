@@ -46,8 +46,8 @@ pub struct TimeContext {
     pub timezone: String,
     pub locale: String,
     pub reference_time: DateTime<Utc>,
-    pub utc_offset_at_capture: Option<i32>, // seconds
-    pub calendar: Option<String>,           // e.g., "gregorian"
+    pub utc_offset_at_capture: i32, // seconds (required, from F01 contract)
+    pub calendar: String,           // e.g., "gregorian" (required, validated)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,6 +58,7 @@ pub struct ResolutionResult {
     pub candidates: Vec<DateTime<Utc>>, // for ambiguous times (DST folds)
     pub is_ambiguous: bool,
     pub ambiguity_reason: Option<String>,
+    pub is_past: bool,
     pub context: TimeContext,
 }
 
@@ -72,11 +73,8 @@ pub enum ResolutionError {
     #[error("Invalid timezone: {0}")]
     InvalidTimezone(String),
 
-    #[error("Ambiguous time (possibly DST gap): {0}")]
-    AmbiguousTime(String),
-
-    #[error("Time is in the past: {0}")]
-    PastTime(String),
+    #[error("Invalid calendar: {0}")]
+    InvalidCalendar(String),
 
     #[error("Other error: {0}")]
     Other(String),
@@ -90,6 +88,9 @@ impl TimeResolver {
         context: &TimeContext,
     ) -> Result<ResolutionResult, ResolutionError> {
         let phrase_normalized = phrase.trim().to_lowercase();
+
+        // Validate context early
+        Self::validate_calendar(&context.calendar)?;
 
         // Parse unsupported repeats early
         if Self::is_unsupported_repeat(&phrase_normalized) {
@@ -135,6 +136,17 @@ impl TimeResolver {
             .map_err(|_| ResolutionError::InvalidTimezone(context.timezone.clone()))
     }
 
+    fn validate_calendar(calendar: &str) -> Result<(), ResolutionError> {
+        if calendar == "gregorian" {
+            Ok(())
+        } else {
+            Err(ResolutionError::InvalidCalendar(format!(
+                "Only gregorian calendar is supported in M1, got: {}",
+                calendar
+            )))
+        }
+    }
+
     fn parse_explicit_date(
         phrase_normalized: &str,
         original_phrase: &str,
@@ -162,7 +174,8 @@ impl TimeResolver {
         original_phrase: &str,
         context: &TimeContext,
     ) -> Result<ResolutionResult, ResolutionError> {
-        let ref_date = context.reference_time.date_naive();
+        let tz = Self::get_tz(context)?;
+        let ref_date = context.reference_time.with_timezone(&tz).date_naive();
         let is_past = date < ref_date;
 
         Ok(ResolutionResult {
@@ -171,11 +184,8 @@ impl TimeResolver {
             resolved_time: None,
             candidates: vec![],
             is_ambiguous: true,
-            ambiguity_reason: if is_past {
-                Some("Time is in the past".to_string())
-            } else {
-                Some("Missing hour: date-only input requires a time".to_string())
-            },
+            ambiguity_reason: Some("Missing hour: date-only input requires a time".to_string()),
+            is_past,
             context: context.clone(),
         })
     }
@@ -191,11 +201,12 @@ impl TimeResolver {
         match tz.from_local_datetime(&naive_dt) {
             LocalResult::None => Ok(ResolutionResult {
                 original_phrase: original_phrase.to_string(),
-                resolved_date: None,
+                resolved_date: Some(naive_dt.date()),
                 resolved_time: None,
                 candidates: vec![],
                 is_ambiguous: true,
                 ambiguity_reason: Some("Nonexistent time in DST gap".to_string()),
+                is_past: false,
                 context: context.clone(),
             }),
             LocalResult::Ambiguous(dt1, dt2) => {
@@ -203,7 +214,7 @@ impl TimeResolver {
                 let utc2 = dt2.with_timezone(&Utc);
                 Ok(ResolutionResult {
                     original_phrase: original_phrase.to_string(),
-                    resolved_date: None,
+                    resolved_date: Some(naive_dt.date()),
                     resolved_time: None,
                     candidates: vec![utc1, utc2],
                     is_ambiguous: true,
@@ -211,6 +222,7 @@ impl TimeResolver {
                         "Ambiguous time in DST fold: could be {} or {}",
                         utc1, utc2
                     )),
+                    is_past: false,
                     context: context.clone(),
                 })
             }
@@ -220,7 +232,7 @@ impl TimeResolver {
 
                 Ok(ResolutionResult {
                     original_phrase: original_phrase.to_string(),
-                    resolved_date: None,
+                    resolved_date: Some(naive_dt.date()),
                     resolved_time: Some(utc_dt),
                     candidates: vec![],
                     is_ambiguous: is_past,
@@ -229,6 +241,7 @@ impl TimeResolver {
                     } else {
                         None
                     },
+                    is_past,
                     context: context.clone(),
                 })
             }
@@ -251,6 +264,7 @@ impl TimeResolver {
                 tomorrow,
                 original_phrase,
                 context,
+                tz,
             ));
         }
 
@@ -272,6 +286,7 @@ impl TimeResolver {
                     target_date,
                     original_phrase,
                     context,
+                    tz,
                 ));
             }
         }
@@ -285,6 +300,7 @@ impl TimeResolver {
                         target_date,
                         original_phrase,
                         context,
+                        tz,
                     ));
                 }
             }
@@ -299,6 +315,7 @@ impl TimeResolver {
                         target_date,
                         original_phrase,
                         context,
+                        tz,
                     ));
                 }
             }
@@ -313,7 +330,11 @@ impl TimeResolver {
         date: NaiveDate,
         original_phrase: &str,
         context: &TimeContext,
+        tz: Tz,
     ) -> ResolutionResult {
+        let ref_date = context.reference_time.with_timezone(&tz).date_naive();
+        let is_past = date < ref_date;
+
         ResolutionResult {
             original_phrase: original_phrase.to_string(),
             resolved_date: Some(date),
@@ -321,6 +342,7 @@ impl TimeResolver {
             candidates: vec![],
             is_ambiguous: true,
             ambiguity_reason: Some("Missing hour: date-only input requires a time".to_string()),
+            is_past,
             context: context.clone(),
         }
     }
@@ -341,70 +363,13 @@ impl TimeResolver {
         let current_wd = ref_dt.weekday();
         let today = ref_dt.date_naive();
 
-        let days_back = match current_wd {
-            chrono::Weekday::Mon => match target {
-                chrono::Weekday::Mon => 7,
-                chrono::Weekday::Tue => 6,
-                chrono::Weekday::Wed => 5,
-                chrono::Weekday::Thu => 4,
-                chrono::Weekday::Fri => 3,
-                chrono::Weekday::Sat => 2,
-                chrono::Weekday::Sun => 1,
-            },
-            chrono::Weekday::Tue => match target {
-                chrono::Weekday::Mon => 1,
-                chrono::Weekday::Tue => 7,
-                chrono::Weekday::Wed => 6,
-                chrono::Weekday::Thu => 5,
-                chrono::Weekday::Fri => 4,
-                chrono::Weekday::Sat => 3,
-                chrono::Weekday::Sun => 2,
-            },
-            chrono::Weekday::Wed => match target {
-                chrono::Weekday::Mon => 2,
-                chrono::Weekday::Tue => 1,
-                chrono::Weekday::Wed => 7,
-                chrono::Weekday::Thu => 6,
-                chrono::Weekday::Fri => 5,
-                chrono::Weekday::Sat => 4,
-                chrono::Weekday::Sun => 3,
-            },
-            chrono::Weekday::Thu => match target {
-                chrono::Weekday::Mon => 3,
-                chrono::Weekday::Tue => 2,
-                chrono::Weekday::Wed => 1,
-                chrono::Weekday::Thu => 7,
-                chrono::Weekday::Fri => 6,
-                chrono::Weekday::Sat => 5,
-                chrono::Weekday::Sun => 4,
-            },
-            chrono::Weekday::Fri => match target {
-                chrono::Weekday::Mon => 4,
-                chrono::Weekday::Tue => 3,
-                chrono::Weekday::Wed => 2,
-                chrono::Weekday::Thu => 1,
-                chrono::Weekday::Fri => 7,
-                chrono::Weekday::Sat => 6,
-                chrono::Weekday::Sun => 5,
-            },
-            chrono::Weekday::Sat => match target {
-                chrono::Weekday::Mon => 5,
-                chrono::Weekday::Tue => 4,
-                chrono::Weekday::Wed => 3,
-                chrono::Weekday::Thu => 2,
-                chrono::Weekday::Fri => 1,
-                chrono::Weekday::Sat => 7,
-                chrono::Weekday::Sun => 6,
-            },
-            chrono::Weekday::Sun => match target {
-                chrono::Weekday::Mon => 6,
-                chrono::Weekday::Tue => 5,
-                chrono::Weekday::Wed => 4,
-                chrono::Weekday::Thu => 3,
-                chrono::Weekday::Fri => 2,
-                chrono::Weekday::Sat => 1,
-                chrono::Weekday::Sun => 7,
-            },
+        let current_num = current_wd.number_from_monday();
+        let target_num = target.number_from_monday();
+
+        let days_back = if target_num >= current_num {
+            7 - (target_num - current_num)
+        } else {
+            current_num - target_num
         };
 
         today - Duration::days(days_back as i64)
@@ -432,8 +397,8 @@ mod tests {
             reference_time: DateTime::parse_from_rfc3339("2024-10-15T10:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            utc_offset_at_capture: Some(0),
-            calendar: Some("gregorian".to_string()),
+            utc_offset_at_capture: 0,
+            calendar: "gregorian".to_string(),
         }
     }
 
@@ -444,8 +409,8 @@ mod tests {
             reference_time: DateTime::parse_from_rfc3339("2025-10-15T10:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
-            utc_offset_at_capture: Some(-14400), // EDT: -4 hours
-            calendar: Some("gregorian".to_string()),
+            utc_offset_at_capture: -14400, // EDT: -4 hours
+            calendar: "gregorian".to_string(),
         }
     }
 
@@ -688,6 +653,7 @@ mod tests {
         assert!(result.is_ambiguous);
         assert!(result.resolved_date.is_some());
         assert!(result.resolved_time.is_none());
-        assert!(result.ambiguity_reason.as_ref().unwrap().contains("past"));
+        assert!(result.is_past);
+        assert!(result.ambiguity_reason.as_ref().unwrap().contains("hour"));
     }
 }
