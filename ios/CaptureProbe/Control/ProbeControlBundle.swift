@@ -16,16 +16,6 @@ struct ProbeCaptureControl: ControlWidget {
     }
 }
 
-@available(iOS 18.0, *)
-struct ProbeOpenCaptureIntent: AppIntent {
-    static let title: LocalizedStringResource = "Open Capture Probe"
-    static let openAppWhenRun = true
-
-    func perform() async throws -> some IntentResult {
-        .result()
-    }
-}
-
 @main
 struct ProbeControlBundle: WidgetBundle {
     var body: some Widget {

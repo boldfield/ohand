@@ -33,6 +33,8 @@ OWNED_SOURCE_ROOTS = {
 # Control extension target -> host app target, and the owned directory each extension compiles.
 CONTROL_EXTENSIONS = {"CaptureProbe": "CaptureProbeControl", "OhAndApp": "OhAndCaptureControl"}
 CONTROL_ROOTS = {"CaptureProbeControl": "CaptureProbe/Control", "OhAndCaptureControl": "Capture/Entry/Control"}
+# Directory compiled into BOTH the host app and its control extension; it holds the openAppWhenRun intent.
+SHARED_INTENT_ROOTS = {"CaptureProbeControl": "CaptureProbe/Shared", "OhAndCaptureControl": "Capture/Entry/Shared"}
 
 PROBE_USAGE_STRINGS = {
     "AudioProbe": ["NSMicrophoneUsageDescription"],
@@ -121,6 +123,7 @@ def check_control_extensions(project, root=IOS_ROOT):
         excluded = [x for e in host_entries for x in e.get("excludes", [])]
         if f"{relative}/**" not in excluded:
             errors.append(f"{host_name} must exclude {control_root}/ so extension code is not compiled into the host")
+        errors += check_shared_intent(host_name, host, extension_name, extension, root)
         plist_path = root / control_root / "Info.plist"
         with plist_path.open("rb") as handle:
             plist = plistlib.load(handle)
@@ -128,6 +131,33 @@ def check_control_extensions(project, root=IOS_ROOT):
             errors.append(f"{control_root}/Info.plist must declare the WidgetKit extension point")
         if not list((root / control_root).glob("*.swift")):
             errors.append(f"{control_root}/ has no Swift source")
+    return errors
+
+
+def check_shared_intent(host_name, host, extension_name, extension, root=IOS_ROOT):
+    errors = []
+    shared_root = SHARED_INTENT_ROOTS[extension_name]
+    control_root = CONTROL_ROOTS[extension_name]
+    owner_root, _, relative = shared_root.partition("/")
+    if shared_root not in source_paths(extension):
+        errors.append(f"{extension_name} must include {shared_root}/ (shared app-opening intent)")
+    host_entries = [e for e in host.get("sources", []) if isinstance(e, dict) and e["path"] == owner_root]
+    if not host_entries:
+        errors.append(f"{host_name} must compile {owner_root}/, which contains {shared_root}/")
+    for entry in host_entries:
+        for pattern in entry.get("excludes", []):
+            excluded_prefix = pattern.rstrip("*").rstrip("/")
+            if excluded_prefix and (relative == excluded_prefix or relative.startswith(excluded_prefix + "/")):
+                errors.append(f"{host_name} must not exclude {shared_root}/")
+    intent_sources = [path for path in (root / shared_root).glob("*.swift") if "openAppWhenRun = true" in path.read_text()]
+    if not intent_sources:
+        errors.append(f"{shared_root}/ must contain an AppIntent with openAppWhenRun = true")
+    for intent_path in intent_sources:
+        intent_names = re.findall(r"struct\s+(\w+)\s*:\s*AppIntent", intent_path.read_text())
+        for control_source in (root / control_root).glob("*.swift"):
+            for intent_name in intent_names:
+                if re.search(rf"struct\s+{intent_name}\b", control_source.read_text()):
+                    errors.append(f"{control_root}/ must not redefine shared intent {intent_name}")
     return errors
 
 

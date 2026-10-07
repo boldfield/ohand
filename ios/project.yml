@@ -94,6 +94,11 @@ targets:
         createIntermediateGroups: true
         excludes:
           - Info.plist
+      - path: Capture/Entry/Shared
+        createIntermediateGroups: true
+        optional: true
+        excludes:
+          - "**/.placeholder"
     settings:
       PRODUCT_NAME: OhAndCaptureControl
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.app.capture-control
@@ -190,6 +195,11 @@ targets:
         createIntermediateGroups: true
         excludes:
           - Info.plist
+      - path: CaptureProbe/Shared
+        createIntermediateGroups: true
+        optional: true
+        excludes:
+          - "**/.placeholder"
     settings:
       PRODUCT_NAME: CaptureProbeControl
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.capture.control

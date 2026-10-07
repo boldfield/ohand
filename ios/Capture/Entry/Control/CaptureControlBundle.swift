@@ -16,16 +16,6 @@ struct OhAndCaptureControl: ControlWidget {
     }
 }
 
-@available(iOS 18.0, *)
-struct OpenCaptureIntent: AppIntent {
-    static let title: LocalizedStringResource = "Open Oh And Capture"
-    static let openAppWhenRun = true
-
-    func perform() async throws -> some IntentResult {
-        .result()
-    }
-}
-
 @main
 struct OhAndCaptureControlBundle: WidgetBundle {
     var body: some Widget {

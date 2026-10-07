@@ -41,6 +41,7 @@ ios/
     Voice/              # Recording control with recovery (C04)
     Entry/              # System control entry handoff (C06)
       Control/          # OhAndCaptureControl extension sources
+      Shared/           # intent compiled into both the app and the control extension
     Acknowledgment/     # Save acknowledgment UI (C06)
   Tests/                # Test modules (organized by service)
   BridgeProbe/          # Rust-Swift boundary validation (P01)
@@ -50,6 +51,7 @@ ios/
   CredentialProbe/      # Keychain credential protection (P11)
   CaptureProbe/         # System control handoff (P02)
     Control/            # CaptureProbeControl extension sources
+    Shared/             # intent compiled into both the probe app and its control
   Config/               # Shared xcconfig (unsigned simulator; local signing include)
   scripts/              # generate/build scripts and static project checks
   Mintfile              # Pinned XcodeGen version

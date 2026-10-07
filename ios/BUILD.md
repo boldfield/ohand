@@ -46,7 +46,7 @@ python3 ios/scripts/check_project_config.py
 python3 -m unittest discover -s ios/scripts -p 'test_*.py'
 ```
 
-These need PyYAML. They verify structure only: every F01-owned native root is a source root of exactly the expected target (and `Services/` of exactly one), the test bundle is a real unit-test bundle with a test action, bundle identifiers are unique and under the project prefix, no signing material or identity is configured, the simulator is unsigned in `Base.xcconfig`, plists parse, required usage strings and module-qualified scene delegates are present, and each control extension is an embedded WidgetKit app extension with a host-prefixed bundle identifier whose sources are not compiled into the host. They do not prove the project generates or compiles. They are not yet run by `make check` or `make test` (and need PyYAML); F05 owns the Makefile and CI and must wire them in alongside the macOS generate/build/test job.
+These need PyYAML. They verify structure only: every F01-owned native root is a source root of exactly the expected target (and `Services/` of exactly one), the test bundle is a real unit-test bundle with a test action, bundle identifiers are unique and under the project prefix, no signing material or identity is configured, the simulator is unsigned in `Base.xcconfig`, plists parse, required usage strings and module-qualified scene delegates are present, each control extension is an embedded WidgetKit app extension with a host-prefixed bundle identifier whose sources are not compiled into the host, and it shares an `openAppWhenRun` intent directory (`Shared/`) with its host (dual target membership; the intent is not redefined in `Control/`). They do not prove the project generates or compiles. They are not yet run by `make check` or `make test` (and need PyYAML); F05 owns the Makefile and CI and must wire them in alongside the macOS generate/build/test job.
 
 ## Source inclusion and ownership
 
@@ -58,9 +58,11 @@ Targets include whole directories, so owners add files under their F01 paths wit
 | `Services/` | `OhAndServices` framework, the only target that compiles it; depends on `OhAndCoreBridge` |
 | `AppAssembly/`, `Capture/` (except `Capture/Entry/Control/`) | `OhAndApp`; depends on `OhAndServices` and embeds `OhAndCaptureControl` |
 | `Capture/Entry/Control/` | `OhAndCaptureControl` control extension (C06) |
+| `Capture/Entry/Shared/` | compiled into both `OhAndApp` (via `Capture/`) and `OhAndCaptureControl`; holds the app-opening `OpenCaptureIntent` |
 | `Tests/` | `OhAndTests` unit-test bundle, hosted by `OhAndApp`; `Tests/ProjectSmoke/` is a minimal XCTest so the bundle has an executable and proves the app and both frameworks import |
 | `<Name>Probe/` | the same-named probe application (whole directory except `Info.plist`) |
 | `CaptureProbe/Control/` | `CaptureProbeControl` control extension embedded in `CaptureProbe` (P02); excluded from the probe app itself |
+| `CaptureProbe/Shared/` | compiled into both `CaptureProbe` and `CaptureProbeControl`; holds the app-opening `ProbeOpenCaptureIntent` |
 
 `Capture/` is app-side code and may import `OhAndServices`; `Services/` cannot import `Capture/`. B02's composition root in `Services/Assembly/` therefore wires service dependencies, and U01 in `AppAssembly/` composes `Capture/` views with it.
 
@@ -69,6 +71,6 @@ Every target's usage strings live in its own `Info.plist`: the app has microphon
 ## Targets
 
 - `OhAndApp`: production app. Production capture uses a foreground native surface: `Capture/` views are presented from the foreground app scene, and no background-launched recording is assumed.
-- `OhAndCaptureControl`: production system-control extension (`com.apple.widgetkit-extension`, bundle id `com.boldfield.ohand.app.capture-control`), embedded in `OhAndApp`. Its sources are `Capture/Entry/Control/` (C06); the button intent opens the foreground app, which then shows the native capture surface. It currently contains a minimal `ControlWidget` so the extension links.
-- `CaptureProbeControl`: the P02 probe's control extension (`com.boldfield.ohand.probes.capture.control`), embedded in `CaptureProbe`, sources in `CaptureProbe/Control/`. P02 may replace its contents freely.
+- `OhAndCaptureControl`: production system-control extension (`com.apple.widgetkit-extension`, bundle id `com.boldfield.ohand.app.capture-control`), embedded in `OhAndApp`. Its sources are `Capture/Entry/Control/` (C06); the button runs `OpenCaptureIntent` (`openAppWhenRun = true`), which is defined in `Capture/Entry/Shared/` so it is a member of both the app and the extension, as app-opening control intents require. Whether the foreground handoff actually opens the app is unverified until C06/P02 test it on a device; no native build has been run here. Put any further intent shared between the app and control in a `Shared/` directory, not in `Control/`. It currently contains a minimal `ControlWidget` so the extension links.
+- `CaptureProbeControl`: the P02 probe's control extension (`com.boldfield.ohand.probes.capture.control`), embedded in `CaptureProbe`, sources in `CaptureProbe/Control/` plus the shared intent in `CaptureProbe/Shared/`. P02 may replace its contents freely; the handoff itself is unverified until P02 probes it.
 - Probes: minimal apps each showing a foreground native screen for the capability named in the F01 ownership map.

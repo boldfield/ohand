@@ -43,6 +43,29 @@ class ProjectConfigChecks(unittest.TestCase):
         project["targets"]["CaptureProbeControl"]["settings"]["PRODUCT_BUNDLE_IDENTIFIER"] = "com.boldfield.ohand.probes.other"
         self.assertTrue(any("prefixed by" in e for e in checks.check_project(project)))
 
+    def test_extension_must_include_shared_intent_directory(self):
+        project = checks.load_project()
+        project["targets"]["CaptureProbeControl"]["sources"] = [project["targets"]["CaptureProbeControl"]["sources"][0]]
+        self.assertTrue(any("shared app-opening intent" in e for e in checks.check_project(project)))
+
+    def test_host_must_not_exclude_shared_intent_directory(self):
+        project = checks.load_project()
+        project["targets"]["OhAndApp"]["sources"][1]["excludes"].append("Entry/Shared/**")
+        self.assertTrue(any("must not exclude" in e for e in checks.check_project(project)))
+
+    def test_host_must_compile_shared_intent_directory(self):
+        project = checks.load_project()
+        project["targets"]["OhAndApp"]["sources"] = [project["targets"]["OhAndApp"]["sources"][0]]
+        self.assertTrue(any("must compile Capture" in e for e in checks.check_project(project)))
+
+    def test_shared_intent_must_be_app_opening(self):
+        original = checks.SHARED_INTENT_ROOTS["CaptureProbeControl"]
+        checks.SHARED_INTENT_ROOTS["CaptureProbeControl"] = "CaptureProbe/Sources"
+        try:
+            self.assertTrue(any("openAppWhenRun" in e for e in checks.check_control_extensions(checks.load_project())))
+        finally:
+            checks.SHARED_INTENT_ROOTS["CaptureProbeControl"] = original
+
     def test_non_unit_test_bundle_is_rejected(self):
         project = checks.load_project()
         project["targets"]["OhAndTests"]["type"] = "bundle"
