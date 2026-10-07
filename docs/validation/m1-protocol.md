@@ -2,7 +2,7 @@
 
 Status: preregistered protocol, 2026-10-07. This document specifies the evidence collection methodology, device targets, success criteria, and pass/fail outcomes before the two-week M1 trial runs. It defines what will be measured, how to judge whether M1 is successful, and what observations trigger a loop revision rather than acceptance.
 
-This protocol is the reference for task T08 (evaluate the two-week M1 trial).
+This protocol is the reference for task T08 (evaluate the two-week M1 trial), which is blocked on this task's completion.
 
 ## Device and Platform Target
 
@@ -40,7 +40,7 @@ These are required:
 3. **Locked device capture**: attempt capture with device locked (if supported by entry mechanism); record whether handoff is durable and whether private history access is denied.
 4. **Device lock during processing**: lock the device while a job is running (transcription, interpretation, reminder scheduling); verify work resumes when unlocked, no duplicates, and source remains protected.
 5. **Background interruption**: record capture, return to home screen, and verify acknowledgment occurs even if background work is cut short; remind the user if processing is pending, do not claim completion.
-6. **Mac asleep** (required if a Mac inlet is present in the trial build; otherwise record N/A and document why no Mac was available): verify behavior with the companion device unavailable (e.g., asleep, disconnected); ensure no loss of acknowledgment and queued work is resumable when the companion reconnects.
+6. **Mac asleep** (required if a Mac inlet is present in the trial build): verify behavior with the companion device unavailable (e.g., asleep, disconnected); ensure no loss of acknowledgment and queued work is resumable when the companion reconnects. If no Mac inlet is present, record N/A with documented reason (e.g., "Mac inlet not included in trial build" or "M1 architecture specifies no Mac client").
 
 ### Reminder and Scheduling Cases
 
@@ -163,10 +163,12 @@ The trial is adequate if it includes:
 - **Report**: whether prompts are actually useful or consistently muted
 
 ### Capture Avoidance and Burden Assessment
-- **Measurement**: record instances where capture is available but not used (self-reported skip, visible UI gesture without save, app closed without capture)
-- **Threshold**: if more than 20% of intentional interaction sessions result in skipped capture or prompt dismissal, the loop is not frictionless enough; define a UI/flow revision
-- **Burden indicators**: record prompt mute actions, settings changes to disable optional prompts, and any feedback suggesting capture is too burdensome
-- **Generic vs. Explicitly Enabled Preview Comparison** (if applicable): when trying both generic and explicitly enabled non-private previews, record which mechanism led to successful retrieval and whether one was consistently preferred or ignored
+- **Definition of "intentional interaction session"**: any user-initiated action where capture is presented and could have been used, including: opening the capture UI (whether from control, notification, or app launch), tapping the save button area (but not completing save), receiving a retrieval search result page, or dismissing a notification. Each session is a discrete encounter with a capture opportunity.
+- **Collection method for skips**: maintain a dated skip log throughout the trial with entries in the form: "YYYY-MM-DD HH:MM:SS: [skip reason] (in context: [activity name or search query]). App version X.Y build Z (commit ABC)." Pair each skip entry with the same citation tuple required for evidence (named artifact, exact build, ISO 8601 timestamp).
+- **Threshold for capture avoidance**: if more than 20% of intentional interaction sessions result in skipped capture or prompt dismissal (calculated as: count of skip log entries divided by count of total interaction sessions), the loop is not frictionless enough; define a UI/flow revision as required by loop-revision outcome below.
+- **Muting the only proactive prompt**: if the only configured optional prompt is muted (disabled via settings, cleared via notification action, or not re-enabled within one day of dismissal), this is an unmet criterion regardless of the 20% threshold. This triggers loop revision per DESIGN M1: "If people avoid capture or mute the only prompt, revise the loop."
+- **Burden indicators**: record prompt mute actions (with timestamp and context), settings changes to disable optional prompts, app-close actions during or immediately after capture UI presentation, and any user feedback (in a private log) suggesting capture is too burdensome.
+- **Generic vs. Explicitly Enabled Preview Comparison** (required if preview support is enabled; otherwise record N/A): when preview support is configured, record whether user retrieval attempts use generic previews versus explicitly enabled non-private previews; document which mechanism led to successful item recall and whether one was consistently preferred, ignored, or caused friction. If preview support is disabled or unavailable, record N/A with reason (e.g., "Preview support not enabled in trial configuration" or "Provider does not support previews").
 
 ## Multi-Day Lapse
 
@@ -200,11 +202,13 @@ The trial must include at least one gap of 2+ consecutive days with no app use (
 The following may be published without private-content exposure:
 
 1. **Latency distributions**: trigger-to-ready, end-of-input-to-save, interpretation, reminder scheduling (median, p95, count)
-2. **Sample counts**: total captures, by type (voice/text); successful interpretations, by provider; reminders scheduled; retrievals
-3. **Error summary**: count of timeout, denied-permission, capacity-exceeded, unsupported-language failures (types only, no source content)
-4. **Lapse recovery**: confirmation that multi-day gap has no forced cleanup
-5. **Configuration evidence**: provider names and versions used; confirmation of two-backend switching
-6. **Accessibility observations**: if tested, presence/absence of issues, fix counts (not detailed user experience)
+2. **Sample counts**: total captures, by type (voice/text); successful interpretations, by provider; reminders scheduled; retrievals; resurfacing/return encounters (prompt activations, reminder taps, explicit retrieval requests)
+3. **Resurfacing and usefulness**: count of resurfacing encounters that resulted in successful item recall/action versus encounters with no useful result; success rate (%) of resurfacing mechanisms
+4. **Burden and avoidance**: total intentional interaction sessions recorded; count of skipped captures (from skip log); percentage of sessions with skip or prompt dismissal; count of prompt mute/disable actions
+5. **Error summary**: count of timeout, denied-permission, capacity-exceeded, unsupported-language failures (types only, no source content)
+6. **Lapse recovery**: confirmation that multi-day gap has no forced cleanup
+7. **Configuration evidence**: provider names and versions used; confirmation of two-backend switching; recording of whether generic and explicitly enabled previews were both tested (as applicable)
+8. **Accessibility observations**: if tested, presence/absence of issues, fix counts (not detailed user experience)
 
 ## Private Evidence (Local-Only)
 
@@ -237,13 +241,15 @@ M1 is **accepted** if all of the following are met:
 
 M1 is **not met** and requires a **loop revision** if:
 
-1. **Capture avoidance**: More than 20% of interaction sessions result in skipped capture or dismissed prompts (measured as documented skip events and mute actions). The loop is not frictionless enough. Define a concrete UI/flow revision and create a focused follow-up task.
-2. **Retrieval failure**: Original text cannot be reliably retrieved after capture, or the only available path requires unacceptable authentication friction. Define what part of the retrieval loop failed and create a follow-up task.
-3. **Insufficient resurfacing**: Fewer than 5 distinct resurfacing/return encounters occur, or resurfacing encounters are consistently unsuccessful (no useful result or item). The return mechanism is not helping users recall captures. Define whether the mechanism needs redesign or whether M1 scope requires adjustment.
-4. **Silent losses or duplicates**: Despite passing the functional matrix, an uncontrolled loss of captures, retrieval failures, or duplicate reminders are observed in real use. Define the root cause and create a corrective task.
-5. **Provider instability**: Both configured backends fail interpretation consistently or in unexpected ways, preventing assessment of the provider-switching requirement. Document the failures and create a provider-specific follow-up task.
-6. **Performance blockers**: Trigger-to-ready or end-of-input-to-save latency exceeds 3 seconds (median) under normal conditions, making capture impractical. Define the bottleneck and create a performance task.
-7. **Device-specific blockers**: Unresolved issues with the target device/OS (e.g., background work cannot be constrained, notifications cannot be reliable) that prevent the trial from proceeding. Document the blocker precisely and determine whether M2 or M3 is required.
+1. **Prompt muting (automatic loop revision)**: the only configured proactive optional prompt is muted, disabled via settings, or not re-enabled within one day of dismissal during the trial. This is not conditioned on the 20% avoidance threshold. DESIGN M1 requires loop revision before adding features: "If people avoid capture or mute the only prompt, revise the loop." Define what aspect of the prompt (timing, content, presentation, or frequency) caused the mute and create a focused follow-up task with a proposed change.
+2. **Capture avoidance**: More than 20% of intentional interaction sessions (calculated from the skip log: skip count ÷ session count) result in skipped capture or dismissed prompts. The loop is not frictionless enough. Define a concrete UI/flow revision and create a focused follow-up task addressing the specific friction points identified in the skip log.
+3. **Retrieval failure**: Original text cannot be reliably retrieved after capture, or the only available path requires unacceptable authentication friction. Define what part of the retrieval loop failed and create a follow-up task.
+4. **Insufficient resurfacing**: Fewer than 5 distinct resurfacing/return encounters occur during the 14-day window (counted from the resurfacing log), indicating inadequate observation. Do not declare loop revision; instead continue observation until the 5-encounter minimum is met. If the window extends beyond 14 days and encounters remain below 5, evaluate whether the resurfacing mechanism needs redesign versus whether M1 scope requires adjustment.
+5. **Resurfacing mechanism failure**: resurfacing encounters are present but consistently unsuccessful (fewer than 50% of resurfacing attempts result in useful item recall or action), or users mute the optional prompt entirely. The return mechanism is not helping users recall captures. Define whether the mechanism needs redesign (e.g., better selection criteria, different presentation) or whether M1 scope requires adjustment.
+6. **Silent losses or duplicates**: Despite passing the functional matrix, an uncontrolled loss of captures, retrieval failures, or duplicate reminders are observed in real use. Define the root cause and create a corrective task.
+7. **Provider instability**: Both configured backends fail interpretation consistently or in unexpected ways, preventing assessment of the provider-switching requirement. Document the failures and create a provider-specific follow-up task.
+8. **Performance blockers**: Trigger-to-ready or end-of-input-to-save latency exceeds 3 seconds (median) under normal conditions, making capture impractical. Define the bottleneck and create a performance task.
+9. **Device-specific blockers**: Unresolved issues with the target device/OS (e.g., background work cannot be constrained, notifications cannot be reliable) that prevent the trial from proceeding. Document the blocker precisely and determine whether M2 or M3 is required.
 
 If any condition above is observed, stop M1 acceptance. Instead:
 - Record the exact evidence (sample counts, error logs, reproduction steps)
@@ -255,13 +261,13 @@ If any condition above is observed, stop M1 acceptance. Instead:
 
 When evidence is insufficient, the trial result is explicitly **unmet**, not completed. The following outcomes are defined:
 
-1. **Continue observation**: if the trial window is less than 14 days, sample counts are below minimums, or the multi-day gap is missing, extend the observation window and collect additional data. Do not declare the trial complete until the full 14-day window is met.
+1. **Continue observation**: if the trial window is less than 14 days, sample counts are below minimums, the multi-day gap is missing, or resurfacing encounters are below 5 within the current window, extend the observation window and collect additional data. Do not declare the trial complete until the full 14-day window is met AND all sample minimums (including at least 5 resurfacing encounters) are reached. Resurfacing inadequacy is an observation deficit, not a mechanism failure.
 
-2. **Blocked, not completed**: if a required test case cannot be tested due to platform limitations, unavailable hardware, or unresolved blockers (e.g., Mac inlet not present in the trial build), record the reason and mark the case as explicitly blocked. A blocked required case means M1 evidence is incomplete. Do not accept M1 until the blocker is resolved or a deliberate scope amendment is recorded in writing.
+2. **Blocked, not completed**: if a required test case cannot be tested due to platform limitations, unavailable hardware, or unresolved blockers (excluding Mac-asleep, which is N/A when no Mac inlet is present), record the reason and mark the case as explicitly blocked. A blocked required case means M1 evidence is incomplete. Do not accept M1 until the blocker is resolved or a deliberate scope amendment is recorded in writing.
 
-3. **Loop revision required**: if the trial completes the 14-day window with adequate samples but a success criterion is not met (e.g., capture avoidance, performance blocker, provider failure), follow the loop-revision path above. Record the exact evidence and define the minimal fix.
+3. **Loop revision required**: if the trial completes the 14-day window with adequate samples but a success criterion is not met (e.g., the only prompt is muted, capture avoidance exceeds 20%, resurfacing encounters are present but consistently unsuccessful, performance blocker, provider failure), follow the loop-revision path in the "Unmet Evidence and Loop Revision" section above. Record the exact evidence and define the minimal fix.
 
-**Pass/fail is binary and pre-registered**: a trial either meets all success criteria or it does not. Incomplete evidence (short window, inadequate samples, blocked cases) and unmet criteria (functional failure, performance blocker, usability barrier) are both reasons to continue observation or define a revision, never to accept without evidence.
+**Pass/fail is binary and pre-registered**: a trial either meets all success criteria or it does not. Incomplete evidence (short window, inadequate samples, blocked cases) and unmet criteria (functional failure, performance blocker, usability barrier, prompt muting) are both reasons to continue observation or define a revision, never to accept without evidence.
 
 ## Reviewer Checklist for T08 (Two-Week Trial Evaluation)
 
@@ -270,13 +276,14 @@ When evaluating the trial against this protocol:
 1. ✓ Verify the trial window is 14+ calendar days with recorded start/end times
 2. ✓ Confirm the multi-day gap (2+ days) is included in the window
 3. ✓ Check functional matrix: every required test case is documented and passed; if any required case is blocked, M1 evidence is incomplete and the trial is not met
-4. ✓ Validate sample adequacy: counts meet minimums; distributions make sense (not all captures on one day)
+4. ✓ Validate sample adequacy: counts meet minimums (including at least 5 resurfacing encounters); distributions make sense (not all captures on one day, captures in both weeks)
 5. ✓ Inspect latency reports: median and p95 are present for each measurement point; outliers are explained
-6. ✓ Verify content-free metrics only; no source text, audio, or private endpoints in the public report
-7. ✓ Confirm configuration evidence: exact provider names, models, and switch records; no credentials exposed
-8. ✓ Check fault recovery: at least one failure scenario is tested and resolution is documented
-9. ✓ If success: record the trial as complete and M1 as accepted
-10. ✓ If unmet: identify which success criterion failed; create a follow-up task and note the evidence that triggered it
+6. ✓ Verify content-free metrics only; no source text, audio, or private endpoints in the public report; confirm resurfacing counts, skip/avoidance counts, and prompt mute/disable counts are reported
+7. ✓ Confirm configuration evidence: exact provider names, models, and switch records; no credentials exposed; recording of whether generic and explicitly enabled previews were both tested (as applicable)
+8. ✓ Check fault recovery: all applicable required failure scenarios in the functional matrix (interruption, permission denial, provider outage, device lock) are tested and resolution is documented with cited artifacts
+9. ✓ Verify prompt muting outcome: if the only proactive prompt was muted or disabled, confirm loop revision is triggered (not acceptance)
+10. ✓ If success: record the trial as complete and M1 as accepted
+11. ✓ If unmet: identify which success criterion failed; create a follow-up task and note the evidence that triggered it
 
 ## Reference Documents
 
