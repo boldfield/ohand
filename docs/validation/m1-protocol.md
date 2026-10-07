@@ -13,8 +13,9 @@ This protocol is the reference for task T08 (evaluate the two-week M1 trial).
 
 ### Baseline Assumptions
 - Fresh or prior install with seeded data (no production traffic in the trial)
-- Synthetic captures and authorized local data only
-- No personal private content commits to the repository
+- Synthetic captures may be used for scripted functional test cases only; they do not count toward sample-adequacy minimums
+- Authorized local data only; no personal private content commits to the repository
+- Sample-adequacy counts (captures, interpretations, retrievals, reminders, resurfacing) must come from actual trial use, not synthetic or seeded fixtures
 - If hardware is unavailable, this task blocks with explicit evidence needs; continue independent work and create a corrective follow-up task
 
 ## Test Scenarios and Functional Matrix
@@ -39,7 +40,7 @@ These are required:
 3. **Locked device capture**: attempt capture with device locked (if supported by entry mechanism); record whether handoff is durable and whether private history access is denied.
 4. **Device lock during processing**: lock the device while a job is running (transcription, interpretation, reminder scheduling); verify work resumes when unlocked, no duplicates, and source remains protected.
 5. **Background interruption**: record capture, return to home screen, and verify acknowledgment occurs even if background work is cut short; remind the user if processing is pending, do not claim completion.
-6. **Mac asleep**: if tested on a Mac (M2 candidate); verify behavior with the companion device unavailable.
+6. **Mac asleep** (required if a Mac inlet is present in the trial build; otherwise record N/A and document why no Mac was available): verify behavior with the companion device unavailable (e.g., asleep, disconnected); ensure no loss of acknowledgment and queued work is resumable when the companion reconnects.
 
 ### Reminder and Scheduling Cases
 
@@ -52,8 +53,9 @@ These are required (use synthetic content only):
 5. **Ambiguous time**: request a reminder with ambiguous wording (e.g., "next week" without a day); verify it is saved as `not_scheduled_yet` with a correction path, not guessed.
 6. **Capacity boundary**: schedule reminders until the OS pending-request limit is reached; verify explicit `capacity_exceeded` state, documented refill policy, and no silent dropping.
 7. **Duplicate prevention**: schedule the same reminder twice (or retry the same request); verify the OS notification is not duplicated.
-8. **Cancel and edit**: schedule a reminder, edit its time, cancel it; verify the OS notification is removed and state is reconciled.
-9. **Notification action**: deliver a notification, tap it, acknowledge or complete the action; verify action handling is correct and does not corrupt state.
+8. **Repeated transport and idempotency**: simulate transport retry, provider request replay, or handoff re-delivery of an already-processed capture or job; verify the system is idempotent—no duplicate captures, lost acknowledgments, or duplicate jobs result from the retry.
+9. **Cancel and edit**: schedule a reminder, edit its time, cancel it; verify the OS notification is removed and state is reconciled.
+10. **Notification action**: deliver a notification, tap it, acknowledge or complete the action; verify action handling is correct and does not corrupt state.
 
 ### Retrieval and Resurfacing Cases
 
@@ -117,6 +119,18 @@ Measure and report the following as **content-free metrics** (timing distributio
 - **Definition**: measure interpretation and reminder scheduling latency while the device is locked (if process is allowed to continue) vs. unlocked.
 - **Report**: comparison of medians, p95.
 
+## Evidence Citation Format
+
+Every observed result, measurement, and finding must include:
+
+1. **Named sanitized artifact**: reference name for the capture, log, or screenshot (e.g., "capture-001", "reminder-batch-05", "retrieval-log-day-7")
+2. **Exact build/revision**: app version, build number, and commit hash or tag
+3. **Collection time**: ISO 8601 timestamp (date and time, timezone included)
+
+Example: "Capture-001: app v0.8 build 42 (commit abc1234), 2026-10-10T14:23:45+00:00. Voice recording interrupted at 3 seconds; audio preserved and recovery prompted."
+
+Do not cite results by prose assertion alone. Every success criterion, failure case, and measurement must be traceable to a named artifact, exact version, and time.
+
 ## Sample Adequacy
 
 The trial is adequate if it includes:
@@ -124,7 +138,7 @@ The trial is adequate if it includes:
 ### Capture Volume
 - **Minimum**: 15 distinct captures across the two-week window
 - **Distribution**: include both voice and text; include offline and online scenarios
-- **Variety**: include at least one capture per day on at least 10 distinct days (the multi-day gap may consume 1–3 days)
+- **Spread**: captures must be distributed across both weeks (at least 2 captures in week 1, at least 2 in week 2); nonuse between captures is allowed. Do not cluster all captures on a single day.
 
 ### Interpretation Attempts
 - **Minimum**: 10 successful interpretations and at least 1 failed/abstained interpretation
@@ -139,9 +153,20 @@ The trial is adequate if it includes:
 - **Minimum**: 5 distinct reminders scheduled, at least 2 delivered and opened, at least 1 explicit `not_scheduled` or `unschedulable` state recorded
 - **Scenarios**: include fast-path offline reminder, provider-proposed reminder, ambiguous-time handling
 
+### Resurfacing and Return Encounters
+- **Minimum**: at least 5 distinct resurfacing/return encounters (either via optional prompt activation, explicit retrieval request, or reminder notification tap) across the two-week window
+- **Measurement**: record each encounter, the mechanism (prompt activation, search, reminder tap), the user response (selected item, dismissed, muted), and whether a useful result was found
+- **Report**: whether resurfacing mechanisms (prompts, reminders, search) help the user recall and act on prior captures
+
 ### Optional Prompts (if enabled)
 - **Minimum**: prompt activated at least 3 times; user responded (selected item, dismissed, muted) to at least 2 activations
 - **Report**: whether prompts are actually useful or consistently muted
+
+### Capture Avoidance and Burden Assessment
+- **Measurement**: record instances where capture is available but not used (self-reported skip, visible UI gesture without save, app closed without capture)
+- **Threshold**: if more than 20% of intentional interaction sessions result in skipped capture or prompt dismissal, the loop is not frictionless enough; define a UI/flow revision
+- **Burden indicators**: record prompt mute actions, settings changes to disable optional prompts, and any feedback suggesting capture is too burdensome
+- **Generic vs. Explicitly Enabled Preview Comparison** (if applicable): when trying both generic and explicitly enabled non-private previews, record which mechanism led to successful retrieval and whether one was consistently preferred or ignored
 
 ## Multi-Day Lapse
 
@@ -199,21 +224,22 @@ Preserve private evidence locally with an auditable reference (filename, hash, t
 
 M1 is **accepted** if all of the following are met:
 
-1. **Functional matrix**: Every required test case in the scenarios section passes. No acknowledged capture is lost. No reminder is duplicated or invented. No private history is leaked to locked access.
-2. **Latency measured**: Trigger-to-ready and end-of-input-to-save are measured and reported separately. No latency claim is made without measurements.
-3. **Sample adequate**: Minimum capture, interpretation, retrieval, and reminder counts are met over 14+ calendar days with a 2+ day lapse included.
-4. **Configuration verified**: Two distinct provider backends are successfully switched; configuration state is inspectable in both; sources unchanged.
-5. **Processing state honest**: Save, processing, reminder request and reminder schedule states are independently visible and reflect reality. A pending or failed state never claims success.
-6. **Recovery from faults**: Interrupted processes, permission denials, provider outages, and device lock transitions are handled without loss of acknowledged captures or invention of reminders. A reset is explicitly flagged and recovery options are offered.
-7. **Offline capability verified**: Silent text capture, offline fast-path reminders, and local search work without a configured provider.
+1. **Functional matrix**: Every required test case in the scenarios section passes and is cited with a named artifact, build version, and timestamp. No acknowledged capture is lost. No reminder is duplicated or invented. No private history is leaked to locked access.
+2. **Latency measured**: Trigger-to-ready and end-of-input-to-save are measured and reported separately with artifact citations and collection times. No latency claim is made without measurements and traceable evidence.
+3. **Sample adequate**: Minimum capture, interpretation, retrieval, and reminder counts are met over 14+ calendar days with a 2+ day lapse included. All counts include only real trial use, not synthetic or seeded data. Counts are traceable to named artifacts and timestamps.
+4. **Configuration verified**: Two distinct provider backends are successfully switched; configuration state is inspectable in both; sources unchanged. Switch evidence is cited with artifacts and times.
+5. **Processing state honest**: Save, processing, reminder request and reminder schedule states are independently visible and reflect reality. A pending or failed state never claims success. All states are tied to specific artifacts and timestamps.
+6. **Recovery from faults**: Interrupted processes, permission denials, provider outages, and device lock transitions are handled without loss of acknowledged captures or invention of reminders. Each recovery scenario is cited with a named artifact and exact time. A reset is explicitly flagged and recovery options are offered.
+7. **Offline capability verified**: Silent text capture, offline fast-path reminders, and local search work without a configured provider. Offline cases are documented with artifacts and timestamps.
+8. **Evidence cited**: Every observed result, measurement, and finding includes a named sanitized artifact, exact build/revision, and ISO 8601 collection time. No prose assertions without traceable evidence.
 
 ## Unmet Evidence and Loop Revision
 
 M1 is **not met** and requires a **loop revision** if:
 
-1. **Capture avoidance**: Captures are consistently avoided or skipped during normal use. The loop is not frictionless enough. Define a concrete UI/flow revision and create a focused follow-up task.
+1. **Capture avoidance**: More than 20% of interaction sessions result in skipped capture or dismissed prompts (measured as documented skip events and mute actions). The loop is not frictionless enough. Define a concrete UI/flow revision and create a focused follow-up task.
 2. **Retrieval failure**: Original text cannot be reliably retrieved after capture, or the only available path requires unacceptable authentication friction. Define what part of the retrieval loop failed and create a follow-up task.
-3. **Reminder muting**: The only return mechanism (optional prompt or reminder) is consistently muted or ignored. Define whether the mechanism is useful or should be revised before M1 acceptance.
+3. **Insufficient resurfacing**: Fewer than 5 distinct resurfacing/return encounters occur, or resurfacing encounters are consistently unsuccessful (no useful result or item). The return mechanism is not helping users recall captures. Define whether the mechanism needs redesign or whether M1 scope requires adjustment.
 4. **Silent losses or duplicates**: Despite passing the functional matrix, an uncontrolled loss of captures, retrieval failures, or duplicate reminders are observed in real use. Define the root cause and create a corrective task.
 5. **Provider instability**: Both configured backends fail interpretation consistently or in unexpected ways, preventing assessment of the provider-switching requirement. Document the failures and create a provider-specific follow-up task.
 6. **Performance blockers**: Trigger-to-ready or end-of-input-to-save latency exceeds 3 seconds (median) under normal conditions, making capture impractical. Define the bottleneck and create a performance task.
@@ -225,13 +251,25 @@ If any condition above is observed, stop M1 acceptance. Instead:
 - Create a focused follow-up task with clear acceptance criteria
 - Continue independent work on other M1 features while the revision is addressed
 
+## Insufficient Evidence Outcomes
+
+When evidence is insufficient, the trial result is explicitly **unmet**, not completed. The following outcomes are defined:
+
+1. **Continue observation**: if the trial window is less than 14 days, sample counts are below minimums, or the multi-day gap is missing, extend the observation window and collect additional data. Do not declare the trial complete until the full 14-day window is met.
+
+2. **Blocked, not completed**: if a required test case cannot be tested due to platform limitations, unavailable hardware, or unresolved blockers (e.g., Mac inlet not present in the trial build), record the reason and mark the case as explicitly blocked. A blocked required case means M1 evidence is incomplete. Do not accept M1 until the blocker is resolved or a deliberate scope amendment is recorded in writing.
+
+3. **Loop revision required**: if the trial completes the 14-day window with adequate samples but a success criterion is not met (e.g., capture avoidance, performance blocker, provider failure), follow the loop-revision path above. Record the exact evidence and define the minimal fix.
+
+**Pass/fail is binary and pre-registered**: a trial either meets all success criteria or it does not. Incomplete evidence (short window, inadequate samples, blocked cases) and unmet criteria (functional failure, performance blocker, usability barrier) are both reasons to continue observation or define a revision, never to accept without evidence.
+
 ## Reviewer Checklist for T08 (Two-Week Trial Evaluation)
 
 When evaluating the trial against this protocol:
 
 1. ✓ Verify the trial window is 14+ calendar days with recorded start/end times
 2. ✓ Confirm the multi-day gap (2+ days) is included in the window
-3. ✓ Check functional matrix: every required test case is documented, passed, or explicitly blocked with evidence
+3. ✓ Check functional matrix: every required test case is documented and passed; if any required case is blocked, M1 evidence is incomplete and the trial is not met
 4. ✓ Validate sample adequacy: counts meet minimums; distributions make sense (not all captures on one day)
 5. ✓ Inspect latency reports: median and p95 are present for each measurement point; outliers are explained
 6. ✓ Verify content-free metrics only; no source text, audio, or private endpoints in the public report
@@ -244,6 +282,6 @@ When evaluating the trial against this protocol:
 
 - [DESIGN.md](../../DESIGN.md) — M1 exit evidence section
 - [m1-plan.md](../features/m1-plan.md) — M1 executable specification
-- [m1-contracts.md](m1-contracts.md) — Architecture contracts and state model
+- [m1-contracts.md](../architecture/m1-contracts.md) — Architecture contracts and state model
 - [T08 Task Specification](../features/m1-plan.md#t08) — Two-week trial evaluation
 
