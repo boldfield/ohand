@@ -46,12 +46,16 @@ pub struct TimeContext {
     pub timezone: String,
     pub locale: String,
     pub reference_time: DateTime<Utc>,
+    pub utc_offset_at_capture: Option<i32>, // seconds
+    pub calendar: Option<String>,           // e.g., "gregorian"
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolutionResult {
     pub original_phrase: String,
+    pub resolved_date: Option<NaiveDate>,
     pub resolved_time: Option<DateTime<Utc>>,
+    pub candidates: Vec<DateTime<Utc>>, // for ambiguous times (DST folds)
     pub is_ambiguous: bool,
     pub ambiguity_reason: Option<String>,
     pub context: TimeContext,
@@ -94,6 +98,9 @@ impl TimeResolver {
             ));
         }
 
+        // Validate timezone early to distinguish timezone errors from format errors
+        let _ = Self::get_tz(context)?;
+
         // Try to parse as explicit date formats first
         if let Ok(result) = Self::parse_explicit_date(&phrase_normalized, phrase, context) {
             return Ok(result);
@@ -108,12 +115,19 @@ impl TimeResolver {
     }
 
     fn is_unsupported_repeat(phrase: &str) -> bool {
-        phrase.contains("every")
-            || phrase.contains("recurring")
-            || phrase.contains("daily")
-            || phrase.contains("weekly")
-            || phrase.contains("monthly")
-            || phrase.contains("yearly")
+        let tokens: Vec<&str> = phrase.split_whitespace().collect();
+        for token in tokens {
+            if token == "every"
+                || token == "recurring"
+                || token == "daily"
+                || token == "weekly"
+                || token == "monthly"
+                || token == "yearly"
+            {
+                return true;
+            }
+        }
+        false
     }
 
     fn get_tz(context: &TimeContext) -> Result<Tz, ResolutionError> {
@@ -130,19 +144,12 @@ impl TimeResolver {
 
         // Try ISO 8601 date format (YYYY-MM-DD)
         if let Ok(date) = NaiveDate::parse_from_str(phrase_normalized, "%Y-%m-%d") {
-            let naive_dt = date.and_hms_opt(0, 0, 0).unwrap();
-            return Self::handle_datetime_result(
-                naive_dt,
-                original_phrase,
-                context,
-                tz,
-                Some("hour"),
-            );
+            return Self::handle_date_only_result(date, original_phrase, context);
         }
 
         // Try with time component (YYYY-MM-DD HH:MM:SS)
         if let Ok(dt) = NaiveDateTime::parse_from_str(phrase_normalized, "%Y-%m-%d %H:%M:%S") {
-            return Self::handle_datetime_result(dt, original_phrase, context, tz, None);
+            return Self::handle_complete_datetime_result(dt, original_phrase, context, tz);
         }
 
         Err(ResolutionError::InvalidDateFormat(
@@ -150,43 +157,80 @@ impl TimeResolver {
         ))
     }
 
-    fn handle_datetime_result(
+    fn handle_date_only_result(
+        date: NaiveDate,
+        original_phrase: &str,
+        context: &TimeContext,
+    ) -> Result<ResolutionResult, ResolutionError> {
+        let ref_date = context.reference_time.date_naive();
+        let is_past = date < ref_date;
+
+        Ok(ResolutionResult {
+            original_phrase: original_phrase.to_string(),
+            resolved_date: Some(date),
+            resolved_time: None,
+            candidates: vec![],
+            is_ambiguous: true,
+            ambiguity_reason: if is_past {
+                Some("Time is in the past".to_string())
+            } else {
+                Some("Missing hour: date-only input requires a time".to_string())
+            },
+            context: context.clone(),
+        })
+    }
+
+    fn handle_complete_datetime_result(
         naive_dt: NaiveDateTime,
         original_phrase: &str,
         context: &TimeContext,
         tz: Tz,
-        missing_component: Option<&str>,
     ) -> Result<ResolutionResult, ResolutionError> {
+        let ref_utc = context.reference_time;
+
         match tz.from_local_datetime(&naive_dt) {
             LocalResult::None => Ok(ResolutionResult {
                 original_phrase: original_phrase.to_string(),
+                resolved_date: None,
                 resolved_time: None,
+                candidates: vec![],
                 is_ambiguous: true,
                 ambiguity_reason: Some("Nonexistent time in DST gap".to_string()),
                 context: context.clone(),
             }),
-            LocalResult::Ambiguous(dt1, dt2) => Ok(ResolutionResult {
-                original_phrase: original_phrase.to_string(),
-                resolved_time: Some(dt1.with_timezone(&Utc)),
-                is_ambiguous: true,
-                ambiguity_reason: Some(format!(
-                    "Ambiguous time in DST fold: could be {} or {}",
-                    dt1.with_timezone(&Utc),
-                    dt2.with_timezone(&Utc)
-                )),
-                context: context.clone(),
-            }),
+            LocalResult::Ambiguous(dt1, dt2) => {
+                let utc1 = dt1.with_timezone(&Utc);
+                let utc2 = dt2.with_timezone(&Utc);
+                Ok(ResolutionResult {
+                    original_phrase: original_phrase.to_string(),
+                    resolved_date: None,
+                    resolved_time: None,
+                    candidates: vec![utc1, utc2],
+                    is_ambiguous: true,
+                    ambiguity_reason: Some(format!(
+                        "Ambiguous time in DST fold: could be {} or {}",
+                        utc1, utc2
+                    )),
+                    context: context.clone(),
+                })
+            }
             LocalResult::Single(dt) => {
                 let utc_dt = dt.with_timezone(&Utc);
-                let result = ResolutionResult {
+                let is_past = utc_dt < ref_utc;
+
+                Ok(ResolutionResult {
                     original_phrase: original_phrase.to_string(),
+                    resolved_date: None,
                     resolved_time: Some(utc_dt),
-                    is_ambiguous: missing_component.is_some(),
-                    ambiguity_reason: missing_component
-                        .map(|c| format!("Missing {}: midnight assumed", c)),
+                    candidates: vec![],
+                    is_ambiguous: is_past,
+                    ambiguity_reason: if is_past {
+                        Some("Time is in the past".to_string())
+                    } else {
+                        None
+                    },
                     context: context.clone(),
-                };
-                Ok(result)
+                })
             }
         }
     }
@@ -203,14 +247,11 @@ impl TimeResolver {
 
         if phrase_normalized == "tomorrow" {
             let tomorrow = ref_dt.date_naive() + Duration::days(1);
-            let naive_dt = tomorrow.and_hms_opt(0, 0, 0).unwrap();
-            return Self::handle_datetime_result(
-                naive_dt,
+            return Ok(Self::make_date_only_result(
+                tomorrow,
                 original_phrase,
                 context,
-                tz,
-                Some("hour"),
-            );
+            ));
         }
 
         // Handle weekday names
@@ -226,11 +267,12 @@ impl TimeResolver {
 
         for (name, target_weekday) in &weekdays {
             if phrase_normalized == *name {
-                if let Ok(dt) =
-                    Self::get_next_weekday(&ref_dt, *target_weekday, tz, context, original_phrase)
-                {
-                    return Ok(dt);
-                }
+                let target_date = Self::get_next_weekday_date(&ref_dt, *target_weekday);
+                return Ok(Self::make_date_only_result(
+                    target_date,
+                    original_phrase,
+                    context,
+                ));
             }
         }
 
@@ -238,15 +280,12 @@ impl TimeResolver {
         if let Some(day_str) = phrase_normalized.strip_prefix("next ") {
             for (name, target_weekday) in &weekdays {
                 if day_str == *name {
-                    if let Ok(dt) = Self::get_next_weekday(
-                        &ref_dt,
-                        *target_weekday,
-                        tz,
-                        context,
+                    let target_date = Self::get_next_weekday_date(&ref_dt, *target_weekday);
+                    return Ok(Self::make_date_only_result(
+                        target_date,
                         original_phrase,
-                    ) {
-                        return Ok(dt);
-                    }
+                        context,
+                    ));
                 }
             }
         }
@@ -255,15 +294,12 @@ impl TimeResolver {
         if let Some(day_str) = phrase_normalized.strip_prefix("since ") {
             for (name, target_weekday) in &weekdays {
                 if day_str == *name {
-                    if let Ok(dt) = Self::get_past_weekday(
-                        &ref_dt,
-                        *target_weekday,
-                        tz,
-                        context,
+                    let target_date = Self::get_past_weekday_date(&ref_dt, *target_weekday);
+                    return Ok(Self::make_date_only_result(
+                        target_date,
                         original_phrase,
-                    ) {
-                        return Ok(dt);
-                    }
+                        context,
+                    ));
                 }
             }
         }
@@ -273,60 +309,38 @@ impl TimeResolver {
         ))
     }
 
-    fn get_next_weekday(
-        ref_dt: &DateTime<Tz>,
-        target: chrono::Weekday,
-        tz: Tz,
-        context: &TimeContext,
+    fn make_date_only_result(
+        date: NaiveDate,
         original_phrase: &str,
-    ) -> Result<ResolutionResult, ResolutionError> {
+        context: &TimeContext,
+    ) -> ResolutionResult {
+        ResolutionResult {
+            original_phrase: original_phrase.to_string(),
+            resolved_date: Some(date),
+            resolved_time: None,
+            candidates: vec![],
+            is_ambiguous: true,
+            ambiguity_reason: Some("Missing hour: date-only input requires a time".to_string()),
+            context: context.clone(),
+        }
+    }
+
+    fn get_next_weekday_date(ref_dt: &DateTime<Tz>, target: chrono::Weekday) -> NaiveDate {
         let current_wd = ref_dt.weekday();
         let today = ref_dt.date_naive();
 
         let days_ahead = Self::days_until_weekday(current_wd, target);
-        let target_date = if days_ahead == 0 {
+        if days_ahead == 0 {
             today + Duration::days(7)
         } else {
             today + Duration::days(days_ahead as i64)
-        };
-
-        let naive_dt = target_date.and_hms_opt(0, 0, 0).unwrap();
-        match tz.from_local_datetime(&naive_dt) {
-            LocalResult::None => Ok(ResolutionResult {
-                original_phrase: original_phrase.to_string(),
-                resolved_time: None,
-                is_ambiguous: true,
-                ambiguity_reason: Some("Nonexistent time in DST gap".to_string()),
-                context: context.clone(),
-            }),
-            LocalResult::Ambiguous(dt1, _) => Ok(ResolutionResult {
-                original_phrase: original_phrase.to_string(),
-                resolved_time: Some(dt1.with_timezone(&Utc)),
-                is_ambiguous: true,
-                ambiguity_reason: Some("Ambiguous time in DST fold".to_string()),
-                context: context.clone(),
-            }),
-            LocalResult::Single(dt) => Ok(ResolutionResult {
-                original_phrase: original_phrase.to_string(),
-                resolved_time: Some(dt.with_timezone(&Utc)),
-                is_ambiguous: true,
-                ambiguity_reason: Some("Missing hour: midnight assumed".to_string()),
-                context: context.clone(),
-            }),
         }
     }
 
-    fn get_past_weekday(
-        ref_dt: &DateTime<Tz>,
-        target: chrono::Weekday,
-        tz: Tz,
-        context: &TimeContext,
-        original_phrase: &str,
-    ) -> Result<ResolutionResult, ResolutionError> {
+    fn get_past_weekday_date(ref_dt: &DateTime<Tz>, target: chrono::Weekday) -> NaiveDate {
         let current_wd = ref_dt.weekday();
         let today = ref_dt.date_naive();
 
-        // Find the most recent occurrence (on or before today)
         let days_back = match current_wd {
             chrono::Weekday::Mon => match target {
                 chrono::Weekday::Mon => 7,
@@ -393,32 +407,7 @@ impl TimeResolver {
             },
         };
 
-        let target_date = today - Duration::days(days_back as i64);
-        let naive_dt = target_date.and_hms_opt(0, 0, 0).unwrap();
-
-        match tz.from_local_datetime(&naive_dt) {
-            LocalResult::None => Ok(ResolutionResult {
-                original_phrase: original_phrase.to_string(),
-                resolved_time: None,
-                is_ambiguous: true,
-                ambiguity_reason: Some("Nonexistent time in DST gap".to_string()),
-                context: context.clone(),
-            }),
-            LocalResult::Ambiguous(dt1, _) => Ok(ResolutionResult {
-                original_phrase: original_phrase.to_string(),
-                resolved_time: Some(dt1.with_timezone(&Utc)),
-                is_ambiguous: true,
-                ambiguity_reason: Some("Ambiguous time in DST fold".to_string()),
-                context: context.clone(),
-            }),
-            LocalResult::Single(dt) => Ok(ResolutionResult {
-                original_phrase: original_phrase.to_string(),
-                resolved_time: Some(dt.with_timezone(&Utc)),
-                is_ambiguous: true,
-                ambiguity_reason: Some("Missing hour: midnight assumed".to_string()),
-                context: context.clone(),
-            }),
-        }
+        today - Duration::days(days_back as i64)
     }
 
     fn days_until_weekday(from: chrono::Weekday, to: chrono::Weekday) -> u32 {
@@ -443,6 +432,8 @@ mod tests {
             reference_time: DateTime::parse_from_rfc3339("2024-10-15T10:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
+            utc_offset_at_capture: Some(0),
+            calendar: Some("gregorian".to_string()),
         }
     }
 
@@ -453,6 +444,8 @@ mod tests {
             reference_time: DateTime::parse_from_rfc3339("2025-10-15T10:00:00Z")
                 .unwrap()
                 .with_timezone(&Utc),
+            utc_offset_at_capture: Some(-14400), // EDT: -4 hours
+            calendar: Some("gregorian".to_string()),
         }
     }
 
@@ -464,10 +457,12 @@ mod tests {
     }
 
     #[test]
-    fn test_date_without_time_is_ambiguous() {
+    fn test_date_without_time_is_ambiguous_no_resolved_time() {
         let context = test_context();
         let result = TimeResolver::resolve("2024-10-20", &context).unwrap();
         assert!(result.is_ambiguous);
+        assert!(result.resolved_time.is_none());
+        assert!(result.resolved_date.is_some());
         assert!(result.ambiguity_reason.is_some());
         assert!(result.ambiguity_reason.as_ref().unwrap().contains("hour"));
     }
@@ -477,6 +472,7 @@ mod tests {
         let context = test_context();
         let result = TimeResolver::resolve("2024-10-20 14:30:00", &context).unwrap();
         assert!(!result.is_ambiguous);
+        assert!(result.resolved_time.is_some());
     }
 
     #[test]
@@ -497,7 +493,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dst_fold_america_new_york() {
+    fn test_dst_fold_america_new_york_has_both_candidates() {
         let mut context = ny_context();
         context.reference_time = DateTime::parse_from_rfc3339("2025-11-01T10:00:00Z")
             .unwrap()
@@ -505,25 +501,27 @@ mod tests {
 
         let result = TimeResolver::resolve("2025-11-02 01:30:00", &context).unwrap();
         assert!(result.is_ambiguous);
-        assert!(result.resolved_time.is_some());
+        assert!(result.resolved_time.is_none());
+        assert_eq!(result.candidates.len(), 2);
         assert!(result.ambiguity_reason.as_ref().unwrap().contains("fold"));
     }
 
     #[test]
-    fn test_tomorrow_uses_local_timezone() {
+    fn test_tomorrow_returns_date_only() {
         let mut context = ny_context();
         context.reference_time = DateTime::parse_from_rfc3339("2025-10-15T02:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
 
         let result = TimeResolver::resolve("tomorrow", &context).unwrap();
-        assert!(result.resolved_time.is_some());
+        assert!(result.resolved_date.is_some());
+        assert!(result.resolved_time.is_none());
         assert!(result.is_ambiguous);
         assert!(result.ambiguity_reason.as_ref().unwrap().contains("hour"));
     }
 
     #[test]
-    fn test_weekday_names() {
+    fn test_weekday_names_return_date_only() {
         let context = test_context();
 
         for day in &[
@@ -536,22 +534,24 @@ mod tests {
             "sunday",
         ] {
             let result = TimeResolver::resolve(day, &context).unwrap();
-            assert!(result.resolved_time.is_some());
+            assert!(result.resolved_date.is_some());
+            assert!(result.resolved_time.is_none());
         }
     }
 
     #[test]
-    fn test_since_finds_past_occurrence() {
+    fn test_since_finds_past_occurrence_as_date_only() {
         let mut context = test_context();
         context.reference_time = DateTime::parse_from_rfc3339("2024-10-18T10:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
 
         let result = TimeResolver::resolve("since friday", &context).unwrap();
-        assert!(result.resolved_time.is_some());
+        assert!(result.resolved_date.is_some());
+        assert!(result.resolved_time.is_none());
 
-        let resolved = result.resolved_time.unwrap();
-        assert!(resolved < context.reference_time);
+        let resolved_date = result.resolved_date.unwrap();
+        assert!(resolved_date < context.reference_time.date_naive());
     }
 
     #[test]
@@ -664,5 +664,30 @@ mod tests {
         context.timezone = "Invalid/Timezone".to_string();
         let result = TimeResolver::resolve("2024-10-20", &context);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_everyone_is_not_repeat_keyword() {
+        let context = test_context();
+        let result = TimeResolver::resolve("meet everyone tomorrow", &context);
+        assert!(result.is_err()); // Invalid date format, not an unsupported repeat
+    }
+
+    #[test]
+    fn test_past_datetime_is_ambiguous() {
+        let context = test_context();
+        let result = TimeResolver::resolve("2024-10-10 14:30:00", &context).unwrap();
+        assert!(result.is_ambiguous);
+        assert!(result.ambiguity_reason.as_ref().unwrap().contains("past"));
+    }
+
+    #[test]
+    fn test_past_date_only_is_ambiguous() {
+        let context = test_context();
+        let result = TimeResolver::resolve("2024-10-10", &context).unwrap();
+        assert!(result.is_ambiguous);
+        assert!(result.resolved_date.is_some());
+        assert!(result.resolved_time.is_none());
+        assert!(result.ambiguity_reason.as_ref().unwrap().contains("past"));
     }
 }
