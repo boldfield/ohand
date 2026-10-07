@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
 use std::thread;
 
 use ohand_core::store::captures::{get_capture, save_capture, Capture};
@@ -442,50 +442,45 @@ fn test_fault_injection_locked_write_during_commit() -> Result<()> {
 
     let capture = make_test_capture("cap-1");
 
-    // Spawn a second connection that holds an exclusive lock
+    // Spawn a second connection that holds an exclusive lock until signaled to release
     let path_clone = path.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
     let handle = thread::spawn(move || -> Result<()> {
         let db2 = make_test_db(&path_clone, instant)?;
-        // Use raw connection to hold EXCLUSIVE lock without automatic rollback
         let conn = db2.conn();
         conn.execute("BEGIN EXCLUSIVE", [])?;
         conn.execute("INSERT INTO captures (capture_id, text, audio_reference, capture_instant, timezone_id, utc_offset_minutes, locale, calendar, item_scope, route_id, entry_locked, created_at, session_topic) VALUES ('lock-holder', 'text', NULL, '2026-01-15T10:30:00Z', 'UTC', 0, 'en', 'gregorian', 'personal', 'route-1', 0, '2026-01-15T10:30:00Z', NULL)", [])?;
-        thread::sleep(std::time::Duration::from_millis(1000));
+        // Wait for signal to release the lock
+        let _ = rx.recv();
         conn.execute("ROLLBACK", [])?;
         Ok(())
     });
 
-    // Try to save while the other connection holds the lock
+    // Give lock holder time to acquire and hold the lock
     thread::sleep(std::time::Duration::from_millis(100));
+
+    // Try to save while the other connection holds the lock.
+    // This should fail when save_capture's busy_timeout expires (5 seconds).
     let result = save_capture(&mut db1, &capture);
 
+    // Signal the lock holder to release the lock
+    let _ = tx.send(());
     handle.join().unwrap()?;
 
-    // Verify all-or-nothing: either the save succeeded and is durable,
-    // or it failed and the row is completely absent
-    match result {
-        Ok(saved) => {
-            // If save succeeded, verify it persists after database reopen
-            let mut db_reopen = make_test_db(&path, instant)?;
-            let tx = db_reopen.transaction()?;
-            let retrieved = get_capture(&tx, "cap-1")?;
-            assert_eq!(
-                retrieved,
-                Some(saved),
-                "Acknowledged save must persist after reopen"
-            );
-        }
-        Err(_) => {
-            // If save failed, verify the row is completely absent after reopen
-            let mut db_reopen = make_test_db(&path, instant)?;
-            let tx = db_reopen.transaction()?;
-            let retrieved = get_capture(&tx, "cap-1")?;
-            assert_eq!(
-                retrieved, None,
-                "Failed save must leave no partial row after reopen"
-            );
-        }
-    }
+    // Verify that save failed (the lock was held longer than busy_timeout allows)
+    assert!(
+        result.is_err(),
+        "save_capture should fail when write lock is held and busy_timeout expires"
+    );
+
+    // Verify all-or-nothing: after a failed save, the row is completely absent
+    let mut db_reopen = make_test_db(&path, instant)?;
+    let tx_reopen = db_reopen.transaction()?;
+    let retrieved = get_capture(&tx_reopen, "cap-1")?;
+    assert_eq!(
+        retrieved, None,
+        "Failed save must leave no partial row after reopen"
+    );
 
     let _ = std::fs::remove_file(&path);
     Ok(())
@@ -531,37 +526,79 @@ fn test_concurrent_retries_idempotent() -> Result<()> {
     // Initialize database first to avoid migration race condition
     let _ = make_test_db(&path, instant)?;
 
-    let mut handles = vec![];
+    // Run multiple rounds of concurrent tests to increase the likelihood of detecting race conditions
+    for round in 0..3 {
+        let capture_id = format!("cap-concurrent-r{}", round);
+        let mut capture_round = capture.clone();
+        capture_round.capture_id = capture_id.clone();
 
-    // Spawn 2 concurrent threads, both calling save_capture with the same capture.
-    // IMMEDIATE transactions ensure idempotency even under concurrent access.
-    for _ in 0..2 {
-        let path_clone = path.clone();
-        let capture_clone = capture.clone();
+        let num_threads = 6;
+        let barrier = Arc::new(Barrier::new(num_threads));
+        let mut handles = vec![];
 
-        let handle = thread::spawn(move || -> Result<()> {
-            let mut db = make_test_db(&path_clone, instant)?;
-            let _ = save_capture(&mut db, &capture_clone)?;
-            Ok(())
-        });
+        // Spawn multiple threads, all calling save_capture with the same capture ID.
+        // Barrier ensures they all try to acquire the lock at approximately the same time.
+        // IMMEDIATE transactions ensure idempotency even under concurrent access.
+        for _ in 0..num_threads {
+            let path_clone = path.clone();
+            let capture_clone = capture_round.clone();
+            let barrier_clone = Arc::clone(&barrier);
 
-        handles.push(handle);
-    }
+            let handle = thread::spawn(move || -> Result<Capture> {
+                // Open DB (each thread has its own connection)
+                let mut db = make_test_db(&path_clone, instant)?;
 
-    // Join all threads and verify they all succeeded
-    for handle in handles {
-        match handle.join() {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => return Err(anyhow::anyhow!("Thread failed: {}", e)),
-            Err(_) => return Err(anyhow::anyhow!("Thread panicked")),
+                // Synchronize at the barrier so all threads try to save at the same instant
+                barrier_clone.wait();
+
+                // All threads now call save_capture concurrently
+                let result = save_capture(&mut db, &capture_clone)?;
+                Ok(result)
+            });
+
+            handles.push(handle);
+        }
+
+        // Join all threads, verify they all succeeded, and assert they all got the same record
+        let mut results = vec![];
+        for handle in handles {
+            match handle.join() {
+                Ok(Ok(cap)) => results.push(cap),
+                Ok(Err(e)) => return Err(anyhow::anyhow!("Thread failed: {}", e)),
+                Err(_) => return Err(anyhow::anyhow!("Thread panicked")),
+            }
+        }
+
+        // All threads should have succeeded
+        assert_eq!(
+            results.len(),
+            num_threads,
+            "All {} threads should succeed",
+            num_threads
+        );
+
+        // All results should be identical
+        for (i, result) in results.iter().enumerate() {
+            assert_eq!(
+                result, &capture_round,
+                "Thread {} returned different capture than expected",
+                i
+            );
         }
     }
 
-    // Verify final state
+    // Verify final state after all rounds
     let mut db = make_test_db(&path, instant)?;
-    let tx = db.transaction()?;
-    let retrieved = get_capture(&tx, "cap-concurrent")?;
-    assert_eq!(retrieved, Some(capture));
+    for round in 0..3 {
+        let capture_id = format!("cap-concurrent-r{}", round);
+        let tx = db.transaction()?;
+        let retrieved = get_capture(&tx, &capture_id)?;
+        assert!(
+            retrieved.is_some(),
+            "Capture {} should exist after concurrent saves",
+            capture_id
+        );
+    }
 
     let _ = std::fs::remove_file(&path);
     Ok(())
