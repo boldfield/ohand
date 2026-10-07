@@ -4,6 +4,7 @@
 //! testing timeout, cancellation, bounded response size, and invalid output handling.
 //! It has no provider history as canonical memory; each request is independent.
 
+use super::normalizer::ResponseNormalizer;
 use super::{
     CapabilityMetadata, CapabilitySupport, ErrorType, InterpretationResponse, InterpretationResult,
     ProviderCapability, ProviderError, ProviderProfile, ProviderProtocol, ResponseStatus,
@@ -57,14 +58,17 @@ impl FakeBehavior {
 pub struct FakeProvider {
     behavior: FakeBehavior,
     max_output_size: usize,
+    normalizer: ResponseNormalizer,
 }
 
 impl FakeProvider {
     /// Create a new fake provider with the specified behavior.
     pub fn new(behavior: FakeBehavior) -> Self {
+        let max_output_size = 100_000;
         FakeProvider {
             behavior,
-            max_output_size: 100_000,
+            max_output_size,
+            normalizer: ResponseNormalizer::new(max_output_size),
         }
     }
 
@@ -118,9 +122,8 @@ impl FakeProvider {
         profile
     }
 
-    /// Simulate a provider response based on the configured behavior.
-    /// Enforces bounds: OversizedOutput returns truncated output, not full.
-    pub fn interpret(&self, request_id: &str) -> InterpretationResponse {
+    /// Generate raw response based on configured behavior.
+    fn raw_response(&self, request_id: &str) -> InterpretationResponse {
         let status;
         let result;
         let error;
@@ -182,23 +185,13 @@ impl FakeProvider {
                 });
             }
             FakeBehavior::OversizedOutput => {
-                status = ResponseStatus::InvalidOutput;
+                status = ResponseStatus::Success;
                 let oversized_raw = "x".repeat(self.max_output_size + 1000);
-                let bounded = if oversized_raw.len() > self.max_output_size {
-                    oversized_raw[..self.max_output_size].to_string()
-                } else {
-                    oversized_raw
-                };
                 result = Some(InterpretationResult {
                     annotations: None,
-                    raw_output: bounded,
+                    raw_output: oversized_raw,
                 });
-                error = Some(ProviderError {
-                    error_type: ErrorType::InvalidOutput,
-                    message: "Response exceeds maximum size".to_string(),
-                    retriable: false,
-                    code: Some("OVERSIZED".to_string()),
-                });
+                error = None;
             }
         }
 
@@ -216,6 +209,13 @@ impl FakeProvider {
                 None
             },
         }
+    }
+
+    /// Simulate a provider response based on the configured behavior.
+    /// Enforces contract bounds through normalization.
+    pub fn interpret(&self, request_id: &str) -> InterpretationResponse {
+        let raw = self.raw_response(request_id);
+        self.normalizer.normalize(raw)
     }
 
     /// Get the expected delay for this behavior.
@@ -310,7 +310,19 @@ mod tests {
     }
 
     #[test]
-    fn test_fake_provider_bounds_enforcement_at_limit() {
+    fn test_fake_provider_success_passes_through_normalizer() {
+        let provider = FakeProvider::new(FakeBehavior::Success);
+        let request_id = Uuid::new_v4().to_string();
+
+        let response = provider.interpret(&request_id);
+
+        assert_eq!(response.status, ResponseStatus::Success);
+        assert!(response.result.is_some());
+        assert!(response.result.as_ref().unwrap().raw_output.len() < provider.max_output_size());
+    }
+
+    #[test]
+    fn test_fake_provider_oversized_output_is_rejected() {
         let provider = FakeProvider::new(FakeBehavior::OversizedOutput);
         let request_id = Uuid::new_v4().to_string();
 
@@ -318,20 +330,11 @@ mod tests {
 
         assert_eq!(response.status, ResponseStatus::InvalidOutput);
         assert!(response.error.is_some());
-
-        let result = response.result.unwrap();
-        assert!(result.raw_output.len() <= provider.max_output_size);
-    }
-
-    #[test]
-    fn test_fake_provider_bounds_enforcement_exceeds_limit() {
-        let provider = FakeProvider::new(FakeBehavior::OversizedOutput);
-        let request_id = Uuid::new_v4().to_string();
-
-        let response = provider.interpret(&request_id);
-
-        let result = response.result.unwrap();
-        assert_eq!(result.raw_output.len(), provider.max_output_size);
+        assert_eq!(
+            response.error.as_ref().unwrap().error_type,
+            ErrorType::InvalidOutput
+        );
+        assert!(response.result.as_ref().unwrap().raw_output.is_empty());
     }
 
     #[test]

@@ -12,6 +12,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub mod fake;
+pub mod normalizer;
 
 /// Protocol type supported by a provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

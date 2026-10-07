@@ -157,18 +157,21 @@ fn test_fake_provider_bounds_at_exact_limit() {
 
     let response = provider.interpret(&request_id);
 
+    assert_eq!(response.status, ResponseStatus::InvalidOutput);
+    assert!(response.error.is_some());
     let result = response.result.expect("oversized behavior returns result");
-    assert_eq!(result.raw_output.len(), provider.max_output_size());
+    assert!(result.raw_output.is_empty());
 }
 
 #[test]
 fn test_fake_provider_bounds_below_limit() {
-    let provider = FakeProvider::new(FakeBehavior::OversizedOutput);
+    let provider = FakeProvider::new(FakeBehavior::Success);
     let request_id = Uuid::new_v4().to_string();
 
     let response = provider.interpret(&request_id);
 
-    let result = response.result.expect("oversized behavior returns result");
+    assert_eq!(response.status, ResponseStatus::Success);
+    let result = response.result.expect("success behavior returns result");
     assert!(result.raw_output.len() <= provider.max_output_size());
 }
 
