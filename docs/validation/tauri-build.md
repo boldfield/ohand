@@ -48,20 +48,37 @@ npm ci
 cargo generate-lockfile --locked  # Verify Cargo.lock is present
 ```
 
-### 3. Build for iOS simulator
+### 3. Initialize iOS project (first time only)
 
-Build for the aarch64-apple-ios-sim target:
+If the `src-tauri/gen/apple` directory does not exist, initialize the Xcode project:
 
 ```bash
-cargo tauri ios build --target aarch64-apple-ios-sim
+cd src-tauri
+cargo tauri ios init
+cd ..
+```
+
+This creates the iOS Xcode project under `src-tauri/gen/apple/`.
+
+### 4. Build for iOS simulator
+
+Build for the aarch64-sim target (simulator):
+
+```bash
+cargo tauri ios build --target aarch64-sim
+```
+
+For a physical device, use:
+```bash
+cargo tauri ios build --target aarch64
 ```
 
 This generates:
 - Rust backend compilation (tauri-build runs)
-- iOS app bundle under `target/aarch64-apple-ios-sim/debug/build/`
+- iOS app bundle under `target/aarch64-sim/debug/` (simulator) or `target/aarch64/debug/` (device)
 - Xcode integration files
 
-### 4. Launch on simulator
+### 5. Launch on simulator
 
 Boot a simulator and launch the app:
 
@@ -69,15 +86,15 @@ Boot a simulator and launch the app:
 # Boot simulator (if not running)
 xcrun simctl boot "iPhone 16"  # or another available device
 
-# Install the app
-APP_PATH="target/aarch64-apple-ios-sim/debug/build/ohand_tauri_probe.app"
+# Install the app (find the built bundle)
+APP_PATH=$(find target -name "ohand_tauri_probe.app" -type d | head -1)
 DEVICE_UDID="<simulator-udid>"
 xcrun simctl install "$DEVICE_UDID" "$APP_PATH"
 
 # Launch the app
 xcrun simctl launch "$DEVICE_UDID" "com.boldfield.ohand.tauri-probe"
 
-# Observe simulator
+# Observe simulator - app should automatically run echo test on launch
 ```
 
 ## Simulator Validation Procedure
@@ -86,22 +103,23 @@ xcrun simctl launch "$DEVICE_UDID" "com.boldfield.ohand.tauri-probe"
 
 1. **App launches** without crash on simulator boot
 2. **UI displays** with title "Oh And Tauri Probe"
-3. **Text input** accepts text (e.g., "Hello from Tauri")
-4. **Echo button** invokes Rust backend via Tauri v2 IPC
-5. **Result displays** "Echo from Rust: [input text]"
-6. **Status updates** to "Success"
+3. **Automatic test runs** - the app automatically calls the echo function on launch
+4. **Result displays** automatically: "Echo from Rust: Hello from Tauri"
+5. **Status updates** to "Success" (or stays running to indicate completion)
 
 ### Test procedure
 
 1. Build and launch per steps above
-2. In the simulator app:
-   - Read title: "Oh And Tauri Probe"
-   - Verify input field shows default "Hello from Tauri"
-   - Tap "Echo" button
-   - Observe result field updates with echo response: "Echo from Rust: Hello from Tauri"
+2. Observe the simulator:
+   - App opens with title "Oh And Tauri Probe"
+   - Status shows "Tauri ready - running automatic echo test..."
+   - After ~500ms, result field updates with: "Echo from Rust: Hello from Tauri"
    - Status changes to "Success"
-3. Repeat with custom input to verify Rust communication works
-4. Take a screenshot of the successful result
+3. Manual testing (optional, for development):
+   - Clear the input field and enter custom text
+   - Tap "Echo" button
+   - Observe result updates with the echoed text
+4. Take a screenshot of the successful automatic test result
 
 ### Failure modes to document
 
@@ -180,7 +198,10 @@ rm -rf src-tauri/target
 rm -rf dist
 cargo clean
 npm ci
-cargo tauri ios build --target aarch64-apple-ios-sim
+# Re-initialize if gen/apple was deleted
+cd src-tauri && cargo tauri ios init && cd ..
+# Rebuild
+cargo tauri ios build --target aarch64-sim
 ```
 
 ## Troubleshooting
@@ -244,7 +265,7 @@ Simulator validation passes and device testing is separate. To test on a physica
 1. Obtain Apple Developer signing credentials
 2. Configure signing in Xcode (team/provisioning profile)
 3. Plug iPhone 16 and select it as target
-4. Run `cargo tauri ios build --target aarch64-apple-ios`
+4. Run `cargo tauri ios build --target aarch64`
 
 Device testing is not part of this probe; see **P08** (signing) and **P09** (device feasibility) for production builds and physical validation.
 

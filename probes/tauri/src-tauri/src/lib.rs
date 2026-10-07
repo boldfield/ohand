@@ -1,5 +1,3 @@
-use tauri::Manager;
-
 #[tauri::command]
 fn echo_message(input: String) -> String {
     format!("Echo from Rust: {}", input)

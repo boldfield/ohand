@@ -25,9 +25,25 @@ async function testEcho() {
 
 // Initialize when Tauri is ready
 document.addEventListener('DOMContentLoaded', () => {
+    const statusEl = document.getElementById('status');
+    const echoButton = document.getElementById('echoButton');
+
+    if (echoButton) {
+        echoButton.addEventListener('click', testEcho);
+    }
+
     if (typeof window.__TAURI__ !== 'undefined' && window.__TAURI__.core) {
-        document.getElementById('status').textContent = 'Tauri ready';
+        statusEl.textContent = 'Tauri ready - running automatic echo test...';
+        // Automatically run the echo test on load for CI verification
+        setTimeout(testEcho, 500);
     } else {
-        document.getElementById('status').textContent = 'Waiting for Tauri...';
+        statusEl.textContent = 'Waiting for Tauri...';
+        // Retry after a delay in case Tauri isn't loaded yet
+        setTimeout(() => {
+            if (typeof window.__TAURI__ !== 'undefined' && window.__TAURI__.core) {
+                statusEl.textContent = 'Tauri ready - running automatic echo test...';
+                setTimeout(testEcho, 500);
+            }
+        }, 1000);
     }
 });

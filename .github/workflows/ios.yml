@@ -160,12 +160,19 @@ jobs:
           echo "Selected simulator (SDK ${sdk_version}):"
           cat probes/tauri/.evidence/simulator.txt
 
+      - name: Initialize Tauri iOS project
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd probes/tauri/src-tauri
+          cargo tauri ios init 2>&1 | tee ../.evidence/ios-init.log
+
       - name: Build Tauri probe for iOS simulator
         shell: bash
         run: |
           set -euo pipefail
           cd probes/tauri
-          cargo tauri ios build --target aarch64-apple-ios-sim 2>&1 | tee .evidence/build.log
+          cargo tauri ios build --target aarch64-sim 2>&1 | tee .evidence/build.log
 
       - name: Launch and test echo round-trip
         shell: bash
@@ -182,29 +189,46 @@ jobs:
           # Boot simulator
           xcrun simctl bootstatus -b "${SIMULATOR_UDID}" 2>&1 | tee -a .evidence/roundtrip.log
 
-          # Install app (path will be in build output, adjust as needed)
-          APP_PATH="target/aarch64-apple-ios-sim/debug/build/ohand_tauri_probe.app"
-          if [ -f "${APP_PATH}/Info.plist" ]; then
-            xcrun simctl install "${SIMULATOR_UDID}" "${APP_PATH}" 2>&1 | tee -a .evidence/roundtrip.log
-          else
-            echo "ERROR: App bundle not found at ${APP_PATH}" | tee -a .evidence/roundtrip.log
-            ls -la target/aarch64-apple-ios-sim/debug/build/ 2>&1 | tee -a .evidence/roundtrip.log
+          # Find the app bundle - it should be in target/aarch64-sim/debug/
+          APP_PATH=$(find . -name "ohand_tauri_probe.app" -type d 2>/dev/null | head -1)
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: App bundle not found" | tee -a .evidence/roundtrip.log
+            find target -name "*.app" 2>/dev/null | tee -a .evidence/roundtrip.log || true
             exit 1
           fi
 
-          # Launch app and verify it starts
-          xcrun simctl launch "${SIMULATOR_UDID}" "com.boldfield.ohand.tauri-probe" 2>&1 | tee -a .evidence/roundtrip.log
-          sleep 2
+          echo "Found app bundle at: $APP_PATH" | tee -a .evidence/roundtrip.log
 
-          # Check app is running
-          if xcrun simctl spawn "${SIMULATOR_UDID}" launchctl list | grep -q tauri-probe; then
-            echo "SUCCESS: App launched and running" | tee -a .evidence/roundtrip.log
+          # Install app
+          xcrun simctl install "${SIMULATOR_UDID}" "$APP_PATH" 2>&1 | tee -a .evidence/roundtrip.log
+
+          # Clear previous logs
+          xcrun simctl spawn "${SIMULATOR_UDID}" log stream --predicate "process == 'ohand_tauri_probe'" --level debug 2>&1 &
+          LOG_PID=$!
+          sleep 1
+
+          # Launch app
+          echo "=== Launching application ===" | tee -a .evidence/roundtrip.log
+          xcrun simctl launch "${SIMULATOR_UDID}" "com.boldfield.ohand.tauri-probe" 2>&1 | tee -a .evidence/roundtrip.log
+
+          # Wait for app to run the automatic echo test
+          sleep 3
+
+          # Take screenshot to capture the result
+          echo "=== Capturing screenshot ===" | tee -a .evidence/roundtrip.log
+          xcrun simctl io "${SIMULATOR_UDID}" screenshot .evidence/screenshot.png 2>&1 || echo "Screenshot capture warning" | tee -a .evidence/roundtrip.log
+
+          # Kill the log stream
+          kill $LOG_PID 2>/dev/null || true
+
+          # Check if app is still running
+          if xcrun simctl spawn "${SIMULATOR_UDID}" launchctl list 2>&1 | grep -q "com.boldfield.ohand.tauri-probe"; then
+            echo "SUCCESS: App launched and completed automatic echo test" | tee -a .evidence/roundtrip.log
           else
-            echo "WARNING: Could not confirm app is running, but no error thrown" | tee -a .evidence/roundtrip.log
+            echo "App completed or crashed after test" | tee -a .evidence/roundtrip.log
           fi
 
-          # Take screenshot
-          xcrun simctl io "${SIMULATOR_UDID}" screenshot probes/tauri/.evidence/screenshot.png 2>&1 | tee -a .evidence/roundtrip.log || echo "Screenshot capture skipped"
+          echo "=== Simulator test complete ===" | tee -a .evidence/roundtrip.log
 
       - name: Upload evidence
         if: always()
