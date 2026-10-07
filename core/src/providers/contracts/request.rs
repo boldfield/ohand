@@ -29,12 +29,17 @@ pub enum RequestValidationError {
     EmptyInstructionVersion,
     #[error("route id must not be empty")]
     EmptyRoute,
+    #[error("profile id must not be empty")]
+    EmptyProfileId,
+    #[error("text basis revision must equal the source revision")]
+    RevisionMismatch,
 }
 
 /// One interpretation request. It carries everything needed to prove which immutable profile,
 /// instruction set and source basis were dispatched, and nothing from earlier requests:
 /// provider-side conversation history is never canonical memory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(try_from = "InterpretationRequestRecord")]
 pub struct InterpretationRequest {
     capture_id: String,
     source_revision: u64,
@@ -48,6 +53,44 @@ pub struct InterpretationRequest {
     #[serde(skip_serializing, default)]
     route_id: String,
     time_context: TimeContext,
+}
+
+/// Unvalidated wire form; deserialization always passes through `InterpretationRequest::validate`.
+/// `route_id` is never serialized, so a record without one is rejected rather than defaulted.
+#[derive(Deserialize)]
+struct InterpretationRequestRecord {
+    capture_id: String,
+    source_revision: u64,
+    text_basis: TextBasis,
+    text: String,
+    request_version: String,
+    instruction_version: String,
+    profile_id: String,
+    profile_version: String,
+    #[serde(default)]
+    route_id: String,
+    time_context: TimeContext,
+}
+
+impl TryFrom<InterpretationRequestRecord> for InterpretationRequest {
+    type Error = RequestValidationError;
+
+    fn try_from(record: InterpretationRequestRecord) -> Result<Self, Self::Error> {
+        let request = InterpretationRequest {
+            capture_id: record.capture_id,
+            source_revision: record.source_revision,
+            text_basis: record.text_basis,
+            text: record.text,
+            request_version: record.request_version,
+            instruction_version: record.instruction_version,
+            profile_id: record.profile_id,
+            profile_version: record.profile_version,
+            route_id: record.route_id,
+            time_context: record.time_context,
+        };
+        request.validate()?;
+        Ok(request)
+    }
 }
 
 impl InterpretationRequest {
@@ -87,14 +130,26 @@ impl InterpretationRequest {
         if Uuid::parse_str(&self.request_version).is_err() {
             return Err(E::InvalidIdentifier("request_version"));
         }
-        if let TextBasis::Correction {
-            correction_record_id,
-            ..
-        } = &self.text_basis
-        {
-            if Uuid::parse_str(correction_record_id).is_err() {
-                return Err(E::InvalidIdentifier("correction_record_id"));
+        if Uuid::parse_str(&self.profile_version).is_err() {
+            return Err(E::InvalidIdentifier("profile_version"));
+        }
+        if self.profile_id.trim().is_empty() {
+            return Err(E::EmptyProfileId);
+        }
+        let basis_revision = match &self.text_basis {
+            TextBasis::Original { item_revision } => *item_revision,
+            TextBasis::Correction {
+                correction_record_id,
+                item_revision,
+            } => {
+                if Uuid::parse_str(correction_record_id).is_err() {
+                    return Err(E::InvalidIdentifier("correction_record_id"));
+                }
+                *item_revision
             }
+        };
+        if basis_revision != self.source_revision {
+            return Err(E::RevisionMismatch);
         }
         if self.text.trim().is_empty() {
             return Err(E::EmptyText);

@@ -359,11 +359,51 @@ fn https_origin(url: &str) -> Option<String> {
     if authority.is_empty() || authority.contains('@') {
         return None;
     }
-    let host = authority.split(':').next().unwrap_or("");
-    if host.is_empty() {
+    if !is_valid_authority(authority) {
         return None;
     }
     Some(format!("https://{}", authority.to_ascii_lowercase()))
+}
+
+/// Validates `host[:port]` where host is a DNS name, IPv4 literal or bracketed IPv6 literal
+/// and port is a decimal number in 1..=65535.
+fn is_valid_authority(authority: &str) -> bool {
+    let (host_is_valid, port) = if let Some(bracketed) = authority.strip_prefix('[') {
+        let Some((inner, rest)) = bracketed.split_once(']') else {
+            return false;
+        };
+        let port = match rest.strip_prefix(':') {
+            Some(port) => Some(port),
+            None if rest.is_empty() => None,
+            None => return false,
+        };
+        (inner.parse::<std::net::Ipv6Addr>().is_ok(), port)
+    } else {
+        match authority.split_once(':') {
+            Some((host, port)) => (is_valid_dns_host(host), Some(port)),
+            None => (is_valid_dns_host(authority), None),
+        }
+    };
+    let port_is_valid = port.is_none_or(|port| {
+        !port.is_empty()
+            && port.bytes().all(|byte| byte.is_ascii_digit())
+            && port.parse::<u16>().is_ok_and(|number| number != 0)
+    });
+    host_is_valid && port_is_valid
+}
+
+fn is_valid_dns_host(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= 253
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
 }
 
 fn validate_record(record: &ProfileRecord) -> Result<(), ProfileValidationError> {

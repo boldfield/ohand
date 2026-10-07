@@ -3,8 +3,8 @@ use ohand_core::providers::contracts::fake::{FakeProvider, FakeStep};
 use ohand_core::providers::contracts::{
     dispatch, CancelToken, CapabilityMetadata, DispatchLimits, ErrorClass, FailureKind,
     InterpretationRequest, ManualClock, ProfileValidationError, ProviderCapability,
-    ProviderFailure, ProviderProfile, ProviderProfileBuilder, ProviderProtocol, RetryPolicy,
-    StructuredOutputMode, TextBasis, TransportError,
+    ProviderFailure, ProviderProfile, ProviderProfileBuilder, ProviderProtocol,
+    RequestValidationError, RetryPolicy, StructuredOutputMode, TextBasis, TransportError,
 };
 use ohand_core::time::TimeContext;
 use std::sync::Arc;
@@ -117,6 +117,25 @@ fn valid_profile_exposes_declared_contract_and_mints_uuid_version() {
 }
 
 #[test]
+fn well_formed_authorities_are_accepted() {
+    for origin in [
+        "https://llm.example.test",
+        "https://llm.example.test:443",
+        "https://a-b.example.test:65535",
+        "https://127.0.0.1:8443",
+        "https://[::1]:8443",
+        "https://[2001:db8::1]",
+    ] {
+        valid_builder()
+            .clear_authorized_destinations()
+            .authorized_destination(origin)
+            .endpoint(format!("{origin}/v1"))
+            .build()
+            .unwrap_or_else(|error| panic!("{origin} should be accepted: {error}"));
+    }
+}
+
+#[test]
 fn hosted_profile_without_endpoint_is_valid() {
     ProviderProfileBuilder::new("hosted", ProviderProtocol::Anthropic, "model-b")
         .credential_ref("cred-ref-2")
@@ -208,6 +227,89 @@ fn invalid_profiles_are_rejected_with_specific_errors() {
                 .clear_authorized_destinations()
                 .authorized_destination("https://llm.example.test:8443/v1"),
             E::InvalidAuthorizedDestination,
+        ),
+        (
+            "destination with nonnumeric port",
+            valid_builder()
+                .clear_authorized_destinations()
+                .authorized_destination("https://llm.example.test:notaport"),
+            E::InvalidAuthorizedDestination,
+        ),
+        (
+            "destination with out-of-range port",
+            valid_builder()
+                .clear_authorized_destinations()
+                .authorized_destination("https://llm.example.test:65536"),
+            E::InvalidAuthorizedDestination,
+        ),
+        (
+            "destination with zero port",
+            valid_builder()
+                .clear_authorized_destinations()
+                .authorized_destination("https://llm.example.test:0"),
+            E::InvalidAuthorizedDestination,
+        ),
+        (
+            "destination with empty port",
+            valid_builder()
+                .clear_authorized_destinations()
+                .authorized_destination("https://llm.example.test:"),
+            E::InvalidAuthorizedDestination,
+        ),
+        (
+            "destination with empty host",
+            valid_builder()
+                .clear_authorized_destinations()
+                .authorized_destination("https://:8443"),
+            E::InvalidAuthorizedDestination,
+        ),
+        (
+            "destination with invalid host characters",
+            valid_builder()
+                .clear_authorized_destinations()
+                .authorized_destination("https://llm_example.test:8443"),
+            E::InvalidAuthorizedDestination,
+        ),
+        (
+            "destination with leading hyphen label",
+            valid_builder()
+                .clear_authorized_destinations()
+                .authorized_destination("https://-llm.example.test"),
+            E::InvalidAuthorizedDestination,
+        ),
+        (
+            "destination with empty label",
+            valid_builder()
+                .clear_authorized_destinations()
+                .authorized_destination("https://llm..example.test"),
+            E::InvalidAuthorizedDestination,
+        ),
+        (
+            "destination with malformed ipv6",
+            valid_builder()
+                .clear_authorized_destinations()
+                .authorized_destination("https://[::zz]:8443"),
+            E::InvalidAuthorizedDestination,
+        ),
+        (
+            "destination with multiple colons",
+            valid_builder()
+                .clear_authorized_destinations()
+                .authorized_destination("https://llm.example.test:8443:9"),
+            E::InvalidAuthorizedDestination,
+        ),
+        (
+            "endpoint with nonnumeric port matching destination",
+            valid_builder()
+                .clear_authorized_destinations()
+                .authorized_destination("https://llm.example.test:notaport")
+                .endpoint("https://llm.example.test:notaport/v1"),
+            E::InvalidAuthorizedDestination,
+        ),
+        (
+            "endpoint with nonnumeric port",
+            valid_builder().endpoint("https://llm.example.test:notaport/v1"),
+            E::InvalidEndpoint,
         ),
         (
             "self-hosted without endpoint",
@@ -431,6 +533,78 @@ fn request_pins_profile_and_rejects_malformed_identity() {
         item_revision: 1,
     };
     assert!(build(&ok_id, "t", good_correction, &ok_id).is_ok());
+}
+
+#[test]
+fn request_rejects_inconsistent_revisions_and_profile_identity() {
+    let profile = profile();
+    let id = Uuid::new_v4().to_string();
+    let build = |source_revision: u64, basis: TextBasis| {
+        InterpretationRequest::new(
+            &id,
+            source_revision,
+            basis,
+            "t",
+            &id,
+            "i-v1",
+            &profile,
+            "route",
+            time_context(),
+        )
+    };
+    assert_eq!(
+        build(2, TextBasis::Original { item_revision: 1 }).unwrap_err(),
+        RequestValidationError::RevisionMismatch
+    );
+    let correction = TextBasis::Correction {
+        correction_record_id: id.clone(),
+        item_revision: 3,
+    };
+    assert_eq!(
+        build(2, correction).unwrap_err(),
+        RequestValidationError::RevisionMismatch
+    );
+    assert!(build(2, TextBasis::Original { item_revision: 2 }).is_ok());
+}
+
+#[test]
+fn deserialized_requests_are_validated_and_cannot_omit_the_route() {
+    let profile = profile();
+    let request = request_for(&profile, "call mom");
+    let serialized = serde_json::to_value(&request).unwrap();
+
+    // The route is never serialized, so a round trip cannot yield a dispatchable request.
+    assert!(
+        serde_json::from_value::<InterpretationRequest>(serialized.clone())
+            .unwrap_err()
+            .to_string()
+            .contains("route id")
+    );
+
+    let mut with_route = serialized.clone();
+    with_route["route_id"] = "route-secret-name".into();
+    let restored: InterpretationRequest = serde_json::from_value(with_route.clone()).unwrap();
+    assert_eq!(restored.route_id(), "route-secret-name");
+    assert!(restored.is_pinned_to(&profile));
+
+    let mutations: Vec<(&str, serde_json::Value, &str)> = vec![
+        ("capture_id", "nope".into(), "capture_id"),
+        ("request_version", "nope".into(), "request_version"),
+        ("profile_version", "nope".into(), "profile_version"),
+        ("profile_id", " ".into(), "profile id"),
+        ("text", "  ".into(), "text must not be empty"),
+        ("instruction_version", "".into(), "instruction version"),
+        ("route_id", " ".into(), "route id"),
+        ("source_revision", 9.into(), "revision"),
+    ];
+    for (field, value, expected) in mutations {
+        let mut mutated = with_route.clone();
+        mutated[field] = value;
+        let error = serde_json::from_value::<InterpretationRequest>(mutated)
+            .expect_err(field)
+            .to_string();
+        assert!(error.contains(expected), "{field}: {error}");
+    }
 }
 
 #[test]
