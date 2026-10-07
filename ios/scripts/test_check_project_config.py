@@ -23,10 +23,25 @@ class ProjectConfigChecks(unittest.TestCase):
         project["settings"]["CODE_SIGN_IDENTITY"] = "iPhone Developer"
         self.assertTrue(any("CODE_SIGN_IDENTITY" in e for e in checks.check_project(project)))
 
-    def test_valued_swift_condition_is_rejected(self):
+    def test_control_as_second_application_is_rejected(self):
         project = checks.load_project()
-        project["targets"]["OhAndControl"]["settings"]["SWIFT_ACTIVE_COMPILATION_CONDITIONS"] = "OHAND_BUILD_TARGET_CONTROL=1"
-        self.assertTrue(any("valueless" in e for e in checks.check_project(project)))
+        project["targets"]["OhAndControl"] = {"type": "application"}
+        self.assertTrue(any("second application" in e for e in checks.check_project(project)))
+
+    def test_control_extension_must_be_embedded_in_host(self):
+        project = checks.load_project()
+        project["targets"]["CaptureProbe"]["dependencies"] = []
+        self.assertTrue(any("must depend on" in e for e in checks.check_project(project)))
+
+    def test_control_extension_must_not_be_compiled_into_host(self):
+        project = checks.load_project()
+        project["targets"]["OhAndApp"]["sources"][1]["excludes"] = ["**/.placeholder"]
+        self.assertTrue(any("must exclude" in e for e in checks.check_project(project)))
+
+    def test_control_extension_bundle_id_must_be_prefixed_by_host(self):
+        project = checks.load_project()
+        project["targets"]["CaptureProbeControl"]["settings"]["PRODUCT_BUNDLE_IDENTIFIER"] = "com.boldfield.ohand.probes.other"
+        self.assertTrue(any("prefixed by" in e for e in checks.check_project(project)))
 
     def test_non_unit_test_bundle_is_rejected(self):
         project = checks.load_project()

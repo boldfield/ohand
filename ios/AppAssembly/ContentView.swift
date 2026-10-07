@@ -3,22 +3,6 @@ import SwiftUI
 struct ContentView: View {
     let bundleIdentifier = Bundle.main.bundleIdentifier ?? "unknown"
 
-    var buildTargetName: String {
-        #if OHAND_BUILD_TARGET_CONTROL
-        "OhAndControl"
-        #else
-        "OhAndApp"
-        #endif
-    }
-
-    var buildTargetDescription: String {
-        #if OHAND_BUILD_TARGET_CONTROL
-        "Control-entry build variant reserved for system-control handoff"
-        #else
-        "Production application with capture and management UI"
-        #endif
-    }
-
     var body: some View {
         VStack(spacing: 16) {
             Text("Oh And M1")
@@ -26,7 +10,7 @@ struct ContentView: View {
                 .fontWeight(.bold)
                 .padding()
 
-            Text(buildTargetDescription)
+            Text("Production application with capture and management UI")
                 .font(.body)
                 .foregroundColor(.secondary)
 
@@ -41,7 +25,7 @@ struct ContentView: View {
                 HStack {
                     Text("Build Target:")
                     Spacer()
-                    Text(buildTargetName)
+                    Text("OhAndApp")
                 }
                 HStack {
                     Text("Bundle ID:")

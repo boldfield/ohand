@@ -30,6 +30,10 @@ OWNED_SOURCE_ROOTS = {
     "CaptureProbe": "CaptureProbe",
 }
 
+# Control extension target -> host app target, and the owned directory each extension compiles.
+CONTROL_EXTENSIONS = {"CaptureProbe": "CaptureProbeControl", "OhAndApp": "OhAndCaptureControl"}
+CONTROL_ROOTS = {"CaptureProbeControl": "CaptureProbe/Control", "OhAndCaptureControl": "Capture/Entry/Control"}
+
 PROBE_USAGE_STRINGS = {
     "AudioProbe": ["NSMicrophoneUsageDescription"],
     "TranscriptionProbe": ["NSMicrophoneUsageDescription", "NSSpeechRecognitionUsageDescription"],
@@ -71,7 +75,7 @@ def check_project(project, root=IOS_ROOT):
         errors.append("OhAndTests scheme has no test action")
 
     for target_name, target in targets.items():
-        if target["type"] != "framework" and target_name not in project.get("schemes", {}):
+        if target["type"] not in ("framework", "app-extension") and target_name not in project.get("schemes", {}):
             errors.append(f"{target_name} has no scheme")
 
     bundle_ids = [t.get("settings", {}).get("PRODUCT_BUNDLE_IDENTIFIER") for t in targets.values()]
@@ -81,10 +85,9 @@ def check_project(project, root=IOS_ROOT):
     if len(set(bundle_ids)) != len(bundle_ids):
         errors.append("bundle identifiers are not unique")
 
-    control = targets.get("OhAndControl", {})
-    conditions = control.get("settings", {}).get("SWIFT_ACTIVE_COMPILATION_CONDITIONS", "")
-    if "$(inherited)" not in conditions or "OHAND_BUILD_TARGET_CONTROL" not in conditions or "=" in conditions:
-        errors.append("OhAndControl must append a valueless OHAND_BUILD_TARGET_CONTROL Swift condition")
+    if "OhAndControl" in targets:
+        errors.append("OhAndControl must not be a second application; controls are app extensions")
+    errors += check_control_extensions(project, root)
 
     flattened = yaml.safe_dump(project)
     for forbidden in ("CODE_SIGN_IDENTITY", "DEVELOPMENT_TEAM", "PROVISIONING_PROFILE"):
@@ -92,6 +95,39 @@ def check_project(project, root=IOS_ROOT):
             errors.append(f"project.yml must not set {forbidden}; signing is supplied at build time")
     if project.get("configFiles") != {"Debug": "Config/Base.xcconfig", "Release": "Config/Base.xcconfig"}:
         errors.append("project configFiles must point at Config/Base.xcconfig")
+    return errors
+
+
+def check_control_extensions(project, root=IOS_ROOT):
+    errors = []
+    targets = project["targets"]
+    for host_name, extension_name in CONTROL_EXTENSIONS.items():
+        host = targets.get(host_name, {})
+        extension = targets.get(extension_name, {})
+        if extension.get("type") != "app-extension":
+            errors.append(f"{extension_name} must be an app-extension target")
+            continue
+        host_id = host.get("settings", {}).get("PRODUCT_BUNDLE_IDENTIFIER", "")
+        extension_id = extension.get("settings", {}).get("PRODUCT_BUNDLE_IDENTIFIER", "")
+        if not extension_id.startswith(host_id + "."):
+            errors.append(f"{extension_name} bundle identifier must be prefixed by {host_name}'s")
+        if extension_name not in [d.get("target") for d in host.get("dependencies", [])]:
+            errors.append(f"{host_name} must depend on (embed) {extension_name}")
+        control_root = CONTROL_ROOTS[extension_name]
+        if control_root not in source_paths(extension):
+            errors.append(f"{extension_name} must include {control_root}/")
+        owner_root, _, relative = control_root.partition("/")
+        host_entries = [e for e in host.get("sources", []) if isinstance(e, dict) and e["path"] == owner_root]
+        excluded = [x for e in host_entries for x in e.get("excludes", [])]
+        if f"{relative}/**" not in excluded:
+            errors.append(f"{host_name} must exclude {control_root}/ so extension code is not compiled into the host")
+        plist_path = root / control_root / "Info.plist"
+        with plist_path.open("rb") as handle:
+            plist = plistlib.load(handle)
+        if plist.get("NSExtension", {}).get("NSExtensionPointIdentifier") != "com.apple.widgetkit-extension":
+            errors.append(f"{control_root}/Info.plist must declare the WidgetKit extension point")
+        if not list((root / control_root).glob("*.swift")):
+            errors.append(f"{control_root}/ has no Swift source")
     return errors
 
 

@@ -3,12 +3,12 @@ options:
   bundleIdPrefix: com.boldfield.ohand
   deploymentTarget:
     iOS: "16.0"
-  xcodeVersion: "15.4"
+  xcodeVersion: "16.4"
 
 settings:
   PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.app
   IPHONEOS_DEPLOYMENT_TARGET: "16.0"
-  SWIFT_VERSION: "5.9"
+  SWIFT_VERSION: "5.0"
 
 configFiles:
   Debug: Config/Base.xcconfig
@@ -55,33 +55,14 @@ targets:
         optional: true
         excludes:
           - "**/.placeholder"
+          - "Entry/Control/**"
     settings:
       PRODUCT_NAME: OhAnd
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.app
       INFOPLIST_FILE: AppAssembly/Info.plist
     dependencies:
       - target: OhAndServices
-
-  OhAndControl:
-    type: application
-    platform: iOS
-    sources:
-      - path: AppAssembly
-        createIntermediateGroups: true
-        excludes:
-          - "**/.placeholder"
-      - path: Capture
-        createIntermediateGroups: true
-        optional: true
-        excludes:
-          - "**/.placeholder"
-    settings:
-      PRODUCT_NAME: OhAndControl
-      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.control
-      INFOPLIST_FILE: AppAssembly/Info.plist
-      SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) OHAND_BUILD_TARGET_CONTROL"
-    dependencies:
-      - target: OhAndServices
+      - target: OhAndCaptureControl
 
   OhAndTests:
     type: bundle.unit-test
@@ -100,6 +81,23 @@ targets:
       BUNDLE_LOADER: $(TEST_HOST)
     dependencies:
       - target: OhAndApp
+      - target: OhAndServices
+        embed: false
+      - target: OhAndCoreBridge
+        embed: false
+
+  OhAndCaptureControl:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Capture/Entry/Control
+        createIntermediateGroups: true
+        excludes:
+          - Info.plist
+    settings:
+      PRODUCT_NAME: OhAndCaptureControl
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.app.capture-control
+      INFOPLIST_FILE: Capture/Entry/Control/Info.plist
 
   BridgeProbe:
     type: application
@@ -176,20 +174,32 @@ targets:
         createIntermediateGroups: true
         excludes:
           - Info.plist
+          - "Control/**"
     settings:
       PRODUCT_NAME: CaptureProbe
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.capture
       INFOPLIST_FILE: CaptureProbe/Info.plist
+    dependencies:
+      - target: CaptureProbeControl
+
+  CaptureProbeControl:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: CaptureProbe/Control
+        createIntermediateGroups: true
+        excludes:
+          - Info.plist
+    settings:
+      PRODUCT_NAME: CaptureProbeControl
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.capture.control
+      INFOPLIST_FILE: CaptureProbe/Control/Info.plist
 
 schemes:
   OhAndApp:
     build:
       targets:
         OhAndApp: all
-  OhAndControl:
-    build:
-      targets:
-        OhAndControl: all
   OhAndTests:
     build:
       targets:

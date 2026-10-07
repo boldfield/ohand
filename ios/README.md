@@ -7,7 +7,7 @@ Native iOS application and probe components for Oh And M1.
 The iOS project implements:
 - **OhAndApp**: Main production application with SwiftUI capture and management UI
 - **OhAndServices**: Services framework for concurrent native task implementations
-- **OhAndControl**: Reserved control-entry build variant of the app sources
+- **OhAndCaptureControl**: System-control (WidgetKit) app extension embedded in the app; sources in `Capture/Entry/Control/`
 - **OhAndCoreBridge**: Swift bridge to Rust core (maintained by B01)
 - **Probe applications**: Isolated validation targets for M1 feasibility testing
 
@@ -40,6 +40,7 @@ ios/
     Text/               # Text entry surface (C03)
     Voice/              # Recording control with recovery (C04)
     Entry/              # System control entry handoff (C06)
+      Control/          # OhAndCaptureControl extension sources
     Acknowledgment/     # Save acknowledgment UI (C06)
   Tests/                # Test modules (organized by service)
   BridgeProbe/          # Rust-Swift boundary validation (P01)
@@ -48,6 +49,7 @@ ios/
   TranscriptionProbe/   # On-device transcription (P04)
   CredentialProbe/      # Keychain credential protection (P11)
   CaptureProbe/         # System control handoff (P02)
+    Control/            # CaptureProbeControl extension sources
   Config/               # Shared xcconfig (unsigned simulator; local signing include)
   scripts/              # generate/build scripts and static project checks
   Mintfile              # Pinned XcodeGen version
@@ -102,4 +104,4 @@ Ownership is enforced by directory-based source inclusion in `project.yml`. Conc
 
 ## Baseline
 
-Xcode 15.4 (iOS 17.5 SDK), deployment target iOS 16.0, Swift 5.9, XcodeGen 2.40.0. Details in [BUILD.md](BUILD.md).
+Xcode 16.4 (iOS 18.5 SDK), deployment target iOS 16.0 (control code gated with `@available(iOS 18.0, *)`), Swift 5 language mode, XcodeGen 2.40.0. Details in [BUILD.md](BUILD.md).
