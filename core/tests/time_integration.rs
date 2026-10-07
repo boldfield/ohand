@@ -4,6 +4,7 @@ use ohand_core::time::{TimeContext, TimeResolver};
 fn make_context(tz: &str, ref_time: &str) -> TimeContext {
     TimeContext {
         timezone: tz.to_string(),
+        locale: "en-US".to_string(),
         reference_time: DateTime::parse_from_rfc3339(ref_time)
             .unwrap()
             .with_timezone(&Utc),
@@ -14,11 +15,12 @@ fn make_context(tz: &str, ref_time: &str) -> TimeContext {
 fn test_explicit_dates_iso_format() {
     let context = make_context("UTC", "2024-10-15T10:00:00Z");
 
-    // Future date
+    // Future date without time - ambiguous because hour is missing
     let result = TimeResolver::resolve("2024-10-20", &context).unwrap();
     assert_eq!(result.original_phrase, "2024-10-20");
     assert!(result.resolved_time.is_some());
-    assert!(!result.is_ambiguous);
+    assert!(result.is_ambiguous);
+    assert!(result.ambiguity_reason.as_ref().unwrap().contains("hour"));
 
     // Past date marked ambiguous but resolved
     let past = TimeResolver::resolve("2024-10-10", &context).unwrap();
@@ -34,19 +36,21 @@ fn test_tomorrow_phrase() {
 
     assert_eq!(result.original_phrase, "tomorrow");
     assert!(result.resolved_time.is_some());
-    assert!(!result.is_ambiguous);
+    assert!(result.is_ambiguous);
+    assert!(result.ambiguity_reason.as_ref().unwrap().contains("hour"));
 
-    // Verify it's actually the next day
+    // Verify it's actually the next day (at midnight UTC)
     let resolved = result.resolved_time.unwrap();
     let expected_date = "2024-10-16";
     assert!(resolved.to_rfc3339().starts_with(expected_date));
+    assert_eq!(resolved.hour(), 0);
 }
 
 #[test]
 fn test_weekday_phrases() {
     let context = make_context("UTC", "2024-10-15T10:00:00Z"); // Tuesday
 
-    // Test single weekday names
+    // Test single weekday names - ambiguous because no time is specified
     for day in &[
         "monday",
         "tuesday",
@@ -59,7 +63,8 @@ fn test_weekday_phrases() {
         let result = TimeResolver::resolve(day, &context).unwrap();
         assert_eq!(result.original_phrase, *day);
         assert!(result.resolved_time.is_some());
-        assert!(!result.is_ambiguous);
+        assert!(result.is_ambiguous);
+        assert!(result.ambiguity_reason.as_ref().unwrap().contains("hour"));
     }
 }
 
@@ -69,18 +74,20 @@ fn test_next_weekday_phrases() {
 
     let result = TimeResolver::resolve("next monday", &context).unwrap();
     assert!(result.resolved_time.is_some());
-    assert!(!result.is_ambiguous);
+    assert!(result.is_ambiguous);
+    assert!(result.ambiguity_reason.as_ref().unwrap().contains("hour"));
 }
 
 #[test]
 fn test_since_phrases() {
     let context = make_context("UTC", "2024-10-15T10:00:00Z");
 
-    // since <day> should resolve to the next occurrence of that day
+    // since <day> resolves to the most recent (or same) day that matches
     let result = TimeResolver::resolve("since friday", &context).unwrap();
     assert_eq!(result.original_phrase, "since friday");
     assert!(result.resolved_time.is_some());
-    assert!(!result.is_ambiguous);
+    assert!(result.is_ambiguous);
+    assert!(result.ambiguity_reason.as_ref().unwrap().contains("hour"));
 }
 
 #[test]
@@ -191,15 +198,25 @@ fn test_datetime_with_explicit_time() {
 
 #[test]
 fn test_dst_handling_utc() {
-    // UTC has no DST, so this should always work
+    // UTC has no DST, but dates without times are still ambiguous due to missing hour
     let spring_context = make_context("UTC", "2024-03-10T10:00:00Z");
     let fall_context = make_context("UTC", "2024-11-03T10:00:00Z");
 
     let spring_result = TimeResolver::resolve("2024-03-15", &spring_context).unwrap();
-    assert!(!spring_result.is_ambiguous);
+    assert!(spring_result.is_ambiguous);
+    assert!(spring_result
+        .ambiguity_reason
+        .as_ref()
+        .unwrap()
+        .contains("hour"));
 
     let fall_result = TimeResolver::resolve("2024-11-05", &fall_context).unwrap();
-    assert!(!fall_result.is_ambiguous);
+    assert!(fall_result.is_ambiguous);
+    assert!(fall_result
+        .ambiguity_reason
+        .as_ref()
+        .unwrap()
+        .contains("hour"));
 }
 
 #[test]
@@ -290,6 +307,7 @@ fn test_error_messages_are_informative() {
     // Invalid timezone error
     let bad_tz = TimeContext {
         timezone: "Invalid/Timezone".to_string(),
+        locale: "en-US".to_string(),
         reference_time: context.reference_time,
     };
     let tz_error = TimeResolver::resolve("2024-10-20", &bad_tz);
