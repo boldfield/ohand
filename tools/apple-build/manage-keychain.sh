@@ -72,6 +72,12 @@ case "$ACTION" in
 
         echo "✓ Certificate imported"
 
+        # Set partition list for headless code signing (AC3 requirement)
+        security set-key-partition-list -S "apple-tool:,apple:" \
+            -k "$APPLE_CERT_PASSWORD" \
+            "$KEYCHAIN_NAME" > /dev/null 2>&1
+        echo "✓ Partition list configured for headless signing"
+
         # List imported certificates
         echo "Imported certificates:"
         security find-identity -v -p codesigning "$KEYCHAIN_NAME" || true

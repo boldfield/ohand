@@ -6,7 +6,7 @@ set -euo pipefail
 ACTION="${1:-}"
 PROFILE_PATH="${2:-}"
 
-PROFILES_DIR="$HOME/Library/MobileDevice/Provisioning\ Profiles"
+PROFILES_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
 
 if [ -z "$ACTION" ]; then
     echo "Usage: $0 <action> [profile-path]"
