@@ -104,15 +104,24 @@ final class NotificationProbeTests: XCTestCase {
                 let beforeCount = requests.count
                 self.notificationCenter.removePendingNotificationRequests(withIdentifiers: ["cancel-1", "cancel-2"])
 
-                self.notificationCenter.getPendingNotificationRequests { requestsAfter in
-                    let afterCount = requestsAfter.count
-                    XCTAssertEqual(beforeCount - afterCount, 2, "Should have removed exactly 2 requests")
+                let removeGroup = DispatchGroup()
+                removeGroup.enter()
 
-                    let remaining = requestsAfter.filter { testIds.contains($0.identifier) }
-                    XCTAssertEqual(remaining.count, 1, "Only cancel-3 should remain")
-                    XCTAssertEqual(remaining.first?.identifier, "cancel-3")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    removeGroup.leave()
+                }
 
-                    expectation.fulfill()
+                removeGroup.notify(queue: .main) {
+                    self.notificationCenter.getPendingNotificationRequests { requestsAfter in
+                        let afterCount = requestsAfter.count
+                        XCTAssertEqual(beforeCount - afterCount, 2, "Should have removed exactly 2 requests")
+
+                        let remaining = requestsAfter.filter { testIds.contains($0.identifier) }
+                        XCTAssertEqual(remaining.count, 1, "Only cancel-3 should remain")
+                        XCTAssertEqual(remaining.first?.identifier, "cancel-3")
+
+                        expectation.fulfill()
+                    }
                 }
             }
         }
@@ -128,7 +137,6 @@ final class NotificationProbeTests: XCTestCase {
         notificationCenter.removeAllPendingNotificationRequests()
 
         let group = DispatchGroup()
-        var successCount = 0
 
         for i in 0..<100 {
             group.enter()
@@ -147,9 +155,6 @@ final class NotificationProbeTests: XCTestCase {
             )
 
             notificationCenter.add(request) { error in
-                if error == nil {
-                    successCount += 1
-                }
                 group.leave()
             }
         }
@@ -157,9 +162,8 @@ final class NotificationProbeTests: XCTestCase {
         group.notify(queue: .main) {
             self.notificationCenter.getPendingNotificationRequests { requests in
                 let actualLimit = requests.count
-                XCTAssertGreater(actualLimit, 0, "Some requests should be pending")
-                XCTAssertLess(actualLimit, 100, "Not all 100 requests should be accepted")
-                XCTAssertEqual(successCount, actualLimit, "Actual limit should match pending count")
+                XCTAssertGreaterThan(actualLimit, 0, "Some requests should be pending")
+                XCTAssertLessThan(actualLimit, 100, "Not all 100 requests should be accepted")
 
                 expectation.fulfill()
             }
@@ -199,7 +203,7 @@ final class NotificationProbeTests: XCTestCase {
                 if let calendarTrigger = pending?.trigger as? UNCalendarNotificationTrigger {
                     let nextFire = calendarTrigger.nextTriggerDate()
                     XCTAssertNotNil(nextFire, "Calendar trigger should compute next fire date")
-                    XCTAssertGreater(nextFire ?? Date(), Date(), "Fire date should be in future")
+                    XCTAssertGreaterThan(nextFire ?? Date(), Date(), "Fire date should be in future")
                 } else {
                     XCTFail("Trigger should be a calendar trigger")
                 }

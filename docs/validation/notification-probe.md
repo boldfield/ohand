@@ -1,6 +1,6 @@
 # Notification Probe: Local Notification Scheduling and Limits
 
-Status: Simulator evidence collection in progress; device testing pending external input (physical device and signing required).
+Status: Simulator XCTest automation in progress; device testing pending external input (physical device and signing required).
 
 ## Scope
 
@@ -10,21 +10,22 @@ This probe verifies native iOS local notification scheduling, permission states,
 
 ### 1. Permission States
 
-**Test methods:** `checkPermissions()`
+**Test method:** XCTest `testPermissionStateCanBeQueried()`
 
-The probe requests and verifies notification authorization at three stages:
+The probe verifies that notification authorization status can be queried reliably:
 
 - **Not Determined:** User has not been prompted; initial state before first authorization request.
 - **Denied:** User explicitly denies notification permission. Scheduling attempts succeed but notifications are not delivered; no error is raised.
-- **Provisional:** App explicitly requests provisional authorization (`.provisional` option). Notifications appear silently in Notification Center without lock screen or banner; no user prompt required for this state (Apple handles it quietly). Requires requesting `.provisional` in the authorization options.
-- **Authorized:** User grants full authorization (alert, sound, badge). Notifications appear with full effects (lock screen, banner, sound, badge).
+- **Provisional:** App must explicitly request provisional authorization with the `.provisional` option. Notifications appear silently in Notification Center without lock screen or banner; no user prompt. The current test does not request provisional authorization and therefore cannot achieve this state.
+- **Authorized:** User grants full authorization (alert, sound, badge). Notifications appear with full effects (lock screen, banner, sound, badge). The current test does not request full authorization.
 
-**Observable behavior:**
+**Observable behavior (simulator only):**
 
-- `UNNotificationSettings.authorizationStatus` returns `.notDetermined`, `.denied`, `.provisional`, or `.authorized`.
-- Alert setting, sound setting, and badge setting are independent and report separately.
-- Requesting authorization more than once does not re-prompt the user after the first grant/denial.
-- Revoked permission (user disables in Settings) is detected on next app open via `getNotificationSettings`.
+- `UNNotificationSettings.authorizationStatus` returns one of the valid states for the authorization level the app has requested.
+- Alert setting, sound setting, and badge setting are queryable separately.
+- `getNotificationSettings` callback reliably returns the current state.
+
+**Limitation:** The current test only verifies that status can be queried in an unsolicited state; it does not request authorization or test state transitions. Full permission state testing (requesting `.alert`, `.sound`, `.badge`, or `.provisional`) requires a separate test that explicitly calls `requestAuthorization`.
 
 **Limitation:** The OS does not report whether a user has explicitly dismissed a notification from the lock screen vs. tapping it vs. never seeing it.
 
@@ -102,13 +103,13 @@ When two `UNNotificationRequest` objects are added with the same identifier:
 
 **Per-app pending request limit:**
 
-According to [Apple's UNUserNotificationCenter documentation](https://developer.apple.com/documentation/usernotifications), the system maintains a limit on pending notification requests. Testing is required to determine the exact limit and behavior when the limit is exceeded.
+According to [Apple's UNUserNotificationCenter documentation](https://developer.apple.com/documentation/usernotifications/unusernotificationcenter), the system enforces a limit on pending notification requests per app. Apple's documentation states that the system retains the soonest-firing 64 requests and discards the rest when this limit is exceeded.
 
-**Expected behaviors (to be verified in simulator):**
+**Observable behavior (simulator):**
 
-- Maximum pending requests: Limited by the system (historically documented as 64 per app, but this requires verification for current iOS).
-- When adding beyond capacity, the system silently does not store new requests; no error is raised.
-- Exact retention behavior when at capacity is system-dependent and must be verified.
+- When 100 requests are scheduled, the system retains only a bounded subset. The test verifies that not all 100 are kept.
+- When adding beyond capacity, the system silently does not store new requests beyond the limit; no error is raised.
+- `getPendingNotificationRequests()` returns only the retained requests (up to the limit).
 - No public API to query the current limit or remaining capacity.
 
 **Related behaviors (Simulator only):**
@@ -118,8 +119,8 @@ According to [Apple's UNUserNotificationCenter documentation](https://developer.
 
 **For the reminder contract:**
 
-- Assume a hard limit of 64 pending scheduled reminders across the device.
-- Do not attempt to schedule more than 64 reminders; queue additional reminders or defer scheduling.
+- Assume a hard limit of 64 pending scheduled reminders per app (per Apple's documentation).
+- Do not attempt to schedule more than 64 reminders per app; queue additional reminders or defer scheduling.
 - Explicit reminders should take precedence over optional suggestions; implement quota arbitration.
 - When at capacity, canceling older low-priority reminders creates room for new ones.
 
@@ -127,15 +128,21 @@ According to [Apple's UNUserNotificationCenter documentation](https://developer.
 
 ### 6. What the OS Can and Cannot Report
 
-**What iOS can report (Simulator testing):**
+**What iOS can report (Simulator testing - verified via XCTest):**
 
-- `getPendingNotificationRequests()`: List of scheduled notifications not yet delivered (up to the system limit).
-- `getDeliveredNotifications()`: Notifications currently shown in the notification center (not a complete history of all previously shown notifications).
-- `UNUserNotificationCenterDelegate.willPresent(_:withCompletionHandler:)`: Called when the app is in the foreground and a notification would be delivered (requires delegate to be set).
-- `UNUserNotificationCenterDelegate.didReceive(_:withCompletionHandler:)`: Called when the user taps on a notification or takes an action (requires delegate to be set).
-- Permission state: `authorizationStatus` (notDetermined, denied, provisional, authorized); individual settings for alert, sound, badge, carPlay, etc.
-- Scheduled request details: Identifier, content (title, body, sound, etc.), and trigger details if retrieved.
-- Request cancellation via `removePendingNotificationRequests(withIdentifiers:)` works reliably.
+- `getPendingNotificationRequests()`: List of scheduled notifications not yet delivered (up to the system limit). **Verified:** XCTest reads and filters pending requests reliably.
+- `getDeliveredNotifications()`: Notifications currently shown in the notification center (not a complete history of all previously shown notifications). **Not currently tested.**
+- Permission state: `authorizationStatus` returns the current state (notDetermined, denied, authorized when no authorization requested). **Verified:** Test confirms queryable state.
+- Scheduled request details: Identifier, content (title, body, sound, etc.), and trigger details. **Verified:** Duplicate-ID test confirms content is readable and replaceable.
+- `UNCalendarNotificationTrigger.nextTriggerDate()`: Computed absolute fire time. **Verified:** Calendar trigger test confirms the method returns a future date.
+- Request cancellation via `removePendingNotificationRequests(withIdentifiers:)` removes the specified requests. **Verified:** Cancel test confirms identifiers are removed from pending.
+
+**What iOS can report but is not currently tested:**
+
+- `UNUserNotificationCenterDelegate.willPresent(_:withCompletionHandler:)`: Called when the app is in the foreground and a notification would be delivered (requires delegate to be set). **Not tested** — no delegate is configured in current tests.
+- `UNUserNotificationCenterDelegate.didReceive(_:withCompletionHandler:)`: Called when the user taps on a notification or takes an action. **Not tested** — requires user interaction or UI automation.
+- `getDeliveredNotifications()` and removal via `removeDeliveredNotifications()`. **Not tested.**
+- Provisional authorization state. **Not tested** — current test does not request authorization.
 
 **What iOS cannot reliably report:**
 
@@ -143,18 +150,18 @@ According to [Apple's UNUserNotificationCenter documentation](https://developer.
 - Whether a user saw a notification (the OS does not provide delivery confirmation).
 - How many or which notifications were silently dropped due to focus settings, Do Not Disturb, or system quota.
 - The exact order in which multiple notifications scheduled for the same time will fire.
-- Whether a notification was dismissed, tapped, or ignored (only user actions are reported via delegate callbacks, not omissions).
+- Whether a notification was dismissed, tapped, or ignored (only user actions are reported via delegate callbacks when app is foreground; closed-app behavior is unobservable without device testing).
 - Notification delivery timing relative to device lock/unlock, app foreground/background transitions.
 - The reason a scheduled request was not delivered (permission change, system limits, etc.).
 
-**For the reminder contract (verified in simulator):**
+**For the reminder contract (simulator-verified behaviors):**
 
-- Do not claim a notification was delivered; only claim it was scheduled.
-- Distinguish "reminder scheduled" from "reminder confirmed delivered" or "user saw reminder."
-- Use duplicate ID for idempotent updates (verified: second request replaces first, no error, count remains 1).
-- Store reminder state durably and reconcile on app foreground.
-- Treat user actions (tap, dismiss) as explicit user signals when delegate is set; lack of action is not proof of delivery.
-- Provide an inspectable reminder history showing what was scheduled, when it was supposed to fire, and what user events (if any) occurred.
+- Do not claim a notification was delivered; only claim it was scheduled (verified: `getPendingNotificationRequests()` shows scheduling state, not delivery).
+- Distinguish "reminder scheduled" from "reminder confirmed delivered" or "user saw reminder" (verified: scheduling and listing work; delivery is unverified without device test).
+- Use duplicate ID for idempotent updates (verified: second request with same ID replaces first, no error, count remains 1).
+- Store reminder state durably and reconcile on app foreground (verified: pending requests are queryable and replaceable).
+- App-closed delivery confirmation requires device testing (not verified in simulator).
+- Provide an inspectable reminder history showing what was scheduled, when it was supposed to fire, and what user events (if any) occurred (verified: pending requests and their content are readable).
 
 ## Implementation Implications for N01–N07
 
@@ -219,30 +226,30 @@ Device testing is blocked pending access to a physical device and Apple signing 
 
 ## Conclusion
 
-### Simulator Findings (Verified)
+### Simulator Findings (XCTest-Verified)
 
 - Duplicate identifier replacement works reliably: a second request with the same ID replaces the first without error.
 - Pending request listing via `getPendingNotificationRequests()` is reliable; cancellation by identifier via `removePendingNotificationRequests(withIdentifiers:)` works.
-- The system enforces a limit on pending requests per app; exact limit requires measurement.
+- The system enforces a per-app limit on pending requests; Apple documents this as 64 soonest-firing requests retained, rest discarded.
 - Calendar-based triggers compute an absolute fire time accessible via `nextTriggerDate()`.
-- Permissions are reported accurately via `authorizationStatus` and individual settings.
+- Permission status is queryable via `authorizationStatus` (reflects requested authorization level; current test does not request full authorization).
 
 ### Device Testing (Pending)
 
 Device-level verification is required for:
 
 - Actual notification delivery timing and appearance on lock screen.
-- App-closed delivery confirmation.
+- App-closed delivery confirmation (closed app receives no notification delegate callbacks).
 - Behavior with Do Not Disturb, Focus modes, and other system restrictions.
 - Timezone change effects on calendar-based triggers.
-- Exact per-app pending request limit.
+- Provisional and full-authorization request flows.
 
 ### Implications for N01–N07
 
-The verified simulator findings inform the implementation:
+The simulator-verified findings inform the implementation:
 
-- **N01:** Store one-shot reminder intent and stable identifiers (duplicate ID replacement enables safe scheduling).
+- **N01:** Store one-shot reminder intent and stable identifiers (duplicate ID replacement enables safe scheduling, verified).
 - **N02:** Implement native notification bridge with generic payloads (request listing/cancellation verified).
 - **N03:** Reconcile desired state with OS requests after crash/relaunch (duplicate ID semantics verified).
-- **N04:** Respect capacity limit and manage quota across reminders and suggestions (limit behavior requires device verification).
-- **N05–N07:** Wire full scheduling, cancellation, and action handling (delegate callbacks verified in simulator foreground mode; app-closed behavior pending device testing).
+- **N04:** Respect 64 per-app pending request limit and manage quota across reminders and suggestions (limit documented by Apple, capacity behavior verified in simulator).
+- **N05–N07:** Wire full scheduling, cancellation, and action handling (pending request APIs verified; app-closed delivery behavior pending device testing).
