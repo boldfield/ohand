@@ -31,15 +31,11 @@ impl Clock for SystemClock {
 /// Database handle with schema validation.
 pub struct Database {
     conn: Connection,
-    #[allow(dead_code)]
-    clock: Arc<dyn Clock>,
 }
 
 impl std::fmt::Debug for Database {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Database")
-            .field("clock", &"<clock>")
-            .finish()
+        f.debug_struct("Database").finish()
     }
 }
 
@@ -57,24 +53,8 @@ impl Database {
         // Enable foreign keys for constraint enforcement.
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
 
-        // Create metadata table if it doesn't exist.
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS _schema_metadata (
-                version INTEGER PRIMARY KEY,
-                created_at TEXT NOT NULL,
-                upgraded_at TEXT NOT NULL
-            )",
-            [],
-        )?;
-
-        // Query current schema version.
-        let current_version: Option<u32> = conn
-            .query_row(
-                "SELECT version FROM _schema_metadata ORDER BY version DESC LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?;
+        // Query current schema version (metadata table may not exist yet).
+        let current_version: Option<u32> = Self::query_version(&conn)?;
 
         if let Some(ver) = current_version {
             if ver < SCHEMA_VERSION {
@@ -86,29 +66,39 @@ impl Database {
             Self::create_schema_v1(&mut conn, &clock)?;
         }
 
-        Ok(Database { conn, clock })
+        Ok(Database { conn })
+    }
+
+    /// Query the current schema version, returning None if metadata table doesn't exist.
+    fn query_version(conn: &Connection) -> Result<Option<u32>> {
+        // Check if metadata table exists in sqlite_master.
+        let table_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_schema_metadata')",
+                [],
+                |row| row.get(0),
+            )?;
+
+        if !table_exists {
+            return Ok(None);
+        }
+
+        // Read version from metadata.
+        let version = conn
+            .query_row(
+                "SELECT version FROM _schema_metadata ORDER BY version DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        Ok(version)
     }
 
     /// Check schema version on a read-only connection/transaction.
     /// Prevents forward-incompatible databases from being modified.
     fn check_version(conn: &Connection) -> Result<()> {
-        // Read-only query to check if metadata exists and what version is stored.
-        let current_version: Option<u32> = match conn.query_row(
-            "SELECT version FROM _schema_metadata ORDER BY version DESC LIMIT 1",
-            [],
-            |row| row.get(0),
-        ) {
-            Ok(ver) => Some(ver),
-            Err(rusqlite::Error::QueryReturnedNoRows) => None,
-            Err(e) => {
-                let err_msg = e.to_string();
-                if err_msg.contains("no such table") {
-                    None
-                } else {
-                    return Err(anyhow!("Failed to check schema version: {}", e));
-                }
-            }
-        };
+        let current_version = Self::query_version(conn)?;
 
         if let Some(ver) = current_version {
             if ver > SCHEMA_VERSION {
@@ -127,6 +117,16 @@ impl Database {
     /// Create schema version 1 tables.
     fn create_schema_v1(conn: &mut Connection, clock: &Arc<dyn Clock>) -> Result<()> {
         let tx = conn.transaction()?;
+
+        // Create metadata table inside the transaction for atomicity.
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS _schema_metadata (
+                version INTEGER PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                upgraded_at TEXT NOT NULL
+            )",
+            [],
+        )?;
 
         // Record schema version in metadata table.
         let now = clock.now().to_rfc3339();
@@ -242,6 +242,7 @@ impl Database {
                 route_name TEXT NOT NULL,
                 scope TEXT NOT NULL,
                 processing_destinations TEXT NOT NULL,
+                preview_safe INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             )",
             [],
@@ -318,12 +319,14 @@ impl Database {
         )?;
 
         // Provider profiles table: versioned, immutable provider configuration.
+        // Multiple versions can coexist per profile_id; jobs pin to a specific version.
+        // profile_version is the immutable versioning key; profile_id groups related versions.
         // Note: No FK to jobs; profile can be deleted independently.
         // Jobs record the profile_version and fail visibly if it's no longer available.
         tx.execute(
             "CREATE TABLE IF NOT EXISTS provider_profiles (
-                profile_id TEXT PRIMARY KEY,
-                profile_version TEXT NOT NULL UNIQUE,
+                profile_version TEXT PRIMARY KEY,
+                profile_id TEXT NOT NULL,
                 provider_type TEXT NOT NULL,
                 endpoint TEXT,
                 model TEXT NOT NULL,
@@ -334,6 +337,10 @@ impl Database {
                 capabilities TEXT NOT NULL,
                 created_at TEXT NOT NULL
             )",
+            [],
+        )?;
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS idx_provider_profiles_profile_id ON provider_profiles(profile_id)",
             [],
         )?;
 
@@ -422,6 +429,31 @@ impl Database {
         )?;
         tx.execute(
             "CREATE INDEX IF NOT EXISTS idx_reminders_request_state ON reminders(request_state)",
+            [],
+        )?;
+
+        // Reminder operations table: durable record of scheduling/cancellation operations.
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS reminder_operations (
+                operation_id TEXT PRIMARY KEY,
+                reminder_id TEXT NOT NULL,
+                operation_type TEXT NOT NULL,
+                operation_state TEXT NOT NULL,
+                effect_identity TEXT NOT NULL,
+                external_id TEXT,
+                scheduled_for TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (reminder_id) REFERENCES reminders(reminder_id),
+                UNIQUE (reminder_id, effect_identity)
+            )",
+            [],
+        )?;
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reminder_operations_reminder_id ON reminder_operations(reminder_id)",
+            [],
+        )?;
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS idx_reminder_operations_operation_state ON reminder_operations(operation_state)",
             [],
         )?;
 

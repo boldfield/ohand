@@ -121,15 +121,15 @@ fn test_forward_incompatible_database_not_modified() -> Result<()> {
             rusqlite::params![2, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"],
         )?;
     }
-    let size_before = std::fs::metadata(&path)?.len();
+    let bytes_before = std::fs::read(&path)?;
 
     // Try to open: should fail without modifying the file.
     let _ = make_test_db(&path, instant);
-    let size_after = std::fs::metadata(&path)?.len();
+    let bytes_after = std::fs::read(&path)?;
 
-    // File size should not have changed (no WAL or new tables created).
+    // File bytes should not have changed (no WAL or new tables created).
     assert_eq!(
-        size_before, size_after,
+        bytes_before, bytes_after,
         "Database file was modified during version check"
     );
 
@@ -244,6 +244,100 @@ fn test_migration_failure_atomicity() -> Result<()> {
             count, 1,
             "Source capture should survive interrupted migration"
         );
+    }
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn test_migration_with_conflicting_schema_rolls_back() -> Result<()> {
+    let tmpdir = std::env::temp_dir();
+    let path = format!(
+        "{}/test_rollback_{}.db",
+        tmpdir.display(),
+        uuid::Uuid::new_v4()
+    );
+    let _ = std::fs::remove_file(&path);
+
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+
+    // Create a v0 database with metadata and an old-schema captures table.
+    {
+        let conn = Connection::open(&path)?;
+        conn.execute(
+            "CREATE TABLE _schema_metadata (
+                version INTEGER PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                upgraded_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO _schema_metadata (version, created_at, upgraded_at) VALUES (?, ?, ?)",
+            rusqlite::params![0, "2026-01-15T10:00:00Z", "2026-01-15T10:00:00Z"],
+        )?;
+        // Create an old-shape captures table (missing required fields like route_id).
+        conn.execute(
+            "CREATE TABLE captures (
+                capture_id TEXT PRIMARY KEY,
+                text TEXT
+            )",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO captures (capture_id, text) VALUES (?, ?)",
+            rusqlite::params!["test-capture-old", "old text"],
+        )?;
+    }
+
+    // Try to migrate: should fail because of the conflicting schema.
+    let result = make_test_db(&path, instant);
+    assert!(
+        result.is_err(),
+        "Migration with conflicting schema should fail"
+    );
+
+    // Verify the database still contains the old captures record and no v1 tables were created.
+    {
+        let conn = Connection::open(&path)?;
+        // Check that captures table still has only 2 columns (old schema).
+        let mut stmt = conn.prepare("PRAGMA table_info(captures)")?;
+        let columns: Vec<String> = stmt
+            .query_map([], |row| row.get(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            columns.len(),
+            2,
+            "Captures table should still have old schema (2 columns)"
+        );
+
+        // Check that old record survives.
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM captures WHERE capture_id = 'test-capture-old'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            count, 1,
+            "Old capture record should survive failed migration"
+        );
+
+        // Check that v1-only tables don't exist (no items table).
+        let items_exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='items')",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(
+            !items_exists,
+            "Items table should not exist after failed migration"
+        );
+
+        // Check that version is still 0 (not updated on failure).
+        let version: u32 =
+            conn.query_row("SELECT version FROM _schema_metadata", [], |row| row.get(0))?;
+        assert_eq!(version, 0, "Version should remain 0 after failed migration");
     }
 
     let _ = std::fs::remove_file(&path);
@@ -478,6 +572,81 @@ fn test_routes_and_authorizations_exist() -> Result<()> {
         auth_columns.contains(&"capability".to_string()),
         "capability should exist in authorizations"
     );
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn test_provider_profiles_versioning() -> Result<()> {
+    let tmpdir = std::env::temp_dir();
+    let path = format!(
+        "{}/test_profile_versions_{}.db",
+        tmpdir.display(),
+        uuid::Uuid::new_v4()
+    );
+    let _ = std::fs::remove_file(&path);
+
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+
+    let db = make_test_db(&path, instant)?;
+
+    // Insert two versions of the same profile (same profile_id, different profile_version).
+    db.conn().execute(
+        "INSERT INTO provider_profiles (
+            profile_version, profile_id, provider_type, model, timeout_seconds,
+            retry_policy, authorized_destinations, capabilities, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rusqlite::params![
+            "prof-123-v1",
+            "prof-123",
+            "test",
+            "model-1",
+            30,
+            "exponential",
+            "[]",
+            "[]",
+            "2026-01-15T10:30:00Z"
+        ],
+    )?;
+
+    db.conn().execute(
+        "INSERT INTO provider_profiles (
+            profile_version, profile_id, provider_type, model, timeout_seconds,
+            retry_policy, authorized_destinations, capabilities, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rusqlite::params![
+            "prof-123-v2",
+            "prof-123",
+            "test",
+            "model-2",
+            60,
+            "exponential",
+            "[]",
+            "[]",
+            "2026-01-15T10:31:00Z"
+        ],
+    )?;
+
+    // Verify both versions exist with the same profile_id.
+    let count: i64 = db.conn().query_row(
+        "SELECT COUNT(*) FROM provider_profiles WHERE profile_id = 'prof-123'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(
+        count, 2,
+        "Should be able to store multiple versions per profile_id"
+    );
+
+    // Verify they have different profile_version values.
+    let versions: Vec<String> = db
+        .conn()
+        .prepare("SELECT profile_version FROM provider_profiles WHERE profile_id = 'prof-123' ORDER BY profile_version")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    assert_eq!(versions, vec!["prof-123-v1", "prof-123-v2"]);
 
     let _ = std::fs::remove_file(&path);
     Ok(())
