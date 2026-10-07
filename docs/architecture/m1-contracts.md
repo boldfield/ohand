@@ -43,7 +43,7 @@ Rust owns authoritative domain state. Swift owns platform effects and protected 
 - **Request version**: immutable identifier of one interpretation request, covering the versioned instruction set (I07), the request context version, the profile version and the source revision. Recorded for audit.
 - **Proposal schema version**: a proposal carries a schema version number, validated before any semantic check. Unknown or unsupported schema versions are rejected without mutation.
 - **Proposal identity**: each proposal has an immutable proposal ID and records capture ID, source revision, request version and proposal schema version.
-- **Job version**: each job has an immutable job ID and records the job type (interpretation, transcription attachment, shadow review), the profile version and request version pinned at enqueue, the source revision, attempt count and creation time. A job keeps its pinned profile version for its whole life. Changing the default profile never reroutes queued jobs; if a pinned profile version is deleted or its destination is no longer authorized, the job stops with an explicit configuration failure and waits for the user, never falling back to another destination.
+- **Job version**: each job has an immutable job ID and records the job type (interpretation, transcription attachment, shadow review), the profile version and request version pinned at enqueue, the source revision, attempt count and creation time. Transcription-attachment jobs run on-device, so their profile version and request version are not applicable and are recorded as absent. A job keeps its pinned profile version for its whole life. Changing the default profile never reroutes queued jobs; if a pinned profile version is deleted or its destination is no longer authorized, the job stops with an explicit configuration failure and waits for the user, never falling back to another destination.
 
 ### Time Context
 
@@ -527,7 +527,7 @@ Native target inclusion is reserved by F03 in the same way. Production service r
 
 Before the first unlock after a device restart no store is readable, so capture cannot start; the native surface says so rather than losing input.
 
-Provider secrets live in the Keychain with accessibility `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`: bounded background completion may need them while locked, and the device-only variant keeps them out of device migration and backups. P11 verifies lock and relaunch behavior with synthetic secrets; a stricter class is used if the probe shows it is workable. No shared Keychain access group is used.
+Provider secrets live in the Keychain with accessibility `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`: bounded background completion may need them while locked, and the device-only variant keeps them out of device migration and backups. An encrypted backup restored to the same device may still bring such items back, so re-entry after a restore is the conservative assumption, not a guarantee. P11 verifies lock and relaunch behavior with synthetic secrets; a stricter class is used if the probe shows it is workable. No shared Keychain access group is used.
 
 ### Backup inclusion
 
@@ -593,7 +593,7 @@ These are recorded, not reopened here:
 - Linux core CI (F04): build, lint and test on hosted runners.
 - Native simulator CI (F05): real build and test on macOS runners for the exact revision; F05 also establishes the result-collection path.
 - Artifact hygiene (F06): secret scanning and fixture policy; fixtures are synthetic and no secrets, private data or signing material enter the public repository.
-- No placeholder success is acceptable: a command is reported as passing only if it ran. Until F02 and F05 land there is no application build or test command.
+- No placeholder success is acceptable: a command is reported as passing only if it ran. Until F02 and F05 land there is no application build or test command. F01 is a documentation-only change with no predecessor, so `make check` and `make test` do not exist when it is reviewed; they are created by F02 and F05, and F01 must not create them because it does not own the Makefile.
 
 ## Next Steps
 
