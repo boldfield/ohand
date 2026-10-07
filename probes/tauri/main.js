@@ -1,4 +1,4 @@
-// Tauri iOS probe: test native round-trip communication
+// Tauri 2 iOS probe: test native round-trip communication
 async function testEcho() {
     const input = document.getElementById('messageInput').value;
     const status = document.getElementById('status');
@@ -12,10 +12,7 @@ async function testEcho() {
     try {
         status.textContent = 'Calling Rust backend...';
 
-        // Note: At this phase, we test the Tauri framework communication capability.
-        // Production provider keys would NOT be passed to JavaScript per the spec.
-        // This probe verifies that the webview can call native Rust code successfully.
-        const response = await window.__TAURI__.invoke('echo_message', { input });
+        const response = await window.__TAURI__.core.invoke('echo_message', { input });
 
         status.textContent = 'Success';
         result.textContent = response;
@@ -27,8 +24,10 @@ async function testEcho() {
 }
 
 // Initialize when Tauri is ready
-if (typeof window.__TAURI__ !== 'undefined') {
-    document.getElementById('status').textContent = 'Tauri ready';
-} else {
-    document.getElementById('status').textContent = 'Waiting for Tauri...';
-}
+document.addEventListener('DOMContentLoaded', () => {
+    if (typeof window.__TAURI__ !== 'undefined' && window.__TAURI__.core) {
+        document.getElementById('status').textContent = 'Tauri ready';
+    } else {
+        document.getElementById('status').textContent = 'Waiting for Tauri...';
+    }
+});

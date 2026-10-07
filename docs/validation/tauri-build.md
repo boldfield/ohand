@@ -18,54 +18,67 @@ The probe does **not** implement production features; it tests framework feasibi
 - macOS 12.0 or later
 - Xcode 16.4 (pinned in `ios/project.yml`)
 - Rust toolchain (installed via `rust-toolchain.toml`)
-- Node.js 18+ (for Tauri CLI)
+- Node.js 18+ (for Tauri 2.4.1 CLI)
 - Target: iPhone simulator running iOS 16.0+
+
+## Pinned Dependencies
+
+This probe uses **pinned, reproducible versions**:
+- Tauri 2.4.1 (Rust and CLI)
+- @tauri-apps/api 2.4.1 and @tauri-apps/cli 2.4.1 (JavaScript)
+- Cargo.lock (committed to repository)
+- package-lock.json (committed to repository)
+
+**Do not use `@latest` or `^` versions.** Clean checkout must use the pinned lockfiles.
 
 ## Build Steps
 
-### 1. Install Tauri CLI
-
-```bash
-npm install -g @tauri-apps/cli@latest
-```
-
-### 2. Navigate to probe directory
+### 1. Navigate to probe directory
 
 ```bash
 cd probes/tauri
 ```
 
-### 3. Install frontend dependencies (if needed)
+### 2. Install pinned dependencies
 
-The probe uses minimal dependencies (just Tauri API). If a package.json exists:
+Install dependencies using the committed lockfiles:
 
 ```bash
-npm install
+npm ci
+cargo generate-lockfile --locked  # Verify Cargo.lock is present
 ```
 
-### 4. Build for iOS simulator
+### 3. Build for iOS simulator
+
+Build for the aarch64-apple-ios-sim target:
 
 ```bash
-tauri build --target aarch64-apple-ios-sim
+cargo tauri ios build --target aarch64-apple-ios-sim
 ```
 
 This generates:
-- Rust backend compilation
-- iOS app bundle
-- Xcode project integration
+- Rust backend compilation (tauri-build runs)
+- iOS app bundle under `target/aarch64-apple-ios-sim/debug/build/`
+- Xcode integration files
 
-### 5. Launch on simulator
+### 4. Launch on simulator
+
+Boot a simulator and launch the app:
 
 ```bash
-xcrun simctl boot "iPhone 16"
-tauri ios dev --target aarch64-apple-ios-sim
-```
+# Boot simulator (if not running)
+xcrun simctl boot "iPhone 16"  # or another available device
 
-Or manually:
-1. Open the generated Xcode project
-2. Select "OhAndTauriProbe" target
-3. Select "iPhone 16 Simulator"
-4. Build and run (Cmd+R)
+# Install the app
+APP_PATH="target/aarch64-apple-ios-sim/debug/build/ohand_tauri_probe.app"
+DEVICE_UDID="<simulator-udid>"
+xcrun simctl install "$DEVICE_UDID" "$APP_PATH"
+
+# Launch the app
+xcrun simctl launch "$DEVICE_UDID" "com.boldfield.ohand.tauri-probe"
+
+# Observe simulator
+```
 
 ## Simulator Validation Procedure
 
@@ -74,7 +87,7 @@ Or manually:
 1. **App launches** without crash on simulator boot
 2. **UI displays** with title "Oh And Tauri Probe"
 3. **Text input** accepts text (e.g., "Hello from Tauri")
-4. **Echo button** invokes Rust backend
+4. **Echo button** invokes Rust backend via Tauri v2 IPC
 5. **Result displays** "Echo from Rust: [input text]"
 6. **Status updates** to "Success"
 
@@ -85,22 +98,46 @@ Or manually:
    - Read title: "Oh And Tauri Probe"
    - Verify input field shows default "Hello from Tauri"
    - Tap "Echo" button
-   - Observe result field updates with echo response
+   - Observe result field updates with echo response: "Echo from Rust: Hello from Tauri"
    - Status changes to "Success"
 3. Repeat with custom input to verify Rust communication works
+4. Take a screenshot of the successful result
 
 ### Failure modes to document
 
-- Xcode compilation error (Rust, Swift, or framework mismatch)
-- App crash on launch (indicates native incompatibility)
-- Button tap produces no response (IPC failure)
-- IPC returns error (bridge communication broken)
+- **Tauri configuration error** ("tauri.conf.json error")
+- **Workspace resolution error** ("is not in the workspace")
+- **Cargo.lock/package-lock.json mismatch** (lockfile out of date or missing)
+- **Rust compilation error** (unsupported features, mismatched dependencies)
+- **iOS app build error** (Xcode, Swift, or framework mismatch)
+- **App crash on launch** (indicates native incompatibility or missing configuration)
+- **Button tap produces no response** (IPC failure)
+- **IPC returns error** (bridge communication broken, missing capability)
 
 Document any failures with:
 - Exact error message and stack trace
-- Xcode build log excerpt
-- Simulator logs (via `xcrun simctl spawn <device_id> log stream --predicate 'process == "OhAndTauriProbe"'`)
+- Build log excerpt (especially configuration validation and Rust compiler output)
+- Simulator logs (via `xcrun simctl spawn <device_id> log stream`)
 - Tauri version and architecture used
+- Pinned dependency versions from Cargo.lock and package-lock.json
+
+## JavaScript Bridge (Tauri 2 API)
+
+This probe uses **Tauri 2.x API**, not Tauri 1.x. Key differences:
+
+**Tauri 2.x (correct):**
+```javascript
+// IPC invoke in Tauri 2
+const response = await window.__TAURI__.core.invoke('echo_message', { input: 'Hello' });
+```
+
+**Tauri 1.x (incorrect):**
+```javascript
+// This is Tauri 1 API - do NOT use
+const response = await window.__TAURI__.invoke('echo_message', { input: 'Hello' });
+```
+
+The probe's index.html and main.js use Tauri 2 API and include a strict Content-Security-Policy. Scripts are bundled locally; no remote URLs are loaded.
 
 ## Security validation
 
@@ -109,28 +146,28 @@ Document any failures with:
 The production app must **never** pass provider API keys or secrets to JavaScript. This probe verifies:
 
 1. **No keys in configuration files** (tauri.conf.json contains no secrets)
-2. **No keys in JavaScript** (main.js has no hardcoded credentials)
-3. **Rust backend handles secrets** (echo_message command does not echo secrets; credentials remain in Rust domain only)
+2. **No keys in JavaScript** (main.js has no hardcoded credentials or API keys)
+3. **Rust backend handles secrets** (echo_message command does not transmit secrets; credentials remain in Rust domain only)
 
 For production integrations, use native Keychain for credential storage and expose only opaque references across the JavaScript boundary.
 
 ### Test: Credential isolation
 
-Add a provider key to the Rust backend (synthetic only):
+The echo_message command is a proof of concept that Rust ↔ JavaScript communication works without exposing secrets:
 
 ```rust
 #[tauri::command]
-fn get_api_endpoint() -> String {
-    // NEVER: return secret; always return opaque reference only
-    "ohand://provider/1".to_string()
+fn echo_message(input: String) -> String {
+    // Command succeeds; no secrets are involved
+    format!("Echo from Rust: {}", input)
 }
 ```
 
-The JavaScript can receive an opaque reference but never the actual key:
+JavaScript invokes it but never receives or sends actual credentials:
 
 ```javascript
-const providerRef = await window.__TAURI__.invoke('get_api_endpoint');
-// providerRef = "ohand://provider/1" — never exposes actual key
+const response = await window.__TAURI__.core.invoke('echo_message', { input: 'Hello' });
+// response = "Echo from Rust: Hello" — demonstrates IPC without secrets
 ```
 
 ## Clean Build and Full Cycle
@@ -141,7 +178,9 @@ If incremental builds fail:
 cd probes/tauri
 rm -rf src-tauri/target
 rm -rf dist
-tauri build --target aarch64-apple-ios-sim
+cargo clean
+npm ci
+cargo tauri ios build --target aarch64-apple-ios-sim
 ```
 
 ## Troubleshooting
@@ -154,12 +193,33 @@ xcrun simctl list devices
 xcrun simctl boot "iPhone 16"
 ```
 
-### "Tauri plugin not found"
+### "tauri.conf.json error"
 
-Verify Tauri CLI is installed and up to date:
-```bash
-tauri --version
-npm install -g @tauri-apps/cli@latest
+Tauri 2 uses a different schema than Tauri 1. Ensure:
+- `identifier` is at the root level, not inside `bundle`
+- `bundle.targets` is `["app"]`, not `["ios"]` or `[{"ios": ["app"]}]`
+- `build.devUrl` and `build.frontendDist` are set correctly
+- No invalid Tauri 1 keys like `build.devPath` exist
+
+Run `npx tauri info` to validate the configuration.
+
+### "current package believes it's in a workspace when it's not"
+
+Ensure the root Cargo.toml has:
+```toml
+[workspace]
+exclude = ["probes/tauri/src-tauri"]
+```
+
+This keeps the probe's Rust code outside the workspace.
+
+### "depends on tauri with feature X but tauri does not have that feature"
+
+Remove Tauri 1 features like `shell-open` or `os-all` from Cargo.toml. Tauri 2 does not have these. Use pinned versions:
+
+```toml
+[dependencies]
+tauri = { version = "=2.4.1" }
 ```
 
 ### "Compilation error: unknown module"
@@ -169,11 +229,13 @@ Ensure Rust toolchain matches (check `rust-toolchain.toml`):
 rustup override set $(cat ../../rust-toolchain.toml | grep channel | cut -d'"' -f2)
 ```
 
-### "IPC communication timeout"
+### "IPC communication timeout or undefined __TAURI__"
 
-- Check that `window.__TAURI__` is defined in browser console
-- Verify `tauri.conf.json` security settings allow IPC
-- Ensure Rust command handler is registered in `main.rs` via `generate_handler!`
+- Check that `window.__TAURI__.core` is defined in JavaScript console
+- Use Tauri 2 API: `window.__TAURI__.core.invoke()`, not Tauri 1's `window.__TAURI__.invoke()`
+- Verify `tauri.conf.json` has a valid window definition (not an empty array)
+- Ensure Rust command is registered via `generate_handler![echo_message]`
+- Check CSP in index.html allows inline scripts
 
 ## Live Device Testing
 
@@ -182,7 +244,7 @@ Simulator validation passes and device testing is separate. To test on a physica
 1. Obtain Apple Developer signing credentials
 2. Configure signing in Xcode (team/provisioning profile)
 3. Plug iPhone 16 and select it as target
-4. Run `tauri ios dev --target aarch64-apple-ios`
+4. Run `cargo tauri ios build --target aarch64-apple-ios`
 
 Device testing is not part of this probe; see **P08** (signing) and **P09** (device feasibility) for production builds and physical validation.
 

@@ -1,20 +1,30 @@
 {
+  "productName": "ohand-tauri-probe",
+  "version": "0.1.0",
+  "identifier": "com.boldfield.ohand.tauri-probe",
   "build": {
     "beforeBuildCommand": "",
     "beforeDevCommand": "",
-    "devPath": "../",
-    "frontendDist": "../"
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../dist"
   },
   "app": {
-    "windows": [],
+    "windows": [
+      {
+        "title": "Oh And Tauri Probe",
+        "width": 400,
+        "height": 600,
+        "resizable": false,
+        "fullscreen": false
+      }
+    ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'"
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["ios"],
-    "identifier": "com.boldfield.ohand.tauri-probe",
+    "targets": ["app"],
     "icon": [],
     "resources": []
   }
