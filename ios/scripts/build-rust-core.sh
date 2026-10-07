@@ -55,7 +55,7 @@ done
 
 # Create a universal library for multi-architecture support
 if [ ${#LIBS[@]} -gt 1 ]; then
-  universal_lib="${CORE_BUILD}/libohand_core.a"
+  universal_lib="${BUILD_DIR}/libohand_core.a"
   echo "Creating universal library with lipo..."
   lipo -create "${LIBS[@]}" -output "${universal_lib}"
   # Clean up individual architecture libraries
@@ -64,8 +64,8 @@ if [ ${#LIBS[@]} -gt 1 ]; then
   done
 else
   # Single target case (unlikely for iOS but handled)
-  cp "${LIBS[0]}" "${CORE_BUILD}/libohand_core.a"
+  cp "${LIBS[0]}" "${BUILD_DIR}/libohand_core.a"
   rm "${LIBS[0]}"
 fi
 
-echo "Rust core library built: ${CORE_BUILD}/libohand_core.a"
+echo "Rust core library built: ${BUILD_DIR}/libohand_core.a"
