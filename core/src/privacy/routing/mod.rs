@@ -172,12 +172,16 @@ impl RoutingPolicyBuilder {
         self
     }
 
-    /// Authorize a capability for reviewer routes (no destination needed).
-    pub fn with_reviewer_capability(mut self, capability: ProviderCapability) -> Self {
+    /// Authorize a capability for reviewer routes with a specific destination.
+    pub fn with_reviewer_capability(
+        mut self,
+        capability: ProviderCapability,
+        destination: impl Into<String>,
+    ) -> Self {
         self.grants.insert(CapabilityGrant {
             capability,
             route: ProcessingRoute::Reviewer,
-            destination: None,
+            destination: Some(destination.into()),
         });
         self
     }
@@ -215,14 +219,18 @@ pub enum AuthorizationError {
 }
 
 /// Authorization context for a job to leave the device.
+/// The route, capability, and destination come from the stored capture and route authorizations,
+/// not from untrusted caller input. This ensures the original user intent is preserved.
 pub struct AuthorizationContext {
-    /// The route the capture declared.
-    pub declared_route: ProcessingRoute,
+    /// The immutable route from the stored capture (route_id in schema).
+    /// Never supplied by caller; always read from persistent storage.
+    pub route: ProcessingRoute,
     /// The capability being requested (e.g., TextInterpretation).
     pub capability: ProviderCapability,
     /// The profile version the job was queued against.
     pub profile_version: String,
-    /// The destination the job would use (if not local-only).
+    /// The destination from the stored route authorization.
+    /// Required for non-local routes; never supplied by caller.
     pub destination: Option<String>,
 }
 
@@ -245,7 +253,7 @@ impl Authorizer {
         profile: &ProviderProfile,
     ) -> Result<AuthorizationDecision, AuthorizationError> {
         // For local-only routes, payload never leaves the device.
-        if context.declared_route == ProcessingRoute::LocalOnly {
+        if context.route == ProcessingRoute::LocalOnly {
             return Ok(AuthorizationDecision::Authorized);
         }
 
@@ -256,7 +264,7 @@ impl Authorizer {
             .ok_or(AuthorizationError::DestinationRequired)?;
 
         // Validate profile protocol matches the route type.
-        Self::validate_profile_for_route(context.declared_route, profile)?;
+        Self::validate_profile_for_route(context.route, profile)?;
 
         // Check that the capability is supported by the profile.
         use crate::providers::contracts::CapabilitySupport;
@@ -278,7 +286,7 @@ impl Authorizer {
 
         // Check if this capability is authorized for this route and destination.
         if !self.routing_policy.is_capability_authorized(
-            context.declared_route,
+            context.route,
             context.capability,
             Some(destination),
         ) {
@@ -311,11 +319,11 @@ impl Authorizer {
                 _ => Err(AuthorizationError::ProfileProtocolMismatch),
             },
             ProcessingRoute::Reviewer => {
-                // Reviewer can use any profile type, but typically would be a separate service
-                // For M1, we restrict reviewer to only explicit reviewer profiles
+                // Reviewer can use cloud or self-hosted services with explicit authorization
                 match profile.protocol() {
-                    ProviderProtocol::Anthropic | ProviderProtocol::OpenAi => Ok(()),
-                    _ => Err(AuthorizationError::ProfileProtocolMismatch),
+                    ProviderProtocol::Anthropic
+                    | ProviderProtocol::OpenAi
+                    | ProviderProtocol::SelfHosted => Ok(()),
                 }
             }
             ProcessingRoute::LocalOnly => Ok(()),
@@ -351,7 +359,7 @@ mod tests {
 
         // Fresh install denies cloud routes even with a cloud profile.
         let context = AuthorizationContext {
-            declared_route: ProcessingRoute::Cloud,
+            route: ProcessingRoute::Cloud,
             capability: ProviderCapability::TextInterpretation,
             profile_version: profile.profile_version().to_string(),
             destination: Some("https://api.anthropic.com".to_string()),
@@ -394,7 +402,7 @@ mod tests {
 
         // Attempting to send to cloud provider with private-server-only authorization fails.
         let context = AuthorizationContext {
-            declared_route: ProcessingRoute::PrivateServer,
+            route: ProcessingRoute::PrivateServer,
             capability: ProviderCapability::TextInterpretation,
             profile_version: profile.profile_version().to_string(),
             destination: Some("https://api.anthropic.com".to_string()),
@@ -408,43 +416,45 @@ mod tests {
     }
 
     #[test]
-    fn reviewer_auth_cannot_use_cloud_profile() {
-        // A reviewer authorization should not automatically allow any provider.
+    fn reviewer_auth_requires_explicit_destination() {
+        // A reviewer authorization requires a specific destination.
         let policy = RoutingPolicy::builder()
-            .with_reviewer_capability(ProviderCapability::TextInterpretation)
+            .with_reviewer_capability(
+                ProviderCapability::TextInterpretation,
+                "https://reviewer.example.com",
+            )
             .build();
         let authorizer = Authorizer::new(policy);
 
-        let mut profile_builder = crate::providers::contracts::ProviderProfileBuilder::new(
-            "cloud_profile",
-            crate::providers::contracts::ProviderProtocol::Anthropic,
-            "claude-3-5-sonnet",
+        // Reviewer is a separate service with its own profile and destination.
+        let mut reviewer_profile_builder = crate::providers::contracts::ProviderProfileBuilder::new(
+            "reviewer_service",
+            crate::providers::contracts::ProviderProtocol::SelfHosted,
+            "reviewer-model",
         );
-        profile_builder = profile_builder
-            .authorized_destination("https://api.anthropic.com")
-            .credential_ref("test_credential");
+        reviewer_profile_builder = reviewer_profile_builder
+            .endpoint("https://reviewer.example.com/api")
+            .authorized_destination("https://reviewer.example.com")
+            .credential_ref("reviewer_credential");
 
         use crate::providers::contracts::CapabilityMetadata;
-        profile_builder = profile_builder.capability(
+        reviewer_profile_builder = reviewer_profile_builder.capability(
             CapabilityMetadata::supported(ProviderCapability::TextInterpretation, "test_evidence")
                 .with_input_size_limit(10_000),
         );
 
-        let profile = profile_builder.build().expect("valid profile");
+        let reviewer_profile = reviewer_profile_builder.build().expect("valid profile");
 
-        // Reviewer authorization requires a destination (it's a separate service).
+        // Reviewer authorization with matching destination succeeds.
         let context = AuthorizationContext {
-            declared_route: ProcessingRoute::Reviewer,
+            route: ProcessingRoute::Reviewer,
             capability: ProviderCapability::TextInterpretation,
-            profile_version: profile.profile_version().to_string(),
-            destination: None, // Reviewer route requires a destination
+            profile_version: reviewer_profile.profile_version().to_string(),
+            destination: Some("https://reviewer.example.com".to_string()),
         };
 
-        let result = authorizer.authorize(&context, &profile);
-        assert!(matches!(
-            result,
-            Err(AuthorizationError::DestinationRequired)
-        ));
+        let result = authorizer.authorize(&context, &reviewer_profile);
+        assert_eq!(result, Ok(AuthorizationDecision::Authorized));
     }
 
     #[test]
@@ -476,7 +486,7 @@ mod tests {
         let profile = profile_builder.build().expect("valid profile");
 
         let context = AuthorizationContext {
-            declared_route: ProcessingRoute::Cloud,
+            route: ProcessingRoute::Cloud,
             capability: ProviderCapability::TextInterpretation,
             profile_version: profile.profile_version().to_string(),
             destination: None,
@@ -520,7 +530,7 @@ mod tests {
 
         // Attempt to use alternate destination even though only api.anthropic.com is authorized.
         let context = AuthorizationContext {
-            declared_route: ProcessingRoute::Cloud,
+            route: ProcessingRoute::Cloud,
             capability: ProviderCapability::TextInterpretation,
             profile_version: profile.profile_version().to_string(),
             destination: Some("https://api.anthropic-alt.com".to_string()),
@@ -584,7 +594,7 @@ mod tests {
 
         // Job pinned to v1 cannot use v2, even though both are authorized for the same destination.
         let context = AuthorizationContext {
-            declared_route: ProcessingRoute::Cloud,
+            route: ProcessingRoute::Cloud,
             capability: ProviderCapability::TextInterpretation,
             profile_version: profile_v1_version,
             destination: Some("https://api.anthropic.com".to_string()),
@@ -622,7 +632,7 @@ mod tests {
 
         // Attempt to declare cloud route when no cloud authorization exists.
         let context = AuthorizationContext {
-            declared_route: ProcessingRoute::Cloud,
+            route: ProcessingRoute::Cloud,
             capability: ProviderCapability::TextInterpretation,
             profile_version: profile.profile_version().to_string(),
             destination: Some("https://api.anthropic.com".to_string()),
@@ -667,7 +677,7 @@ mod tests {
         let profile = profile_builder.build().expect("valid profile");
 
         let context = AuthorizationContext {
-            declared_route: ProcessingRoute::LocalOnly,
+            route: ProcessingRoute::LocalOnly,
             capability: ProviderCapability::TextInterpretation,
             profile_version: profile.profile_version().to_string(),
             destination: None,
@@ -705,7 +715,7 @@ mod tests {
         let profile = profile_builder.build().expect("valid profile");
 
         let context = AuthorizationContext {
-            declared_route: ProcessingRoute::Cloud,
+            route: ProcessingRoute::Cloud,
             capability: ProviderCapability::TextInterpretation,
             profile_version: profile.profile_version().to_string(),
             destination: Some("https://api.anthropic.com".to_string()),
@@ -744,7 +754,7 @@ mod tests {
 
         // Even though cloud is authorized, this destination isn't.
         let context = AuthorizationContext {
-            declared_route: ProcessingRoute::Cloud,
+            route: ProcessingRoute::Cloud,
             capability: ProviderCapability::TextInterpretation,
             profile_version: profile.profile_version().to_string(),
             destination: Some("https://unauthorized.com".to_string()),
@@ -786,7 +796,7 @@ mod tests {
 
         // Transcription is not declared in the profile.
         let context = AuthorizationContext {
-            declared_route: ProcessingRoute::Cloud,
+            route: ProcessingRoute::Cloud,
             capability: ProviderCapability::Transcription,
             profile_version: profile.profile_version().to_string(),
             destination: Some("https://api.anthropic.com".to_string()),
@@ -831,7 +841,7 @@ mod tests {
         let profile = profile_builder.build().expect("valid profile");
 
         let context = AuthorizationContext {
-            declared_route: ProcessingRoute::PrivateServer,
+            route: ProcessingRoute::PrivateServer,
             capability: ProviderCapability::TextInterpretation,
             profile_version: profile.profile_version().to_string(),
             destination: Some("https://private.example.com".to_string()),
