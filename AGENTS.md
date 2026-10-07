@@ -29,7 +29,7 @@ Credentials, account enrollment/legal actions, and genuine device experiences ar
 - Preserve raw captures and explicit corrections. Model output cannot silently overwrite authoritative intent.
 - Capture must remain durable during network, provider, and reviewer outages.
 - Test retry/idempotency, conflicts, reminder states, migrations/restore, deletion, and processing-boundary enforcement where a change affects them.
-- Run checks appropriate to the task. There is no application or canonical build/test command at bootstrap; establish those through implementation tasks and update these instructions. Never claim a placeholder command passed.
+- Run checks appropriate to the task. The canonical build and test commands for the Rust core are `make check` and `make test`; these are documented in the "Required checks for Linux Odonian workers" section below. Never claim a placeholder command passed.
 - Use synthetic fixtures in this public repository. Do not commit secrets, recordings, personal captures, private conversations, signing material, or internal service endpoints.
 - Required CI and independent review remain gates even though human approval is not one. Use standard hosted runners and bounded artifact retention; paid capacity requires separate authorization.
 - Runtime adversarial review follows DESIGN.md and is not a substitute for independent code review.
@@ -42,7 +42,7 @@ Rust core checks are executed via the Makefile:
 
 - `make check` — Validate contract correctness, compile, format, and lint:
   - `contract-check` — Python contract validation
-  - `cargo-check --all --all-targets --locked` — Compilation with locked dependencies
+  - `cargo check --all --all-targets --locked` — Compilation with locked dependencies
   - `cargo fmt --all -- --check` — Code format validation (no in-place changes)
   - `cargo clippy --all-targets --locked -- -D warnings` — Lint pass with warnings-as-errors
 
@@ -50,6 +50,8 @@ Rust core checks are executed via the Makefile:
   - `contract-test` — Python contract tests
   - `cargo test --all --locked` — Full Rust test suite with locked dependencies
 
-These checks are wired into `.github/workflows/core.yml` on Linux runners (ubuntu-latest) via GitHub Actions. The workflow runs on all pull requests to main and validates that the change compiles, passes tests, and meets lint standards with locked dependencies. Evidence collection is separate from CI: device/simulator results, live trial data, and provider integration tests are distinct artifacts and do not gate the Linux checks.
+These checks are wired into `.github/workflows/core.yml` on Linux runners (ubuntu-latest) via GitHub Actions. The workflow runs on all pull requests to main and validates that the change compiles, passes tests, and meets lint standards with locked dependencies. 
+
+Artifact retention is bounded: `core.yml` does not upload artifacts; any future CI artifact upload must set `retention-days ≤ 7` to limit storage and cost. Evidence collection is separate from CI: device/simulator results, live trial data, and provider integration tests are distinct artifacts and do not gate the Linux checks.
 
 The first repository commit contains documentation and license material only. It is a bootstrap operation, not an application implementation or proof of completed milestones.
