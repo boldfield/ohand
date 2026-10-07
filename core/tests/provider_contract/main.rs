@@ -31,7 +31,7 @@ fn test_profile_validation_rejects_all_unsupported_capabilities() {
         ProviderCapability::Transcription,
         CapabilityMetadata {
             capability: ProviderCapability::Transcription,
-            support_state: CapabilitySupport::Unavailable,
+            support_state: CapabilitySupport::Unverified,
             input_size_limit: None,
             structured_output_supported: false,
         },
@@ -113,10 +113,10 @@ fn test_profile_validation_rejects_test_fake_in_normal_flow() {
 }
 
 #[test]
-fn test_profile_validation_rejects_zero_profile_version() {
+fn test_profile_validation_rejects_empty_profile_version() {
     let mut profile = FakeProvider::fake_test_profile();
     profile.protocol = ProviderProtocol::Anthropic;
-    profile.profile_version = 0;
+    profile.profile_version = String::new();
     profile.credential_ref = Some(CredentialRef {
         ref_id: "test-cred".to_string(),
     });
@@ -174,6 +174,7 @@ fn test_fake_provider_bounds_below_limit() {
 
 #[test]
 fn test_interpretation_request_with_full_contract() {
+    let profile_version = Uuid::new_v4().to_string();
     let request = InterpretationRequest {
         request_id: Uuid::new_v4().to_string(),
         request_version: 1,
@@ -183,7 +184,7 @@ fn test_interpretation_request_with_full_contract() {
         text_basis: "original source capture".to_string(),
         instructions: "extract action items and dates".to_string(),
         profile_id: "anthropic-test".to_string(),
-        profile_version: 1,
+        profile_version: profile_version.clone(),
         authorization_route: "interpreter".to_string(),
         context: RequestContext {
             capture_instant: chrono::Utc::now(),
@@ -194,7 +195,7 @@ fn test_interpretation_request_with_full_contract() {
         },
     };
 
-    assert_eq!(request.profile_version, 1);
+    assert_eq!(request.profile_version, profile_version);
     assert_eq!(request.request_version, 1);
     assert!(!request.capture_id.is_empty());
     assert!(!request.text_basis.is_empty());
@@ -204,6 +205,7 @@ fn test_interpretation_request_with_full_contract() {
 
 #[test]
 fn test_request_response_serialization() {
+    let profile_version = Uuid::new_v4().to_string();
     let request = InterpretationRequest {
         request_id: Uuid::new_v4().to_string(),
         request_version: 1,
@@ -213,7 +215,7 @@ fn test_request_response_serialization() {
         text_basis: "original".to_string(),
         instructions: "test".to_string(),
         profile_id: "test".to_string(),
-        profile_version: 1,
+        profile_version,
         authorization_route: "test".to_string(),
         context: RequestContext {
             capture_instant: chrono::Utc::now(),
@@ -258,12 +260,14 @@ fn test_response_with_all_fields() {
 }
 
 #[test]
-fn test_profile_versioning_is_deterministic() {
+fn test_profile_versioning_is_immutable_and_unique() {
     let profile1 = FakeProvider::anthropic_profile();
     let profile2 = FakeProvider::anthropic_profile();
 
-    assert_eq!(profile1.profile_version, profile2.profile_version);
+    assert_ne!(profile1.profile_version, profile2.profile_version);
     assert_eq!(profile1.schema_version, profile2.schema_version);
+    assert!(!profile1.profile_version.is_empty());
+    assert!(!profile2.profile_version.is_empty());
 }
 
 #[test]

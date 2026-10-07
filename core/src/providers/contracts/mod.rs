@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use thiserror::Error;
+use uuid::Uuid;
 
 pub mod fake;
 
@@ -64,8 +65,8 @@ pub enum CapabilitySupport {
     Supported,
     #[serde(rename = "unsupported")]
     Unsupported,
-    #[serde(rename = "unavailable")]
-    Unavailable,
+    #[serde(rename = "unverified")]
+    Unverified,
 }
 
 impl CapabilitySupport {
@@ -73,7 +74,7 @@ impl CapabilitySupport {
         match self {
             CapabilitySupport::Supported => "supported",
             CapabilitySupport::Unsupported => "unsupported",
-            CapabilitySupport::Unavailable => "unavailable",
+            CapabilitySupport::Unverified => "unverified",
         }
     }
 }
@@ -95,10 +96,11 @@ pub struct CapabilityMetadata {
 
 /// Immutable versioned provider profile.
 /// Multiple versions can coexist per profile_id; jobs pin to a specific version.
+/// profile_version is an immutable UUID; any change creates a new version.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderProfile {
     pub schema_version: u32,
-    pub profile_version: u32,
+    pub profile_version: String,
     pub profile_id: String,
     pub protocol: ProviderProtocol,
     pub endpoint: Option<String>,
@@ -115,7 +117,7 @@ impl ProviderProfile {
     pub fn new(profile_id: String, protocol: ProviderProtocol, model: String) -> ProviderProfile {
         ProviderProfile {
             schema_version: 1,
-            profile_version: 1,
+            profile_version: Uuid::new_v4().to_string(),
             profile_id,
             protocol,
             endpoint: None,
@@ -135,7 +137,7 @@ impl ProviderProfile {
             return Err(ProfileValidationError::EmptyProfileId);
         }
 
-        if self.profile_version == 0 {
+        if self.profile_version.is_empty() {
             return Err(ProfileValidationError::InvalidProfileVersion);
         }
 
@@ -168,6 +170,11 @@ impl ProviderProfile {
             ProviderProtocol::SelfHosted => {
                 if self.endpoint.is_none() {
                     return Err(ProfileValidationError::MissingEndpoint);
+                }
+                if let Some(ref endpoint) = self.endpoint {
+                    if !self.authorized_destinations.contains(endpoint) {
+                        return Err(ProfileValidationError::EndpointNotInAuthorizedDestinations);
+                    }
                 }
             }
             ProviderProtocol::TestFake => unreachable!(),
@@ -217,7 +224,7 @@ impl ProviderProfile {
 pub enum ProfileValidationError {
     #[error("Profile ID cannot be empty")]
     EmptyProfileId,
-    #[error("Profile version cannot be zero")]
+    #[error("Profile version cannot be empty")]
     InvalidProfileVersion,
     #[error("Schema version cannot be zero")]
     InvalidSchemaVersion,
@@ -233,6 +240,8 @@ pub enum ProfileValidationError {
     UnexpectedEndpoint,
     #[error("Profile is missing endpoint for self-hosted protocol")]
     MissingEndpoint,
+    #[error("Self-hosted endpoint is not in authorized destinations")]
+    EndpointNotInAuthorizedDestinations,
     #[error("Profile is missing credential reference")]
     MissingCredential,
     #[error("Credential reference ID cannot be empty")]
@@ -243,7 +252,7 @@ pub enum ProfileValidationError {
     EmptyAuthorizedDestination,
     #[error("Profile declares no capabilities")]
     NoCapabilities,
-    #[error("All capabilities are unsupported or unavailable")]
+    #[error("All capabilities are unsupported or unverified")]
     NoSupportedCapabilities,
     #[error("Capability map key does not match metadata")]
     InconsistentCapabilityMetadata,
@@ -278,7 +287,7 @@ pub struct InterpretationRequest {
     pub text_basis: String,
     pub instructions: String,
     pub profile_id: String,
-    pub profile_version: u32,
+    pub profile_version: String,
     pub authorization_route: String,
     pub context: RequestContext,
 }
@@ -631,16 +640,17 @@ mod tests {
 
     #[test]
     fn test_profile_validation_self_hosted_with_endpoint() {
+        let endpoint = "http://localhost:8000".to_string();
         let mut profile = ProviderProfile::new(
             "test-profile".to_string(),
             ProviderProtocol::SelfHosted,
             "llama-3".to_string(),
         );
-        profile.endpoint = Some("http://localhost:8000".to_string());
+        profile.endpoint = Some(endpoint.clone());
         profile.credential_ref = Some(CredentialRef {
             ref_id: "local-cred".to_string(),
         });
-        profile.authorized_destinations = vec!["local".to_string()];
+        profile.authorized_destinations = vec![endpoint];
         profile.capabilities.insert(
             ProviderCapability::TextInterpretation,
             CapabilityMetadata {
@@ -652,6 +662,35 @@ mod tests {
         );
 
         assert!(profile.validate().is_ok());
+    }
+
+    #[test]
+    fn test_profile_validation_endpoint_not_in_authorized_destinations() {
+        let mut profile = ProviderProfile::new(
+            "test-profile".to_string(),
+            ProviderProtocol::SelfHosted,
+            "llama-3".to_string(),
+        );
+        profile.endpoint = Some("http://localhost:8000".to_string());
+        profile.credential_ref = Some(CredentialRef {
+            ref_id: "local-cred".to_string(),
+        });
+        profile.authorized_destinations = vec!["other-destination".to_string()];
+        profile.capabilities.insert(
+            ProviderCapability::TextInterpretation,
+            CapabilityMetadata {
+                capability: ProviderCapability::TextInterpretation,
+                support_state: CapabilitySupport::Supported,
+                input_size_limit: None,
+                structured_output_supported: true,
+            },
+        );
+
+        let result = profile.validate();
+        assert!(matches!(
+            result,
+            Err(ProfileValidationError::EndpointNotInAuthorizedDestinations)
+        ));
     }
 
     #[test]
@@ -670,6 +709,7 @@ mod tests {
 
     #[test]
     fn test_interpretation_request_creation() {
+        let profile_version = Uuid::new_v4().to_string();
         let request = InterpretationRequest {
             request_id: Uuid::new_v4().to_string(),
             request_version: 1,
@@ -679,7 +719,7 @@ mod tests {
             text_basis: "original capture text".to_string(),
             instructions: "extract action items".to_string(),
             profile_id: "test-profile".to_string(),
-            profile_version: 1,
+            profile_version: profile_version.clone(),
             authorization_route: "default".to_string(),
             context: RequestContext {
                 capture_instant: Utc::now(),
@@ -692,7 +732,7 @@ mod tests {
 
         assert_eq!(request.capability, ProviderCapability::TextInterpretation);
         assert_eq!(request.source_text, "remind me to call the roofer");
-        assert_eq!(request.profile_version, 1);
+        assert_eq!(request.profile_version, profile_version);
         assert_eq!(request.request_version, 1);
     }
 
