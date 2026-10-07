@@ -12,8 +12,9 @@ serde_json = "1.0"
 
 # Time and date handling
 # M1 uses chrono for core timestamp and datetime handling, compatible with rusqlite.
-# The time crate is reserved for I02 module if specialized parsing is needed later.
+# I02 uses chrono-tz for proper timezone/DST handling with LocalResult support.
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.8"
 
 # UUID
 uuid = { version = "1.0", features = ["v4", "serde"] }
