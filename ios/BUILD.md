@@ -2,7 +2,7 @@
 
 ## Verification status
 
-Nothing in this directory has been generated or built natively yet. Authoring happened on Linux, where neither XcodeGen nor Xcode exists. The only checks run so far are the static checks in `scripts/check_project_config.py` (see below). The native generate, simulator build and unit-test result for an exact revision is collected by macOS CI established in F05; until that runs, treat the project as unverified.
+Nothing in this directory has been generated or built natively yet. Authoring happened on Linux, where neither XcodeGen nor Xcode exists. The only checks run so far are the static checks in `scripts/check_project_config.py` (see below). The native generate, simulator build, unit-test and launch-smoke result for an exact revision is collected by the macOS workflow `.github/workflows/ios.yml`; treat a revision as unverified until that run, found by commit SHA (see `AGENTS.md`), has succeeded.
 
 ## Baseline (provisional)
 
@@ -32,8 +32,10 @@ Run unit tests (macOS):
 
 ```bash
 xcodebuild test -project OhAnd.xcodeproj -scheme OhAndTests -sdk iphonesimulator \
-  -destination 'platform=iOS Simulator,name=iPhone 15' CODE_SIGNING_ALLOWED=NO
+  -destination "platform=iOS Simulator,id=<udid>" CODE_SIGNING_ALLOWED=NO
 ```
+
+Pick the UDID from the installed simulators with `xcrun simctl list -j devices available | python3 scripts/select_simulator.py --max-runtime "$(xcrun --sdk iphonesimulator --show-sdk-version)"`. After building a probe, `scripts/smoke-simulator.sh <udid> .derived/Build/Products/Debug-iphonesimulator/BridgeProbe.app com.boldfield.ohand.probes.bridge` boots, installs and launches it.
 
 ## Device signing
 
@@ -46,7 +48,7 @@ python3 ios/scripts/check_project_config.py
 python3 -m unittest discover -s ios/scripts -p 'test_*.py'
 ```
 
-These need PyYAML. They verify structure only: every F01-owned native root is a source root of exactly the expected target (and `Services/` of exactly one), the test bundle is a real unit-test bundle with a test action, bundle identifiers are unique and under the project prefix, no signing material or identity is configured, the simulator is unsigned in `Base.xcconfig`, plists parse, required usage strings and module-qualified scene delegates are present, each control extension is an embedded WidgetKit app extension with a host-prefixed bundle identifier whose sources are not compiled into the host, and it shares an intent directory (`Shared/`) with its host (dual target membership) that defines an `OpenIntent` with an `@Parameter target`, uses no legacy `openAppWhenRun`, is not redefined in `Control/`, and is the action of the control's `ControlWidgetButton`. They do not prove the project generates or compiles. They are not yet run by `make check` or `make test` (and need PyYAML); F05 owns the Makefile and CI and must wire them in alongside the macOS generate/build/test job.
+These need PyYAML. They verify structure only: every F01-owned native root is a source root of exactly the expected target (and `Services/` of exactly one), the test bundle is a real unit-test bundle with a test action, bundle identifiers are unique and under the project prefix, no signing material or identity is configured, the simulator is unsigned in `Base.xcconfig`, plists parse, required usage strings and module-qualified scene delegates are present, each control extension is an embedded WidgetKit app extension with a host-prefixed bundle identifier whose sources are not compiled into the host, and it shares an intent directory (`Shared/`) with its host (dual target membership) that defines an `OpenIntent` with an `@Parameter target`, uses no legacy `openAppWhenRun`, is not redefined in `Control/`, and is the action of the control's `ControlWidgetButton`. They do not prove the project generates or compiles. `make check` runs them through the `ios-check` target (PyYAML required).
 
 ## Source inclusion and ownership
 
