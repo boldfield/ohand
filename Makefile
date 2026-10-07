@@ -5,8 +5,8 @@ export PYTHONDONTWRITEBYTECODE := 1
 
 # check: Validate contract correctness, compile, format, and lint.
 # F01 establishes contract-check and contract-test. F02 adds cargo targets and lint.
-# F05 adds native targets and documentation. F06 adds hygiene checks.
-check: contract-check cargo-check cargo-fmt-check cargo-clippy ios-check hygiene-check
+# F05 adds native targets and documentation. F06 adds hygiene checks (separate workflow).
+check: contract-check cargo-check cargo-fmt-check cargo-clippy ios-check
 
 # test: Run contract validation tests and cargo test suite.
 test: contract-test cargo-test

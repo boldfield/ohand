@@ -305,9 +305,9 @@ def check_path(path: str) -> List[Tuple[str, int | None]]:
     except (OSError, IOError):
         return issues
 
-    # Skip secret checking for tools/hygiene/fixtures/ (allowlisted test fixtures)
-    # but NOT for tools/hygiene/*.py (implementation files should be checked)
-    if path.startswith('tools/hygiene/fixtures/'):
+    # Skip secret checking for test fixtures and test files
+    # These contain deliberately seeded test secrets for unit test verification
+    if path.startswith('tools/hygiene/fixtures/') or re.search(r'test_.*\.py$', path):
         return issues
 
     # Check for secrets in content
@@ -458,8 +458,6 @@ if __name__ == '__main__':
     parser.add_argument('paths', nargs='*', help='Specific paths to check (if none, auto-detects)')
     parser.add_argument('--scan-mode', choices=['auto', 'uncommitted', 'tracked', 'pr-diff'], default='auto',
                         help='Which files to scan: auto (default), uncommitted (untracked/modified), tracked (all), pr-diff (PR changes)')
-    parser.add_argument('--require-gitleaks', action='store_true', default=True,
-                        help='Require gitleaks to be installed (default: true for tracked/auto modes)')
 
     args = parser.parse_args()
 

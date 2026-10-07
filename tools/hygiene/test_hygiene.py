@@ -471,8 +471,8 @@ class TestCLISubprocess(unittest.TestCase):
         """Create a temporary git repository for testing."""
         self.test_dir = tempfile.mkdtemp()
         self.original_cwd = os.getcwd()
-        # Get the absolute path to check_hygiene.py before we change directories
-        self.script_path = os.path.abspath('check_hygiene.py')
+        # Get the absolute path to check_hygiene.py using __file__ location
+        self.script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'check_hygiene.py')
 
     def tearDown(self):
         """Clean up the temporary repository."""

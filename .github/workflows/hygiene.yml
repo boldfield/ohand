@@ -23,8 +23,15 @@ jobs:
         run: |
           # Install pinned gitleaks version from official releases
           GITLEAKS_VERSION="8.21.2"
-          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks-linux-x64" -o gitleaks
-          chmod +x gitleaks
-          sudo mv gitleaks /usr/local/bin/gitleaks
+          GITLEAKS_URL="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          GITLEAKS_SHA256="d5cc2b1a37b519e56b2f9eef2e6a8355eb12d8fc08f16b9c0a945f91b1c5d5f4"
+
+          # Download and verify
+          curl -fsSL "$GITLEAKS_URL" -o /tmp/gitleaks.tar.gz
+          echo "$GITLEAKS_SHA256 /tmp/gitleaks.tar.gz" | sha256sum -c -
+
+          # Extract and install
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp
+          sudo mv /tmp/gitleaks /usr/local/bin/gitleaks
           gitleaks version
       - run: make hygiene-check
