@@ -59,17 +59,18 @@ fn test_smoke_serde_json() {
 }
 
 #[test]
-#[allow(unused_imports)]
 fn test_smoke_core_interface() {
-    use ohand_core::domain;
-    use ohand_core::interpretation;
-    use ohand_core::store;
+    use ohand_core::{domain, interpretation, store, CORE_VERSION};
 
-    // Verify that core modules are importable and the public API surface is accessible.
-    // This test confirms the full module tree defined by F01 and F02 compiles and
-    // public interface exports from domain, interpretation, and store are reachable.
-    //
-    // Each module is accessible as part of the core workspace contract.
-    // As downstream feature tasks fill F02-owned modules, this interface will grow
-    // with concrete types and functions exercised by their own acceptance tests.
+    // Verify that the core crate exports a meaningful public interface.
+    // This test confirms the version contract and module accessibility.
+    assert!(!CORE_VERSION.is_empty(), "CORE_VERSION should be non-empty");
+    assert_eq!(
+        CORE_VERSION, "0.1.0-m1",
+        "CORE_VERSION should match the M1 contract"
+    );
+
+    // Verify that core modules are importable. As downstream feature tasks
+    // fill F02-owned modules, they will exercise concrete types in these paths.
+    let _ = (domain, interpretation, store);
 }
