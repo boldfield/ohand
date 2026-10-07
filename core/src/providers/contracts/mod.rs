@@ -91,8 +91,33 @@ pub struct CredentialRef {
 pub struct CapabilityMetadata {
     pub capability: ProviderCapability,
     pub support_state: CapabilitySupport,
+    pub evidence: Option<String>,
+    pub unsupported_reason: Option<String>,
     pub input_size_limit: Option<usize>,
     pub structured_output_supported: bool,
+}
+
+impl CapabilityMetadata {
+    pub fn new_supported(capability: ProviderCapability) -> Self {
+        CapabilityMetadata {
+            capability,
+            support_state: CapabilitySupport::Supported,
+            evidence: None,
+            unsupported_reason: None,
+            input_size_limit: None,
+            structured_output_supported: false,
+        }
+    }
+
+    pub fn with_input_limit(mut self, limit: usize) -> Self {
+        self.input_size_limit = Some(limit);
+        self
+    }
+
+    pub fn with_structured_output(mut self, supported: bool) -> Self {
+        self.structured_output_supported = supported;
+        self
+    }
 }
 
 /// Immutable versioned provider profile.
@@ -277,15 +302,32 @@ impl Default for RetryPolicy {
     }
 }
 
+/// Text basis kind: original source or a specific correction record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TextBasisKind {
+    #[serde(rename = "original")]
+    Original,
+    #[serde(rename = "correction")]
+    Correction,
+}
+
+/// Immutable text basis: identifies which version of text is being requested on.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextBasis {
+    pub kind: TextBasisKind,
+    pub correction_record_id: Option<String>,
+    pub source_revision: u32,
+}
+
 /// Normalized interpretation request contract pinned to an immutable profile version.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InterpretationRequest {
     pub request_id: String,
-    pub request_version: u32,
+    pub request_version: String,
     pub capture_id: String,
     pub capability: ProviderCapability,
     pub source_text: String,
-    pub text_basis: String,
+    pub text_basis: TextBasis,
     pub instructions: String,
     pub profile_id: String,
     pub profile_version: String,
@@ -299,7 +341,7 @@ pub struct RequestContext {
     pub capture_instant: DateTime<Utc>,
     pub timezone_id: String,
     pub locale: String,
-    pub source_revision: u32,
+    pub calendar: String,
     pub utc_offset_seconds: i32,
 }
 
@@ -383,6 +425,30 @@ impl ErrorType {
     }
 }
 
+/// Provider adapter trait for normalized interpretation requests.
+/// Real adapters (Anthropic, OpenAI, self-hosted) implement this to provide raw output.
+pub trait ProviderAdapter: Send + Sync {
+    /// Provide raw output for an interpretation request.
+    /// Adapters return raw provider output; enforcement (timeout, cancellation, validation)
+    /// is applied by a shared harness.
+    fn raw_interpret(&self, request: &InterpretationRequest) -> Result<String, TransportError>;
+}
+
+/// Transport-level errors that adapters can return.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransportError {
+    #[serde(rename = "timeout")]
+    Timeout,
+    #[serde(rename = "network")]
+    Network,
+    #[serde(rename = "unauthorized")]
+    Unauthorized,
+    #[serde(rename = "unavailable")]
+    Unavailable,
+    #[serde(rename = "unknown")]
+    Unknown,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,6 +484,8 @@ mod tests {
             CapabilityMetadata {
                 capability: ProviderCapability::TextInterpretation,
                 support_state: CapabilitySupport::Supported,
+                evidence: None,
+                unsupported_reason: None,
                 input_size_limit: None,
                 structured_output_supported: true,
             },
@@ -463,6 +531,8 @@ mod tests {
             CapabilityMetadata {
                 capability: ProviderCapability::TextInterpretation,
                 support_state: CapabilitySupport::Supported,
+                evidence: None,
+                unsupported_reason: None,
                 input_size_limit: None,
                 structured_output_supported: true,
             },
@@ -491,6 +561,8 @@ mod tests {
             CapabilityMetadata {
                 capability: ProviderCapability::TextInterpretation,
                 support_state: CapabilitySupport::Supported,
+                evidence: None,
+                unsupported_reason: None,
                 input_size_limit: None,
                 structured_output_supported: true,
             },
@@ -518,6 +590,8 @@ mod tests {
             CapabilityMetadata {
                 capability: ProviderCapability::TextInterpretation,
                 support_state: CapabilitySupport::Supported,
+                evidence: None,
+                unsupported_reason: None,
                 input_size_limit: None,
                 structured_output_supported: true,
             },
@@ -546,6 +620,8 @@ mod tests {
             CapabilityMetadata {
                 capability: ProviderCapability::TextInterpretation,
                 support_state: CapabilitySupport::Unsupported,
+                evidence: None,
+                unsupported_reason: Some("Not available for this account".to_string()),
                 input_size_limit: None,
                 structured_output_supported: false,
             },
@@ -576,6 +652,8 @@ mod tests {
                 support_state: CapabilitySupport::Supported,
                 input_size_limit: None,
                 structured_output_supported: true,
+                evidence: None,
+                unsupported_reason: None,
             },
         );
 
@@ -599,6 +677,8 @@ mod tests {
             CapabilityMetadata {
                 capability: ProviderCapability::TextInterpretation,
                 support_state: CapabilitySupport::Supported,
+                evidence: None,
+                unsupported_reason: None,
                 input_size_limit: None,
                 structured_output_supported: true,
             },
@@ -627,6 +707,8 @@ mod tests {
             CapabilityMetadata {
                 capability: ProviderCapability::TextInterpretation,
                 support_state: CapabilitySupport::Supported,
+                evidence: None,
+                unsupported_reason: None,
                 input_size_limit: None,
                 structured_output_supported: true,
             },
@@ -657,6 +739,8 @@ mod tests {
             CapabilityMetadata {
                 capability: ProviderCapability::TextInterpretation,
                 support_state: CapabilitySupport::Supported,
+                evidence: None,
+                unsupported_reason: None,
                 input_size_limit: None,
                 structured_output_supported: true,
             },
@@ -682,6 +766,8 @@ mod tests {
             CapabilityMetadata {
                 capability: ProviderCapability::TextInterpretation,
                 support_state: CapabilitySupport::Supported,
+                evidence: None,
+                unsupported_reason: None,
                 input_size_limit: None,
                 structured_output_supported: true,
             },
@@ -711,13 +797,18 @@ mod tests {
     #[test]
     fn test_interpretation_request_creation() {
         let profile_version = Uuid::new_v4().to_string();
+        let request_version_uuid = Uuid::new_v4().to_string();
         let request = InterpretationRequest {
             request_id: Uuid::new_v4().to_string(),
-            request_version: 1,
+            request_version: request_version_uuid.clone(),
             capture_id: Uuid::new_v4().to_string(),
             capability: ProviderCapability::TextInterpretation,
             source_text: "remind me to call the roofer".to_string(),
-            text_basis: "original capture text".to_string(),
+            text_basis: TextBasis {
+                kind: TextBasisKind::Original,
+                correction_record_id: None,
+                source_revision: 0,
+            },
             instructions: "extract action items".to_string(),
             profile_id: "test-profile".to_string(),
             profile_version: profile_version.clone(),
@@ -726,7 +817,7 @@ mod tests {
                 capture_instant: Utc::now(),
                 timezone_id: "America/New_York".to_string(),
                 locale: "en-US".to_string(),
-                source_revision: 0,
+                calendar: "gregorian".to_string(),
                 utc_offset_seconds: -18000,
             },
         };
@@ -734,7 +825,7 @@ mod tests {
         assert_eq!(request.capability, ProviderCapability::TextInterpretation);
         assert_eq!(request.source_text, "remind me to call the roofer");
         assert_eq!(request.profile_version, profile_version);
-        assert_eq!(request.request_version, 1);
+        assert_eq!(request.request_version, request_version_uuid);
     }
 
     #[test]

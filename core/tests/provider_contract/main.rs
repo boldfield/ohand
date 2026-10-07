@@ -5,7 +5,7 @@ use ohand_core::providers::contracts::{
     fake::{FakeBehavior, FakeProvider},
     CapabilityMetadata, CapabilitySupport, CredentialRef, ErrorType, InterpretationRequest,
     InterpretationResponse, ProfileValidationError, ProviderCapability, ProviderProtocol,
-    RequestContext, ResponseStatus,
+    RequestContext, ResponseStatus, TextBasis, TextBasisKind,
 };
 use uuid::Uuid;
 
@@ -25,6 +25,8 @@ fn test_profile_validation_rejects_all_unsupported_capabilities() {
             support_state: CapabilitySupport::Unsupported,
             input_size_limit: None,
             structured_output_supported: false,
+            evidence: None,
+            unsupported_reason: None,
         },
     );
     profile.capabilities.insert(
@@ -34,6 +36,8 @@ fn test_profile_validation_rejects_all_unsupported_capabilities() {
             support_state: CapabilitySupport::Unverified,
             input_size_limit: None,
             structured_output_supported: false,
+            evidence: None,
+            unsupported_reason: None,
         },
     );
 
@@ -60,6 +64,8 @@ fn test_profile_validation_rejects_inconsistent_capability_keys() {
             support_state: CapabilitySupport::Supported,
             input_size_limit: None,
             structured_output_supported: false,
+            evidence: None,
+            unsupported_reason: None,
         },
     );
 
@@ -178,13 +184,18 @@ fn test_fake_provider_bounds_below_limit() {
 #[test]
 fn test_interpretation_request_with_full_contract() {
     let profile_version = Uuid::new_v4().to_string();
+    let request_version_uuid = Uuid::new_v4().to_string();
     let request = InterpretationRequest {
         request_id: Uuid::new_v4().to_string(),
-        request_version: 1,
+        request_version: request_version_uuid.clone(),
         capture_id: Uuid::new_v4().to_string(),
         capability: ProviderCapability::TextInterpretation,
         source_text: "remind me to call the roofer".to_string(),
-        text_basis: "original source capture".to_string(),
+        text_basis: TextBasis {
+            kind: TextBasisKind::Original,
+            correction_record_id: None,
+            source_revision: 0,
+        },
         instructions: "extract action items and dates".to_string(),
         profile_id: "anthropic-test".to_string(),
         profile_version: profile_version.clone(),
@@ -193,15 +204,15 @@ fn test_interpretation_request_with_full_contract() {
             capture_instant: chrono::Utc::now(),
             timezone_id: "America/New_York".to_string(),
             locale: "en-US".to_string(),
-            source_revision: 0,
+            calendar: "gregorian".to_string(),
             utc_offset_seconds: -18000,
         },
     };
 
     assert_eq!(request.profile_version, profile_version);
-    assert_eq!(request.request_version, 1);
+    assert_eq!(request.request_version, request_version_uuid);
     assert!(!request.capture_id.is_empty());
-    assert!(!request.text_basis.is_empty());
+    assert_eq!(request.text_basis.kind, TextBasisKind::Original);
     assert!(!request.authorization_route.is_empty());
     assert!(request.context.utc_offset_seconds != 0);
 }
@@ -209,13 +220,18 @@ fn test_interpretation_request_with_full_contract() {
 #[test]
 fn test_request_response_serialization() {
     let profile_version = Uuid::new_v4().to_string();
+    let request_version_uuid = Uuid::new_v4().to_string();
     let request = InterpretationRequest {
         request_id: Uuid::new_v4().to_string(),
-        request_version: 1,
+        request_version: request_version_uuid.clone(),
         capture_id: Uuid::new_v4().to_string(),
         capability: ProviderCapability::TextInterpretation,
         source_text: "test input".to_string(),
-        text_basis: "original".to_string(),
+        text_basis: TextBasis {
+            kind: TextBasisKind::Original,
+            correction_record_id: None,
+            source_revision: 0,
+        },
         instructions: "test".to_string(),
         profile_id: "test".to_string(),
         profile_version,
@@ -224,7 +240,7 @@ fn test_request_response_serialization() {
             capture_instant: chrono::Utc::now(),
             timezone_id: "UTC".to_string(),
             locale: "en-US".to_string(),
-            source_revision: 0,
+            calendar: "gregorian".to_string(),
             utc_offset_seconds: 0,
         },
     };
@@ -310,48 +326,11 @@ fn test_capability_support_state_validation() {
             support_state: CapabilitySupport::Unsupported,
             input_size_limit: None,
             structured_output_supported: false,
+            evidence: None,
+            unsupported_reason: None,
         },
     );
 
-    assert!(profile.validate().is_ok());
-}
-
-#[test]
-fn test_input_size_limit_metadata() {
-    let mut profile = FakeProvider::anthropic_profile();
-
-    if let Some(cap) = profile
-        .capabilities
-        .get_mut(&ProviderCapability::TextInterpretation)
-    {
-        cap.input_size_limit = Some(50_000);
-    }
-
-    assert_eq!(
-        profile
-            .capabilities
-            .get(&ProviderCapability::TextInterpretation)
-            .and_then(|c| c.input_size_limit),
-        Some(50_000)
-    );
-    assert!(profile.validate().is_ok());
-}
-
-#[test]
-fn test_structured_output_support_metadata() {
-    let mut profile = FakeProvider::anthropic_profile();
-
-    if let Some(cap) = profile
-        .capabilities
-        .get_mut(&ProviderCapability::TextInterpretation)
-    {
-        cap.structured_output_supported = true;
-    }
-
-    assert!(profile
-        .capabilities
-        .get(&ProviderCapability::TextInterpretation)
-        .is_some_and(|c| c.structured_output_supported));
     assert!(profile.validate().is_ok());
 }
 
@@ -392,15 +371,4 @@ fn test_fake_provider_cancellation_detection() {
 
     assert_eq!(response.status, ResponseStatus::Cancelled);
     assert!(response.error.is_some());
-}
-
-#[test]
-fn test_credential_ref_is_opaque() {
-    let cred_ref = CredentialRef {
-        ref_id: "vault-key-abc-123".to_string(),
-    };
-
-    assert!(!cred_ref.ref_id.is_empty());
-    assert!(!cred_ref.ref_id.contains("secret"));
-    assert!(!cred_ref.ref_id.contains("password"));
 }

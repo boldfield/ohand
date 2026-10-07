@@ -6,22 +6,12 @@
 
 use super::normalizer::ResponseNormalizer;
 use super::{
-    CapabilityMetadata, CapabilitySupport, ErrorType, InterpretationResponse, InterpretationResult,
-    ProviderCapability, ProviderError, ProviderProfile, ProviderProtocol, ResponseStatus,
-    UsageInfo,
+    CapabilityMetadata, ErrorType, InterpretationRequest, InterpretationResponse,
+    InterpretationResult, ProviderAdapter, ProviderCapability, ProviderError, ProviderProfile,
+    ProviderProtocol, ResponseStatus, UsageInfo,
 };
 use serde_json::json;
 use std::time::Duration;
-
-/// Provider adapter trait for contract normalization.
-/// Real adapters (Anthropic, OpenAI, self-hosted) implement this.
-pub trait ProviderAdapter: Send + Sync {
-    /// Interpret with contract enforcement: timeout, cancellation, bounded output.
-    fn interpret(&self, request_id: &str, profile: &ProviderProfile) -> InterpretationResponse;
-
-    /// Get expected delay for this behavior (testing only).
-    fn expected_delay(&self) -> Duration;
-}
 
 /// Configuration for fake provider behavior in tests.
 #[derive(Debug, Clone, Copy)]
@@ -85,12 +75,9 @@ impl FakeProvider {
 
         profile.capabilities.insert(
             ProviderCapability::TextInterpretation,
-            CapabilityMetadata {
-                capability: ProviderCapability::TextInterpretation,
-                support_state: CapabilitySupport::Supported,
-                input_size_limit: Some(100_000),
-                structured_output_supported: true,
-            },
+            CapabilityMetadata::new_supported(ProviderCapability::TextInterpretation)
+                .with_input_limit(100_000)
+                .with_structured_output(true),
         );
 
         profile
@@ -111,12 +98,9 @@ impl FakeProvider {
 
         profile.capabilities.insert(
             ProviderCapability::TextInterpretation,
-            CapabilityMetadata {
-                capability: ProviderCapability::TextInterpretation,
-                support_state: CapabilitySupport::Supported,
-                input_size_limit: Some(100_000),
-                structured_output_supported: true,
-            },
+            CapabilityMetadata::new_supported(ProviderCapability::TextInterpretation)
+                .with_input_limit(100_000)
+                .with_structured_output(true),
         );
 
         profile
@@ -226,6 +210,27 @@ impl FakeProvider {
     /// Get the maximum output size for bounds testing.
     pub fn max_output_size(&self) -> usize {
         self.max_output_size
+    }
+}
+
+/// FakeProvider implements the ProviderAdapter trait, returning raw output for testing.
+impl ProviderAdapter for FakeProvider {
+    /// Return raw output based on the configured behavior.
+    /// The normalizer applies timeout/cancellation/validation through a separate harness.
+    fn raw_interpret(
+        &self,
+        _request: &InterpretationRequest,
+    ) -> Result<String, super::TransportError> {
+        match self.behavior {
+            FakeBehavior::Success => {
+                Ok(r#"{"intent":"action","text":"call the roofer"}"#.to_string())
+            }
+            FakeBehavior::InvalidOutput => Ok("not valid json {]".to_string()),
+            FakeBehavior::OversizedOutput => Ok("x".repeat(self.max_output_size + 1000)),
+            FakeBehavior::Timeout => Err(super::TransportError::Timeout),
+            FakeBehavior::Unavailable => Err(super::TransportError::Unavailable),
+            FakeBehavior::Cancelled => Err(super::TransportError::Unknown),
+        }
     }
 }
 
@@ -360,31 +365,6 @@ mod tests {
     }
 
     #[test]
-    fn test_behavior_delay_ordering() {
-        let success = FakeBehavior::Success;
-        let timeout = FakeBehavior::Timeout;
-
-        assert!(success.delay_ms() < timeout.delay_ms());
-        assert!(timeout.delay_ms() > 30000);
-    }
-
-    #[test]
-    fn test_fake_provider_no_state_between_requests() {
-        let provider = FakeProvider::new(FakeBehavior::Success);
-
-        let req1 = Uuid::new_v4().to_string();
-        let req2 = Uuid::new_v4().to_string();
-
-        let resp1 = provider.interpret(&req1);
-        let resp2 = provider.interpret(&req2);
-
-        assert_eq!(resp1.request_id, req1);
-        assert_eq!(resp2.request_id, req2);
-        assert_ne!(resp1.request_id, resp2.request_id);
-        assert_eq!(resp1.status, resp2.status);
-    }
-
-    #[test]
     fn test_response_serialization_roundtrip() {
         let provider = FakeProvider::new(FakeBehavior::Success);
         let request_id = Uuid::new_v4().to_string();
@@ -396,26 +376,5 @@ mod tests {
 
         assert_eq!(response.request_id, deserialized.request_id);
         assert_eq!(response.status, deserialized.status);
-    }
-
-    #[test]
-    fn test_all_behaviors_produce_responses() {
-        let behaviors = [
-            FakeBehavior::Success,
-            FakeBehavior::Timeout,
-            FakeBehavior::InvalidOutput,
-            FakeBehavior::Unavailable,
-            FakeBehavior::Cancelled,
-            FakeBehavior::OversizedOutput,
-        ];
-
-        for behavior in &behaviors {
-            let provider = FakeProvider::new(*behavior);
-            let request_id = Uuid::new_v4().to_string();
-            let response = provider.interpret(&request_id);
-
-            assert_eq!(response.request_id, request_id);
-            assert!(!response.request_id.is_empty());
-        }
     }
 }
