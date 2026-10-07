@@ -33,7 +33,7 @@ OWNED_SOURCE_ROOTS = {
 # Control extension target -> host app target, and the owned directory each extension compiles.
 CONTROL_EXTENSIONS = {"CaptureProbe": "CaptureProbeControl", "OhAndApp": "OhAndCaptureControl"}
 CONTROL_ROOTS = {"CaptureProbeControl": "CaptureProbe/Control", "OhAndCaptureControl": "Capture/Entry/Control"}
-# Directory compiled into BOTH the host app and its control extension; it holds the openAppWhenRun intent.
+# Directory compiled into BOTH the host app and its control extension; it holds the app-opening OpenIntent.
 SHARED_INTENT_ROOTS = {"CaptureProbeControl": "CaptureProbe/Shared", "OhAndCaptureControl": "Capture/Entry/Shared"}
 
 PROBE_USAGE_STRINGS = {
@@ -149,15 +149,23 @@ def check_shared_intent(host_name, host, extension_name, extension, root=IOS_ROO
             excluded_prefix = pattern.rstrip("*").rstrip("/")
             if excluded_prefix and (relative == excluded_prefix or relative.startswith(excluded_prefix + "/")):
                 errors.append(f"{host_name} must not exclude {shared_root}/")
-    intent_sources = [path for path in (root / shared_root).glob("*.swift") if "openAppWhenRun = true" in path.read_text()]
-    if not intent_sources:
-        errors.append(f"{shared_root}/ must contain an AppIntent with openAppWhenRun = true")
-    for intent_path in intent_sources:
-        intent_names = re.findall(r"struct\s+(\w+)\s*:\s*AppIntent", intent_path.read_text())
-        for control_source in (root / control_root).glob("*.swift"):
-            for intent_name in intent_names:
-                if re.search(rf"struct\s+{intent_name}\b", control_source.read_text()):
-                    errors.append(f"{control_root}/ must not redefine shared intent {intent_name}")
+    intent_names = []
+    for intent_path in sorted((root / shared_root).glob("*.swift")):
+        intent_text = intent_path.read_text()
+        if "openAppWhenRun" in intent_text:
+            errors.append(f"{intent_path.relative_to(root)} uses legacy openAppWhenRun; control handoff must use OpenIntent")
+        for intent_name in re.findall(r"struct\s+(\w+)\s*:[^{]*\bOpenIntent\b", intent_text):
+            if not re.search(r"@Parameter\b[^\n]*\n\s*var\s+target\s*:", intent_text):
+                errors.append(f"{intent_path.relative_to(root)}: OpenIntent {intent_name} must declare an @Parameter target")
+            intent_names.append(intent_name)
+    if not intent_names:
+        errors.append(f"{shared_root}/ must contain an OpenIntent that launches {host_name}")
+    control_text = "\n".join(path.read_text() for path in (root / control_root).glob("*.swift"))
+    for intent_name in intent_names:
+        if re.search(rf"struct\s+{intent_name}\b", control_text):
+            errors.append(f"{control_root}/ must not redefine shared intent {intent_name}")
+    if intent_names and not any(re.search(rf"ControlWidgetButton\(action:\s*{name}\(", control_text) for name in intent_names):
+        errors.append(f"{control_root}/ control button must run a shared OpenIntent from {shared_root}/")
     return errors
 
 

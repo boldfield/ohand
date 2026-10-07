@@ -8,7 +8,7 @@ struct ProbeCaptureControl: ControlWidget {
 
     var body: some ControlWidgetConfiguration {
         StaticControlConfiguration(kind: Self.kind) {
-            ControlWidgetButton(action: ProbeOpenCaptureIntent()) {
+            ControlWidgetButton(action: ProbeOpenCaptureIntent(target: .capture)) {
                 Label("Capture Probe", systemImage: "mic")
             }
         }

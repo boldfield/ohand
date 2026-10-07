@@ -8,7 +8,7 @@ struct OhAndCaptureControl: ControlWidget {
 
     var body: some ControlWidgetConfiguration {
         StaticControlConfiguration(kind: Self.kind) {
-            ControlWidgetButton(action: OpenCaptureIntent()) {
+            ControlWidgetButton(action: OpenCaptureIntent(target: .capture)) {
                 Label("Capture", systemImage: "mic")
             }
         }
