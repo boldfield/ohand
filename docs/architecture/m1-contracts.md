@@ -279,7 +279,8 @@ The following map lists every implementation area and its owning task. Each path
 | `core/` | Rust workspace root | F02 |
 | `Cargo.toml` | Workspace manifest and dependency declarations | F02 |
 | `Cargo.lock` | Locked dependencies | F02 |
-| `Makefile` | Build, lint, test commands (F02 creates, F05 later edits) | F02, F05 |
+| `Makefile` | Build, lint, test commands (F01 creates the contract-check targets, F02 extends, F05 later edits) | F01, F02, F05 |
+| `tools/contracts/` | Contract and ownership-map validation behind `make check` and `make test` | F01 |
 | `ios/` | Native iOS workspace root | F03 |
 | `ios/project.yml` | Native Xcode project generation (F03 creates, F05 later edits) | F03, F05 |
 | `.github/workflows/core.yml` | Linux CI for Rust checks | F04 |
@@ -502,9 +503,9 @@ The following map lists every implementation area and its owning task. Each path
 
 ## Shared File Ordering
 
-Every owned path in the map belongs to exactly one task except the shared files below. Each shared file has an existing dependency chain in `docs/features/m1-tasks.json` that serializes its editors; no two editors run concurrently. Anything else needing a shared-file edit must wait on one of these edges or get a separate serialized integration task.
+Every owned path in the map belongs to exactly one task except the shared files below. The manifest gives F01 only this document; F01 also reserves `Makefile` and `tools/contracts/` so that the contract has real checks before any application code exists. Each shared file has an existing dependency chain in `docs/features/m1-tasks.json` that serializes its editors; no two editors run concurrently. Anything else needing a shared-file edit must wait on one of these edges or get a separate serialized integration task.
 
-- Makefile: F02 creates it, F05 later edits it. Edge: F02, then F04, then F05.
+- Makefile: F01 creates it with the contract-check targets, F02 extends it with the Rust targets, and F05 later adds the native targets. Edge: F01, then F02, then F04, then F05. Later editors keep the contract checks inside `make check` and `make test`.
 - AGENTS.md: F04, then F05, then T07. Edge: F04, then F05, then T06, then T07.
 - ios/project.yml: F03 creates it, F05 later edits it. Edge: F03, then F05.
 - tools/apple-build/: P08 owns the directory; T06 owns only its trial/ subdirectory. P08 is an ancestor of T06 in the dependency graph, so T06 starts after P08 lands.
@@ -593,7 +594,8 @@ These are recorded, not reopened here:
 - Linux core CI (F04): build, lint and test on hosted runners.
 - Native simulator CI (F05): real build and test on macOS runners for the exact revision; F05 also establishes the result-collection path.
 - Artifact hygiene (F06): secret scanning and fixture policy; fixtures are synthetic and no secrets, private data or signing material enter the public repository.
-- No placeholder success is acceptable: a command is reported as passing only if it ran. Until F02 and F05 land there is no application build or test command. F01 is a documentation-only change with no predecessor, so `make check` and `make test` do not exist when it is reviewed; they are created by F02 and F05, and F01 must not create them because it does not own the Makefile.
+- No placeholder success is acceptable: a command is reported as passing only if it ran. Until F02 and F05 land there is no application build or test command.
+- F01 creates `make check` and `make test` with real contract checks. `make check` reconciles this ownership map with every `file_scope` path and owner in `docs/features/m1-tasks.json`. It also confirms that the dependency graph is acyclic, that every shared path is listed in Shared File Ordering with its editors serialized by a dependency path, and that this contract has no fenced code. `make test` runs unit tests that feed synthetic drift into those checks and confirm each one fails. F02 and F05 add their real build, lint and test commands to the same targets and do not remove the contract checks.
 
 ## Next Steps
 
