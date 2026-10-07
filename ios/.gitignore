@@ -1,0 +1,27 @@
+# Generated Xcode project
+OhAnd.xcodeproj/
+
+# Build artifacts
+.derived/
+Build/
+*.build/
+
+# Xcode user data
+xcuserdata/
+*.xcworkspace/xcuserdata/
+*.xcworkspace/xcshareddata/
+*.xcodeproj/xcshareddata/
+*.xcodeproj/xcuserdata/
+
+# Simulator artifacts
+*.app/
+
+# Temporary files
+.DS_Store
+*.swp
+*~
+.*.swp
+
+# Local signing configuration (never committed)
+Config/Local.xcconfig
+__pycache__/

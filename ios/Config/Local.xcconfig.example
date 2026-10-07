@@ -1,0 +1,2 @@
+// Copy to Local.xcconfig (git-ignored) for device builds. Never commit it.
+DEVELOPMENT_TEAM = YOUR_TEAM_ID
