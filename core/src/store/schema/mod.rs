@@ -366,7 +366,7 @@ fn create_tables_v1(tx: &Transaction<'_>) -> Result<()> {
         [],
     )?;
 
-    // Events table: lifecycle events (completion, cancellation, deletion, session-topic).
+    // Events table: lifecycle events (completion, cancellation, correction, suggestion-control).
     tx.execute(
         "CREATE TABLE events (
             event_id TEXT PRIMARY KEY,
@@ -374,6 +374,10 @@ fn create_tables_v1(tx: &Transaction<'_>) -> Result<()> {
             revision INTEGER NOT NULL,
             event_type TEXT NOT NULL,
             happened_at TEXT NOT NULL,
+            correction_kind TEXT,
+            correction_old_value TEXT,
+            correction_new_value TEXT,
+            suggestion_control_kind TEXT,
             FOREIGN KEY (item_id) REFERENCES items(item_id)
         )",
         [],

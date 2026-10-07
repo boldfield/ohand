@@ -41,11 +41,32 @@ impl FromStr for EventType {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Correction {
+    pub kind: String,
+    pub old_value: Option<String>,
+    pub new_value: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SuggestionControlPayload {
+    pub kind: String, // "not_now", "cooldown", "stop_suggesting"
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EventPayload {
+    Correction(Correction),
+    SuggestionControl(SuggestionControlPayload),
+    Completion,
+    Cancellation,
+}
+
+#[derive(Clone, Debug)]
 pub struct Event {
     pub event_id: String,
     pub item_id: String,
     pub revision: i32,
     pub event_type: EventType,
+    pub payload: EventPayload,
     pub happened_at: String,
 }
 
@@ -55,6 +76,7 @@ impl Event {
         item_id: String,
         revision: i32,
         event_type: EventType,
+        payload: EventPayload,
         happened_at: String,
     ) -> Result<Self> {
         if event_id.is_empty() {
@@ -71,10 +93,24 @@ impl Event {
             item_id,
             revision,
             event_type,
+            payload,
             happened_at,
         })
     }
 }
+
+impl PartialEq for Event {
+    fn eq(&self, other: &Self) -> bool {
+        self.event_id == other.event_id
+            && self.item_id == other.item_id
+            && self.revision == other.revision
+            && self.event_type == other.event_type
+            && self.payload == other.payload
+            && self.happened_at == other.happened_at
+    }
+}
+
+impl Eq for Event {}
 
 impl fmt::Display for Event {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -92,40 +128,71 @@ fn event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
         .parse::<EventType>()
         .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
 
+    let payload = match event_type {
+        EventType::Correction => {
+            let kind: Option<String> = row.get(5)?;
+            let old_value: Option<String> = row.get(6)?;
+            let new_value: Option<String> = row.get(7)?;
+            EventPayload::Correction(Correction {
+                kind: kind.unwrap_or_default(),
+                old_value,
+                new_value: new_value.unwrap_or_default(),
+            })
+        }
+        EventType::SuggestionControl => {
+            let kind: Option<String> = row.get(8)?;
+            EventPayload::SuggestionControl(SuggestionControlPayload {
+                kind: kind.unwrap_or_default(),
+            })
+        }
+        EventType::Completion => EventPayload::Completion,
+        EventType::Cancellation => EventPayload::Cancellation,
+    };
+
     Ok(Event {
         event_id: row.get(0)?,
         item_id: row.get(1)?,
         revision: row.get(2)?,
         event_type,
+        payload,
         happened_at: row.get(4)?,
     })
 }
 
 /// Save an event with compare-and-set revision semantics.
 /// Returns the saved event if successful.
+/// expected_item_revision: the item's revision at the time of the user's action.
 ///
 /// If an event with the same ID already exists:
 /// - Returns the existing event if it is identical (idempotent retry)
-/// - Returns an error if it conflicts (different item_id, revision, or event_type)
+/// - Returns an error if it conflicts
 ///
-/// If a different event with a newer or equal revision for the same item already exists,
-/// the operation fails to prevent stale updates from overwriting newer state.
-pub fn save_event(db: &mut Database, event: &Event) -> Result<Event> {
+/// Compares against the item's authoritative revision; rejects if expected_item_revision
+/// doesn't match the current items.revision. On success, atomically increments items.revision.
+pub fn save_event(db: &mut Database, event: &Event, expected_item_revision: i32) -> Result<Event> {
     let tx = db.immediate_transaction()?;
-    let result = save_event_in_tx(&tx, event)?;
+    let result = save_event_in_tx(&tx, event, expected_item_revision)?;
     tx.commit()?;
     Ok(result)
 }
 
 /// Save an event within a caller-owned transaction.
-/// This is a lower-level helper; prefer `save_event` for durable operations.
+/// expected_item_revision: the item's revision at the time of the user's action.
 ///
-/// Compare-and-set semantics: conflicting stale updates are rejected.
-pub fn save_event_in_tx(tx: &Transaction<'_>, event: &Event) -> Result<Event> {
-    // Check if event with same ID already exists
+/// Compare-and-set semantics against items.revision: conflicting stale updates are rejected
+/// with the current item state returned in the error.
+pub fn save_event_in_tx(
+    tx: &Transaction<'_>,
+    event: &Event,
+    expected_item_revision: i32,
+) -> Result<Event> {
+    // Check if event with same ID already exists (idempotent retry)
     let existing: Option<Event> = tx
         .query_row(
-            "SELECT event_id, item_id, revision, event_type, happened_at FROM events WHERE event_id = ?",
+            "SELECT event_id, item_id, revision, event_type, happened_at,
+                    correction_kind, correction_old_value, correction_new_value,
+                    suggestion_control_kind
+             FROM events WHERE event_id = ?",
             [event.event_id.as_str()],
             event_from_row,
         )
@@ -141,55 +208,97 @@ pub fn save_event_in_tx(tx: &Transaction<'_>, event: &Event) -> Result<Event> {
         ));
     }
 
-    // Check for conflicting event at the same revision: if there's already an event
-    // for this item at this revision, reject it as a conflict (stale update).
-    let existing_at_revision: Option<String> = tx
+    // Read the item's current revision (authoritative source for compare-and-set)
+    let current_item_revision: i32 = tx
         .query_row(
-            "SELECT event_id FROM events WHERE item_id = ? AND revision = ?",
-            rusqlite::params![event.item_id.as_str(), event.revision],
-            |row| row.get(0),
-        )
-        .optional()?;
-
-    if let Some(existing_id) = existing_at_revision {
-        if existing_id != event.event_id {
-            return Err(anyhow!(
-                "Stale event: item {} already has event {} at revision {}",
-                event.item_id,
-                existing_id,
-                event.revision
-            ));
-        }
-    }
-
-    // Also reject if trying to insert at a revision lower than an existing one
-    // (this prevents retroactively inserting events into the past).
-    let max_revision: i32 = tx
-        .query_row(
-            "SELECT COALESCE(MAX(revision), -1) FROM events WHERE item_id = ?",
+            "SELECT revision FROM items WHERE item_id = ?",
             [event.item_id.as_str()],
             |row| row.get(0),
-        )?;
+        )
+        .optional()?
+        .ok_or_else(|| anyhow!("Item {} not found", event.item_id))?;
 
-    if event.revision < max_revision {
+    // Compare-and-set: reject if expected revision doesn't match current
+    if expected_item_revision != current_item_revision {
         return Err(anyhow!(
-            "Stale event: item {} already has event at revision {} (trying to insert at {})",
+            "Stale write: expected item {} revision {} but current is {}",
             event.item_id,
-            max_revision,
-            event.revision
+            expected_item_revision,
+            current_item_revision
         ));
     }
 
+    // Insert the event with payload fields
+    let (correction_kind, correction_old_value, correction_new_value, suggestion_control_kind) =
+        match &event.payload {
+            EventPayload::Correction(c) => (
+                Some(c.kind.clone()),
+                c.old_value.clone(),
+                Some(c.new_value.clone()),
+                None,
+            ),
+            EventPayload::SuggestionControl(s) => (None, None, None, Some(s.kind.clone())),
+            EventPayload::Completion => (None, None, None, None),
+            EventPayload::Cancellation => (None, None, None, None),
+        };
+
     tx.execute(
-        "INSERT INTO events (event_id, item_id, revision, event_type, happened_at)
-         VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO events (event_id, item_id, revision, event_type, happened_at,
+                            correction_kind, correction_old_value, correction_new_value,
+                            suggestion_control_kind)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         rusqlite::params![
             &event.event_id,
             &event.item_id,
             event.revision,
             event.event_type.as_str(),
             &event.happened_at,
+            correction_kind,
+            correction_old_value,
+            correction_new_value,
+            suggestion_control_kind,
         ],
+    )?;
+
+    // If this is a Correction event, also write to the corrections table
+    if let EventPayload::Correction(corr) = &event.payload {
+        let correction_id = format!("{}-correction", event.event_id);
+        tx.execute(
+            "INSERT INTO corrections (correction_id, item_id, revision, kind, old_value, new_value, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            rusqlite::params![
+                &correction_id,
+                &event.item_id,
+                event.revision,
+                &corr.kind,
+                &corr.old_value,
+                &corr.new_value,
+                &event.happened_at,
+            ],
+        )?;
+    }
+
+    // Apply lifecycle state changes
+    match event.event_type {
+        EventType::Completion => {
+            tx.execute(
+                "UPDATE items SET lifecycle_state = 'completed' WHERE item_id = ?",
+                [event.item_id.as_str()],
+            )?;
+        }
+        EventType::Cancellation => {
+            tx.execute(
+                "UPDATE items SET lifecycle_state = 'cancelled' WHERE item_id = ?",
+                [event.item_id.as_str()],
+            )?;
+        }
+        _ => {}
+    }
+
+    // Atomically increment the item's revision
+    tx.execute(
+        "UPDATE items SET revision = revision + 1 WHERE item_id = ?",
+        [event.item_id.as_str()],
     )?;
 
     Ok(event.clone())
@@ -198,7 +307,10 @@ pub fn save_event_in_tx(tx: &Transaction<'_>, event: &Event) -> Result<Event> {
 /// Retrieve an event by ID.
 pub fn get_event(tx: &Transaction<'_>, event_id: &str) -> Result<Option<Event>> {
     tx.query_row(
-        "SELECT event_id, item_id, revision, event_type, happened_at FROM events WHERE event_id = ?",
+        "SELECT event_id, item_id, revision, event_type, happened_at,
+                correction_kind, correction_old_value, correction_new_value,
+                suggestion_control_kind
+         FROM events WHERE event_id = ?",
         [event_id],
         event_from_row,
     )
@@ -209,7 +321,10 @@ pub fn get_event(tx: &Transaction<'_>, event_id: &str) -> Result<Option<Event>> 
 /// Retrieve all events for an item, ordered by revision ascending.
 pub fn get_events_for_item(tx: &Transaction<'_>, item_id: &str) -> Result<Vec<Event>> {
     let mut stmt = tx.prepare(
-        "SELECT event_id, item_id, revision, event_type, happened_at FROM events
+        "SELECT event_id, item_id, revision, event_type, happened_at,
+                correction_kind, correction_old_value, correction_new_value,
+                suggestion_control_kind
+         FROM events
          WHERE item_id = ? ORDER BY revision ASC",
     )?;
 
