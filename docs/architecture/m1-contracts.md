@@ -72,7 +72,8 @@ No shared state exists between layers. Rust owns authoritative domain state; Swi
 
 ### Derived State (Non-Authoritative)
 
-- Interpretation results, inferred notes/actions/ideas, reminder time proposals, embeddings, summaries.
+- M1 interpretation results: inferred notes/actions/ideas, reminder time proposals, session-topic suggestion.
+- M1 supports text interpretation only; embeddings and summaries are M2+ features.
 - May be re-computed on demand; invalid/stale derived output reverts to prior state rather than demoting item.
 - Proposal schema validation alone is never sufficient; semantic validation is required before application.
 - Invalid interpretations (malformed JSON, missing required fields, stale source revisions) are rejected without mutation.
@@ -101,7 +102,9 @@ These are orthogonal to processing and reminder states. A save does not imply pr
 **Reminder Requested/Desired State:**
 - `not_requested`: no reminder asked.
 - `desired`: reminder requested, time resolved, waiting for OS scheduling.
-- `unsupported`: requested recurrence, ambiguous time, or time resolution failed; original phrase preserved with optional correction path.
+- `not_scheduled_yet`: time is ambiguous or underspecified (e.g., "next week"); original phrase preserved with optional clarification path.
+- `unsupported_recurrence`: recurring reminder requested (e.g., "every Friday"), but M1 supports one-shot only; original phrase preserved.
+- `unschedulable`: scheduling failed (expired opportunity, permission denied, capacity exceeded, or other recoverable error); error state and recovery path documented.
 
 **Reminder Scheduled State:**
 - `scheduled`: OS native notification installed with identifier.
@@ -137,9 +140,9 @@ Privacy is governed by two independent dimensions:
 **Privacy Scopes** (data classification):
 - **Personal**: default route; private thoughts, personal-context captures, therapy notes, exploratory ideas.
 - **Work**: work-context captures and derivations. Explicitly opted-in by user.
-- **Session**: a source-linked facet independent of personal/work scopes and processing permissions. Identifies a user-correctable session or event context (e.g., "therapy session", "project review") without affecting privacy classification or upload permission.
+- **Session**: a processing scope for session-scoped read-auth boundary (e.g., authenticated access during an active session). Independent of personal/work classification.
 
-Route assignment is stored with capture metadata at ingestion time. No classifier creates or changes routes; only explicit user configuration or API authorization (at setup time) does. A single capture is assigned to exactly one personal/work scope. Session facet is independent and may be assigned to any personal/work item.
+Route assignment is stored with capture metadata at ingestion time. No classifier creates or changes routes; only explicit user configuration or API authorization (at setup time) does. A single capture is assigned to exactly one personal/work/session scope.
 
 **Processing Permissions** (where data may be processed):
 - **Local-Only Processing**: transcription (on-device only), fast-path reminders, retrieval, FTS indexing. No outbound requests; deterministic validation only.
@@ -149,15 +152,15 @@ Route assignment is stored with capture metadata at ingestion time. No classifie
 
 A single capture routed personal uses the personal-route provider destination. A capture routed work uses the work-route destination. Changing a provider profile affects all future queued work; existing queued jobs retain their profile version.
 
-### Session-Topic Facet
+### User-Correctable Session-Topic Facet
 
-The session-topic is a user-correctable facet **independent of privacy scope and processing permission**:
-- Derived fact independent of item type (note/action/idea).
+The session-topic facet is a derived, user-correctable annotation **completely independent of privacy scope and processing permission**:
+- Annotation independent of item type (note/action/idea) and privacy scope.
 - User-correctable via explicit UI or edit operations.
 - Supports filtering in retrieval (e.g., "session notes since Thursday").
 - Source-linked: correction evidence is captured and revision-tracked.
-- Does **not** automatically affect privacy scope, processing permissions, or destination routing.
-- User may explicitly opt into disclosure of session-topic items if desired, but session-topic assignment alone does not grant preview eligibility or change privacy route.
+- Does **not** affect privacy scope, processing permissions, or destination routing.
+- Session-topic assignment alone does not grant preview eligibility or change privacy route; preview eligibility depends only on route designation and user explicit opt-in.
 
 ### Privacy Scope Enforcement
 
@@ -169,10 +172,11 @@ The session-topic is a user-correctable facet **independent of privacy scope and
 
 **Notification and preview safety:**
 - Notification payloads contain only generic wording and opaque identifiers; no private text ever in OS notifications.
-- Preview eligibility (for optional daily prompts) is determined by route and user configuration:
+- Preview eligibility (for optional daily prompts) is determined by route and user explicit opt-in:
   - Default: all prompts show generic text only (no preview).
-  - If user enables preview mode: only items designated as preview-safe by the user may be previewed; personal-route items are never previewed, regardless of configuration.
-  - Session-topic assignment does not grant preview eligibility; user must explicitly enable preview mode, and personal route still excludes all items.
+  - Personal-route items are **never** eligible for preview, regardless of configuration or user opt-in.
+  - If user explicitly enables preview mode: only work-route items designated as preview-safe by the user may be previewed. Session-topic assignment does not grant preview eligibility.
+  - The payload for previewed items is generic text or explicitly preview-policy-approved text from the user-designated preview-safe route only.
   - Classification can only remove preview eligibility, never grant it.
 
 **Export and backup:**
@@ -249,12 +253,13 @@ The session-topic is a user-correctable facet **independent of privacy scope and
 - Reconciliation: if core restarts and does not find a native notification matching the core identifier, it re-schedules.
 
 **Unsupported Repeats:**
-- Explicitly marked as unsupported (not silently reduced to one-shot).
+- Explicitly marked as unsupported_recurrence (not silently reduced to one-shot).
 - Original phrase preserved.
-- Stored as not-scheduled with recovery path (manual one-shot creation, correction opportunity).
+- Stored with recovery path (manual one-shot creation, correction opportunity).
 
 **Error Contract:**
-- Ambiguous time (e.g., "next week"): marked unsupported, UI offers clarification path.
+- Ambiguous time (e.g., "next week"): marked not_scheduled_yet, UI offers clarification path.
+- Unsupported recurrence: marked unsupported_recurrence, original phrase retained.
 - Expired opportunity (requested time in past): marked unschedulable, no automatic time adjustment.
 - Permission denied: marked unschedulable, permission recovery path available.
 - Capacity exceeded: explicit unschedulable state, documented horizon and refill strategy.
@@ -265,7 +270,8 @@ The session-topic is a user-correctable facet **independent of privacy scope and
 **Eligibility:**
 - Exclude completed, cancelled, deleted, snoozed, pull-only items.
 - Exclude uninterpreted items and items with only speculative intent.
-- Exclude personal-route items unless explicitly designated preview-safe and user enables preview.
+- Exclude personal-route items entirely from preview suggestions.
+- Include work-route items if explicitly designated preview-safe and user has enabled preview mode.
 - Exclude items without clear actionable form.
 
 **Selection:**
@@ -291,10 +297,11 @@ The session-topic is a user-correctable facet **independent of privacy scope and
 - Stop future processing (cancel in-flight jobs).
 
 **Durability:**
-- Deletion marker is durable (surviving relaunch and restore from backup predating deletion).
+- Deletion marker is durable within current device state and forward-looking backups created after deletion.
 - Cleanup is best-effort; interruption must not restore readable text.
 - Racing job result or correction during deletion is rejected.
 - Stale source replay after deletion is ignored.
+- **Backup limitation**: A device restore from a backup taken *before* deletion will restore the deleted item. M1 documents the honest deletion-versus-backup lifecycle rather than guaranteeing rescue from immutable historical backups.
 
 **Error Contract:**
 - Stale revision: rejection with current state.
@@ -333,10 +340,10 @@ All native effects are trait-injected. Rust owns the pure orchestration logic; S
 
 **Credential Storage Interface:**
 - Get: input (opaque key); output (raw secret bytes or error).
-- Store: input (opaque key, secret bytes); output (success or error). M1 may use this for testing; unused in production M1 base.
-- Delete: input (opaque key); output (success or error). M1 may use this for testing; unused in production M1 base.
+- Store: input (opaque key, secret bytes); output (success or error). Used at setup time for user-provided credentials (e.g., API key entry) and in testing.
+- Delete: input (opaque key); output (success or error). Used when user removes a configured provider credential.
 - Fields: key (opaque reference), secret (raw bytes).
-- Invariants: secrets never persisted into job state. Retrieval errors are explicit; no fallback. Keys are opaque to core; Swift interprets them as Keychain references. Writes happen only at credential setup time or testing; no secret is persisted into queued jobs.
+- Invariants: secrets never persisted into job state. Retrieval errors are explicit; no fallback. Keys are opaque to core; Swift interprets them as Keychain references. Writes happen only at credential setup/update/removal time; no secret is persisted into queued jobs. Rust receives raw bytes only for the active HTTP request; cleared immediately after send.
 
 **Audio Capture Effect Interface:**
 - Start recording: input (capture ID); output (recording handle).
@@ -411,14 +418,15 @@ The following map lists every implementation area and its owning task. All file 
 | `Cargo.lock` | Locked dependencies | F02 |
 | `Makefile` | Build, lint, test commands (shared: F02 owns initial, F05 extends) | F02, F05 |
 | `ios/` | Native iOS workspace root | F03 |
-| `ios/project.yml` | Native Xcode project generation (shared: F03 owns initial, F05 reads) | F03, F05 |
+| `ios/project.yml` | Native Xcode project generation (shared: F03 owns initial, F05 edits) | F03, F05 |
 | `.github/workflows/core.yml` | Linux CI for Rust checks | F04 |
 | `.github/workflows/ios.yml` | macOS CI for native simulator | F05 |
 | `.github/workflows/hygiene.yml` | Secret scanner and fixture policy | F06 |
-| `AGENTS.md` | Worker capability documentation (shared: F04 owns initial, F05 extends) | F04, F05 |
+| `AGENTS.md` | Worker capability documentation (shared: F04 owns initial, F05 extends, T07 documents) | F04, F05, T07 |
 | `tools/hygiene/` | Hygiene check implementation | F06 |
 | `docs/contributing.md` | Contribution guidelines | F06 |
 | `tools/apple-build/` | Reproducible signing and device build | P08 |
+| `tools/apple-build/trial/` | Trial-specific signing and build automation (nested under P08, owned by T06) | T06 |
 | `tools/bindings/` | Binding generation (reproducible output) | B01 |
 | `tools/evaluation/` | Semantic evaluation reporting | E01 |
 | `tools/provider-probe/` | Self-hosted endpoint validation | V08 |
@@ -573,7 +581,7 @@ The following map lists every implementation area and its owning task. All file 
 
 | Module | Responsibility | Task |
 | --- | --- | --- |
-| `core/bindings/` | Rust → Swift generated bindings | B01 |
+| `core/bindings/` | Rust → Swift generated bindings (reproducible output) | P01 |
 | `ios/BridgeProbe/` | Round-trip boundary validation | P01 |
 | `ios/NotificationProbe/` | Native scheduling/list/cancel primitives | P05 |
 | `ios/AudioProbe/` | Recording interruption and partial-audio recovery | P03 |
@@ -619,17 +627,24 @@ The following map lists every implementation area and its owning task. All file 
 | `docs/validation/live-providers.md` | Live provider interchangeability validation | E02 |
 | `docs/validation/device-feasibility.md` | Actual-device feasibility evidence (P09) | P09 |
 | `docs/validation/accessibility.md` | Native accessibility validation results | U10 |
+| `docs/validation/m1-device-results.md` | Actual-device M1 functional exit matrix | T05 |
+| `docs/validation/m1-trial-results.md` | Two-week M1 trial evidence and evaluation | T08 |
+| `docs/testing/m1-upgrade-evidence.md` | Trial build versioning and upgrade persistence | T10 |
+| `docs/releases/m1-trial.md` | Signed M1 trial build and installation guide | T06 |
+| `docs/setup.md` | M1 setup and operational instructions | T07 |
+| `docs/recovery.md` | Honest M1 limitations and recovery procedures | T07 |
+| `README.md` | Initial Oh And product documentation | T07 |
 
 ## Data Protection and Backup Lifecycle
 
 ### File Protection Classes
 
 All stored data is protected by device file protection class:
-- **NSFileProtectionComplete**: captures (text/audio references), items, corrections, reminders, import records. Requires device unlock. Aligns with Keychain `kSecAttrAccessibleWhenUnlocked`.
-- **NSFileProtectionCompleteUnlessOpen**: indexes, caches, FTS indexes. Accessible after first unlock within session. Aligns with Keychain `kSecAttrAccessibleAfterFirstUnlock`.
-- **NSFileProtectionNone**: configuration, metadata (non-sensitive). Never locked. Aligns with Keychain `kSecAttrAccessibleAlways`.
+- **NSFileProtectionComplete**: captures (text/audio references), items, corrections, reminders. Requires device unlock. Aligns with Keychain `kSecAttrAccessibleWhenUnlocked`.
+- **NSFileProtectionCompleteUntilFirstUserAuthentication**: ingress records, indexes, caches, FTS indexes. Accessible after first device unlock. Aligns with Keychain `kSecAttrAccessibleAfterFirstUserAuthentication`.
+- **NSFileProtectionNone**: configuration, metadata (non-sensitive). Always accessible. Aligns with Keychain `kSecAttrAccessibleAlways` (deprecated; prefer stronger class if possible).
 
-Credentials and secrets are stored in native Keychain with appropriate accessibility class (at minimum `kSecAttrAccessibleAfterFirstUnlock` for supported cases; stricter where needed for sensitive credentials).
+Credentials and secrets are stored in native Keychain with appropriate accessibility class (at minimum `kSecAttrAccessibleAfterFirstUserAuthentication` for supported cases; stricter where needed for sensitive credentials).
 
 ### Audio Retention and Deletion
 
@@ -776,4 +791,4 @@ The Rust core receives injected clock and timezone providers:
 - D01 implements the versioned SQLite schema from this contract.
 - Remaining tasks fill modules and validate against these contracts.
 
-All implementation changes are bounded to task-owned paths. Shared manifests (Cargo.toml, Makefile, ios/project.yml, AGENTS.md) follow explicit ordering dependencies: F02 owns initial Cargo.toml/Makefile, F05 extends them; F03 owns ios/project.yml, F05 reads it; F04 owns initial AGENTS.md, F05 extends it.
+All implementation changes are bounded to task-owned paths. Shared manifests (Cargo.toml, Makefile, ios/project.yml, AGENTS.md) follow explicit ordering dependencies: F02 owns initial Cargo.toml/Makefile, F05 extends them; F03 owns ios/project.yml, F05 edits it; F04 owns initial AGENTS.md, F05 extends it, T07 adds documentation. Nested tools/apple-build/trial/ (T06) is owned by T06 and ordered after P08's tools/apple-build/.
