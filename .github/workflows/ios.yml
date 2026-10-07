@@ -58,23 +58,66 @@ jobs:
       - name: Determine simulator destination
         id: simulator
         run: |
-          # Parse available simulators and select the first one by UDID
-          DEVICE_JSON=$(xcrun simctl list -j devices available | python3 -c "import json, sys; devs = json.load(sys.stdin).get('devices', {}).get('com.apple.CoreSimulator.SimRuntime.iOS-*', []); print(json.dumps(devs[0]) if devs else '')")
-          if [ -z "$DEVICE_JSON" ] || [ "$DEVICE_JSON" = "null" ]; then
-            echo "ERROR: No available iPhone simulator found"
-            xcrun simctl list devices iOS available
-            exit 1
-          fi
-          DEVICE_UDID=$(echo "$DEVICE_JSON" | python3 -c "import json, sys; d = json.load(sys.stdin); print(d.get('udid', ''))")
-          DEVICE_NAME=$(echo "$DEVICE_JSON" | python3 -c "import json, sys; d = json.load(sys.stdin); print(d.get('name', ''))")
-          DEVICE_RUNTIME=$(echo "$DEVICE_JSON" | python3 -c "import json, sys; d = json.load(sys.stdin); print(d.get('runtimeVersion', ''))")
-          if [ -z "$DEVICE_UDID" ]; then
-            echo "ERROR: Failed to extract simulator UDID"
-            exit 1
-          fi
-          echo "udid=$DEVICE_UDID" >> $GITHUB_OUTPUT
-          echo "name=$DEVICE_NAME" >> $GITHUB_OUTPUT
-          echo "runtime=$DEVICE_RUNTIME" >> $GITHUB_OUTPUT
+          # Parse available simulators, iterate through iOS runtimes, and select first available iPhone
+          python3 << 'PYTHON_EOF'
+          import json
+          import sys
+
+          data = json.load(sys.stdin)
+          devices = data.get('devices', {})
+
+          # Find iOS runtime keys and sort by version (descending)
+          ios_runtimes = sorted(
+              [k for k in devices.keys() if k.startswith('com.apple.CoreSimulator.SimRuntime.iOS-')],
+              reverse=True
+          )
+
+          if not ios_runtimes:
+              print("ERROR: No iOS simulators found", file=sys.stderr)
+              sys.exit(1)
+
+          # Find first available iPhone simulator
+          selected = None
+          selected_runtime_key = None
+          for runtime_key in ios_runtimes:
+              devices_in_runtime = devices.get(runtime_key, [])
+              for device in devices_in_runtime:
+                  if device.get('isAvailable', False) and device.get('name', '').startswith('iPhone'):
+                      selected = device
+                      selected_runtime_key = runtime_key
+                      break
+              if selected:
+                  break
+
+          if not selected:
+              print("ERROR: No available iPhone simulator found", file=sys.stderr)
+              sys.exit(1)
+
+          # Extract runtime version from the key
+          runtime_version = selected_runtime_key.replace('com.apple.CoreSimulator.SimRuntime.iOS-', '')
+
+          device_udid = selected.get('udid', '')
+          device_name = selected.get('name', '')
+
+          if not device_udid:
+              print("ERROR: Failed to extract simulator UDID", file=sys.stderr)
+              sys.exit(1)
+
+          # Write to GitHub output and capture variables
+          print(f"udid={device_udid}")
+          print(f"name={device_name}")
+          print(f"runtime={runtime_version}")
+          PYTHON_EOF > /tmp/sim_output.txt
+
+          # Parse output file
+          while IFS='=' read -r key value; do
+            echo "$key=$value" >> $GITHUB_OUTPUT
+          done < /tmp/sim_output.txt
+
+          # Extract values for logging
+          DEVICE_UDID=$(grep "^udid=" /tmp/sim_output.txt | cut -d= -f2)
+          DEVICE_NAME=$(grep "^name=" /tmp/sim_output.txt | cut -d= -f2)
+          DEVICE_RUNTIME=$(grep "^runtime=" /tmp/sim_output.txt | cut -d= -f2)
           echo "Selected simulator: $DEVICE_NAME (UDID: $DEVICE_UDID, Runtime: $DEVICE_RUNTIME)"
       - name: Build BridgeProbe for test
         shell: bash
