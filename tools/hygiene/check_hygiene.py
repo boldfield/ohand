@@ -18,22 +18,22 @@ from typing import List, Tuple, Set, Optional
 SECRET_PATTERNS = [
     # AWS credentials
     (r'AKIA[0-9A-Z]{16}', 'AWS Access Key ID'),
-    (r'aws_secret_access_key\s*=\s*[^\s]+', 'AWS Secret Access Key'),
+    (r'aws_secret_access_key\s*[:=]\s*[^\s]+', 'AWS Secret Access Key'),
 
-    # API keys and tokens
-    (r'api[_-]?key\s*=\s*[^\s]+', 'API Key'),
-    (r'auth[_-]?token\s*=\s*[^\s]+', 'Auth Token'),
-    (r'x-api-key\s*=\s*[^\s]+', 'X-API-Key'),
+    # API keys and tokens (support both = and : separators)
+    (r'api[_-]?key\s*[:=]\s*[^\s]+', 'API Key'),
+    (r'auth[_-]?token\s*[:=]\s*[^\s]+', 'Auth Token'),
+    (r'x-api-key\s*[:=]\s*[^\s]+', 'X-API-Key'),
     (r'bearer\s+[a-zA-Z0-9._\-]+', 'Bearer Token'),
 
     # OAuth tokens
-    (r'oauth[_-]?token\s*=\s*[^\s]+', 'OAuth Token'),
-    (r'access[_-]?token\s*=\s*[^\s]+', 'Access Token'),
-    (r'refresh[_-]?token\s*=\s*[^\s]+', 'Refresh Token'),
+    (r'oauth[_-]?token\s*[:=]\s*[^\s]+', 'OAuth Token'),
+    (r'access[_-]?token\s*[:=]\s*[^\s]+', 'Access Token'),
+    (r'refresh[_-]?token\s*[:=]\s*[^\s]+', 'Refresh Token'),
 
     # Passwords
-    (r'password\s*=\s*[^\s]+', 'Password'),
-    (r'passwd\s*=\s*[^\s]+', 'Password'),
+    (r'password\s*[:=]\s*[^\s]+', 'Password'),
+    (r'passwd\s*[:=]\s*[^\s]+', 'Password'),
 
     # Private keys
     (r'-----BEGIN RSA PRIVATE KEY-----', 'RSA Private Key'),
@@ -48,9 +48,13 @@ SECRET_PATTERNS = [
     # Database URLs with credentials
     (r'(postgres|mysql|mongodb)://[^/\s]*:[^@\s]+@', 'Database URL with Credentials'),
 
-    # Anthropic/OpenAI API keys (common patterns)
-    (r'sk-[a-zA-Z0-9]{20,}', 'OpenAI-style API Key'),
-    (r'sk-ant-[a-zA-Z0-9]{20,}', 'Anthropic API Key'),
+    # GitHub tokens
+    (r'ghp_[a-zA-Z0-9_]{36,255}', 'GitHub Personal Access Token'),
+    (r'ghs_[a-zA-Z0-9_]{36,255}', 'GitHub OAuth Token'),
+
+    # Anthropic/OpenAI API keys (more specific patterns first)
+    (r'sk-ant-[a-zA-Z0-9_\-]{20,}', 'Anthropic API Key'),
+    (r'sk-[a-zA-Z0-9_\-]{20,}', 'OpenAI-style API Key'),
 ]
 
 # File extensions and paths that should not contain private captures
@@ -220,30 +224,43 @@ def run_gitleaks_check() -> Tuple[List[Tuple[str, str, None]], bool]:
     Returns (issues list, has_gitleaks) - issues as (path, description, None) tuples
     """
     try:
-        result = subprocess.run(
-            ['gitleaks', 'detect', '--source', 'local', '--exit-code', '0', '--report-format', 'json'],
-            capture_output=True,
-            text=True,
-            cwd=os.getcwd(),
-            timeout=60
-        )
+        # Create a temporary file for the JSON report
+        import tempfile
+        report_fd, report_path = tempfile.mkstemp(suffix='.json')
+        os.close(report_fd)
 
-        issues = []
-        if result.stdout.strip():
-            try:
-                report = json.loads(result.stdout)
-                matches = report.get('Matches', [])
-                for match in matches:
-                    path = match.get('File', 'unknown')
-                    secret_type = match.get('RuleID', 'Secret')
-                    issues.append((path, f'Secret detected by gitleaks: {secret_type}', None))
-            except json.JSONDecodeError:
-                pass
+        try:
+            result = subprocess.run(
+                ['gitleaks', 'detect', '--redact', '--report-path', report_path],
+                capture_output=True,
+                text=True,
+                cwd=os.getcwd(),
+                timeout=60
+            )
 
-        return issues, True
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        # gitleaks not installed or timed out - continue with custom checks
-        return [], False
+            issues = []
+            if os.path.exists(report_path) and os.path.getsize(report_path) > 0:
+                try:
+                    with open(report_path, 'r') as f:
+                        report = json.load(f)
+                    # gitleaks returns a list directly
+                    matches = report if isinstance(report, list) else report.get('Matches', [])
+                    for match in matches:
+                        path = match.get('File', 'unknown')
+                        secret_type = match.get('RuleID', 'Secret')
+                        issues.append((path, f'Secret detected by gitleaks: {secret_type}', None))
+                except (json.JSONDecodeError, IOError):
+                    pass
+
+            return issues, True
+        finally:
+            if os.path.exists(report_path):
+                os.unlink(report_path)
+    except FileNotFoundError:
+        # gitleaks not installed - fail closed
+        raise RuntimeError('gitleaks is not installed or not in PATH. Install gitleaks and add to PATH.')
+    except subprocess.TimeoutExpired:
+        raise RuntimeError('gitleaks scan timed out after 60 seconds.')
 
 
 def check_path(path: str) -> List[Tuple[str, int | None]]:
@@ -288,8 +305,9 @@ def check_path(path: str) -> List[Tuple[str, int | None]]:
     except (OSError, IOError):
         return issues
 
-    # Skip secret checking for hygiene checker implementation and tests
-    if path.startswith('tools/hygiene/'):
+    # Skip secret checking for tools/hygiene/fixtures/ (allowlisted test fixtures)
+    # but NOT for tools/hygiene/*.py (implementation files should be checked)
+    if path.startswith('tools/hygiene/fixtures/'):
         return issues
 
     # Check for secrets in content
@@ -355,13 +373,14 @@ def find_uncommitted_files() -> Set[str]:
         return set()
 
 
-def check_repository(paths: List[str] = None, scan_mode: str = 'auto') -> Tuple[List[Tuple[str, str, int | None]], int]:
+def check_repository(paths: List[str] = None, scan_mode: str = 'auto', require_gitleaks: bool = True) -> Tuple[List[Tuple[str, str, int | None]], int]:
     """
     Check repository for hygiene issues.
 
     Args:
         paths: Specific paths to check. If None, auto-detects based on scan_mode.
         scan_mode: 'uncommitted' (untracked/modified), 'tracked' (all tracked), 'pr-diff' (PR changes), 'auto' (PR if origin/main exists, else uncommitted)
+        require_gitleaks: If True, fail if gitleaks is not available. If False, continue with custom checks only.
 
     Returns:
         (issues: List of (file_path, issue_description, line_number), exit_code)
@@ -387,9 +406,16 @@ def check_repository(paths: List[str] = None, scan_mode: str = 'auto') -> Tuple[
 
     issues = []
 
-    # Run gitleaks first if available
-    gitleaks_issues, has_gitleaks = run_gitleaks_check()
-    issues.extend(gitleaks_issues)
+    # Run gitleaks first - required in CI to ensure maintained scanner runs
+    try:
+        gitleaks_issues, _ = run_gitleaks_check()
+        issues.extend(gitleaks_issues)
+    except RuntimeError as e:
+        if require_gitleaks:
+            # In CI, we must have gitleaks installed
+            print(f'CRITICAL: {str(e)}', file=sys.stderr)
+            return [(str(e), '', None)], 1
+        # In local testing, optional
 
     # Then run custom checks on specified paths
     for path in paths:
@@ -432,10 +458,15 @@ if __name__ == '__main__':
     parser.add_argument('paths', nargs='*', help='Specific paths to check (if none, auto-detects)')
     parser.add_argument('--scan-mode', choices=['auto', 'uncommitted', 'tracked', 'pr-diff'], default='auto',
                         help='Which files to scan: auto (default), uncommitted (untracked/modified), tracked (all), pr-diff (PR changes)')
+    parser.add_argument('--require-gitleaks', action='store_true', default=True,
+                        help='Require gitleaks to be installed (default: true for tracked/auto modes)')
 
     args = parser.parse_args()
 
+    # In tracked/auto/pr-diff modes, require gitleaks scanner
+    require_gitleaks = args.scan_mode in ['auto', 'tracked', 'pr-diff']
+
     paths = args.paths if args.paths else None
-    issues, exit_code = check_repository(paths, scan_mode=args.scan_mode)
+    issues, exit_code = check_repository(paths, scan_mode=args.scan_mode, require_gitleaks=require_gitleaks)
     print(format_report(issues), file=sys.stderr if exit_code else sys.stdout)
     sys.exit(exit_code)
