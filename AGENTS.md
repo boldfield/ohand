@@ -56,24 +56,28 @@ Artifact retention is bounded: `core.yml` does not upload artifacts; any future 
 
 ## Required checks for macOS workers
 
-Native iOS checks run on macOS runners (macos-latest) via `.github/workflows/ios.yml`. These checks validate the iOS project structure, simulator build, and unit tests for the exact submitted commit.
+Native iOS checks run on macOS runners (macos-15) via `.github/workflows/ios.yml`. These checks validate the iOS project structure, simulator build, and unit tests for the exact submitted commit.
 
 Native iOS checks executed via the workflow:
 
 - **Project generation and simulator build** (`generate-build` job):
   - `scripts/generate.sh` — Generate `OhAnd.xcodeproj` using pinned XcodeGen via mint
   - `scripts/build-simulator.sh BridgeProbe` — Build one probe app for iOS Simulator without signing
-  - Capture and log Xcode version, Swift version, and Simulator SDK information
+  - Capture and log Xcode version (pinned to 16.4), Swift version, and Simulator SDK information
 
-- **Unit tests** (`test` job):
-  - `xcodebuild test -scheme OhAndTests -sdk iphonesimulator` — Run native unit tests on simulated iPhone 15
+- **Unit tests and smoke test** (`test` job):
+  - Dynamically selects first available iOS simulator from `xcrun simctl list -j devices available`
+  - `xcodebuild test -scheme OhAndTests -sdk iphonesimulator` — Run native unit tests on selected simulator
+  - Boot selected simulator and launch BridgeProbe app with deterministic boot status wait
+  - Log selected simulator device name, runtime version, and UDID for reproducibility
 
 Linux Odonian workers authorizing native checks for Swift/Objective-C code:
 
 - When a PR touches native iOS code (files under `ios/` except generated/ignored paths), Linux workers must await completion of the macOS iOS CI jobs before review.
-- Retrieve the workflow run URL via `gh run list --repo [repo] --branch [branch] --status completed --limit 1 --json url` or link it directly in the PR/task.
+- Retrieve the workflow run URL via `gh run list --repo [repo] --commit [head-sha] --status completed --json url` to match the exact submitted commit, or link it directly in the PR/task. Do NOT use branch-based lookups, which may retrieve stale runs.
 - Block review if the run is not available or if `generate-build` or `test` jobs fail; Linux-only validation cannot certify Swift/Objective-C.
-- Confirm toolchain versions (Xcode, Swift, SDK) and device simulator version are captured in the run logs; these establish that the build is reproducible for the exact revision reviewed.
+- Confirm toolchain versions (Xcode, Swift, SDK), selected simulator device name/runtime/UDID, and test results are captured in the run logs; these establish that the build is reproducible for the exact revision reviewed.
+- Retrieve and link the `ios-test-logs` artifact from the run (contains test output and xcresult bundle); this artifact is available for 7 days at the GitHub URL: `https://github.com/boldfield/ohand/actions/runs/{run-id}` → Artifacts.
 - No signing credentials or private certificates are involved in these checks; fork PRs require no special permissions.
 
 The first repository commit contains documentation and license material only. It is a bootstrap operation, not an application implementation or proof of completed milestones.

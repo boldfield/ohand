@@ -11,9 +11,13 @@ permissions:
 jobs:
   generate-build:
     name: Generate project and build simulator
-    runs-on: macos-14-arm64
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - name: Setup Xcode version
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '16.4'
       - name: Install mint
         run: brew install mint
       - name: Generate Xcode project
@@ -37,9 +41,13 @@ jobs:
 
   test:
     name: Run unit tests with simulator launch
-    runs-on: macos-14-arm64
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - name: Setup Xcode version
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '16.4'
       - name: Install mint
         run: brew install mint
       - name: Generate Xcode project
@@ -50,85 +58,92 @@ jobs:
       - name: Determine simulator destination
         id: simulator
         run: |
-          # Find first available iPhone simulator with iOS 18 or later
-          DEVICE=$(xcrun simctl list devices iOS available | grep "iPhone" | head -1 | sed 's/.*(\([^)]*\)).*/\1/')
-          if [ -z "$DEVICE" ]; then
+          # Parse available simulators and select the first one by UDID
+          DEVICE_JSON=$(xcrun simctl list -j devices available | python3 -c "import json, sys; devs = json.load(sys.stdin).get('devices', {}).get('com.apple.CoreSimulator.SimRuntime.iOS-*', []); print(json.dumps(devs[0]) if devs else '')")
+          if [ -z "$DEVICE_JSON" ] || [ "$DEVICE_JSON" = "null" ]; then
             echo "ERROR: No available iPhone simulator found"
             xcrun simctl list devices iOS available
             exit 1
           fi
-          echo "device=$DEVICE" >> $GITHUB_OUTPUT
-          echo "Selected simulator: $DEVICE"
+          DEVICE_UDID=$(echo "$DEVICE_JSON" | python3 -c "import json, sys; d = json.load(sys.stdin); print(d.get('udid', ''))")
+          DEVICE_NAME=$(echo "$DEVICE_JSON" | python3 -c "import json, sys; d = json.load(sys.stdin); print(d.get('name', ''))")
+          DEVICE_RUNTIME=$(echo "$DEVICE_JSON" | python3 -c "import json, sys; d = json.load(sys.stdin); print(d.get('runtimeVersion', ''))")
+          if [ -z "$DEVICE_UDID" ]; then
+            echo "ERROR: Failed to extract simulator UDID"
+            exit 1
+          fi
+          echo "udid=$DEVICE_UDID" >> $GITHUB_OUTPUT
+          echo "name=$DEVICE_NAME" >> $GITHUB_OUTPUT
+          echo "runtime=$DEVICE_RUNTIME" >> $GITHUB_OUTPUT
+          echo "Selected simulator: $DEVICE_NAME (UDID: $DEVICE_UDID, Runtime: $DEVICE_RUNTIME)"
+      - name: Build BridgeProbe for test
+        shell: bash
+        run: |
+          set -o pipefail
+          cd ios
+          ./scripts/build-simulator.sh BridgeProbe
       - name: Run OhAndTests
         shell: bash
         run: |
           set -o pipefail
           cd ios
-          DEVICE="${{ steps.simulator.outputs.device }}"
+          DEVICE_UDID="${{ steps.simulator.outputs.udid }}"
+          DEVICE_NAME="${{ steps.simulator.outputs.name }}"
 
           echo "=== Simulator and Runtime Info ==="
-          xcrun simctl list devices iOS available | grep "$DEVICE"
+          echo "Device: $DEVICE_NAME (UDID: $DEVICE_UDID)"
 
           xcodebuild test \
             -project OhAnd.xcodeproj \
             -scheme OhAndTests \
             -sdk iphonesimulator \
-            -destination "platform=iOS Simulator,name=$DEVICE" \
+            -destination "platform=iOS Simulator,id=$DEVICE_UDID" \
             -derivedDataPath .derived \
+            -resultBundlePath .derived/test-results.xcresult \
             CODE_SIGNING_ALLOWED=NO 2>&1 | tee test-output.log
       - name: Smoke test - boot simulator and launch app
         shell: bash
         run: |
           set -o pipefail
           cd ios
-          DEVICE="${{ steps.simulator.outputs.device }}"
-          DEVICE_ID=$(xcrun simctl list devices iOS available | grep "$DEVICE" | grep -oE '\([A-F0-9-]+\)' | tr -d '()')
+          DEVICE_UDID="${{ steps.simulator.outputs.udid }}"
+          DEVICE_NAME="${{ steps.simulator.outputs.name }}"
+          DEVICE_RUNTIME="${{ steps.simulator.outputs.runtime }}"
 
-          echo "=== Device ID ===" && echo "$DEVICE_ID"
+          echo "=== Device Information ===" && \
+          echo "Device Name: $DEVICE_NAME" && \
+          echo "Device UDID: $DEVICE_UDID" && \
+          echo "Runtime: $DEVICE_RUNTIME"
 
           # Boot simulator if not already running
-          echo "=== Booting simulator ===" && xcrun simctl boot "$DEVICE_ID" || true
+          echo "=== Booting simulator ===" && xcrun simctl boot "$DEVICE_UDID" || true
 
-          # Wait for simulator to boot
-          sleep 5
+          # Wait deterministically for simulator to boot
+          echo "=== Waiting for simulator to boot ===" && \
+          xcrun simctl bootstatus "$DEVICE_UDID" -b
 
           # Install app
           echo "=== Installing BridgeProbe ===" && \
-          xcrun simctl install "$DEVICE_ID" ".derived/Build/Products/Debug-iphonesimulator/BridgeProbe.app" || {
+          xcrun simctl install "$DEVICE_UDID" ".derived/Build/Products/Debug-iphonesimulator/BridgeProbe.app" || {
             echo "ERROR: Failed to install BridgeProbe"
             exit 1
           }
 
-          # Launch app
+          # Launch app with correct bundle ID from project.yml
           echo "=== Launching BridgeProbe ===" && \
-          BUNDLE_ID=$(grep -o 'PRODUCT_BUNDLE_IDENTIFIER = "[^"]*"' OhAnd.xcodeproj/project.pbxproj | head -1 | sed 's/.*= "\([^"]*\)".*/\1/') && \
-          xcrun simctl launch "$DEVICE_ID" "com.oh-and.bridgeprobe" || {
+          xcrun simctl launch "$DEVICE_UDID" "com.boldfield.ohand.probes.bridge" || {
             echo "ERROR: Failed to launch BridgeProbe"
             exit 1
           }
 
           echo "=== Smoke test completed successfully ===" && \
-          xcrun simctl list devices iOS available | grep "$DEVICE"
-      - name: Upload test logs
+          xcrun simctl list devices iOS available | grep "$DEVICE_NAME"
+      - name: Upload test artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ios-test-logs
-          path: ios/test-output.log
+          path: |
+            ios/test-output.log
+            ios/.derived/test-results.xcresult
           retention-days: 7
-      - name: Check test results
-        if: always()
-        shell: bash
-        run: |
-          if [ ! -f ios/test-output.log ]; then
-            echo "ERROR: test-output.log not found"
-            exit 1
-          fi
-          if grep -q "Test Suite.*passed" ios/test-output.log; then
-            echo "Unit tests passed"
-            exit 0
-          else
-            echo "ERROR: Unit tests failed or did not complete"
-            echo "=== Test output ===" && cat ios/test-output.log
-            exit 1
-          fi
