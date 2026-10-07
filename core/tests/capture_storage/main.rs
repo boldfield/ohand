@@ -435,52 +435,120 @@ fn test_retrieved_capture_matches_saved() -> Result<()> {
 }
 
 #[test]
-fn test_fault_injection_locked_write_during_commit() -> Result<()> {
-    let path = temp_db_path("fault_locked_write");
+fn test_fault_injection_lock_held_at_transaction_begin() -> Result<()> {
+    let path = temp_db_path("fault_lock_at_begin");
     let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
     let mut db1 = make_test_db(&path, instant)?;
+    // Keep the test fast: fail quickly instead of waiting out the default busy timeout.
+    db1.conn()
+        .busy_timeout(std::time::Duration::from_millis(200))?;
 
     let capture = make_test_capture("cap-1");
 
-    // Spawn a second connection that holds an exclusive lock until signaled to release
     let path_clone = path.clone();
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
     let handle = thread::spawn(move || -> Result<()> {
         let db2 = make_test_db(&path_clone, instant)?;
         let conn = db2.conn();
         conn.execute("BEGIN EXCLUSIVE", [])?;
         conn.execute("INSERT INTO captures (capture_id, text, audio_reference, capture_instant, timezone_id, utc_offset_minutes, locale, calendar, item_scope, route_id, entry_locked, created_at, session_topic) VALUES ('lock-holder', 'text', NULL, '2026-01-15T10:30:00Z', 'UTC', 0, 'en', 'gregorian', 'personal', 'route-1', 0, '2026-01-15T10:30:00Z', NULL)", [])?;
-        // Wait for signal to release the lock
-        let _ = rx.recv();
+        ready_tx.send(()).ok();
+        let _ = release_rx.recv();
         conn.execute("ROLLBACK", [])?;
         Ok(())
     });
 
-    // Give lock holder time to acquire and hold the lock
-    thread::sleep(std::time::Duration::from_millis(100));
+    // Do not attempt the save until the lock holder demonstrably holds the lock.
+    ready_rx.recv().expect("lock holder must signal readiness");
 
-    // Try to save while the other connection holds the lock.
-    // This should fail when save_capture's busy_timeout expires (5 seconds).
     let result = save_capture(&mut db1, &capture);
 
-    // Signal the lock holder to release the lock
-    let _ = tx.send(());
+    let _ = release_tx.send(());
     handle.join().unwrap()?;
 
-    // Verify that save failed (the lock was held longer than busy_timeout allows)
     assert!(
         result.is_err(),
-        "save_capture should fail when write lock is held and busy_timeout expires"
+        "save_capture must not acknowledge while another connection holds the write lock"
     );
 
-    // Verify all-or-nothing: after a failed save, the row is completely absent
     let mut db_reopen = make_test_db(&path, instant)?;
     let tx_reopen = db_reopen.transaction()?;
-    let retrieved = get_capture(&tx_reopen, "cap-1")?;
+    assert_eq!(get_capture(&tx_reopen, "cap-1")?, None);
+    assert_eq!(get_capture(&tx_reopen, "lock-holder")?, None);
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn test_fault_injection_commit_failure_yields_no_acknowledgment() -> Result<()> {
+    let path = temp_db_path("fault_commit_failure");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let capture = make_test_capture("cap-1");
+
+    {
+        let mut db = make_test_db(&path, instant)?;
+        // TEMP objects live only on this connection, so they never reach the persisted schema.
+        // The trigger fires after the capture INSERT and creates an orphan child row whose
+        // deferred foreign key is only checked at COMMIT, so the INSERT succeeds and the
+        // COMMIT itself fails.
+        db.conn().execute_batch(
+            "CREATE TEMP TABLE fault_parent (id INTEGER PRIMARY KEY);
+             CREATE TEMP TABLE fault_child (
+                 parent_id INTEGER REFERENCES fault_parent(id) DEFERRABLE INITIALLY DEFERRED
+             );
+             CREATE TEMP TRIGGER fault_after_capture_insert AFTER INSERT ON main.captures
+             BEGIN
+                 INSERT INTO fault_child (parent_id) VALUES (999);
+             END;",
+        )?;
+
+        let result = save_capture(&mut db, &capture);
+        assert!(
+            result.is_err(),
+            "save_capture must not acknowledge when COMMIT fails, got {:?}",
+            result
+        );
+    }
+
+    let mut db_reopen = make_test_db(&path, instant)?;
+    let tx_reopen = db_reopen.transaction()?;
     assert_eq!(
-        retrieved, None,
-        "Failed save must leave no partial row after reopen"
+        get_capture(&tx_reopen, "cap-1")?,
+        None,
+        "A save whose commit failed must leave no row after reopen"
     );
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn test_fault_injection_abort_between_insert_and_commit_yields_no_acknowledgment() -> Result<()> {
+    let path = temp_db_path("fault_abort_after_insert");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let capture = make_test_capture("cap-1");
+
+    {
+        let mut db = make_test_db(&path, instant)?;
+        db.conn().execute_batch(
+            "CREATE TEMP TRIGGER fault_abort_after_insert AFTER INSERT ON main.captures
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected fault after insert');
+             END;",
+        )?;
+
+        let result = save_capture(&mut db, &capture);
+        assert!(
+            result.is_err(),
+            "save_capture must not acknowledge when a fault follows the INSERT"
+        );
+    }
+
+    let mut db_reopen = make_test_db(&path, instant)?;
+    let tx_reopen = db_reopen.transaction()?;
+    assert_eq!(get_capture(&tx_reopen, "cap-1")?, None);
 
     let _ = std::fs::remove_file(&path);
     Ok(())
