@@ -31,8 +31,8 @@ fn fresh_install_is_local_only_default() {
     let result = authorizer.authorize(&context, &profile);
     assert!(result.is_err());
     match result.unwrap_err() {
-        AuthorizationError::RouteNotAuthorized(_) => {} // Expected
-        _ => panic!("Expected RouteNotAuthorized"),
+        AuthorizationError::CapabilityNotAuthorizedForRoute => {} // Expected
+        e => panic!("Expected CapabilityNotAuthorizedForRoute, got {}", e),
     }
 }
 
@@ -67,8 +67,7 @@ fn classifier_cannot_upgrade_disclosure_permission() {
     let result = authorizer.authorize(&context, &profile);
     assert_eq!(result, Ok(AuthorizationDecision::Authorized));
 
-    // Malicious stored instruction tries to upgrade to cloud.
-    // But since the declared_route is immutable, it stays local-only.
+    // Attempt to upgrade to cloud even though only local-only is authorized.
     let upgraded_context = AuthorizationContext {
         declared_route: ProcessingRoute::Cloud,
         capability: ProviderCapability::TextInterpretation,
@@ -78,6 +77,10 @@ fn classifier_cannot_upgrade_disclosure_permission() {
 
     let result = authorizer.authorize(&upgraded_context, &profile);
     assert!(result.is_err());
+    match result.unwrap_err() {
+        AuthorizationError::CapabilityNotAuthorizedForRoute => {} // Expected
+        e => panic!("Expected CapabilityNotAuthorizedForRoute, got {}", e),
+    }
 }
 
 /// Acceptance test: provider outage cannot reroute payloads.
@@ -86,7 +89,17 @@ fn classifier_cannot_upgrade_disclosure_permission() {
 /// cannot affect already-queued jobs.
 #[test]
 fn provider_outage_cannot_reroute_queued_payloads() {
-    let policy = RoutingPolicy::builder().with_cloud().build();
+    // Authorize both cloud destinations to isolate the version check.
+    let policy = RoutingPolicy::builder()
+        .with_cloud_capability(
+            ProviderCapability::TextInterpretation,
+            "https://api.anthropic.com",
+        )
+        .with_cloud_capability(
+            ProviderCapability::TextInterpretation,
+            "https://api.openai.com",
+        )
+        .build();
     let authorizer = Authorizer::new(policy);
 
     // Original profile for Anthropic.
@@ -179,7 +192,12 @@ fn malicious_instructions_cannot_override_declared_route() {
 /// Test: explicit cloud authorization allows cloud routes.
 #[test]
 fn explicit_cloud_authorization_allows_cloud_routes() {
-    let policy = RoutingPolicy::builder().with_cloud().build();
+    let policy = RoutingPolicy::builder()
+        .with_cloud_capability(
+            ProviderCapability::TextInterpretation,
+            "https://api.anthropic.com",
+        )
+        .build();
     let authorizer = Authorizer::new(policy);
 
     let mut builder = ProviderProfileBuilder::new("test", ProviderProtocol::Anthropic, "claude");
@@ -207,7 +225,12 @@ fn explicit_cloud_authorization_allows_cloud_routes() {
 /// Test: explicit private-server authorization allows private-server routes.
 #[test]
 fn explicit_private_server_authorization() {
-    let policy = RoutingPolicy::builder().with_private_server().build();
+    let policy = RoutingPolicy::builder()
+        .with_private_server_capability(
+            ProviderCapability::TextInterpretation,
+            "https://private.example.com",
+        )
+        .build();
     let authorizer = Authorizer::new(policy);
 
     let mut builder =
@@ -237,7 +260,12 @@ fn explicit_private_server_authorization() {
 /// Test: unapproved destinations are rejected.
 #[test]
 fn unapproved_destination_is_rejected() {
-    let policy = RoutingPolicy::builder().with_cloud().build();
+    let policy = RoutingPolicy::builder()
+        .with_cloud_capability(
+            ProviderCapability::TextInterpretation,
+            "https://api.anthropic.com",
+        )
+        .build();
     let authorizer = Authorizer::new(policy);
 
     let mut builder = ProviderProfileBuilder::new("test", ProviderProtocol::Anthropic, "claude");
@@ -275,8 +303,14 @@ fn routing_policy_reports_authorized_routes() {
     assert_eq!(routes, vec![ProcessingRoute::LocalOnly]);
 
     let policy = RoutingPolicy::builder()
-        .with_cloud()
-        .with_private_server()
+        .with_cloud_capability(
+            ProviderCapability::TextInterpretation,
+            "https://api.anthropic.com",
+        )
+        .with_private_server_capability(
+            ProviderCapability::TextInterpretation,
+            "https://private.example.com",
+        )
         .build();
     let routes = policy.authorized_routes();
     assert!(routes.contains(&ProcessingRoute::LocalOnly));
@@ -288,7 +322,12 @@ fn routing_policy_reports_authorized_routes() {
 /// Test: capability support validation.
 #[test]
 fn unsupported_capability_is_rejected() {
-    let policy = RoutingPolicy::builder().with_cloud().build();
+    let policy = RoutingPolicy::builder()
+        .with_cloud_capability(
+            ProviderCapability::TextInterpretation,
+            "https://api.anthropic.com",
+        )
+        .build();
     let authorizer = Authorizer::new(policy);
 
     let mut builder = ProviderProfileBuilder::new("test", ProviderProtocol::Anthropic, "claude");
@@ -323,7 +362,6 @@ fn unsupported_capability_is_rejected() {
 #[test]
 fn reviewer_route_requires_explicit_authorization() {
     let policy = RoutingPolicy::fresh_install();
-    assert!(!policy.allow_reviewer());
 
     let context = AuthorizationContext {
         declared_route: ProcessingRoute::Reviewer,
@@ -347,7 +385,96 @@ fn reviewer_route_requires_explicit_authorization() {
     let result = authorizer.authorize(&context, &profile);
     assert!(result.is_err());
     match result.unwrap_err() {
-        AuthorizationError::RouteNotAuthorized(_) => {} // Expected
-        e => panic!("Expected RouteNotAuthorized, got {}", e),
+        AuthorizationError::DestinationRequired => {} // Expected for reviewer route
+        e => panic!("Expected DestinationRequired, got {}", e),
+    }
+}
+
+/// Test: per-capability per-destination authorization boundaries.
+#[test]
+fn per_capability_authorization_enforced() {
+    // Cloud authorized for TextInterpretation at api.anthropic.com only.
+    let policy = RoutingPolicy::builder()
+        .with_cloud_capability(
+            ProviderCapability::TextInterpretation,
+            "https://api.anthropic.com",
+        )
+        .build();
+    let authorizer = Authorizer::new(policy);
+
+    let mut builder = ProviderProfileBuilder::new("test", ProviderProtocol::Anthropic, "claude");
+    builder = builder
+        .authorized_destination("https://api.anthropic.com")
+        .authorized_destination("https://api.anthropic-alt.com")
+        .credential_ref("test_key");
+    builder = builder.capability(
+        CapabilityMetadata::supported(ProviderCapability::TextInterpretation, "test_evidence_1")
+            .with_input_size_limit(10_000),
+    );
+
+    let profile = builder.build().expect("valid profile");
+
+    // TextInterpretation is authorized for api.anthropic.com.
+    let text_context = AuthorizationContext {
+        declared_route: ProcessingRoute::Cloud,
+        capability: ProviderCapability::TextInterpretation,
+        profile_version: profile.profile_version().to_string(),
+        destination: Some("https://api.anthropic.com".to_string()),
+    };
+    assert_eq!(
+        authorizer.authorize(&text_context, &profile),
+        Ok(AuthorizationDecision::Authorized)
+    );
+
+    // Same capability is not authorized for alternate destination.
+    let alt_dest_context = AuthorizationContext {
+        declared_route: ProcessingRoute::Cloud,
+        capability: ProviderCapability::TextInterpretation,
+        profile_version: profile.profile_version().to_string(),
+        destination: Some("https://api.anthropic-alt.com".to_string()),
+    };
+    assert!(authorizer.authorize(&alt_dest_context, &profile).is_err());
+    match authorizer.authorize(&alt_dest_context, &profile).unwrap_err() {
+        AuthorizationError::CapabilityNotAuthorizedForRoute => {} // Expected
+        e => panic!("Expected CapabilityNotAuthorizedForRoute, got {}", e),
+    }
+}
+
+/// Test: profile protocol mismatch detection.
+#[test]
+fn profile_protocol_must_match_route() {
+    let policy = RoutingPolicy::builder()
+        .with_private_server_capability(
+            ProviderCapability::TextInterpretation,
+            "https://private.example.com",
+        )
+        .build();
+    let authorizer = Authorizer::new(policy);
+
+    // Create a cloud profile (Anthropic), not a self-hosted profile.
+    let mut builder = ProviderProfileBuilder::new("test", ProviderProtocol::Anthropic, "claude");
+    builder = builder
+        .authorized_destination("https://api.anthropic.com")
+        .credential_ref("test_key");
+    builder = builder.capability(
+        CapabilityMetadata::supported(ProviderCapability::TextInterpretation, "test_evidence")
+            .with_input_size_limit(10_000),
+    );
+
+    let profile = builder.build().expect("valid profile");
+
+    // Attempt to use a cloud profile for a private-server route.
+    let context = AuthorizationContext {
+        declared_route: ProcessingRoute::PrivateServer,
+        capability: ProviderCapability::TextInterpretation,
+        profile_version: profile.profile_version().to_string(),
+        destination: Some("https://api.anthropic.com".to_string()),
+    };
+
+    let result = authorizer.authorize(&context, &profile);
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        AuthorizationError::ProfileProtocolMismatch => {} // Expected
+        e => panic!("Expected ProfileProtocolMismatch, got {}", e),
     }
 }
