@@ -5,16 +5,13 @@ on:
     branches:
       - main
 
-env:
-  CARGO_TERM_COLOR: always
-
 permissions:
   contents: read
 
 jobs:
   generate-build:
     name: Generate project and build simulator
-    runs-on: macos-latest
+    runs-on: macos-14-arm64
     steps:
       - uses: actions/checkout@v4
       - name: Install mint
@@ -25,7 +22,7 @@ jobs:
         run: |
           echo "=== Xcode version ===" && xcodebuild -version
           echo "=== Swift version ===" && swift --version
-          echo "=== Simulator SDK ===" && xcrun --show-sdk-path -sdk iphonesimulator | xargs -I {} xcrun --show-sdk-version -sdk iphonesimulator
+          echo "=== Simulator SDK version ===" && xcrun --sdk iphonesimulator --show-sdk-version
       - name: Build BridgeProbe for simulator
         run: cd ios && ./scripts/build-simulator.sh BridgeProbe
       - name: Verify build artifact exists
@@ -39,29 +36,99 @@ jobs:
           fi
 
   test:
-    name: Run unit tests
-    runs-on: macos-latest
+    name: Run unit tests with simulator launch
+    runs-on: macos-14-arm64
     steps:
       - uses: actions/checkout@v4
       - name: Install mint
         run: brew install mint
       - name: Generate Xcode project
         run: cd ios && ./scripts/generate.sh
-      - name: Run OhAndTests
+      - name: List available simulators
         run: |
+          echo "=== Available simulators ===" && xcrun simctl list devices iOS available
+      - name: Determine simulator destination
+        id: simulator
+        run: |
+          # Find first available iPhone simulator with iOS 18 or later
+          DEVICE=$(xcrun simctl list devices iOS available | grep "iPhone" | head -1 | sed 's/.*(\([^)]*\)).*/\1/')
+          if [ -z "$DEVICE" ]; then
+            echo "ERROR: No available iPhone simulator found"
+            xcrun simctl list devices iOS available
+            exit 1
+          fi
+          echo "device=$DEVICE" >> $GITHUB_OUTPUT
+          echo "Selected simulator: $DEVICE"
+      - name: Run OhAndTests
+        shell: bash
+        run: |
+          set -o pipefail
           cd ios
+          DEVICE="${{ steps.simulator.outputs.device }}"
+
+          echo "=== Simulator and Runtime Info ==="
+          xcrun simctl list devices iOS available | grep "$DEVICE"
+
           xcodebuild test \
             -project OhAnd.xcodeproj \
             -scheme OhAndTests \
             -sdk iphonesimulator \
-            -destination 'platform=iOS Simulator,name=iPhone 15' \
+            -destination "platform=iOS Simulator,name=$DEVICE" \
             -derivedDataPath .derived \
             CODE_SIGNING_ALLOWED=NO 2>&1 | tee test-output.log
+      - name: Smoke test - boot simulator and launch app
+        shell: bash
+        run: |
+          set -o pipefail
+          cd ios
+          DEVICE="${{ steps.simulator.outputs.device }}"
+          DEVICE_ID=$(xcrun simctl list devices iOS available | grep "$DEVICE" | grep -oE '\([A-F0-9-]+\)' | tr -d '()')
+
+          echo "=== Device ID ===" && echo "$DEVICE_ID"
+
+          # Boot simulator if not already running
+          echo "=== Booting simulator ===" && xcrun simctl boot "$DEVICE_ID" || true
+
+          # Wait for simulator to boot
+          sleep 5
+
+          # Install app
+          echo "=== Installing BridgeProbe ===" && \
+          xcrun simctl install "$DEVICE_ID" ".derived/Build/Products/Debug-iphonesimulator/BridgeProbe.app" || {
+            echo "ERROR: Failed to install BridgeProbe"
+            exit 1
+          }
+
+          # Launch app
+          echo "=== Launching BridgeProbe ===" && \
+          BUNDLE_ID=$(grep -o 'PRODUCT_BUNDLE_IDENTIFIER = "[^"]*"' OhAnd.xcodeproj/project.pbxproj | head -1 | sed 's/.*= "\([^"]*\)".*/\1/') && \
+          xcrun simctl launch "$DEVICE_ID" "com.oh-and.bridgeprobe" || {
+            echo "ERROR: Failed to launch BridgeProbe"
+            exit 1
+          }
+
+          echo "=== Smoke test completed successfully ===" && \
+          xcrun simctl list devices iOS available | grep "$DEVICE"
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-test-logs
+          path: ios/test-output.log
+          retention-days: 7
       - name: Check test results
         if: always()
+        shell: bash
         run: |
+          if [ ! -f ios/test-output.log ]; then
+            echo "ERROR: test-output.log not found"
+            exit 1
+          fi
           if grep -q "Test Suite.*passed" ios/test-output.log; then
             echo "Unit tests passed"
+            exit 0
           else
-            echo "Unit tests may have issues; check log above"
+            echo "ERROR: Unit tests failed or did not complete"
+            echo "=== Test output ===" && cat ios/test-output.log
+            exit 1
           fi
