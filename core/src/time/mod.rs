@@ -2,4 +2,6 @@
 
 pub mod resolver;
 
-pub use resolver::{DayOfWeek, ResolutionError, ResolutionResult, TimeContext, TimeResolver};
+pub use resolver::{
+    AmbiguityKind, DayOfWeek, ResolutionError, ResolutionResult, TimeContext, TimeResolver,
+};

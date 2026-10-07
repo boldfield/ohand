@@ -1,14 +1,21 @@
-use chrono::{DateTime, NaiveDate, Timelike, Utc};
-use ohand_core::time::{TimeContext, TimeResolver};
+use chrono::{DateTime, NaiveDate, Offset, TimeZone, Timelike, Utc};
+use chrono_tz::Tz;
+use ohand_core::time::{AmbiguityKind, ResolutionError, TimeContext, TimeResolver};
 
 fn make_context(tz: &str, ref_time: &str) -> TimeContext {
+    let reference_time = DateTime::parse_from_rfc3339(ref_time)
+        .unwrap()
+        .with_timezone(&Utc);
+    let zone: Tz = tz.parse().unwrap();
+    let utc_offset_at_capture = zone
+        .offset_from_utc_datetime(&reference_time.naive_utc())
+        .fix()
+        .local_minus_utc();
     TimeContext {
         timezone: tz.to_string(),
         locale: "en-US".to_string(),
-        reference_time: DateTime::parse_from_rfc3339(ref_time)
-            .unwrap()
-            .with_timezone(&Utc),
-        utc_offset_at_capture: 0,
+        reference_time,
+        utc_offset_at_capture,
         calendar: "gregorian".to_string(),
     }
 }
@@ -176,11 +183,16 @@ fn test_since_phrases_table() {
 
 #[test]
 fn test_dst_gap_america_new_york() {
-    let mut context = make_context("America/New_York", "2025-03-08T10:00:00Z");
-    context.utc_offset_at_capture = -18000; // EST: -5 hours
+    let context = make_context("America/New_York", "2025-03-08T10:00:00Z");
 
     let result = TimeResolver::resolve("2025-03-09 02:30:00", &context).unwrap();
     assert!(result.is_ambiguous);
+    assert_eq!(result.ambiguity_kind, Some(AmbiguityKind::DstGap));
+    assert_eq!(
+        result.resolved_local,
+        NaiveDate::from_ymd_opt(2025, 3, 9).and_then(|d| d.and_hms_opt(2, 30, 0))
+    );
+    assert!(!result.is_past);
     assert!(result.resolved_time.is_none());
     assert!(result.candidates.is_empty());
     assert!(result.resolved_date.is_some());
@@ -193,8 +205,7 @@ fn test_dst_gap_america_new_york() {
 
 #[test]
 fn test_dst_fold_america_new_york() {
-    let mut context = make_context("America/New_York", "2025-11-01T10:00:00Z");
-    context.utc_offset_at_capture = -14400; // EDT: -4 hours
+    let context = make_context("America/New_York", "2025-11-01T10:00:00Z");
 
     let result = TimeResolver::resolve("2025-11-02 01:30:00", &context).unwrap();
     assert!(result.is_ambiguous);
@@ -205,6 +216,12 @@ fn test_dst_fold_america_new_york() {
         "DST fold should have two candidates"
     );
     assert!(result.resolved_date.is_some());
+    assert_eq!(result.ambiguity_kind, Some(AmbiguityKind::DstFold));
+    assert_eq!(
+        result.resolved_local,
+        NaiveDate::from_ymd_opt(2025, 11, 2).and_then(|d| d.and_hms_opt(1, 30, 0))
+    );
+    assert!(!result.is_past);
     assert!(result.ambiguity_reason.as_ref().unwrap().contains("fold"));
 }
 
@@ -407,8 +424,7 @@ fn test_case_insensitivity() {
 fn test_past_date_in_non_utc_zones() {
     // Test case from reviewer: America/New_York, reference 2024-10-16T02:00Z (local Oct 15 22:00)
     // Phrase "2024-10-15" is TODAY locally, not past
-    let mut context = make_context("America/New_York", "2024-10-16T02:00:00Z");
-    context.utc_offset_at_capture = -14400; // EDT: -4 hours
+    let context = make_context("America/New_York", "2024-10-16T02:00:00Z");
     let result = TimeResolver::resolve("2024-10-15", &context).unwrap();
     assert!(result.is_ambiguous);
     assert!(result.resolved_date.is_some());
@@ -416,8 +432,7 @@ fn test_past_date_in_non_utc_zones() {
 
     // Test case: Australia/Sydney, reference 2024-10-15T22:00Z (local Oct 16 09:00)
     // Phrase "2024-10-15" is YESTERDAY locally
-    let mut context = make_context("Australia/Sydney", "2024-10-15T22:00:00Z");
-    context.utc_offset_at_capture = 39600; // AEDT: +11 hours
+    let context = make_context("Australia/Sydney", "2024-10-15T22:00:00Z");
     let result = TimeResolver::resolve("2024-10-15", &context).unwrap();
     assert!(result.is_past, "2024-10-15 is yesterday locally in Sydney");
 
@@ -426,4 +441,85 @@ fn test_past_date_in_non_utc_zones() {
     let context = make_context("UTC", "2024-10-15T10:00:00Z");
     let result = TimeResolver::resolve("2024-10-15", &context).unwrap();
     assert!(!result.is_past, "2024-10-15 is today in UTC");
+}
+
+#[test]
+fn test_past_dst_gap_and_fold_table() {
+    // (reference, phrase, expected kind, expected is_past)
+    let test_cases = vec![
+        (
+            "2025-12-01T12:00:00Z",
+            "2025-03-09 02:30:00",
+            AmbiguityKind::DstGap,
+            true,
+        ),
+        (
+            "2025-12-01T12:00:00Z",
+            "2025-11-02 01:30:00",
+            AmbiguityKind::DstFold,
+            true,
+        ),
+        (
+            "2025-03-08T10:00:00Z",
+            "2025-03-09 02:30:00",
+            AmbiguityKind::DstGap,
+            false,
+        ),
+        (
+            "2025-11-01T10:00:00Z",
+            "2025-11-02 01:30:00",
+            AmbiguityKind::DstFold,
+            false,
+        ),
+    ];
+
+    for (ref_time, phrase, expected_kind, expected_past) in test_cases {
+        let context = make_context("America/New_York", ref_time);
+        let result = TimeResolver::resolve(phrase, &context).unwrap();
+        assert_eq!(
+            result.ambiguity_kind,
+            Some(expected_kind),
+            "{phrase} @ {ref_time}"
+        );
+        assert_eq!(result.is_past, expected_past, "{phrase} @ {ref_time}");
+        assert!(result.resolved_time.is_none());
+        assert!(result.resolved_local.is_some());
+    }
+}
+
+#[test]
+fn test_wrong_utc_offset_rejected() {
+    let mut context = make_context("America/New_York", "2025-07-01T12:00:00Z");
+    context.utc_offset_at_capture = 0;
+    let err = TimeResolver::resolve("2025-07-02 09:00:00", &context).unwrap_err();
+    assert!(matches!(err, ResolutionError::InconsistentContext(_)));
+
+    // EST offset is wrong during EDT
+    context.utc_offset_at_capture = -18000;
+    let err = TimeResolver::resolve("2025-07-02 09:00:00", &context).unwrap_err();
+    assert!(matches!(err, ResolutionError::InconsistentContext(_)));
+
+    context.utc_offset_at_capture = -14400;
+    assert!(TimeResolver::resolve("2025-07-02 09:00:00", &context).is_ok());
+}
+
+#[test]
+fn test_non_gregorian_calendar_rejected() {
+    let mut context = make_context("UTC", "2024-10-15T10:00:00Z");
+    context.calendar = "hebrew".to_string();
+    let err = TimeResolver::resolve("2024-10-20 12:00:00", &context).unwrap_err();
+    assert!(matches!(err, ResolutionError::InvalidCalendar(_)));
+}
+
+#[test]
+fn test_ambiguity_kinds_for_missing_hour_and_past() {
+    let context = make_context("UTC", "2024-10-15T10:00:00Z");
+
+    let date_only = TimeResolver::resolve("2024-10-10", &context).unwrap();
+    assert_eq!(date_only.ambiguity_kind, Some(AmbiguityKind::MissingHour));
+    assert!(date_only.is_past);
+
+    let past = TimeResolver::resolve("2024-10-10 14:30:00", &context).unwrap();
+    assert_eq!(past.ambiguity_kind, Some(AmbiguityKind::Past));
+    assert!(past.resolved_time.is_some());
 }

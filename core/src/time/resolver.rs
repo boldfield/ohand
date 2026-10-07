@@ -50,13 +50,23 @@ pub struct TimeContext {
     pub calendar: String,           // e.g., "gregorian" (required, validated)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AmbiguityKind {
+    MissingHour,
+    DstGap,
+    DstFold,
+    Past,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolutionResult {
     pub original_phrase: String,
     pub resolved_date: Option<NaiveDate>,
+    pub resolved_local: Option<NaiveDateTime>, // wall-clock date and time as parsed, in the captured zone
     pub resolved_time: Option<DateTime<Utc>>,
     pub candidates: Vec<DateTime<Utc>>, // for ambiguous times (DST folds)
     pub is_ambiguous: bool,
+    pub ambiguity_kind: Option<AmbiguityKind>,
     pub ambiguity_reason: Option<String>,
     pub is_past: bool,
     pub context: TimeContext,
@@ -76,8 +86,8 @@ pub enum ResolutionError {
     #[error("Invalid calendar: {0}")]
     InvalidCalendar(String),
 
-    #[error("Other error: {0}")]
-    Other(String),
+    #[error("Inconsistent time context: {0}")]
+    InconsistentContext(String),
 }
 
 pub struct TimeResolver;
@@ -89,8 +99,7 @@ impl TimeResolver {
     ) -> Result<ResolutionResult, ResolutionError> {
         let phrase_normalized = phrase.trim().to_lowercase();
 
-        // Validate context early
-        Self::validate_calendar(&context.calendar)?;
+        Self::validate_context(context)?;
 
         // Parse unsupported repeats early
         if Self::is_unsupported_repeat(&phrase_normalized) {
@@ -98,9 +107,6 @@ impl TimeResolver {
                 "Repeating reminders are not supported in M1".to_string(),
             ));
         }
-
-        // Validate timezone early to distinguish timezone errors from format errors
-        let _ = Self::get_tz(context)?;
 
         // Try to parse as explicit date formats first
         if let Ok(result) = Self::parse_explicit_date(&phrase_normalized, phrase, context) {
@@ -134,6 +140,22 @@ impl TimeResolver {
     fn get_tz(context: &TimeContext) -> Result<Tz, ResolutionError> {
         Tz::from_str(&context.timezone)
             .map_err(|_| ResolutionError::InvalidTimezone(context.timezone.clone()))
+    }
+
+    fn validate_context(context: &TimeContext) -> Result<(), ResolutionError> {
+        Self::validate_calendar(&context.calendar)?;
+        let tz = Self::get_tz(context)?;
+        let expected_offset = tz
+            .offset_from_utc_datetime(&context.reference_time.naive_utc())
+            .fix()
+            .local_minus_utc();
+        if context.utc_offset_at_capture != expected_offset {
+            return Err(ResolutionError::InconsistentContext(format!(
+                "utc_offset_at_capture {} does not match {} offset {} at reference time",
+                context.utc_offset_at_capture, context.timezone, expected_offset
+            )));
+        }
+        Ok(())
     }
 
     fn validate_calendar(calendar: &str) -> Result<(), ResolutionError> {
@@ -181,9 +203,11 @@ impl TimeResolver {
         Ok(ResolutionResult {
             original_phrase: original_phrase.to_string(),
             resolved_date: Some(date),
+            resolved_local: None,
             resolved_time: None,
             candidates: vec![],
             is_ambiguous: true,
+            ambiguity_kind: Some(AmbiguityKind::MissingHour),
             ambiguity_reason: Some("Missing hour: date-only input requires a time".to_string()),
             is_past,
             context: context.clone(),
@@ -197,45 +221,56 @@ impl TimeResolver {
         tz: Tz,
     ) -> Result<ResolutionResult, ResolutionError> {
         let ref_utc = context.reference_time;
+        let ref_local = ref_utc.with_timezone(&tz).naive_local();
 
-        match tz.from_local_datetime(&naive_dt) {
-            LocalResult::None => Ok(ResolutionResult {
+        let result = match tz.from_local_datetime(&naive_dt) {
+            LocalResult::None => ResolutionResult {
                 original_phrase: original_phrase.to_string(),
                 resolved_date: Some(naive_dt.date()),
+                resolved_local: Some(naive_dt),
                 resolved_time: None,
                 candidates: vec![],
                 is_ambiguous: true,
+                ambiguity_kind: Some(AmbiguityKind::DstGap),
                 ambiguity_reason: Some("Nonexistent time in DST gap".to_string()),
-                is_past: false,
+                is_past: naive_dt < ref_local,
                 context: context.clone(),
-            }),
+            },
             LocalResult::Ambiguous(dt1, dt2) => {
                 let utc1 = dt1.with_timezone(&Utc);
                 let utc2 = dt2.with_timezone(&Utc);
-                Ok(ResolutionResult {
+                ResolutionResult {
                     original_phrase: original_phrase.to_string(),
                     resolved_date: Some(naive_dt.date()),
+                    resolved_local: Some(naive_dt),
                     resolved_time: None,
                     candidates: vec![utc1, utc2],
                     is_ambiguous: true,
+                    ambiguity_kind: Some(AmbiguityKind::DstFold),
                     ambiguity_reason: Some(format!(
                         "Ambiguous time in DST fold: could be {} or {}",
                         utc1, utc2
                     )),
-                    is_past: false,
+                    is_past: utc1.max(utc2) < ref_utc,
                     context: context.clone(),
-                })
+                }
             }
             LocalResult::Single(dt) => {
                 let utc_dt = dt.with_timezone(&Utc);
                 let is_past = utc_dt < ref_utc;
 
-                Ok(ResolutionResult {
+                ResolutionResult {
                     original_phrase: original_phrase.to_string(),
                     resolved_date: Some(naive_dt.date()),
+                    resolved_local: Some(naive_dt),
                     resolved_time: Some(utc_dt),
                     candidates: vec![],
                     is_ambiguous: is_past,
+                    ambiguity_kind: if is_past {
+                        Some(AmbiguityKind::Past)
+                    } else {
+                        None
+                    },
                     ambiguity_reason: if is_past {
                         Some("Time is in the past".to_string())
                     } else {
@@ -243,9 +278,10 @@ impl TimeResolver {
                     },
                     is_past,
                     context: context.clone(),
-                })
+                }
             }
-        }
+        };
+        Ok(result)
     }
 
     fn parse_natural_language(
@@ -338,9 +374,11 @@ impl TimeResolver {
         ResolutionResult {
             original_phrase: original_phrase.to_string(),
             resolved_date: Some(date),
+            resolved_local: None,
             resolved_time: None,
             candidates: vec![],
             is_ambiguous: true,
+            ambiguity_kind: Some(AmbiguityKind::MissingHour),
             ambiguity_reason: Some("Missing hour: date-only input requires a time".to_string()),
             is_past,
             context: context.clone(),
@@ -446,9 +484,16 @@ mod tests {
         context.reference_time = DateTime::parse_from_rfc3339("2025-03-08T10:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
+        context.utc_offset_at_capture = -18000; // EST: -5 hours
 
         let result = TimeResolver::resolve("2025-03-09 02:30:00", &context).unwrap();
         assert!(result.is_ambiguous);
+        assert_eq!(result.ambiguity_kind, Some(AmbiguityKind::DstGap));
+        assert_eq!(
+            result.resolved_local,
+            NaiveDate::from_ymd_opt(2025, 3, 9).and_then(|d| d.and_hms_opt(2, 30, 0))
+        );
+        assert!(!result.is_past);
         assert!(result.resolved_time.is_none());
         assert!(result
             .ambiguity_reason
@@ -468,7 +513,45 @@ mod tests {
         assert!(result.is_ambiguous);
         assert!(result.resolved_time.is_none());
         assert_eq!(result.candidates.len(), 2);
+        assert_eq!(result.ambiguity_kind, Some(AmbiguityKind::DstFold));
+        assert_eq!(
+            result.resolved_local,
+            NaiveDate::from_ymd_opt(2025, 11, 2).and_then(|d| d.and_hms_opt(1, 30, 0))
+        );
         assert!(result.ambiguity_reason.as_ref().unwrap().contains("fold"));
+    }
+
+    #[test]
+    fn test_past_dst_gap_and_fold_are_flagged_past() {
+        let mut context = ny_context();
+        context.reference_time = DateTime::parse_from_rfc3339("2025-12-01T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        context.utc_offset_at_capture = -18000; // EST: -5 hours
+
+        let gap = TimeResolver::resolve("2025-03-09 02:30:00", &context).unwrap();
+        assert_eq!(gap.ambiguity_kind, Some(AmbiguityKind::DstGap));
+        assert!(gap.is_past);
+
+        let fold = TimeResolver::resolve("2025-11-02 01:30:00", &context).unwrap();
+        assert_eq!(fold.ambiguity_kind, Some(AmbiguityKind::DstFold));
+        assert!(fold.is_past);
+    }
+
+    #[test]
+    fn test_wrong_utc_offset_is_rejected() {
+        let mut context = ny_context();
+        context.utc_offset_at_capture = 0;
+        let err = TimeResolver::resolve("2025-10-20 12:00:00", &context).unwrap_err();
+        assert!(matches!(err, ResolutionError::InconsistentContext(_)));
+    }
+
+    #[test]
+    fn test_non_gregorian_calendar_is_rejected() {
+        let mut context = test_context();
+        context.calendar = "hebrew".to_string();
+        let err = TimeResolver::resolve("2024-10-20 12:00:00", &context).unwrap_err();
+        assert!(matches!(err, ResolutionError::InvalidCalendar(_)));
     }
 
     #[test]
