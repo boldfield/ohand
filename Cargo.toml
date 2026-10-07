@@ -22,10 +22,6 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 anyhow = "1.0"
 thiserror = "1.0"
 
-# Testing
-tempfile = "3.8"
-
-
 [profile.dev]
 opt-level = 0
 
