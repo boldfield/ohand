@@ -221,7 +221,8 @@ def run_gitleaks_check() -> Tuple[List[Tuple[str, str, None]], bool]:
     """
     Run gitleaks to detect secrets in the repository.
 
-    Returns (issues list, has_gitleaks) - issues as (path, description, None) tuples
+    Returns (issues list, has_gitleaks) - issues as (path, description, None) tuples.
+    Exit code 1 indicates secrets found, 0 indicates none found.
     """
     try:
         # Create a temporary file for the JSON report
@@ -239,6 +240,7 @@ def run_gitleaks_check() -> Tuple[List[Tuple[str, str, None]], bool]:
             )
 
             issues = []
+            # Parse the JSON report if it exists
             if os.path.exists(report_path) and os.path.getsize(report_path) > 0:
                 try:
                     with open(report_path, 'r') as f:
@@ -249,8 +251,16 @@ def run_gitleaks_check() -> Tuple[List[Tuple[str, str, None]], bool]:
                         path = match.get('File', 'unknown')
                         secret_type = match.get('RuleID', 'Secret')
                         issues.append((path, f'Secret detected by gitleaks: {secret_type}', None))
-                except (json.JSONDecodeError, IOError):
-                    pass
+                except (json.JSONDecodeError, IOError, KeyError, TypeError) as e:
+                    raise RuntimeError(f'Failed to parse gitleaks report: {str(e)}')
+
+            # gitleaks returns 1 if findings, 0 if none, non-zero other on error
+            # If exit code is 1 but we have issues, that's expected
+            # If exit code is 1 but we have no issues, the report was invalid
+            if result.returncode == 1 and not issues:
+                raise RuntimeError('gitleaks found secrets but report is empty or invalid')
+            elif result.returncode not in (0, 1):
+                raise RuntimeError(f'gitleaks exited with code {result.returncode}: {result.stderr}')
 
             return issues, True
         finally:
