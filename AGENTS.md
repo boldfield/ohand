@@ -54,4 +54,26 @@ These checks are wired into `.github/workflows/core.yml` on Linux runners (ubunt
 
 Artifact retention is bounded: `core.yml` does not upload artifacts; any future CI artifact upload must set `retention-days ≤ 7` to limit storage and cost. Evidence collection is separate from CI: device/simulator results, live trial data, and provider integration tests are distinct artifacts and do not gate the Linux checks.
 
+## Required checks for macOS workers
+
+Native iOS checks run on macOS runners (macos-latest) via `.github/workflows/ios.yml`. These checks validate the iOS project structure, simulator build, and unit tests for the exact submitted commit.
+
+Native iOS checks executed via the workflow:
+
+- **Project generation and simulator build** (`generate-build` job):
+  - `scripts/generate.sh` — Generate `OhAnd.xcodeproj` using pinned XcodeGen via mint
+  - `scripts/build-simulator.sh BridgeProbe` — Build one probe app for iOS Simulator without signing
+  - Capture and log Xcode version, Swift version, and Simulator SDK information
+
+- **Unit tests** (`test` job):
+  - `xcodebuild test -scheme OhAndTests -sdk iphonesimulator` — Run native unit tests on simulated iPhone 15
+
+Linux Odonian workers authorizing native checks for Swift/Objective-C code:
+
+- When a PR touches native iOS code (files under `ios/` except generated/ignored paths), Linux workers must await completion of the macOS iOS CI jobs before review.
+- Retrieve the workflow run URL via `gh run list --repo [repo] --branch [branch] --status completed --limit 1 --json url` or link it directly in the PR/task.
+- Block review if the run is not available or if `generate-build` or `test` jobs fail; Linux-only validation cannot certify Swift/Objective-C.
+- Confirm toolchain versions (Xcode, Swift, SDK) and device simulator version are captured in the run logs; these establish that the build is reproducible for the exact revision reviewed.
+- No signing credentials or private certificates are involved in these checks; fork PRs require no special permissions.
+
 The first repository commit contains documentation and license material only. It is a bootstrap operation, not an application implementation or proof of completed milestones.

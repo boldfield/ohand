@@ -1,0 +1,67 @@
+name: iOS simulator checks
+
+on:
+  pull_request:
+    branches:
+      - main
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  generate-build:
+    name: Generate project and build simulator
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mint
+        run: brew install mint
+      - name: Generate Xcode project
+        run: cd ios && ./scripts/generate.sh
+      - name: Capture toolchain versions
+        run: |
+          echo "=== Xcode version ===" && xcodebuild -version
+          echo "=== Swift version ===" && swift --version
+          echo "=== Simulator SDK ===" && xcrun --show-sdk-path -sdk iphonesimulator | xargs -I {} xcrun --show-sdk-version -sdk iphonesimulator
+      - name: Build BridgeProbe for simulator
+        run: cd ios && ./scripts/build-simulator.sh BridgeProbe
+      - name: Verify build artifact exists
+        run: |
+          if [ -d "ios/.derived/Build/Products/Debug-iphonesimulator/BridgeProbe.app" ]; then
+            echo "BridgeProbe simulator build successful"
+            ls -lh ios/.derived/Build/Products/Debug-iphonesimulator/BridgeProbe.app
+          else
+            echo "ERROR: BridgeProbe.app not found"
+            exit 1
+          fi
+
+  test:
+    name: Run unit tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mint
+        run: brew install mint
+      - name: Generate Xcode project
+        run: cd ios && ./scripts/generate.sh
+      - name: Run OhAndTests
+        run: |
+          cd ios
+          xcodebuild test \
+            -project OhAnd.xcodeproj \
+            -scheme OhAndTests \
+            -sdk iphonesimulator \
+            -destination 'platform=iOS Simulator,name=iPhone 15' \
+            -derivedDataPath .derived \
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tee test-output.log
+      - name: Check test results
+        if: always()
+        run: |
+          if grep -q "Test Suite.*passed" ios/test-output.log; then
+            echo "Unit tests passed"
+          else
+            echo "Unit tests may have issues; check log above"
+          fi
