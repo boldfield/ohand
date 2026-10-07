@@ -81,21 +81,25 @@ class KeychainTester {
     struct TestResult {
         let accessibilityClass: AccessibilityClass
         let stored: Bool
+        let storeStatus: OSStatus?
         let retrieved: Bool
+        let retrieveStatus: OSStatus?
         let timestamp: String
 
         var summary: String {
             if stored && retrieved {
                 return "✓ \(accessibilityClass.displayName): Stored & Retrieved"
             } else if stored && !retrieved {
-                return "⚠ \(accessibilityClass.displayName): Stored but not retrieved"
+                let statusStr = retrieveStatus.map { " (status: \($0))" } ?? ""
+                return "⚠ \(accessibilityClass.displayName): Stored but not retrieved\(statusStr)"
             } else {
-                return "✗ \(accessibilityClass.displayName): Failed to store"
+                let statusStr = storeStatus.map { " (status: \($0))" } ?? ""
+                return "✗ \(accessibilityClass.displayName): Failed to store\(statusStr)"
             }
         }
     }
 
-    static func storeCredential(value: String, accessibility: AccessibilityClass) -> Bool {
+    static func storeCredential(value: String, accessibility: AccessibilityClass) -> (success: Bool, status: OSStatus) {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: syntheticServiceName,
@@ -106,10 +110,10 @@ class KeychainTester {
 
         SecItemDelete(query as CFDictionary)
         let status = SecItemAdd(query as CFDictionary, nil)
-        return status == errSecSuccess
+        return (success: status == errSecSuccess, status: status)
     }
 
-    static func retrieveCredential(accessibility: AccessibilityClass) -> String? {
+    static func retrieveCredential(accessibility: AccessibilityClass) -> (value: String?, status: OSStatus) {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: syntheticServiceName,
@@ -121,11 +125,11 @@ class KeychainTester {
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
 
-        guard status == errSecSuccess, let data = result as? Data else {
-            return nil
+        if status == errSecSuccess, let data = result as? Data {
+            let value = String(data: data, encoding: .utf8)
+            return (value: value, status: status)
         }
-
-        return String(data: data, encoding: .utf8)
+        return (value: nil, status: status)
     }
 
     static func deleteAllTestCredentials() {
@@ -162,12 +166,15 @@ class KeychainTester {
 
         return accessibilityClasses.map { accessClass in
             let syntheticValue = "synthetic-credential-\(accessClass.displayName)"
-            let stored = storeCredential(value: syntheticValue, accessibility: accessClass)
-            let retrieved = retrieveCredential(accessibility: accessClass) == syntheticValue
+            let storeResult = storeCredential(value: syntheticValue, accessibility: accessClass)
+            let retrieveResult = retrieveCredential(accessibility: accessClass)
+            let retrieved = retrieveResult.value == syntheticValue
             return TestResult(
                 accessibilityClass: accessClass,
-                stored: stored,
+                stored: storeResult.success,
+                storeStatus: storeResult.status != errSecSuccess ? storeResult.status : nil,
                 retrieved: retrieved,
+                retrieveStatus: retrieveResult.status != errSecSuccess ? retrieveResult.status : nil,
                 timestamp: timestamp
             )
         }

@@ -19,45 +19,45 @@ The probe evaluates five standard iOS Keychain accessibility classes:
 **Accessibility**: Data is accessible only when the device is unlocked.
 
 - **Simulator behavior**: Accessible during normal app execution.
-- **Lock/relaunch on device**: Data is accessible immediately after unlock and remains inaccessible while locked. Requires biometric or passcode unlock each time.
-- **Use case in M1**: Not suitable for credentials needed before user authentication (e.g., session tokens).
-- **Test outcome**: ✓ Stored & Retrieved in simulator; physical lock behavior depends on device-level testing.
+- **Lock/relaunch on device**: Data is accessible immediately after unlock and becomes inaccessible while locked. Requires device to be unlocked; permissions do not require biometric/passcode on each access.
+- **Use case in M1**: Not suitable for credentials needed while device is locked.
+- **Test outcome**: Not run in simulator CI; physical lock behavior validated on device by P09.
 
 ### 2. `kSecAttrAccessibleAfterFirstUnlock`
 
-**Accessibility**: Data is accessible after the first device unlock each boot, then remains accessible until the device locks again.
+**Accessibility**: Data is accessible after the first device unlock each boot, then remains accessible until the device restarts.
 
 - **Simulator behavior**: Always accessible (simulator does not enforce lock state).
-- **Lock/relaunch on device**: Accessible until the next lock; requires unlock after reboot.
-- **Use case in M1**: Suitable for provider credentials that survive reboot and app relaunch.
-- **Test outcome**: ✓ Stored & Retrieved in simulator; physical behavior validated on device.
+- **Lock/relaunch on device**: Accessible after first unlock; remains accessible even after lock until the next device restart. After restart, requires unlock again.
+- **Use case in M1**: Suitable for provider credentials that survive app relaunch and device lock but not device restart.
+- **Test outcome**: Not run in simulator CI; physical behavior validated on device by P09.
 
 ### 3. `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`
 
 **Accessibility**: Like `AfterFirstUnlock`, but bound to the device and not transferable via backup/restore.
 
 - **Simulator behavior**: Identical to `AfterFirstUnlock` on simulator.
-- **Lock/relaunch on device**: Accessible after first unlock, not accessible after lock. Not transferred during backup/restore.
+- **Lock/relaunch on device**: Accessible after first unlock; remains accessible even after lock until the next device restart. Not transferred during backup/restore.
 - **Use case in M1**: Recommended for device-specific credentials (e.g., locally created provider tokens).
-- **Test outcome**: ✓ Stored & Retrieved in simulator; backup/restore behavior tested separately.
+- **Test outcome**: Not run in simulator CI; backup/restore behavior tested separately on device by P09.
 
 ### 4. `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`
 
 **Accessibility**: Data is accessible only while the device is unlocked, bound to this device.
 
 - **Simulator behavior**: Accessible during normal execution.
-- **Lock/relaunch on device**: Requires unlock on every access; not transferred via backup.
+- **Lock/relaunch on device**: Becomes inaccessible while locked but is not cleared from storage. Accessible again after unlock. Not transferred via backup.
 - **Use case in M1**: High security for temporary session data or recently entered credentials.
-- **Test outcome**: ✓ Stored & Retrieved in simulator; lock-mediated access validated on device.
+- **Test outcome**: Not run in simulator CI; lock-mediated access validated on device by P09.
 
 ### 5. `kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly`
 
 **Accessibility**: Accessible only if the device has a passcode set, and only while unlocked.
 
 - **Simulator behavior**: Accessible (no passcode requirement enforced).
-- **Lock/relaunch on device**: Requires both a set passcode and device unlock. Inaccessible if passcode is removed.
+- **Lock/relaunch on device**: Requires both a set passcode and device unlock. Becomes inaccessible if passcode is removed.
 - **Use case in M1**: Credentials that require strong device protection.
-- **Test outcome**: ✓ Stored & Retrieved in simulator; passcode requirement tested on device.
+- **Test outcome**: Not run in simulator CI; passcode requirement tested on device by P09.
 
 ## Implementation Details
 
@@ -81,11 +81,9 @@ No real API keys, passwords, or sensitive data are used. Test credentials are ea
 
 The probe provides:
 
-1. **Refresh Tests**: Attempts to store and retrieve each synthetic credential, displaying immediate access results.
-2. **Clear Test Credentials**: Removes all probe test credentials from the Keychain, leaving production data untouched.
-3. **Status Display**: Shows timestamp of last test run and accessibility class results.
-
-The UI label indicates "Simulator" vs. device context; physical lock behavior cannot be tested on a simulator.
+1. **Refresh Tests**: Attempts to store and retrieve each synthetic credential, displaying immediate access results with error status codes (e.g., `-25308` for `errSecInteractionNotAllowed` indicating a locked device).
+2. **Clear Test Credentials**: Removes all probe test credentials from the Keychain, leaving production data untouched. Credentials persist in Keychain until explicitly cleared.
+3. **Status Display**: Shows timestamp of last test run and accessibility class results. On device, lock-related access denials are shown with their OSStatus code for diagnostic purposes.
 
 ## Lock/Relaunch Tests for P09
 
@@ -134,13 +132,13 @@ Physical device testing must cover:
 - `WhenUnlockedThisDeviceOnly`: ✗ Not accessible (requires unlock).
 - `WhenPasscodeSetThisDeviceOnly`: ✗ Not accessible (requires unlock and passcode).
 
-### After First Unlock (during normal use)
+### After First Unlock (during normal use, including after lock)
 
-- `WhenUnlocked`: ✓ Accessible.
-- `AfterFirstUnlock`: ✓ Accessible (until next lock/reboot).
-- `AfterFirstUnlockThisDeviceOnly`: ✓ Accessible (until next lock/reboot).
-- `WhenUnlockedThisDeviceOnly`: ✓ Accessible.
-- `WhenPasscodeSetThisDeviceOnly`: ✓ Accessible (if passcode set).
+- `WhenUnlocked`: ✓ Accessible (while device is unlocked).
+- `AfterFirstUnlock`: ✓ Accessible (until next restart).
+- `AfterFirstUnlockThisDeviceOnly`: ✓ Accessible (until next restart).
+- `WhenUnlockedThisDeviceOnly`: ✓ Accessible (while device is unlocked).
+- `WhenPasscodeSetThisDeviceOnly`: ✓ Accessible (if passcode set and device is unlocked).
 
 ## Considerations for Production (P09)
 
@@ -164,33 +162,53 @@ Physical device testing must cover:
 ### Build Command
 
 ```bash
-ios/scripts/generate.sh
-xcodebuild build -scheme CredentialProbe -configuration Debug
+ios/scripts/build-simulator.sh CredentialProbe
 ```
 
-Or using the unified Makefile:
+This command generates the project, builds for simulator with unsigned configuration, and places the `.app` bundle in the derived data directory.
+
+Alternatively, to use xcodebuild directly:
 
 ```bash
-make ios-credential-probe
+cd ios
+./scripts/generate.sh
+xcodebuild build \
+  -project OhAnd.xcodeproj \
+  -scheme CredentialProbe \
+  -configuration Debug \
+  -sdk iphonesimulator \
+  -destination 'generic/platform=iOS Simulator' \
+  CODE_SIGNING_ALLOWED=NO
 ```
 
 ### Clean Build
 
 ```bash
+cd ios
 xcodebuild clean -scheme CredentialProbe
 ```
 
+## Simulator Build and Results
+
+The CI build (`ios/scripts/build-simulator.sh CredentialProbe`) verifies that:
+
+1. The CredentialProbe target compiles without production schema/bridge dependencies.
+2. The probe starts on the simulator and returns OSStatus codes for failed operations.
+3. All five accessibility classes can be exercised through the UI (with all returning accessible state on simulator, as expected).
+
+**Important**: Simulator results show theoretical accessibility only. The simulator does not enforce lock state, so all classes appear accessible even though `WhenUnlocked`, `WhenUnlockedThisDeviceOnly` and `WhenPasscodeSetThisDeviceOnly` would be inaccessible on a real locked device.
+
 ## Results Recording for P09
 
-This probe itself produces no production-ready evidence. P09 must record:
+P09 must record actual device behavior using the lock/relaunch procedures in this document:
 
 1. **Device/OS metadata**: iPhone model, iOS version, build number.
-2. **Lock behavior**: For each accessibility class, the result of locked vs. unlocked retrieval.
+2. **Lock behavior**: For each accessibility class, the result of locked vs. unlocked retrieval, including OSStatus codes.
 3. **Relaunch behavior**: Accessibility after app relaunch and device reboot.
 4. **Timestamp of test run**: When the device testing occurred.
 5. **Any deviations** from documented behavior (e.g., unexpected access or denial).
 
-**No synthetic test credentials or Keychain contents are published in P09 results.** Only the accessibility class behavior matrix is recorded.
+**No synthetic test credentials or Keychain contents are published in P09 results.** Only the accessibility class behavior matrix is recorded. OSStatus codes (`-25308` for lock errors, etc.) are included in the matrix for diagnostic clarity.
 
 ## Privacy and Hygiene
 
@@ -201,7 +219,11 @@ This probe itself produces no production-ready evidence. P09 must record:
 
 ## See Also
 
-- [P05: Probe native notification scheduling](notification-probe.md) — Related probe for native integration.
-- [P01: Prove the Rust-to-Swift boundary](core-binding.md) — Predecessor for boundary validation.
-- [P09: Collect actual-device feasibility evidence](device-feasibility.md) — Physical testing using this probe's guidelines.
-- [M1 Device and Trial Protocol](m1-protocol.md) — Overall testing methodology.
+- [M1 Device and Trial Protocol](m1-protocol.md) — Overall testing methodology for device feasibility.
+- [docs/features/m1-plan.md](../../docs/features/m1-plan.md) — P09 task specification for actual-device feasibility evidence.
+
+## Related Tasks
+
+- **P05** — Probe native notification scheduling
+- **P01** — Prove the Rust-to-Swift boundary
+- **P09** — Collect actual-device feasibility evidence (uses this probe's lock/relaunch procedure)

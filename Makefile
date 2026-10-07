@@ -1,7 +1,7 @@
 PYTHON ?= python3
 export PYTHONDONTWRITEBYTECODE := 1
 
-.PHONY: check test contract-check contract-test ios-check
+.PHONY: check test contract-check contract-test ios-check ios-credential-probe
 
 # check: Validate contract correctness, compile, format, and lint.
 # F01 establishes contract-check and contract-test. F02 adds cargo targets and lint.
@@ -44,3 +44,8 @@ contract-test:
 ios-check:
 	$(PYTHON) ios/scripts/check_project_config.py
 	$(PYTHON) -m unittest discover --start-directory ios/scripts --pattern 'test_*.py' --verbose
+
+# ios-credential-probe: Build CredentialProbe for simulator (macOS with Xcode only).
+# Verifies that CredentialProbe compiles without production dependencies.
+ios-credential-probe:
+	cd ios && ./scripts/build-simulator.sh CredentialProbe
