@@ -1,12 +1,12 @@
 PYTHON ?= python3
 export PYTHONDONTWRITEBYTECODE := 1
 
-.PHONY: check test contract-check contract-test
+.PHONY: check test contract-check contract-test ios-check
 
 # check: Validate contract correctness, compile, format, and lint.
 # F01 establishes contract-check and contract-test. F02 adds cargo targets and lint.
-# F05 later adds native targets and documentation.
-check: contract-check cargo-check cargo-fmt-check cargo-clippy
+# F05 adds native targets and documentation.
+check: contract-check cargo-check cargo-fmt-check cargo-clippy ios-check
 
 # test: Run contract validation tests and cargo test suite.
 test: contract-test cargo-test
@@ -38,3 +38,9 @@ contract-check:
 
 contract-test:
 	$(PYTHON) -m unittest discover --start-directory tools/contracts --pattern 'test_*.py' --verbose
+
+# ios-check: Validate iOS project configuration (any host with PyYAML).
+# Runs static checks on project.yml structure, bundle identifiers, signing config, and plists.
+ios-check:
+	$(PYTHON) ios/scripts/check_project_config.py
+	$(PYTHON) -m unittest discover --start-directory ios/scripts --pattern 'test_*.py' --verbose

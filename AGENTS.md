@@ -54,4 +54,25 @@ These checks are wired into `.github/workflows/core.yml` on Linux runners (ubunt
 
 Artifact retention is bounded: `core.yml` does not upload artifacts; any future CI artifact upload must set `retention-days ≤ 7` to limit storage and cost. Evidence collection is separate from CI: device/simulator results, live trial data, and provider integration tests are distinct artifacts and do not gate the Linux checks.
 
+## Required checks for macOS workers
+
+Native iOS checks run on the standard GitHub-hosted `macos-15` runner via `.github/workflows/ios.yml` on every pull request to `main`, with Xcode pinned to 16.4 (matching `options.xcodeVersion` in `ios/project.yml`). The workflow has `contents: read` permission only, needs no secrets or signing material, and therefore also runs for fork PRs. The single `simulator` job:
+
+- records `sw_vers`, Xcode, Swift, simulator SDK and the available simulators (`ios-evidence/toolchain.txt`);
+- picks one available iPhone simulator with `ios/scripts/select_simulator.py` (newest iOS runtime not newer than the pinned SDK) and logs its name, runtime and UDID (`ios-evidence/simulator.txt`);
+- generates the project with pinned XcodeGen (`ios/scripts/generate.sh`) and runs `xcodebuild test -scheme OhAndTests` on that UDID, keeping the exit status (`pipefail`), so a failure to find a device or run tests fails the job;
+- builds `BridgeProbe` unsigned (`ios/scripts/build-simulator.sh BridgeProbe`);
+- runs the launch smoke test `ios/scripts/smoke-simulator.sh`: boot with `simctl bootstatus -b`, install `BridgeProbe.app`, launch `com.boldfield.ohand.probes.bridge`, verify it is still running, capture a screenshot;
+- uploads `ios-evidence` (logs, `OhAndTests.xcresult`, screenshot) with `retention-days: 7`.
+
+Linux checks cover the native tooling that runs on any host: `make check` runs `ios-check` (`ios/scripts/check_project_config.py` plus the unit tests for it and for `select_simulator.py`). They do not prove that Swift compiles.
+
+Linux Odonian workers whose change touches native code (anything under `ios/`, or `.github/workflows/ios.yml`) must, for the exact submitted commit:
+
+1. Push the branch and open or update the PR. Take the commit with `head_sha=$(git rev-parse HEAD)`.
+2. Find the run for that commit, not for the branch: `gh run list --workflow ios.yml --commit "$head_sha" --json databaseId,headSha,status,conclusion,url`. Require `headSha` to equal `$head_sha`; if there is no run yet, wait and poll (the workflow starts on PR push; `gh workflow run` is unnecessary because it only triggers on `pull_request`).
+3. Wait for completion with `gh run watch <databaseId> --exit-status`. The run must conclude `success`; a failed, cancelled or still-queued run means the work is not done. Do not rerun until it passes by lowering checks.
+4. Link the run URL in the PR description and the task result. Retrieve the evidence with `gh run download <databaseId> --name ios-evidence` (kept 7 days) and confirm that `toolchain.txt` and `simulator.txt` name the Xcode, SDK, simulator, runtime and UDID, that `OhAndTests.log` contains `** TEST SUCCEEDED **`, and that `smoke.log` ends with `Smoke test passed`.
+5. If macOS runners are unavailable (no run starts, runs stay queued, or the service is down), block the task with `odonian transition <id> --to blocked --note "<reason>"`. Linux-only validation cannot certify Swift.
+
 The first repository commit contains documentation and license material only. It is a bootstrap operation, not an application implementation or proof of completed milestones.

@@ -25,3 +25,4 @@ xcuserdata/
 # Local signing configuration (never committed)
 Config/Local.xcconfig
 __pycache__/
+.evidence/
