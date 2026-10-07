@@ -9,8 +9,10 @@ undocumented raw audio while allowing synthetic fixtures in documented paths.
 import re
 import sys
 import os
+import subprocess
+import json
 from pathlib import Path
-from typing import List, Tuple, Set
+from typing import List, Tuple, Set, Optional
 
 # Patterns that indicate potential secrets or private content
 SECRET_PATTERNS = [
@@ -80,16 +82,27 @@ SYNTHETIC_FIXTURE_PATHS = {
     'docs/validation/',
 }
 
+# Signing material that must not be committed
+SIGNING_MATERIAL_PATTERNS = [
+    r'\.p12$',                           # PKCS#12 certificates
+    r'\.mobileprovision$',               # iOS provisioning profiles
+    r'\.cer$',                           # Certificates
+    r'\.pem$',                           # PEM encoded keys/certs
+    r'\.key$',                           # Private keys
+    r'\.jks$',                           # Java keystores
+    r'\.keystore$',                      # Android keystores
+    r'\.gpg$',                           # GPG keys
+    r'\.asc$',                           # ASCII-armored keys
+]
+
 # Files to skip checking entirely
 SKIP_PATTERNS = {
     r'\.git/',
-    r'\.github/',
     r'target/',
     r'Cargo.lock',
     r'\.DS_Store',
     r'node_modules/',
     r'\.venv/',
-    r'\.env',
 }
 
 
@@ -109,6 +122,39 @@ def is_synthetic_fixture_path(path: str) -> bool:
     return False
 
 
+def has_provenance_file(audio_path: str) -> bool:
+    """Check if audio file has a provenance sidecar file documenting it as synthetic."""
+    path_obj = Path(audio_path)
+
+    # Look for .provenance sidecar (e.g., audio.m4a.provenance)
+    provenance_path = Path(str(path_obj) + '.provenance')
+    if provenance_path.exists():
+        try:
+            with open(provenance_path, 'r') as f:
+                content = f.read().lower()
+                # Check that the provenance file documents it as synthetic
+                if 'synthetic' in content or 'generated' in content:
+                    return True
+        except (OSError, IOError):
+            pass
+
+    # Look for adjacent README or MANIFEST file
+    parent = path_obj.parent
+    for manifest_name in ['README.md', 'MANIFEST.md', 'FIXTURES.md']:
+        manifest_path = parent / manifest_name
+        if manifest_path.exists():
+            try:
+                with open(manifest_path, 'r') as f:
+                    content = f.read().lower()
+                    # Check if the manifest documents this file as synthetic
+                    if path_obj.name in content.lower() and ('synthetic' in content or 'generated' in content):
+                        return True
+            except (OSError, IOError):
+                pass
+
+    return False
+
+
 def check_for_secrets(content: str, path: str) -> List[Tuple[str, int]]:
     """
     Check content for patterns matching secrets or private keys.
@@ -119,23 +165,17 @@ def check_for_secrets(content: str, path: str) -> List[Tuple[str, int]]:
     lines = content.split('\n')
 
     for line_num, line in enumerate(lines, 1):
-        # Skip comments in source files
-        if path.endswith(('.py', '.rs', '.ts', '.tsx', '.swift', '.java')):
-            stripped = line.strip()
-            if stripped.startswith('#') or stripped.startswith('//'):
-                continue
-
         for pattern, secret_type in SECRET_PATTERNS:
             if re.search(pattern, line, re.IGNORECASE):
                 issues.append((f'Potential {secret_type} detected', line_num))
-                break  # Only report first match per line
+                break
 
     return issues
 
 
 def check_private_captures(path: str) -> List[str]:
     """
-    Check if private audio/capture files exist outside approved paths.
+    Check if private audio/capture files exist outside approved paths or without provenance.
 
     Returns list of issue descriptions.
     """
@@ -146,17 +186,64 @@ def check_private_captures(path: str) -> List[str]:
             # Audio files outside fixtures are not allowed
             if not is_synthetic_fixture_path(path):
                 issues.append(f'Audio file outside documented fixtures: {path}')
+            else:
+                # Inside fixtures, must have provenance
+                if not has_provenance_file(path):
+                    issues.append(f'Audio file in fixtures must have provenance documentation: {path}')
             break
 
     for pattern in RECORDING_FILE_PATTERNS:
         if re.search(pattern, path, re.IGNORECASE):
-            # Recording files outside fixtures should be documented
             if not is_synthetic_fixture_path(path):
-                # Audio files require explicit fixture path
                 if any(re.search(ext, path) for ext in PRIVATE_CAPTURE_PATTERNS):
                     issues.append(f'Recording outside fixtures requires documentation: {path}')
 
     return issues
+
+
+def check_signing_material(path: str) -> List[str]:
+    """Check if signing material or private certificates are committed."""
+    issues = []
+
+    for pattern in SIGNING_MATERIAL_PATTERNS:
+        if re.search(pattern, path, re.IGNORECASE):
+            issues.append(f'Signing material or private certificate must not be committed: {path}')
+            break
+
+    return issues
+
+
+def run_gitleaks_check() -> Tuple[List[Tuple[str, str, None]], bool]:
+    """
+    Run gitleaks to detect secrets in the repository.
+
+    Returns (issues list, has_gitleaks) - issues as (path, description, None) tuples
+    """
+    try:
+        result = subprocess.run(
+            ['gitleaks', 'detect', '--source', 'local', '--exit-code', '0', '--report-format', 'json'],
+            capture_output=True,
+            text=True,
+            cwd=os.getcwd(),
+            timeout=60
+        )
+
+        issues = []
+        if result.stdout.strip():
+            try:
+                report = json.loads(result.stdout)
+                matches = report.get('Matches', [])
+                for match in matches:
+                    path = match.get('File', 'unknown')
+                    secret_type = match.get('RuleID', 'Secret')
+                    issues.append((path, f'Secret detected by gitleaks: {secret_type}', None))
+            except json.JSONDecodeError:
+                pass
+
+        return issues, True
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        # gitleaks not installed or timed out - continue with custom checks
+        return [], False
 
 
 def check_path(path: str) -> List[Tuple[str, int | None]]:
@@ -173,6 +260,13 @@ def check_path(path: str) -> List[Tuple[str, int | None]]:
     # Skip non-files
     if not os.path.isfile(path):
         return issues
+
+    # Check signing material first
+    signing_issues = check_signing_material(path)
+    for issue in signing_issues:
+        issues.append((issue, None))
+        if signing_issues:
+            return issues
 
     # Check file-path based issues (before reading content)
     capture_issues = check_private_captures(path)
@@ -195,7 +289,6 @@ def check_path(path: str) -> List[Tuple[str, int | None]]:
         return issues
 
     # Skip secret checking for hygiene checker implementation and tests
-    # (they intentionally contain pattern definitions and test data)
     if path.startswith('tools/hygiene/'):
         return issues
 
@@ -206,10 +299,39 @@ def check_path(path: str) -> List[Tuple[str, int | None]]:
     return issues
 
 
+def find_pr_diff_files() -> Set[str]:
+    """Find files in the PR diff (compared to origin/main)."""
+    try:
+        result = subprocess.run(
+            ['git', 'diff', 'origin/main...HEAD', '--name-only'],
+            capture_output=True,
+            text=True,
+            cwd=os.getcwd()
+        )
+        files = set(result.stdout.strip().split('\n')) if result.stdout.strip() else set()
+        return files - {''}
+    except Exception:
+        return set()
+
+
+def find_tracked_files() -> Set[str]:
+    """Find all tracked files in the repository."""
+    try:
+        result = subprocess.run(
+            ['git', 'ls-files'],
+            capture_output=True,
+            text=True,
+            cwd=os.getcwd()
+        )
+        files = set(result.stdout.strip().split('\n')) if result.stdout.strip() else set()
+        return files - {''}
+    except Exception:
+        return set()
+
+
 def find_uncommitted_files() -> Set[str]:
     """Find files that are not in git index (untracked or uncommitted)."""
     try:
-        import subprocess
         # Get untracked files
         result = subprocess.run(
             ['git', 'ls-files', '--others', '--exclude-standard'],
@@ -233,22 +355,43 @@ def find_uncommitted_files() -> Set[str]:
         return set()
 
 
-def check_repository(paths: List[str] = None) -> Tuple[List[Tuple[str, str, int | None]], int]:
+def check_repository(paths: List[str] = None, scan_mode: str = 'auto') -> Tuple[List[Tuple[str, str, int | None]], int]:
     """
     Check repository for hygiene issues.
 
     Args:
-        paths: Specific paths to check. If None, checks all modified/untracked files.
+        paths: Specific paths to check. If None, auto-detects based on scan_mode.
+        scan_mode: 'uncommitted' (untracked/modified), 'tracked' (all tracked), 'pr-diff' (PR changes), 'auto' (PR if origin/main exists, else uncommitted)
 
     Returns:
         (issues: List of (file_path, issue_description, line_number), exit_code)
     """
     if paths is None:
-        # Check uncommitted files
-        paths = list(find_uncommitted_files())
+        if scan_mode == 'auto':
+            # In CI, scan PR diff if origin/main exists, else scan tracked files
+            try:
+                subprocess.run(['git', 'rev-parse', 'origin/main'], capture_output=True, check=True, cwd=os.getcwd())
+                paths = list(find_pr_diff_files())
+                if not paths:
+                    # No diff from main, scan all tracked files
+                    paths = list(find_tracked_files())
+            except subprocess.CalledProcessError:
+                # origin/main doesn't exist, scan uncommitted files
+                paths = list(find_uncommitted_files())
+        elif scan_mode == 'uncommitted':
+            paths = list(find_uncommitted_files())
+        elif scan_mode == 'tracked':
+            paths = list(find_tracked_files())
+        elif scan_mode == 'pr-diff':
+            paths = list(find_pr_diff_files())
 
     issues = []
 
+    # Run gitleaks first if available
+    gitleaks_issues, has_gitleaks = run_gitleaks_check()
+    issues.extend(gitleaks_issues)
+
+    # Then run custom checks on specified paths
     for path in paths:
         file_issues = check_path(path)
         for issue_desc, line_num in file_issues:
@@ -283,7 +426,16 @@ def format_report(issues: List[Tuple[str, str, int | None]]) -> str:
 
 
 if __name__ == '__main__':
-    paths = sys.argv[1:] if len(sys.argv) > 1 else None
-    issues, exit_code = check_repository(paths)
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Check repository fixture hygiene and secret policies')
+    parser.add_argument('paths', nargs='*', help='Specific paths to check (if none, auto-detects)')
+    parser.add_argument('--scan-mode', choices=['auto', 'uncommitted', 'tracked', 'pr-diff'], default='auto',
+                        help='Which files to scan: auto (default), uncommitted (untracked/modified), tracked (all), pr-diff (PR changes)')
+
+    args = parser.parse_args()
+
+    paths = args.paths if args.paths else None
+    issues, exit_code = check_repository(paths, scan_mode=args.scan_mode)
     print(format_report(issues), file=sys.stderr if exit_code else sys.stdout)
     sys.exit(exit_code)

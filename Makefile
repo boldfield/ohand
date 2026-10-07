@@ -48,5 +48,5 @@ ios-check:
 # hygiene-check: Check for secret leaks and private-capture policy violations.
 # Ensures no credentials, keys, or private recordings are committed to the public repository.
 hygiene-check:
-	$(PYTHON) tools/hygiene/check_hygiene.py
+	$(PYTHON) tools/hygiene/check_hygiene.py --scan-mode tracked
 	$(PYTHON) -m unittest discover --start-directory tools/hygiene --pattern 'test_*.py' --verbose

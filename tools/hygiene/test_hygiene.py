@@ -6,11 +6,14 @@ Tests verify that:
 - Seeded test secrets/private-path fixtures fail the check
 - Approved synthetic fixtures pass
 - Real secrets would be detected
+- E2E integration tests prove acceptance criteria
 """
 
 import unittest
 import tempfile
 import os
+import subprocess
+import shutil
 from pathlib import Path
 from check_hygiene import (
     check_for_secrets,
@@ -18,6 +21,10 @@ from check_hygiene import (
     check_path,
     is_synthetic_fixture_path,
     is_skipped_path,
+    check_signing_material,
+    has_provenance_file,
+    check_repository,
+    find_tracked_files,
 )
 
 
@@ -108,21 +115,22 @@ MIIEpAIBAAKCAQEA1234567890...
         """Skipped paths should not be checked."""
         self.assertTrue(is_skipped_path('.git/config'))
         self.assertTrue(is_skipped_path('target/release/app'))
-        self.assertTrue(is_skipped_path('.env'))
+        self.assertTrue(is_skipped_path('node_modules/package.json'))
+        self.assertFalse(is_skipped_path('.env'))  # .env files are NOT skipped - they should be checked
         self.assertFalse(is_skipped_path('src/main.rs'))
         self.assertFalse(is_skipped_path('fixtures/test.wav'))
 
-    def test_comment_secrets_ignored(self):
-        """Secrets in comments should not be flagged."""
-        # Python comment
+    def test_comment_secrets_detected(self):
+        """Secrets in comments should be flagged - comments don't protect against leaks."""
+        # Python comment with secret
         content_py = '# api_key = fake_key_1234567890abcdefghij'
         issues = check_for_secrets(content_py, 'script.py')
-        self.assertEqual(len(issues), 0)
+        self.assertTrue(any('API Key' in issue[0] or 'OpenAI-style' in issue[0] for issue in issues))
 
-        # Rust comment
+        # Rust comment with secret
         content_rs = '// password = super_secret'
         issues = check_for_secrets(content_rs, 'lib.rs')
-        self.assertEqual(len(issues), 0)
+        self.assertTrue(any('Password' in issue[0] for issue in issues))
 
     def test_no_secrets_in_clean_content(self):
         """Clean content should pass."""
@@ -135,6 +143,18 @@ fn main() {
 '''
         issues = check_for_secrets(content, 'main.rs')
         self.assertEqual(len(issues), 0)
+
+    def test_env_file_secrets_detected(self):
+        """Secrets in .env files should be detected."""
+        content = 'DATABASE_PASSWORD=super_secret_password_123'
+        issues = check_for_secrets(content, '.env')
+        self.assertTrue(any('Password' in issue[0] for issue in issues))
+
+    def test_env_production_file_secrets_detected(self):
+        """Secrets in .env.production files should be detected."""
+        content = 'API_KEY=sk-test-1234567890abcdefghij'
+        issues = check_for_secrets(content, '.env.production')
+        self.assertTrue(any('API Key' in issue[0] or 'OpenAI-style' in issue[0] for issue in issues))
 
     def test_no_audio_in_clean_paths(self):
         """Clean paths should pass."""
@@ -172,6 +192,192 @@ class TestFixtureDocumentation(unittest.TestCase):
         """docs/validation/ is approved for evidence/probe documentation."""
         self.assertTrue(is_synthetic_fixture_path('docs/validation/'))
         self.assertTrue(is_synthetic_fixture_path('docs/validation/probe_audio.ogg'))
+
+
+class TestSigningMaterial(unittest.TestCase):
+    """Test detection of signing material and certificates."""
+
+    def test_p12_detected(self):
+        """PKCS#12 certificate files should be detected."""
+        issues = check_signing_material('certs/apple.p12')
+        self.assertTrue(any('Signing material' in issue for issue in issues))
+
+    def test_mobileprovision_detected(self):
+        """iOS provisioning profile should be detected."""
+        issues = check_signing_material('profile/signing.mobileprovision')
+        self.assertTrue(any('Signing material' in issue for issue in issues))
+
+    def test_pem_detected(self):
+        """PEM files should be detected."""
+        issues = check_signing_material('keys/private.pem')
+        self.assertTrue(any('Signing material' in issue for issue in issues))
+
+    def test_key_detected(self):
+        """Private key files should be detected."""
+        issues = check_signing_material('certs/server.key')
+        self.assertTrue(any('Signing material' in issue for issue in issues))
+
+    def test_keystore_detected(self):
+        """Android keystore files should be detected."""
+        issues = check_signing_material('android/release.keystore')
+        self.assertTrue(any('Signing material' in issue for issue in issues))
+
+    def test_cer_detected(self):
+        """Certificate files should be detected."""
+        issues = check_signing_material('certs/root.cer')
+        self.assertTrue(any('Signing material' in issue for issue in issues))
+
+    def test_gpg_detected(self):
+        """GPG keys should be detected."""
+        issues = check_signing_material('keys/signing.gpg')
+        self.assertTrue(any('Signing material' in issue for issue in issues))
+
+    def test_asc_detected(self):
+        """ASCII-armored key files should be detected."""
+        issues = check_signing_material('keys/public.asc')
+        self.assertTrue(any('Signing material' in issue for issue in issues))
+
+
+class TestProvenanceRequirement(unittest.TestCase):
+    """Test that audio files require provenance documentation."""
+
+    def test_audio_without_provenance_fails(self):
+        """Audio in fixtures without provenance should fail."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_file = os.path.join(tmpdir, 'fixtures', 'test.wav')
+            os.makedirs(os.path.dirname(audio_file), exist_ok=True)
+
+            with open(audio_file, 'wb') as f:
+                f.write(b'fake audio data')
+
+            os.chdir(tmpdir)
+            issues = check_private_captures('fixtures/test.wav')
+            self.assertTrue(any('provenance' in issue for issue in issues))
+
+    def test_audio_with_provenance_passes(self):
+        """Audio in fixtures with provenance sidecar should pass."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_file = os.path.join(tmpdir, 'fixtures', 'synthetic.wav')
+            provenance_file = audio_file + '.provenance'
+
+            os.makedirs(os.path.dirname(audio_file), exist_ok=True)
+
+            with open(audio_file, 'wb') as f:
+                f.write(b'fake audio')
+
+            with open(provenance_file, 'w') as f:
+                f.write('This is synthetic generated audio from TTS.')
+
+            os.chdir(tmpdir)
+            issues = check_private_captures('fixtures/synthetic.wav')
+            self.assertFalse(any('provenance' in issue for issue in issues))
+
+
+class TestE2EIntegration(unittest.TestCase):
+    """End-to-end integration tests with real git repositories."""
+
+    def setUp(self):
+        """Create a temporary git repository for testing."""
+        self.test_dir = tempfile.mkdtemp()
+        self.original_cwd = os.getcwd()
+
+    def tearDown(self):
+        """Clean up the temporary repository."""
+        os.chdir(self.original_cwd)
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def init_git_repo(self):
+        """Initialize a git repository in the test directory."""
+        os.chdir(self.test_dir)
+        subprocess.run(['git', 'init'], check=True, capture_output=True)
+        subprocess.run(['git', 'config', 'user.email', 'test@example.com'], check=True, capture_output=True)
+        subprocess.run(['git', 'config', 'user.name', 'Test User'], check=True, capture_output=True)
+
+    def test_committed_secret_fails(self):
+        """Committed secret should be detected and fail check."""
+        self.init_git_repo()
+
+        # Create a file with a secret
+        secret_file = os.path.join(self.test_dir, 'config.py')
+        with open(secret_file, 'w') as f:
+            f.write('api_key = sk-1234567890abcdefghij\n')
+
+        # Commit it
+        subprocess.run(['git', 'add', 'config.py'], check=True, capture_output=True)
+        subprocess.run(['git', 'commit', '-m', 'Initial commit'], check=True, capture_output=True)
+
+        # Check should find the issue
+        issues, exit_code = check_repository(scan_mode='tracked')
+        self.assertEqual(exit_code, 1)
+        self.assertTrue(any('config.py' in issue[0] and ('API Key' in issue[1] or 'OpenAI' in issue[1]) for issue in issues))
+
+    def test_committed_audio_without_provenance_fails(self):
+        """Audio file in fixtures without provenance should fail."""
+        self.init_git_repo()
+
+        # Create audio in fixtures without provenance
+        audio_dir = os.path.join(self.test_dir, 'fixtures')
+        os.makedirs(audio_dir, exist_ok=True)
+
+        audio_file = os.path.join(audio_dir, 'test.wav')
+        with open(audio_file, 'wb') as f:
+            f.write(b'fake audio')
+
+        # Commit it
+        subprocess.run(['git', 'add', 'fixtures/test.wav'], check=True, capture_output=True)
+        subprocess.run(['git', 'commit', '-m', 'Add audio'], check=True, capture_output=True)
+
+        # Check should detect missing provenance
+        issues, exit_code = check_repository(scan_mode='tracked')
+        self.assertEqual(exit_code, 1)
+        self.assertTrue(any('fixtures/test.wav' in issue[0] and 'provenance' in issue[1] for issue in issues))
+
+    def test_documented_synthetic_fixture_passes(self):
+        """Audio file in fixtures with provenance should pass."""
+        self.init_git_repo()
+
+        # Create audio with provenance
+        audio_dir = os.path.join(self.test_dir, 'fixtures')
+        os.makedirs(audio_dir, exist_ok=True)
+
+        audio_file = os.path.join(audio_dir, 'synthetic.wav')
+        provenance_file = audio_file + '.provenance'
+
+        with open(audio_file, 'wb') as f:
+            f.write(b'fake audio')
+
+        with open(provenance_file, 'w') as f:
+            f.write('Generated synthetic audio for testing.')
+
+        # Commit both
+        subprocess.run(['git', 'add', 'fixtures/'], check=True, capture_output=True)
+        subprocess.run(['git', 'commit', '-m', 'Add synthetic audio'], check=True, capture_output=True)
+
+        # Check should pass
+        issues, exit_code = check_repository(scan_mode='tracked')
+        self.assertEqual(exit_code, 0)
+
+    def test_secret_not_in_output(self):
+        """Secret values should not appear in check output."""
+        self.init_git_repo()
+
+        # Create a file with a secret
+        secret_value = 'sk-test-1234567890abcdefghij'
+        secret_file = os.path.join(self.test_dir, 'config.py')
+        with open(secret_file, 'w') as f:
+            f.write(f'api_key = {secret_value}\n')
+
+        # Commit it
+        subprocess.run(['git', 'add', 'config.py'], check=True, capture_output=True)
+        subprocess.run(['git', 'commit', '-m', 'Initial commit'], check=True, capture_output=True)
+
+        # Run check and capture output
+        from check_hygiene import format_report
+        issues, _ = check_repository(scan_mode='tracked')
+        report = format_report(issues)
+
+        # Secret value should not be in the report
+        self.assertNotIn(secret_value, report)
 
 
 if __name__ == '__main__':

@@ -14,6 +14,7 @@ The following must never be committed, even in test fixtures or documentation:
   - Passwords and authentication tokens
   - Database URLs with embedded credentials
   - Anthropic, OpenAI, or other provider API credentials
+  - Signing certificates, provisioning profiles, and keystores (.p12, .mobileprovision, .cer, .pem, .key, .keystore, .jks)
 
 - **Private captures and recordings:**
   - Real audio recordings of user speech
@@ -40,7 +41,7 @@ The following paths are explicitly approved for synthetic test fixtures:
 
 Synthetic fixtures in these paths must:
 - Use obviously fake/placeholder data
-- Clearly label any audio as synthetic or generated
+- Audio files must include a `.provenance` sidecar or adjacent `FIXTURES.md`/`MANIFEST.md` documenting them as synthetic
 - Include inline documentation of provenance if non-obvious
 - Never include transcripts or derivatives of real private content
 
@@ -68,18 +69,32 @@ Note: Removing from git history does not guarantee the data is unrecoverable fro
 
 Audio fixtures are essential for testing speech capture, transcription, and voice processing:
 
-- **Synthetic generated audio** — Always allowed in `fixtures/`, `tests/`, and `**/Tests/` paths
+- **Synthetic generated audio** — Always allowed in `fixtures/`, `tests/`, `core/tests/`, and `ios/Tests/` paths, provided it includes a provenance record
 - **Real recordings** — Never commit real speech or personal audio
-- **Downloaded/purchased samples** — Only with clear licensing; include provenance in fixture documentation
+- **Downloaded/purchased samples** — Only with clear licensing; include detailed provenance documentation
 - **Redacted or scrambled** — For documentation only, clearly marked as redacted
 
-Example fixture documentation:
+Audio files must include provenance documentation in one of these forms:
+1. Sidecar file: `audio_file.wav.provenance` with "synthetic" or "generated" label
+2. Adjacent manifest: `FIXTURES.md` or `MANIFEST.md` in the same directory listing the audio and its provenance
+3. Inline documentation in test code explaining the audio source
 
-```python
-# fixtures/audio/synthetic_reminder.wav — Synthetic audio:
-# Generated from TTS using a neutral system voice. No real speech.
-# Provenance: ttsx3 library, en-US voice (not identifiable human)
-# Use: Unit tests for audio processing pipelines
+Example sidecar provenance file:
+
+```
+fixtures/audio/synthetic_reminder.wav.provenance:
+  Synthetic audio generated from TTS using a neutral system voice.
+  No real speech. Generated with ttsx3 library, en-US voice.
+  Use: Unit tests for audio processing pipelines.
+```
+
+Example manifest documentation:
+
+```
+fixtures/audio/FIXTURES.md:
+  # Synthetic Audio Fixtures
+  - synthetic_reminder.wav: Generated with ttsx3 library, neutral voice, 3 seconds
+  - noise_background.wav: Generated white noise at -20dB, 5 seconds
 ```
 
 ### Contributing without secrets
@@ -89,7 +104,7 @@ Example fixture documentation:
 1. Review all committed paths — do they contain real credentials, audio, or private data?
 2. Run `make hygiene-check` locally — fix any detected issues before pushing
 3. Use `.gitignore` for local configuration with real secrets (never commit them)
-4. Replace real provider keys with obvious placeholders in tests (e.g., `sk-test-1234...`)
+4. Replace real provider keys with obvious placeholders in tests (e.g., `PLACEHOLDER_API_KEY_12345`, `fake_token_abcdef`)
 5. Use fixture generators or synthetic data instead of captured real data
 
 **Example `.gitignore` for local development:**
