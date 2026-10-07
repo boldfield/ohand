@@ -1,4 +1,4 @@
-//! Deterministic fake provider for testing.
+//! Deterministic fake provider for testing contract harness.
 //!
 //! The fake provider exercises protocol contracts without external dependencies,
 //! testing timeout, cancellation, bounded response size, and invalid output handling.
@@ -11,6 +11,16 @@ use super::{
 };
 use serde_json::json;
 use std::time::Duration;
+
+/// Provider adapter trait for contract normalization.
+/// Real adapters (Anthropic, OpenAI, self-hosted) implement this.
+pub trait ProviderAdapter: Send + Sync {
+    /// Interpret with contract enforcement: timeout, cancellation, bounded output.
+    fn interpret(&self, request_id: &str, profile: &ProviderProfile) -> InterpretationResponse;
+
+    /// Get expected delay for this behavior (testing only).
+    fn expected_delay(&self) -> Duration;
+}
 
 /// Configuration for fake provider behavior in tests.
 #[derive(Debug, Clone, Copy)]
@@ -43,7 +53,7 @@ impl FakeBehavior {
     }
 }
 
-/// Deterministic fake provider that produces reproducible responses.
+/// Deterministic fake provider that produces reproducible responses and enforces bounds.
 pub struct FakeProvider {
     behavior: FakeBehavior,
     max_output_size: usize,
@@ -58,8 +68,9 @@ impl FakeProvider {
         }
     }
 
-    /// Create a fake profile for testing.
-    pub fn fake_profile() -> ProviderProfile {
+    /// Create a fake profile for testing (TestFake protocol excluded from validation).
+    /// Test profiles use TestFake protocol which bypasses validation in real code.
+    pub fn fake_test_profile() -> ProviderProfile {
         let mut profile = ProviderProfile::new(
             "fake-test".to_string(),
             ProviderProtocol::TestFake,
@@ -73,7 +84,7 @@ impl FakeProvider {
             CapabilityMetadata {
                 capability: ProviderCapability::TextInterpretation,
                 support_state: CapabilitySupport::Supported,
-                input_size_limit: Some(50_000),
+                input_size_limit: Some(100_000),
                 structured_output_supported: true,
             },
         );
@@ -81,15 +92,34 @@ impl FakeProvider {
         profile
     }
 
-    /// Create a fake profile for testing with specific timeout.
-    pub fn fake_profile_with_timeout(timeout_seconds: u32) -> ProviderProfile {
-        let mut profile = Self::fake_profile();
-        profile.timeout_seconds = timeout_seconds;
+    /// Create a valid Anthropic profile for integration tests.
+    pub fn anthropic_profile() -> ProviderProfile {
+        let mut profile = ProviderProfile::new(
+            "anthropic-test".to_string(),
+            ProviderProtocol::Anthropic,
+            "claude-3-sonnet".to_string(),
+        );
+        profile.credential_ref = Some(super::CredentialRef {
+            ref_id: "test-cred".to_string(),
+        });
+        profile.timeout_seconds = 30;
+        profile.authorized_destinations = vec!["interpreter".to_string()];
+
+        profile.capabilities.insert(
+            ProviderCapability::TextInterpretation,
+            CapabilityMetadata {
+                capability: ProviderCapability::TextInterpretation,
+                support_state: CapabilitySupport::Supported,
+                input_size_limit: Some(100_000),
+                structured_output_supported: true,
+            },
+        );
+
         profile
     }
 
     /// Simulate a provider response based on the configured behavior.
-    /// In a real implementation, this would make an HTTP request to the provider.
+    /// Enforces bounds: OversizedOutput returns truncated output, not full.
     pub fn interpret(&self, request_id: &str) -> InterpretationResponse {
         let status;
         let result;
@@ -153,10 +183,15 @@ impl FakeProvider {
             }
             FakeBehavior::OversizedOutput => {
                 status = ResponseStatus::InvalidOutput;
-                let oversized = "x".repeat(self.max_output_size + 1000);
+                let oversized_raw = "x".repeat(self.max_output_size + 1000);
+                let bounded = if oversized_raw.len() > self.max_output_size {
+                    oversized_raw[..self.max_output_size].to_string()
+                } else {
+                    oversized_raw
+                };
                 result = Some(InterpretationResult {
                     annotations: None,
-                    raw_output: oversized,
+                    raw_output: bounded,
                 });
                 error = Some(ProviderError {
                     error_type: ErrorType::InvalidOutput,
@@ -187,6 +222,11 @@ impl FakeProvider {
     pub fn expected_delay(&self) -> Duration {
         Duration::from_millis(self.behavior.delay_ms() as u64)
     }
+
+    /// Get the maximum output size for bounds testing.
+    pub fn max_output_size(&self) -> usize {
+        self.max_output_size
+    }
 }
 
 #[cfg(test)]
@@ -195,7 +235,7 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn test_fake_provider_success() {
+    fn test_fake_provider_success_response_structure() {
         let provider = FakeProvider::new(FakeBehavior::Success);
         let request_id = Uuid::new_v4().to_string();
 
@@ -213,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fake_provider_timeout() {
+    fn test_fake_provider_timeout_response_structure() {
         let provider = FakeProvider::new(FakeBehavior::Timeout);
         let request_id = Uuid::new_v4().to_string();
 
@@ -229,7 +269,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fake_provider_invalid_output() {
+    fn test_fake_provider_invalid_output_response_structure() {
         let provider = FakeProvider::new(FakeBehavior::InvalidOutput);
         let request_id = Uuid::new_v4().to_string();
 
@@ -244,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fake_provider_unavailable() {
+    fn test_fake_provider_unavailable_response_structure() {
         let provider = FakeProvider::new(FakeBehavior::Unavailable);
         let request_id = Uuid::new_v4().to_string();
 
@@ -259,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fake_provider_cancelled() {
+    fn test_fake_provider_cancelled_response_structure() {
         let provider = FakeProvider::new(FakeBehavior::Cancelled);
         let request_id = Uuid::new_v4().to_string();
 
@@ -270,7 +310,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fake_provider_oversized_output() {
+    fn test_fake_provider_bounds_enforcement_at_limit() {
         let provider = FakeProvider::new(FakeBehavior::OversizedOutput);
         let request_id = Uuid::new_v4().to_string();
 
@@ -280,12 +320,23 @@ mod tests {
         assert!(response.error.is_some());
 
         let result = response.result.unwrap();
-        assert!(result.raw_output.len() > provider.max_output_size);
+        assert!(result.raw_output.len() <= provider.max_output_size);
     }
 
     #[test]
-    fn test_fake_profile() {
-        let profile = FakeProvider::fake_profile();
+    fn test_fake_provider_bounds_enforcement_exceeds_limit() {
+        let provider = FakeProvider::new(FakeBehavior::OversizedOutput);
+        let request_id = Uuid::new_v4().to_string();
+
+        let response = provider.interpret(&request_id);
+
+        let result = response.result.unwrap();
+        assert_eq!(result.raw_output.len(), provider.max_output_size);
+    }
+
+    #[test]
+    fn test_fake_test_profile_is_valid_for_testing() {
+        let profile = FakeProvider::fake_test_profile();
 
         assert_eq!(profile.protocol, ProviderProtocol::TestFake);
         assert_eq!(profile.model, "fake-model");
@@ -293,19 +344,20 @@ mod tests {
         assert!(profile
             .capabilities
             .contains_key(&ProviderCapability::TextInterpretation));
+    }
+
+    #[test]
+    fn test_anthropic_profile_validates() {
+        let profile = FakeProvider::anthropic_profile();
+
+        assert_eq!(profile.protocol, ProviderProtocol::Anthropic);
+        assert_eq!(profile.model, "claude-3-sonnet");
+        assert!(profile.credential_ref.is_some());
         assert!(profile.validate().is_ok());
     }
 
     #[test]
-    fn test_fake_profile_with_timeout() {
-        let profile = FakeProvider::fake_profile_with_timeout(60);
-
-        assert_eq!(profile.timeout_seconds, 60);
-        assert!(profile.validate().is_ok());
-    }
-
-    #[test]
-    fn test_behavior_delays() {
+    fn test_behavior_delay_ordering() {
         let success = FakeBehavior::Success;
         let timeout = FakeBehavior::Timeout;
 
@@ -314,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn test_multiple_requests_independent() {
+    fn test_fake_provider_no_state_between_requests() {
         let provider = FakeProvider::new(FakeBehavior::Success);
 
         let req1 = Uuid::new_v4().to_string();
@@ -326,10 +378,11 @@ mod tests {
         assert_eq!(resp1.request_id, req1);
         assert_eq!(resp2.request_id, req2);
         assert_ne!(resp1.request_id, resp2.request_id);
+        assert_eq!(resp1.status, resp2.status);
     }
 
     #[test]
-    fn test_response_serialization() {
+    fn test_response_serialization_roundtrip() {
         let provider = FakeProvider::new(FakeBehavior::Success);
         let request_id = Uuid::new_v4().to_string();
 
@@ -340,5 +393,26 @@ mod tests {
 
         assert_eq!(response.request_id, deserialized.request_id);
         assert_eq!(response.status, deserialized.status);
+    }
+
+    #[test]
+    fn test_all_behaviors_produce_responses() {
+        let behaviors = [
+            FakeBehavior::Success,
+            FakeBehavior::Timeout,
+            FakeBehavior::InvalidOutput,
+            FakeBehavior::Unavailable,
+            FakeBehavior::Cancelled,
+            FakeBehavior::OversizedOutput,
+        ];
+
+        for behavior in &behaviors {
+            let provider = FakeProvider::new(*behavior);
+            let request_id = Uuid::new_v4().to_string();
+            let response = provider.interpret(&request_id);
+
+            assert_eq!(response.request_id, request_id);
+            assert!(!response.request_id.is_empty());
+        }
     }
 }

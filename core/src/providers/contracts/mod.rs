@@ -9,7 +9,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use thiserror::Error;
-use uuid::Uuid;
 
 pub mod fake;
 
@@ -98,7 +97,8 @@ pub struct CapabilityMetadata {
 /// Multiple versions can coexist per profile_id; jobs pin to a specific version.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderProfile {
-    pub profile_version: String,
+    pub schema_version: u32,
+    pub profile_version: u32,
     pub profile_id: String,
     pub protocol: ProviderProtocol,
     pub endpoint: Option<String>,
@@ -114,7 +114,8 @@ pub struct ProviderProfile {
 impl ProviderProfile {
     pub fn new(profile_id: String, protocol: ProviderProtocol, model: String) -> ProviderProfile {
         ProviderProfile {
-            profile_version: format!("{}-{}", profile_id, Uuid::new_v4()),
+            schema_version: 1,
+            profile_version: 1,
             profile_id,
             protocol,
             endpoint: None,
@@ -130,12 +131,32 @@ impl ProviderProfile {
 
     /// Validate the profile for completeness and internal consistency.
     pub fn validate(&self) -> Result<(), ProfileValidationError> {
+        if self.profile_id.is_empty() {
+            return Err(ProfileValidationError::EmptyProfileId);
+        }
+
+        if self.profile_version == 0 {
+            return Err(ProfileValidationError::InvalidProfileVersion);
+        }
+
+        if self.schema_version == 0 {
+            return Err(ProfileValidationError::InvalidSchemaVersion);
+        }
+
+        if self.schema_version > 1 {
+            return Err(ProfileValidationError::UnsupportedSchemaVersion);
+        }
+
         if self.model.is_empty() {
             return Err(ProfileValidationError::MissingModel);
         }
 
         if self.timeout_seconds == 0 {
             return Err(ProfileValidationError::InvalidTimeout);
+        }
+
+        if self.protocol == ProviderProtocol::TestFake {
+            return Err(ProfileValidationError::TestFakeNotAllowed);
         }
 
         match self.protocol {
@@ -149,10 +170,14 @@ impl ProviderProfile {
                     return Err(ProfileValidationError::MissingEndpoint);
                 }
             }
-            ProviderProtocol::TestFake => {}
+            ProviderProtocol::TestFake => unreachable!(),
         }
 
-        if self.credential_ref.is_none() && self.protocol != ProviderProtocol::TestFake {
+        if let Some(ref cred) = self.credential_ref {
+            if cred.ref_id.is_empty() {
+                return Err(ProfileValidationError::EmptyCredentialRef);
+            }
+        } else {
             return Err(ProfileValidationError::MissingCredential);
         }
 
@@ -160,8 +185,28 @@ impl ProviderProfile {
             return Err(ProfileValidationError::MissingAuthorizedDestinations);
         }
 
+        for dest in &self.authorized_destinations {
+            if dest.is_empty() {
+                return Err(ProfileValidationError::EmptyAuthorizedDestination);
+            }
+        }
+
         if self.capabilities.is_empty() {
             return Err(ProfileValidationError::NoCapabilities);
+        }
+
+        let mut has_supported = false;
+        for (key, metadata) in &self.capabilities {
+            if key != &metadata.capability {
+                return Err(ProfileValidationError::InconsistentCapabilityMetadata);
+            }
+            if metadata.support_state == CapabilitySupport::Supported {
+                has_supported = true;
+            }
+        }
+
+        if !has_supported {
+            return Err(ProfileValidationError::NoSupportedCapabilities);
         }
 
         Ok(())
@@ -170,20 +215,38 @@ impl ProviderProfile {
 
 #[derive(Debug, Error)]
 pub enum ProfileValidationError {
+    #[error("Profile ID cannot be empty")]
+    EmptyProfileId,
+    #[error("Profile version cannot be zero")]
+    InvalidProfileVersion,
+    #[error("Schema version cannot be zero")]
+    InvalidSchemaVersion,
+    #[error("Unsupported schema version")]
+    UnsupportedSchemaVersion,
     #[error("Profile is missing model")]
     MissingModel,
     #[error("Profile has invalid timeout (must be > 0)")]
     InvalidTimeout,
+    #[error("TestFake protocol is only for testing")]
+    TestFakeNotAllowed,
     #[error("Profile has unexpected endpoint for protocol")]
     UnexpectedEndpoint,
     #[error("Profile is missing endpoint for self-hosted protocol")]
     MissingEndpoint,
     #[error("Profile is missing credential reference")]
     MissingCredential,
+    #[error("Credential reference ID cannot be empty")]
+    EmptyCredentialRef,
     #[error("Profile has no authorized destinations")]
     MissingAuthorizedDestinations,
+    #[error("Authorized destination cannot be empty")]
+    EmptyAuthorizedDestination,
     #[error("Profile declares no capabilities")]
     NoCapabilities,
+    #[error("All capabilities are unsupported or unavailable")]
+    NoSupportedCapabilities,
+    #[error("Capability map key does not match metadata")]
+    InconsistentCapabilityMetadata,
 }
 
 /// Retry policy configuration.
@@ -204,23 +267,30 @@ impl Default for RetryPolicy {
     }
 }
 
-/// Normalized interpretation request contract.
+/// Normalized interpretation request contract pinned to an immutable profile version.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InterpretationRequest {
     pub request_id: String,
+    pub request_version: u32,
+    pub capture_id: String,
     pub capability: ProviderCapability,
     pub source_text: String,
+    pub text_basis: String,
     pub instructions: String,
+    pub profile_id: String,
+    pub profile_version: u32,
+    pub authorization_route: String,
     pub context: RequestContext,
 }
 
-/// Request context: capture time, timezone, locale, etc.
+/// Request context: capture time, timezone, locale, and complete time context.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestContext {
     pub capture_instant: DateTime<Utc>,
     pub timezone_id: String,
     pub locale: String,
     pub source_revision: u32,
+    pub utc_offset_seconds: i32,
 }
 
 /// Normalized interpretation response contract.
@@ -306,6 +376,7 @@ impl ErrorType {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     #[test]
     fn test_profile_new() {
@@ -322,12 +393,43 @@ mod tests {
     }
 
     #[test]
+    fn test_profile_validation_empty_profile_id() {
+        let mut profile = ProviderProfile::new(
+            "".to_string(),
+            ProviderProtocol::Anthropic,
+            "claude-3-sonnet".to_string(),
+        );
+        profile.credential_ref = Some(CredentialRef {
+            ref_id: "test-cred".to_string(),
+        });
+        profile.authorized_destinations = vec!["local".to_string()];
+        profile.capabilities.insert(
+            ProviderCapability::TextInterpretation,
+            CapabilityMetadata {
+                capability: ProviderCapability::TextInterpretation,
+                support_state: CapabilitySupport::Supported,
+                input_size_limit: None,
+                structured_output_supported: true,
+            },
+        );
+
+        let result = profile.validate();
+        assert!(matches!(
+            result,
+            Err(ProfileValidationError::EmptyProfileId)
+        ));
+    }
+
+    #[test]
     fn test_profile_validation_missing_model() {
         let mut profile = ProviderProfile::new(
             "test-profile".to_string(),
             ProviderProtocol::Anthropic,
             "".to_string(),
         );
+        profile.credential_ref = Some(CredentialRef {
+            ref_id: "test-cred".to_string(),
+        });
         profile.authorized_destinations = vec!["local".to_string()];
 
         let result = profile.validate();
@@ -342,12 +444,52 @@ mod tests {
             "claude-3-sonnet".to_string(),
         );
         profile.timeout_seconds = 0;
+        profile.credential_ref = Some(CredentialRef {
+            ref_id: "test-cred".to_string(),
+        });
         profile.authorized_destinations = vec!["local".to_string()];
+        profile.capabilities.insert(
+            ProviderCapability::TextInterpretation,
+            CapabilityMetadata {
+                capability: ProviderCapability::TextInterpretation,
+                support_state: CapabilitySupport::Supported,
+                input_size_limit: None,
+                structured_output_supported: true,
+            },
+        );
 
         let result = profile.validate();
         assert!(matches!(
             result,
             Err(ProfileValidationError::InvalidTimeout)
+        ));
+    }
+
+    #[test]
+    fn test_profile_validation_empty_credential_ref() {
+        let mut profile = ProviderProfile::new(
+            "test-profile".to_string(),
+            ProviderProtocol::Anthropic,
+            "claude-3-sonnet".to_string(),
+        );
+        profile.credential_ref = Some(CredentialRef {
+            ref_id: "".to_string(),
+        });
+        profile.authorized_destinations = vec!["local".to_string()];
+        profile.capabilities.insert(
+            ProviderCapability::TextInterpretation,
+            CapabilityMetadata {
+                capability: ProviderCapability::TextInterpretation,
+                support_state: CapabilitySupport::Supported,
+                input_size_limit: None,
+                structured_output_supported: true,
+            },
+        );
+
+        let result = profile.validate();
+        assert!(matches!(
+            result,
+            Err(ProfileValidationError::EmptyCredentialRef)
         ));
     }
 
@@ -379,21 +521,83 @@ mod tests {
     }
 
     #[test]
-    fn test_profile_validation_missing_capabilities() {
+    fn test_profile_validation_no_supported_capabilities() {
         let mut profile = ProviderProfile::new(
             "test-profile".to_string(),
             ProviderProtocol::Anthropic,
             "claude-3-sonnet".to_string(),
         );
-        profile.authorized_destinations = vec!["local".to_string()];
         profile.credential_ref = Some(CredentialRef {
             ref_id: "test-cred".to_string(),
         });
+        profile.authorized_destinations = vec!["local".to_string()];
+        profile.capabilities.insert(
+            ProviderCapability::TextInterpretation,
+            CapabilityMetadata {
+                capability: ProviderCapability::TextInterpretation,
+                support_state: CapabilitySupport::Unsupported,
+                input_size_limit: None,
+                structured_output_supported: false,
+            },
+        );
 
         let result = profile.validate();
         assert!(matches!(
             result,
-            Err(ProfileValidationError::NoCapabilities)
+            Err(ProfileValidationError::NoSupportedCapabilities)
+        ));
+    }
+
+    #[test]
+    fn test_profile_validation_inconsistent_capability_metadata() {
+        let mut profile = ProviderProfile::new(
+            "test-profile".to_string(),
+            ProviderProtocol::Anthropic,
+            "claude-3-sonnet".to_string(),
+        );
+        profile.credential_ref = Some(CredentialRef {
+            ref_id: "test-cred".to_string(),
+        });
+        profile.authorized_destinations = vec!["local".to_string()];
+        profile.capabilities.insert(
+            ProviderCapability::TextInterpretation,
+            CapabilityMetadata {
+                capability: ProviderCapability::Transcription,
+                support_state: CapabilitySupport::Supported,
+                input_size_limit: None,
+                structured_output_supported: true,
+            },
+        );
+
+        let result = profile.validate();
+        assert!(matches!(
+            result,
+            Err(ProfileValidationError::InconsistentCapabilityMetadata)
+        ));
+    }
+
+    #[test]
+    fn test_profile_validation_test_fake_rejected() {
+        let mut profile = ProviderProfile::new(
+            "test-profile".to_string(),
+            ProviderProtocol::TestFake,
+            "fake-model".to_string(),
+        );
+        profile.authorized_destinations = vec!["local".to_string()];
+        profile.capabilities.insert(
+            ProviderCapability::TextInterpretation,
+            CapabilityMetadata {
+                capability: ProviderCapability::TextInterpretation,
+                support_state: CapabilitySupport::Supported,
+                input_size_limit: None,
+                structured_output_supported: true,
+            },
+        );
+
+        let result = profile.validate();
+        assert!(matches!(
+            result,
+            Err(ProfileValidationError::TestFakeNotAllowed)
         ));
     }
 
@@ -404,6 +608,9 @@ mod tests {
             ProviderProtocol::SelfHosted,
             "llama-3".to_string(),
         );
+        profile.credential_ref = Some(CredentialRef {
+            ref_id: "test-cred".to_string(),
+        });
         profile.authorized_destinations = vec!["local".to_string()];
         profile.capabilities.insert(
             ProviderCapability::TextInterpretation,
@@ -430,6 +637,9 @@ mod tests {
             "llama-3".to_string(),
         );
         profile.endpoint = Some("http://localhost:8000".to_string());
+        profile.credential_ref = Some(CredentialRef {
+            ref_id: "local-cred".to_string(),
+        });
         profile.authorized_destinations = vec!["local".to_string()];
         profile.capabilities.insert(
             ProviderCapability::TextInterpretation,
@@ -440,9 +650,6 @@ mod tests {
                 structured_output_supported: true,
             },
         );
-        profile.credential_ref = Some(CredentialRef {
-            ref_id: "local-cred".to_string(),
-        });
 
         assert!(profile.validate().is_ok());
     }
@@ -465,19 +672,28 @@ mod tests {
     fn test_interpretation_request_creation() {
         let request = InterpretationRequest {
             request_id: Uuid::new_v4().to_string(),
+            request_version: 1,
+            capture_id: Uuid::new_v4().to_string(),
             capability: ProviderCapability::TextInterpretation,
             source_text: "remind me to call the roofer".to_string(),
+            text_basis: "original capture text".to_string(),
             instructions: "extract action items".to_string(),
+            profile_id: "test-profile".to_string(),
+            profile_version: 1,
+            authorization_route: "default".to_string(),
             context: RequestContext {
                 capture_instant: Utc::now(),
                 timezone_id: "America/New_York".to_string(),
                 locale: "en-US".to_string(),
                 source_revision: 0,
+                utc_offset_seconds: -18000,
             },
         };
 
         assert_eq!(request.capability, ProviderCapability::TextInterpretation);
         assert_eq!(request.source_text, "remind me to call the roofer");
+        assert_eq!(request.profile_version, 1);
+        assert_eq!(request.request_version, 1);
     }
 
     #[test]
