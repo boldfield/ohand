@@ -280,15 +280,16 @@ fn test_multiple_different_captures() -> Result<()> {
 }
 
 #[test]
-fn test_durability_abort_before_commit() -> Result<()> {
-    let path = temp_db_path("durability_abort");
+fn test_public_save_captures_api_commits() -> Result<()> {
+    let path = temp_db_path("api_commits");
     let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
     let mut db = make_test_db(&path, instant)?;
 
     let capture = make_test_capture("cap-1");
+    // The public save_capture API owns the transaction and commits automatically
     save_capture(&mut db, &capture)?;
 
-    // Verify capture WAS persisted (new API commits automatically)
+    // Verify capture WAS persisted after the public API call
     let tx = db.transaction()?;
     let retrieved = get_capture(&tx, "cap-1")?;
     assert_eq!(retrieved, Some(capture));
@@ -322,21 +323,26 @@ fn test_durability_persists_after_commit() -> Result<()> {
 }
 
 #[test]
-fn test_ack_only_after_transaction_commit() -> Result<()> {
-    let path = temp_db_path("ack_after_commit");
+fn test_ack_after_commit_survives_reopen() -> Result<()> {
+    let path = temp_db_path("ack_survives_reopen");
     let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
-    let mut db = make_test_db(&path, instant)?;
 
     let capture = make_test_capture("cap-ack");
 
-    // New API: save_capture owns the transaction and only returns after commit
-    let saved = save_capture(&mut db, &capture)?;
-    assert_eq!(saved, capture);
+    {
+        let mut db = make_test_db(&path, instant)?;
+        // Public API: save_capture owns the transaction and only returns after commit
+        let saved = save_capture(&mut db, &capture)?;
+        assert_eq!(saved, capture);
+    }
 
-    // Verify it persists
-    let tx = db.transaction()?;
-    let retrieved = get_capture(&tx, "cap-ack")?;
-    assert_eq!(retrieved, Some(capture));
+    // Reopen and verify the acknowledged save persists durably
+    {
+        let mut db = make_test_db(&path, instant)?;
+        let tx = db.transaction()?;
+        let retrieved = get_capture(&tx, "cap-ack")?;
+        assert_eq!(retrieved, Some(capture));
+    }
 
     let _ = std::fs::remove_file(&path);
     Ok(())
@@ -436,28 +442,49 @@ fn test_fault_injection_locked_write_during_commit() -> Result<()> {
 
     let capture = make_test_capture("cap-1");
 
-    // Spawn a second connection that holds a write lock
+    // Spawn a second connection that holds an exclusive lock
     let path_clone = path.clone();
     let handle = thread::spawn(move || -> Result<()> {
-        let mut db2 = make_test_db(&path_clone, instant)?;
-        let tx = db2.transaction()?;
-        tx.execute("INSERT INTO captures (capture_id, text, audio_reference, capture_instant, timezone_id, utc_offset_minutes, locale, calendar, item_scope, route_id, entry_locked, created_at, session_topic) VALUES ('lock-holder', 'text', NULL, '2026-01-15T10:30:00Z', 'UTC', 0, 'en', 'gregorian', 'personal', 'route-1', 0, '2026-01-15T10:30:00Z', NULL)", [])?;
-        thread::sleep(std::time::Duration::from_millis(500));
+        let db2 = make_test_db(&path_clone, instant)?;
+        // Use raw connection to hold EXCLUSIVE lock without automatic rollback
+        let conn = db2.conn();
+        conn.execute("BEGIN EXCLUSIVE", [])?;
+        conn.execute("INSERT INTO captures (capture_id, text, audio_reference, capture_instant, timezone_id, utc_offset_minutes, locale, calendar, item_scope, route_id, entry_locked, created_at, session_topic) VALUES ('lock-holder', 'text', NULL, '2026-01-15T10:30:00Z', 'UTC', 0, 'en', 'gregorian', 'personal', 'route-1', 0, '2026-01-15T10:30:00Z', NULL)", [])?;
+        thread::sleep(std::time::Duration::from_millis(1000));
+        conn.execute("ROLLBACK", [])?;
         Ok(())
     });
 
-    // Try to save while the other connection holds the lock - should wait or fail
+    // Try to save while the other connection holds the lock
     thread::sleep(std::time::Duration::from_millis(100));
     let result = save_capture(&mut db1, &capture);
 
     handle.join().unwrap()?;
 
-    // Result can be Ok or Err depending on timing, but crucially:
-    // if it's Ok, then it means the capture was successfully committed to disk
-    if let Ok(saved) = result {
-        let tx = db1.transaction()?;
-        let retrieved = get_capture(&tx, "cap-1")?;
-        assert_eq!(retrieved, Some(saved));
+    // Verify all-or-nothing: either the save succeeded and is durable,
+    // or it failed and the row is completely absent
+    match result {
+        Ok(saved) => {
+            // If save succeeded, verify it persists after database reopen
+            let mut db_reopen = make_test_db(&path, instant)?;
+            let tx = db_reopen.transaction()?;
+            let retrieved = get_capture(&tx, "cap-1")?;
+            assert_eq!(
+                retrieved,
+                Some(saved),
+                "Acknowledged save must persist after reopen"
+            );
+        }
+        Err(_) => {
+            // If save failed, verify the row is completely absent after reopen
+            let mut db_reopen = make_test_db(&path, instant)?;
+            let tx = db_reopen.transaction()?;
+            let retrieved = get_capture(&tx, "cap-1")?;
+            assert_eq!(
+                retrieved, None,
+                "Failed save must leave no partial row after reopen"
+            );
+        }
     }
 
     let _ = std::fs::remove_file(&path);
@@ -501,31 +528,34 @@ fn test_concurrent_retries_idempotent() -> Result<()> {
 
     let capture = make_test_capture("cap-concurrent");
 
-    let path1 = path.clone();
-    let capture1 = capture.clone();
+    // Initialize database first to avoid migration race condition
+    let _ = make_test_db(&path, instant)?;
 
-    // Save from thread 1
-    let handle1 = thread::spawn(move || -> Result<()> {
-        let mut db = make_test_db(&path1, instant)?;
-        save_capture(&mut db, &capture1)?;
-        Ok(())
-    });
+    let mut handles = vec![];
 
-    thread::sleep(std::time::Duration::from_millis(50));
+    // Spawn 2 concurrent threads, both calling save_capture with the same capture.
+    // IMMEDIATE transactions ensure idempotency even under concurrent access.
+    for _ in 0..2 {
+        let path_clone = path.clone();
+        let capture_clone = capture.clone();
 
-    let path2 = path.clone();
-    let capture2 = capture.clone();
+        let handle = thread::spawn(move || -> Result<()> {
+            let mut db = make_test_db(&path_clone, instant)?;
+            let _ = save_capture(&mut db, &capture_clone)?;
+            Ok(())
+        });
 
-    // Retry from thread 2 with identical capture
-    let handle2 = thread::spawn(move || -> Result<()> {
-        let mut db = make_test_db(&path2, instant)?;
-        let _result = save_capture(&mut db, &capture2)?;
-        // Should succeed with idempotent behavior (returns the existing record)
-        Ok(())
-    });
+        handles.push(handle);
+    }
 
-    handle1.join().unwrap()?;
-    handle2.join().unwrap()?;
+    // Join all threads and verify they all succeeded
+    for handle in handles {
+        match handle.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(anyhow::anyhow!("Thread failed: {}", e)),
+            Err(_) => return Err(anyhow::anyhow!("Thread panicked")),
+        }
+    }
 
     // Verify final state
     let mut db = make_test_db(&path, instant)?;

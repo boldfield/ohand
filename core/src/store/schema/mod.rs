@@ -76,6 +76,9 @@ impl Database {
 
         let mut conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        // Set a reasonable busy timeout to allow concurrent transactions to wait
+        // rather than immediately fail. 5 seconds should be sufficient for most operations.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
         // Version check happens before any write to the database file.
         let current_version = Self::query_version(&conn)?;
@@ -161,6 +164,16 @@ impl Database {
     /// Begin a transaction.
     pub fn transaction(&mut self) -> Result<Transaction<'_>> {
         self.conn.transaction().map_err(|e| anyhow!(e))
+    }
+
+    /// Begin an IMMEDIATE transaction for idempotent operations.
+    /// IMMEDIATE transactions upgrade to write lock immediately, preventing
+    /// concurrent read-to-write escalation conflicts. This is needed for
+    /// idempotent operations where check-then-insert must be atomic.
+    pub fn immediate_transaction(&mut self) -> Result<Transaction<'_>> {
+        self.conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| anyhow!(e))
     }
 
     /// Get a reference to the connection (for queries in tests).

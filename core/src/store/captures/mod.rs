@@ -6,6 +6,11 @@ use anyhow::{anyhow, Result};
 use rusqlite::{OptionalExtension, Transaction};
 use std::fmt;
 
+// Columns used in SELECT queries for captures table.
+const CAPTURE_COLUMNS: &str = "capture_id, text, audio_reference, capture_instant, timezone_id, \
+     utc_offset_minutes, locale, calendar, item_scope, route_id, entry_locked, \
+     created_at, session_topic";
+
 /// A capture record holding source text/audio references and context.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Capture {
@@ -92,81 +97,69 @@ fn capture_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Capture> {
 /// record if an identical one was already saved).
 ///
 /// If a different capture with the same ID already exists, returns an error.
-/// Durability is guaranteed only after successful return.
+/// Durability is guaranteed only after successful return. Uses IMMEDIATE transactions
+/// to prevent concurrent read-to-write escalation conflicts.
 pub fn save_capture(db: &mut Database, capture: &Capture) -> Result<Capture> {
-    #[cfg(test)]
-    {
-        let conn = db.conn_mut();
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let tx = db.immediate_transaction()?;
 
-        let existing: Option<Capture> = tx
-            .query_row(
-                "SELECT capture_id, text, audio_reference, capture_instant, timezone_id,
-                        utc_offset_minutes, locale, calendar, item_scope, route_id, entry_locked,
-                        created_at, session_topic
-                 FROM captures WHERE capture_id = ?",
-                [capture.capture_id.as_str()],
-                capture_from_row,
-            )
-            .optional()?;
+    let existing: Option<Capture> = tx
+        .query_row(
+            &format!(
+                "SELECT {} FROM captures WHERE capture_id = ?",
+                CAPTURE_COLUMNS
+            ),
+            [capture.capture_id.as_str()],
+            capture_from_row,
+        )
+        .optional()?;
 
-        if let Some(existing_capture) = existing {
-            if existing_capture == *capture {
-                tx.commit()?;
-                return Ok(existing_capture);
-            }
-            return Err(anyhow!(
-                "Capture with ID {} already exists with different content",
-                capture.capture_id
-            ));
-        }
-
-        tx.execute(
-            "INSERT INTO captures (
-                capture_id, text, audio_reference, capture_instant, timezone_id,
-                utc_offset_minutes, locale, calendar, item_scope, route_id,
-                entry_locked, created_at, session_topic
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            rusqlite::params![
-                &capture.capture_id,
-                &capture.text,
-                &capture.audio_reference,
-                &capture.capture_instant,
-                &capture.timezone_id,
-                capture.utc_offset_minutes,
-                &capture.locale,
-                &capture.calendar,
-                &capture.item_scope,
-                &capture.route_id,
-                if capture.entry_locked { 1 } else { 0 },
-                &capture.created_at,
-                &capture.session_topic,
-            ],
-        )?;
-
-        tx.commit()?;
-        Ok(capture.clone())
-    }
-
-    #[cfg(not(test))]
-    {
-        let tx = db.transaction()?;
-        _save_capture_in_tx(&tx, capture).and_then(|cap| {
+    if let Some(existing_capture) = existing {
+        if existing_capture == *capture {
             tx.commit()?;
-            Ok(cap)
-        })
+            return Ok(existing_capture);
+        }
+        return Err(anyhow!(
+            "Capture with ID {} already exists with different content",
+            capture.capture_id
+        ));
     }
+
+    tx.execute(
+        "INSERT INTO captures (
+            capture_id, text, audio_reference, capture_instant, timezone_id,
+            utc_offset_minutes, locale, calendar, item_scope, route_id,
+            entry_locked, created_at, session_topic
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rusqlite::params![
+            &capture.capture_id,
+            &capture.text,
+            &capture.audio_reference,
+            &capture.capture_instant,
+            &capture.timezone_id,
+            capture.utc_offset_minutes,
+            &capture.locale,
+            &capture.calendar,
+            &capture.item_scope,
+            &capture.route_id,
+            if capture.entry_locked { 1 } else { 0 },
+            &capture.created_at,
+            &capture.session_topic,
+        ],
+    )?;
+
+    tx.commit()?;
+    Ok(capture.clone())
 }
 
 /// Idempotent save of a capture within a caller-owned transaction.
 /// This is a lower-level helper; prefer `save_capture` for durable operations.
-pub fn _save_capture_in_tx(tx: &Transaction<'_>, capture: &Capture) -> Result<Capture> {
+pub fn save_capture_in_tx(tx: &Transaction<'_>, capture: &Capture) -> Result<Capture> {
     let existing: Option<Capture> = tx
         .query_row(
-            "SELECT capture_id, text, audio_reference, capture_instant, timezone_id,
-                    utc_offset_minutes, locale, calendar, item_scope, route_id, entry_locked,
-                    created_at, session_topic
-             FROM captures WHERE capture_id = ?",
+            &format!(
+                "SELECT {} FROM captures WHERE capture_id = ?",
+                CAPTURE_COLUMNS
+            ),
             [capture.capture_id.as_str()],
             capture_from_row,
         )
@@ -211,10 +204,10 @@ pub fn _save_capture_in_tx(tx: &Transaction<'_>, capture: &Capture) -> Result<Ca
 /// Retrieve a capture by ID.
 pub fn get_capture(tx: &Transaction<'_>, capture_id: &str) -> Result<Option<Capture>> {
     tx.query_row(
-        "SELECT capture_id, text, audio_reference, capture_instant, timezone_id,
-                utc_offset_minutes, locale, calendar, item_scope, route_id, entry_locked,
-                created_at, session_topic
-         FROM captures WHERE capture_id = ?",
+        &format!(
+            "SELECT {} FROM captures WHERE capture_id = ?",
+            CAPTURE_COLUMNS
+        ),
         [capture_id],
         capture_from_row,
     )
