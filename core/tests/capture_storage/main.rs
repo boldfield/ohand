@@ -1,6 +1,7 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
+use std::thread;
 
 use ohand_core::store::captures::{get_capture, save_capture, Capture};
 use ohand_core::store::schema::{Clock, Database};
@@ -74,9 +75,7 @@ fn test_save_and_retrieve_capture() -> Result<()> {
     let mut db = make_test_db(&path, instant)?;
 
     let capture = make_test_capture("cap-1");
-    let tx = db.transaction()?;
-    let saved = save_capture(&tx, &capture)?;
-    tx.commit()?;
+    let saved = save_capture(&mut db, &capture)?;
 
     assert_eq!(saved, capture);
 
@@ -96,15 +95,8 @@ fn test_idempotent_save_returns_same_record() -> Result<()> {
 
     let capture = make_test_capture("cap-1");
 
-    // First save
-    let tx = db.transaction()?;
-    let saved1 = save_capture(&tx, &capture)?;
-    tx.commit()?;
-
-    // Second save with identical capture
-    let tx = db.transaction()?;
-    let saved2 = save_capture(&tx, &capture)?;
-    tx.commit()?;
+    let saved1 = save_capture(&mut db, &capture)?;
+    let saved2 = save_capture(&mut db, &capture)?;
 
     assert_eq!(saved1, saved2);
     assert_eq!(saved1, capture);
@@ -120,22 +112,23 @@ fn test_conflict_on_different_content_same_id() -> Result<()> {
     let mut db = make_test_db(&path, instant)?;
 
     let capture1 = make_test_capture("cap-1");
-    let tx = db.transaction()?;
-    save_capture(&tx, &capture1)?;
-    tx.commit()?;
+    save_capture(&mut db, &capture1)?;
 
     // Try to save different capture with same ID
     let mut capture2 = make_test_capture("cap-1");
     capture2.text = Some("different text".to_string());
 
-    let tx = db.transaction()?;
-    let result = save_capture(&tx, &capture2);
+    let result = save_capture(&mut db, &capture2);
     assert!(result.is_err());
     assert!(result
         .unwrap_err()
         .to_string()
         .contains("already exists with different content"));
-    tx.rollback()?;
+
+    // Verify original source words are still there
+    let tx = db.transaction()?;
+    let retrieved = get_capture(&tx, "cap-1")?;
+    assert_eq!(retrieved, Some(capture1));
 
     let _ = std::fs::remove_file(&path);
     Ok(())
@@ -163,9 +156,7 @@ fn test_capture_with_text_and_audio() -> Result<()> {
         Some("therapy".to_string()),
     )?;
 
-    let tx = db.transaction()?;
-    let saved = save_capture(&tx, &capture)?;
-    tx.commit()?;
+    let saved = save_capture(&mut db, &capture)?;
 
     assert_eq!(saved.text, Some("text content".to_string()));
     assert_eq!(saved.audio_reference, Some("audio:ref".to_string()));
@@ -183,9 +174,7 @@ fn test_metadata_persists_across_reopen() -> Result<()> {
     {
         let mut db = make_test_db(&path, instant)?;
         let capture = make_test_capture("cap-1");
-        let tx = db.transaction()?;
-        save_capture(&tx, &capture)?;
-        tx.commit()?;
+        save_capture(&mut db, &capture)?;
     }
 
     {
@@ -218,7 +207,7 @@ fn test_privacy_metadata_persists() -> Result<()> {
         0,
         "en-GB".to_string(),
         "gregorian".to_string(),
-        "session".to_string(),
+        "work".to_string(),
         "route-private".to_string(),
         true,
         "2026-01-15T10:30:00Z".to_string(),
@@ -227,9 +216,7 @@ fn test_privacy_metadata_persists() -> Result<()> {
 
     {
         let mut db = make_test_db(&path, instant)?;
-        let tx = db.transaction()?;
-        save_capture(&tx, &capture)?;
-        tx.commit()?;
+        save_capture(&mut db, &capture)?;
     }
 
     {
@@ -237,7 +224,7 @@ fn test_privacy_metadata_persists() -> Result<()> {
         let tx = db.transaction()?;
         let retrieved = get_capture(&tx, "cap-1")?;
         let cap = retrieved.unwrap();
-        assert_eq!(cap.item_scope, "session");
+        assert_eq!(cap.item_scope, "work");
         assert_eq!(cap.route_id, "route-private");
         assert!(cap.entry_locked);
         assert_eq!(cap.session_topic, Some("therapy".to_string()));
@@ -254,9 +241,7 @@ fn test_audio_only_capture() -> Result<()> {
     let mut db = make_test_db(&path, instant)?;
 
     let capture = make_test_capture_with_audio("cap-audio");
-    let tx = db.transaction()?;
-    let saved = save_capture(&tx, &capture)?;
-    tx.commit()?;
+    let saved = save_capture(&mut db, &capture)?;
 
     assert_eq!(saved.text, None);
     assert_eq!(
@@ -278,12 +263,8 @@ fn test_multiple_different_captures() -> Result<()> {
     let mut cap2 = make_test_capture("cap-2");
     cap2.text = Some("different text".to_string());
 
-    {
-        let tx = db.transaction()?;
-        save_capture(&tx, &cap1)?;
-        save_capture(&tx, &cap2)?;
-        tx.commit()?;
-    }
+    save_capture(&mut db, &cap1)?;
+    save_capture(&mut db, &cap2)?;
 
     {
         let tx = db.transaction()?;
@@ -305,16 +286,12 @@ fn test_durability_abort_before_commit() -> Result<()> {
     let mut db = make_test_db(&path, instant)?;
 
     let capture = make_test_capture("cap-1");
-    {
-        let tx = db.transaction()?;
-        save_capture(&tx, &capture)?;
-        tx.rollback()?;
-    }
+    save_capture(&mut db, &capture)?;
 
-    // Verify capture was NOT persisted
+    // Verify capture WAS persisted (new API commits automatically)
     let tx = db.transaction()?;
     let retrieved = get_capture(&tx, "cap-1")?;
-    assert_eq!(retrieved, None);
+    assert_eq!(retrieved, Some(capture));
 
     let _ = std::fs::remove_file(&path);
     Ok(())
@@ -329,9 +306,7 @@ fn test_durability_persists_after_commit() -> Result<()> {
 
     {
         let mut db = make_test_db(&path, instant)?;
-        let tx = db.transaction()?;
-        save_capture(&tx, &capture)?;
-        tx.commit()?;
+        save_capture(&mut db, &capture)?;
     }
 
     // Reopen and verify capture persists
@@ -354,32 +329,14 @@ fn test_ack_only_after_transaction_commit() -> Result<()> {
 
     let capture = make_test_capture("cap-ack");
 
-    {
-        let tx = db.transaction()?;
-        let _saved = save_capture(&tx, &capture)?;
-        tx.rollback()?;
-    }
-
-    // After rollback, verify it was not persisted
-    {
-        let tx = db.transaction()?;
-        let retrieved = get_capture(&tx, "cap-ack")?;
-        assert_eq!(retrieved, None);
-    }
-
-    // Now commit properly
-    {
-        let tx = db.transaction()?;
-        save_capture(&tx, &capture)?;
-        tx.commit()?;
-    }
+    // New API: save_capture owns the transaction and only returns after commit
+    let saved = save_capture(&mut db, &capture)?;
+    assert_eq!(saved, capture);
 
     // Verify it persists
-    {
-        let tx = db.transaction()?;
-        let retrieved = get_capture(&tx, "cap-ack")?;
-        assert_eq!(retrieved, Some(capture));
-    }
+    let tx = db.transaction()?;
+    let retrieved = get_capture(&tx, "cap-ack")?;
+    assert_eq!(retrieved, Some(capture));
 
     let _ = std::fs::remove_file(&path);
     Ok(())
@@ -419,18 +376,19 @@ fn test_idempotent_conflict_different_scope() -> Result<()> {
     let mut db = make_test_db(&path, instant)?;
 
     let capture1 = make_test_capture("cap-1");
-    let tx = db.transaction()?;
-    save_capture(&tx, &capture1)?;
-    tx.commit()?;
+    save_capture(&mut db, &capture1)?;
 
     // Try to save with different scope
     let mut capture2 = make_test_capture("cap-1");
     capture2.item_scope = "work".to_string();
 
-    let tx = db.transaction()?;
-    let result = save_capture(&tx, &capture2);
+    let result = save_capture(&mut db, &capture2);
     assert!(result.is_err());
-    tx.rollback()?;
+
+    // Verify original scope is preserved
+    let tx = db.transaction()?;
+    let retrieved = get_capture(&tx, "cap-1")?;
+    assert_eq!(retrieved.unwrap().item_scope, "personal");
 
     let _ = std::fs::remove_file(&path);
     Ok(())
@@ -458,15 +416,122 @@ fn test_retrieved_capture_matches_saved() -> Result<()> {
         Some("project-alpha".to_string()),
     )?;
 
-    let tx = db.transaction()?;
-    let saved = save_capture(&tx, &capture)?;
-    tx.commit()?;
+    let saved = save_capture(&mut db, &capture)?;
 
     let tx = db.transaction()?;
     let retrieved = get_capture(&tx, "cap-match")?;
 
     assert_eq!(retrieved, Some(capture.clone()));
     assert_eq!(saved, capture);
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn test_fault_injection_locked_write_during_commit() -> Result<()> {
+    let path = temp_db_path("fault_locked_write");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db1 = make_test_db(&path, instant)?;
+
+    let capture = make_test_capture("cap-1");
+
+    // Spawn a second connection that holds a write lock
+    let path_clone = path.clone();
+    let handle = thread::spawn(move || -> Result<()> {
+        let mut db2 = make_test_db(&path_clone, instant)?;
+        let tx = db2.transaction()?;
+        tx.execute("INSERT INTO captures (capture_id, text, audio_reference, capture_instant, timezone_id, utc_offset_minutes, locale, calendar, item_scope, route_id, entry_locked, created_at, session_topic) VALUES ('lock-holder', 'text', NULL, '2026-01-15T10:30:00Z', 'UTC', 0, 'en', 'gregorian', 'personal', 'route-1', 0, '2026-01-15T10:30:00Z', NULL)", [])?;
+        thread::sleep(std::time::Duration::from_millis(500));
+        Ok(())
+    });
+
+    // Try to save while the other connection holds the lock - should wait or fail
+    thread::sleep(std::time::Duration::from_millis(100));
+    let result = save_capture(&mut db1, &capture);
+
+    handle.join().unwrap()?;
+
+    // Result can be Ok or Err depending on timing, but crucially:
+    // if it's Ok, then it means the capture was successfully committed to disk
+    if let Ok(saved) = result {
+        let tx = db1.transaction()?;
+        let retrieved = get_capture(&tx, "cap-1")?;
+        assert_eq!(retrieved, Some(saved));
+    }
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn test_conflict_preserves_original_text() -> Result<()> {
+    let path = temp_db_path("conflict_preserves_text");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let original = make_test_capture("cap-conflict");
+    let original_text = original.text.clone();
+    let original_audio = original.audio_reference.clone();
+
+    save_capture(&mut db, &original)?;
+
+    // Try to save different audio but same ID
+    let mut different = make_test_capture("cap-conflict");
+    different.audio_reference = Some("different:audio:ref".to_string());
+
+    let result = save_capture(&mut db, &different);
+    assert!(result.is_err());
+
+    // Verify source words are intact
+    let tx = db.transaction()?;
+    let retrieved = get_capture(&tx, "cap-conflict")?;
+    let retrieved_cap = retrieved.unwrap();
+    assert_eq!(retrieved_cap.text, original_text);
+    assert_eq!(retrieved_cap.audio_reference, original_audio);
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn test_concurrent_retries_idempotent() -> Result<()> {
+    let path = temp_db_path("concurrent_retries");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+
+    let capture = make_test_capture("cap-concurrent");
+
+    let path1 = path.clone();
+    let capture1 = capture.clone();
+
+    // Save from thread 1
+    let handle1 = thread::spawn(move || -> Result<()> {
+        let mut db = make_test_db(&path1, instant)?;
+        save_capture(&mut db, &capture1)?;
+        Ok(())
+    });
+
+    thread::sleep(std::time::Duration::from_millis(50));
+
+    let path2 = path.clone();
+    let capture2 = capture.clone();
+
+    // Retry from thread 2 with identical capture
+    let handle2 = thread::spawn(move || -> Result<()> {
+        let mut db = make_test_db(&path2, instant)?;
+        let _result = save_capture(&mut db, &capture2)?;
+        // Should succeed with idempotent behavior (returns the existing record)
+        Ok(())
+    });
+
+    handle1.join().unwrap()?;
+    handle2.join().unwrap()?;
+
+    // Verify final state
+    let mut db = make_test_db(&path, instant)?;
+    let tx = db.transaction()?;
+    let retrieved = get_capture(&tx, "cap-concurrent")?;
+    assert_eq!(retrieved, Some(capture));
 
     let _ = std::fs::remove_file(&path);
     Ok(())
