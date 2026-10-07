@@ -7,10 +7,10 @@ The Oh And iOS project uses XcodeGen to generate a reproducible Xcode project fr
 ## Requirements
 
 - **macOS**: 14.5+
-- **Xcode**: 15.4+
-- **iOS Deployment Target**: 16.0+
-- **Swift**: 5.9+
-- **XcodeGen**: 2.40.0 (or compatible version specified in build tools)
+- **Xcode**: 15.4 (pinned; use `xcode-select` to verify)
+- **iOS Deployment Target**: 16.0
+- **Swift**: 5.9
+- **XcodeGen**: 2.40.0 (pinned; verify with `xcodegen --version`)
 
 ## Building the Project
 
@@ -21,41 +21,51 @@ cd ios
 xcodegen generate
 ```
 
-This reads `project.yml` and generates `OhAnd.xcodeproj`.
+This reads `project.yml` and generates `OhAnd.xcodeproj` with all target, scheme, and build setting definitions. The generated project must be regenerated after editing `project.yml`.
 
-### 2. Build for Simulator
+### 2. Build for Simulator (Unsigned)
+
+Unsigned simulator builds require no signing credentials. The project.yml default settings (`CODE_SIGNING_REQUIRED=NO`, `AD_HOC_CODE_SIGNING_ALLOWED=YES`) allow ad-hoc signing:
 
 ```bash
 xcodebuild -project OhAnd.xcodeproj \
   -scheme OhAndApp \
   -configuration Debug \
-  -sdk iphonesimulator \
-  -derivedDataPath .derived
+  -sdk iphonesimulator
 ```
 
 ### 3. Build Options
 
-- **Scheme**: `OhAndApp`, `BridgeProbe`, `NotificationProbe`, `AudioProbe`, `TranscriptionProbe`, `CredentialProbe`, `CaptureProbe`
+- **Scheme**: `OhAndApp` (main app), `OhAndControl` (control target), `OhAndTests` (unit tests), `BridgeProbe`, `NotificationProbe`, `AudioProbe`, `TranscriptionProbe`, `CredentialProbe`, `CaptureProbe` (probes)
 - **SDK**: `iphonesimulator` (simulator) or `iphoneos` (device)
 - **Configuration**: `Debug` or `Release`
+- **Derived Data**: Use `-derivedDataPath` to set build artifact location; default is `~/Library/Developer/Xcode/DerivedData/`
 
 ## Signing Configuration
 
-Unsigned simulator builds require no signing configuration and are the default.
+### Unsigned Simulator Builds
 
-For device builds, signing credentials must be provided at build time via command line or Xcode build settings:
+No signing credentials are required for simulator builds. The project settings `CODE_SIGNING_REQUIRED=NO` and `AD_HOC_CODE_SIGNING_ALLOWED=YES` allow unsigned builds:
+
+```bash
+xcodebuild -project OhAnd.xcodeproj -scheme OhAndApp -sdk iphonesimulator
+```
+
+### Device Builds
+
+Device builds require signing credentials supplied at build time. Provide `DEVELOPMENT_TEAM`:
 
 ```bash
 xcodebuild -project OhAnd.xcodeproj \
   -scheme OhAndApp \
   -configuration Release \
   -sdk iphoneos \
-  CODE_SIGN_IDENTITY="iPhone Developer" \
-  DEVELOPMENT_TEAM="ABCD1234567" \
-  PROVISIONING_PROFILE_SPECIFIER="OhAnd Distribution Profile"
+  DEVELOPMENT_TEAM="ABCD1234567"
 ```
 
-**Important**: No certificates, provisioning profiles, or team IDs are committed to the repository. All signing material must be supplied at build time.
+The project-level `CODE_SIGN_IDENTITY: iPhone Developer` is a placeholder default that must be overridden by build settings or Xcode provisioning.
+
+**Important**: No certificates, provisioning profiles, team IDs, or signing credentials are committed to the repository. Signed builds require externally supplied credentials and a valid provisioning profile for the target device.
 
 ## Project Structure
 
@@ -86,24 +96,39 @@ After the first `xcodegen generate`, subsequent project changes can be applied b
 2. Running `xcodegen generate` again
 3. No manual Xcode configuration is required
 
-## Proof of Reproducibility
+## Reproducibility and CI Validation
 
-Simulator build validation and CI integration are established by F05. This documentation defines the build interface and directory structure; F05 will demonstrate that clean checkouts generate identical XcodeGen output and link real CI evidence.
+F03 establishes the build system, project structure, and proof-of-generation artifacts. F05 adds native CI integration and provides evidence that clean checkouts generate identical project structures and pass simulator build checks on macOS runners.
+
+This documentation defines the reproducible build interface, command structure, and directory ownership; reproducibility is verified by F05's CI integration.
 
 ## SDK and Deployment Baseline
 
-- **SDK**: iOS 16.0 (configurable in project.yml and `IPHONEOS_DEPLOYMENT_TARGET`)
+- **iOS SDK**: 16.0 (set in `project.yml` `options.deploymentTarget`)
+- **iOS Deployment Target**: 16.0 (set in `project.yml` and `IPHONEOS_DEPLOYMENT_TARGET`)
 - **Swift Version**: 5.9
-- **Xcode Version**: 15.4
+- **Xcode Version**: 15.4 (pinned)
 
-These can be updated by editing `project.yml` and regenerating the project.
+These baselines are configurable by editing `project.yml`, but changes require regeneration and CI verification. Do not change them without updating F05 CI baselines.
 
-## Expected Target Probes
+## Probe and Target Modules
 
-The following probe targets are reserved by F03 and supported by the structure above:
-- `BridgeProbe`: Round-trip boundary validation
-- `NotificationProbe`: Native scheduling/list/cancel primitives
-- `AudioProbe`: Recording interruption and partial-audio recovery
-- `TranscriptionProbe`: On-device transcription availability
-- `CredentialProbe`: Keychain accessibility and lock behavior
-- `CaptureProbe`: System-control handoff and entry validation
+F03 reserves the following targets. Each probe is a minimal application with a foreground native surface for testing the specified capability:
+
+### Main Application Targets
+
+- `OhAndApp`: Production application with capture and management UI
+- `OhAndControl`: Control target for testing capture control flow (distinct from OhAndApp)
+- `OhAndTests`: Unit test bundle for integration tests
+- `OhAndServices`: Services framework used by both OhAndApp and OhAndControl
+
+### Probe Targets
+
+- `BridgeProbe`: Rust-Swift boundary validation (P01)
+- `NotificationProbe`: Native scheduling/list/cancel primitives (P05)
+- `AudioProbe`: Recording interruption and partial-audio recovery (P03)
+- `TranscriptionProbe`: On-device transcription availability (P04)
+- `CredentialProbe`: Keychain accessibility and lock behavior (P11)
+- `CaptureProbe`: System-control handoff and entry validation (P02)
+
+Each probe target includes its own foreground UI screen for manual testing and demonstration.

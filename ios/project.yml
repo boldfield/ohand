@@ -14,27 +14,6 @@ settings:
   AD_HOC_CODE_SIGNING_ALLOWED: "YES"
 
 targets:
-  OhAndApp:
-    type: application
-    platform: iOS
-    sources:
-      - path: AppAssembly
-        createIntermediateGroups: true
-      - path: OhAndCoreBridge
-        createIntermediateGroups: true
-      - path: Services
-        createIntermediateGroups: true
-        optional: true
-      - path: Capture
-        createIntermediateGroups: true
-        optional: true
-    settings:
-      PRODUCT_NAME: OhAnd
-      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.app
-      INFOPLIST_FILE: AppAssembly/Info.plist
-    dependencies:
-      - target: OhAndServices
-
   OhAndServices:
     type: framework
     platform: iOS
@@ -46,19 +25,42 @@ targets:
       PRODUCT_NAME: OhAndServices
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.services
 
+  OhAndApp:
+    type: application
+    platform: iOS
+    sources:
+      - path: AppAssembly
+        createIntermediateGroups: true
+      - path: OhAndCoreBridge
+        createIntermediateGroups: true
+      - path: Capture
+        createIntermediateGroups: true
+        optional: true
+    settings:
+      PRODUCT_NAME: OhAnd
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.app
+      INFOPLIST_FILE: AppAssembly/Info.plist
+    dependencies:
+      - target: OhAndServices
+
   OhAndControl:
     type: application
     platform: iOS
     sources:
       - path: AppAssembly
         createIntermediateGroups: true
+      - path: OhAndCoreBridge
+        createIntermediateGroups: true
     settings:
       PRODUCT_NAME: OhAndControl
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.control
       INFOPLIST_FILE: AppAssembly/Info.plist
+      GCC_PREPROCESSOR_DEFINITIONS: OHAND_BUILD_TARGET_CONTROL=1
+    dependencies:
+      - target: OhAndServices
 
   OhAndTests:
-    type: bundle
+    type: bundle.unit-test
     platform: iOS
     sources:
       - path: Tests
@@ -67,7 +69,8 @@ targets:
     settings:
       PRODUCT_NAME: OhAndTests
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.tests
-      TEST_TARGET_NAME: OhAndApp
+      TEST_HOST: $(BUILT_PRODUCTS_DIR)/OhAnd.app/OhAnd
+      BUNDLE_LOADER: $(TEST_HOST)
     dependencies:
       - target: OhAndApp
 
@@ -75,12 +78,14 @@ targets:
     type: application
     platform: iOS
     sources:
-      - path: BridgeProbe/Sources
+      - path: BridgeProbe
         createIntermediateGroups: true
+        excludes:
+          - Info.plist
     settings:
       PRODUCT_NAME: BridgeProbe
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.bridge
-      INFOPLIST_FILE: BridgeProbe/Sources/Info.plist
+      INFOPLIST_FILE: BridgeProbe/Info.plist
     dependencies:
       - target: OhAndServices
 
@@ -88,56 +93,66 @@ targets:
     type: application
     platform: iOS
     sources:
-      - path: NotificationProbe/Sources
+      - path: NotificationProbe
         createIntermediateGroups: true
+        excludes:
+          - Info.plist
     settings:
       PRODUCT_NAME: NotificationProbe
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.notification
-      INFOPLIST_FILE: NotificationProbe/Sources/Info.plist
+      INFOPLIST_FILE: NotificationProbe/Info.plist
 
   AudioProbe:
     type: application
     platform: iOS
     sources:
-      - path: AudioProbe/Sources
+      - path: AudioProbe
         createIntermediateGroups: true
+        excludes:
+          - Info.plist
     settings:
       PRODUCT_NAME: AudioProbe
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.audio
-      INFOPLIST_FILE: AudioProbe/Sources/Info.plist
+      INFOPLIST_FILE: AudioProbe/Info.plist
 
   TranscriptionProbe:
     type: application
     platform: iOS
     sources:
-      - path: TranscriptionProbe/Sources
+      - path: TranscriptionProbe
         createIntermediateGroups: true
+        excludes:
+          - Info.plist
     settings:
       PRODUCT_NAME: TranscriptionProbe
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.transcription
-      INFOPLIST_FILE: TranscriptionProbe/Sources/Info.plist
+      INFOPLIST_FILE: TranscriptionProbe/Info.plist
 
   CredentialProbe:
     type: application
     platform: iOS
     sources:
-      - path: CredentialProbe/Sources
+      - path: CredentialProbe
         createIntermediateGroups: true
+        excludes:
+          - Info.plist
     settings:
       PRODUCT_NAME: CredentialProbe
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.credential
-      INFOPLIST_FILE: CredentialProbe/Sources/Info.plist
+      INFOPLIST_FILE: CredentialProbe/Info.plist
 
   CaptureProbe:
     type: application
     platform: iOS
     sources:
-      - path: CaptureProbe/Sources
+      - path: CaptureProbe
         createIntermediateGroups: true
+        excludes:
+          - Info.plist
     settings:
       PRODUCT_NAME: CaptureProbe
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.capture
-      INFOPLIST_FILE: CaptureProbe/Sources/Info.plist
+      INFOPLIST_FILE: CaptureProbe/Info.plist
 
 schemes:
   OhAndApp:
@@ -152,6 +167,9 @@ schemes:
     build:
       targets:
         OhAndTests: all
+    test:
+      targets:
+        - OhAndTests
   BridgeProbe:
     build:
       targets:

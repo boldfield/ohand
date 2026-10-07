@@ -35,8 +35,51 @@ class NotificationProbeSceneDelegate: UIResponder, UIWindowSceneDelegate {
     ) {
         guard let windowScene = (scene as? UIWindowScene) else { return }
         let window = UIWindow(windowScene: windowScene)
-        window.rootViewController = UIViewController()
+        let rootViewController = NotificationProbeViewController()
+        window.rootViewController = rootViewController
         self.window = window
         window.makeKeyAndVisible()
+    }
+}
+
+class NotificationProbeViewController: UIViewController {
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .systemBackground
+
+        let container = UIStackView()
+        container.axis = .vertical
+        container.spacing = 16
+        container.alignment = .center
+        container.distribution = .fillProportionally
+        container.translatesAutoresizingMaskIntoConstraints = false
+
+        let titleLabel = UILabel()
+        titleLabel.text = "Notification Probe"
+        titleLabel.font = UIFont.systemFont(ofSize: 24, weight: .bold)
+        titleLabel.textAlignment = .center
+        container.addArrangedSubview(titleLabel)
+
+        let descriptionLabel = UILabel()
+        descriptionLabel.text = "Native notification scheduling and limits\nPermission states, delivery, and platform behavior"
+        descriptionLabel.font = UIFont.systemFont(ofSize: 14, weight: .regular)
+        descriptionLabel.numberOfLines = 0
+        descriptionLabel.textAlignment = .center
+        descriptionLabel.textColor = .secondaryLabel
+        container.addArrangedSubview(descriptionLabel)
+
+        let statusLabel = UILabel()
+        statusLabel.text = "Probe screen initialized"
+        statusLabel.font = UIFont.systemFont(ofSize: 12, weight: .light)
+        statusLabel.textColor = .tertiaryLabel
+        container.addArrangedSubview(statusLabel)
+
+        view.addSubview(container)
+        NSLayoutConstraint.activate([
+            container.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            container.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            container.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 20),
+            container.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -20)
+        ])
     }
 }
