@@ -34,7 +34,7 @@
                     <key>UISceneConfigurationName</key>
                     <string>Default Configuration</string>
                     <key>UISceneDelegateClassName</key>
-                    <string></string>
+                    <string>AudioProbeSceneDelegate</string>
                 </dict>
             </array>
         </dict>

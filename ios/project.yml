@@ -14,6 +14,16 @@ settings:
   AD_HOC_CODE_SIGNING_ALLOWED: "YES"
 
 targets:
+  OhAndCoreBridge:
+    type: framework
+    platform: iOS
+    sources:
+      - path: OhAndCoreBridge
+        createIntermediateGroups: true
+    settings:
+      PRODUCT_NAME: OhAndCoreBridge
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.corebridge
+
   OhAndServices:
     type: framework
     platform: iOS
@@ -21,9 +31,13 @@ targets:
       - path: Services
         createIntermediateGroups: true
         optional: true
+        excludes:
+          - "**/.placeholder"
     settings:
       PRODUCT_NAME: OhAndServices
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.services
+    dependencies:
+      - target: OhAndCoreBridge
 
   OhAndApp:
     type: application
@@ -31,11 +45,13 @@ targets:
     sources:
       - path: AppAssembly
         createIntermediateGroups: true
-      - path: OhAndCoreBridge
-        createIntermediateGroups: true
+        excludes:
+          - "**/.placeholder"
       - path: Capture
         createIntermediateGroups: true
         optional: true
+        excludes:
+          - "**/.placeholder"
     settings:
       PRODUCT_NAME: OhAnd
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.app
@@ -49,13 +65,18 @@ targets:
     sources:
       - path: AppAssembly
         createIntermediateGroups: true
-      - path: OhAndCoreBridge
+        excludes:
+          - "**/.placeholder"
+      - path: Capture
         createIntermediateGroups: true
+        optional: true
+        excludes:
+          - "**/.placeholder"
     settings:
       PRODUCT_NAME: OhAndControl
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.control
       INFOPLIST_FILE: AppAssembly/Info.plist
-      GCC_PREPROCESSOR_DEFINITIONS: OHAND_BUILD_TARGET_CONTROL=1
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: OHAND_BUILD_TARGET_CONTROL=1
     dependencies:
       - target: OhAndServices
 
@@ -66,6 +87,8 @@ targets:
       - path: Tests
         createIntermediateGroups: true
         optional: true
+        excludes:
+          - "**/.placeholder"
     settings:
       PRODUCT_NAME: OhAndTests
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.tests
@@ -87,7 +110,7 @@ targets:
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.bridge
       INFOPLIST_FILE: BridgeProbe/Info.plist
     dependencies:
-      - target: OhAndServices
+      - target: OhAndCoreBridge
 
   NotificationProbe:
     type: application

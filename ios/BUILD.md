@@ -23,9 +23,9 @@ xcodegen generate
 
 This reads `project.yml` and generates `OhAnd.xcodeproj` with all target, scheme, and build setting definitions. The generated project must be regenerated after editing `project.yml`.
 
-### 2. Build for Simulator (Unsigned)
+### 2. Build for Simulator
 
-Unsigned simulator builds require no signing credentials. The project.yml default settings (`CODE_SIGNING_REQUIRED=NO`, `AD_HOC_CODE_SIGNING_ALLOWED=YES`) allow ad-hoc signing:
+Simulator builds use ad-hoc signing by default. The project.yml settings (`CODE_SIGNING_REQUIRED=NO`, `AD_HOC_CODE_SIGNING_ALLOWED=YES`, `CODE_SIGN_IDENTITY: iPhone Developer`) enable ad-hoc code signing that does not require signing credentials or profiles:
 
 ```bash
 xcodebuild -project OhAnd.xcodeproj \
@@ -43,9 +43,12 @@ xcodebuild -project OhAnd.xcodeproj \
 
 ## Signing Configuration
 
-### Unsigned Simulator Builds
+### Simulator Builds (Ad-Hoc Signing)
 
-No signing credentials are required for simulator builds. The project settings `CODE_SIGNING_REQUIRED=NO` and `AD_HOC_CODE_SIGNING_ALLOWED=YES` allow unsigned builds:
+Simulator builds use ad-hoc code signing by default; no external credentials or provisioning profiles are required. The project settings are:
+- `CODE_SIGNING_REQUIRED=NO`: Signing is not required
+- `AD_HOC_CODE_SIGNING_ALLOWED=YES`: Ad-hoc signing is permitted
+- `CODE_SIGN_IDENTITY: iPhone Developer`: Default signing identity
 
 ```bash
 xcodebuild -project OhAnd.xcodeproj -scheme OhAndApp -sdk iphonesimulator
@@ -104,10 +107,12 @@ This documentation defines the reproducible build interface, command structure, 
 
 ## SDK and Deployment Baseline
 
-- **iOS SDK**: 16.0 (set in `project.yml` `options.deploymentTarget`)
-- **iOS Deployment Target**: 16.0 (set in `project.yml` and `IPHONEOS_DEPLOYMENT_TARGET`)
+- **Xcode Version**: 15.4 (pinned; use `xcode-select` to verify)
+- **iOS SDK**: 17.5 (bundled with Xcode 15.4; selected via `-sdk iphonesimulator` or `-sdk iphoneos`)
+- **iOS Deployment Target**: 16.0 (minimum OS version; set in `project.yml` `options.deploymentTarget` and `IPHONEOS_DEPLOYMENT_TARGET`)
 - **Swift Version**: 5.9
-- **Xcode Version**: 15.4 (pinned)
+
+The iOS SDK version (17.5) is determined by the installed Xcode version, not by a setting in `project.yml`. The deployment target (16.0) is the minimum OS version the application supports. These are independent values: deployment target is configured in `project.yml`, while the SDK is selected by Xcode based on the `-sdk` flag and Xcode version.
 
 These baselines are configurable by editing `project.yml`, but changes require regeneration and CI verification. Do not change them without updating F05 CI baselines.
 

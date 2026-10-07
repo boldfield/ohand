@@ -75,7 +75,10 @@ ios/
 
 ## Signing
 
-**Unsigned simulator builds** require no configuration and are the default. The project.yml sets `CODE_SIGNING_REQUIRED=NO` and `AD_HOC_CODE_SIGNING_ALLOWED=YES`:
+**Simulator builds** use ad-hoc code signing and require no configuration. The project.yml sets:
+- `CODE_SIGNING_REQUIRED=NO`: Signing not required
+- `AD_HOC_CODE_SIGNING_ALLOWED=YES`: Ad-hoc signing permitted
+- `CODE_SIGN_IDENTITY: iPhone Developer`: Default signing identity
 
 ```bash
 xcodebuild -project OhAnd.xcodeproj \
@@ -83,6 +86,8 @@ xcodebuild -project OhAnd.xcodeproj \
   -sdk iphonesimulator \
   -configuration Debug
 ```
+
+No external signing credentials, provisioning profiles, or team IDs are required for simulator builds.
 
 **Device builds** require signing credentials supplied at build time. Override `DEVELOPMENT_TEAM` at the command line:
 
@@ -144,12 +149,12 @@ Ownership is enforced by directory-based source inclusion in `project.yml`. Conc
 
 ## Deployment Target and SDK
 
-- **iOS Deployment Target**: 16.0
-- **iOS SDK**: 16.0
-- **Swift**: 5.9
 - **Xcode**: 15.4
+- **iOS SDK**: 17.5 (bundled with Xcode 15.4; not set in `project.yml`)
+- **iOS Deployment Target**: 16.0 (minimum OS version; set in `project.yml` `options.deploymentTarget`)
+- **Swift**: 5.9
 
-Editable in `project.yml` `options.deploymentTarget` and `options.xcodeVersion`.
+The iOS SDK (17.5) is the system framework version bundled with Xcode 15.4. The deployment target (16.0) is the minimum iOS version the app supports, configurable in `project.yml` via `options.deploymentTarget`.
 
 ## Generated Project
 
