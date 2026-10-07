@@ -1,9 +1,9 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction};
 use std::sync::Arc;
 
-use ohand_core::store::schema::{Clock, Database};
+use ohand_core::store::schema::{Clock, Database, MigrationFn, MigrationStep, MIGRATIONS};
 
 struct TestClock {
     instant: DateTime<Utc>,
@@ -185,84 +185,219 @@ fn test_migration_from_version_zero() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn test_migration_failure_atomicity() -> Result<()> {
-    let tmpdir = std::env::temp_dir();
-    let path = format!(
-        "{}/test_failure_atomicity_{}.db",
-        tmpdir.display(),
+fn temp_db_path(label: &str) -> String {
+    format!(
+        "{}/test_{}_{}.db",
+        std::env::temp_dir().display(),
+        label,
         uuid::Uuid::new_v4()
-    );
-    let _ = std::fs::remove_file(&path);
+    )
+}
 
+fn insert_source_capture(conn: &Connection, capture_id: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO captures (capture_id, text, capture_instant, timezone_id, utc_offset_minutes, locale, calendar, item_scope, route_id, entry_locked, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rusqlite::params![capture_id, "test text", "2026-01-15T10:30:00Z", "UTC", 0, "en", "gregorian", "personal", "route-1", 0, "2026-01-15T10:30:00Z"],
+    )?;
+    Ok(())
+}
+
+fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)",
+        [name],
+        |row| row.get(0),
+    )?)
+}
+
+fn capture_count(conn: &Connection, capture_id: &str) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM captures WHERE capture_id = ?",
+        [capture_id],
+        |row| row.get(0),
+    )?)
+}
+
+fn create_synthetic_v2_table(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute("CREATE TABLE synthetic_v2 (id TEXT PRIMARY KEY)", [])?;
+    Ok(())
+}
+
+fn fail_after_ddl(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute("CREATE TABLE synthetic_partial (id TEXT PRIMARY KEY)", [])?;
+    tx.execute(
+        "ALTER TABLE captures ADD COLUMN synthetic_partial_col TEXT",
+        [],
+    )?;
+    tx.execute("INSERT INTO synthetic_missing_table VALUES (1)", [])?;
+    Ok(())
+}
+
+fn steps_with(extra: MigrationFn) -> Vec<MigrationStep> {
+    let mut steps = MIGRATIONS.to_vec();
+    steps.push(MigrationStep {
+        target_version: steps.len() as u32 + 1,
+        apply: extra,
+    });
+    steps
+}
+
+fn open_with(path: &str, instant: DateTime<Utc>, steps: &[MigrationStep]) -> Result<Database> {
+    let clock: Arc<dyn Clock> = Arc::new(TestClock { instant });
+    Database::open_with_migrations(path, clock, steps)
+}
+
+#[test]
+fn test_synthetic_step_success_records_own_version() -> Result<()> {
+    let path = temp_db_path("step_success");
     let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let later = DateTime::parse_from_rfc3339("2026-02-01T08:00:00+00:00")?.with_timezone(&Utc);
 
-    // Create initial v1 database with a test source record.
     {
         let db = make_test_db(&path, instant)?;
-        db.conn().execute(
-            "INSERT INTO captures (capture_id, text, capture_instant, timezone_id, utc_offset_minutes, locale, calendar, item_scope, route_id, entry_locked, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            rusqlite::params!["test-capture-1", "test text", "2026-01-15T10:30:00Z", "UTC", 0, "en", "gregorian", "personal", "route-1", 0, "2026-01-15T10:30:00Z"],
-        )?;
+        insert_source_capture(db.conn(), "capture-keep")?;
     }
 
-    // Verify the capture record survives reopening.
+    let steps = steps_with(create_synthetic_v2_table);
     {
-        let db = make_test_db(&path, instant)?;
-        let count: i64 = db.conn().query_row(
-            "SELECT COUNT(*) FROM captures WHERE capture_id = 'test-capture-1'",
+        let db = open_with(&path, later, &steps)?;
+        assert_eq!(db.schema_version()?, 2);
+        assert!(table_exists(db.conn(), "synthetic_v2")?);
+        assert_eq!(capture_count(db.conn(), "capture-keep")?, 1);
+        let (created, version_one): (String, String) = db.conn().query_row(
+            "SELECT (SELECT created_at FROM _schema_metadata WHERE version = 2),
+                    (SELECT created_at FROM _schema_metadata WHERE version = 1)",
             [],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-        assert_eq!(count, 1, "Source capture should survive migration");
-    }
-
-    // Simulate interrupted migration by setting version to 0 and removing a table.
-    {
-        let conn = Connection::open(&path)?;
-        conn.execute("DELETE FROM _schema_metadata", [])?;
-        conn.execute(
-            "INSERT INTO _schema_metadata (version, created_at, upgraded_at) VALUES (?, ?, ?)",
-            rusqlite::params![0, "2026-01-15T10:00:00Z", "2026-01-15T10:00:00Z"],
-        )?;
-    }
-
-    // Reopen should recover and recreate version 1 record atomically with tables.
-    {
-        let db = make_test_db(&path, instant)?;
-        let version = db.schema_version()?;
-        assert_eq!(version, 1, "Schema version should be restored");
-
-        // Source record should still be intact even after migration.
-        let count: i64 = db.conn().query_row(
-            "SELECT COUNT(*) FROM captures WHERE capture_id = 'test-capture-1'",
-            [],
-            |row| row.get(0),
-        )?;
-        assert_eq!(
-            count, 1,
-            "Source capture should survive interrupted migration"
+        assert!(created.starts_with("2026-02-01"), "Got: {}", created);
+        assert!(
+            version_one.starts_with("2026-01-15"),
+            "Got: {}",
+            version_one
         );
     }
+
+    // The default (v1-only) list now refuses the v2 database.
+    let refused = make_test_db(&path, instant);
+    assert!(refused
+        .unwrap_err()
+        .to_string()
+        .contains("newer than supported"));
 
     let _ = std::fs::remove_file(&path);
     Ok(())
 }
 
 #[test]
-fn test_migration_with_conflicting_schema_rolls_back() -> Result<()> {
-    let tmpdir = std::env::temp_dir();
-    let path = format!(
-        "{}/test_rollback_{}.db",
-        tmpdir.display(),
-        uuid::Uuid::new_v4()
-    );
-    let _ = std::fs::remove_file(&path);
-
+fn test_fresh_database_walks_full_step_list() -> Result<()> {
+    let path = temp_db_path("fresh_walk");
     let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
 
-    // Create a v0 database with metadata and an old-schema captures table.
+    let steps = steps_with(create_synthetic_v2_table);
+    let db = open_with(&path, instant, &steps)?;
+    assert_eq!(db.schema_version()?, 2);
+    assert!(table_exists(db.conn(), "captures")?);
+    assert!(table_exists(db.conn(), "synthetic_v2")?);
+    let versions: i64 =
+        db.conn()
+            .query_row("SELECT COUNT(*) FROM _schema_metadata", [], |row| {
+                row.get(0)
+            })?;
+    assert_eq!(versions, 2);
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn test_failed_step_rolls_back_and_preserves_source_records() -> Result<()> {
+    let path = temp_db_path("step_failure");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+
+    {
+        let db = make_test_db(&path, instant)?;
+        insert_source_capture(db.conn(), "capture-keep")?;
+    }
+
+    let steps = steps_with(fail_after_ddl);
+    let result = open_with(&path, instant, &steps);
+    let error = result.unwrap_err().to_string();
+    assert!(
+        error.contains("Migration to version 2 failed"),
+        "Got: {}",
+        error
+    );
+
+    {
+        let conn = Connection::open(&path)?;
+        let version: u32 =
+            conn.query_row("SELECT MAX(version) FROM _schema_metadata", [], |row| {
+                row.get(0)
+            })?;
+        assert_eq!(version, 1, "Version must stay at the last good version");
+        assert!(!table_exists(&conn, "synthetic_partial")?);
+        let column_added: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('captures') WHERE name='synthetic_partial_col')",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(!column_added, "Partial ALTER must be rolled back");
+        assert_eq!(capture_count(&conn, "capture-keep")?, 1);
+    }
+
+    // The original database still opens normally.
+    let db = make_test_db(&path, instant)?;
+    assert_eq!(db.schema_version()?, 1);
+    assert_eq!(capture_count(db.conn(), "capture-keep")?, 1);
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn test_failed_initial_migration_leaves_no_partial_schema() -> Result<()> {
+    let path = temp_db_path("initial_failure");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+
+    fn fail_initial(tx: &Transaction<'_>) -> Result<()> {
+        tx.execute("CREATE TABLE partial_one (id TEXT)", [])?;
+        tx.execute("CREATE TABLE partial_one (id TEXT)", [])?;
+        Ok(())
+    }
+    let steps = [MigrationStep {
+        target_version: 1,
+        apply: fail_initial,
+    }];
+    assert!(open_with(&path, instant, &steps).is_err());
+
+    let conn = Connection::open(&path)?;
+    assert!(!table_exists(&conn, "partial_one")?);
+    assert!(!table_exists(&conn, "_schema_metadata")?);
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn test_unordered_step_list_rejected() -> Result<()> {
+    let path = temp_db_path("unordered");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let steps = [MigrationStep {
+        target_version: 2,
+        apply: create_synthetic_v2_table,
+    }];
+    assert!(open_with(&path, instant, &steps).is_err());
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn test_version_row_without_schema_rejected() -> Result<()> {
+    let path = temp_db_path("stamp_only");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+
     {
         let conn = Connection::open(&path)?;
         conn.execute(
@@ -274,71 +409,85 @@ fn test_migration_with_conflicting_schema_rolls_back() -> Result<()> {
             [],
         )?;
         conn.execute(
-            "INSERT INTO _schema_metadata (version, created_at, upgraded_at) VALUES (?, ?, ?)",
-            rusqlite::params![0, "2026-01-15T10:00:00Z", "2026-01-15T10:00:00Z"],
+            "INSERT INTO _schema_metadata (version, created_at, upgraded_at) VALUES (1, 'x', 'x')",
+            [],
         )?;
-        // Create an old-shape captures table (missing required fields like route_id).
+    }
+
+    let error = make_test_db(&path, instant).unwrap_err().to_string();
+    assert!(error.contains("missing"), "Got: {}", error);
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn test_malformed_table_at_claimed_version_rejected() -> Result<()> {
+    let path = temp_db_path("malformed");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+
+    {
+        let db = make_test_db(&path, instant)?;
+        db.conn()
+            .execute("ALTER TABLE deletion_work DROP COLUMN work_type", [])?;
+    }
+
+    let error = make_test_db(&path, instant).unwrap_err().to_string();
+    assert!(error.contains("unexpected shape"), "Got: {}", error);
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn test_version_zero_with_conflicting_late_table_rolls_back() -> Result<()> {
+    let path = temp_db_path("late_conflict");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+
+    // Version 0 database holding a malformed table that conflicts only at the end of step 1.
+    {
+        let conn = Connection::open(&path)?;
         conn.execute(
-            "CREATE TABLE captures (
-                capture_id TEXT PRIMARY KEY,
-                text TEXT
+            "CREATE TABLE _schema_metadata (
+                version INTEGER PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                upgraded_at TEXT NOT NULL
             )",
             [],
         )?;
         conn.execute(
-            "INSERT INTO captures (capture_id, text) VALUES (?, ?)",
-            rusqlite::params!["test-capture-old", "old text"],
+            "INSERT INTO _schema_metadata (version, created_at, upgraded_at) VALUES (0, 'x', 'x')",
+            [],
         )?;
+        conn.execute(
+            "CREATE TABLE deletion_work (deletion_work_id TEXT PRIMARY KEY, note TEXT)",
+            [],
+        )?;
+        conn.execute("INSERT INTO deletion_work VALUES ('old', 'keep me')", [])?;
     }
 
-    // Try to migrate: should fail because of the conflicting schema.
-    let result = make_test_db(&path, instant);
-    assert!(
-        result.is_err(),
-        "Migration with conflicting schema should fail"
-    );
+    assert!(make_test_db(&path, instant).is_err());
 
-    // Verify the database still contains the old captures record and no v1 tables were created.
-    {
-        let conn = Connection::open(&path)?;
-        // Check that captures table still has only 2 columns (old schema).
-        let mut stmt = conn.prepare("PRAGMA table_info(captures)")?;
-        let columns: Vec<String> = stmt
-            .query_map([], |row| row.get(1))?
-            .collect::<Result<Vec<_>, _>>()?;
-        assert_eq!(
-            columns.len(),
-            2,
-            "Captures table should still have old schema (2 columns)"
-        );
-
-        // Check that old record survives.
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM captures WHERE capture_id = 'test-capture-old'",
-            [],
-            |row| row.get(0),
-        )?;
-        assert_eq!(
-            count, 1,
-            "Old capture record should survive failed migration"
-        );
-
-        // Check that v1-only tables don't exist (no items table).
-        let items_exists: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='items')",
-            [],
-            |row| row.get(0),
-        )?;
+    let conn = Connection::open(&path)?;
+    for table in [
+        "captures",
+        "items",
+        "jobs",
+        "proposals",
+        "provider_profiles",
+    ] {
         assert!(
-            !items_exists,
-            "Items table should not exist after failed migration"
+            !table_exists(&conn, table)?,
+            "{} must be rolled back after late failure",
+            table
         );
-
-        // Check that version is still 0 (not updated on failure).
-        let version: u32 =
-            conn.query_row("SELECT version FROM _schema_metadata", [], |row| row.get(0))?;
-        assert_eq!(version, 0, "Version should remain 0 after failed migration");
     }
+    let kept: i64 = conn.query_row("SELECT COUNT(*) FROM deletion_work", [], |row| row.get(0))?;
+    assert_eq!(kept, 1);
+    let version: u32 = conn.query_row("SELECT MAX(version) FROM _schema_metadata", [], |row| {
+        row.get(0)
+    })?;
+    assert_eq!(version, 0);
 
     let _ = std::fs::remove_file(&path);
     Ok(())
