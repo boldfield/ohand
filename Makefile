@@ -1,4 +1,5 @@
 PYTHON ?= python3
+export PYTHONDONTWRITEBYTECODE := 1
 
 .PHONY: check test contract-check contract-test
 

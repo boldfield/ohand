@@ -42,8 +42,9 @@ Rust owns authoritative domain state. Swift owns platform effects and protected 
 - **Provider profile version**: immutable UUID. Any change to adapter, endpoint, model, capabilities, timeouts or authorized destinations creates a new profile version. The credential is referenced by a stable opaque credential reference that is not part of the profile version (see Credential Boundary).
 - **Request version**: immutable identifier of one interpretation request, covering the versioned instruction set (I07), the request context version, the profile version and the source revision. Recorded for audit.
 - **Proposal schema version**: a proposal carries a schema version number, validated before any semantic check. Unknown or unsupported schema versions are rejected without mutation.
-- **Proposal identity**: each proposal has an immutable proposal ID and records capture ID, source revision, request version and proposal schema version.
-- **Job version**: each job has an immutable job ID and records the job type (interpretation, transcription attachment, shadow review), the profile version and request version pinned at enqueue, the source revision, attempt count and creation time. Transcription-attachment jobs run on-device, so their profile version and request version are not applicable and are recorded as absent. A job keeps its pinned profile version for its whole life. Changing the default profile never reroutes queued jobs; if a pinned profile version is deleted or its destination is no longer authorized, the job stops with an explicit configuration failure and waits for the user, never falling back to another destination.
+- **Proposal identity**: each proposal has an immutable proposal ID and records capture ID, source revision, text basis (see Text basis below), request version and proposal schema version.
+- **Job record schema version**: every persisted job record carries an integer job schema version, starting at 1 in M1 and incremented whenever a job record field is added, removed or changes meaning. A job record is read only by code that declares support for its schema version. Migrations (D01) upgrade older supported versions explicitly in the same transaction as the schema change. A job with an unknown or newer schema version (for example after a downgrade restore) is never executed, retried, reinterpreted or deleted; it stops as an explicit configuration failure with reason `unsupported_job_version` (the item stays `unprocessed` and visible) and its source capture is untouched until a supporting build reads it.
+- **Job identity**: each job has an immutable job ID and records the job schema version, the job type (interpretation, transcription attachment, shadow review), the profile version and request version pinned at enqueue, the source revision, attempt count and creation time. Transcription-attachment jobs run on-device, so their profile version and request version are not applicable and are recorded as absent. A job keeps its pinned profile version for its whole life. Changing the default profile never reroutes queued jobs; if a pinned profile version is deleted or its destination is no longer authorized, the job stops with an explicit configuration failure and waits for the user, never falling back to another destination.
 
 ### Time Context
 
@@ -119,7 +120,7 @@ Transient failures (timeout, network, outage) keep the state `unprocessed` or `p
 - `cancelled`: dropped by the user; searchable, not suggested.
 - `deleted`: tombstone; excluded from every result while cleanup completes.
 
-**Suggestion state**: `not_eligible` (excluded by policy, lifecycle, snooze, scope, uninterpreted/abstained status or speculative intent), `eligible`, `snoozed` (cooldown-gated), `pull_only` (user said stop suggesting; remains searchable).
+**Suggestion state**: `not_eligible` (excluded by policy, lifecycle, scope, uninterpreted/abstained status or speculative intent), `eligible`, `snoozed` (cooldown-gated), `pull_only` (user said stop suggesting; remains searchable).
 
 The statement the UI may make about a captured reminder is derived from these dimensions. By default the save acknowledgment distinguishes "saved" from "reminder confirmed installed"; an interrupted transcript or unscheduled reminder never implies success.
 
@@ -176,9 +177,11 @@ Errors: duplicate capture ID returns the existing item; same ID with different c
 
 ### Interpretation Request Contract
 
-Input: capture ID, source revision, authoritative text (original or latest correction), request version, profile ID and version, route (internal use only for authorization, not disclosed to the interpreter), time context.
+Input: capture ID, source revision, text basis, the exact text identified by that basis, request version, profile ID and version, route (internal use only for authorization, not disclosed to the interpreter), time context.
 
-Output (proposal): schema version; zero or one note, action or idea annotation; optional reminder time with resolution quality (explicit, inferred, ambiguous); optional session-topic proposal; source spans into the original text; or an explicit abstention.
+Output (proposal): schema version; zero or one note, action or idea annotation; optional reminder time with resolution quality (explicit, inferred, ambiguous); optional session-topic proposal; source spans into the supplied text; or an explicit abstention.
+
+Text basis: the request text is either the immutable original source text or one immutable text-correction record, identified by kind (`original` or `correction`) plus the correction record ID, with the item revision at which it was current. Correction records are never edited in place, so a basis always resolves to the same exact text. Source spans are character offsets (Unicode scalar values) into that exact basis text, never into the original when a correction was supplied. Semantic validation resolves the basis, rejects spans outside its bounds, and rejects a proposal whose basis is no longer the item's current text at its current revision. The UI reaches the original and the full correction history from the basis through the item's correction records; spans are never remapped onto other text.
 
 Errors: timeout or outage keeps the job in retry wait with no mutation; invalid or schema-unsupported output is rejected and the source is retained as searchable; refusal or capability mismatch becomes an abstention or a visible unavailable status; profile or configuration mismatch stops the job with a visible explanation and no fallback.
 
@@ -252,7 +255,7 @@ All native capabilities reach Rust through injected effect interfaces so Rust is
 ### Transcription Interface
 
 - Transcribe: audio reference, language code. Result: transcript text, confidence, detected language, or an error (`unsupported` for language or model, `permanent` for unreadable audio).
-- Invariants: on-device only, with no cloud fallback. An unsupported result leaves audio pending with visible retry and delete.
+- Invariants: on-device only, with no cloud fallback. An unsupported result sets `transcription_unsupported`, retaining the audio with visible retry and delete.
 
 ### Lifecycle Coordination Interface
 
@@ -521,7 +524,7 @@ Native target inclusion is reserved by F03 in the same way. Production service r
 | Store | File protection class | Reason |
 | --- | --- | --- |
 | Ingress staging records and in-progress audio | `NSFileProtectionCompleteUnlessOpen` | New files can be created and an already-open file kept writing while the device is locked, so a locked or cold handoff stays durable. Not readable while locked. |
-| SQLite database, write-ahead log and journal files | `NSFileProtectionCompleteUntilFirstUserAuthentication` | Core must import staged captures, reconcile reminders and run bounded background completion while locked after the first unlock. Reading private history is gated by the session read scope, not by the file class alone. |
+| SQLite database, write-ahead log and journal files | `NSFileProtectionCompleteUntilFirstUserAuthentication` | Core must reconcile reminders and run bounded background completion while locked after the first unlock. A staging record closed while locked cannot be reopened until the next unlock, so import of a capture taken while locked waits for that unlock; there is no locked-import path, and durability rests on the staging record. Reading private history is gated by the session read scope, not by the file class alone. |
 | Finalized audio files | `NSFileProtectionCompleteUntilFirstUserAuthentication` | Same reason; retention sweeps and transcription retry may run after first unlock. |
 | Full-text index and caches | `NSFileProtectionCompleteUntilFirstUserAuthentication` | Rebuildable derived data that must stay readable wherever the database is. |
 | Configuration (profiles without secrets, route and preview settings, retention settings) | `NSFileProtectionCompleteUntilFirstUserAuthentication` | Route settings can reveal private structure, so there is no unprotected class. |
