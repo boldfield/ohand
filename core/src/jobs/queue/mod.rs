@@ -160,6 +160,7 @@ pub fn enqueue_job_in_tx(
     request_version: Option<String>,
     job_schema_version: i32,
 ) -> Result<Job> {
+    // Check if this job_id already exists
     let existing: Option<Job> = tx
         .query_row(
             &format!("SELECT {} FROM jobs WHERE job_id = ?", JOB_COLUMNS),
@@ -170,6 +171,34 @@ pub fn enqueue_job_in_tx(
 
     if existing.is_some() {
         return Err(anyhow!("Job with ID {} already exists", job_id));
+    }
+
+    // Check if the same logical work (item + type + source + versions) is already queued
+    let logical_dup: Option<(String,)> = tx
+        .query_row(
+            "SELECT job_id FROM jobs WHERE item_id = ? AND job_type = ? AND source_revision = ? AND profile_version IS ? AND request_version IS ? AND status != ?",
+            rusqlite::params![
+                &item_id,
+                &job_type,
+                source_revision,
+                &profile_version,
+                &request_version,
+                JobStatus::Completed.as_str()
+            ],
+            |row| Ok((row.get(0)?,)),
+        )
+        .optional()?;
+
+    if let Some((dup_id,)) = logical_dup {
+        return Err(anyhow!(
+            "Logical job already exists: item={}, type={}, source={}, profile={:?}, request={:?} (job_id={})",
+            item_id,
+            job_type,
+            source_revision,
+            profile_version,
+            request_version,
+            dup_id
+        ));
     }
 
     let now = Utc::now();

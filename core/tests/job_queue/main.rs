@@ -860,6 +860,24 @@ fn test_duplicate_delivery_prevention() -> Result<()> {
 
     assert!(duplicate.is_err());
 
+    // Same logical work with different job_id also fails (logical key enforcement)
+    let different_id = "job-capture-1-interp-v1-retry";
+    let result = enqueue_job(
+        &mut db,
+        different_id.to_string(),
+        item_id.clone(),
+        "interpretation".to_string(),
+        0,
+        Some("profile-v1".to_string()),
+        None,
+        1,
+    );
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("Logical job already exists"));
+
     // But different version/profile can be enqueued
     let job_id_v2 = "job-capture-1-interp-v2";
     let second = enqueue_job(
