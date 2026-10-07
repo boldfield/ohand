@@ -1,0 +1,149 @@
+name: OhAnd
+options:
+  bundleIdPrefix: com.boldfield.ohand
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "15.4"
+
+# Configurable signing: identity and team must be set at build time, not in this file
+settings:
+  PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.app
+  IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+  SWIFT_VERSION: "5.9"
+  # Code signing identity and team are provided by build configuration, not hardcoded
+  CODE_SIGN_IDENTITY: iPhone Developer
+  # DEVELOPMENT_TEAM is set via command line or build config, not here
+
+targets:
+  # Production app target reserved for M1
+  OhAndApp:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources/App
+        createIntermediateGroups: true
+    settings:
+      PRODUCT_NAME: OhAnd
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.app
+      INFOPLIST_FILE: Sources/App/Info.plist
+    dependencies:
+      - target: OhAndCore
+
+  # Core bridge library reserved for M1
+  OhAndCore:
+    type: framework
+    platform: iOS
+    sources:
+      - path: Sources/Core
+        createIntermediateGroups: true
+    settings:
+      PRODUCT_NAME: OhAndCore
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.core
+
+  # Probe targets for testing and validation
+  BridgeProbe:
+    type: application
+    platform: iOS
+    sources:
+      - path: Probes/BridgeProbe/Sources
+        createIntermediateGroups: true
+    settings:
+      PRODUCT_NAME: BridgeProbe
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.bridge
+    dependencies:
+      - target: OhAndCore
+
+  NotificationProbe:
+    type: application
+    platform: iOS
+    sources:
+      - path: Probes/NotificationProbe/Sources
+        createIntermediateGroups: true
+    settings:
+      PRODUCT_NAME: NotificationProbe
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.notification
+
+  AudioProbe:
+    type: application
+    platform: iOS
+    sources:
+      - path: Probes/AudioProbe/Sources
+        createIntermediateGroups: true
+    settings:
+      PRODUCT_NAME: AudioProbe
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.audio
+
+  TranscriptionProbe:
+    type: application
+    platform: iOS
+    sources:
+      - path: Probes/TranscriptionProbe/Sources
+        createIntermediateGroups: true
+    settings:
+      PRODUCT_NAME: TranscriptionProbe
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.transcription
+
+  CredentialProbe:
+    type: application
+    platform: iOS
+    sources:
+      - path: Probes/CredentialProbe/Sources
+        createIntermediateGroups: true
+    settings:
+      PRODUCT_NAME: CredentialProbe
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.credential
+
+  CaptureProbe:
+    type: application
+    platform: iOS
+    sources:
+      - path: Probes/CaptureProbe/Sources
+        createIntermediateGroups: true
+    settings:
+      PRODUCT_NAME: CaptureProbe
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.capture
+
+  # Service module frameworks reserved for concurrent tasks
+  # Each service owns its own directory tree without editing project.yml
+  # Services are linked at build time by the production composition
+  OhAndServices:
+    type: framework
+    platform: iOS
+    sources:
+      - path: Sources/Services
+        createIntermediateGroups: true
+    settings:
+      PRODUCT_NAME: OhAndServices
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.services
+    dependencies:
+      - target: OhAndCore
+
+schemes:
+  OhAndApp:
+    build:
+      targets:
+        OhAndApp: all
+  BridgeProbe:
+    build:
+      targets:
+        BridgeProbe: all
+  NotificationProbe:
+    build:
+      targets:
+        NotificationProbe: all
+  AudioProbe:
+    build:
+      targets:
+        AudioProbe: all
+  TranscriptionProbe:
+    build:
+      targets:
+        TranscriptionProbe: all
+  CredentialProbe:
+    build:
+      targets:
+        CredentialProbe: all
+  CaptureProbe:
+    build:
+      targets:
+        CaptureProbe: all
