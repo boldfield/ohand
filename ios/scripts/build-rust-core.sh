@@ -3,19 +3,20 @@
 # and generate the C FFI header. Invoked by Xcode build phase.
 set -euo pipefail
 
-RUST_PROJECT_DIR="$(cd "$(dirname "$0")/../../core" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+RUST_PROJECT_DIR="${REPO_ROOT}/core"
 BUILD_DIR="${BUILT_PRODUCTS_DIR}/rust-core"
-CORE_BUILD="${BUILD_DIR}"
 
 # Ensure build directory exists
-mkdir -p "${CORE_BUILD}"
+mkdir -p "${BUILD_DIR}"
 
 # Target architectures for the current SDK
 case "${SDKNAME}" in
-  iphonesimulator)
-    TARGETS=("aarch64-apple-ios-sim" "x86_64-apple-ios-sim")
+  iphonesimulator*)
+    TARGETS=("aarch64-apple-ios-sim" "x86_64-apple-ios")
     ;;
-  iphoneos)
+  iphoneos*)
     TARGETS=("aarch64-apple-ios")
     ;;
   *)
@@ -24,25 +25,31 @@ case "${SDKNAME}" in
     ;;
 esac
 
+# Get the workspace target directory
+WORKSPACE_TARGET_DIR=$(cd "${REPO_ROOT}" && cargo metadata --format-version 1 | grep -o '"target_directory":"[^"]*"' | cut -d'"' -f4)
+
 # Cross-compile for each target and collect libraries
 LIBS=()
 for target in "${TARGETS[@]}"; do
-  output="${CORE_BUILD}/libohand_core-${target}.a"
+  output="${BUILD_DIR}/libohand_core-${target}.a"
   echo "Building ohand_core for ${target}..."
 
   # Ensure target is installed
-  rustup target add "${target}" 2>/dev/null || true
+  if ! rustup target list | grep -q "^${target} (installed)"; then
+    echo "Installing Rust target ${target}..."
+    rustup target add "${target}"
+  fi
 
   # Build the library with locked dependencies
-  cd "${RUST_PROJECT_DIR}"
+  cd "${REPO_ROOT}"
   cargo build \
     --release \
     --target "${target}" \
     --lib \
     --locked
 
-  # Copy the built artifact
-  cp "target/${target}/release/libohand_core.a" "${output}"
+  # Copy the built artifact from the workspace target directory
+  cp "${WORKSPACE_TARGET_DIR}/${target}/release/libohand_core.a" "${output}"
   LIBS+=("${output}")
 done
 

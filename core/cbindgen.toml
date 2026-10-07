@@ -1,5 +1,6 @@
 language = "C"
 
-# Export only the FFI bindings module to prevent unrelated defines
-# from leaking into the generated header
-export = ["bindings"]
+# Export only bindings module items to prevent unrelated defines from leaking
+[export]
+include = ["ohand_core"]
+exclude = []

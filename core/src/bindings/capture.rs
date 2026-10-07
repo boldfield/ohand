@@ -49,6 +49,22 @@ pub extern "C" fn ohand_capture_new(
         return ptr::null_mut();
     }
 
+    // Check required pointers early to prevent undefined behavior
+    if capture_id.is_null()
+        || capture_instant.is_null()
+        || timezone_id.is_null()
+        || locale.is_null()
+        || calendar.is_null()
+        || item_scope.is_null()
+        || route_id.is_null()
+        || created_at.is_null()
+    {
+        unsafe {
+            *out_error = create_ffi_error(anyhow::anyhow!("Null pointer for required parameter"));
+        }
+        return ptr::null_mut();
+    }
+
     let capture_id_str = match unsafe { CStr::from_ptr(capture_id) }.to_str() {
         Ok(s) => s.to_string(),
         Err(e) => {
@@ -610,6 +626,176 @@ mod tests {
             let msg = CStr::from_ptr(error_msg).to_str().unwrap();
             assert!(!msg.is_empty(), "Error message should not be empty");
             ohand_error_free(out_error);
+        }
+    }
+
+    #[test]
+    fn test_null_required_parameter() {
+        let text = CString::new("Test").unwrap();
+        let capture_instant = CString::new("2024-01-01T12:00:00Z").unwrap();
+        let timezone_id = CString::new("UTC").unwrap();
+        let locale = CString::new("en-US").unwrap();
+        let calendar = CString::new("gregorian").unwrap();
+        let item_scope = CString::new("personal").unwrap();
+        let route_id = CString::new("local").unwrap();
+        let created_at = CString::new("2024-01-01T12:00:00Z").unwrap();
+
+        let mut out_error: *mut OhAndError = ptr::null_mut();
+        let result = ohand_capture_new(
+            ptr::null(), // Null capture_id - required field
+            text.as_ptr(),
+            ptr::null(),
+            capture_instant.as_ptr(),
+            timezone_id.as_ptr(),
+            0,
+            locale.as_ptr(),
+            calendar.as_ptr(),
+            item_scope.as_ptr(),
+            route_id.as_ptr(),
+            0,
+            created_at.as_ptr(),
+            ptr::null(),
+            &mut out_error,
+        );
+
+        assert!(result.is_null(), "Should fail with null required parameter");
+        assert!(!out_error.is_null(), "Error should be set");
+        unsafe {
+            let msg = CStr::from_ptr(ohand_error_message(out_error))
+                .to_str()
+                .unwrap();
+            assert!(
+                msg.contains("Null pointer"),
+                "Error should mention null pointer"
+            );
+            ohand_error_free(out_error);
+        }
+    }
+
+    #[test]
+    fn test_invalid_utf8_in_required_field() {
+        // Invalid UTF-8 sequence: 0xFF followed by NUL terminator
+        let invalid_bytes = [0xFF_u8, 0x00];
+        let capture_id = unsafe { CStr::from_bytes_with_nul_unchecked(&invalid_bytes) };
+        let text = CString::new("Test").unwrap();
+        let capture_instant = CString::new("2024-01-01T12:00:00Z").unwrap();
+        let timezone_id = CString::new("UTC").unwrap();
+        let locale = CString::new("en-US").unwrap();
+        let calendar = CString::new("gregorian").unwrap();
+        let item_scope = CString::new("personal").unwrap();
+        let route_id = CString::new("local").unwrap();
+        let created_at = CString::new("2024-01-01T12:00:00Z").unwrap();
+
+        let mut out_error: *mut OhAndError = ptr::null_mut();
+        let result = ohand_capture_new(
+            capture_id.as_ptr(),
+            text.as_ptr(),
+            ptr::null(),
+            capture_instant.as_ptr(),
+            timezone_id.as_ptr(),
+            0,
+            locale.as_ptr(),
+            calendar.as_ptr(),
+            item_scope.as_ptr(),
+            route_id.as_ptr(),
+            0,
+            created_at.as_ptr(),
+            ptr::null(),
+            &mut out_error,
+        );
+
+        assert!(result.is_null(), "Should fail with invalid UTF-8");
+        assert!(!out_error.is_null(), "Error should be set");
+        let msg = unsafe {
+            CStr::from_ptr(ohand_error_message(out_error))
+                .to_str()
+                .unwrap()
+        };
+        assert!(msg.contains("UTF-8"), "Error should mention UTF-8 failure");
+        ohand_error_free(out_error);
+    }
+
+    #[test]
+    fn test_ownership_and_cleanup_multiple_calls() {
+        // Multiple successful calls to verify memory is properly managed
+        for i in 0..10 {
+            let capture_id = format!("test-cleanup-{}", i);
+            let capture_id_c = CString::new(capture_id).unwrap();
+            let text = CString::new("Test cleanup").unwrap();
+            let capture_instant = CString::new("2024-01-01T12:00:00Z").unwrap();
+            let timezone_id = CString::new("UTC").unwrap();
+            let locale = CString::new("en-US").unwrap();
+            let calendar = CString::new("gregorian").unwrap();
+            let item_scope = CString::new("personal").unwrap();
+            let route_id = CString::new("local").unwrap();
+            let created_at = CString::new("2024-01-01T12:00:00Z").unwrap();
+
+            let mut out_error: *mut OhAndError = ptr::null_mut();
+            let result = ohand_capture_new(
+                capture_id_c.as_ptr(),
+                text.as_ptr(),
+                ptr::null(),
+                capture_instant.as_ptr(),
+                timezone_id.as_ptr(),
+                0,
+                locale.as_ptr(),
+                calendar.as_ptr(),
+                item_scope.as_ptr(),
+                route_id.as_ptr(),
+                0,
+                created_at.as_ptr(),
+                ptr::null(),
+                &mut out_error,
+            );
+
+            assert!(!result.is_null(), "Iteration {} should succeed", i);
+            assert!(out_error.is_null(), "No error on successful creation");
+            ohand_capture_free(result);
+        }
+    }
+
+    #[test]
+    fn test_capture_very_large_input() {
+        let capture_id = CString::new("test-very-large").unwrap();
+        // Test with 10 MB text to verify handling of large inputs
+        let large_text = "x".repeat(10_000_000);
+        let text = CString::new(large_text).unwrap();
+        let capture_instant = CString::new("2024-01-01T12:00:00Z").unwrap();
+        let timezone_id = CString::new("UTC").unwrap();
+        let locale = CString::new("en-US").unwrap();
+        let calendar = CString::new("gregorian").unwrap();
+        let item_scope = CString::new("personal").unwrap();
+        let route_id = CString::new("local").unwrap();
+        let created_at = CString::new("2024-01-01T12:00:00Z").unwrap();
+
+        let mut out_error: *mut OhAndError = ptr::null_mut();
+        let result = ohand_capture_new(
+            capture_id.as_ptr(),
+            text.as_ptr(),
+            ptr::null(),
+            capture_instant.as_ptr(),
+            timezone_id.as_ptr(),
+            0,
+            locale.as_ptr(),
+            calendar.as_ptr(),
+            item_scope.as_ptr(),
+            route_id.as_ptr(),
+            0,
+            created_at.as_ptr(),
+            ptr::null(),
+            &mut out_error,
+        );
+
+        assert!(
+            !result.is_null(),
+            "Very large capture creation should succeed"
+        );
+        assert!(out_error.is_null(), "No error on valid large input");
+        unsafe {
+            let c_capture = &*result;
+            let retrieved_text = CStr::from_ptr(c_capture.text).to_str().unwrap();
+            assert_eq!(retrieved_text.len(), 10_000_000);
+            ohand_capture_free(result);
         }
     }
 }

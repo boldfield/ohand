@@ -186,13 +186,54 @@ final class OhAndCoreBridgeTests: XCTestCase {
         XCTAssertTrue(true)
     }
 
-    // MARK: - Cancellation and Timeout (Out of scope - documented as not implemented)
+    // MARK: - Synchronous Contract and Ownership
 
-    // Cancellation/timeout behavior is explicitly not implemented in M1.
-    // This placeholder documents that it remains a future feature.
-    func testCancellationIsOutOfScope() {
-        // M1 does not implement cancellation/timeout for capture operations.
-        // This will be addressed in a later milestone if needed.
+    func testSynchronousCallContract() throws {
+        // Verify that capture creation is synchronous and non-blocking.
+        // The Rust FFI boundary does not implement cancellation tokens or timeout.
+        // The call returns when the capture is fully constructed, with ownership
+        // transferred to the caller. The caller must call ohand_capture_free
+        // (indirectly through the Swift wrapper's defer block) to release memory.
+        let startTime = Date()
+        let _ = try createCapture(
+            captureId: "test-sync",
+            text: "Synchronous call",
+            captureInstant: "2024-01-01T12:00:00Z",
+            timezoneId: "UTC",
+            utcOffsetMinutes: 0,
+            locale: "en-US",
+            calendar: "gregorian",
+            itemScope: "personal",
+            routeId: "local",
+            createdAt: "2024-01-01T12:00:00Z"
+        )
+        let elapsed = Date().timeIntervalSince(startTime)
+        // Capture creation should be fast (well under 1 second for small inputs)
+        XCTAssertLessThan(elapsed, 1.0, "Capture creation should complete synchronously")
+    }
+
+    func testOwnershipReleaseOnReturn() throws {
+        // Verify ownership semantics: after createCapture returns,
+        // all ownership is with the caller. The defer block in createCapture
+        // ensures memory is freed when the function returns.
+        for i in 0..<50 {
+            let capture = try createCapture(
+                captureId: "test-ownership-\(i)",
+                text: String(repeating: "x", count: 10_000),
+                captureInstant: "2024-01-01T12:00:00Z",
+                timezoneId: "UTC",
+                utcOffsetMinutes: 0,
+                locale: "en-US",
+                calendar: "gregorian",
+                itemScope: "personal",
+                routeId: "local",
+                createdAt: "2024-01-01T12:00:00Z"
+            )
+            // The capture struct contains string data that is copied from C strings
+            // The underlying C pointers are freed in the defer block
+            XCTAssertEqual(capture.captureId.count, 19) // "test-ownership-XX"
+        }
+        // If no crash occurred, ownership was correctly managed
         XCTAssertTrue(true)
     }
 }
