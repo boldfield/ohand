@@ -1,0 +1,21 @@
+{
+  "build": {
+    "beforeBuildCommand": "",
+    "beforeDevCommand": "",
+    "devPath": "../",
+    "frontendDist": "../"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["ios"],
+    "identifier": "com.boldfield.ohand.tauri-probe",
+    "icon": [],
+    "resources": []
+  }
+}

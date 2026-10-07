@@ -1,0 +1,26 @@
+# Tauri
+dist/
+.tauri
+node_modules/
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+.env.local
+.env.*.local
+
+# Rust
+target/
+Cargo.lock
+**/*.rs.bk
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
