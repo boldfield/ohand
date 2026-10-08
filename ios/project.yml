@@ -373,3 +373,10 @@ schemes:
     build:
       targets:
         CaptureProbe: all
+  AudioProbeTests:
+    build:
+      targets:
+        AudioProbeTests: all
+    test:
+      targets:
+        - AudioProbeTests
