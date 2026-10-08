@@ -35,6 +35,9 @@ This repository is public. Commit only synthetic fixtures; keep credentials, per
 
   The check fails if the sidecar is missing, untracked, malformed, says anything other than the values above, or its `sha256` no longer matches the media file. The sidecar is an attestation by the author, enforced for presence and integrity; reviewers still judge whether the content really is synthetic.
 
+- **Private capture directories**: no file of any type may live under `captures/`, `recordings/`, `private/`, `personal/`, `transcripts/`, `conversations/`, `voice-memos/`, `voicememos/` or `voice_memos/` at the repository root, or directly beneath a fixture root (for example `fixtures/recordings/`). Source modules deeper in the tree, such as `core/src/store/captures/`, are ordinary code and are not affected.
+- **Reachable history**: the same signing-material, environment-file, suppression-file, private-directory and audio/video rules also apply to paths that were deleted but are still reachable from `HEAD`, because a deleted private artifact stays public in history. A removed audio/video file under a fixture root passes only if the last tree containing it also held a valid sidecar whose digest matched. CI checks out full history (`fetch-depth: 0`); a shallow clone fails closed rather than skipping this check. Only the final version of a removed fixture is verified, so reviewers still judge intermediate commits.
+
 Other files, including documents under `docs/validation/`, are covered by the secret scanner only.
 
 ### Tests

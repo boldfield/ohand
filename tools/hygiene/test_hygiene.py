@@ -24,6 +24,7 @@ from check_hygiene import (
     Finding,
     GITLEAKS_VERSION,
     ScannerError,
+    check_private_path,
     check_repository,
     check_signing_material,
     format_report,
@@ -125,6 +126,25 @@ class SigningMaterialPolicyTests(unittest.TestCase):
                 self.assertEqual(check_signing_material(path), [])
 
 
+class PrivatePathPolicyTests(unittest.TestCase):
+    def test_private_directories_at_root_and_under_fixture_roots_are_rejected(self):
+        for path in [
+            "captures/personal-note.txt", "private/conversation.json", "recordings/transcript.txt",
+            "Transcripts/day1.md", "voice-memos/a.txt", "conversations/x.json", "personal/diary.txt",
+            "fixtures/recordings/notes.txt", "core/tests/fixtures/private/x.json", "ios/Tests/Fixtures/captures/y.txt",
+        ]:
+            with self.subTest(path=path):
+                self.assertTrue(check_private_path(path))
+
+    def test_ordinary_source_paths_and_root_files_are_allowed(self):
+        for path in [
+            "core/src/store/captures/mod.rs", "docs/privacy/policy.md", "fixtures/audio/tone.txt",
+            "captures.md", "private", "ios/Sources/Capture/Entry.swift", "fixtures/captures.json",
+        ]:
+            with self.subTest(path=path):
+                self.assertEqual(check_private_path(path), [])
+
+
 class MediaPolicyTests(TempRepoTestCase):
     def policy_findings(self):
         return check_repository(self.repo_dir, run_scanner=False)
@@ -182,6 +202,68 @@ class MediaPolicyTests(TempRepoTestCase):
         self.commit_all()
         paths = {finding.path for finding in self.policy_findings()}
         self.assertEqual(paths, {"ios/Signing/dist.p12", ".env.production"})
+
+    def test_non_media_files_in_private_roots_fail(self):
+        for path in ["captures/personal-note.txt", "private/conversation.json", "recordings/transcript.txt"]:
+            self.write(path, "synthetic placeholder\n")
+        self.commit_all()
+        paths = {finding.path for finding in self.policy_findings()}
+        self.assertEqual(paths, {"captures/personal-note.txt", "private/conversation.json", "recordings/transcript.txt"})
+
+    def test_deleted_recording_still_in_history_fails(self):
+        self.write("recordings/call.m4a", b"private")
+        self.commit_all()
+        os.remove(os.path.join(self.repo_dir, "recordings/call.m4a"))
+        self.commit_all()
+        findings = [finding for finding in self.policy_findings() if finding.path == "recordings/call.m4a"]
+        self.assertTrue(findings)
+        self.assertTrue(all("reachable history" in finding.message for finding in findings))
+
+    def test_deleted_signing_material_and_private_file_still_in_history_fail(self):
+        self.write("ios/dist.p12", b"x")
+        self.write("captures/day.txt", "x\n")
+        self.write(".env", "A=1\n")
+        self.write("keep.txt", "keep\n")
+        self.commit_all()
+        for removed in ["ios/dist.p12", "captures/day.txt", ".env"]:
+            os.remove(os.path.join(self.repo_dir, removed))
+        self.commit_all()
+        paths = {finding.path for finding in self.policy_findings()}
+        self.assertEqual(paths, {"ios/dist.p12", "captures/day.txt", ".env"})
+
+    def test_deleted_fixture_audio_without_provenance_still_in_history_fails(self):
+        self.write("fixtures/audio/oops.wav", b"actually a private recording")
+        self.commit_all()
+        os.remove(os.path.join(self.repo_dir, "fixtures/audio/oops.wav"))
+        self.commit_all()
+        messages = [finding.message for finding in self.policy_findings()]
+        self.assertTrue(any("no provenance record" in message and "reachable history" in message for message in messages))
+
+    def test_deleted_fixture_audio_with_invalid_provenance_still_in_history_fails(self):
+        self.write_media_with_provenance("fixtures/audio/tone.m4a", synthetic=False)
+        self.commit_all()
+        for removed in ["fixtures/audio/tone.m4a", "fixtures/audio/tone.m4a.provenance.json"]:
+            os.remove(os.path.join(self.repo_dir, removed))
+        self.commit_all()
+        messages = [finding.message for finding in self.policy_findings()]
+        self.assertTrue(any("invalid provenance record" in message and "reachable history" in message for message in messages))
+
+    def test_deleted_fixture_audio_with_valid_provenance_passes(self):
+        self.write_media_with_provenance("fixtures/audio/tone.m4a")
+        self.commit_all()
+        for removed in ["fixtures/audio/tone.m4a", "fixtures/audio/tone.m4a.provenance.json"]:
+            os.remove(os.path.join(self.repo_dir, removed))
+        self.commit_all()
+        self.assertEqual(self.policy_findings(), [])
+
+    def test_deleted_file_re_added_in_approved_form_is_judged_on_current_tree(self):
+        self.write("fixtures/audio/tone.m4a", b"first")
+        self.commit_all()
+        os.remove(os.path.join(self.repo_dir, "fixtures/audio/tone.m4a"))
+        self.commit_all()
+        self.write_media_with_provenance("fixtures/audio/tone.m4a")
+        self.commit_all()
+        self.assertEqual(self.policy_findings(), [])
 
     def test_clean_repository_passes(self):
         self.write("README.md", "# hello\n")
@@ -350,6 +432,25 @@ class RealGitleaksTests(TempRepoTestCase):
         completed = self.run_cli()
         self.assertEqual(completed.returncode, check_hygiene.EXIT_FINDINGS)
         self.assertIn("recordings/call.m4a", completed.stderr)
+
+    def test_non_media_private_path_files_fail_through_cli(self):
+        for path in ["captures/personal-note.txt", "private/conversation.json", "recordings/transcript.txt"]:
+            self.write(path, "synthetic placeholder\n")
+        self.commit_all()
+        completed = self.run_cli()
+        self.assertEqual(completed.returncode, check_hygiene.EXIT_FINDINGS)
+        for path in ["captures/personal-note.txt", "private/conversation.json", "recordings/transcript.txt"]:
+            self.assertIn(path, completed.stderr)
+
+    def test_deleted_private_recording_still_in_history_fails_through_cli(self):
+        self.write("recordings/call.m4a", b"private")
+        self.commit_all()
+        os.remove(os.path.join(self.repo_dir, "recordings/call.m4a"))
+        self.commit_all()
+        completed = self.run_cli()
+        self.assertEqual(completed.returncode, check_hygiene.EXIT_FINDINGS)
+        self.assertIn("recordings/call.m4a", completed.stderr)
+        self.assertIn("reachable history", completed.stderr)
 
     def test_run_gitleaks_returns_redacted_findings(self):
         self.write("leak.txt", seeded_aws_access_key() + "\n")

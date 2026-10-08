@@ -2,9 +2,10 @@
 """Public-repository hygiene check.
 
 Combines a pinned, maintained secret scanner (gitleaks) over the reachable git
-history with project policy checks over every tracked file: no signing
-material, no committed environment files, and no audio/video recordings unless
-they sit under a documented fixture root next to a valid provenance record.
+history with project policy checks over every tracked file and every path still reachable in
+history: no signing material, no committed environment files, no files in
+private capture/recording/transcript directories, and no audio/video recordings
+unless they sit under a documented fixture root next to a valid provenance record.
 
 Exit status: 0 clean, 1 policy or secret findings, 2 the scanner could not run.
 Output never includes matched secret values.
@@ -49,6 +50,13 @@ SYNTHETIC_FIXTURE_ROOTS = (
     "ios/Tests/Fixtures/",
 )
 PROVENANCE_SUFFIX = ".provenance.json"
+# Matched as a whole directory name, case-insensitively, only at the repository
+# root or directly beneath a fixture root: deeper source modules such as
+# core/src/store/captures/ are ordinary code.
+PRIVATE_DIRECTORY_NAMES = {
+    "captures", "recordings", "private", "personal", "transcripts",
+    "conversations", "voice-memos", "voicememos", "voice_memos",
+}
 
 
 class Finding(NamedTuple):
@@ -84,6 +92,21 @@ def check_scanner_suppression(path: str) -> List[str]:
     return []
 
 
+def check_private_path(path: str) -> List[str]:
+    posix_path = PurePosixPath(path)
+    directory_parts = posix_path.parts[:-1]
+    if not directory_parts:
+        return []
+    candidate_names = {directory_parts[0].lower()}
+    for fixture_root in SYNTHETIC_FIXTURE_ROOTS:
+        root_parts = PurePosixPath(fixture_root).parts
+        if directory_parts[:len(root_parts)] == root_parts and len(directory_parts) > len(root_parts):
+            candidate_names.add(directory_parts[len(root_parts)].lower())
+    if candidate_names & PRIVATE_DIRECTORY_NAMES:
+        return ["files under private capture, recording or transcript directories must not be committed"]
+    return []
+
+
 def is_under_fixture_root(path: str) -> bool:
     return path.startswith(SYNTHETIC_FIXTURE_ROOTS)
 
@@ -94,6 +117,10 @@ def sha256_of_file(file_path: str) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def check_path_policy(path: str) -> List[str]:
+    return check_signing_material(path) + check_scanner_suppression(path) + check_private_path(path)
 
 
 def check_provenance_record(path: str, repo_dir: str, tracked: Set[str]) -> List[str]:
@@ -133,6 +160,63 @@ def check_media_file(path: str, repo_dir: str, tracked: Set[str]) -> List[str]:
     return check_provenance_record(path, repo_dir, tracked)
 
 
+def list_historical_paths(repo_dir: str) -> List[str]:
+    result = subprocess.run(
+        ["git", "log", "--format=", "--name-only", "--no-renames", "-z", "HEAD"],
+        capture_output=True, cwd=repo_dir, check=True,
+    )
+    names = (entry.decode("utf-8", "surrogateescape").strip("\n") for entry in result.stdout.split(b"\0"))
+    return sorted({name for name in names if name})
+
+
+def read_git_object(repo_dir: str, revision_and_path: str) -> Optional[bytes]:
+    result = subprocess.run(["git", "show", revision_and_path], capture_output=True, cwd=repo_dir)
+    return result.stdout if result.returncode == 0 else None
+
+
+def check_deleted_media_provenance(path: str, repo_dir: str) -> List[str]:
+    """Verify a media file that no longer exists using the last tree that contained it."""
+    last_touch = subprocess.run(
+        ["git", "--literal-pathspecs", "rev-list", "-n", "1", "HEAD", "--", path],
+        capture_output=True, text=True, cwd=repo_dir,
+    ).stdout.strip()
+    media_bytes = read_git_object(repo_dir, f"{last_touch}^:{path}") if last_touch else None
+    sidecar_bytes = read_git_object(repo_dir, f"{last_touch}^:{path}{PROVENANCE_SUFFIX}") if last_touch else None
+    if media_bytes is None:
+        return ["cannot verify provenance of removed audio/video file in reachable history"]
+    if sidecar_bytes is None:
+        return ["removed audio/video file had no provenance record and remains in reachable history"]
+    try:
+        record = json.loads(sidecar_bytes.decode("utf-8"))
+    except ValueError:
+        record = None
+    if (
+        not isinstance(record, dict)
+        or record.get("synthetic") is not True
+        or record.get("contains_personal_data") is not False
+        or record.get("sha256") != hashlib.sha256(media_bytes).hexdigest()
+    ):
+        return ["removed audio/video file had an invalid provenance record and remains in reachable history"]
+    return []
+
+
+def check_history_paths(repo_dir: str, tracked: Set[str]) -> List[Finding]:
+    """Apply path policy to files deleted from the tree but still reachable from HEAD."""
+    findings = []
+    for path in list_historical_paths(repo_dir):
+        if path in tracked:
+            continue
+        messages = check_path_policy(path)
+        if path.lower().endswith(MEDIA_SUFFIXES):
+            if is_under_fixture_root(path):
+                messages += check_deleted_media_provenance(path, repo_dir)
+            else:
+                messages.append("audio/video file outside documented synthetic fixture roots")
+        for message in messages:
+            findings.append(Finding(path, f"{message} (deleted, still in reachable history)"))
+    return findings
+
+
 def check_tracked_files(repo_dir: str) -> List[Finding]:
     tracked_files = list_tracked_files(repo_dir)
     tracked = set(tracked_files)
@@ -140,9 +224,12 @@ def check_tracked_files(repo_dir: str) -> List[Finding]:
     for path in tracked_files:
         if not os.path.isfile(os.path.join(repo_dir, path)):
             continue
-        messages = check_signing_material(path) + check_scanner_suppression(path) + check_media_file(path, repo_dir, tracked)
+        messages = (
+            check_path_policy(path) + check_media_file(path, repo_dir, tracked)
+        )
         for message in messages:
             findings.append(Finding(path, message))
+    findings.extend(check_history_paths(repo_dir, tracked))
     return findings
 
 
