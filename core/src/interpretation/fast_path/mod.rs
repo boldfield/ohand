@@ -60,10 +60,58 @@
 //!   a speaker label, two competing times, a relation word before the time, or a recurrence
 //!   request anywhere in the command). Nothing is scheduled; the
 //!   abstention only records why and never suppresses later interpretation of the same text.
+//!
+//! # Session topics
+//!
+//! [`recognize_session_topic`] and [`recognize_with_session_topic`] add a second, independent
+//! bounded grammar: an explicit phrase that files the note under a session topic. It derives
+//! only the session-topic facet. It never sets item scope, a route, upload authorization or
+//! preview eligibility, and a topic stated at capture or corrected by the user still outranks it
+//! (`resolve_session_topic`).
+//!
+//! ```text
+//! clause    := lead preposition [ "my" | "our" | "the" ] [ "next" ] topic [ "session" ]
+//! lead      := "bring" ("this"|"it") "up" | "raise" ("this"|"it") | "mention" ("this"|"it")
+//!            | "discuss" ("this"|"it") | "talk" "about" ("this"|"it")
+//! preposition := "in" | "at" | "during"
+//! topic     := "therapy" | "counseling" | "counselling" | "coaching" | "supervision"
+//! sentence  := prefix [ intent ] clause ( "please" | "thanks" | "," )* terminal*
+//! intent    := ["i"] ("need" | "want" | "have") "to" | "remember" "to"
+//! ```
+//!
+//! The topic vocabulary is closed and holds no scope name, so a topic cannot be confused with
+//! "personal" or "work". The stored topic is the canonical word ("counselling" is stored as
+//! "counseling"); the evidence span selects the whole clause. Any other topic word ("home",
+//! "5pm", "please", "the car"), a bare "my next session", or any other word in the sentence is
+//! not this grammar and is left for the approved interpreter. A prefix before the clause follows
+//! the same fillers-and-self-labels rule as reminders. Negation, quotes, brackets, questions,
+//! trailing off, hypotheticals, reported speech and completed work abstain.
+//!
+//! [`recognize_with_session_topic`] is exactly [`recognize_reminder`] when there is no clause.
+//! With one, the clause composes with the unchanged reminder logic in two placements, and both
+//! yield one proposal whose reminder and session-topic facets carry spans into the original text:
+//! - inside the command, as its whole content: "Remind me tomorrow to bring this up in
+//!   therapy". The reminder rides on an action whose span is the clause, which is also the
+//!   topic evidence.
+//! - in a sentence of its own next to a reminder sentence, before or after it: "Bring this up in
+//!   therapy. Remind me tomorrow to call mom." The topic sentence is blanked (offsets are
+//!   preserved) and the rest goes to the reminder logic.
+//!
+//! "next" inside a reminder command is competing time evidence, so "Remind me <time> to discuss
+//! this in my next therapy session" abstains as ambiguous; the same clause as its own sentence is
+//! fine.
+//!
+//! A topic sentence alone yields only the topic facet. If the topic sentence or the reminder
+//! abstains, the result is that abstention and neither facet is derived, since a proposal cannot
+//! carry facets and an abstention together. If the rest of the text is not a supported
+//! reminder (including a reminder without a time), nothing is derived and the whole text stays
+//! with the interpreter. A clause that is part of a longer command ("... to call mom and bring
+//! this up in therapy") is not the whole content and derives no topic.
 
 use crate::domain::items::SUPPORTED_PROPOSAL_SCHEMA_VERSION;
 use crate::interpretation::contracts::{
-    AbstentionReason, Proposal, ReminderProposal, SourceSpan, TextBasis, TimeResolutionQuality,
+    AbstentionReason, Proposal, ReminderProposal, SessionTopicProposal, SourceSpan, TextBasis,
+    TimeResolutionQuality,
 };
 use crate::store::events::ItemType;
 use crate::time::{ResolutionResult, TimeContext, TimeResolver};
@@ -1332,6 +1380,32 @@ pub fn recognize_reminder(
     request_version: &str,
     time_context: &TimeContext,
 ) -> Option<Proposal> {
+    recognize_reminder_accepting(
+        text,
+        item_id,
+        capture_id,
+        source_revision,
+        text_basis,
+        request_version,
+        time_context,
+        &content_is_in_lexicon,
+    )
+}
+
+/// The reminder recognizer with the final content-lexicon decision injected. Every guard that
+/// precedes that decision (prefix, quotes, negation, conditions, time, recurrence) is identical
+/// for all callers, so a caller can only widen which already-guarded content is accepted.
+#[allow(clippy::too_many_arguments)]
+fn recognize_reminder_accepting(
+    text: &str,
+    item_id: &str,
+    capture_id: &str,
+    source_revision: i32,
+    text_basis: TextBasis,
+    request_version: &str,
+    time_context: &TimeContext,
+    accepts_content: &dyn Fn(&[Token]) -> bool,
+) -> Option<Proposal> {
     let tokens = tokenize(text);
     let command_index = find_command(&tokens)?;
     let prefix = &tokens[..command_index];
@@ -1370,11 +1444,11 @@ pub fn recognize_reminder(
     if dangling_relation {
         return Some(provenance.abstention(AbstentionReason::Ambiguous));
     }
-    if !content_is_in_lexicon(content) {
+    if !accepts_content(content) {
         return None;
     }
 
-    // The lexicon check above guarantees a non-empty content; a reminder is only ever proposed
+    // The content check above guarantees a non-empty content; a reminder is only ever proposed
     // on an action with sourced target evidence.
     let (first, last) = (content.first()?, content.last()?);
     Some(
@@ -1384,4 +1458,370 @@ pub fn recognize_reminder(
             .with_item_type(Some(ItemType::Action))
             .with_source_spans(Some(vec![SourceSpan::new(first.start, last.end)])),
     )
+}
+
+const SESSION_LEADS: &[&[&str]] = &[
+    &["bring", "this", "up"],
+    &["bring", "it", "up"],
+    &["raise", "this"],
+    &["raise", "it"],
+    &["mention", "this"],
+    &["mention", "it"],
+    &["discuss", "this"],
+    &["discuss", "it"],
+    &["talk", "about", "this"],
+    &["talk", "about", "it"],
+];
+
+const SESSION_PREPOSITIONS: &[&str] = &["in", "at", "during"];
+
+const SESSION_DETERMINERS: &[&str] = &["my", "our", "the"];
+
+/// Spoken form, then the topic stored for it. The topic vocabulary is closed and holds no scope
+/// name ("personal", "work"), so a topic can never be mistaken for an item scope.
+const SESSION_TOPICS: &[(&str, &str)] = &[
+    ("therapy", "therapy"),
+    ("counseling", "counseling"),
+    ("counselling", "counseling"),
+    ("coaching", "coaching"),
+    ("supervision", "supervision"),
+];
+
+/// Stated intent that may stand directly before the lead ("I need to bring this up in therapy").
+/// Longest first, so the longer form wins.
+const SESSION_INTENT_LEADS: &[&[&str]] = &[
+    &["i", "need", "to"],
+    &["i", "want", "to"],
+    &["i", "have", "to"],
+    &["need", "to"],
+    &["want", "to"],
+    &["have", "to"],
+    &["remember", "to"],
+];
+
+/// A matched session-topic clause: token range and the evidence span it covers.
+struct TopicClause {
+    first_token: usize,
+    end_token: usize,
+    topic: &'static str,
+    span: SourceSpan,
+}
+
+fn words_equal(tokens: &[Token], expected: &[&str]) -> bool {
+    tokens.len() == expected.len()
+        && tokens
+            .iter()
+            .zip(expected)
+            .all(|(token, word)| token.is_word_equal_to(word))
+}
+
+fn word_in(token: Option<&Token>, vocabulary: &[&str]) -> bool {
+    token.is_some_and(|token| in_lexicon(token, vocabulary))
+}
+
+/// Length in tokens of the clause that starts at `start`, with its topic, when the tokens match
+/// `lead preposition [determiner] [next] topic [session]`.
+fn session_clause_at(tokens: &[Token], start: usize) -> Option<(usize, &'static str)> {
+    let lead = SESSION_LEADS.iter().find(|lead| {
+        tokens
+            .get(start..start + lead.len())
+            .is_some_and(|window| words_equal(window, lead))
+    })?;
+    let mut next = start + lead.len();
+    if !word_in(tokens.get(next), SESSION_PREPOSITIONS) {
+        return None;
+    }
+    next += 1;
+    if word_in(tokens.get(next), SESSION_DETERMINERS) {
+        next += 1;
+    }
+    if tokens
+        .get(next)
+        .is_some_and(|token| token.is_word_equal_to("next"))
+    {
+        next += 1;
+    }
+    let spoken = tokens.get(next).filter(|token| token.is_word())?;
+    let (_, topic) = SESSION_TOPICS
+        .iter()
+        .find(|(word, _)| *word == spoken.lower)?;
+    next += 1;
+    if tokens
+        .get(next)
+        .is_some_and(|token| token.is_word_equal_to("session"))
+    {
+        next += 1;
+    }
+    Some((next - start, topic))
+}
+
+/// The earliest session-topic clause in the text, by position.
+fn find_topic_clause(tokens: &[Token]) -> Option<TopicClause> {
+    (0..tokens.len()).find_map(|start| {
+        let (length, topic) = session_clause_at(tokens, start)?;
+        let end_token = start + length;
+        Some(TopicClause {
+            first_token: start,
+            end_token,
+            topic,
+            span: SourceSpan::new(tokens[start].start, tokens[end_token - 1].end),
+        })
+    })
+}
+
+/// True when the clause sits inside a reminder command ("remind me <time> to <clause>") rather
+/// than in a sentence of its own.
+fn clause_is_inside_command(tokens: &[Token], clause: &TopicClause) -> bool {
+    let before = &tokens[..clause.first_token];
+    current_sentence(before)
+        .windows(2)
+        .any(|pair| pair[0].is_word_equal_to("remind") && pair[1].is_word_equal_to("me"))
+}
+
+fn is_unsafe_context_token(token: &Token) -> bool {
+    token.kind == TokenKind::Quote
+        || token.ch == '?'
+        || (token.kind == TokenKind::ClauseBreak
+            && matches!(token.ch, '(' | ')' | '[' | ']' | '\u{2026}' | '.'))
+        || is_negation_word(token)
+        || (token.is_word()
+            && (HYPOTHETICAL_WORDS.contains(&token.lower.as_str())
+                || REPORTING_WORDS.contains(&token.lower.as_str())
+                || COMPLETED_WORDS.contains(&token.lower.as_str())))
+}
+
+enum TopicSentence {
+    /// An explicit command in a sentence of its own; the range is the sentence with its
+    /// terminal punctuation, in tokens.
+    Accepted {
+        first_token: usize,
+        end_token: usize,
+    },
+    Abstain(AbstentionReason),
+    NotGrammar,
+}
+
+/// Judge the sentence holding `clause`. The sentence may hold only allowed fillers, one stated
+/// intent and terminal "please", "thanks", commas, full stops and exclamation marks around the
+/// clause. Negation, quotes, brackets, questions, trailing off, hypotheticals, reported speech
+/// and completed work abstain; anything else is not this grammar.
+fn judge_topic_sentence(tokens: &[Token], clause: &TopicClause) -> TopicSentence {
+    let sentence_start = tokens[..clause.first_token]
+        .iter()
+        .rposition(|token| token.kind == TokenKind::SentenceBreak)
+        .map_or(0, |index| index + 1);
+    let terminator_start = tokens[clause.end_token..]
+        .iter()
+        .position(|token| token.kind == TokenKind::SentenceBreak)
+        .map_or(tokens.len(), |offset| clause.end_token + offset);
+    let terminators = tokens[terminator_start..]
+        .iter()
+        .take_while(|token| token.kind == TokenKind::SentenceBreak)
+        .count();
+    let end_token = terminator_start + terminators;
+
+    let mut lead_start = clause.first_token;
+    for intent in SESSION_INTENT_LEADS {
+        let candidate = clause.first_token.saturating_sub(intent.len());
+        if candidate >= sentence_start
+            && words_equal(&tokens[candidate..clause.first_token], intent)
+        {
+            lead_start = candidate;
+            break;
+        }
+    }
+    let prefix = &tokens[sentence_start..lead_start];
+    let suffix = &tokens[clause.end_token..terminator_start];
+    let terminal = &tokens[terminator_start..end_token];
+
+    let preceding_quotes = tokens[..sentence_start]
+        .iter()
+        .filter(|token| token.kind == TokenKind::Quote)
+        .count();
+    if preceding_quotes % 2 == 1 {
+        return TopicSentence::Abstain(AbstentionReason::UncertainTarget);
+    }
+    if prefix.iter().chain(suffix).any(is_negation_word) {
+        return TopicSentence::Abstain(AbstentionReason::Negated);
+    }
+    if prefix_abstention(prefix).is_some()
+        || prefix
+            .iter()
+            .chain(suffix)
+            .chain(terminal)
+            .any(is_unsafe_context_token)
+    {
+        return TopicSentence::Abstain(AbstentionReason::UncertainTarget);
+    }
+    let suffix_is_allowed = suffix.iter().all(|token| {
+        token.is_word_equal_to("please") || token.is_word_equal_to("thanks") || token.ch == ','
+    });
+    if !prefix_is_allowed(prefix) || !suffix_is_allowed {
+        return TopicSentence::NotGrammar;
+    }
+    TopicSentence::Accepted {
+        first_token: sentence_start,
+        end_token,
+    }
+}
+
+fn topic_facet(clause: &TopicClause) -> SessionTopicProposal {
+    SessionTopicProposal {
+        topic: clause.topic.to_string(),
+        source_span: Some(clause.span),
+    }
+}
+
+/// The text with the characters in `[start, end)` replaced by spaces, so every offset in the
+/// result is an offset into the original text.
+fn blank_out(text: &str, start: usize, end: usize) -> String {
+    text.chars()
+        .enumerate()
+        .map(|(index, ch)| {
+            if (start..end).contains(&index) {
+                ' '
+            } else {
+                ch
+            }
+        })
+        .collect()
+}
+
+/// Recognize an explicit offline session-topic phrase and nothing else. The text must be the
+/// topic sentence alone; it yields a proposal holding only the derived session-topic facet. See
+/// the module documentation for the grammar. Use [`recognize_with_session_topic`] when a
+/// reminder may be present.
+pub fn recognize_session_topic(
+    text: &str,
+    item_id: &str,
+    capture_id: &str,
+    source_revision: i32,
+    text_basis: TextBasis,
+    request_version: &str,
+) -> Option<Proposal> {
+    let tokens = tokenize(text);
+    let clause = find_topic_clause(&tokens)?;
+    if clause_is_inside_command(&tokens, &clause) {
+        return None;
+    }
+    let provenance = Provenance {
+        item_id,
+        capture_id,
+        source_revision,
+        text_basis,
+        request_version,
+    };
+    match judge_topic_sentence(&tokens, &clause) {
+        TopicSentence::Abstain(reason) => Some(provenance.abstention(reason)),
+        TopicSentence::NotGrammar => None,
+        TopicSentence::Accepted {
+            first_token,
+            end_token,
+        } if first_token == 0 && end_token == tokens.len() => Some(
+            provenance
+                .proposal()
+                .with_session_topic_proposal(Some(topic_facet(&clause))),
+        ),
+        TopicSentence::Accepted { .. } => None,
+    }
+}
+
+/// Recognize a reminder command, a session-topic phrase, or both in one text. Without a topic
+/// phrase this is exactly [`recognize_reminder`]. With one, the topic is composed with the
+/// unchanged reminder logic into a single sourced proposal; see the module documentation for the
+/// supported placements and for when the composition abstains or recognizes nothing.
+pub fn recognize_with_session_topic(
+    text: &str,
+    item_id: &str,
+    capture_id: &str,
+    source_revision: i32,
+    text_basis: TextBasis,
+    request_version: &str,
+    time_context: &TimeContext,
+) -> Option<Proposal> {
+    let tokens = tokenize(text);
+    let Some(clause) = find_topic_clause(&tokens) else {
+        return recognize_reminder(
+            text,
+            item_id,
+            capture_id,
+            source_revision,
+            text_basis,
+            request_version,
+            time_context,
+        );
+    };
+
+    if clause_is_inside_command(&tokens, &clause) {
+        let is_clause_content = |content: &[Token]| {
+            content.first().map(|token| token.start) == Some(clause.span.start)
+                && content.last().map(|token| token.end) == Some(clause.span.end)
+        };
+        let proposal = recognize_reminder_accepting(
+            text,
+            item_id,
+            capture_id,
+            source_revision,
+            text_basis,
+            request_version,
+            time_context,
+            &|content| is_clause_content(content) || content_is_in_lexicon(content),
+        )?;
+        let rides_on_clause = proposal.reminder_proposal.is_some()
+            && proposal.source_spans.as_deref() == Some(&[clause.span][..]);
+        return Some(if rides_on_clause {
+            proposal.with_session_topic_proposal(Some(topic_facet(&clause)))
+        } else {
+            proposal
+        });
+    }
+
+    let provenance = Provenance {
+        item_id,
+        capture_id,
+        source_revision,
+        text_basis: text_basis.clone(),
+        request_version,
+    };
+    match judge_topic_sentence(&tokens, &clause) {
+        TopicSentence::Abstain(reason) => Some(provenance.abstention(reason)),
+        TopicSentence::NotGrammar => recognize_reminder(
+            text,
+            item_id,
+            capture_id,
+            source_revision,
+            text_basis,
+            request_version,
+            time_context,
+        ),
+        TopicSentence::Accepted {
+            first_token,
+            end_token,
+        } => {
+            let sentence_start = tokens[first_token].start;
+            let sentence_end = tokens[end_token - 1].end;
+            let remainder = blank_out(text, sentence_start, sentence_end);
+            if tokenize(&remainder).is_empty() {
+                return Some(
+                    provenance
+                        .proposal()
+                        .with_session_topic_proposal(Some(topic_facet(&clause))),
+                );
+            }
+            let proposal = recognize_reminder(
+                &remainder,
+                item_id,
+                capture_id,
+                source_revision,
+                text_basis,
+                request_version,
+                time_context,
+            )?;
+            Some(if proposal.reminder_proposal.is_some() {
+                proposal.with_session_topic_proposal(Some(topic_facet(&clause)))
+            } else {
+                proposal
+            })
+        }
+    }
 }

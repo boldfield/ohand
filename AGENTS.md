@@ -12,7 +12,7 @@ Interactive agents investigate, discuss, and maintain design/specification docum
 
 This project explicitly authorizes agent-driven delivery with **no routine human approval or merge gate**. This overrides generic Odonian skill defaults calling for human approval of each design choice, task, milestone, merge, or release. It does not remove independent review, required checks, or real test evidence, and does not change other projects' policies.
 
-- Decompose build/design work into small, single-purpose, Haiku-sized tasks. Set initial `model=haiku` and `escalate=true`.
+- Decompose build/design work into small, single-purpose tasks. Set initial `model=sonnet` for code changes (Rust core, Swift, FFI, tools and test harnesses) and `model=haiku` only for docs, configuration and evidence-recording tasks; set `escalate=true` on both. Rationale recorded 2026-10-08: across 39 landed tasks on this board, Haiku landed 2, both scaffolding, and every traced chain escalated after four rejected rounds; the overlay's Haiku-sized slices escalated at the same rate as unsliced tasks, so the failure mode is reviewer rigor at the Rust/Swift boundary, not task size.
 - Set immutable `agent_merge=true` when creating each implementation task.
 - Specify independent Claude and Codex reviewers explicitly. The intended pair is `opus` and `gpt-6.1-sol`; verify the deployed allowlist and worker availability before dispatch, and use supported equivalents if those identifiers change.
 - Use the Odonian REST API to create tasks in batches of 2–3. Register a design/feature document first and link every task to its document.
@@ -62,7 +62,7 @@ Artifact retention is bounded: `core.yml` does not upload artifacts; any future 
 
 ## Required checks for macOS workers
 
-Native iOS checks run on the standard GitHub-hosted `macos-15` runner via `.github/workflows/ios.yml` on every pull request to `main`, with Xcode pinned to 16.4 (matching `options.xcodeVersion` in `ios/project.yml`). The workflow has `contents: read` permission only, needs no secrets or signing material, and therefore also runs for fork PRs. The single `simulator` job:
+Native iOS checks run on the standard GitHub-hosted `macos-26` runner via `.github/workflows/ios.yml` on every pull request to `main`, with Xcode pinned to 26.6 and its iOS 26 simulator SDK (matching `options.xcodeVersion` in `ios/project.yml`; `ios/scripts/check_project_config.py` fails if the workflow pin and `options.xcodeVersion` disagree). The `tauri-probe` job uses the same runner and pin. The next bump is to Xcode 27 once hosted images carry it. The workflow has `contents: read` permission only, needs no secrets or signing material, and therefore also runs for fork PRs. The `simulator` job:
 
 - records `sw_vers`, Xcode, Swift, simulator SDK and the available simulators (`ios-evidence/toolchain.txt`);
 - picks one available iPhone simulator with `ios/scripts/select_simulator.py` (newest iOS runtime not newer than the pinned SDK) and logs its name, runtime and UDID (`ios-evidence/simulator.txt`);

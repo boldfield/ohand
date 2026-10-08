@@ -13,6 +13,7 @@ from pathlib import Path
 import yaml
 
 IOS_ROOT = Path(__file__).resolve().parent.parent
+IOS_WORKFLOW = IOS_ROOT.parent / ".github" / "workflows" / "ios.yml"
 BUNDLE_PREFIX = "com.boldfield.ohand"
 
 # F01-owned native roots that must be reachable from a target without editing project.yml.
@@ -38,7 +39,7 @@ SHARED_INTENT_ROOTS = {"CaptureProbeControl": "CaptureProbe/Shared", "OhAndCaptu
 
 PROBE_USAGE_STRINGS = {
     "AudioProbe": ["NSMicrophoneUsageDescription"],
-    "TranscriptionProbe": ["NSMicrophoneUsageDescription", "NSSpeechRecognitionUsageDescription"],
+    "TranscriptionProbe": ["NSSpeechRecognitionUsageDescription"],
 }
 APP_USAGE_STRINGS = ["NSMicrophoneUsageDescription", "NSSpeechRecognitionUsageDescription"]
 
@@ -97,6 +98,27 @@ def check_project(project, root=IOS_ROOT):
             errors.append(f"project.yml must not set {forbidden}; signing is supplied at build time")
     if project.get("configFiles") != {"Debug": "Config/Base.xcconfig", "Release": "Config/Base.xcconfig"}:
         errors.append("project configFiles must point at Config/Base.xcconfig")
+    return errors
+
+
+def check_workflow_xcode_pin(project, workflow_path=IOS_WORKFLOW):
+    errors = []
+    project_pin = str(project.get("options", {}).get("xcodeVersion", ""))
+    if not project_pin:
+        errors.append("project.yml must set options.xcodeVersion")
+    workflow = yaml.safe_load(workflow_path.read_text())
+    for job_name, job in workflow.get("jobs", {}).items():
+        pins = [
+            str(step.get("with", {}).get("xcode-version", ""))
+            for step in job.get("steps", [])
+            if str(step.get("uses", "")).startswith("maxim-lobanov/setup-xcode@")
+        ]
+        if len(pins) != 1:
+            errors.append(f"ios.yml job {job_name} must select Xcode with exactly one setup-xcode step, found {len(pins)}")
+        elif pins[0] != project_pin:
+            errors.append(f"ios.yml job {job_name} selects Xcode {pins[0]!r} but options.xcodeVersion is {project_pin!r}")
+    if not workflow.get("jobs"):
+        errors.append("ios.yml defines no jobs")
     return errors
 
 
@@ -221,7 +243,8 @@ def check_no_signing_material(root=IOS_ROOT):
 
 
 def run_all_checks():
-    return check_project(load_project()) + check_xcconfig() + check_plists() + check_no_signing_material()
+    project = load_project()
+    return check_project(project) + check_workflow_xcode_pin(project) + check_xcconfig() + check_plists() + check_no_signing_material()
 
 
 if __name__ == "__main__":

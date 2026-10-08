@@ -3,7 +3,7 @@
 
 Reads the JSON from stdin (or --input FILE) and prints `udid=`, `name=`, `runtime=` and
 `runtime_key=` lines suitable for appending to $GITHUB_OUTPUT. With --max-runtime, runtimes newer
-than that iOS version (for example the SDK bundled with the pinned Xcode) are ignored.
+than that iOS version (the SDK reported by the selected Xcode, never a literal) are ignored.
 """
 import argparse
 import json
@@ -68,7 +68,7 @@ def select_simulator(simctl_json, max_runtime=None):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", help="simctl JSON file (default: stdin)")
-    parser.add_argument("--max-runtime", help="highest iOS runtime version to consider, e.g. 18.5")
+    parser.add_argument("--max-runtime", help="highest iOS runtime version to consider, e.g. 26.6")
     args = parser.parse_args(argv)
 
     if args.input:

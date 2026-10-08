@@ -3,7 +3,7 @@ options:
   bundleIdPrefix: com.boldfield.ohand
   deploymentTarget:
     iOS: "16.0"
-  xcodeVersion: "16.4"
+  xcodeVersion: "26.6"
 
 settings:
   PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.app
@@ -233,10 +233,24 @@ targets:
         createIntermediateGroups: true
         excludes:
           - Info.plist
+          - "Tests/**"
     settings:
       PRODUCT_NAME: TranscriptionProbe
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.transcription
       INFOPLIST_FILE: TranscriptionProbe/Info.plist
+
+  TranscriptionProbeTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: TranscriptionProbe/Tests
+        createIntermediateGroups: true
+      - path: TranscriptionProbe/Shared
+        createIntermediateGroups: true
+    settings:
+      PRODUCT_NAME: TranscriptionProbeTests
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.transcription.tests
+      GENERATE_INFOPLIST_FILE: YES
 
   CredentialProbe:
     type: application
@@ -290,9 +304,24 @@ targets:
     sources:
       - path: CaptureProbe/UITests
         createIntermediateGroups: true
+        excludes:
+          - ManagementHandoffUITests.swift
     settings:
       PRODUCT_NAME: CaptureProbeUITests
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.capture.uitests
+      GENERATE_INFOPLIST_FILE: YES
+      TEST_TARGET_NAME: CaptureProbe
+    dependencies:
+      - target: CaptureProbe
+
+  ManagementHandoffUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: CaptureProbe/UITests/ManagementHandoffUITests.swift
+    settings:
+      PRODUCT_NAME: ManagementHandoffUITests
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.capture.handoff-uitests
       GENERATE_INFOPLIST_FILE: YES
       TEST_TARGET_NAME: CaptureProbe
     dependencies:
@@ -328,12 +357,14 @@ schemes:
         BridgeProbeTests: all
         CaptureProbeTests: all
         AudioProbeTests: all
+        TranscriptionProbeTests: all
     test:
       targets:
         - OhAndTests
         - BridgeProbeTests
         - CaptureProbeTests
         - AudioProbeTests
+        - TranscriptionProbeTests
   CaptureProbeTests:
     build:
       targets:
@@ -348,6 +379,13 @@ schemes:
     test:
       targets:
         - CaptureProbeUITests
+  ManagementHandoffUITests:
+    build:
+      targets:
+        ManagementHandoffUITests: all
+    test:
+      targets:
+        - ManagementHandoffUITests
   BridgeProbeTests:
     build:
       targets:
@@ -393,3 +431,10 @@ schemes:
     test:
       targets:
         - AudioProbeTests
+  TranscriptionProbeTests:
+    build:
+      targets:
+        TranscriptionProbeTests: all
+    test:
+      targets:
+        - TranscriptionProbeTests

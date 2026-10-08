@@ -1,11 +1,18 @@
 use chrono::{DateTime, Offset, TimeZone, Utc};
 use chrono_tz::Tz;
+use ohand_core::domain::items::{apply_proposal, load_item_state};
 use ohand_core::interpretation::contracts::{
     AbstentionReason, Proposal, ReminderProposal, SourceSpan, TextBasis, TimeResolutionQuality,
 };
-use ohand_core::interpretation::fast_path::recognize_reminder;
+use ohand_core::interpretation::fast_path::{
+    recognize_reminder, recognize_session_topic, recognize_with_session_topic,
+};
+use ohand_core::retrieval::index::sync_item_in_tx;
+use ohand_core::retrieval::query::{scoped_query, QueryFilter, QueryPagination};
 use ohand_core::store::events::ItemType;
+use ohand_core::store::schema::{Clock, Database};
 use ohand_core::time::TimeContext;
+use std::sync::Arc;
 
 const ITEM_ID: &str = "550e8400-e29b-41d4-a716-446655440002";
 const CAPTURE_ID: &str = "550e8400-e29b-41d4-a716-446655440003";
@@ -1066,4 +1073,790 @@ fn only_neutral_reminder_pictographs_may_precede_the_command() {
         FUTURE_INSTANT,
         FUTURE_PHRASE,
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Session topics (I03b)
+// ---------------------------------------------------------------------------------------------
+
+fn topic_only(text: &str) -> Option<Proposal> {
+    let proposal = recognize_session_topic(
+        text,
+        ITEM_ID,
+        CAPTURE_ID,
+        0,
+        TextBasis::Original { item_revision: 0 },
+        REQUEST_VERSION,
+    );
+    if let Some(proposal) = &proposal {
+        proposal
+            .validate(text)
+            .unwrap_or_else(|error| panic!("{text:?} produced an invalid proposal: {error}"));
+    }
+    proposal
+}
+
+fn composed(text: &str) -> Option<Proposal> {
+    let proposal = recognize_with_session_topic(
+        text,
+        ITEM_ID,
+        CAPTURE_ID,
+        0,
+        TextBasis::Original { item_revision: 0 },
+        REQUEST_VERSION,
+        &context(),
+    );
+    if let Some(proposal) = &proposal {
+        proposal
+            .validate(text)
+            .unwrap_or_else(|error| panic!("{text:?} produced an invalid proposal: {error}"));
+    }
+    proposal
+}
+
+/// Everything a proposal derives, without its random identifier.
+type Facets = (
+    Option<ItemType>,
+    Option<ReminderProposal>,
+    Option<(String, Option<SourceSpan>)>,
+    Option<Vec<SourceSpan>>,
+    Option<AbstentionReason>,
+);
+
+fn facets_of(proposal: &Option<Proposal>) -> Option<Facets> {
+    proposal.as_ref().map(|proposal| {
+        (
+            proposal.item_type,
+            proposal.reminder_proposal.clone(),
+            proposal
+                .session_topic_proposal
+                .as_ref()
+                .map(|topic| (topic.topic.clone(), topic.source_span)),
+            proposal.source_spans.clone(),
+            proposal.abstention.clone(),
+        )
+    })
+}
+
+fn assert_topic_only(text: &str, topic: &str, evidence: &str) {
+    let proposal = topic_only(text).unwrap_or_else(|| panic!("{text:?} must derive a topic"));
+    let facet = proposal
+        .session_topic_proposal
+        .as_ref()
+        .unwrap_or_else(|| panic!("{text:?} must carry a topic facet"));
+    assert_eq!(facet.topic, topic, "{text:?}");
+    let span = facet.source_span.expect("topic evidence span");
+    assert_eq!(selected(text, span), evidence, "{text:?}");
+    assert_eq!(proposal.item_type, None, "{text:?}");
+    assert_eq!(proposal.reminder_proposal, None, "{text:?}");
+    assert_eq!(proposal.source_spans, None, "{text:?}");
+    assert_eq!(proposal.abstention, None, "{text:?}");
+    assert_eq!(
+        facets_of(&composed(text)),
+        facets_of(&Some(proposal)),
+        "{text:?}: the composer must agree with the topic-only recognizer"
+    );
+}
+
+fn assert_topic_abstains(text: &str) {
+    for proposal in [topic_only(text), composed(text)] {
+        let proposal = proposal.unwrap_or_else(|| panic!("{text:?} must abstain explicitly"));
+        assert!(proposal.abstention.is_some(), "{text:?}");
+        assert_eq!(proposal.session_topic_proposal, None, "{text:?}");
+        assert_eq!(proposal.reminder_proposal, None, "{text:?}");
+        assert_eq!(proposal.item_type, None, "{text:?}");
+    }
+}
+
+fn assert_topic_not_recognized(text: &str) {
+    assert_eq!(
+        topic_only(text),
+        None,
+        "{text:?} must be left for the interpreter"
+    );
+    if let Some(proposal) = composed(text) {
+        assert_eq!(
+            proposal.session_topic_proposal, None,
+            "{text:?} must not derive a topic"
+        );
+    }
+}
+
+#[test]
+fn session_topic_phrases_derive_only_the_topic_facet() {
+    for (text, topic, evidence) in [
+        (
+            "Bring this up in therapy",
+            "therapy",
+            "Bring this up in therapy",
+        ),
+        (
+            "bring this up in therapy.",
+            "therapy",
+            "bring this up in therapy",
+        ),
+        (
+            "Bring it up in therapy!",
+            "therapy",
+            "Bring it up in therapy",
+        ),
+        (
+            "Please bring this up in therapy, thanks.",
+            "therapy",
+            "bring this up in therapy",
+        ),
+        (
+            "Raise this at coaching",
+            "coaching",
+            "Raise this at coaching",
+        ),
+        (
+            "Mention this during supervision",
+            "supervision",
+            "Mention this during supervision",
+        ),
+        (
+            "Discuss this in counseling",
+            "counseling",
+            "Discuss this in counseling",
+        ),
+        (
+            "Discuss it in counselling",
+            "counseling",
+            "Discuss it in counselling",
+        ),
+        (
+            "Talk about this in therapy",
+            "therapy",
+            "Talk about this in therapy",
+        ),
+        (
+            "Bring this up in my therapy session",
+            "therapy",
+            "Bring this up in my therapy session",
+        ),
+        (
+            "Bring this up at my next therapy session",
+            "therapy",
+            "Bring this up at my next therapy session",
+        ),
+        (
+            "Raise it in the next coaching session",
+            "coaching",
+            "Raise it in the next coaching session",
+        ),
+        (
+            "I need to bring this up in therapy",
+            "therapy",
+            "bring this up in therapy",
+        ),
+        (
+            "Remember to raise this in supervision.",
+            "supervision",
+            "raise this in supervision",
+        ),
+        (
+            "Note to self: bring this up in therapy",
+            "therapy",
+            "bring this up in therapy",
+        ),
+        (
+            "BRING THIS UP IN THERAPY",
+            "therapy",
+            "BRING THIS UP IN THERAPY",
+        ),
+        (
+            "\u{1F4DD} Bring this up in therapy",
+            "therapy",
+            "Bring this up in therapy",
+        ),
+    ] {
+        assert_topic_only(text, topic, evidence);
+    }
+}
+
+#[test]
+fn session_topic_spans_count_characters_not_bytes() {
+    let text = "\u{1F4DD}\u{1F4DD} bring this up in therapy";
+    assert_topic_only(text, "therapy", "bring this up in therapy");
+    let span = topic_only(text)
+        .and_then(|proposal| proposal.session_topic_proposal)
+        .and_then(|topic| topic.source_span)
+        .unwrap();
+    assert_eq!(span.start, 3);
+}
+
+#[test]
+fn session_topic_is_a_closed_vocabulary_not_the_first_word_after_the_verb() {
+    for text in [
+        "Bring this in please",
+        "Bring this in tomorrow",
+        "Bring this up in please",
+        "Bring this up in tomorrow",
+        "Discuss this at 5pm",
+        "Discuss this at 17:00",
+        "Talk about this in detail",
+        "Mention this in passing",
+        "Discuss this at home",
+        "Discuss this at work",
+        "Discuss this at personal",
+        "Talk about this in doctor",
+        "Discuss this at the dentist",
+        "Bring this up in the car",
+        "Bring this up in my next session",
+        "Bring this up in my session",
+        "Bring this up in group",
+        "Bring this up with my therapist",
+        "Bring this up in therapist",
+        "Bring this up on therapy",
+        "Bring up this in therapy",
+        "Bring this up",
+        "Bring this up in",
+        "Therapy",
+        "I should see a therapist",
+    ] {
+        assert_topic_not_recognized(text);
+    }
+}
+
+#[test]
+fn session_topic_is_not_derived_when_other_words_surround_the_clause() {
+    for text in [
+        "Bring this up in therapy tomorrow",
+        "Bring this up in therapy with Sam",
+        "Bring this up in therapy and also buy milk",
+        "Sam will bring this up in therapy",
+        "In case it rains, bring this up in therapy",
+        "Had a rough week. Bring this up in therapy.",
+        "Bring this up in therapy. Had a rough week.",
+        "Bring this up in therapy. Bring this up in coaching.",
+        "Bring this up in therapy at 5pm",
+        "xyzzy bring this up in therapy",
+    ] {
+        assert_topic_not_recognized(text);
+    }
+}
+
+#[test]
+fn negated_quoted_reported_and_hypothetical_session_phrases_abstain() {
+    for text in [
+        "Don't bring this up in therapy",
+        "Do not bring this up in therapy",
+        "Never mention this in therapy",
+        "Bring this up in therapy, not coaching",
+        "Bring this up in therapy or never",
+        "I don't want to bring this up in therapy",
+        "Without bringing it up, discuss this in therapy",
+        "\"Bring this up in therapy\"",
+        "'Bring this up in therapy'",
+        "She said \"bring this up in therapy\"",
+        "She said bring this up in therapy",
+        "He told me to bring this up in therapy",
+        "Sam wants to bring this up in therapy",
+        "Sam: bring this up in therapy",
+        "(bring this up in therapy)",
+        "[bring this up in therapy]",
+        "If I bring this up in therapy",
+        "Maybe discuss this in therapy",
+        "Should I bring this up in therapy?",
+        "Bring this up in therapy?",
+        "Bring this up in therapy...",
+        "Bring this up in therapy\u{2026}",
+        "I already did bring this up in therapy",
+        "I already mention this in therapy",
+        "Bring this up in therapy (maybe)",
+        "Might bring this up in therapy",
+        "My sister should bring this up in therapy",
+    ] {
+        assert_topic_abstains(text);
+    }
+}
+
+#[test]
+fn topic_vocabulary_holds_no_scope_name() {
+    for text in [
+        "Bring this up in therapy",
+        "Raise this at coaching",
+        "Mention this during supervision",
+        "Discuss this in counselling",
+    ] {
+        let topic = topic_only(text)
+            .unwrap()
+            .session_topic_proposal
+            .unwrap()
+            .topic;
+        assert!(!matches!(topic.as_str(), "personal" | "work"), "{text:?}");
+    }
+    for text in [
+        "Discuss this at work",
+        "Bring this up at work",
+        "Raise this in personal",
+        "Mention this in the work session",
+    ] {
+        assert_topic_not_recognized(text);
+    }
+}
+
+const REMINDER_ONLY_CORPUS: &[&str] = &[
+    "Remind me 2025-10-20 14:30:00 to call mom",
+    "Remind me tomorrow to call mom",
+    "Remind me to call mom on 2025-10-20 14:30:00",
+    "Remind me 2025-10-20 to call mom",
+    "Remind me to buy milk",
+    "Remind me tomorrow",
+    "Please remind me on Friday to email the plumber.",
+    "Don't remind me 2025-10-20 14:30:00 to call mom",
+    "Remind me every day to call mom",
+    "Sam said remind me tomorrow to call mom",
+    "\"Remind me tomorrow to call mom\"",
+    "Remind me tomorrow to call mom if it rains",
+    "Buy milk",
+    "Therapy tomorrow at 9",
+    "",
+];
+
+#[test]
+fn the_reminder_recognizer_is_unchanged_and_the_composer_defers_to_it() {
+    for text in REMINDER_ONLY_CORPUS {
+        assert_eq!(
+            facets_of(&composed(text)),
+            facets_of(&recognize(text)),
+            "{text:?}: without a topic clause the composer is the reminder recognizer"
+        );
+    }
+    // The reminder lexicon is not widened: these were not reminders before session topics and
+    // still are not, so the topic can never smuggle unknown content into a schedule.
+    for text in [
+        "Remind me 2025-10-20 14:30:00 to bring this up in therapy",
+        "Remind me 2025-10-20 14:30:00 to discuss this in supervision",
+        "Remind me 2025-10-20 14:30:00 to discuss therapy",
+        "Remind me 2025-10-20 14:30:00 to xyzzy frobnicate bring this up in therapy",
+        "Remind me 2025-10-20 14:30:00 to bring this up in therapy xyzzy",
+        "Remind me tomorrow to bring this up in therapy",
+    ] {
+        assert_eq!(recognize(text), None, "{text:?}");
+    }
+}
+
+fn assert_reminder_with_topic(
+    text: &str,
+    topic: &str,
+    topic_evidence: &str,
+    content_evidence: &str,
+    reminder_evidence: &str,
+) -> Proposal {
+    let proposal = composed(text).unwrap_or_else(|| panic!("{text:?} must derive both facets"));
+    assert_eq!(proposal.abstention, None, "{text:?}");
+    assert_rides_on_action(&proposal, text);
+    let content = proposal.source_spans.as_ref().unwrap()[0];
+    assert_eq!(selected(text, content), content_evidence, "{text:?}");
+    let reminder = reminder_of(&proposal);
+    assert_eq!(
+        selected(text, reminder.source_span.unwrap()),
+        reminder_evidence,
+        "{text:?}"
+    );
+    let facet = proposal
+        .session_topic_proposal
+        .as_ref()
+        .unwrap_or_else(|| panic!("{text:?} must carry a topic facet"));
+    assert_eq!(facet.topic, topic, "{text:?}");
+    assert_eq!(
+        selected(text, facet.source_span.unwrap()),
+        topic_evidence,
+        "{text:?}"
+    );
+    proposal
+}
+
+#[test]
+fn a_reminder_whose_content_is_the_topic_clause_keeps_both_facets() {
+    let text = "Remind me 2025-10-20 14:30:00 to bring this up in therapy";
+    let proposal = assert_reminder_with_topic(
+        text,
+        "therapy",
+        "bring this up in therapy",
+        "bring this up in therapy",
+        FUTURE_PHRASE,
+    );
+    assert_eq!(
+        reminder_of(&proposal).instant.as_deref(),
+        Some(FUTURE_INSTANT)
+    );
+    assert_eq!(
+        reminder_of(&proposal).quality,
+        TimeResolutionQuality::Explicit
+    );
+
+    let text = "Please remind me 2025-10-20 14:30:00 to discuss this in my supervision session.";
+    assert_reminder_with_topic(
+        text,
+        "supervision",
+        "discuss this in my supervision session",
+        "discuss this in my supervision session",
+        FUTURE_PHRASE,
+    );
+
+    // "next" inside a command is competing time evidence, so the command abstains.
+    let proposal =
+        composed("Remind me 2025-10-20 14:30:00 to discuss this in my next supervision session")
+            .expect("abstention");
+    assert_eq!(proposal.abstention, Some(AbstentionReason::Ambiguous));
+    assert_eq!(proposal.session_topic_proposal, None);
+    assert_eq!(proposal.reminder_proposal, None);
+
+    let text = "Remind me to raise it at coaching on 2025-10-20 14:30:00";
+    assert_reminder_with_topic(
+        text,
+        "coaching",
+        "raise it at coaching",
+        "raise it at coaching",
+        FUTURE_PHRASE,
+    );
+
+    let text = "Remind me tomorrow to bring this up in therapy";
+    let proposal = assert_reminder_with_topic(
+        text,
+        "therapy",
+        "bring this up in therapy",
+        "bring this up in therapy",
+        "tomorrow",
+    );
+    assert_eq!(
+        reminder_of(&proposal).quality,
+        TimeResolutionQuality::Ambiguous
+    );
+    assert_eq!(reminder_of(&proposal).instant, None);
+}
+
+#[test]
+fn a_topic_sentence_next_to_a_reminder_sentence_keeps_both_facets() {
+    let text = "Bring this up in therapy. Remind me 2025-10-20 14:30:00 to call mom";
+    let proposal = assert_reminder_with_topic(
+        text,
+        "therapy",
+        "Bring this up in therapy",
+        "call mom",
+        FUTURE_PHRASE,
+    );
+    assert_eq!(
+        reminder_of(&proposal).instant.as_deref(),
+        Some(FUTURE_INSTANT)
+    );
+
+    let text = "Remind me 2025-10-20 14:30:00 to call mom. Bring this up in therapy.";
+    assert_reminder_with_topic(
+        text,
+        "therapy",
+        "Bring this up in therapy",
+        "call mom",
+        FUTURE_PHRASE,
+    );
+
+    let text = "\u{1F4DD} Raise this at coaching!\nRemind me tomorrow to email the plumber";
+    assert_reminder_with_topic(
+        text,
+        "coaching",
+        "Raise this at coaching",
+        "email the plumber",
+        "tomorrow",
+    );
+
+    // The same text without the topic sentence is exactly the reminder recognizer's result.
+    let reminder_text = "Remind me 2025-10-20 14:30:00 to call mom";
+    let reminder = recognize(reminder_text).unwrap();
+    let mixed =
+        composed("Bring this up in therapy. Remind me 2025-10-20 14:30:00 to call mom").unwrap();
+    assert_eq!(
+        mixed.reminder_proposal.as_ref().unwrap().instant,
+        reminder_of(&reminder).instant
+    );
+    assert_eq!(mixed.item_type, reminder.item_type);
+}
+
+#[test]
+fn mixed_input_with_an_unsafe_or_unsupported_half_derives_no_facet() {
+    for text in [
+        "Don't bring this up in therapy. Remind me 2025-10-20 14:30:00 to call mom",
+        "Remind me 2025-10-20 14:30:00 to call mom. Don't bring this up in therapy",
+        "Bring this up in therapy. Don't remind me 2025-10-20 14:30:00 to call mom",
+        "Bring this up in therapy. Remind me every day to call mom",
+        "Bring this up in therapy. Sam said remind me 2025-10-20 14:30:00 to call mom",
+        "Remind me 2025-10-20 14:30:00 to not bring this up in therapy",
+        "Remind me 2025-10-20 14:30:00 to bring this up in therapy if it rains",
+        "Remind me 2025-10-20 14:30:00 to \"bring this up in therapy\"",
+    ] {
+        let proposal = composed(text).unwrap_or_else(|| panic!("{text:?} must abstain"));
+        assert!(proposal.abstention.is_some(), "{text:?}");
+        assert_eq!(proposal.session_topic_proposal, None, "{text:?}");
+        assert_eq!(proposal.reminder_proposal, None, "{text:?}");
+    }
+    for text in [
+        "Bring this up in therapy. Remind me to call mom",
+        "Bring this up in therapy. Remind me tomorrow",
+        "Bring this up in therapy. Remind me 2025-10-20 14:30:00 to xyzzy frobnicate",
+        "Remind me 2025-10-20 14:30:00 to xyzzy frobnicate bring this up in therapy",
+        "Remind me 2025-10-20 14:30:00 to bring this up in therapy xyzzy",
+        "Remind me 2025-10-20 14:30:00 to call mom and bring this up in therapy",
+        "Remind me 2025-10-20 14:30:00 to bring this up in therapy and call mom",
+    ] {
+        assert_eq!(composed(text), None, "{text:?}");
+    }
+}
+
+#[test]
+fn topic_only_recognizer_never_takes_a_reminder_or_other_sentences() {
+    for text in [
+        "Bring this up in therapy. Remind me 2025-10-20 14:30:00 to call mom",
+        "Remind me 2025-10-20 14:30:00 to bring this up in therapy",
+        "Bring this up in therapy. Thanks for dinner.",
+    ] {
+        assert_eq!(topic_only(text), None, "{text:?}");
+    }
+}
+
+// ---- Provider-free retrieval handoff, scope and disclosure invariants ----
+
+struct SessionClock;
+
+impl Clock for SessionClock {
+    fn now(&self) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+}
+
+fn open_database(label: &str) -> (Database, String) {
+    let path = format!(
+        "{}/test_fast_path_{}_{}.db",
+        std::env::temp_dir().display(),
+        label,
+        uuid::Uuid::new_v4()
+    );
+    (Database::open(&path, Arc::new(SessionClock)).unwrap(), path)
+}
+
+/// Save a capture and its item the way ingress does, on a route with one authorization.
+fn save_capture_item(db: &mut Database, text: &str, scope: &str, route_id: &str) {
+    let tx = db.immediate_transaction().unwrap();
+    tx.execute(
+        "INSERT INTO routes (route_id, route_name, scope, processing_destinations, preview_safe, created_at)
+         VALUES (?, 'Local route', ?, '[]', 0, '2026-01-15T10:30:00Z')",
+        rusqlite::params![route_id, scope],
+    )
+    .unwrap();
+    tx.execute(
+        "INSERT INTO route_authorizations (auth_id, route_id, capability, authorized_destinations, created_at)
+         VALUES ('auth-1', ?, 'interpretation', '[]', '2026-01-15T10:30:00Z')",
+        [route_id],
+    )
+    .unwrap();
+    tx.execute(
+        "INSERT INTO captures (capture_id, text, audio_reference, capture_instant, timezone_id,
+            utc_offset_minutes, locale, calendar, item_scope, route_id, entry_locked, created_at, session_topic)
+         VALUES (?, ?, NULL, '2026-01-15T10:30:00Z', 'UTC', 0, 'en', 'gregorian', ?, ?, 0, '2026-01-15T10:30:00Z', NULL)",
+        rusqlite::params![CAPTURE_ID, text, scope, route_id],
+    )
+    .unwrap();
+    tx.execute(
+        "INSERT INTO items (item_id, capture_id, revision, lifecycle_state, save_state, sync_state,
+            processing_state, transcription_state, created_at, updated_at)
+         VALUES (?, ?, 0, 'active', 'saved', 'not_synced', 'unprocessed', 'unprocessed', '2026-01-15T10:30:00Z', '2026-01-15T10:30:00Z')",
+        rusqlite::params![ITEM_ID, CAPTURE_ID],
+    )
+    .unwrap();
+    sync_item_in_tx(&tx, ITEM_ID).unwrap();
+    tx.commit().unwrap();
+}
+
+/// Persist a recognized proposal as an unapplied row, keeping the same fields the store reads.
+fn store_proposal(db: &mut Database, proposal: &Proposal) {
+    let tx = db.immediate_transaction().unwrap();
+    tx.execute(
+        "INSERT INTO proposals (proposal_id, item_id, capture_id, source_revision, schema_version,
+            text_basis_kind, text_basis_id, applied_state, proposal_type, reminder_proposal,
+            session_topic_proposal, source_spans, abstained, request_version, created_at)
+         VALUES (?, ?, ?, ?, ?, 'original', NULL, 'unapplied', ?, ?, ?, ?, ?, ?, '2026-01-15T10:30:00Z')",
+        rusqlite::params![
+            proposal.proposal_id,
+            proposal.item_id,
+            proposal.capture_id,
+            proposal.source_revision,
+            proposal.schema_version,
+            proposal.item_type.map(|item_type| item_type.as_str().to_string()),
+            proposal
+                .reminder_proposal
+                .as_ref()
+                .map(|reminder| serde_json::to_string(reminder).unwrap()),
+            proposal
+                .session_topic_proposal
+                .as_ref()
+                .map(|topic| topic.topic.clone()),
+            proposal
+                .source_spans
+                .as_ref()
+                .map(|spans| serde_json::to_string(spans).unwrap()),
+            i32::from(proposal.abstention.is_some()),
+            proposal.request_version,
+        ],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+}
+
+/// Scope, route, authorization and preview rows that a derived topic must never touch.
+fn policy_snapshot(db: &Database) -> Vec<String> {
+    let mut rows = Vec::new();
+    for query in [
+        "SELECT item_scope || '|' || route_id || '|' || entry_locked || '|' || COALESCE(text, '') FROM captures",
+        "SELECT COALESCE(current_scope, 'none') || '|' || lifecycle_state || '|' || revision FROM items",
+        "SELECT route_id || '|' || scope || '|' || processing_destinations || '|' || preview_safe FROM routes",
+        "SELECT route_id || '|' || capability || '|' || authorized_destinations FROM route_authorizations",
+    ] {
+        let mut statement = db.conn().prepare(query).unwrap();
+        let found: Vec<String> = statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        rows.extend(found);
+    }
+    rows
+}
+
+fn topic_hits(db: &Database, topic: &str, filter: QueryFilter) -> Vec<(String, String)> {
+    let mut filter = filter;
+    filter.session_topics = vec![topic.to_string()];
+    scoped_query(db.conn(), "therapy", &filter, &QueryPagination::default())
+        .unwrap()
+        .hits
+        .into_iter()
+        .map(|hit| (hit.item_id, hit.current_text))
+        .collect()
+}
+
+#[test]
+fn recognized_session_note_is_retrievable_by_topic_without_a_provider() {
+    let text = "Bring this up in therapy";
+    let (mut db, path) = open_database("topic_handoff");
+    save_capture_item(&mut db, text, "personal", "local");
+    let before = policy_snapshot(&db);
+
+    // Nothing is filed under the topic until the recognized proposal is applied.
+    assert!(topic_hits(&db, "therapy", QueryFilter::personal_only()).is_empty());
+
+    let proposal = topic_only(text).expect("topic proposal");
+    store_proposal(&mut db, &proposal);
+    let tx = db.immediate_transaction().unwrap();
+    let state = apply_proposal(&tx, ITEM_ID, &proposal.proposal_id).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(state.session_topic.as_deref(), Some("therapy"));
+
+    // Retrieval is local: only the store and the scoped index are involved, no provider.
+    let mut local = QueryFilter::personal_only();
+    local.route_ids = vec!["local".to_string()];
+    assert_eq!(
+        topic_hits(&db, "therapy", local),
+        vec![(ITEM_ID.to_string(), text.to_string())]
+    );
+    assert_eq!(
+        topic_hits(&db, "therapy", QueryFilter::personal_only()),
+        vec![(ITEM_ID.to_string(), text.to_string())]
+    );
+    assert!(topic_hits(&db, "coaching", QueryFilter::personal_only()).is_empty());
+
+    // The original source is preserved and scope, route, authorization and preview are unchanged.
+    let tx = db.immediate_transaction().unwrap();
+    let reloaded = load_item_state(&tx, ITEM_ID).unwrap().unwrap();
+    tx.commit().unwrap();
+    assert_eq!(reloaded.current_text.text(), Some(text));
+    assert_eq!(reloaded.scope.as_str(), "personal");
+    assert_eq!(policy_snapshot(&db), before);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn applying_a_derived_topic_leaves_scope_and_disclosure_unchanged_and_stays_in_scope() {
+    let text = "Raise this at coaching";
+    let (mut db, path) = open_database("topic_scope");
+    save_capture_item(&mut db, text, "work", "route-work");
+    let before = policy_snapshot(&db);
+
+    let proposal = topic_only(text).expect("topic proposal");
+    store_proposal(&mut db, &proposal);
+    let tx = db.immediate_transaction().unwrap();
+    let state = apply_proposal(&tx, ITEM_ID, &proposal.proposal_id).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(state.session_topic.as_deref(), Some("coaching"));
+    assert_eq!(state.scope.as_str(), "work");
+    assert_eq!(policy_snapshot(&db), before);
+
+    // A personal-only reader still cannot see the work note through its topic.
+    let hidden = scoped_query(
+        db.conn(),
+        "coaching",
+        &{
+            let mut filter = QueryFilter::personal_only();
+            filter.session_topics = vec!["coaching".to_string()];
+            filter
+        },
+        &QueryPagination::default(),
+    )
+    .unwrap();
+    assert!(hidden.hits.is_empty());
+    assert_eq!(hidden.total_accessible, 0);
+    let visible = scoped_query(
+        db.conn(),
+        "coaching",
+        &{
+            let mut filter = QueryFilter::both_scopes();
+            filter.session_topics = vec!["coaching".to_string()];
+            filter
+        },
+        &QueryPagination::default(),
+    )
+    .unwrap();
+    assert_eq!(visible.hits.len(), 1);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn a_mixed_proposal_applies_its_topic_and_leaves_policy_alone() {
+    let text = "Bring this up in therapy. Remind me 2025-10-20 14:30:00 to call mom";
+    let (mut db, path) = open_database("topic_mixed");
+    save_capture_item(&mut db, text, "personal", "local");
+    let before = policy_snapshot(&db);
+
+    let proposal = composed(text).expect("mixed proposal");
+    assert!(proposal.reminder_proposal.is_some());
+    store_proposal(&mut db, &proposal);
+    let tx = db.immediate_transaction().unwrap();
+    let state = apply_proposal(&tx, ITEM_ID, &proposal.proposal_id).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(state.session_topic.as_deref(), Some("therapy"));
+    assert_eq!(state.item_type, Some(ItemType::Action));
+    assert_eq!(policy_snapshot(&db), before);
+    assert_eq!(
+        topic_hits(&db, "therapy", QueryFilter::personal_only()),
+        vec![(ITEM_ID.to_string(), text.to_string())]
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn an_abstained_topic_phrase_files_nothing() {
+    let text = "Don't bring this up in therapy";
+    let (mut db, path) = open_database("topic_abstain");
+    save_capture_item(&mut db, text, "personal", "local");
+    let proposal = topic_only(text).expect("abstention");
+    store_proposal(&mut db, &proposal);
+    let tx = db.immediate_transaction().unwrap();
+    assert!(apply_proposal(&tx, ITEM_ID, &proposal.proposal_id).is_err());
+    tx.commit().unwrap();
+    assert!(topic_hits(&db, "therapy", QueryFilter::personal_only()).is_empty());
+    let _ = std::fs::remove_file(path);
 }
