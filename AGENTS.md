@@ -25,6 +25,8 @@ This project explicitly authorizes agent-driven delivery with **no routine human
 
 Credentials, account enrollment/legal actions, and genuine device experiences are external inputs. Continue independent work when one is missing. Never fabricate a device test, successful deployment, or supported provider capability.
 
+For P08/V08 external execution inputs, read [the prerequisite status and provider configuration reference](docs/features/m1-external-prerequisites.md). Neither task is complete until its original real-evidence criteria pass.
+
 ## Implementation and review
 
 - Use descriptive variable names and keep provider protocols separate from domain behavior.
