@@ -707,9 +707,29 @@ fn add_profile_revocation_and_requeue_v4(tx: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Step 5: Add source_phrase column to reminders table for N01, so a requested phrase that is
-/// ambiguous or unscheduled stays inspectable after the item's text is corrected.
+/// Step 5 (N01): reminder source phrase, state version and user command ledger.
+/// - `source_phrase` keeps a requested phrase that is ambiguous or unscheduled inspectable after
+///   the item's text is corrected.
+/// - `state_version` increases on every reminder write so a user command can name the version it
+///   was issued against (compare-and-set).
+/// - `reminder_commands` records each applied user reminder command by its immutable command ID
+///   with its original result, so a delayed retry returns that result instead of reapplying.
 fn add_reminder_source_phrase_v5(tx: &Transaction<'_>) -> Result<()> {
     tx.execute("ALTER TABLE reminders ADD COLUMN source_phrase TEXT", [])?;
+    tx.execute(
+        "ALTER TABLE reminders ADD COLUMN state_version INTEGER NOT NULL DEFAULT 1",
+        [],
+    )?;
+    tx.execute(
+        "CREATE TABLE reminder_commands (
+            command_id TEXT PRIMARY KEY,
+            item_id TEXT NOT NULL,
+            command_fingerprint TEXT NOT NULL,
+            result_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (item_id) REFERENCES items(item_id)
+        )",
+        [],
+    )?;
     Ok(())
 }

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
-use rusqlite::Transaction;
+use rusqlite::{Connection, OptionalExtension, Transaction};
 use std::sync::Arc;
 
 use ohand_core::domain::status::{
@@ -10,8 +10,8 @@ use ohand_core::reminders::state::{
     apply_derived_request, apply_user_time_correction, cancel_for_inactive_item, cancel_reminder,
     desired_notifications, end_item_with_event, get_reminder, list_operations,
     notification_identifier, reconcile_inactive_items, AcknowledgmentState, DeliveryState,
-    DerivedReminderRequest, OperationState, OperationType, ReminderRecord, ReminderStateError,
-    RequestState, ScheduleState, UnschedulableReason, UserTimeCorrection,
+    DerivedReminderRequest, OperationState, OperationType, ReminderCancellation, ReminderRecord,
+    ReminderStateError, RequestState, ScheduleState, UnschedulableReason, UserTimeCorrection,
 };
 use ohand_core::store::events::{
     save_event, Correction, CorrectionKind, Event, EventPayload, EventType,
@@ -131,12 +131,46 @@ fn derived(item_id: &str, source_revision: i32, phrase: &str) -> DerivedReminder
     }
 }
 
-fn user_time(item_id: &str, expected_revision: i32, moment: &str) -> UserTimeCorrection {
+/// Current reminder `state_version` of an item, 0 when it has none.
+fn reminder_version(conn: &Connection, item_id: &str) -> i64 {
+    conn.query_row(
+        "SELECT state_version FROM reminders WHERE item_id = ?",
+        [item_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .unwrap()
+    .unwrap_or(0)
+}
+
+fn command_id() -> String {
+    format!("cmd-{}", uuid::Uuid::new_v4())
+}
+
+/// A new user time command issued against the reminder as currently stored.
+fn user_time(
+    conn: &Connection,
+    item_id: &str,
+    expected_revision: i32,
+    moment: &str,
+) -> UserTimeCorrection {
     UserTimeCorrection {
+        command_id: command_id(),
         item_id: item_id.to_string(),
         expected_revision,
+        expected_reminder_version: reminder_version(conn, item_id),
         instant: instant(moment),
         timezone_id: "UTC".to_string(),
+    }
+}
+
+/// A new user cancel command issued against the reminder as currently stored.
+fn cancellation(conn: &Connection, item_id: &str, expected_revision: i32) -> ReminderCancellation {
+    ReminderCancellation {
+        command_id: command_id(),
+        item_id: item_id.to_string(),
+        expected_revision,
+        expected_reminder_version: reminder_version(conn, item_id),
     }
 }
 
@@ -219,11 +253,11 @@ fn reminder_commands_do_not_change_the_item_revision() -> Result<()> {
         apply_user_time_correction(
             tx,
             &clock,
-            &user_time("item-1", revision, "2026-01-17T09:00:00Z"),
+            &user_time(tx, "item-1", revision, "2026-01-17T09:00:00Z"),
         )
     })?;
     run(&mut db, |tx| {
-        cancel_reminder(tx, &clock, "item-1", revision)
+        cancel_reminder(tx, &clock, &cancellation(tx, "item-1", revision))
     })?;
     assert_eq!(item_revision(&mut db, "item-1")?, revision);
     Ok(())
@@ -266,7 +300,7 @@ fn rescheduling_starts_a_new_generation_and_retires_the_old_identifier() -> Resu
         )
     })?;
 
-    let correction = user_time("item-1", revision, "2026-01-17T15:00:00Z");
+    let correction = user_time(db.conn(), "item-1", revision, "2026-01-17T15:00:00Z");
     let second = run(&mut db, |tx| {
         apply_user_time_correction(tx, &clock, &correction)
     })?;
@@ -314,14 +348,11 @@ fn cancelling_a_scheduled_reminder_records_one_cancel_for_its_identifier() -> Re
         )
     })?;
 
-    let cancelled = run(&mut db, |tx| {
-        cancel_reminder(tx, &clock, "item-1", revision)
-    })?
-    .expect("reminder exists");
+    let cancel = cancellation(db.conn(), "item-1", revision);
+    let cancelled =
+        run(&mut db, |tx| cancel_reminder(tx, &clock, &cancel))?.expect("reminder exists");
     assert_eq!(cancelled.request_state, RequestState::Cancelled);
-    let replay = run(&mut db, |tx| {
-        cancel_reminder(tx, &clock, "item-1", revision)
-    })?;
+    let replay = run(&mut db, |tx| cancel_reminder(tx, &clock, &cancel))?;
     assert_eq!(replay, Some(cancelled));
 
     let operations = run(&mut db, |tx| list_operations(tx, &scheduled.reminder_id))?;
@@ -342,7 +373,9 @@ fn cancelling_without_a_reminder_is_a_no_op() -> Result<()> {
     let clock = clock_at(capture_instant());
     assert_eq!(
         run(&mut db, |tx| cancel_reminder(
-            tx, &clock, "item-1", revision
+            tx,
+            &clock,
+            &cancellation(tx, "item-1", revision)
         ))?,
         None
     );
@@ -397,7 +430,7 @@ fn a_completed_item_accepts_no_new_reminder_time() -> Result<()> {
         apply_user_time_correction(
             tx,
             &clock,
-            &user_time("item-1", completed_revision, "2026-01-17T09:00:00Z"),
+            &user_time(tx, "item-1", completed_revision, "2026-01-17T09:00:00Z"),
         )
     });
     assert!(matches!(
@@ -421,14 +454,14 @@ fn user_can_restore_a_cancelled_reminder_under_a_fresh_identifier() -> Result<()
         )
     })?;
     run(&mut db, |tx| {
-        cancel_reminder(tx, &clock, "item-1", revision)
+        cancel_reminder(tx, &clock, &cancellation(tx, "item-1", revision))
     })?;
 
     let restored = run(&mut db, |tx| {
         apply_user_time_correction(
             tx,
             &clock,
-            &user_time("item-1", revision, "2026-01-16T09:00:00Z"),
+            &user_time(tx, "item-1", revision, "2026-01-16T09:00:00Z"),
         )
     })?;
     assert_eq!(restored.request_state, RequestState::Resolved);
@@ -465,7 +498,7 @@ fn ambiguous_time_stays_pending_and_inspectable_with_no_operation() -> Result<()
         apply_user_time_correction(
             tx,
             &clock,
-            &user_time("item-1", revision, "2026-01-20T08:00:00Z"),
+            &user_time(tx, "item-1", revision, "2026-01-20T08:00:00Z"),
         )
     })?;
     assert_eq!(corrected.request_state, RequestState::Resolved);
@@ -533,7 +566,7 @@ fn user_time_in_the_past_is_not_adjusted_or_scheduled() -> Result<()> {
         apply_user_time_correction(
             tx,
             &clock,
-            &user_time("item-1", revision, "2026-01-15T09:00:00Z"),
+            &user_time(tx, "item-1", revision, "2026-01-15T09:00:00Z"),
         )
     })?;
     assert_eq!(
@@ -564,7 +597,7 @@ fn moving_a_scheduled_reminder_into_the_past_retires_the_old_identifier() -> Res
         apply_user_time_correction(
             tx,
             &clock,
-            &user_time("item-1", revision, "2026-01-15T09:00:00Z"),
+            &user_time(tx, "item-1", revision, "2026-01-15T09:00:00Z"),
         )
     })?;
     assert_eq!(
@@ -629,7 +662,7 @@ fn recurring_request_is_saved_unsupported_and_never_reduced_to_one_shot() -> Res
         apply_user_time_correction(
             tx,
             &clock,
-            &user_time("item-1", revision, "2026-01-16T08:00:00Z"),
+            &user_time(tx, "item-1", revision, "2026-01-16T08:00:00Z"),
         )
     })?;
     assert_eq!(manual.request_state, RequestState::Resolved);
@@ -679,7 +712,7 @@ fn derived_output_cannot_replace_an_explicit_user_correction() -> Result<()> {
         apply_user_time_correction(
             tx,
             &clock,
-            &user_time("item-1", revision, "2026-01-17T12:00:00Z"),
+            &user_time(tx, "item-1", revision, "2026-01-17T12:00:00Z"),
         )
     })?;
 
@@ -714,7 +747,7 @@ fn a_user_correction_over_a_derived_time_survives_reprocessing() -> Result<()> {
         apply_user_time_correction(
             tx,
             &clock,
-            &user_time("item-1", revision, "2026-01-17T12:00:00Z"),
+            &user_time(tx, "item-1", revision, "2026-01-17T12:00:00Z"),
         )
     })?;
 
@@ -746,7 +779,7 @@ fn derived_output_cannot_revive_a_cancelled_reminder() -> Result<()> {
         )
     })?;
     run(&mut db, |tx| {
-        cancel_reminder(tx, &clock, "item-1", revision)
+        cancel_reminder(tx, &clock, &cancellation(tx, "item-1", revision))
     })?;
     let result = run(&mut db, |tx| {
         apply_derived_request(
@@ -785,7 +818,11 @@ fn stale_revisions_are_rejected_with_the_current_revision() -> Result<()> {
         })
     ));
     let user_result = run(&mut db, |tx| {
-        apply_user_time_correction(tx, &clock, &user_time("item-1", 7, "2026-01-17T09:00:00Z"))
+        apply_user_time_correction(
+            tx,
+            &clock,
+            &user_time(tx, "item-1", 7, "2026-01-17T09:00:00Z"),
+        )
     });
     assert!(matches!(
         user_result,
@@ -795,7 +832,9 @@ fn stale_revisions_are_rejected_with_the_current_revision() -> Result<()> {
             ..
         })
     ));
-    let cancel_result = run(&mut db, |tx| cancel_reminder(tx, &clock, "item-1", 0));
+    let cancel_result = run(&mut db, |tx| {
+        cancel_reminder(tx, &clock, &cancellation(tx, "item-1", 0))
+    });
     assert!(matches!(
         cancel_result,
         Err(ReminderStateError::StaleRevision { .. })
@@ -832,7 +871,7 @@ fn unknown_timezone_is_rejected() -> Result<()> {
     let mut db = open_db(&temp_db_path("bad_tz"))?;
     let revision = insert_item(&mut db, "item-1", ROOFER_TEXT, true)?;
     let clock = clock_at(capture_instant());
-    let mut correction = user_time("item-1", revision, "2026-01-17T09:00:00Z");
+    let mut correction = user_time(db.conn(), "item-1", revision, "2026-01-17T09:00:00Z");
     correction.timezone_id = "Mars/Olympus".to_string();
     let result = run(&mut db, |tx| {
         apply_user_time_correction(tx, &clock, &correction)
@@ -854,7 +893,7 @@ fn failed_command_rolls_back_state_and_operations_together() -> Result<()> {
         apply_user_time_correction(
             tx,
             &clock,
-            &user_time("item-1", revision, "2026-01-17T09:00:00Z"),
+            &user_time(tx, "item-1", revision, "2026-01-17T09:00:00Z"),
         )?;
         Err(ReminderStateError::Corrupt("simulated crash".to_string()))
     });
@@ -873,19 +912,16 @@ fn failed_command_rolls_back_state_and_operations_together() -> Result<()> {
 fn state_operations_and_idempotency_survive_reopening_the_database_file() -> Result<()> {
     let path = temp_db_path("reopen");
     let clock = clock_at(capture_instant());
-    let (before, request) = {
+    let (before, request, correction) = {
         let mut db = open_db(&path)?;
         let revision = insert_item(&mut db, "item-1", ROOFER_TEXT, true)?;
         let request = derived("item-1", revision, "2026-01-16 09:00:00");
         let record = run(&mut db, |tx| apply_derived_request(tx, &clock, &request))?;
+        let correction = user_time(db.conn(), "item-1", revision, "2026-01-17T09:00:00Z");
         run(&mut db, |tx| {
-            apply_user_time_correction(
-                tx,
-                &clock,
-                &user_time("item-1", revision, "2026-01-17T09:00:00Z"),
-            )
+            apply_user_time_correction(tx, &clock, &correction)
         })?;
-        (record, request)
+        (record, request, correction)
     };
 
     let mut db = open_db(&path)?;
@@ -904,7 +940,7 @@ fn state_operations_and_idempotency_survive_reopening_the_database_file() -> Res
         Err(ReminderStateError::CommittedTimeProtected)
     ));
     let replay = run(&mut db, |tx| {
-        apply_user_time_correction(tx, &clock, &user_time("item-1", 1, "2026-01-17T09:00:00Z"))
+        apply_user_time_correction(tx, &clock, &correction)
     })?;
     assert_eq!(replay, after);
     assert_eq!(operations(&mut db, "item-1")?.len(), 3);
@@ -914,18 +950,19 @@ fn state_operations_and_idempotency_survive_reopening_the_database_file() -> Res
 #[test]
 fn concurrent_retries_of_one_command_produce_one_reminder_and_one_operation() -> Result<()> {
     let path = temp_db_path("concurrent");
-    let revision = {
+    let correction = {
         let mut db = open_db(&path)?;
-        insert_item(&mut db, "item-1", ROOFER_TEXT, true)?
+        let revision = insert_item(&mut db, "item-1", ROOFER_TEXT, true)?;
+        user_time(db.conn(), "item-1", revision, "2026-01-16T09:00:00Z")
     };
 
     let handles: Vec<_> = (0..4)
         .map(|_| {
             let path = path.clone();
+            let correction = correction.clone();
             std::thread::spawn(move || -> Result<ReminderRecord> {
                 let mut db = open_db(&path)?;
                 let clock = clock_at(capture_instant());
-                let correction = user_time("item-1", revision, "2026-01-16T09:00:00Z");
                 Ok(run(&mut db, |tx| {
                     apply_user_time_correction(tx, &clock, &correction)
                 })?)
@@ -952,7 +989,7 @@ fn concurrent_retries_of_one_command_produce_one_reminder_and_one_operation() ->
 fn late_replay_does_not_flip_a_scheduled_reminder_to_past() -> Result<()> {
     let mut db = open_db(&temp_db_path("late_user_replay"))?;
     let revision = insert_item(&mut db, "item-1", ROOFER_TEXT, true)?;
-    let correction = user_time("item-1", revision, "2026-01-16T09:00:00Z");
+    let correction = user_time(db.conn(), "item-1", revision, "2026-01-16T09:00:00Z");
     let first = run(&mut db, |tx| {
         apply_user_time_correction(tx, &clock_at(capture_instant()), &correction)
     })?;
@@ -1042,7 +1079,7 @@ fn derived_output_cannot_reduce_a_stored_recurrence_to_a_one_shot() -> Result<()
         apply_user_time_correction(
             tx,
             &clock,
-            &user_time("item-1", revision, "2026-01-16T09:00:00Z"),
+            &user_time(tx, "item-1", revision, "2026-01-16T09:00:00Z"),
         )
     })?;
     assert_eq!(explicit.request_state, RequestState::Resolved);
@@ -1146,7 +1183,7 @@ fn expired_opportunity_loads_through_the_item_status_api_with_its_own_reason_col
     );
 
     run(&mut db, |tx| {
-        cancel_reminder(tx, &clock, "item-1", revision)
+        cancel_reminder(tx, &clock, &cancellation(tx, "item-1", revision))
     })?;
     let cancelled = run_status(&mut db, "item-1")?;
     assert_eq!(
@@ -1223,7 +1260,7 @@ fn the_requested_phrase_survives_a_text_correction_while_ambiguity_is_pending() 
         apply_user_time_correction(
             tx,
             &clock,
-            &user_time("item-1", corrected_revision, "2026-01-20T08:00:00Z"),
+            &user_time(tx, "item-1", corrected_revision, "2026-01-20T08:00:00Z"),
         )
     })?;
     assert_eq!(resolved.request_state, RequestState::Resolved);
@@ -1366,7 +1403,7 @@ fn sub_second_user_time_replay_is_idempotent() -> Result<()> {
     let mut db = open_db(&temp_db_path("sub_second"))?;
     let revision = insert_item(&mut db, "item-1", ROOFER_TEXT, true)?;
     let clock = clock_at(capture_instant());
-    let mut correction = user_time("item-1", revision, "2026-01-16T09:00:00Z");
+    let mut correction = user_time(db.conn(), "item-1", revision, "2026-01-16T09:00:00Z");
     correction.instant = instant("2026-01-16T09:00:00.500Z");
 
     let first = run(&mut db, |tx| {
@@ -1394,11 +1431,11 @@ fn timezone_only_correction_updates_display_timezone_without_a_new_generation() 
     let mut db = open_db(&temp_db_path("timezone_only"))?;
     let revision = insert_item(&mut db, "item-1", ROOFER_TEXT, true)?;
     let clock = clock_at(capture_instant());
-    let utc = user_time("item-1", revision, "2026-01-16T14:00:00Z");
+    let utc = user_time(db.conn(), "item-1", revision, "2026-01-16T14:00:00Z");
     let first = run(&mut db, |tx| apply_user_time_correction(tx, &clock, &utc))?;
     assert_eq!(first.timezone_id.as_deref(), Some("UTC"));
 
-    let mut new_york = utc.clone();
+    let mut new_york = user_time(db.conn(), "item-1", revision, "2026-01-16T14:00:00Z");
     new_york.timezone_id = "America/New_York".to_string();
     let second = run(&mut db, |tx| {
         apply_user_time_correction(tx, &clock, &new_york)
@@ -1420,5 +1457,254 @@ fn timezone_only_correction_updates_display_timezone_without_a_new_generation() 
         apply_user_time_correction(tx, &clock, &new_york)
     })?;
     assert_eq!(replay, second);
+    Ok(())
+}
+
+#[test]
+fn a_delayed_edit_replay_after_a_newer_edit_returns_its_original_result_and_changes_nothing(
+) -> Result<()> {
+    let mut db = open_db(&temp_db_path("delayed_edit_replay"))?;
+    let revision = insert_item(&mut db, "item-1", ROOFER_TEXT, true)?;
+    let clock = clock_at(capture_instant());
+    let nine = user_time(db.conn(), "item-1", revision, "2026-01-16T09:00:00Z");
+    let first = run(&mut db, |tx| apply_user_time_correction(tx, &clock, &nine))?;
+    let ten = user_time(db.conn(), "item-1", revision, "2026-01-16T10:00:00Z");
+    let newer = run(&mut db, |tx| apply_user_time_correction(tx, &clock, &ten))?;
+    assert_eq!(newer.schedule_generation, 2);
+    let operations_before = operations(&mut db, "item-1")?;
+
+    let replay = run(&mut db, |tx| apply_user_time_correction(tx, &clock, &nine))?;
+    assert_eq!(replay, first);
+    let current = reminder(&mut db, "item-1")?.unwrap();
+    assert_eq!(current, newer);
+    assert_eq!(
+        current.resolved_instant,
+        Some(instant("2026-01-16T10:00:00Z"))
+    );
+    assert_eq!(operations(&mut db, "item-1")?, operations_before);
+    Ok(())
+}
+
+#[test]
+fn a_delayed_cancel_replay_after_a_restore_does_not_cancel_again() -> Result<()> {
+    let mut db = open_db(&temp_db_path("delayed_cancel_replay"))?;
+    let revision = insert_item(&mut db, "item-1", ROOFER_TEXT, true)?;
+    let clock = clock_at(capture_instant());
+    run(&mut db, |tx| {
+        apply_derived_request(
+            tx,
+            &clock,
+            &derived("item-1", revision, "2026-01-16 09:00:00"),
+        )
+    })?;
+    let cancel = cancellation(db.conn(), "item-1", revision);
+    let cancelled = run(&mut db, |tx| cancel_reminder(tx, &clock, &cancel))?;
+    let restore = user_time(db.conn(), "item-1", revision, "2026-01-16T09:00:00Z");
+    let restored = run(&mut db, |tx| {
+        apply_user_time_correction(tx, &clock, &restore)
+    })?;
+    assert_eq!(restored.request_state, RequestState::Resolved);
+    let operations_before = operations(&mut db, "item-1")?;
+
+    let replay = run(&mut db, |tx| cancel_reminder(tx, &clock, &cancel))?;
+    assert_eq!(replay, cancelled);
+    assert_eq!(reminder(&mut db, "item-1")?.unwrap(), restored);
+    assert_eq!(operations(&mut db, "item-1")?, operations_before);
+    let desired = run(&mut db, desired_notifications)?;
+    assert_eq!(
+        desired[0].notification_id,
+        restored.notification_id().unwrap()
+    );
+    Ok(())
+}
+
+#[test]
+fn a_distinct_command_issued_against_an_older_reminder_version_is_rejected() -> Result<()> {
+    let mut db = open_db(&temp_db_path("stale_reminder_version"))?;
+    let revision = insert_item(&mut db, "item-1", ROOFER_TEXT, true)?;
+    let clock = clock_at(capture_instant());
+    let created = run(&mut db, |tx| {
+        apply_user_time_correction(
+            tx,
+            &clock,
+            &user_time(tx, "item-1", revision, "2026-01-16T09:00:00Z"),
+        )
+    })?;
+    // Two devices act on the same view of the reminder.
+    let edit = user_time(db.conn(), "item-1", revision, "2026-01-16T10:00:00Z");
+    let stale_edit = user_time(db.conn(), "item-1", revision, "2026-01-16T11:00:00Z");
+    let stale_cancel = cancellation(db.conn(), "item-1", revision);
+    let edited = run(&mut db, |tx| apply_user_time_correction(tx, &clock, &edit))?;
+    let operations_before = operations(&mut db, "item-1")?;
+
+    let result = run(&mut db, |tx| {
+        apply_user_time_correction(tx, &clock, &stale_edit)
+    });
+    match result {
+        Err(ReminderStateError::StaleReminderVersion {
+            expected, current, ..
+        }) => {
+            assert_eq!(expected, created.state_version);
+            assert_eq!(current, edited.state_version);
+        }
+        other => panic!("expected stale reminder version, got {other:?}"),
+    }
+    let result = run(&mut db, |tx| cancel_reminder(tx, &clock, &stale_cancel));
+    assert!(matches!(
+        result,
+        Err(ReminderStateError::StaleReminderVersion { .. })
+    ));
+    assert_eq!(reminder(&mut db, "item-1")?.unwrap(), edited);
+    assert_eq!(operations(&mut db, "item-1")?, operations_before);
+
+    // A rejected command was not recorded, so it can be reissued against the current version.
+    let reissued = UserTimeCorrection {
+        expected_reminder_version: edited.state_version,
+        ..stale_edit
+    };
+    let applied = run(&mut db, |tx| {
+        apply_user_time_correction(tx, &clock, &reissued)
+    })?;
+    assert_eq!(
+        applied.resolved_instant,
+        Some(instant("2026-01-16T11:00:00Z"))
+    );
+    Ok(())
+}
+
+#[test]
+fn derived_writes_advance_the_reminder_version_seen_by_user_commands() -> Result<()> {
+    let mut db = open_db(&temp_db_path("derived_bumps_version"))?;
+    let revision = insert_item(&mut db, "item-1", ROOFER_TEXT, true)?;
+    let clock = clock_at(capture_instant());
+    let before_derivation = user_time(db.conn(), "item-1", revision, "2026-01-17T09:00:00Z");
+    assert_eq!(before_derivation.expected_reminder_version, 0);
+    let derived_record = run(&mut db, |tx| {
+        apply_derived_request(
+            tx,
+            &clock,
+            &derived("item-1", revision, "2026-01-16 09:00:00"),
+        )
+    })?;
+    assert_eq!(derived_record.state_version, 1);
+
+    let result = run(&mut db, |tx| {
+        apply_user_time_correction(tx, &clock, &before_derivation)
+    });
+    assert!(matches!(
+        result,
+        Err(ReminderStateError::StaleReminderVersion {
+            expected: 0,
+            current: 1,
+            ..
+        })
+    ));
+    assert_eq!(reminder(&mut db, "item-1")?.unwrap(), derived_record);
+    Ok(())
+}
+
+#[test]
+fn reusing_a_command_id_for_different_content_is_a_conflict() -> Result<()> {
+    let mut db = open_db(&temp_db_path("command_id_reuse"))?;
+    let revision = insert_item(&mut db, "item-1", ROOFER_TEXT, true)?;
+    let clock = clock_at(capture_instant());
+    let original = user_time(db.conn(), "item-1", revision, "2026-01-16T09:00:00Z");
+    let first = run(&mut db, |tx| {
+        apply_user_time_correction(tx, &clock, &original)
+    })?;
+
+    let mut different_time = original.clone();
+    different_time.instant = instant("2026-01-16T10:00:00Z");
+    let result = run(&mut db, |tx| {
+        apply_user_time_correction(tx, &clock, &different_time)
+    });
+    assert!(matches!(
+        result,
+        Err(ReminderStateError::CommandIdReused { .. })
+    ));
+
+    let cancel_with_same_id = ReminderCancellation {
+        command_id: original.command_id.clone(),
+        ..cancellation(db.conn(), "item-1", revision)
+    };
+    let result = run(&mut db, |tx| {
+        cancel_reminder(tx, &clock, &cancel_with_same_id)
+    });
+    assert!(matches!(
+        result,
+        Err(ReminderStateError::CommandIdReused { .. })
+    ));
+    assert_eq!(reminder(&mut db, "item-1")?.unwrap(), first);
+    Ok(())
+}
+
+#[test]
+fn concurrent_conflicting_commands_apply_exactly_one() -> Result<()> {
+    let path = temp_db_path("concurrent_conflict");
+    let (edit, cancel, scheduled) = {
+        let mut db = open_db(&path)?;
+        let revision = insert_item(&mut db, "item-1", ROOFER_TEXT, true)?;
+        let clock = clock_at(capture_instant());
+        let scheduled = run(&mut db, |tx| {
+            apply_user_time_correction(
+                tx,
+                &clock,
+                &user_time(tx, "item-1", revision, "2026-01-16T09:00:00Z"),
+            )
+        })?;
+        (
+            user_time(db.conn(), "item-1", revision, "2026-01-16T10:00:00Z"),
+            cancellation(db.conn(), "item-1", revision),
+            scheduled,
+        )
+    };
+
+    let edit_path = path.clone();
+    let edit_handle = std::thread::spawn(move || -> Result<bool> {
+        let mut db = open_db(&edit_path)?;
+        let clock = clock_at(capture_instant());
+        match run(&mut db, |tx| apply_user_time_correction(tx, &clock, &edit)) {
+            Ok(_) => Ok(true),
+            Err(ReminderStateError::StaleReminderVersion { .. }) => Ok(false),
+            Err(other) => Err(other.into()),
+        }
+    });
+    let cancel_path = path.clone();
+    let cancel_handle = std::thread::spawn(move || -> Result<bool> {
+        let mut db = open_db(&cancel_path)?;
+        let clock = clock_at(capture_instant());
+        match run(&mut db, |tx| cancel_reminder(tx, &clock, &cancel)) {
+            Ok(_) => Ok(true),
+            Err(ReminderStateError::StaleReminderVersion { .. }) => Ok(false),
+            Err(other) => Err(other.into()),
+        }
+    });
+    let edit_applied = edit_handle.join().unwrap()?;
+    let cancel_applied = cancel_handle.join().unwrap()?;
+    assert!(
+        edit_applied ^ cancel_applied,
+        "exactly one command must win"
+    );
+
+    let mut db = open_db(&path)?;
+    let current = reminder(&mut db, "item-1")?.unwrap();
+    assert_eq!(current.state_version, scheduled.state_version + 1);
+    let commands: i64 =
+        db.conn()
+            .query_row("SELECT COUNT(*) FROM reminder_commands", [], |row| {
+                row.get(0)
+            })?;
+    assert_eq!(commands, 2, "the setup command and the winner");
+    if edit_applied {
+        assert_eq!(current.request_state, RequestState::Resolved);
+        assert_eq!(
+            current.resolved_instant,
+            Some(instant("2026-01-16T10:00:00Z"))
+        );
+        assert_eq!(current.schedule_generation, 2);
+    } else {
+        assert_eq!(current.request_state, RequestState::Cancelled);
+        assert_eq!(current.schedule_generation, 1);
+    }
     Ok(())
 }

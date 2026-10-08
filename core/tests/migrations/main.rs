@@ -1074,6 +1074,19 @@ fn test_v2_to_v3_migration_preserves_reminder_rows() -> Result<()> {
             unschedulable_reason, None,
             "existing reminder rows gain a NULL unschedulable_reason"
         );
+        let (state_version, source_phrase, commands): (i64, Option<String>, i64) =
+            db.conn().query_row(
+                "SELECT state_version, source_phrase, (SELECT COUNT(*) FROM reminder_commands)
+                 FROM reminders WHERE reminder_id = 'rem-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+        assert_eq!(
+            state_version, 1,
+            "existing reminder rows start at version 1, distinct from 'no reminder' (0)"
+        );
+        assert_eq!(source_phrase, None);
+        assert_eq!(commands, 0);
     }
 
     let _ = std::fs::remove_file(&path);

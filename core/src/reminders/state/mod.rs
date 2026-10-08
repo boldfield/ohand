@@ -15,7 +15,12 @@
 //   never replace a committed time (user-set or earlier derived); only an explicit user time
 //   correction changes that.
 // - Every write carries the expected item revision (compare-and-set). Reminder changes do not
-//   bump the item revision.
+//   bump the item revision; they bump the reminder's own `state_version` instead.
+// - User reminder commands (time correction, cancel) carry an immutable command ID and the
+//   reminder `state_version` they were issued against. Each applied command is recorded in
+//   `reminder_commands` with its original result in the same transaction, so a delayed retry
+//   returns that result without touching newer state, and a distinct command issued against an
+//   older version is rejected as stale.
 // - Recurring requests are stored as `unsupported_recurrence` and are never reduced to one shot:
 //   a derived phrase is refused (stored as recurrence) when the item's text carries a repeat
 //   marker anywhere, and derived output can never leave `unsupported_recurrence`; only an
@@ -34,6 +39,7 @@
 use chrono::{DateTime, SecondsFormat, Utc};
 use chrono_tz::Tz;
 use rusqlite::{OptionalExtension, Transaction};
+use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use thiserror::Error;
 
@@ -42,7 +48,7 @@ use crate::store::events::{save_event_in_tx, Event, EventError, EventType};
 use crate::store::schema::Clock;
 use crate::time::{AmbiguityKind, ResolutionError, TimeContext, TimeResolver};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UnschedulableReason {
     TimeInPast,
     PermissionDenied,
@@ -72,7 +78,7 @@ impl FromStr for UnschedulableReason {
 }
 
 /// What the user asked for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RequestState {
     NotRequested,
     Resolved,
@@ -111,7 +117,7 @@ impl RequestState {
 }
 
 /// Native installation state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ScheduleState {
     NotScheduled,
     PendingSchedule,
@@ -144,7 +150,7 @@ impl FromStr for ScheduleState {
 }
 
 /// OS evidence only; the passage of the due time never changes it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeliveryState {
     Unknown,
     Delivered,
@@ -164,7 +170,7 @@ impl FromStr for DeliveryState {
 }
 
 /// Explicit user acknowledgment, independent of delivery and of item completion.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AcknowledgmentState {
     NotAcknowledged,
     Acknowledged,
@@ -243,7 +249,7 @@ impl FromStr for OperationState {
 
 /// Durable desired state of one item's reminder, plus delivery and acknowledgment facts that
 /// are kept apart from it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReminderRecord {
     pub reminder_id: String,
     pub item_id: String,
@@ -265,6 +271,9 @@ pub struct ReminderRecord {
     /// request stays inspectable after the item's text is corrected.
     pub source_phrase: Option<String>,
     pub schedule_generation: i64,
+    /// Increases on every write to this reminder. User commands name the version they were
+    /// issued against; a command against an older version is stale and rejected.
+    pub state_version: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -341,6 +350,14 @@ pub enum ReminderStateError {
     InvalidTimezone(String),
     #[error("time resolution failed: {0}")]
     Resolution(ResolutionError),
+    #[error("stale reminder version on item {item_id}: expected {expected}, current {current}")]
+    StaleReminderVersion {
+        item_id: String,
+        expected: i64,
+        current: i64,
+    },
+    #[error("command {command_id} was already applied with different content")]
+    CommandIdReused { command_id: String },
     #[error("operation {effect_identity} was already recorded with different content")]
     ConflictingReplay { effect_identity: String },
     #[error("stored reminder data is invalid: {0}")]
@@ -358,10 +375,25 @@ fn corrupt(field: &str, value: &str) -> ReminderStateError {
 /// A time given explicitly by the user. The only way to change a committed time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UserTimeCorrection {
+    /// Immutable identity of this user action, reused unchanged by every retry of it.
+    pub command_id: String,
     pub item_id: String,
     pub expected_revision: i32,
+    /// `state_version` of the reminder the user saw; 0 when the item had no reminder.
+    pub expected_reminder_version: i64,
     pub instant: DateTime<Utc>,
     pub timezone_id: String,
+}
+
+/// The user cancelling an item's reminder while keeping the item active.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReminderCancellation {
+    /// Immutable identity of this user action, reused unchanged by every retry of it.
+    pub command_id: String,
+    pub item_id: String,
+    pub expected_revision: i32,
+    /// `state_version` of the reminder the user saw; 0 when the item had no reminder.
+    pub expected_reminder_version: i64,
 }
 
 /// A reminder phrase found in the item's text by the fast path or an interpretation result.
@@ -530,66 +562,214 @@ fn text_repeat_reason(item: &ItemState, context: &TimeContext) -> Option<String>
     }
 }
 
-/// Set or change the reminder time from an explicit user choice. Idempotent for the same
-/// instant; a different instant starts a new schedule generation.
+/// Set or change the reminder time from an explicit user choice. A new instant starts a new
+/// schedule generation; the same instant with a different timezone only updates the display
+/// timezone.
+///
+/// Retries are keyed by `command_id`: replaying an applied command returns its original result
+/// and changes nothing, even if later commands have changed the reminder since. A distinct
+/// command issued against an older `expected_reminder_version` is stale and rejected.
 pub fn apply_user_time_correction(
     tx: &Transaction<'_>,
     clock: &dyn Clock,
     correction: &UserTimeCorrection,
 ) -> Result<ReminderRecord, ReminderStateError> {
+    // Persisted instants carry whole seconds, so normalize once here; comparison, storage and
+    // the command fingerprint all use the same precision.
+    let instant = parse_instant(&format_instant(correction.instant))?;
+    let fingerprint = format!(
+        "user_time|{}|{}|{}|{}|{}",
+        correction.item_id,
+        correction.expected_revision,
+        correction.expected_reminder_version,
+        format_instant(instant),
+        correction.timezone_id
+    );
+    if let Some(original) = replayed_result::<ReminderRecord>(
+        tx,
+        &correction.command_id,
+        &correction.item_id,
+        &fingerprint,
+    )? {
+        return Ok(original);
+    }
+
     let item = load_reminder_capable_item(tx, &correction.item_id)?;
     check_revision(&item, correction.expected_revision)?;
     correction
         .timezone_id
         .parse::<Tz>()
         .map_err(|_| ReminderStateError::InvalidTimezone(correction.timezone_id.clone()))?;
-
-    // Persisted instants carry whole seconds, so compare and store the same precision.
-    let instant = parse_instant(&format_instant(correction.instant))?;
     let existing = load_reminder_by_item(tx, &correction.item_id)?;
+    check_reminder_version(
+        &correction.item_id,
+        existing.as_ref(),
+        correction.expected_reminder_version,
+    )?;
+
+    let result = apply_user_instant(
+        tx,
+        clock.now(),
+        &correction.item_id,
+        existing,
+        instant,
+        &correction.timezone_id,
+    )?;
+    record_command(
+        tx,
+        clock.now(),
+        &correction.command_id,
+        &correction.item_id,
+        &fingerprint,
+        &result,
+    )?;
+    Ok(result)
+}
+
+fn apply_user_instant(
+    tx: &Transaction<'_>,
+    now: DateTime<Utc>,
+    item_id: &str,
+    existing: Option<ReminderRecord>,
+    instant: DateTime<Utc>,
+    timezone_id: &str,
+) -> Result<ReminderRecord, ReminderStateError> {
     if let Some(record) = &existing {
         let committed = matches!(
             record.request_state,
             RequestState::Resolved | RequestState::Unschedulable(_)
         );
         if committed && record.resolved_instant == Some(instant) {
-            if record.timezone_id.as_deref() == Some(correction.timezone_id.as_str()) {
+            if record.timezone_id.as_deref() == Some(timezone_id) {
                 return Ok(record.clone());
             }
             tx.execute(
-                "UPDATE reminders SET timezone_id = ?, updated_at = ? WHERE reminder_id = ?",
-                rusqlite::params![
-                    &correction.timezone_id,
-                    format_instant(clock.now()),
-                    &record.reminder_id
-                ],
+                "UPDATE reminders SET timezone_id = ?, state_version = state_version + 1,
+                        updated_at = ?
+                 WHERE reminder_id = ?",
+                rusqlite::params![timezone_id, format_instant(now), &record.reminder_id],
             )?;
-            return load_reminder_by_item(tx, &correction.item_id)?
+            return load_reminder_by_item(tx, item_id)?
                 .ok_or_else(|| corrupt("reminder", &record.reminder_id));
         }
     }
-    let outcome = TimeOutcome::for_instant(instant, correction.timezone_id.clone(), clock.now());
-    commit_outcome(
-        tx,
-        clock.now(),
-        &correction.item_id,
-        existing,
-        outcome,
-        None,
-    )
+    let outcome = TimeOutcome::for_instant(instant, timezone_id.to_string(), now);
+    commit_outcome(tx, now, item_id, existing, outcome, None)
 }
 
-/// Cancel the reminder only; the item stays active. Idempotent.
+/// Cancel the reminder only; the item stays active. Returns `None` when the item has no
+/// reminder. Retries are keyed by `command_id` exactly as for `apply_user_time_correction`, so
+/// a delayed cancel can never undo a later restore.
 pub fn cancel_reminder(
     tx: &Transaction<'_>,
     clock: &dyn Clock,
-    item_id: &str,
-    expected_revision: i32,
+    cancellation: &ReminderCancellation,
 ) -> Result<Option<ReminderRecord>, ReminderStateError> {
-    let item = load_item(tx, item_id)?;
-    check_revision(&item, expected_revision)?;
+    let fingerprint = format!(
+        "cancel|{}|{}|{}",
+        cancellation.item_id,
+        cancellation.expected_revision,
+        cancellation.expected_reminder_version
+    );
+    if let Some(original) = replayed_result::<Option<ReminderRecord>>(
+        tx,
+        &cancellation.command_id,
+        &cancellation.item_id,
+        &fingerprint,
+    )? {
+        return Ok(original);
+    }
+
+    let item = load_item(tx, &cancellation.item_id)?;
+    check_revision(&item, cancellation.expected_revision)?;
     require_active(&item)?;
-    cancel_existing(tx, clock.now(), item_id)
+    let existing = load_reminder_by_item(tx, &cancellation.item_id)?;
+    check_reminder_version(
+        &cancellation.item_id,
+        existing.as_ref(),
+        cancellation.expected_reminder_version,
+    )?;
+
+    let result = cancel_existing(tx, clock.now(), &cancellation.item_id)?;
+    record_command(
+        tx,
+        clock.now(),
+        &cancellation.command_id,
+        &cancellation.item_id,
+        &fingerprint,
+        &result,
+    )?;
+    Ok(result)
+}
+
+fn check_reminder_version(
+    item_id: &str,
+    existing: Option<&ReminderRecord>,
+    expected: i64,
+) -> Result<(), ReminderStateError> {
+    let current = existing.map_or(0, |record| record.state_version);
+    if current != expected {
+        return Err(ReminderStateError::StaleReminderVersion {
+            item_id: item_id.to_string(),
+            expected,
+            current,
+        });
+    }
+    Ok(())
+}
+
+/// The original result of an already-applied command, or `None` when `command_id` is new.
+/// Reusing a command ID for a different command is a conflict, never a silent replay.
+fn replayed_result<T: serde::de::DeserializeOwned>(
+    tx: &Transaction<'_>,
+    command_id: &str,
+    item_id: &str,
+    fingerprint: &str,
+) -> Result<Option<T>, ReminderStateError> {
+    let stored: Option<(String, String, String)> = tx
+        .query_row(
+            "SELECT item_id, command_fingerprint, result_json
+             FROM reminder_commands WHERE command_id = ?",
+            [command_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((stored_item_id, stored_fingerprint, result_json)) = stored else {
+        return Ok(None);
+    };
+    if stored_item_id != item_id || stored_fingerprint != fingerprint {
+        return Err(ReminderStateError::CommandIdReused {
+            command_id: command_id.to_string(),
+        });
+    }
+    serde_json::from_str(&result_json)
+        .map(Some)
+        .map_err(|_| corrupt("command result", command_id))
+}
+
+fn record_command<T: Serialize>(
+    tx: &Transaction<'_>,
+    now: DateTime<Utc>,
+    command_id: &str,
+    item_id: &str,
+    fingerprint: &str,
+    result: &T,
+) -> Result<(), ReminderStateError> {
+    let result_json =
+        serde_json::to_string(result).map_err(|_| corrupt("command result", command_id))?;
+    tx.execute(
+        "INSERT INTO reminder_commands
+            (command_id, item_id, command_fingerprint, result_json, created_at)
+         VALUES (?, ?, ?, ?, ?)",
+        rusqlite::params![
+            command_id,
+            item_id,
+            fingerprint,
+            result_json,
+            format_instant(now)
+        ],
+    )?;
+    Ok(())
 }
 
 /// Cancel the reminder because its item was completed, cancelled or deleted. Idempotent, and
@@ -844,6 +1024,7 @@ type ReminderColumns = (
     String,
     Option<String>,
     Option<String>,
+    i64,
 );
 
 fn load_reminder_by_item(
@@ -855,7 +1036,7 @@ fn load_reminder_by_item(
             "SELECT reminder_id, item_id, request_state, schedule_state, delivery_state,
                     acknowledgment_state, resolved_instant, timezone_id, ambiguity_reason,
                     unsupported_reason, schedule_generation, created_at, updated_at,
-                    unschedulable_reason, source_phrase
+                    unschedulable_reason, source_phrase, state_version
              FROM reminders WHERE item_id = ?",
             [item_id],
             |row| {
@@ -875,6 +1056,7 @@ fn load_reminder_by_item(
                     row.get(12)?,
                     row.get(13)?,
                     row.get(14)?,
+                    row.get(15)?,
                 ))
             },
         )
@@ -899,6 +1081,7 @@ fn decode_reminder(columns: ReminderColumns) -> Result<ReminderRecord, ReminderS
         updated_at,
         unschedulable_reason,
         source_phrase,
+        state_version,
     ) = columns;
     let request_state = RequestState::decode(&request_state, unschedulable_reason.as_deref())?;
     let resolved_instant = resolved_instant.as_deref().map(parse_instant).transpose()?;
@@ -918,6 +1101,7 @@ fn decode_reminder(columns: ReminderColumns) -> Result<ReminderRecord, ReminderS
         unsupported_reason,
         source_phrase,
         schedule_generation,
+        state_version,
         created_at: parse_instant(&created_at)?,
         updated_at: parse_instant(&updated_at)?,
     })
@@ -1088,7 +1272,7 @@ fn cancel_existing(
     retire_generation(tx, &record.reminder_id, record.schedule_generation, now)?;
     tx.execute(
         "UPDATE reminders SET request_state = 'cancelled', unschedulable_reason = NULL,
-                updated_at = ? WHERE reminder_id = ?",
+                state_version = state_version + 1, updated_at = ? WHERE reminder_id = ?",
         rusqlite::params![format_instant(now), &record.reminder_id],
     )?;
     load_reminder_by_item(tx, item_id)
@@ -1191,8 +1375,8 @@ fn commit_outcome(
                 (reminder_id, item_id, request_state, schedule_state, delivery_state,
                  acknowledgment_state, resolved_instant, timezone_id, ambiguity_reason,
                  unsupported_reason, unschedulable_reason, source_phrase, schedule_generation,
-                 created_at, updated_at)
-             VALUES (?, ?, ?, ?, 'unknown', 'not_acknowledged', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 state_version, created_at, updated_at)
+             VALUES (?, ?, ?, ?, 'unknown', 'not_acknowledged', ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
             rusqlite::params![
                 &reminder_id,
                 item_id,
@@ -1214,7 +1398,7 @@ fn commit_outcome(
             "UPDATE reminders SET request_state = ?, schedule_state = ?, resolved_instant = ?,
                 timezone_id = ?, ambiguity_reason = ?, unsupported_reason = ?,
                 unschedulable_reason = ?, source_phrase = ?, schedule_generation = ?,
-                updated_at = ?
+                state_version = state_version + 1, updated_at = ?
              WHERE reminder_id = ?",
             rusqlite::params![
                 request_state.column_value(),
