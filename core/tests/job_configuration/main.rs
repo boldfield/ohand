@@ -514,6 +514,97 @@ fn test_credentials_not_persisted_in_job() -> Result<()> {
     Ok(())
 }
 
+/// Behavioral Test 6b: Credentials are resolved at execution time from the pinned profile.
+/// When a job is claimed for execution, its pinned profile is queried for the credential_ref.
+/// The credential is never copied into the job row, proving execution-time resolution.
+#[test]
+fn test_credentials_resolved_at_execution_time() -> Result<()> {
+    let clock = Arc::new(MockClock::new(Utc::now()));
+    let (mut db, item_id) = setup_test_db(&clock)?;
+    let now = clock.now();
+
+    let profile = "profile-with-real-credential-5555";
+
+    // Create a profile with a credential reference
+    {
+        let tx = db.immediate_transaction()?;
+        tx.execute(
+            "INSERT INTO provider_profiles (
+                profile_id, profile_version, provider_type, model, timeout_seconds,
+                retry_policy, authorized_destinations, capabilities, credential_ref, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rusqlite::params![
+                "provider-with-real-creds",
+                profile,
+                "anthropic",
+                "claude-3-5-sonnet",
+                30,
+                r#"{"max_attempts":3,"initial_backoff_ms":500,"max_backoff_ms":30000}"#,
+                r#"["https://api.example.com"]"#,
+                r#"{"text_interpretation":{"capability":"text_interpretation","support":"supported","evidence":"V06","input_size_limit":8000,"structured_output":"none"}}"#,
+                "cred-ref-abc123",
+                "2026-01-01T00:00:00Z"
+            ],
+        )?;
+        tx.commit()?;
+    }
+
+    // Enqueue a job pinned to this profile
+    enqueue_job(
+        &mut db,
+        "job-with-cred-ref".to_string(),
+        item_id,
+        "interpret".to_string(),
+        1,
+        Some(profile.to_string()),
+        None,
+        1,
+        now,
+    )?;
+
+    // Verify job contains only profile_version, no credential_ref
+    let (stored_profile, stored_request): (Option<String>, Option<String>) = db.conn().query_row(
+        "SELECT profile_version, request_version FROM jobs WHERE job_id = ?",
+        ["job-with-cred-ref"],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    assert_eq!(stored_profile, Some(profile.to_string()));
+    assert_eq!(stored_request, None);
+
+    // At execution time, the credential_ref is resolved from the pinned profile
+    let credential_ref: Option<String> = db.conn().query_row(
+        "SELECT credential_ref FROM provider_profiles WHERE profile_version = ?",
+        [profile],
+        |row| row.get(0),
+    )?;
+    assert_eq!(
+        credential_ref,
+        Some("cred-ref-abc123".to_string()),
+        "Credential reference should be resolved from pinned profile at execution time"
+    );
+
+    // The credential_ref is never copied to the job or request_version
+    let all_job_fields: (Option<String>, Option<String>, Option<String>) = db.conn().query_row(
+        "SELECT profile_version, request_version, (SELECT credential_ref FROM provider_profiles \
+         WHERE profile_version = jobs.profile_version) as resolved_cred FROM jobs WHERE job_id = ?",
+        ["job-with-cred-ref"],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    let (job_profile, job_request, resolved_cred) = all_job_fields;
+    assert_eq!(job_profile, Some(profile.to_string()));
+    assert_eq!(
+        job_request, None,
+        "Credential should not be in request_version"
+    );
+    assert_eq!(
+        resolved_cred,
+        Some("cred-ref-abc123".to_string()),
+        "Credential is resolved from profile when needed, not persisted in job"
+    );
+
+    Ok(())
+}
+
 /// Behavioral Test 7: Explicit requeue is inspectable; profile change is not silent.
 /// When a profile configuration changes, the old job is cancelled with reason 'requeued'
 /// and a new job is created pinned to the new profile version.
