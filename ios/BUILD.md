@@ -28,11 +28,11 @@ The script runs `scripts/generate.sh` (pinned XcodeGen, writes the git-ignored `
 
 Schemes: `OhAndApp`, `OhAndTests` (build and test), and one per probe: `BridgeProbe`, `NotificationProbe`, `AudioProbe`, `TranscriptionProbe`, `CredentialProbe`, `CaptureProbe`. `OhAndCoreBridge` and `OhAndServices` are frameworks, and `OhAndCaptureControl` and `CaptureProbeControl` are control app extensions; all are built as dependencies of their host.
 
-Run unit tests (macOS):
+Run unit tests (macOS). The test host carries Keychain entitlements (`Config/OhAndApp.entitlements`), and the simulator only honors them for an ad-hoc signed build; with `CODE_SIGNING_ALLOWED=NO` the real-Keychain credential tests fail with `-34018` (`errSecMissingEntitlement`).
 
 ```bash
 xcodebuild test -project OhAnd.xcodeproj -scheme OhAndTests -sdk iphonesimulator \
-  -destination "platform=iOS Simulator,id=<udid>" CODE_SIGNING_ALLOWED=NO
+  -destination "platform=iOS Simulator,id=<udid>" CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM=
 ```
 
 Pick the UDID from the installed simulators with `xcrun simctl list -j devices available | python3 scripts/select_simulator.py --max-runtime "$(xcrun --sdk iphonesimulator --show-sdk-version)"`. After building a probe, `scripts/smoke-simulator.sh <udid> .derived/Build/Products/Debug-iphonesimulator/BridgeProbe.app com.boldfield.ohand.probes.bridge` boots, installs and launches it.

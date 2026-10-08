@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Xcode run-script phase: builds libohand_bindings.a for the SDK and architectures Xcode is
-# building and places it in $OHAND_RUST_OUTPUT_DIR. macOS with Xcode and rustup only.
+# building and places it in $OHAND_RUST_OUTPUT_DIR together with the generated C header
+# (tools/bindings), which Xcode finds through HEADER_SEARCH_PATHS. Neither is committed.
+# macOS with Xcode and rustup only.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -47,11 +49,9 @@ for architecture in ${architectures}; do
   rust_targets="${rust_targets} ${rust_target}"
 done
 
-mkdir -p "${output_dir}"
-built_libraries=""
-for rust_target in ${rust_targets}; do
-  # A clean environment keeps Xcode's compiler and SDK variables from steering the C build
-  # of the bundled SQLite; cc-rs and rustc locate the SDK through xcrun instead.
+# Xcode's compiler and SDK variables must not steer host builds of the generator or the
+# C build of the bundled SQLite; cc-rs and rustc locate the SDK through xcrun instead.
+run_with_clean_environment() {
   env -i \
     HOME="${HOME}" \
     PATH="${PATH}" \
@@ -60,7 +60,23 @@ for rust_target in ${rust_targets}; do
     IPHONEOS_DEPLOYMENT_TARGET="${deployment_target}" \
     ${CARGO_HOME:+CARGO_HOME="${CARGO_HOME}"} \
     ${RUSTUP_HOME:+RUSTUP_HOME="${RUSTUP_HOME}"} \
+    "$@"
+}
+
+mkdir -p "${output_dir}"
+run_with_clean_environment "${repo_root}/tools/bindings/generate.sh" "${output_dir}"
+built_libraries=""
+for rust_target in ${rust_targets}; do
+  run_with_clean_environment \
     cargo build --package ohand-bindings --locked --target "${rust_target}" ${release_flag}
+  # Every slice must export exactly what the shared header declares. Release libraries are
+  # LTO bitcode that nm cannot read, so only debug libraries are inspected; they are built
+  # from the same sources and header.
+  if [ -z "${release_flag}" ]; then
+    run_with_clean_environment "${repo_root}/tools/bindings/check-library.sh" \
+      "${output_dir}/ohand_bindings.h" \
+      "${repo_root}/target/${rust_target}/${profile_directory}/libohand_bindings.a"
+  fi
   built_libraries="${built_libraries} ${repo_root}/target/${rust_target}/${profile_directory}/libohand_bindings.a"
 done
 
