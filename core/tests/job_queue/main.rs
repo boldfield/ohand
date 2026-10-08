@@ -244,15 +244,15 @@ fn test_early_retry_denial() -> Result<()> {
         "Job should not be claimable before next_attempt_at"
     );
 
-    // Advance to just before next_attempt_at - still shouldn't claim
-    mock_clock.advance(Duration::seconds(9));
+    // Advance to just before next_attempt_at (19 seconds total) - still shouldn't claim
+    mock_clock.advance(Duration::seconds(19));
     let claimed3 = claim_job_with_lease(&mut db, Duration::seconds(1), mock_clock.now())?;
     assert!(
         claimed3.is_none(),
         "Job should not be claimable before next_attempt_at"
     );
 
-    // Advance to exactly next_attempt_at - should claim now
+    // Advance to exactly next_attempt_at (20 seconds total) - should claim now
     mock_clock.advance(Duration::seconds(1));
     let claimed4 = claim_job_with_lease(&mut db, Duration::seconds(1), mock_clock.now())?
         .expect("Job should be claimable at next_attempt_at");
@@ -677,6 +677,10 @@ fn test_stale_revision_not_claimed() -> Result<()> {
 
     assert_eq!(claimed.job_id, "job-2");
 
+    // Verify job-1 was cancelled due to stale revision
+    let job1 = get_job(&db, "job-1")?.expect("Job not found");
+    assert_eq!(job1.status, JobStatus::Cancelled);
+
     Ok(())
 }
 
@@ -949,19 +953,20 @@ fn test_unsupported_job_version() -> Result<()> {
         2, // Unsupported version
     )?;
 
-    let claimed =
-        claim_job_with_lease(&mut db, Duration::seconds(30), now)?.expect("Should claim job");
-    let lease_id = claimed.lease_id.unwrap();
+    // Claim should skip unsupported version job and mark it as failed
+    let claimed = claim_job_with_lease(&mut db, Duration::seconds(30), now)?;
+    assert!(
+        claimed.is_none(),
+        "Unsupported version job should not be claimed"
+    );
 
-    // Try to fail with unsupported version - should error
-    let result =
-        fail_job_with_backoff(&mut db, "job-1", "error".to_string(), 2, 60, now, &lease_id);
-    assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .to_lowercase()
-        .contains("unsupported"));
+    // Verify job was marked as failed with unsupported_job_version reason
+    let job = get_job(&db, "job-1")?.expect("Job not found");
+    assert_eq!(job.status, JobStatus::Failed);
+    assert_eq!(
+        job.failure_reason,
+        Some("unsupported_job_version".to_string())
+    );
 
     Ok(())
 }

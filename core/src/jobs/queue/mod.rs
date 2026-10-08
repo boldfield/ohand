@@ -173,17 +173,17 @@ pub fn enqueue_job_in_tx(
         return Err(anyhow!("Job with ID {} already exists", job_id));
     }
 
-    // Check if the same logical work (item + type + source + versions) is already queued
+    // Check if the same logical work (item + type + source + versions) already exists
+    // Prevent duplicate delivery across all terminal and non-terminal states
     let logical_dup: Option<(String,)> = tx
         .query_row(
-            "SELECT job_id FROM jobs WHERE item_id = ? AND job_type = ? AND source_revision = ? AND profile_version IS ? AND request_version IS ? AND status != ?",
+            "SELECT job_id FROM jobs WHERE item_id = ? AND job_type = ? AND source_revision = ? AND profile_version IS ? AND request_version IS ?",
             rusqlite::params![
                 &item_id,
                 &job_type,
                 source_revision,
                 &profile_version,
-                &request_version,
-                JobStatus::Completed.as_str()
+                &request_version
             ],
             |row| Ok((row.get(0)?,)),
         )
@@ -266,7 +266,8 @@ fn get_job_internal(tx: &Transaction<'_>, job_id: &str) -> Result<Option<Job>> {
 /// Claim a job for execution with a lease. The job must be queued, and its item must not be deleted.
 /// Returns the leased job with lease_expires_at set to now + lease_duration, and status set to Running.
 /// If no queued job exists, returns None.
-/// If the job's item is deleted/stale, returns an error.
+/// Skips jobs with unsupported schema versions (marks them failed), deleted items (cancels them),
+/// and stale revision jobs (cancels them).
 pub fn claim_job_with_lease(
     db: &mut Database,
     lease_duration: Duration,
@@ -283,7 +284,7 @@ pub fn claim_job_with_lease_in_tx(
     lease_duration: Duration,
     now: DateTime<Utc>,
 ) -> Result<Option<Job>> {
-    loop {
+    let selected_job = 'search: loop {
         // Find oldest queued job ready for attempt, or expired lease
         let job: Option<Job> = tx
             .query_row(
@@ -304,8 +305,22 @@ pub fn claim_job_with_lease_in_tx(
             .optional()?;
 
         let Some(job) = job else {
-            return Ok(None);
+            break 'search None;
         };
+
+        // Check for unsupported job schema version
+        if job.job_schema_version > 1 {
+            // Mark as failed with unsupported_job_version reason
+            tx.execute(
+                "UPDATE jobs SET status = ?, failure_reason = ?, lease_expires_at = NULL, lease_id = NULL WHERE job_id = ?",
+                rusqlite::params![
+                    JobStatus::Failed.as_str(),
+                    "unsupported_job_version",
+                    &job.job_id
+                ],
+            )?;
+            continue;
+        }
 
         // Check item exists and is not deleted, and check revision staleness
         let item_result: Option<(bool, i32)> = tx
@@ -342,35 +357,26 @@ pub fn claim_job_with_lease_in_tx(
                 continue;
             }
             Some((true, item_revision)) if item_revision != job.source_revision => {
-                // Item has been revised since job was created: skip as stale
+                // Item has been revised since job was created: cancel as stale
+                tx.execute(
+                    "UPDATE jobs SET status = ? WHERE job_id = ? AND status IN (?, ?)",
+                    rusqlite::params![
+                        JobStatus::Cancelled.as_str(),
+                        &job.job_id,
+                        JobStatus::Queued.as_str(),
+                        JobStatus::Running.as_str()
+                    ],
+                )?;
                 continue;
             }
             Some((true, _)) => {
                 // Item is valid, proceed with claim
-                break;
+                break 'search Some(job);
             }
         }
-    }
+    };
 
-    let job: Option<Job> = tx
-        .query_row(
-            &format!(
-                "SELECT {} FROM jobs WHERE (status = ? AND (next_attempt_at IS NULL OR next_attempt_at <= ?)) \
-                 OR (status = ? AND lease_expires_at < ?) \
-                 ORDER BY created_at ASC LIMIT 1",
-                JOB_COLUMNS
-            ),
-            rusqlite::params![
-                JobStatus::Queued.as_str(),
-                now.to_rfc3339(),
-                JobStatus::Running.as_str(),
-                now.to_rfc3339()
-            ],
-            job_from_row,
-        )
-        .optional()?;
-
-    let Some(job) = job else {
+    let Some(job) = selected_job else {
         return Ok(None);
     };
 
@@ -503,15 +509,6 @@ pub fn fail_job_with_backoff_in_tx(
             job_id,
             lease_id,
             job.lease_id
-        ));
-    }
-
-    // Check for unsupported job schema version
-    if job.job_schema_version > 1 {
-        return Err(anyhow!(
-            "Job {} has unsupported schema version {}",
-            job_id,
-            job.job_schema_version
         ));
     }
 

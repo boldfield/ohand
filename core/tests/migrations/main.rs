@@ -32,7 +32,7 @@ fn test_create_empty_database() -> Result<()> {
 
     let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
     let db = make_test_db(&path, instant)?;
-    assert_eq!(db.schema_version()?, 1);
+    assert_eq!(db.schema_version()?, 2);
 
     let _ = std::fs::remove_file(&path);
     Ok(())
@@ -56,7 +56,7 @@ fn test_reopen_database() -> Result<()> {
 
     {
         let db = make_test_db(&path, instant)?;
-        assert_eq!(db.schema_version()?, 1);
+        assert_eq!(db.schema_version()?, 2);
     }
 
     let _ = std::fs::remove_file(&path);
@@ -80,7 +80,7 @@ fn test_forward_incompatible_version_rejected() -> Result<()> {
         let db = make_test_db(&path, instant)?;
         db.conn().execute(
             "INSERT INTO _schema_metadata (version, created_at, upgraded_at) VALUES (?, ?, ?)",
-            rusqlite::params![2, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"],
+            rusqlite::params![3, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"],
         )?;
     }
 
@@ -108,17 +108,17 @@ fn test_forward_incompatible_database_not_modified() -> Result<()> {
 
     let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
 
-    // Create a v1 database.
+    // Create a v2 database (v1 + v2 migrations).
     {
         let _db = make_test_db(&path, instant)?;
     }
 
-    // Manually insert a v2 record.
+    // Manually insert a v3 record (forward-incompatible).
     {
         let conn = Connection::open(&path)?;
         conn.execute(
             "INSERT INTO _schema_metadata (version, created_at, upgraded_at) VALUES (?, ?, ?)",
-            rusqlite::params![2, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"],
+            rusqlite::params![3, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"],
         )?;
     }
     let bytes_before = std::fs::read(&path)?;
@@ -166,11 +166,11 @@ fn test_migration_from_version_zero() -> Result<()> {
         )?;
     }
 
-    // Open with migration: should create v1 tables and update version.
+    // Open with migration: should create v1 tables, add v2 columns, and update version.
     {
         let db = make_test_db(&path, instant)?;
         let version = db.schema_version()?;
-        assert_eq!(version, 1, "Schema version should be upgraded to 1");
+        assert_eq!(version, 2, "Schema version should be upgraded to 2");
 
         // Check that v1 tables now exist.
         let tables_exist: bool = db.conn().query_row(
@@ -262,24 +262,24 @@ fn test_synthetic_step_success_records_own_version() -> Result<()> {
     let steps = steps_with(create_synthetic_v2_table);
     {
         let db = open_with(&path, later, &steps)?;
-        assert_eq!(db.schema_version()?, 2);
+        assert_eq!(db.schema_version()?, 3);
         assert!(table_exists(db.conn(), "synthetic_v2")?);
         assert_eq!(capture_count(db.conn(), "capture-keep")?, 1);
-        let (created, version_one): (String, String) = db.conn().query_row(
-            "SELECT (SELECT created_at FROM _schema_metadata WHERE version = 2),
-                    (SELECT created_at FROM _schema_metadata WHERE version = 1)",
+        let (created, version_two): (String, String) = db.conn().query_row(
+            "SELECT (SELECT created_at FROM _schema_metadata WHERE version = 3),
+                    (SELECT created_at FROM _schema_metadata WHERE version = 2)",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         assert!(created.starts_with("2026-02-01"), "Got: {}", created);
         assert!(
-            version_one.starts_with("2026-01-15"),
+            version_two.starts_with("2026-01-15"),
             "Got: {}",
-            version_one
+            version_two
         );
     }
 
-    // The default (v1-only) list now refuses the v2 database.
+    // The default (v2-only) list now refuses the v3 database.
     let refused = make_test_db(&path, instant);
     assert!(refused
         .unwrap_err()
@@ -297,7 +297,7 @@ fn test_fresh_database_walks_full_step_list() -> Result<()> {
 
     let steps = steps_with(create_synthetic_v2_table);
     let db = open_with(&path, instant, &steps)?;
-    assert_eq!(db.schema_version()?, 2);
+    assert_eq!(db.schema_version()?, 3);
     assert!(table_exists(db.conn(), "captures")?);
     assert!(table_exists(db.conn(), "synthetic_v2")?);
     let versions: i64 =
@@ -305,7 +305,7 @@ fn test_fresh_database_walks_full_step_list() -> Result<()> {
             .query_row("SELECT COUNT(*) FROM _schema_metadata", [], |row| {
                 row.get(0)
             })?;
-    assert_eq!(versions, 2);
+    assert_eq!(versions, 3);
 
     let _ = std::fs::remove_file(&path);
     Ok(())
@@ -325,7 +325,7 @@ fn test_failed_step_rolls_back_and_preserves_source_records() -> Result<()> {
     let result = open_with(&path, instant, &steps);
     let error = result.unwrap_err().to_string();
     assert!(
-        error.contains("Migration to version 2 failed"),
+        error.contains("Migration to version 3 failed"),
         "Got: {}",
         error
     );
@@ -336,7 +336,7 @@ fn test_failed_step_rolls_back_and_preserves_source_records() -> Result<()> {
             conn.query_row("SELECT MAX(version) FROM _schema_metadata", [], |row| {
                 row.get(0)
             })?;
-        assert_eq!(version, 1, "Version must stay at the last good version");
+        assert_eq!(version, 2, "Version must stay at the last good version");
         assert!(!table_exists(&conn, "synthetic_partial")?);
         let column_added: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('captures') WHERE name='synthetic_partial_col')",
@@ -349,7 +349,7 @@ fn test_failed_step_rolls_back_and_preserves_source_records() -> Result<()> {
 
     // The original database still opens normally.
     let db = make_test_db(&path, instant)?;
-    assert_eq!(db.schema_version()?, 1);
+    assert_eq!(db.schema_version()?, 2);
     assert_eq!(capture_count(db.conn(), "capture-keep")?, 1);
 
     let _ = std::fs::remove_file(&path);
@@ -541,7 +541,10 @@ fn test_version_zero_with_conflicting_late_table_rolls_back() -> Result<()> {
     let version: u32 = conn.query_row("SELECT MAX(version) FROM _schema_metadata", [], |row| {
         row.get(0)
     })?;
-    assert_eq!(version, 0);
+    assert_eq!(
+        version, 0,
+        "Version should stay at 0 when initial migration is blocked by late constraint"
+    );
 
     let _ = std::fs::remove_file(&path);
     Ok(())
@@ -916,7 +919,7 @@ fn test_ledger_whitespace_differences_do_not_brick_database() -> Result<()> {
     let instant = instant_for_tests()?;
     drop(make_test_db(&path, instant)?);
     let reopened = make_test_db(&path, instant)?;
-    assert_eq!(reopened.schema_version()?, 1);
+    assert_eq!(reopened.schema_version()?, 2);
     let _ = std::fs::remove_file(&path);
     Ok(())
 }
