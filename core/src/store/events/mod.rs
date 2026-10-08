@@ -4,13 +4,15 @@
 use crate::store::schema::Database;
 use anyhow::{anyhow, Result};
 use rusqlite::{OptionalExtension, Transaction};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 use thiserror::Error;
 
 /// Intent classification of an item. Only an explicit `Action` can carry an obligation;
 /// broad intentions, notes and ideas are preserved and searchable but never obligations.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ItemType {
     BroadIntention,
     Note,
