@@ -806,7 +806,7 @@ fn test_apply_proposal_rejects_stale_proposal() -> Result<()> {
 
     // Now item revision is 1, but proposal's source_revision is 0 (stale).
     let tx = db.transaction()?;
-    let result = apply_proposal(&tx, "item-1", "prop-1", 0);
+    let result = apply_proposal(&tx, "item-1", "prop-1");
     tx.commit()?;
 
     // Should fail with StaleProposal error.
@@ -879,7 +879,7 @@ fn test_apply_proposal_rejects_user_corrected_field() -> Result<()> {
 
     // Try to apply the proposal. Should fail because user already corrected the type.
     let tx = db.transaction()?;
-    let result = apply_proposal(&tx, "item-1", "prop-2", current_revision);
+    let result = apply_proposal(&tx, "item-1", "prop-2");
     tx.commit()?;
 
     match result {
@@ -889,4 +889,276 @@ fn test_apply_proposal_rejects_user_corrected_field() -> Result<()> {
             result
         )),
     }
+}
+
+#[test]
+fn test_apply_proposal_successful_type() -> Result<()> {
+    let path = temp_db_path("apply_proposal_success_type");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let tx = db.transaction()?;
+    insert_test_item(&tx, "item-1", "call the roofer")?;
+    tx.commit()?;
+
+    // Add a proposal for type at revision 0.
+    let tx = db.transaction()?;
+    tx.execute(
+        "INSERT INTO proposals (proposal_id, item_id, capture_id, source_revision, schema_version, text_basis_kind, text_basis_id, applied_state, proposal_type, reminder_proposal, session_topic_proposal, source_spans, abstained, request_version, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rusqlite::params![
+            "prop-1",
+            "item-1",
+            "cap-item-1",
+            0,
+            1,
+            "capture",
+            None::<String>,
+            "unapplied",
+            "action",
+            None::<String>,
+            None::<String>,
+            None::<String>,
+            0,
+            None::<String>,
+            "2026-01-15T10:30:00Z",
+        ],
+    )?;
+    tx.commit()?;
+
+    // Apply the proposal successfully.
+    let tx = db.transaction()?;
+    let result = apply_proposal(&tx, "item-1", "prop-1")?;
+    tx.commit()?;
+
+    // Verify the type was applied.
+    assert_eq!(result.item_type, Some(ItemType::Action));
+    Ok(())
+}
+
+#[test]
+fn test_apply_proposal_with_abstained_rejected() -> Result<()> {
+    let path = temp_db_path("apply_abstained_proposal");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let tx = db.transaction()?;
+    insert_test_item(&tx, "item-1", "call the roofer")?;
+    tx.commit()?;
+
+    // Add an abstained proposal.
+    let tx = db.transaction()?;
+    tx.execute(
+        "INSERT INTO proposals (proposal_id, item_id, capture_id, source_revision, schema_version, text_basis_kind, text_basis_id, applied_state, proposal_type, reminder_proposal, session_topic_proposal, source_spans, abstained, request_version, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rusqlite::params![
+            "prop-2",
+            "item-1",
+            "cap-item-1",
+            0,
+            1,
+            "capture",
+            None::<String>,
+            "unapplied",
+            None::<String>,
+            None::<String>,
+            None::<String>,
+            None::<String>,
+            1,  // abstained = 1
+            None::<String>,
+            "2026-01-15T10:30:00Z",
+        ],
+    )?;
+    tx.commit()?;
+
+    // Try to apply the abstained proposal.
+    let tx = db.transaction()?;
+    let result = apply_proposal(&tx, "item-1", "prop-2");
+    tx.commit()?;
+
+    // Should fail with InvalidProposal error.
+    match result {
+        Err(ProposalApplicationError::InvalidProposal(msg)) if msg.contains("abstained") => Ok(()),
+        _ => Err(anyhow::anyhow!(
+            "Expected InvalidProposal error for abstained proposal, got {:?}",
+            result
+        )),
+    }
+}
+
+#[test]
+fn test_apply_proposal_cross_item_rejected() -> Result<()> {
+    let path = temp_db_path("apply_cross_item_proposal");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    // Create two items.
+    let tx = db.transaction()?;
+    insert_test_item(&tx, "item-1", "call the roofer")?;
+    insert_test_item(&tx, "item-2", "call the electrician")?;
+    tx.commit()?;
+
+    // Add a proposal for item-2.
+    let tx = db.transaction()?;
+    tx.execute(
+        "INSERT INTO proposals (proposal_id, item_id, capture_id, source_revision, schema_version, text_basis_kind, text_basis_id, applied_state, proposal_type, reminder_proposal, session_topic_proposal, source_spans, abstained, request_version, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rusqlite::params![
+            "prop-item2",
+            "item-2",
+            "cap-item-2",
+            0,
+            1,
+            "capture",
+            None::<String>,
+            "unapplied",
+            "action",
+            None::<String>,
+            None::<String>,
+            None::<String>,
+            0,
+            None::<String>,
+            "2026-01-15T10:30:00Z",
+        ],
+    )?;
+    tx.commit()?;
+
+    // Try to apply item-2's proposal to item-1 (ownership check).
+    let tx = db.transaction()?;
+    let result = apply_proposal(&tx, "item-1", "prop-item2");
+    tx.commit()?;
+
+    // Should fail with InvalidProposal error.
+    match result {
+        Err(ProposalApplicationError::InvalidProposal(msg)) if msg.contains("another item") => {
+            Ok(())
+        }
+        _ => Err(anyhow::anyhow!(
+            "Expected InvalidProposal error for cross-item proposal, got {:?}",
+            result
+        )),
+    }
+}
+
+#[test]
+fn test_apply_proposal_with_user_correction_precedence() -> Result<()> {
+    let path = temp_db_path("apply_proposal_correction_precedence");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let tx = db.transaction()?;
+    insert_test_item(&tx, "item-1", "call the roofer")?;
+    tx.commit()?;
+
+    // User corrects the type to idea.
+    let type_event = Event::new(
+        "evt-1".to_string(),
+        "item-1".to_string(),
+        0,
+        EventType::Correction,
+        EventPayload::Correction(Correction {
+            kind: CorrectionKind::Type,
+            old_value: None,
+            new_value: "idea".to_string(),
+        }),
+        "2026-01-15T10:30:00Z".to_string(),
+    )?;
+    save_event(&mut db, &type_event, 0)?;
+
+    // Add a proposal to set type to action at the current revision (after the correction).
+    let tx = db.transaction()?;
+    let current_state = load_item_state(&tx, "item-1")?.expect("item should exist");
+    let current_revision = current_state.revision;
+    tx.commit()?;
+
+    let tx = db.transaction()?;
+    tx.execute(
+        "INSERT INTO proposals (proposal_id, item_id, capture_id, source_revision, schema_version, text_basis_kind, text_basis_id, applied_state, proposal_type, reminder_proposal, session_topic_proposal, source_spans, abstained, request_version, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rusqlite::params![
+            "prop-type-override",
+            "item-1",
+            "cap-item-1",
+            current_revision,
+            1,
+            "capture",
+            None::<String>,
+            "unapplied",
+            "action",
+            None::<String>,
+            None::<String>,
+            None::<String>,
+            0,
+            None::<String>,
+            "2026-01-15T10:30:00Z",
+        ],
+    )?;
+    tx.commit()?;
+
+    // Try to apply the proposal.
+    let tx = db.transaction()?;
+    let result = apply_proposal(&tx, "item-1", "prop-type-override");
+    tx.commit()?;
+
+    // Should fail because user already corrected the type.
+    match result {
+        Err(ProposalApplicationError::ForbiddenByLifecycle) => Ok(()),
+        _ => Err(anyhow::anyhow!(
+            "Expected ForbiddenByLifecycle error, got {:?}",
+            result
+        )),
+    }
+}
+
+#[test]
+fn test_rebuild_equals_projection_after_model_apply() -> Result<()> {
+    let path = temp_db_path("rebuild_after_model_apply");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let tx = db.transaction()?;
+    insert_test_item(&tx, "item-1", "call the roofer")?;
+    tx.commit()?;
+
+    // Add a proposal for type at revision 0.
+    let tx = db.transaction()?;
+    tx.execute(
+        "INSERT INTO proposals (proposal_id, item_id, capture_id, source_revision, schema_version, text_basis_kind, text_basis_id, applied_state, proposal_type, reminder_proposal, session_topic_proposal, source_spans, abstained, request_version, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rusqlite::params![
+            "prop-1",
+            "item-1",
+            "cap-item-1",
+            0,
+            1,
+            "capture",
+            None::<String>,
+            "unapplied",
+            "action",
+            None::<String>,
+            None::<String>,
+            None::<String>,
+            0,
+            None::<String>,
+            "2026-01-15T10:30:00Z",
+        ],
+    )?;
+    tx.commit()?;
+
+    // Apply the proposal.
+    let tx = db.transaction()?;
+    let _result = apply_proposal(&tx, "item-1", "prop-1")?;
+    tx.commit()?;
+
+    // Verify that stored and rebuilt states match.
+    let tx = db.transaction()?;
+    let stored = load_item_state(&tx, "item-1")?.expect("item should exist");
+    let rebuilt = rebuild_state_from_events(&tx, "item-1")?.expect("rebuilt should exist");
+    tx.commit()?;
+
+    // Both should have the applied type.
+    assert_eq!(stored.item_type, Some(ItemType::Action));
+    assert_eq!(rebuilt.item_type, Some(ItemType::Action));
+    assert_eq!(stored, rebuilt);
+    Ok(())
 }

@@ -284,10 +284,22 @@ pub fn load_item_state(tx: &Transaction<'_>, item_id: &str) -> Result<Option<Ite
         .transpose()
         .map_err(|e| anyhow!("Invalid item type: {}", e))?;
 
-    // Track provenance: which fields have user corrections.
-    let type_corrected = item_type.is_some();
-    let scope_corrected = current_scope.is_some();
-    let session_topic_corrected = current_session_topic.is_some();
+    // Track provenance: which fields have user corrections (from corrections table, not from columns).
+    let type_corrected = tx.query_row(
+        "SELECT COUNT(*) FROM corrections WHERE item_id = ? AND kind = 'type'",
+        [item_id],
+        |row| row.get::<_, i64>(0),
+    )? > 0;
+    let scope_corrected = tx.query_row(
+        "SELECT COUNT(*) FROM corrections WHERE item_id = ? AND kind = 'scope'",
+        [item_id],
+        |row| row.get::<_, i64>(0),
+    )? > 0;
+    let session_topic_corrected = tx.query_row(
+        "SELECT COUNT(*) FROM corrections WHERE item_id = ? AND kind = 'session_topic'",
+        [item_id],
+        |row| row.get::<_, i64>(0),
+    )? > 0;
 
     // Resolve scope: user correction takes precedence, else capture default.
     let scope: ItemScope = if let Some(scope_str) = current_scope {
@@ -300,8 +312,46 @@ pub fn load_item_state(tx: &Transaction<'_>, item_id: &str) -> Result<Option<Ite
             .map_err(|e| anyhow!("Invalid capture scope: {}", e))?
     };
 
-    // Resolve session topic: user correction takes precedence, else capture default.
-    let session_topic = current_session_topic.or(capture_session_topic);
+    // Resolve session topic: user correction takes precedence, else capture default, else applied proposal.
+    let mut session_topic = current_session_topic.or(capture_session_topic);
+
+    // Resolve item type: user correction takes precedence over applied proposals.
+    let mut resolved_type = parsed_item_type;
+    if !type_corrected {
+        // Check for applied proposals with type.
+        let applied_type: Option<String> = tx
+            .query_row(
+                "SELECT proposal_type FROM proposals
+                 WHERE item_id = ? AND applied_state = 'applied' AND proposal_type IS NOT NULL AND abstained = 0
+                 ORDER BY created_at DESC LIMIT 1",
+                [item_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(type_str) = applied_type {
+            resolved_type = Some(
+                type_str
+                    .parse::<ItemType>()
+                    .map_err(|e| anyhow!("Invalid applied proposal type: {}", e))?,
+            );
+        }
+    }
+
+    // Similarly, check for applied session_topic if not user-corrected.
+    if !session_topic_corrected {
+        let applied_topic: Option<String> = tx
+            .query_row(
+                "SELECT session_topic_proposal FROM proposals
+                 WHERE item_id = ? AND applied_state = 'applied' AND session_topic_proposal IS NOT NULL AND abstained = 0
+                 ORDER BY created_at DESC LIMIT 1",
+                [item_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(topic) = applied_topic {
+            session_topic = Some(topic);
+        }
+    }
 
     // Resolve text: check for user text correction.
     let (current_text, text_corrected) = {
@@ -330,7 +380,7 @@ pub fn load_item_state(tx: &Transaction<'_>, item_id: &str) -> Result<Option<Ite
         item_id: item_id.to_string(),
         capture_id,
         revision,
-        item_type: parsed_item_type,
+        item_type: resolved_type,
         scope,
         session_topic,
         lifecycle_state,
@@ -468,6 +518,40 @@ pub fn rebuild_state_from_events(tx: &Transaction<'_>, item_id: &str) -> Result<
         }
     }
 
+    // Replay applied proposals with lower precedence than user corrections.
+    // Precedence: capture (source) < applied model proposals < user corrections.
+    let mut applied_proposals_stmt = tx.prepare(
+        "SELECT proposal_type, session_topic_proposal FROM proposals
+         WHERE item_id = ? AND applied_state = 'applied' AND abstained = 0
+         ORDER BY created_at ASC",
+    )?;
+    let applied_proposals = applied_proposals_stmt
+        .query_map([item_id], |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for (proposal_type, session_topic_proposal) in applied_proposals {
+        // Only apply if the user hasn't corrected the field.
+        if let Some(ptype) = proposal_type {
+            if !type_corrected {
+                current_type = ptype
+                    .parse::<ItemType>()
+                    .map_err(|e| anyhow!("Invalid proposal type: {}", e))
+                    .ok();
+            }
+        }
+
+        if let Some(session_topic) = session_topic_proposal {
+            if !session_topic_corrected {
+                current_session_topic = Some(session_topic);
+            }
+        }
+    }
+
     // Replay all lifecycle events in order.
     let mut events_stmt =
         tx.prepare("SELECT event_type FROM events WHERE item_id = ? ORDER BY revision ASC")?;
@@ -557,46 +641,63 @@ impl std::error::Error for ProposalApplicationError {}
 
 /// Apply a model proposal to an item, guarded against stale/invalid output.
 /// Returns the updated ItemState if successful, or a ProposalApplicationError.
-/// The proposal must have source_revision matching current item revision to be applied.
+/// The proposal must have its stored source_revision matching current item revision.
 /// Stale or invalid proposals preserve the prior state rather than demoting the item.
 pub fn apply_proposal(
     tx: &Transaction<'_>,
     item_id: &str,
     proposal_id: &str,
-    source_revision: i32,
 ) -> Result<ItemState, ProposalApplicationError> {
-    // Load current state to check revision.
+    // Load current state to check conditions.
     let current = load_item_state(tx, item_id)
         .map_err(|e| ProposalApplicationError::InvalidProposal(e.to_string()))?
         .ok_or(ProposalApplicationError::InvalidProposal(
             "Item not found".to_string(),
         ))?;
 
-    // Check that proposal is not stale.
-    if source_revision != current.revision {
-        return Err(ProposalApplicationError::StaleProposal {
-            source_revision,
-            current_revision: current.revision,
-        });
-    }
-
-    // Check that the proposal is for this item.
-    let proposal_row: Option<(String, Option<String>)> = tx
+    // Fetch the proposal row, filtering by both proposal_id AND item_id (ownership check).
+    #[allow(clippy::type_complexity)]
+    let proposal_row: Option<(i32, Option<String>, Option<String>, i64, String)> = tx
         .query_row(
-            "SELECT applied_state, proposal_type FROM proposals WHERE proposal_id = ?",
-            [proposal_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            "SELECT source_revision, proposal_type, session_topic_proposal, abstained, applied_state FROM proposals
+             WHERE proposal_id = ? AND item_id = ? AND capture_id = ?",
+            rusqlite::params![proposal_id, item_id, &current.capture_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .optional()
         .map_err(|e| ProposalApplicationError::InvalidProposal(e.to_string()))?;
 
-    let (applied_state, proposal_type) = proposal_row.ok_or(
-        ProposalApplicationError::InvalidProposal("Proposal not found".to_string()),
-    )?;
+    let (stored_source_revision, proposal_type, session_topic_proposal, abstained, applied_state) =
+        proposal_row.ok_or(ProposalApplicationError::InvalidProposal(
+            "Proposal not found or belongs to another item".to_string(),
+        ))?;
+
+    // Check staleness using stored source_revision.
+    if stored_source_revision != current.revision {
+        return Err(ProposalApplicationError::StaleProposal {
+            source_revision: stored_source_revision,
+            current_revision: current.revision,
+        });
+    }
 
     // Check that the proposal has not already been applied.
     if applied_state == "applied" {
         return Err(ProposalApplicationError::AlreadyApplied);
+    }
+
+    // Check that the proposal is not abstained.
+    if abstained != 0 {
+        return Err(ProposalApplicationError::InvalidProposal(
+            "Proposal is abstained".to_string(),
+        ));
     }
 
     // Check that the item lifecycle permits application (completed/cancelled/deleted forbid model updates).
@@ -604,11 +705,20 @@ pub fn apply_proposal(
         return Err(ProposalApplicationError::ForbiddenByLifecycle);
     }
 
-    // Check that the item was not user-corrected on the proposed field.
+    // Validate and apply the proposed type (if present and not user-corrected).
     if let Some(ptype) = &proposal_type {
-        if ptype == "type" && current.provenance.type_corrected {
+        if current.provenance.type_corrected {
             return Err(ProposalApplicationError::ForbiddenByLifecycle);
         }
+        // Validate that the proposed type is a valid ItemType value.
+        let _validated_type = ptype.parse::<ItemType>().map_err(|e| {
+            ProposalApplicationError::InvalidProposal(format!("Invalid proposal_type: {}", e))
+        })?;
+    }
+
+    // Validate and apply the proposed session_topic (if present and not user-corrected).
+    if session_topic_proposal.is_some() && current.provenance.session_topic_corrected {
+        return Err(ProposalApplicationError::ForbiddenByLifecycle);
     }
 
     // Mark proposal as applied in the database.
@@ -618,9 +728,14 @@ pub fn apply_proposal(
     )
     .map_err(|e| ProposalApplicationError::InvalidProposal(e.to_string()))?;
 
-    // Return the current state (which already includes applied proposals from corrections if applicable).
-    // The actual proposal content would be applied through a separate correction mechanism.
-    Ok(current)
+    // Rebuild the state to include the newly applied proposal.
+    let updated_state = rebuild_state_from_events(tx, item_id)
+        .map_err(|e| ProposalApplicationError::InvalidProposal(e.to_string()))?
+        .ok_or(ProposalApplicationError::InvalidProposal(
+            "Failed to rebuild item state after proposal application".to_string(),
+        ))?;
+
+    Ok(updated_state)
 }
 
 #[cfg(test)]
