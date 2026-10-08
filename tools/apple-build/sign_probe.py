@@ -227,6 +227,10 @@ class SigningRun:
             raise input_error(f"{variable} does not point to a readable file")
         if path == REPO_ROOT or REPO_ROOT in path.parents:
             raise input_error(f"{variable} must point outside the repository")
+        label = f"{variable.lower().replace('_', '-')}"
+        self.redactor.register(value, label)
+        self.redactor.register(str(path), label)
+        self.redactor.register(path.name, f"{label}-file-name", forbid_in_evidence=False)
         return path
 
     def _read_certificate_password(self) -> str:

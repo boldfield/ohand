@@ -542,6 +542,21 @@ class RedactionAndEvidenceTests(SigningToolTestCase):
             for sensitive in self.SENSITIVE_VALUES + (keychain_password,):
                 self.assertNotIn(sensitive, surface)
 
+    def test_input_file_names_carrying_profile_metadata_never_reach_any_surface(self):
+        sensitive_stem = f"{SYNTHETIC_TEAM}-{SYNTHETIC_PROFILE_UUID}"
+        self.profile_path = self.inputs / f"{sensitive_stem}.mobileprovision"
+        self.profile_path.write_bytes(plistlib.dumps(profile_plist()))
+        sensitive_p12 = self.inputs / f"{SYNTHETIC_PROFILE_NAME.replace(' ', '-')}.p12"
+        sensitive_p12.write_bytes(b"synthetic-p12")
+        result = self.sign("--install", OHAND_SIGNING_CERT_PATH=str(sensitive_p12), STUB_ECHO_ARGS="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log = next(self.private.glob("*/run.log")).read_text()
+        self.assertIn("<ohand-signing-profile-path>", log)
+        self.assertIn("<ohand-signing-cert-path>", log)
+        for surface in self.all_text_surfaces(result):
+            for sensitive in (SYNTHETIC_TEAM, SYNTHETIC_PROFILE_UUID, SYNTHETIC_PROFILE_NAME.replace(" ", "-")):
+                self.assertNotIn(sensitive, surface)
+
     def test_private_log_keeps_labelled_placeholders_so_it_is_still_debuggable(self):
         result = self.sign("--install", STUB_ECHO_ARGS="1", STUB_LEAK_TEXT=SYNTHETIC_HARDWARE_UDIDS[0])
         self.assertEqual(result.returncode, 0, result.stderr)
