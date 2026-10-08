@@ -29,7 +29,7 @@ The probe evaluates five standard iOS Keychain accessibility classes:
 
 - **Simulator behavior**: Store and retrieve succeed (the simulator does not enforce lock state).
 - **Lock/relaunch on device**: Accessible after first unlock; remains accessible even after lock until the next device restart. After restart, requires unlock again.
-- **Use case in M1**: Suitable for provider credentials that survive app relaunch and device lock but not device restart.
+- **Use case in M1**: The item stays stored across app relaunch, device lock and device restart; after a restart it is unavailable until the first user unlock, then readable again until the next restart. This is the migratable (backup/restore transferable) variant, so it is not the M1 choice for provider credentials; M1 uses `AfterFirstUnlockThisDeviceOnly` (class 3).
 - **Simulator result**: see "Observed simulator results"; lock behavior is device-only and left to P09.
 
 ### 3. `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`
