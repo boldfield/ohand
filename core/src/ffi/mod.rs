@@ -10,3 +10,5 @@
 //! exported functions are named `ohand_*`, exported constants `OHAND_*` (other public
 //! constants of this crate are never exported), types appear in the header only when an
 //! exported function uses them, and no export is gated on the build target.
+
+pub mod core_handle;

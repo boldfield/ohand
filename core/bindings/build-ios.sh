@@ -27,6 +27,28 @@ fi
 
 cd "${repo_root}"
 
+# Several Xcode targets run this script in parallel; rustup, the shared cargo target
+# directory and the generator must not be used by two of them at once.
+mkdir -p "${repo_root}/target"
+lock_directory="${repo_root}/target/.ohand-build-ios.lock"
+lock_deadline=$(( $(date +%s) + 1800 ))
+until mkdir "${lock_directory}" 2>/dev/null; do
+  lock_holder="$(cat "${lock_directory}/pid" 2>/dev/null || true)"
+  if [ -n "${lock_holder}" ] && ! kill -0 "${lock_holder}" 2>/dev/null; then
+    if [ "$(cat "${lock_directory}/pid" 2>/dev/null || true)" = "${lock_holder}" ]; then
+      mv "${lock_directory}" "${lock_directory}.stale.$$" 2>/dev/null && rm -rf "${lock_directory}.stale.$$"
+    fi
+    continue
+  fi
+  if [ "$(date +%s)" -ge "${lock_deadline}" ]; then
+    echo "error: timed out waiting for the Rust build lock held by ${lock_holder:-an unknown process}" >&2
+    exit 1
+  fi
+  sleep 1
+done
+echo "$$" > "${lock_directory}/pid"
+trap 'rm -rf "${lock_directory}"' EXIT
+
 # rust-toolchain.toml pins the toolchain; make sure it is installed (older rustup does not
 # install it implicitly) and fail loudly if it cannot be.
 if ! rustup show active-toolchain >/dev/null 2>&1; then
