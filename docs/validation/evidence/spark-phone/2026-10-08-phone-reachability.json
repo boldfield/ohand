@@ -3,7 +3,7 @@
   "task": "V08b",
   "collector": "maintainer",
   "device": "iPhone 16 Pro",
-  "ios_version": null,
+  "ios_version": "26.6.2",
   "client": "Safari, plain navigation to the models path of the configured base URL",
   "path_to_endpoint": "Tailscale; endpoint is private-network only (not publicly resolvable)",
   "scheme": "https",
