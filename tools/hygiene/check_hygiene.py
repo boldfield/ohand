@@ -123,17 +123,14 @@ def check_path_policy(path: str) -> List[str]:
     return check_signing_material(path) + check_scanner_suppression(path) + check_private_path(path)
 
 
-def check_provenance_record(path: str, repo_dir: str, tracked: Set[str]) -> List[str]:
-    sidecar_path = path + PROVENANCE_SUFFIX
-    if sidecar_path not in tracked:
-        return [f"missing tracked provenance record {PurePosixPath(sidecar_path).name}"]
+def validate_provenance_bytes(sidecar_bytes: bytes, media_digest: str, sidecar_name: str) -> List[str]:
+    """Validate one provenance sidecar against the SHA-256 of the media it describes."""
     try:
-        with open(os.path.join(repo_dir, sidecar_path), "r", encoding="utf-8") as handle:
-            record = json.load(handle)
-    except (OSError, ValueError):
-        return [f"provenance record {PurePosixPath(sidecar_path).name} is not readable JSON"]
+        record = json.loads(sidecar_bytes.decode("utf-8"))
+    except ValueError:
+        return [f"provenance record {sidecar_name} is not readable JSON"]
     if not isinstance(record, dict):
-        return [f"provenance record {PurePosixPath(sidecar_path).name} must be a JSON object"]
+        return [f"provenance record {sidecar_name} must be a JSON object"]
 
     problems = []
     if record.get("synthetic") is not True:
@@ -144,12 +141,24 @@ def check_provenance_record(path: str, repo_dir: str, tracked: Set[str]) -> List
         value = record.get(required_text_field)
         if not isinstance(value, str) or not value.strip():
             problems.append(f'"{required_text_field}" must be a non-empty string')
-    recorded_digest = record.get("sha256")
-    if not isinstance(recorded_digest, str) or recorded_digest != sha256_of_file(os.path.join(repo_dir, path)):
+    if record.get("sha256") != media_digest:
         problems.append('"sha256" must equal the SHA-256 of the media file')
     if problems:
-        return [f"invalid provenance record {PurePosixPath(sidecar_path).name}: " + "; ".join(problems)]
+        return [f"invalid provenance record {sidecar_name}: " + "; ".join(problems)]
     return []
+
+
+def check_provenance_record(path: str, repo_dir: str, tracked: Set[str]) -> List[str]:
+    sidecar_path = path + PROVENANCE_SUFFIX
+    sidecar_name = PurePosixPath(sidecar_path).name
+    if sidecar_path not in tracked:
+        return [f"missing tracked provenance record {sidecar_name}"]
+    try:
+        with open(os.path.join(repo_dir, sidecar_path), "rb") as handle:
+            sidecar_bytes = handle.read()
+    except OSError:
+        return [f"provenance record {sidecar_name} is not readable JSON"]
+    return validate_provenance_bytes(sidecar_bytes, sha256_of_file(os.path.join(repo_dir, path)), sidecar_name)
 
 
 def check_media_file(path: str, repo_dir: str, tracked: Set[str]) -> List[str]:
@@ -174,46 +183,51 @@ def read_git_object(repo_dir: str, revision_and_path: str) -> Optional[bytes]:
     return result.stdout if result.returncode == 0 else None
 
 
-def check_deleted_media_provenance(path: str, repo_dir: str) -> List[str]:
-    """Verify a media file that no longer exists using the last tree that contained it."""
-    last_touch = subprocess.run(
-        ["git", "--literal-pathspecs", "rev-list", "-n", "1", "HEAD", "--", path],
-        capture_output=True, text=True, cwd=repo_dir,
-    ).stdout.strip()
-    media_bytes = read_git_object(repo_dir, f"{last_touch}^:{path}") if last_touch else None
-    sidecar_bytes = read_git_object(repo_dir, f"{last_touch}^:{path}{PROVENANCE_SUFFIX}") if last_touch else None
-    if media_bytes is None:
-        return ["cannot verify provenance of removed audio/video file in reachable history"]
-    if sidecar_bytes is None:
-        return ["removed audio/video file had no provenance record and remains in reachable history"]
-    try:
-        record = json.loads(sidecar_bytes.decode("utf-8"))
-    except ValueError:
-        record = None
-    if (
-        not isinstance(record, dict)
-        or record.get("synthetic") is not True
-        or record.get("contains_personal_data") is not False
-        or record.get("sha256") != hashlib.sha256(media_bytes).hexdigest()
-    ):
-        return ["removed audio/video file had an invalid provenance record and remains in reachable history"]
-    return []
+def list_commits_touching(repo_dir: str, path: str) -> List[str]:
+    result = subprocess.run(
+        ["git", "--literal-pathspecs", "log", "--format=%H", "--no-renames", "--full-history", "HEAD", "--", path],
+        capture_output=True, text=True, cwd=repo_dir, check=True,
+    )
+    return result.stdout.split()
+
+
+def check_fixture_media_history(path: str, repo_dir: str) -> List[Finding]:
+    """Require a valid, hash-matching sidecar in the same tree for every reachable version of a fixture."""
+    sidecar_path = path + PROVENANCE_SUFFIX
+    sidecar_name = PurePosixPath(sidecar_path).name
+    reported_messages: Set[str] = set()
+    findings = []
+    for commit in list_commits_touching(repo_dir, path):
+        media_bytes = read_git_object(repo_dir, f"{commit}:{path}")
+        if media_bytes is None:
+            continue
+        sidecar_bytes = read_git_object(repo_dir, f"{commit}:{sidecar_path}")
+        if sidecar_bytes is None:
+            problems = [f"audio/video file version had no provenance record {sidecar_name}"]
+        else:
+            problems = validate_provenance_bytes(sidecar_bytes, hashlib.sha256(media_bytes).hexdigest(), sidecar_name)
+        for problem in problems:
+            if problem not in reported_messages:
+                reported_messages.add(problem)
+                findings.append(Finding(path, f"{problem} (commit {commit[:8]}, still in reachable history)"))
+    return findings
 
 
 def check_history_paths(repo_dir: str, tracked: Set[str]) -> List[Finding]:
-    """Apply path policy to files deleted from the tree but still reachable from HEAD."""
+    """Apply path and media policy to every path reachable from HEAD, including deleted and overwritten versions."""
     findings = []
     for path in list_historical_paths(repo_dir):
-        if path in tracked:
+        if path not in tracked:
+            for message in check_path_policy(path):
+                findings.append(Finding(path, f"{message} (deleted, still in reachable history)"))
+        if not path.lower().endswith(MEDIA_SUFFIXES):
             continue
-        messages = check_path_policy(path)
-        if path.lower().endswith(MEDIA_SUFFIXES):
-            if is_under_fixture_root(path):
-                messages += check_deleted_media_provenance(path, repo_dir)
-            else:
-                messages.append("audio/video file outside documented synthetic fixture roots")
-        for message in messages:
-            findings.append(Finding(path, f"{message} (deleted, still in reachable history)"))
+        if is_under_fixture_root(path):
+            findings.extend(check_fixture_media_history(path, repo_dir))
+        elif path not in tracked:
+            findings.append(Finding(
+                path, "audio/video file outside documented synthetic fixture roots (deleted, still in reachable history)"
+            ))
     return findings
 
 
@@ -285,8 +299,20 @@ def run_gitleaks(repo_dir: str, binary: str = "gitleaks", log_opts: str = "HEAD"
         ]
 
 
+def ensure_full_history(repo_dir: str) -> None:
+    """Reachable-history checks are meaningless on a truncated clone, so refuse to certify one."""
+    result = subprocess.run(
+        ["git", "rev-parse", "--is-shallow-repository"], capture_output=True, text=True, cwd=repo_dir
+    )
+    if result.returncode != 0:
+        raise ScannerError("cannot determine whether the repository has full history")
+    if result.stdout.strip() != "false":
+        raise ScannerError("repository is a shallow clone; fetch full history (git fetch --unshallow) before checking")
+
+
 def check_repository(repo_dir: str, run_scanner: bool = True, gitleaks_binary: str = "gitleaks") -> List[Finding]:
     """Return all findings; raises ScannerError if the scanner is required but unusable."""
+    ensure_full_history(repo_dir)
     findings = check_tracked_files(repo_dir)
     if run_scanner:
         findings.extend(run_gitleaks(repo_dir, binary=gitleaks_binary))

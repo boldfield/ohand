@@ -256,14 +256,86 @@ class MediaPolicyTests(TempRepoTestCase):
         self.commit_all()
         self.assertEqual(self.policy_findings(), [])
 
-    def test_deleted_file_re_added_in_approved_form_is_judged_on_current_tree(self):
+    def test_deleted_fixture_audio_with_incomplete_provenance_still_in_history_fails(self):
+        for override in [{"generator": ""}, {"description": "  "}]:
+            with self.subTest(override=override):
+                self.setUp()
+                self.write_media_with_provenance("fixtures/audio/tone.wav", **override)
+                self.commit_all()
+                for removed in ["fixtures/audio/tone.wav", "fixtures/audio/tone.wav.provenance.json"]:
+                    os.remove(os.path.join(self.repo_dir, removed))
+                self.commit_all()
+                messages = [finding.message for finding in self.policy_findings()]
+                self.assertTrue(
+                    any("invalid provenance record" in message and "reachable history" in message for message in messages)
+                )
+
+    def test_deleted_file_re_added_in_approved_form_still_fails_for_earlier_version(self):
         self.write("fixtures/audio/tone.m4a", b"first")
         self.commit_all()
         os.remove(os.path.join(self.repo_dir, "fixtures/audio/tone.m4a"))
         self.commit_all()
         self.write_media_with_provenance("fixtures/audio/tone.m4a")
         self.commit_all()
+        messages = [finding.message for finding in self.policy_findings()]
+        self.assertTrue(any("no provenance record" in message and "reachable history" in message for message in messages))
+
+    def test_private_recording_overwritten_with_provenanced_fixture_still_fails(self):
+        self.write("fixtures/audio/tone.m4a", b"real private voice")
+        self.commit_all()
+        self.write_media_with_provenance("fixtures/audio/tone.m4a")
+        self.commit_all()
+        findings = self.policy_findings()
+        self.assertEqual([finding.path for finding in findings], ["fixtures/audio/tone.m4a"])
+        self.assertIn("reachable history", findings[0].message)
+
+    def test_overwrite_then_delete_of_private_recording_still_fails(self):
+        self.write("fixtures/audio/tone.m4a", b"real private voice")
+        self.commit_all()
+        self.write_media_with_provenance("fixtures/audio/tone.m4a")
+        self.commit_all()
+        for removed in ["fixtures/audio/tone.m4a", "fixtures/audio/tone.m4a.provenance.json"]:
+            os.remove(os.path.join(self.repo_dir, removed))
+        self.commit_all()
+        messages = [finding.message for finding in self.policy_findings()]
+        self.assertTrue(any("no provenance record" in message and "reachable history" in message for message in messages))
+
+    def test_every_version_with_valid_provenance_passes(self):
+        self.write_media_with_provenance("fixtures/audio/tone.m4a")
+        self.commit_all()
+        self.write_media_with_provenance("fixtures/audio/tone.m4a", description="revised tone")
+        self.write("fixtures/audio/tone.m4a", b"second synthetic tone")
+        record_path = os.path.join(self.repo_dir, "fixtures/audio/tone.m4a.provenance.json")
+        with open(record_path) as handle:
+            record = json.load(handle)
+        record["sha256"] = hashlib.sha256(b"second synthetic tone").hexdigest()
+        self.write("fixtures/audio/tone.m4a.provenance.json", json.dumps(record))
+        self.commit_all()
         self.assertEqual(self.policy_findings(), [])
+
+    def test_shallow_clone_fails_closed(self):
+        self.write("recordings/call.m4a", b"private")
+        self.commit_all()
+        os.remove(os.path.join(self.repo_dir, "recordings/call.m4a"))
+        self.commit_all()
+        self.write("README.md", "later\n")
+        self.commit_all()
+        shallow_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, shallow_dir, ignore_errors=True)
+        subprocess.run(
+            ["git", "clone", "-q", "--depth", "1", "file://" + self.repo_dir, shallow_dir + "/clone"],
+            check=True, capture_output=True,
+        )
+        with self.assertRaises(ScannerError) as context:
+            check_repository(shallow_dir + "/clone", run_scanner=False)
+        self.assertIn("shallow", str(context.exception))
+        completed = subprocess.run(
+            [sys.executable, SCRIPT_PATH, "--repo", shallow_dir + "/clone", "--gitleaks", "gitleaks-that-is-not-installed"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(completed.returncode, check_hygiene.EXIT_SCANNER_ERROR)
+        self.assertIn("shallow", completed.stderr)
+        self.assertNotIn("No hygiene issues", completed.stdout)
 
     def test_clean_repository_passes(self):
         self.write("README.md", "# hello\n")
@@ -450,6 +522,16 @@ class RealGitleaksTests(TempRepoTestCase):
         completed = self.run_cli()
         self.assertEqual(completed.returncode, check_hygiene.EXIT_FINDINGS)
         self.assertIn("recordings/call.m4a", completed.stderr)
+        self.assertIn("reachable history", completed.stderr)
+
+    def test_overwritten_private_recording_fails_through_cli(self):
+        self.write("fixtures/audio/tone.m4a", b"real private voice")
+        self.commit_all()
+        self.write_media_with_provenance("fixtures/audio/tone.m4a")
+        self.commit_all()
+        completed = self.run_cli()
+        self.assertEqual(completed.returncode, check_hygiene.EXIT_FINDINGS)
+        self.assertIn("fixtures/audio/tone.m4a", completed.stderr)
         self.assertIn("reachable history", completed.stderr)
 
     def test_run_gitleaks_returns_redacted_findings(self):
