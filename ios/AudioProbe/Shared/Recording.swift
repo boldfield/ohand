@@ -60,7 +60,7 @@ struct AudioCaptureError: Error {
 
 protocol AudioCaptureEngine: AnyObject {
     func start(to destination: URL, maxDuration: TimeInterval) throws
-    /// Closes the file synchronously. Returns false when the engine itself reported a failure.
+    /// Closes the file. Returns false unless the engine confirmed a successful finish.
     func stopAndClose() -> Bool
 }
 
@@ -248,8 +248,15 @@ final class AVAudioRecorderEngine: NSObject, AudioCaptureEngine, AVAudioRecorder
         case undetermined
     }
 
+    private let finishWaitSeconds: TimeInterval
     private var recorder: AVAudioRecorder?
     private var reportedFailure = false
+    private var finishReported = false
+
+    init(finishWaitSeconds: TimeInterval = 1.0) {
+        self.finishWaitSeconds = finishWaitSeconds
+        super.init()
+    }
 
     private static func currentPermission() -> Permission {
         if #available(iOS 17.0, *) {
@@ -290,10 +297,12 @@ final class AVAudioRecorderEngine: NSObject, AudioCaptureEngine, AVAudioRecorder
             let newRecorder = try AVAudioRecorder(url: destination, settings: settings)
             newRecorder.delegate = self
             reportedFailure = false
+            finishReported = false
+            recorder = newRecorder
             guard newRecorder.record(forDuration: maxDuration) else {
+                recorder = nil
                 throw AudioCaptureError(reason: "Recording start failed")
             }
-            recorder = newRecorder
         } catch let captureError as AudioCaptureError {
             throw captureError
         } catch {
@@ -305,14 +314,36 @@ final class AVAudioRecorderEngine: NSObject, AudioCaptureEngine, AVAudioRecorder
         guard let activeRecorder = recorder else {
             return false
         }
-        recorder = nil
         activeRecorder.stop()
+        awaitFinishCallback()
+        recorder = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        return !reportedFailure
+        return finishReported && !reportedFailure
+    }
+
+    /// Serves the run loop (not a blocking sleep) so a delegate callback queued on the main thread can arrive.
+    private func awaitFinishCallback() {
+        let deadline = Date().addingTimeInterval(finishWaitSeconds)
+        while !finishReported && Date() < deadline {
+            let sliceEnd = min(deadline, Date().addingTimeInterval(0.01))
+            if !RunLoop.current.run(mode: .default, before: sliceEnd) {
+                Thread.sleep(forTimeInterval: 0.005)
+            }
+        }
+    }
+
+    func attachRecorderForTesting(_ testRecorder: AVAudioRecorder) {
+        recorder = testRecorder
+        reportedFailure = false
+        finishReported = false
     }
 
     func audioRecorderDidFinishRecording(_ finishedRecorder: AVAudioRecorder, successfully flag: Bool) {
-        if !flag && finishedRecorder === recorder {
+        guard finishedRecorder === recorder else {
+            return
+        }
+        finishReported = true
+        if !flag {
             reportedFailure = true
         }
     }

@@ -391,3 +391,78 @@ final class AudioProbeRecordingTests: XCTestCase {
         }
     }
 }
+
+/// Drives the real `AVAudioRecorderEngine` delegate path with an attached (never started) `AVAudioRecorder`, so no microphone is needed.
+final class AVAudioRecorderEngineFinalizationTests: XCTestCase {
+    private var scratchURLs: [URL] = []
+
+    override func tearDown() {
+        scratchURLs.forEach { try? FileManager.default.removeItem(at: $0) }
+        scratchURLs = []
+        super.tearDown()
+    }
+
+    private func makeAttachedEngine(finishWaitSeconds: TimeInterval = 0.2) throws -> (AVAudioRecorderEngine, AVAudioRecorder) {
+        let scratchURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audio-engine-\(UUID().uuidString).wav")
+        scratchURLs.append(scratchURL)
+        let settings: [String: Any] = [
+            AVFormatIDKey: Int(kAudioFormatLinearPCM),
+            AVSampleRateKey: 16000.0,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 16
+        ]
+        let attachedRecorder = try AVAudioRecorder(url: scratchURL, settings: settings)
+        let engine = AVAudioRecorderEngine(finishWaitSeconds: finishWaitSeconds)
+        engine.attachRecorderForTesting(attachedRecorder)
+        return (engine, attachedRecorder)
+    }
+
+    func testSuccessfulFinishDeliveredDuringStopConfirmsClose() throws {
+        let (engine, attachedRecorder) = try makeAttachedEngine()
+        DispatchQueue.main.async { engine.audioRecorderDidFinishRecording(attachedRecorder, successfully: true) }
+
+        XCTAssertTrue(engine.stopAndClose())
+    }
+
+    func testFalseFinishDeliveredDuringStopIsNotReportedAsClean() throws {
+        let (engine, attachedRecorder) = try makeAttachedEngine()
+        DispatchQueue.main.async { engine.audioRecorderDidFinishRecording(attachedRecorder, successfully: false) }
+
+        XCTAssertFalse(engine.stopAndClose())
+    }
+
+    func testFalseFinishDeliveredBeforeStopIsNotReportedAsClean() throws {
+        let (engine, attachedRecorder) = try makeAttachedEngine()
+        engine.audioRecorderDidFinishRecording(attachedRecorder, successfully: false)
+
+        XCTAssertFalse(engine.stopAndClose())
+    }
+
+    func testEncodeErrorIsNotReportedAsClean() throws {
+        let (engine, attachedRecorder) = try makeAttachedEngine()
+        engine.audioRecorderEncodeErrorDidOccur(attachedRecorder, error: nil)
+        engine.audioRecorderDidFinishRecording(attachedRecorder, successfully: true)
+
+        XCTAssertFalse(engine.stopAndClose())
+    }
+
+    func testMissingFinishCallbackWithinBoundIsUnconfirmed() throws {
+        let (engine, _) = try makeAttachedEngine(finishWaitSeconds: 0.05)
+
+        XCTAssertFalse(engine.stopAndClose())
+    }
+
+    func testFinishFromUnrelatedRecorderIsIgnored() throws {
+        let (engine, _) = try makeAttachedEngine(finishWaitSeconds: 0.05)
+        let (_, unrelatedRecorder) = try makeAttachedEngine()
+
+        engine.audioRecorderDidFinishRecording(unrelatedRecorder, successfully: true)
+
+        XCTAssertFalse(engine.stopAndClose())
+    }
+
+    func testStopWithoutRecorderIsNotClean() {
+        XCTAssertFalse(AVAudioRecorderEngine(finishWaitSeconds: 0.05).stopAndClose())
+    }
+}
