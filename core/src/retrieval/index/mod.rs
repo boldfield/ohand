@@ -17,6 +17,13 @@
 // whitespace; every piece containing a letter or digit becomes a quoted FTS5 phrase prefix
 // term, so FTS operators and quote characters are plain text; a record matches when all terms
 // match as token prefixes within its original text, or within its current text.
+//
+// Ranking: hits are ordered by a relevance computed only from the hit's own text (current-text
+// matches before superseded-original matches, then the density of query-term prefix tokens in
+// the current text, then item id). FTS5 `rank` is deliberately not used: bm25 weighs terms by
+// document frequency over the whole table, so records in scopes the caller may not read would
+// change the order of the records it can read. Match membership does not depend on corpus
+// statistics, so the scope filter and this ranking never observe inaccessible records.
 
 use anyhow::{anyhow, Result};
 use rusqlite::{Connection, Transaction};
@@ -157,6 +164,50 @@ fn match_terms(query: &str) -> Option<String> {
     }
 }
 
+fn query_tokens(query: &str) -> Vec<String> {
+    query
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// (query-term token occurrences, total tokens) in the text, from the text alone.
+fn term_density(text: &str, tokens: &[String]) -> (usize, usize) {
+    let mut occurrences = 0;
+    let mut total = 0;
+    for word in text
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+    {
+        total += 1;
+        let lowered = word.to_lowercase();
+        if tokens
+            .iter()
+            .any(|token| lowered.starts_with(token.as_str()))
+        {
+            occurrences += 1;
+        }
+    }
+    (occurrences, total)
+}
+
+fn rank_hits(hits: &mut [SearchHit], query: &str) {
+    let tokens = query_tokens(query);
+    let density = |hit: &SearchHit| term_density(&hit.current_text, &tokens);
+    hits.sort_by(|left, right| {
+        let current_first =
+            (right.matched == MatchedText::Current).cmp(&(left.matched == MatchedText::Current));
+        let (left_hits, left_total) = density(left);
+        let (right_hits, right_total) = density(right);
+        // right density vs left density, compared by cross-multiplication (best first).
+        let denser = (right_hits * left_total.max(1)).cmp(&(left_hits * right_total.max(1)));
+        current_first
+            .then(denser)
+            .then_with(|| left.item_id.cmp(&right.item_id))
+    });
+}
+
 /// Search the full-text index. Only items readable under `allowed_scopes` (by effective scope,
 /// evaluated before ranking) and not deleted are returned, best match first.
 pub fn search_index(
@@ -169,8 +220,7 @@ pub fn search_index(
 
 /// Answer the same query without reading `search_index`: the projection is evaluated straight
 /// from the authoritative tables into a throwaway temp table that uses the same tokenizer, so the
-/// fallback agrees with a freshly rebuilt index on every accessible record. Results are ordered
-/// by item id.
+/// fallback agrees with a freshly rebuilt index on every accessible record, in the same order.
 pub fn search_source_direct(
     conn: &Connection,
     query: &str,
@@ -192,9 +242,7 @@ pub fn search_source_direct(
             ),
             [rusqlite::types::Null],
         )?;
-        let mut hits = search_table(conn, SCRATCH_TABLE, query, allowed_scopes)?;
-        hits.sort_by(|a, b| a.item_id.cmp(&b.item_id));
-        Ok(hits)
+        search_table(conn, SCRATCH_TABLE, query, allowed_scopes)
     })();
     conn.execute_batch(&format!("DROP TABLE IF EXISTS temp.{SCRATCH_TABLE}"))?;
     outcome
@@ -226,7 +274,7 @@ fn search_table(
           WHERE {table} MATCH ?
             AND i.lifecycle_state != 'deleted'
             AND COALESCE(i.current_scope, c.item_scope) IN ({scope_placeholders})
-          ORDER BY rank, {table}.item_id"
+          ORDER BY {table}.item_id"
     );
     let mut params: Vec<String> = vec![either_text];
     params.extend(
@@ -259,7 +307,8 @@ fn search_table(
         current_matches.insert(item_id?);
     }
 
-    rows.into_iter()
+    let mut hits = rows
+        .into_iter()
         .map(
             |(
                 item_id,
@@ -289,5 +338,7 @@ fn search_table(
                 })
             },
         )
-        .collect()
+        .collect::<Result<Vec<SearchHit>>>()?;
+    rank_hits(&mut hits, query);
+    Ok(hits)
 }

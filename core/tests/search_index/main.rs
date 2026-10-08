@@ -450,6 +450,60 @@ fn ranking_returns_best_match_first() -> Result<()> {
 }
 
 #[test]
+fn inaccessible_scope_records_cannot_change_visible_ranking() -> Result<()> {
+    let mut db = new_db("rank_isolation")?;
+    add_item(
+        &mut db,
+        "item-a",
+        Some("alpha one two three"),
+        "personal",
+        None,
+    )?;
+    add_item(&mut db, "item-b", Some("alpha beta"), "personal", None)?;
+    add_item(
+        &mut db,
+        "item-c",
+        Some("beta alpha beta gamma delta"),
+        "personal",
+        None,
+    )?;
+
+    let personal = [ItemScope::Personal];
+    let order = |db: &Database| -> Result<Vec<String>> {
+        Ok(search_index(db.conn(), "alpha beta", &personal)?
+            .into_iter()
+            .map(|hit| hit.item_id)
+            .collect())
+    };
+    let before = order(&db)?;
+    assert_eq!(before, vec!["item-b", "item-c"]);
+
+    for index in 0..10 {
+        add_item(
+            &mut db,
+            &format!("work-{index}"),
+            Some("alpha filler"),
+            "work",
+            None,
+        )?;
+    }
+    assert_eq!(order(&db)?, before);
+    let fallback: Vec<String> = search_source_direct(db.conn(), "alpha beta", &personal)?
+        .into_iter()
+        .map(|hit| hit.item_id)
+        .collect();
+    assert_eq!(fallback, before);
+
+    // Single-term query: the work-only records still do not reorder personal results.
+    let single_before: Vec<String> = search_index(db.conn(), "alpha", &personal)?
+        .into_iter()
+        .map(|hit| hit.item_id)
+        .collect();
+    assert_eq!(single_before, vec!["item-b", "item-a", "item-c"]);
+    Ok(())
+}
+
+#[test]
 fn model_derived_text_is_never_indexed() -> Result<()> {
     let mut db = new_db("derived")?;
     add_item(
