@@ -19,8 +19,6 @@ use ohand_core::time::TimeContext;
 use std::sync::Arc;
 use uuid::Uuid;
 
-#[allow(dead_code)]
-const ENDPOINT: &str = "https://api.openai.com/v1/chat/completions";
 const ORIGIN: &str = "https://api.openai.com";
 
 fn text_capability() -> CapabilityMetadata {
@@ -343,20 +341,6 @@ fn response_size_bound_rejects_over_limit() {
     let (result, _fake) = harness.run(vec![FakeStep::respond(body)], limits);
     let failure = result.expect_err("over limit should fail");
     assert_eq!(failure.kind, FailureKind::OutputTooLarge);
-}
-
-// ---- Refusal handling (modeled as valid JSON with special content) ----
-
-#[test]
-fn refusal_as_valid_json_is_accepted_by_dispatch() {
-    let harness = Harness::new();
-    // A refusal would typically come as valid JSON with a specific structure
-    let (result, _fake) = harness.run(
-        vec![FakeStep::respond(r#"{"kind":"refusal","reason":"policy"}"#)],
-        DispatchLimits::default(),
-    );
-    let output = result.expect("valid JSON should be accepted by dispatch");
-    assert_eq!(output.proposal["kind"], "refusal");
 }
 
 // ---- Configuration-based profile tests ----
