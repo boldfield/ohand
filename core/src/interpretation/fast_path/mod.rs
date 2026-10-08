@@ -5,8 +5,8 @@
 //! same text, so spans always select exactly the evidence they describe.
 //!
 //! ```text
-//! text     := prefix "remind" "me" ( timed | topic-first ) ["please" | "thanks"] [punctuation]
-//! prefix   := filler* [ self-label ( "," | ":" | dash ) filler* ]
+//! text     := prefix "remind" "me" ( timed | topic-first ) ["please" | "thanks"] ["," | "." | "!"]*
+//! prefix   := (filler | pictograph)* [ self-label ( "," | ":" | dash ) filler* ]
 //! timed    := ["on"] time ["," ] [ "to" content ]
 //! topic-first := "to" content ["on"] time
 //! content  := verb particle? object*      (closed content lexicon, at most six words)
@@ -26,7 +26,9 @@
 //! the approved interpreter. The word lists used below to classify known unsafe forms only choose
 //! the abstention reason; they are not the safety boundary.
 //!
-//! A speaker label before a colon, bracket or dash ("Sam:") is attribution and abstains. Text
+//! A speaker label before a colon, bracket or dash ("Sam:") is attribution and abstains. A quote
+//! or bracket anywhere after the command ("... to call mom\"", "(remind me ...)") abstains, and
+//! markup or brackets before it ("> remind me", "` remind me") are not this grammar. Text
 //! that merely contains "remind me" (for example "can the calendar remind me ..." or "my friend
 //! asked me to remind me ...") is not this grammar and is left alone.
 //!
@@ -844,16 +846,14 @@ enum Shape<'a> {
     Scheduled(Box<ParsedCommand<'a>>),
 }
 
-fn trim_breaks(tokens: &[Token]) -> &[Token] {
-    let mut start = 0;
+/// Drops commas that end the content ("to call mom, on <time>"). Every other break stays in the
+/// content so that the content checks see quotes, brackets and clause marks.
+fn trim_trailing_commas(tokens: &[Token]) -> &[Token] {
     let mut end = tokens.len();
-    while start < end && !tokens[start].is_word() {
-        start += 1;
-    }
-    while end > start && !tokens[end - 1].is_word() {
+    while end > 0 && tokens[end - 1].ch == ',' {
         end -= 1;
     }
-    &tokens[start..end]
+    &tokens[..end]
 }
 
 fn content_is_usable(content: &[Token]) -> bool {
@@ -863,14 +863,22 @@ fn content_is_usable(content: &[Token]) -> bool {
             .all(|token| token.kind != TokenKind::SentenceBreak)
 }
 
+fn is_closing_delimiter(token: &Token) -> bool {
+    token.kind == TokenKind::Quote || matches!(token.ch, ')' | ']')
+}
+
+/// The command without terminal "please", "thanks", commas, full stops, exclamation marks and
+/// closing quotes or brackets. Closing quotes and brackets are only set aside to find the shape:
+/// any quote or bracket after the command makes [`recognize_reminder`] abstain. A trailing colon,
+/// semicolon, dash or ellipsis is kept, so the content checks still see it.
 fn command_body(rest: &[Token]) -> &[Token] {
     let mut end = rest.len();
     while end > 0 {
         let token = &rest[end - 1];
         let is_trailing_filler = token.is_word_equal_to("please")
             || token.is_word_equal_to("thanks")
-            || token.kind == TokenKind::ClauseBreak
-            || token.kind == TokenKind::Quote
+            || token.ch == ','
+            || is_closing_delimiter(token)
             || (token.kind == TokenKind::SentenceBreak && (token.ch == '.' || token.ch == '!'));
         if !is_trailing_filler {
             break;
@@ -927,7 +935,7 @@ fn parse_shape<'a>(rest: &'a [Token], time_context: &TimeContext) -> Option<Shap
         if content_end > 0 && after_to[content_end - 1].is_word_equal_to("on") {
             content_end -= 1;
         }
-        let content = trim_breaks(&after_to[..content_end]);
+        let content = trim_trailing_commas(&after_to[..content_end]);
         if !content_is_usable(content) {
             return None;
         }
@@ -957,7 +965,7 @@ fn parse_shape<'a>(rest: &'a [Token], time_context: &TimeContext) -> Option<Shap
     if !body[next].is_word_equal_to("to") {
         return None;
     }
-    let content = trim_breaks(&body[next + 1..]);
+    let content = trim_trailing_commas(&body[next + 1..]);
     if !content_is_usable(content) {
         return None;
     }
@@ -1024,12 +1032,42 @@ fn prefix_abstention(prefix: &[Token]) -> Option<AbstentionReason> {
     None
 }
 
+/// Decorative pictographs ("\u{1F514}") may stand before the command. Markup and other symbols
+/// (">", "`", "*", "#", "|") may quote or delimit it, so they are not allowed.
+fn is_decorative_symbol(ch: char) -> bool {
+    matches!(
+        u32::from(ch),
+        0x1F300..=0x1FAFF | 0x2600..=0x26FF | 0x2705..=0x2757 | 0xFE0F | 0x200D
+    )
+}
+
+/// Each token before the command must be a word (checked as a filler or self label below), a
+/// decorative pictograph, a sentence break or one of the comma, semicolon, colon or dash
+/// separators. Quotes, brackets, ellipses, question marks and other symbols are not allowed.
+fn is_allowed_prefix_token(token: &Token) -> bool {
+    match token.kind {
+        TokenKind::Word => {
+            token.has_letters_or_digits() || token.lower.chars().all(is_decorative_symbol)
+        }
+        TokenKind::ClauseBreak => matches!(token.ch, ',' | ';' | ':' | '\u{2014}' | '\u{2013}'),
+        TokenKind::SentenceBreak => token.ch != '?',
+        TokenKind::Quote => false,
+    }
+}
+
+/// A quote or bracket after the command means the command is quoted, cited or set apart from
+/// the user's own words ("... to call mom\"", "(remind me ...)"), so it is never scheduled.
+fn has_delimiter_after_command(rest: &[Token]) -> bool {
+    rest.iter()
+        .any(|token| is_closing_delimiter(token) || matches!(token.ch, '(' | '['))
+}
+
 /// The whole text before the command may only hold fillers ("please", "hey") and, before a
 /// comma, colon or dash, a self-addressed label or assistant name ("Note to self:", "Siri,").
 /// Any other earlier word, in this sentence or an earlier one, may frame the command ("In case
 /// it rains, ...", "When I land, ...", "In the novel, ..."), so the text is not this grammar.
 fn prefix_is_allowed(prefix: &[Token]) -> bool {
-    if prefix.iter().any(|token| token.kind == TokenKind::Quote) {
+    if !prefix.iter().all(is_allowed_prefix_token) {
         return false;
     }
     let label: Vec<&str> = prefix
@@ -1158,8 +1196,8 @@ fn content_is_in_lexicon(content: &[Token]) -> bool {
 
 /// The reminder content is bounded: it must be a single short plain clause. Negation,
 /// retraction, reported speech or attribution, completed work, conditions or hypotheticals,
-/// quotes, brackets, clause breaks, any further time and any second clause or predicate all mean the user may not be asking for this schedule, so
-/// nothing is scheduled.
+/// quotes, brackets, clause breaks, any further time and any second clause or predicate all
+/// mean the user may not be asking for this schedule, so nothing is scheduled.
 fn content_abstention(content: &[Token]) -> Option<AbstentionReason> {
     if content.iter().any(is_content_negation_word)
         || has_word(content, CONTENT_RETRACTION_WORDS)
@@ -1261,6 +1299,9 @@ pub fn recognize_reminder(
 
     if let Some(reason) = prefix_abstention(prefix) {
         return Some(provenance.abstention(reason));
+    }
+    if has_delimiter_after_command(rest) {
+        return Some(provenance.abstention(AbstentionReason::UncertainTarget));
     }
     if !prefix_is_allowed(prefix) {
         return None;

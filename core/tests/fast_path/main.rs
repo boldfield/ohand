@@ -889,3 +889,69 @@ fn unlisted_conditions_zones_and_retractions_in_the_content_never_schedule() {
     }
     expect_abstention(&format!("{positive} GMT+2"), AbstentionReason::Ambiguous);
 }
+
+#[test]
+fn quotes_and_brackets_after_the_command_never_schedule() {
+    let positive = "remind me 2025-10-20 14:30:00 to call mom";
+    expect_explicit(positive, FUTURE_INSTANT, FUTURE_PHRASE);
+    expect_explicit(&format!("{positive}."), FUTURE_INSTANT, FUTURE_PHRASE);
+    expect_explicit(
+        &format!("{positive}, please!"),
+        FUTURE_INSTANT,
+        FUTURE_PHRASE,
+    );
+    for text in [
+        format!("{positive}\""),
+        format!("{positive}\u{201D}"),
+        format!("{positive}'"),
+        format!("{positive})"),
+        format!("({positive})"),
+        format!("[{positive}]"),
+        "remind me 2025-10-20 14:30:00\"".to_string(),
+        "remind me to call mom on 2025-10-20 14:30:00\u{201D}".to_string(),
+    ] {
+        expect_abstention(&text, AbstentionReason::UncertainTarget);
+    }
+}
+
+#[test]
+fn trailing_clause_marks_are_not_trimmed_away() {
+    let positive = "remind me 2025-10-20 14:30:00 to call mom";
+    for suffix in [":", ";", " \u{2014}", "\u{2026}", ":("] {
+        expect_no_reminder(&format!("{positive}{suffix}"));
+    }
+    expect_unrecognized("remind me 2025-10-20 14:30:00:");
+    expect_unrecognized("remind me to call mom 2025-10-20 14:30:00 \u{2014}");
+}
+
+#[test]
+fn markup_and_symbol_prefixes_are_not_the_grammar() {
+    let command = "remind me 2025-10-20 14:30:00 to call mom";
+    expect_explicit(
+        &format!("\u{1F514} {command}"),
+        FUTURE_INSTANT,
+        FUTURE_PHRASE,
+    );
+    for prefix in [
+        "> ",
+        "` ",
+        "``` ",
+        "* ",
+        "# ",
+        "| ",
+        "- ",
+        "( ",
+        "[ ",
+        "? ",
+        "\u{2026} ",
+    ] {
+        assert!(
+            recognize(&format!("{prefix}{command}"))
+                .is_none_or(|proposal| proposal.reminder_proposal.is_none()),
+            "{prefix:?} must never schedule"
+        );
+    }
+    for prefix in ["> ", "` ", "``` ", "* ", "# ", "| ", "- ", "( ", "[ "] {
+        expect_unrecognized(&format!("{prefix}{command}"));
+    }
+}
