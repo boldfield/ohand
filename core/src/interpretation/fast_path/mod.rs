@@ -523,7 +523,7 @@ const SELF_LABELS: &[&[&str]] = &[
 const CONTENT_VERBS: &[&str] = &[
     "call", "phone", "text", "email", "buy", "get", "pick", "pay", "book", "check", "take",
     "bring", "return", "water", "feed", "walk", "clean", "wash", "pack", "send", "renew", "charge",
-    "refill", "order", "mail", "visit", "fix", "submit", "print", "read", "review", "ask",
+    "refill", "order", "mail", "visit", "fix", "submit", "print", "read", "review", "ask", "discuss",
 ];
 
 // Verb particles ("pick up", "take out", "call back"). They may follow the verb or end the content.
@@ -591,6 +591,7 @@ const CONTENT_NOUNS: &[&str] = &[
     "form",
     "appointment",
     "roof",
+    "therapy",
 ];
 
 const MAX_LEXICON_CONTENT_WORDS: usize = 6;

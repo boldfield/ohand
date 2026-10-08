@@ -3,7 +3,9 @@ use chrono_tz::Tz;
 use ohand_core::interpretation::contracts::{
     AbstentionReason, Proposal, ReminderProposal, SourceSpan, TextBasis, TimeResolutionQuality,
 };
-use ohand_core::interpretation::fast_path::{recognize_reminder, recognize_session_topic};
+use ohand_core::interpretation::fast_path::{
+    recognize_reminder, recognize_session_topic, recognize_with_composed_topics,
+};
 use ohand_core::store::events::ItemType;
 use ohand_core::time::TimeContext;
 
@@ -1361,4 +1363,65 @@ fn reminder_behavior_unchanged_without_topic() {
     // Verify the reminder details are correct
     let reminder = proposal.reminder_proposal.as_ref().unwrap();
     assert_eq!(reminder.quality, TimeResolutionQuality::Ambiguous);
+}
+
+#[test]
+fn composed_recognizer_reminder_only() {
+    // Test the composed recognizer with reminder-only input.
+    let text = "Remind me tomorrow to call mom";
+    let proposal = recognize_with_composed_topics(
+        text,
+        ITEM_ID,
+        CAPTURE_ID,
+        0,
+        TextBasis::Original { item_revision: 0 },
+        REQUEST_VERSION,
+        &context(),
+    )
+    .expect("should recognize reminder");
+
+    // Should have a reminder facet
+    assert!(
+        proposal.reminder_proposal.is_some(),
+        "should have reminder facet"
+    );
+    assert_eq!(
+        proposal.item_type,
+        Some(ItemType::Action),
+        "should be an Action"
+    );
+
+    // Should not have a topic facet
+    assert_eq!(
+        proposal.session_topic_proposal, None,
+        "should not have topic for reminder-only input"
+    );
+}
+
+#[test]
+fn composed_recognizer_topic_only() {
+    // Test the composed recognizer with session-topic-only input.
+    let text = "Bring this up in therapy";
+    let proposal = recognize_with_composed_topics(
+        text,
+        ITEM_ID,
+        CAPTURE_ID,
+        0,
+        TextBasis::Original { item_revision: 0 },
+        REQUEST_VERSION,
+        &context(),
+    )
+    .expect("should recognize topic");
+
+    // Should have a topic facet
+    assert!(
+        proposal.session_topic_proposal.is_some(),
+        "should have topic facet"
+    );
+
+    // Should not have a reminder facet
+    assert_eq!(
+        proposal.reminder_proposal, None,
+        "should not have reminder for topic-only input"
+    );
 }
