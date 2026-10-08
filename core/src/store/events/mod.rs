@@ -138,6 +138,9 @@ pub enum EventType {
     Completion,
     Cancellation,
     SuggestionControl,
+    // Deletion is internal-only and set via mark_deletion_intent, not public save_event
+    #[doc(hidden)]
+    Deletion,
 }
 
 impl EventType {
@@ -147,6 +150,7 @@ impl EventType {
             EventType::Completion => "completion",
             EventType::Cancellation => "cancellation",
             EventType::SuggestionControl => "suggestion_control",
+            EventType::Deletion => "deletion",
         }
     }
 }
@@ -160,6 +164,7 @@ impl FromStr for EventType {
             "completion" => Ok(EventType::Completion),
             "cancellation" => Ok(EventType::Cancellation),
             "suggestion_control" => Ok(EventType::SuggestionControl),
+            "deletion" => Ok(EventType::Deletion),
             _ => Err(anyhow!("Unknown event type: {}", s)),
         }
     }
@@ -245,6 +250,8 @@ pub enum EventPayload {
     SuggestionControl(SuggestionControlPayload),
     Completion,
     Cancellation,
+    #[doc(hidden)]
+    Deletion,
 }
 
 #[derive(Clone, Debug)]
@@ -320,6 +327,7 @@ impl Event {
             (EventType::SuggestionControl, EventPayload::SuggestionControl(_)) => Ok(()),
             (EventType::Completion, EventPayload::Completion) => Ok(()),
             (EventType::Cancellation, EventPayload::Cancellation) => Ok(()),
+            (EventType::Deletion, EventPayload::Deletion) => Ok(()),
             _ => Err(EventError::Invalid(format!(
                 "Invalid event type and payload combination: {:?} with {:?}",
                 self.event_type, self.payload
@@ -394,6 +402,7 @@ fn event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
         }
         EventType::Completion => EventPayload::Completion,
         EventType::Cancellation => EventPayload::Cancellation,
+        EventType::Deletion => EventPayload::Deletion,
     };
 
     Ok(Event {
@@ -517,6 +526,14 @@ pub fn save_event_in_tx(
 ) -> Result<Event, EventError> {
     event.validate()?;
 
+    // Deletion events are internal-only and must be created through mark_deletion_intent.
+    if matches!(event.event_type, EventType::Deletion) {
+        return Err(EventError::Invalid(
+            "Deletion events must be created through mark_deletion_intent, not save_event"
+                .to_string(),
+        ));
+    }
+
     if event.revision != expected_item_revision {
         return Err(EventError::RevisionMismatch {
             event_revision: event.revision,
@@ -597,6 +614,7 @@ pub fn save_event_in_tx(
             EventPayload::SuggestionControl(s) => (None, None, None, Some(s.kind.as_str())),
             EventPayload::Completion => (None, None, None, None),
             EventPayload::Cancellation => (None, None, None, None),
+            EventPayload::Deletion => (None, None, None, None),
         };
 
     tx.execute(
@@ -667,6 +685,108 @@ pub fn save_event_in_tx(
         }
         _ => {}
     }
+
+    tx.execute(
+        "UPDATE items SET revision = revision + 1 WHERE item_id = ?",
+        [event.item_id.as_str()],
+    )?;
+
+    Ok(event.clone())
+}
+
+/// Save a deletion event within a caller-owned transaction.
+/// This is an internal-only function used by mark_deletion_intent and is not exposed through
+/// the public save_event API to prevent callers from bypassing deletion cleanup logic.
+/// expected_item_revision: the item's revision at the time of the deletion.
+/// This is crate-private to enforce deletion through the complete fenced operation in L01.
+pub(crate) fn save_deletion_event_in_tx(
+    tx: &Transaction<'_>,
+    event: &Event,
+    expected_item_revision: i32,
+) -> Result<Event, EventError> {
+    if !matches!(event.event_type, EventType::Deletion) {
+        return Err(EventError::Invalid(
+            "save_deletion_event_in_tx must only be called with Deletion events".to_string(),
+        ));
+    }
+
+    event.validate()?;
+
+    if event.revision != expected_item_revision {
+        return Err(EventError::RevisionMismatch {
+            event_revision: event.revision,
+            expected: expected_item_revision,
+        });
+    }
+
+    // Idempotent retry: an identical event already stored has one effect.
+    let existing: Option<Event> = tx
+        .query_row(
+            "SELECT event_id, item_id, revision, event_type, happened_at,
+                    correction_kind, correction_old_value, correction_new_value,
+                    suggestion_control_kind
+             FROM events WHERE event_id = ?",
+            [event.event_id.as_str()],
+            event_from_row,
+        )
+        .optional()?;
+
+    if let Some(existing_event) = existing {
+        if existing_event == *event {
+            return Ok(existing_event);
+        }
+        return Err(EventError::Conflict {
+            event_id: event.event_id.clone(),
+        });
+    }
+
+    let current =
+        get_item_snapshot(tx, &event.item_id)?.ok_or_else(|| EventError::ItemNotFound {
+            item_id: event.item_id.clone(),
+        })?;
+
+    if expected_item_revision != current.revision {
+        return Err(EventError::StaleRevision {
+            item_id: event.item_id.clone(),
+            expected: expected_item_revision,
+            current,
+        });
+    }
+
+    // Allow deletion from any lifecycle state per the deletion contract in DESIGN.md.
+    // User-requested deletion must work for any item's records, including completed/cancelled items.
+    let allowed = !matches!(current.lifecycle_state.as_str(), "deleted");
+    if !allowed {
+        return Err(EventError::NotAllowedInState {
+            item_id: event.item_id.clone(),
+            lifecycle_state: current.lifecycle_state,
+            event_type: "deletion",
+        });
+    }
+
+    tx.execute(
+        "INSERT INTO events (event_id, item_id, revision, event_type, happened_at,
+                            correction_kind, correction_old_value, correction_new_value,
+                            suggestion_control_kind)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rusqlite::params![
+            &event.event_id,
+            &event.item_id,
+            event.revision,
+            event.event_type.as_str(),
+            &event.happened_at,
+            None::<String>,
+            None::<String>,
+            None::<String>,
+            None::<String>,
+        ],
+    )?;
+
+    // Set lifecycle_state to deleted
+    tx.execute(
+        "UPDATE items SET lifecycle_state = 'deleted' WHERE item_id = ?",
+        [event.item_id.as_str()],
+    )?;
 
     tx.execute(
         "UPDATE items SET revision = revision + 1 WHERE item_id = ?",
