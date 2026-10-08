@@ -87,7 +87,7 @@ jobs:
         run: |
           set -euo pipefail
           cd ios
-          ./scripts/build-simulator.sh CredentialProbe 2>&1 | tee .evidence/CredentialProbe-build.log
+          OHAND_SIMULATOR_ADHOC_SIGN=1 ./scripts/build-simulator.sh CredentialProbe 2>&1 | tee .evidence/CredentialProbe-build.log
 
       - name: Run CredentialProbe Keychain self-test
         shell: bash

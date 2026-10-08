@@ -200,10 +200,12 @@ targets:
         createIntermediateGroups: true
         excludes:
           - Info.plist
+          - CredentialProbe.entitlements
     settings:
       PRODUCT_NAME: CredentialProbe
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.credential
       INFOPLIST_FILE: CredentialProbe/Info.plist
+      CODE_SIGN_ENTITLEMENTS: CredentialProbe/CredentialProbe.entitlements
 
   CaptureProbe:
     type: application
