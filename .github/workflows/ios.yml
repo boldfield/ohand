@@ -15,7 +15,7 @@ concurrency:
 jobs:
   simulator:
     name: Simulator build, unit tests and launch smoke test
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -23,7 +23,9 @@ jobs:
       - name: Select pinned Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: '16.4'
+          # Must equal options.xcodeVersion in ios/project.yml (enforced by check_project_config.py).
+          # Next bump: Xcode 27 once the hosted image carries it.
+          xcode-version: '26.6'
 
       - name: Install XcodeGen launcher
         shell: bash
@@ -218,7 +220,7 @@ jobs:
 
   tauri-probe:
     name: Tauri 2 iOS probe build and round-trip test
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 60
     defaults:
       run:
@@ -230,7 +232,9 @@ jobs:
       - name: Select pinned Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: '16.4'
+          # Must equal options.xcodeVersion in ios/project.yml (enforced by check_project_config.py).
+          # Next bump: Xcode 27 once the hosted image carries it.
+          xcode-version: '26.6'
 
       - name: Record toolchain versions
         run: |
