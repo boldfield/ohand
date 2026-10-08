@@ -44,6 +44,9 @@ MEDIA_SUFFIXES = (
     ".aif", ".aiff", ".amr", ".wma", ".3gp",
     ".mp4", ".mov", ".m4v", ".webm", ".mkv",
 )
+# ISO base media files share the ftyp box with still-image formats, which are not recordings.
+IMAGE_FTYP_BRANDS = {b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"mif1", b"msf1", b"avif", b"avis", b"crx "}
+MEDIA_SNIFF_LENGTH = 12
 SYNTHETIC_FIXTURE_ROOTS = (
     "fixtures/",
     "core/tests/fixtures/",
@@ -115,6 +118,39 @@ def read_blob(repo_dir: str, object_id: str) -> bytes:
     return subprocess.run(
         ["git", "cat-file", "blob", object_id], capture_output=True, cwd=repo_dir, check=True
     ).stdout
+
+
+def read_blob_headers(repo_dir: str, object_ids: List[str], length: int = MEDIA_SNIFF_LENGTH) -> Dict[str, bytes]:
+    """The first length bytes of each blob, read through one git cat-file process."""
+    if not object_ids:
+        return {}
+    completed = subprocess.run(
+        ["git", "cat-file", "--batch"], input="".join(f"{object_id}\n" for object_id in object_ids).encode("ascii"),
+        capture_output=True, cwd=repo_dir, check=True,
+    )
+    output = completed.stdout
+    headers = {}
+    offset = 0
+    for object_id in object_ids:
+        header_end = output.index(b"\n", offset)
+        _, object_type, size = output[offset:header_end].decode("ascii").split()
+        if object_type != "blob":
+            raise ScannerError(f"git object {object_id} is a {object_type}, expected a blob")
+        content_start = header_end + 1
+        headers[object_id] = output[content_start:content_start + min(int(size), length)]
+        offset = content_start + int(size) + 1
+    return headers
+
+
+def looks_like_media(header: bytes) -> bool:
+    """Recognise common audio/video containers from their leading bytes, whatever the file is named."""
+    if header.startswith((b"ID3", b"OggS", b"fLaC", b"caff", b"#!AMR", b"\x1a\x45\xdf\xa3", b"\x30\x26\xb2\x75")):
+        return True
+    if header.startswith(b"RIFF") and header[8:12] in (b"WAVE", b"AVI "):
+        return True
+    if header.startswith(b"FORM") and header[8:12] in (b"AIFF", b"AIFC"):
+        return True
+    return header[4:8] == b"ftyp" and header[8:12] not in IMAGE_FTYP_BRANDS
 
 
 def check_signing_material(path: str) -> List[str]:
@@ -194,10 +230,15 @@ def check_media_version(repo_dir: str, media_entry: TreeEntry, sidecar_entry: Op
     return validate_provenance_bytes(read_blob(repo_dir, sidecar_entry.object_id), media_digest, sidecar_name)
 
 
-def check_media_file(entry: TreeEntry, repo_dir: str, tracked: Dict[str, TreeEntry]) -> List[str]:
+def check_media_file(
+    entry: TreeEntry, repo_dir: str, tracked: Dict[str, TreeEntry], has_media_content: bool = False
+) -> List[str]:
     if not entry.path.lower().endswith(MEDIA_SUFFIXES):
-        return []
-    if not is_under_fixture_root(entry.path):
+        if not has_media_content:
+            return []
+        if not is_under_fixture_root(entry.path):
+            return ["audio/video content (detected from file contents) outside documented synthetic fixture roots"]
+    elif not is_under_fixture_root(entry.path):
         return ["audio/video file outside documented synthetic fixture roots"]
     return check_media_version(repo_dir, entry, tracked.get(entry.path + PROVENANCE_SUFFIX))
 
@@ -211,20 +252,24 @@ def list_historical_paths(repo_dir: str) -> List[str]:
     return sorted({name for name in names if name})
 
 
-def list_commits_touching(repo_dir: str, path: str) -> List[str]:
+def list_commits_touching(repo_dir: str, *paths: str) -> List[str]:
     result = subprocess.run(
-        ["git", "--literal-pathspecs", "log", "--format=%H", "--no-renames", "--full-history", "HEAD", "--", path],
+        ["git", "--literal-pathspecs", "log", "--format=%H", "--no-renames", "--full-history", "HEAD", "--", *paths],
         capture_output=True, text=True, cwd=repo_dir, check=True,
     )
     return result.stdout.split()
 
 
 def check_fixture_media_history(path: str, repo_dir: str) -> List[Finding]:
-    """Require a valid, hash-matching sidecar in the same tree for every reachable version of a fixture."""
+    """Require a valid, hash-matching sidecar in the same tree for every reachable version of a fixture.
+
+    Commits that change only the sidecar are walked too, so deleting or corrupting the record while the
+    media stays put is a reachable unprovenanced state.
+    """
     sidecar_path = path + PROVENANCE_SUFFIX
     reported_messages: Set[str] = set()
     findings = []
-    for commit in list_commits_touching(repo_dir, path):
+    for commit in list_commits_touching(repo_dir, path, sidecar_path):
         media_entry = read_tree_entry(repo_dir, commit, path)
         if media_entry is None:
             continue
@@ -266,16 +311,26 @@ def check_history_paths(repo_dir: str, tracked: Dict[str, TreeEntry]) -> List[Fi
 def check_tracked_files(repo_dir: str) -> List[Finding]:
     tracked_entries = list_tracked_entries(repo_dir)
     tracked = {entry.path: entry for entry in tracked_entries}
+    sniffed_object_ids = sorted({
+        entry.object_id for entry in tracked_entries
+        if entry.mode in REGULAR_FILE_MODES and not entry.path.lower().endswith(MEDIA_SUFFIXES)
+    })
+    headers = read_blob_headers(repo_dir, sniffed_object_ids)
     findings = []
     for entry in tracked_entries:
-        for message in check_path_policy(entry.path) + check_media_file(entry, repo_dir, tracked):
+        has_media_content = entry.object_id in headers and looks_like_media(headers[entry.object_id])
+        for message in check_path_policy(entry.path) + check_media_file(entry, repo_dir, tracked, has_media_content):
             findings.append(Finding(entry.path, message))
     findings.extend(check_history_paths(repo_dir, tracked))
     return findings
 
 
-def run_gitleaks(repo_dir: str, binary: str = "gitleaks", log_opts: str = "HEAD") -> List[Finding]:
-    """Scan history reachable from log_opts; raise ScannerError on anything but a clean or findings result."""
+def run_gitleaks(repo_dir: str, binary: str = "gitleaks", log_opts: str = "-m HEAD") -> List[Finding]:
+    """Scan history reachable from log_opts; raise ScannerError on anything but a clean or findings result.
+
+    git log -p shows no diff for a merge commit unless -m is given, so the default includes it: content
+    added while resolving a merge is scanned against each parent.
+    """
     with tempfile.TemporaryDirectory() as scratch_dir:
         report_path = os.path.join(scratch_dir, "report.json")
         command = [

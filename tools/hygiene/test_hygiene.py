@@ -28,6 +28,7 @@ from check_hygiene import (
     check_repository,
     check_signing_material,
     format_report,
+    looks_like_media,
     run_gitleaks,
 )
 
@@ -58,6 +59,10 @@ def seeded_anthropic_key():
 
 def seeded_generic_password():
     return random_text(24, ALPHANUMERIC, 4)
+
+
+def synthetic_wav_bytes():
+    return b"RIFF" + (36).to_bytes(4, "little") + b"WAVEfmt " + bytes(28)
 
 
 def seeded_private_key_block():
@@ -102,6 +107,26 @@ class TempRepoTestCase(unittest.TestCase):
         }
         record.update(overrides)
         self.write(media_path + ".provenance.json", json.dumps(record))
+
+    def remove(self, *relative_paths):
+        for relative_path in relative_paths:
+            os.remove(os.path.join(self.repo_dir, relative_path))
+
+    def commit_side_branch_merge_with(self, relative_path, content):
+        """Merge a side branch and add relative_path only while resolving the merge."""
+        self.write("base.txt", "base\n")
+        self.commit_all()
+        self.git("branch", "-M", "main")
+        self.git("checkout", "-q", "-b", "side")
+        self.write("side.txt", "side\n")
+        self.commit_all()
+        self.git("checkout", "-q", "main")
+        self.write("main.txt", "main\n")
+        self.commit_all()
+        self.git("merge", "-q", "--no-ff", "--no-commit", "side")
+        self.write(relative_path, content)
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "Merge side")
 
     def replace_with_dangling_symlink(self, relative_path):
         full_path = os.path.join(self.repo_dir, relative_path)
@@ -318,6 +343,46 @@ class MediaPolicyTests(TempRepoTestCase):
         self.commit_all()
         self.assertEqual(self.policy_findings(), [])
 
+    def test_sidecar_deleted_before_media_still_fails(self):
+        self.write_media_with_provenance("fixtures/audio/tone.m4a")
+        self.commit_all()
+        self.remove("fixtures/audio/tone.m4a.provenance.json")
+        self.commit_all()
+        self.remove("fixtures/audio/tone.m4a")
+        self.commit_all()
+        messages = [finding.message for finding in self.policy_findings()]
+        self.assertTrue(any("no provenance record" in message and "reachable history" in message for message in messages))
+
+    def test_sidecar_corrupted_before_media_deleted_still_fails(self):
+        self.write_media_with_provenance("fixtures/audio/tone.m4a")
+        self.commit_all()
+        self.write_media_with_provenance("fixtures/audio/tone.m4a", synthetic=False)
+        self.commit_all()
+        self.remove("fixtures/audio/tone.m4a", "fixtures/audio/tone.m4a.provenance.json")
+        self.commit_all()
+        messages = [finding.message for finding in self.policy_findings()]
+        self.assertTrue(any("invalid provenance record" in message and "reachable history" in message for message in messages))
+
+    def test_renamed_recording_outside_fixture_roots_fails_from_contents(self):
+        for path in ["data/voice.bin", "notes.m4a.txt"]:
+            self.write(path, synthetic_wav_bytes())
+        self.commit_all()
+        findings = self.policy_findings()
+        self.assertEqual({finding.path for finding in findings}, {"data/voice.bin", "notes.m4a.txt"})
+        self.assertTrue(all("detected from file contents" in finding.message for finding in findings))
+
+    def test_renamed_recording_in_fixture_root_needs_provenance(self):
+        self.write("fixtures/audio/tone.bin", synthetic_wav_bytes())
+        self.commit_all()
+        messages = [finding.message for finding in self.policy_findings()]
+        self.assertTrue(any("missing tracked provenance record" in message for message in messages))
+        self.write("fixtures/audio/tone.bin.provenance.json", json.dumps({
+            "synthetic": True, "contains_personal_data": False, "generator": "zero-sample script",
+            "description": "Silent WAV header", "sha256": hashlib.sha256(synthetic_wav_bytes()).hexdigest(),
+        }))
+        self.commit_all()
+        self.assertEqual(self.policy_findings(), [])
+
     def test_recording_replaced_by_dangling_symlink_still_fails(self):
         self.write("recordings/call.m4a", b"sixteen byte rec")
         self.commit_all()
@@ -407,6 +472,25 @@ class MediaPolicyTests(TempRepoTestCase):
         with mock.patch.object(check_hygiene, "run_gitleaks", return_value=[]):
             findings = check_repository(self.repo_dir)
         self.assertEqual([finding.path for finding in findings], ["ios/Signing/dist.p12"])
+
+
+class MediaSniffTests(unittest.TestCase):
+    def test_audio_and_video_containers_are_recognised(self):
+        for header in [
+            synthetic_wav_bytes(), b"ID3\x04\x00\x00\x00\x00\x00\x00", b"OggS\x00\x02", b"fLaC\x00\x00\x00\x22",
+            b"caff\x00\x01\x00\x00", b"FORM\x00\x00\x00\x00AIFF", b"\x00\x00\x00\x20ftypM4A ",
+            b"\x00\x00\x00\x18ftypqt  ", b"\x1a\x45\xdf\xa3\x01", b"#!AMR\n",
+        ]:
+            with self.subTest(header=header):
+                self.assertTrue(looks_like_media(header[:12]))
+
+    def test_images_and_text_are_not_media(self):
+        for header in [
+            b"\x00\x00\x00\x18ftypheic", b"\x00\x00\x00\x1cftypavif", b"RIFF\x00\x00\x00\x00WEBP",
+            b"\x89PNG\r\n\x1a\n", b"# heading\n", b"",
+        ]:
+            with self.subTest(header=header):
+                self.assertFalse(looks_like_media(header[:12]))
 
 
 class ScannerFailClosedTests(TempRepoTestCase):
@@ -602,6 +686,44 @@ class RealGitleaksTests(TempRepoTestCase):
         self.assertEqual(completed.returncode, check_hygiene.EXIT_FINDINGS)
         self.assertIn("recordings/call.m4a", completed.stderr)
         self.assertNotIn("No hygiene issues", completed.stdout)
+
+    def test_secret_introduced_in_merge_commit_fails_and_is_never_printed(self):
+        secret_value = seeded_aws_access_key()
+        self.commit_side_branch_merge_with("cfg.txt", 'aws_key = "' + secret_value + '"\n')
+        completed = self.run_cli()
+        self.assertEqual(completed.returncode, check_hygiene.EXIT_FINDINGS, completed.stderr)
+        self.assertIn("cfg.txt", completed.stderr)
+        self.assertIn("aws-access-token", completed.stderr)
+        self.assertNotIn(secret_value, completed.stdout + completed.stderr)
+
+    def test_secret_introduced_in_merge_commit_and_later_deleted_still_fails(self):
+        secret_value = seeded_aws_access_key()
+        self.commit_side_branch_merge_with("cfg.txt", 'aws_key = "' + secret_value + '"\n')
+        self.remove("cfg.txt")
+        self.commit_all()
+        completed = self.run_cli()
+        self.assertEqual(completed.returncode, check_hygiene.EXIT_FINDINGS, completed.stderr)
+        self.assertIn("cfg.txt", completed.stderr)
+        self.assertNotIn(secret_value, completed.stdout + completed.stderr)
+
+    def test_sidecar_deleted_before_media_fails_through_cli(self):
+        self.write_media_with_provenance("fixtures/audio/tone.m4a")
+        self.commit_all()
+        self.remove("fixtures/audio/tone.m4a.provenance.json")
+        self.commit_all()
+        self.remove("fixtures/audio/tone.m4a")
+        self.commit_all()
+        completed = self.run_cli()
+        self.assertEqual(completed.returncode, check_hygiene.EXIT_FINDINGS)
+        self.assertIn("fixtures/audio/tone.m4a", completed.stderr)
+        self.assertIn("reachable history", completed.stderr)
+
+    def test_renamed_recording_fails_through_cli(self):
+        self.write("data/voice.bin", synthetic_wav_bytes())
+        self.commit_all()
+        completed = self.run_cli()
+        self.assertEqual(completed.returncode, check_hygiene.EXIT_FINDINGS)
+        self.assertIn("data/voice.bin", completed.stderr)
 
     def test_run_gitleaks_returns_redacted_findings(self):
         self.write("leak.txt", seeded_aws_access_key() + "\n")
