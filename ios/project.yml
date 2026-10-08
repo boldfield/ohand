@@ -21,10 +21,22 @@ targets:
     sources:
       - path: OhAndCoreBridge
         createIntermediateGroups: true
+        excludes:
+          - "CoreC/**"
     settings:
       PRODUCT_NAME: OhAndCoreBridge
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.corebridge
       GENERATE_INFOPLIST_FILE: YES
+      ENABLE_USER_SCRIPT_SANDBOXING: NO
+      OHAND_RUST_OUTPUT_DIR: $(PROJECT_TEMP_DIR)/ohand-rust-core/$(PLATFORM_NAME)
+      LIBRARY_SEARCH_PATHS: $(OHAND_RUST_OUTPUT_DIR)
+      HEADER_SEARCH_PATHS: $(OHAND_RUST_OUTPUT_DIR)
+      SWIFT_INCLUDE_PATHS: $(SRCROOT)/OhAndCoreBridge/CoreC
+      OTHER_LDFLAGS: $(inherited) -lohand_bindings -liconv -framework Security -framework CoreFoundation
+    preBuildScripts:
+      - name: Build Rust core bindings
+        script: '"${SRCROOT}/../core/bindings/build-ios.sh"'
+        basedOnDependencyAnalysis: false
 
   OhAndServices:
     type: framework
@@ -80,6 +92,9 @@ targets:
       GENERATE_INFOPLIST_FILE: YES
       TEST_HOST: $(BUILT_PRODUCTS_DIR)/OhAnd.app/OhAnd
       BUNDLE_LOADER: $(TEST_HOST)
+      OHAND_RUST_OUTPUT_DIR: $(PROJECT_TEMP_DIR)/ohand-rust-core/$(PLATFORM_NAME)
+      HEADER_SEARCH_PATHS: $(OHAND_RUST_OUTPUT_DIR)
+      SWIFT_INCLUDE_PATHS: $(SRCROOT)/OhAndCoreBridge/CoreC
     dependencies:
       - target: OhAndApp
       - target: OhAndServices
