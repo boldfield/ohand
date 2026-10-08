@@ -789,7 +789,25 @@ const REMINDER_CUES: &[&[&str]] = &[
 ];
 const NEGATING_WORDS: &[&str] = &[
     "not", "no", "never", "dont", "don't", "doesnt", "doesn't", "didnt", "didn't", "wont", "won't",
-    "cant", "can't", "cannot", "without", "if", "said", "says",
+    "cant", "can't", "cannot", "without", "if", "said", "says", "think", "thinks", "thought",
+    "believe", "believes", "believed",
+];
+/// Words that, between a reminder cue and the quoted time, exclude that time from the request
+/// ("remind me except on ...") or attach it to something else ("remind me to call Bob who called
+/// on ...").
+const EXCLUDING_WORDS: &[&str] = &[
+    "except",
+    "but",
+    "unless",
+    "instead",
+    "besides",
+    "excluding",
+    "other",
+    "rather",
+    "who",
+    "whom",
+    "whose",
+    "which",
 ];
 const COMPLETED_WORDS: &[&str] = &[
     "already",
@@ -816,7 +834,6 @@ const POLITENESS_WORDS: &[&str] = &[
 /// Verbs that, followed by "to", carry the speaker's own request ("I need to", "I'd like to").
 /// Only their first-person forms are listed: "Bob wants to" or "she needs to" is not a request.
 const INTENTION_VERBS: &[&str] = &["need", "want", "like", "love"];
-const NEGATION_LOOKBACK: usize = 4;
 
 fn tokenize_intent_text(text: &str) -> Vec<IntentToken> {
     let characters: Vec<char> = text.chars().collect();
@@ -882,11 +899,13 @@ fn tokenize_intent_text(text: &str) -> Vec<IntentToken> {
 
 /// Whether `text` itself asks for a reminder: a documented cue ("remind me", "set a reminder",
 /// "alert/notify/ping me") outside quotation marks, as a present-tense first-person request (no
-/// negating or reported-speech word, no completed-work word such as "already", no third-party
-/// subject) earlier in the same clause.
+/// negating, reported-speech or opinion word, no completed-work word such as "already", no
+/// third-party subject) anywhere earlier in the same clause.
 ///
 /// With a `time_span` (character offsets of the phrase the model quoted), the request must also
-/// govern that phrase: the span starts after the cue with no clause break in between. The model's
+/// govern that phrase: the span starts after the cue with no clause break in between, and no
+/// negating or excluding word ("not", "except", "who") stands between the cue and the span. The
+/// model's
 /// candidate is never evidence of intent, and its choice of span cannot attach an unrelated date
 /// ("the quote expires 2026-01-16 09:00:00") to a request made elsewhere in the text.
 fn states_reminder_intent(text: &str, time_span: Option<SourceSpan>) -> bool {
@@ -906,7 +925,11 @@ fn states_reminder_intent(text: &str, time_span: Option<SourceSpan>) -> bool {
             time_span.is_none_or(|span| {
                 span.start >= cue_end
                     && !tokens.iter().any(|token| {
-                        token.clause_break && token.start >= cue_end && token.start < span.start
+                        token.start >= cue_end
+                            && token.start < span.start
+                            && (token.clause_break
+                                || NEGATING_WORDS.contains(&token.text.as_str())
+                                || EXCLUDING_WORDS.contains(&token.text.as_str()))
                     })
             })
         })
@@ -922,7 +945,6 @@ fn is_present_first_person_request(tokens: &[IntentToken], cue_start: usize, ver
         .collect();
     if clause_words
         .iter()
-        .take(NEGATION_LOOKBACK)
         .any(|word| NEGATING_WORDS.contains(word) || COMPLETED_WORDS.contains(word))
     {
         return false;

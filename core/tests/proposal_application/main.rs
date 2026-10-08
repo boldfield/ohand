@@ -1390,6 +1390,12 @@ fn a_dated_fact_that_does_not_ask_for_a_reminder_stays_unscheduled() {
         "I told Bob to remind me 2026-01-16 09:00:00",
         "my assistant will call and remind me 2026-01-16 09:00:00",
         "she needs to set a reminder for 2026-01-16 09:00:00",
+        "I don't think I need you to remind me 2026-01-16 09:00:00",
+        "I never said I want you to remind me 2026-01-16 09:00:00",
+        "Bob thinks we need to set a reminder for 2026-01-16 09:00:00",
+        "remind me not on 2026-01-16 09:00:00",
+        "remind me any day except 2026-01-16 09:00:00",
+        "remind me to call Bob who called on 2026-01-16 09:00:00",
     ] {
         let (fixture, disposition) = apply_reminder_candidate(
             text,
