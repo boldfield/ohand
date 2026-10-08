@@ -1,10 +1,14 @@
 import Foundation
+import SQLite3
 import XCTest
 import OhandCoreC
 @testable import OhAndCoreBridge
 
 /// Saves and reads real captures and statuses through `CoreHandle` against the real Rust core
 /// on the simulator. Outcomes are events delivered on the main queue, where XCTest runs.
+///
+/// Saving writes only the capture. Items are created by the foreground import (C02a), so the
+/// status tests stand in for it by inserting item rows into the closed store file directly.
 final class CaptureStatusTests: XCTestCase {
     private var baselineHandles = 0
     private var baselineBuffers = 0
@@ -42,6 +46,27 @@ final class CaptureStatusTests: XCTestCase {
             entryLocked: false,
             createdAt: "2026-10-08T09:30:01Z"
         )
+    }
+
+    /// Runs SQL against the store file while no core has it open (a stand-in for the import).
+    private func seed(_ statements: [String]) throws {
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(storePath, &database), SQLITE_OK)
+        defer { sqlite3_close(database) }
+        for statement in statements {
+            var message: UnsafeMutablePointer<CChar>?
+            let code = sqlite3_exec(database, statement, nil, nil, &message)
+            let detail = message.map { String(cString: $0) } ?? ""
+            sqlite3_free(message)
+            XCTAssertEqual(code, SQLITE_OK, "seed failed: \(detail)")
+        }
+    }
+
+    private func itemInsert(itemID: String, captureID: String, transcription: String = "not_applicable") -> String {
+        "INSERT INTO items (item_id, capture_id, revision, lifecycle_state, save_state, sync_state, "
+            + "processing_state, transcription_state, created_at, updated_at) VALUES "
+            + "('\(itemID)', '\(captureID)', 0, 'active', 'saved_local', 'not_configured', 'unprocessed', "
+            + "'\(transcription)', '2026-10-08T09:30:01Z', '2026-10-08T09:30:01Z')"
     }
 
     /// Opens a core over `path` and records its events in arrival order.
@@ -98,7 +123,7 @@ final class CaptureStatusTests: XCTestCase {
 
     // MARK: Save and read
 
-    func testSavedCaptureIsReadBackWithIndependentInitialStatuses() throws {
+    func testSavedCaptureIsReadBack() throws {
         let session = try Session(path: storePath)
         defer { session.close() }
         let capture = makeCapture(id: "capture-1")
@@ -106,30 +131,53 @@ final class CaptureStatusTests: XCTestCase {
         let acknowledgment = try session.save(capture).decode(SaveCaptureAcknowledgment.self)
         XCTAssertFalse(acknowledgment.alreadySaved)
         XCTAssertEqual(acknowledgment.capture, capture)
-        XCTAssertEqual(acknowledgment.itemID, "capture-1")
 
         let readout = try session.read("capture-1").decode(CaptureReadout.self)
         XCTAssertEqual(readout.capture, capture)
 
-        let status = try session.status(acknowledgment.itemID).decode(ItemStatusReport.self)
-        XCTAssertEqual(status.saveState, "saved_local")
-        XCTAssertEqual(status.syncState, "not_configured")
-        XCTAssertEqual(status.processingState, "unprocessed")
-        XCTAssertEqual(status.transcriptionState, "not_applicable")
-        XCTAssertNil(status.processingJobStatus)
-        XCTAssertNil(status.reminderRequestState, "no reminder exists, so no reminder status is invented")
-        XCTAssertNil(status.reminderScheduleState)
+        let status = try session.status("capture-1")
+        XCTAssertEqual(failure(of: status)?.code, "not_found", "saving a capture creates no item; the import does")
     }
 
-    func testAudioOnlyCaptureReportsAudioPendingTranscription() throws {
-        let session = try Session(path: storePath)
-        defer { session.close() }
-        var capture = makeCapture(id: "capture-audio", text: nil)
-        capture.audioReference = "staging/capture-audio.m4a"
-        _ = try session.save(capture).decode(SaveCaptureAcknowledgment.self)
-        let status = try session.status("capture-audio").decode(ItemStatusReport.self)
-        XCTAssertEqual(status.transcriptionState, "audio_pending")
+    func testStatusesOfASavedCaptureAreReadIndependently() throws {
+        let first = try Session(path: storePath)
+        _ = try first.save(makeCapture(id: "capture-status", text: "call the dentist tomorrow"))
+        var audioOnly = makeCapture(id: "capture-audio", text: nil)
+        audioOnly.audioReference = "staging/capture-audio.m4a"
+        _ = try first.save(audioOnly)
+        first.close()
+
+        try seed([
+            itemInsert(itemID: "7d1c5a1e-0000-4000-8000-000000000001", captureID: "capture-status"),
+            itemInsert(itemID: "7d1c5a1e-0000-4000-8000-000000000002", captureID: "capture-audio",
+                       transcription: "audio_pending"),
+            "UPDATE items SET processing_state = 'uninterpreted' "
+                + "WHERE item_id = '7d1c5a1e-0000-4000-8000-000000000001'",
+            "INSERT INTO reminders (reminder_id, item_id, request_state, schedule_state, delivery_state, "
+                + "acknowledgment_state, unschedulable_reason, created_at, updated_at) VALUES "
+                + "('reminder-1', '7d1c5a1e-0000-4000-8000-000000000001', 'unschedulable', 'not_scheduled', "
+                + "'unknown', 'not_acknowledged', 'permission_denied', '2026-10-08T09:30:02Z', "
+                + "'2026-10-08T09:30:02Z')",
+        ])
+
+        let second = try Session(path: storePath)
+        defer { second.close() }
+        let status = try second.status("7d1c5a1e-0000-4000-8000-000000000001").decode(ItemStatusReport.self)
         XCTAssertEqual(status.saveState, "saved_local")
+        XCTAssertEqual(status.syncState, "not_configured")
+        XCTAssertEqual(status.processingState, "uninterpreted")
+        XCTAssertEqual(status.transcriptionState, "not_applicable")
+        XCTAssertNil(status.processingJobStatus)
+        XCTAssertEqual(status.reminderRequestState, "unschedulable")
+        XCTAssertEqual(status.reminderScheduleState, "not_scheduled")
+        XCTAssertEqual(status.reminderDeliveryState, "unknown")
+        XCTAssertEqual(status.reminderAcknowledgmentState, "not_acknowledged")
+        XCTAssertEqual(status.unschedulableReason, "permission_denied")
+
+        let audio = try second.status("7d1c5a1e-0000-4000-8000-000000000002").decode(ItemStatusReport.self)
+        XCTAssertEqual(audio.transcriptionState, "audio_pending")
+        XCTAssertNil(audio.reminderRequestState, "no reminder exists, so no reminder status is invented")
+        XCTAssertNil(audio.reminderScheduleState)
     }
 
     func testUnicodeTextWithInteriorNulRoundTripsUnchanged() throws {
@@ -143,22 +191,19 @@ final class CaptureStatusTests: XCTestCase {
 
     // MARK: Restart
 
-    func testCaptureAndStatusSurviveClosingAndReopeningTheStore() throws {
+    func testCaptureSurvivesClosingAndReopeningTheStore() throws {
         let capture = makeCapture(id: "capture-restart", text: "still here after restart")
         let first = try Session(path: storePath)
-        let acknowledgment = try first.save(capture).decode(SaveCaptureAcknowledgment.self)
+        _ = try first.save(capture).decode(SaveCaptureAcknowledgment.self)
         first.close()
         XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles)
 
         let second = try Session(path: storePath)
         defer { second.close() }
         XCTAssertEqual(try second.read("capture-restart").decode(CaptureReadout.self).capture, capture)
-        let status = try second.status(acknowledgment.itemID).decode(ItemStatusReport.self)
-        XCTAssertEqual(status.saveState, "saved_local")
 
         let retry = try second.save(capture).decode(SaveCaptureAcknowledgment.self)
         XCTAssertTrue(retry.alreadySaved, "re-delivery after a restart converges on the stored capture")
-        XCTAssertEqual(retry.itemID, acknowledgment.itemID)
     }
 
     // MARK: Duplicate IDs and normalized failures
@@ -185,6 +230,28 @@ final class CaptureStatusTests: XCTestCase {
 
         let readout = try session.read("capture-dup").decode(CaptureReadout.self)
         XCTAssertEqual(readout.capture, original, "the stored capture is untouched by the rejected saves")
+    }
+
+    func testStorageFailureAcknowledgesNothingAndStoresNothing() throws {
+        let session = try Session(path: storePath)
+        defer { session.close() }
+
+        // Another connection holds the write lock past the store's busy timeout.
+        var blocker: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(storePath, &blocker), SQLITE_OK)
+        defer { sqlite3_close(blocker) }
+        XCTAssertEqual(sqlite3_exec(blocker, "BEGIN IMMEDIATE", nil, nil, nil), SQLITE_OK)
+
+        let capture = makeCapture(id: "capture-blocked", text: "must not be acknowledged")
+        let event = try session.save(capture)
+        XCTAssertEqual(failure(of: event)?.code, "store_busy")
+        XCTAssertEqual(failure(of: event)?.errorClass, .transient)
+        XCTAssertThrowsError(try event.decode(SaveCaptureAcknowledgment.self))
+        XCTAssertEqual(sqlite3_exec(blocker, "ROLLBACK", nil, nil, nil), SQLITE_OK)
+
+        XCTAssertEqual(failure(of: try session.read("capture-blocked"))?.code, "not_found")
+        let retry = try session.save(capture).decode(SaveCaptureAcknowledgment.self)
+        XCTAssertFalse(retry.alreadySaved)
     }
 
     func testUnknownRecordsAreNotFoundWithoutEchoingTheRequest() throws {

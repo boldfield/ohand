@@ -121,33 +121,54 @@ fn temporary_store(name: &str) -> (std::path::PathBuf, String) {
     (directory, path)
 }
 
+const ITEM_ID: &str = "7d1c5a1e-0000-4000-8000-000000000001";
+const AUDIO_ITEM_ID: &str = "7d1c5a1e-0000-4000-8000-000000000002";
+
+/// Runs SQL against the store file while no core has it open; stands in for the import (C02a),
+/// which is what creates items in production.
+fn seed(path: &str, statements: &[&str]) {
+    let mut database =
+        Database::open(path, std::sync::Arc::new(crate::store::schema::SystemClock)).unwrap();
+    let tx = database.transaction().unwrap();
+    for statement in statements {
+        tx.execute(statement, []).unwrap();
+    }
+    tx.commit().unwrap();
+}
+
+fn item_insert(item_id: &str, capture_id: &str, transcription_state: &str) -> String {
+    format!(
+        "INSERT INTO items (item_id, capture_id, revision, lifecycle_state, save_state, \
+         sync_state, processing_state, transcription_state, created_at, updated_at) \
+         VALUES ('{item_id}', '{capture_id}', 0, 'active', 'saved_local', 'not_configured', \
+         'unprocessed', '{transcription_state}', '2026-10-08T09:30:01Z', '2026-10-08T09:30:01Z')"
+    )
+}
+
 #[test]
-fn a_saved_capture_is_read_back_with_independent_initial_statuses() {
+fn a_saved_capture_is_read_back_and_creates_no_item() {
     let _guard = serial();
     let session = Session::over(open_memory());
 
     let ack = success_json(&session.save(1, &capture_request("capture-1", "buy oat milk")));
     assert_eq!(ack["operation_id"], 1);
     assert_eq!(ack["already_saved"], false);
-    assert_eq!(ack["item_id"], "capture-1");
+    assert!(ack.get("item_id").is_none());
     assert_eq!(ack["capture"]["text"], "buy oat milk");
 
     let read = success_json(&session.get(2, "capture-1"));
     assert_eq!(read["capture"], ack["capture"]);
 
-    let status = success_json(&session.status(3, "capture-1"));
-    assert_eq!(status["save_state"], "saved_local");
-    assert_eq!(status["sync_state"], "not_configured");
-    assert_eq!(status["processing_state"], "unprocessed");
-    assert_eq!(status["transcription_state"], "not_applicable");
-    assert_eq!(status["processing_job_status"], Value::Null);
-    assert_eq!(status["reminder_request_state"], Value::Null);
-    assert_eq!(status["reminder_schedule_state"], Value::Null);
+    assert_eq!(
+        failure_code(&session.status(3, "capture-1")).1,
+        "not_found",
+        "item identity and projection belong to the import"
+    );
     session.close();
 }
 
 #[test]
-fn an_audio_only_capture_starts_with_audio_pending_transcription() {
+fn an_audio_only_capture_round_trips_its_audio_reference() {
     let _guard = serial();
     let session = Session::over(open_memory());
     let mut request = capture_request("capture-audio", "");
@@ -158,9 +179,10 @@ fn an_audio_only_capture_starts_with_audio_pending_transcription() {
         ack["capture"]["audio_reference"],
         "staging/capture-audio.m4a"
     );
-    let status = success_json(&session.status(2, "capture-audio"));
-    assert_eq!(status["transcription_state"], "audio_pending");
-    assert_eq!(status["save_state"], "saved_local");
+    assert_eq!(
+        success_json(&session.get(2, "capture-audio"))["capture"],
+        ack["capture"]
+    );
     session.close();
 }
 
@@ -197,7 +219,7 @@ fn identical_resaves_converge_and_conflicting_reuse_changes_nothing() {
 }
 
 #[test]
-fn captures_and_statuses_survive_closing_and_reopening_the_store() {
+fn captures_survive_closing_and_reopening_the_store() {
     let _guard = serial();
     let (directory, path) = temporary_store("restart");
 
@@ -211,13 +233,8 @@ fn captures_and_statuses_survive_closing_and_reopening_the_store() {
         success_json(&second.get(2, "capture-restart"))["capture"],
         ack["capture"]
     );
-    assert_eq!(
-        success_json(&second.status(3, "capture-restart"))["save_state"],
-        "saved_local"
-    );
     let resave = success_json(&second.save(4, &request));
     assert_eq!(resave["already_saved"], true);
-    assert_eq!(resave["item_id"], "capture-restart");
     second.close();
     let _ = std::fs::remove_dir_all(directory);
 }
@@ -231,86 +248,81 @@ fn processing_and_reminder_scheduling_statuses_are_read_independently() {
         1,
         &capture_request("capture-status", "call the dentist tomorrow"),
     ));
+    let mut audio = capture_request("capture-audio", "");
+    audio["text"] = Value::Null;
+    audio["audio_reference"] = json!("staging/capture-audio.m4a");
+    success_json(&first.save(2, &audio));
     first.close();
 
-    {
-        let mut database = Database::open(
-            &path,
-            std::sync::Arc::new(crate::store::schema::SystemClock),
-        )
-        .unwrap();
-        let tx = database.transaction().unwrap();
-        tx.execute(
-            "UPDATE items SET processing_state = 'uninterpreted' WHERE item_id = 'capture-status'",
-            [],
-        )
-        .unwrap();
-        tx.execute(
-            "INSERT INTO reminders (reminder_id, item_id, request_state, schedule_state, \
-             delivery_state, acknowledgment_state, unschedulable_reason, created_at, updated_at) \
-             VALUES ('reminder-1', 'capture-status', 'unschedulable', 'not_scheduled', 'unknown', \
-             'not_acknowledged', 'permission_denied', '2026-10-08T09:30:02Z', '2026-10-08T09:30:02Z')",
-            [],
-        )
-        .unwrap();
-        tx.commit().unwrap();
-    }
+    seed(
+        &path,
+        &[
+            &item_insert(ITEM_ID, "capture-status", "not_applicable"),
+            &item_insert(AUDIO_ITEM_ID, "capture-audio", "audio_pending"),
+            &format!(
+                "UPDATE items SET processing_state = 'uninterpreted' WHERE item_id = '{ITEM_ID}'"
+            ),
+            &format!(
+                "INSERT INTO reminders (reminder_id, item_id, request_state, schedule_state, \
+                 delivery_state, acknowledgment_state, unschedulable_reason, created_at, \
+                 updated_at) VALUES ('reminder-1', '{ITEM_ID}', 'unschedulable', 'not_scheduled', \
+                 'unknown', 'not_acknowledged', 'permission_denied', '2026-10-08T09:30:02Z', \
+                 '2026-10-08T09:30:02Z')"
+            ),
+        ],
+    );
 
     let second = Session::over(open_file(&path));
-    let status = success_json(&second.status(2, "capture-status"));
+    let status = success_json(&second.status(3, ITEM_ID));
+    assert_eq!(status["item_id"], ITEM_ID);
     assert_eq!(status["save_state"], "saved_local");
+    assert_eq!(status["sync_state"], "not_configured");
     assert_eq!(status["processing_state"], "uninterpreted");
+    assert_eq!(status["transcription_state"], "not_applicable");
+    assert_eq!(status["processing_job_status"], Value::Null);
     assert_eq!(status["reminder_request_state"], "unschedulable");
     assert_eq!(status["reminder_schedule_state"], "not_scheduled");
     assert_eq!(status["reminder_delivery_state"], "unknown");
     assert_eq!(status["reminder_acknowledgment_state"], "not_acknowledged");
     assert_eq!(status["unschedulable_reason"], "permission_denied");
+
+    let audio_status = success_json(&second.status(4, AUDIO_ITEM_ID));
+    assert_eq!(audio_status["transcription_state"], "audio_pending");
+    assert_eq!(audio_status["reminder_request_state"], Value::Null);
+    assert_eq!(audio_status["reminder_schedule_state"], Value::Null);
     second.close();
     let _ = std::fs::remove_dir_all(directory);
 }
 
 #[test]
-fn a_save_that_fails_after_the_capture_insert_acknowledges_nothing_and_leaves_nothing() {
+fn a_failed_save_acknowledges_nothing_and_leaves_nothing() {
     let _guard = serial();
     let (directory, path) = temporary_store("rollback");
-    let first = Session::over(open_file(&path));
-    success_json(&first.save(1, &capture_request("capture-other", "an unrelated capture")));
-    first.close();
+    let session = Session::over(open_file(&path));
 
-    {
-        let mut database = Database::open(
-            &path,
-            std::sync::Arc::new(crate::store::schema::SystemClock),
-        )
-        .unwrap();
-        let tx = database.transaction().unwrap();
-        // An item that already owns the ID the new capture's item would take.
-        tx.execute(
-            "UPDATE items SET item_id = 'capture-blocked' WHERE item_id = 'capture-other'",
-            [],
-        )
-        .unwrap();
-        tx.commit().unwrap();
-    }
-
-    let second = Session::over(open_file(&path));
-    let failed = second.save(
-        2,
+    // Another connection holds the write lock past the store's busy timeout.
+    let blocker = rusqlite::Connection::open(&path).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let failed = session.save(
+        1,
         &capture_request("capture-blocked", "must not be acknowledged"),
     );
     assert_eq!(
         failure_code(&failed),
-        (OHAND_CORE_STATUS_PERMANENT, "storage_error".to_string())
+        (OHAND_CORE_STATUS_TRANSIENT, "store_busy".to_string())
     );
+    blocker.execute_batch("ROLLBACK").unwrap();
+
     assert_eq!(
-        failure_code(&second.get(3, "capture-blocked")).1,
+        failure_code(&session.get(2, "capture-blocked")).1,
         "not_found"
     );
-    assert_eq!(
-        success_json(&second.get(4, "capture-other"))["capture"]["text"],
-        "an unrelated capture"
-    );
-    second.close();
+    let retry = success_json(&session.save(
+        3,
+        &capture_request("capture-blocked", "must not be acknowledged"),
+    ));
+    assert_eq!(retry["already_saved"], false);
+    session.close();
     let _ = std::fs::remove_dir_all(directory);
 }
 

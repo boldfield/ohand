@@ -12,23 +12,19 @@
 //! * Saving the identical capture again (same `created_at` too) succeeds with
 //!   `already_saved: true`; the same ID with different content fails `capture_conflict` and
 //!   the stored capture is untouched.
-//! * Until the foreground import (C02a) owns projection creation, the save transaction records
-//!   the item projection with the documented initial states (item ID equals capture ID) and
-//!   syncs the text index, so a saved capture has readable, independent statuses.
+//! * Saving writes only the capture record. Item identity, the projection and the text index
+//!   belong to the foreground import (C02a); this module neither chooses item IDs nor creates
+//!   items. Statuses are read for items that the import has created.
 
 use super::core_handle::exports::guarded;
 use super::core_handle::exports::{OhandCoreHandle, OhandCoreResult};
 use super::core_handle::failure::AbiFailure;
 use super::core_handle::instance::{self, lock, JobFn};
-use crate::domain::status::{
-    ItemStatus, ProcessingState, SaveState, SyncState, TranscriptionState,
-};
-use crate::retrieval::index::sync_item_in_tx;
+use crate::domain::status::ItemStatus;
 use crate::store::captures::{get_capture, save_capture_in_tx, Capture};
 use crate::store::events::ItemScope;
 use crate::store::schema::Database;
 use anyhow::Error;
-use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
@@ -78,7 +74,8 @@ impl CaptureRecord {
     }
 
     /// Boundary validation only: required fields, content, and the closed scope vocabulary.
-    /// Route existence and time-context semantics belong to the import that follows.
+    /// No route store exists yet, so route existence and time-context semantics are enforced by
+    /// the foreground import (C02a), which is the acknowledgment point for ingress.
     fn into_valid_capture(self) -> Result<Capture, AbiFailure> {
         let has_content = |value: &Option<String>| value.as_deref().is_some_and(|v| !v.is_empty());
         let required_fields = [
@@ -119,7 +116,6 @@ impl CaptureRecord {
 struct SaveAcknowledgment {
     operation_id: u64,
     already_saved: bool,
-    item_id: String,
     capture: CaptureRecord,
 }
 
@@ -186,58 +182,13 @@ fn save_capture_job(capture: Capture, operation_id: u64) -> JobFn {
             None => false,
         };
         let saved = save_capture_in_tx(&tx, &capture).map_err(storage_failure)?;
-        let item_id = ensure_item_projection(&tx, &saved)?;
         tx.commit().map_err(storage_failure)?;
         to_json(&SaveAcknowledgment {
             operation_id,
             already_saved,
-            item_id,
             capture: CaptureRecord::from_capture(saved),
         })
     })
-}
-
-/// Records the item for `capture` with the initial states of a freshly saved capture, unless
-/// the capture already has one, and returns its ID.
-fn ensure_item_projection(
-    tx: &rusqlite::Transaction<'_>,
-    capture: &Capture,
-) -> Result<String, AbiFailure> {
-    let existing: Option<String> = tx
-        .query_row(
-            "SELECT item_id FROM items WHERE capture_id = ?",
-            [capture.capture_id.as_str()],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(storage_failure)?;
-    if let Some(item_id) = existing {
-        return Ok(item_id);
-    }
-    let item_id = capture.capture_id.clone();
-    let transcription_state = if capture.text.as_deref().is_some_and(|text| !text.is_empty()) {
-        TranscriptionState::NotApplicable
-    } else {
-        TranscriptionState::AudioPending
-    };
-    tx.execute(
-        "INSERT INTO items (item_id, capture_id, revision, lifecycle_state, save_state, \
-         sync_state, processing_state, transcription_state, created_at, updated_at) \
-         VALUES (?, ?, 0, 'active', ?, ?, ?, ?, ?, ?)",
-        rusqlite::params![
-            item_id,
-            capture.capture_id,
-            SaveState::SavedLocal.as_str(),
-            SyncState::NotConfigured.as_str(),
-            ProcessingState::Unprocessed.as_str(),
-            transcription_state.as_str(),
-            capture.created_at,
-            capture.created_at,
-        ],
-    )
-    .map_err(storage_failure)?;
-    sync_item_in_tx(tx, &item_id).map_err(storage_failure)?;
-    Ok(item_id)
 }
 
 fn get_capture_job(capture_id: String, operation_id: u64) -> JobFn {
@@ -283,7 +234,7 @@ fn item_status_job(item_id: String, operation_id: u64) -> JobFn {
 /// Queues a durable save of the capture described by the `request_len` JSON bytes at
 /// `request` (fields of `CaptureRecord`; unknown fields are rejected). The outcome event for
 /// `operation_id` is success only after the save committed, with JSON
-/// `{"operation_id","already_saved","item_id","capture"}`, or a normalized failure.
+/// `{"operation_id","already_saved","capture"}`, or a normalized failure.
 ///
 /// # Safety
 /// `request` must point at `request_len` readable bytes (it may be null only when

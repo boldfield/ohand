@@ -69,13 +69,11 @@ public struct CaptureRecord: Codable, Equatable, Sendable {
 public struct SaveCaptureAcknowledgment: Decodable, Equatable, Sendable {
     public let operationID: UInt64
     public let alreadySaved: Bool
-    public let itemID: String
     public let capture: CaptureRecord
 
     enum CodingKeys: String, CodingKey {
         case operationID = "operation_id"
         case alreadySaved = "already_saved"
-        case itemID = "item_id"
         case capture
     }
 }
