@@ -190,6 +190,7 @@ class SigningRun:
         self.keychain_path: Optional[Path] = None
         self.original_keychains: Optional[List[str]] = None
         self.installed_profile_path: Optional[Path] = None
+        self.partial_profile_path: Optional[Path] = None
         self.profile_info: Optional[ProfileInfo] = None
         self.toolchain: Dict[str, str] = {"xcode_version": "unknown", "xcode_build": "unknown"}
         self.install_performed = False
@@ -307,9 +308,19 @@ class SigningRun:
         directory.mkdir(parents=True, exist_ok=True)
         destination = directory / f"{self.profile_info.uuid}.mobileprovision"
         if destination.exists():
+            if destination.read_bytes() != self.profile_path.read_bytes():
+                raise input_error("a different provisioning profile with the same UUID is already installed in Xcode's "
+                                  "profile directory; remove it or replace it with the supplied profile")
             return
-        shutil.copyfile(self.profile_path, destination)
+        # Copy to a run-specific partial file and rename it onto the UUID name, so that the UUID name never holds a
+        # truncated profile. Both paths are tracked before the copy starts so cleanup removes whatever was created.
+        self.partial_profile_path = directory / f".ohand-signing-{self.run_identifier}.partial"
         self.installed_profile_path = destination
+        try:
+            shutil.copyfile(self.profile_path, self.partial_profile_path)
+            os.replace(self.partial_profile_path, destination)
+        except OSError:
+            raise SigningError("could not install the provisioning profile", EXIT_FAILURE, "profile-install") from None
 
     # ----- keychain -----
 
@@ -371,10 +382,12 @@ class SigningRun:
                 self.keychain_path.unlink()
             if self.keychain_path.exists():
                 problems.append("temporary keychain could not be removed")
-        if self.installed_profile_path is not None:
+        for profile_path in (self.partial_profile_path, self.installed_profile_path):
+            if profile_path is None:
+                continue
             with contextlib.suppress(OSError):
-                self.installed_profile_path.unlink()
-            if self.installed_profile_path.exists():
+                profile_path.unlink()
+            if profile_path.exists():
                 problems.append("installed provisioning profile could not be removed")
         if self.work_dir is not None:
             shutil.rmtree(self.work_dir, ignore_errors=True)

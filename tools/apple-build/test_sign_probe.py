@@ -501,6 +501,83 @@ class FailureAndCleanupTests(SigningToolTestCase):
             real_rmtree(leftover, ignore_errors=True)
         self.assert_failed_at_cleanup(exit_code, printed, "temporary working directory could not be removed")
 
+    def profile_directory_entries(self):
+        directory = self.home / USER_DATA_PROFILE_DIRECTORY
+        return sorted(path.name for path in directory.iterdir()) if directory.is_dir() else []
+
+    def run_with_profile_copy_failing_after_a_partial_write(self, failure):
+        def partial_copy(source, destination, *arguments, **keywords):
+            Path(destination).write_bytes(Path(source).read_bytes()[:7])
+            raise failure
+
+        with mock.patch.object(sign_probe.shutil, "copyfile", partial_copy):
+            return self.run_in_process()
+
+    def test_failed_profile_copy_leaves_no_partial_profile_and_fails_at_the_install_stage(self):
+        exit_code, printed = self.run_with_profile_copy_failing_after_a_partial_write(OSError("synthetic disk full"))
+        self.assertEqual(exit_code, 1)
+        self.assertIn("could not install the provisioning profile", printed)
+        self.assertEqual(self.profile_directory_entries(), [])
+        self.assert_keychain_cleaned_up()
+        self.assertEqual((self.only_evidence()["status"], self.only_evidence()["failed_stage"]), ("failed", "profile-install"))
+        self.assertEqual(self.calls_of("xcodebuild", "-exportArchive"), [])
+
+    def test_interrupted_profile_copy_leaves_no_partial_profile(self):
+        exit_code, printed = self.run_with_profile_copy_failing_after_a_partial_write(sign_probe.Interrupted())
+        self.assertEqual(exit_code, 1)
+        self.assertIn("interrupted", printed)
+        self.assertEqual(self.profile_directory_entries(), [])
+        self.assert_keychain_cleaned_up()
+        self.assertEqual(self.only_evidence()["failed_stage"], "interrupted")
+
+    def test_failed_rename_onto_the_uuid_name_removes_the_partial_file(self):
+        real_replace = os.replace
+
+        def refuse_profile_rename(source, destination, *arguments, **keywords):
+            if Path(destination).suffix == ".mobileprovision":
+                raise OSError("synthetic rename failure")
+            return real_replace(source, destination, *arguments, **keywords)
+
+        with mock.patch.object(sign_probe.os, "replace", refuse_profile_rename):
+            exit_code, printed = self.run_in_process()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("could not install the provisioning profile", printed)
+        self.assertEqual(self.profile_directory_entries(), [])
+        self.assertEqual(self.only_evidence()["failed_stage"], "profile-install")
+
+    def test_a_rerun_after_an_interrupted_copy_installs_the_full_profile_and_removes_it(self):
+        self.run_with_profile_copy_failing_after_a_partial_write(sign_probe.Interrupted())
+        self.state_reset()
+        result = self.sign("--install")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        export_call = self.calls_of("xcodebuild", "-exportArchive")[0]
+        self.assertEqual(export_call["installed_profiles_at_call"],
+                         [f"{USER_DATA_PROFILE_DIRECTORY}/{SYNTHETIC_PROFILE_UUID}.mobileprovision"])
+        self.assertEqual(self.profile_directory_entries(), [])
+
+    def test_a_different_profile_already_installed_under_the_same_uuid_is_refused_and_kept(self):
+        directory = self.home / USER_DATA_PROFILE_DIRECTORY
+        directory.mkdir(parents=True)
+        existing = directory / f"{SYNTHETIC_PROFILE_UUID}.mobileprovision"
+        existing.write_bytes(b"truncated")
+        result = self.sign("--install")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("a different provisioning profile with the same UUID is already installed", result.stderr)
+        self.assertEqual(existing.read_bytes(), b"truncated")
+        self.assertEqual(self.profile_directory_entries(), [existing.name])
+        self.assertEqual(self.calls_of("xcodebuild", "-exportArchive"), [])
+        self.assert_keychain_cleaned_up()
+
+    def test_an_identical_profile_already_installed_is_used_and_kept(self):
+        directory = self.home / USER_DATA_PROFILE_DIRECTORY
+        directory.mkdir(parents=True)
+        existing = directory / f"{SYNTHETIC_PROFILE_UUID}.mobileprovision"
+        existing.write_bytes(self.profile_path.read_bytes())
+        result = self.sign("--install")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(existing.read_bytes(), self.profile_path.read_bytes())
+        self.assertEqual(self.profile_directory_entries(), [existing.name])
+
     def test_unsigned_export_is_a_failure(self):
         result = self.sign("--install", STUB_UNSIGNED_EXPORT="1")
         self.assertEqual(result.returncode, 1)
