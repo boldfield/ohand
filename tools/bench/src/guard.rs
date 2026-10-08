@@ -33,14 +33,25 @@ const PRIVATE_PATH_PREFIXES: &[&str] = &[
 ];
 
 /// Normalized (lowercase, separators removed) key-name suffixes that always hold a credential.
-const SENSITIVE_KEY_SUFFIXES: &[&str] = &[
+const SENSITIVE_KEY_SUFFIXES: &[&str] = &["authorization", "token", "pwd"];
+
+/// Normalized key-name stems that mark a credential wherever they appear in the key, so compound
+/// names such as `secret_key`, `aws_secret_access_key`, `access_key_id` or `db_password_hash`
+/// are caught as well as plain `secret` or `password`.
+const SENSITIVE_KEY_STEMS: &[&str] = &[
     "apikey",
-    "authorization",
     "password",
     "passwd",
+    "passphrase",
     "secret",
-    "token",
+    "credential",
     "privatekey",
+    "accesskey",
+    "signingkey",
+    "sessionkey",
+    "sessionid",
+    "encryptionkey",
+    "clientkey",
 ];
 
 /// Normalized key-name suffixes whose string value must be an approved synthetic endpoint.
@@ -49,7 +60,7 @@ const ENDPOINT_KEY_SUFFIXES: &[&str] = &[
 ];
 
 /// Normalized key names that are sensitive only when they match exactly.
-const SENSITIVE_EXACT_KEYS: &[&str] = &["token", "auth", "credentials", "cookie", "setcookie"];
+const SENSITIVE_EXACT_KEYS: &[&str] = &["token", "auth", "session", "cookie", "setcookie"];
 
 /// Normalized key-name suffixes whose `key: value` header form (no quotes) is a credential for
 /// any non-empty value.
@@ -105,6 +116,9 @@ fn is_sensitive_key_name(normalized: &str, exact_names_too: bool) -> bool {
     SENSITIVE_KEY_SUFFIXES
         .iter()
         .any(|suffix| normalized.ends_with(suffix))
+        || SENSITIVE_KEY_STEMS
+            .iter()
+            .any(|stem| normalized.contains(stem))
         || (exact_names_too && SENSITIVE_EXACT_KEYS.contains(&normalized))
 }
 
@@ -563,6 +577,62 @@ mod tests {
         ] {
             assert!(is_secret_or_endpoint(value), "should reject {value}");
         }
+    }
+
+    #[test]
+    fn rejects_compound_credential_key_names() {
+        for value in [
+            "secret_key=abcdef",
+            "aws_secret_access_key=abcdef",
+            "access_key_id=abcdef",
+            "accessKeyId: abcdef",
+            "credential=abcdef",
+            "client-credential: abcdef",
+            "passphrase=hunter",
+            "pwd=hunter",
+            "session_id=abcdef",
+            "signing_key=abcdef",
+            "{\"secret_key\":\"abcdef\"}",
+        ] {
+            assert!(is_secret_or_endpoint(value), "should reject {value}");
+        }
+        for key in [
+            "secret_key",
+            "secretKey",
+            "access_key_id",
+            "AccessKeyId",
+            "credential",
+            "client_credentials",
+            "passphrase",
+            "pwd",
+            "session",
+            "sessionId",
+            "encryption_key",
+        ] {
+            let mut output = serde_json::Map::new();
+            output.insert(key.to_string(), json!("abcdef"));
+            assert!(
+                json_is_secret_or_endpoint(&Value::Object(output)),
+                "should reject key {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_ordinary_text_near_credential_stems() {
+        for value in [
+            "the secret ingredient is basil",
+            "credential rotation is scheduled",
+            "session ended normally",
+            "password: required",
+            "access key was rotated",
+            "keyboard shortcut pressed",
+        ] {
+            assert!(!is_secret_or_endpoint(value), "should accept {value}");
+        }
+        assert!(!json_is_secret_or_endpoint(
+            &json!({"key": "content", "keyword": "milk", "session_count": null, "secret_key": ""})
+        ));
     }
 
     #[test]

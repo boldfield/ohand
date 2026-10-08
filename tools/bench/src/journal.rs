@@ -1372,6 +1372,48 @@ mod tests {
     }
 
     #[test]
+    fn test_boundary_rejects_compound_credential_keys() -> Result<(), Box<dyn std::error::Error>> {
+        let file = NamedTempFile::new()?;
+        let (experiment, case, attempt) = sample_chain();
+        {
+            let mut writer = JournalWriter::open(file.path())?;
+            writer.write_experiment(&experiment)?;
+            writer.write_case(&case)?;
+        }
+
+        for key in [
+            "secret_key",
+            "access_key_id",
+            "credential",
+            "passphrase",
+            "session_id",
+        ] {
+            let mut map = serde_json::Map::new();
+            map.insert(key.to_string(), serde_json::json!("abcdef"));
+            let output = serde_json::Value::Object(map);
+            assert!(attempt.clone().complete(5, Some(output.clone())).is_err());
+            let mut forged = attempt.clone();
+            forged.state = crate::records::AttemptState::Completed;
+            forged.provider_output = Some(output);
+            assert_write_rejected_and_journal_unchanged(&file, |w| w.write_attempt(&forged));
+
+            let assignment = format!("{key}=abcdef");
+            let mut with_unknown = experiment.clone();
+            with_unknown.unknown_metadata.unknown_fields = vec![assignment.clone()];
+            assert_write_rejected_and_journal_unchanged(&file, |w| {
+                w.write_experiment(&with_unknown)
+            });
+            let mut forged_case = case.clone();
+            forged_case.content = assignment;
+            assert_write_rejected_and_journal_unchanged(&file, |w| w.write_case(&forged_case));
+        }
+
+        let reader = JournalReader::open(file.path())?;
+        assert_eq!(reader.records().len(), 2);
+        Ok(())
+    }
+
+    #[test]
     fn test_boundary_accepts_placeholder_and_endpoint_prose(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let file = NamedTempFile::new()?;
