@@ -53,7 +53,11 @@ pub const MIGRATIONS: &[MigrationStep] = &[
     },
     MigrationStep {
         target_version: 3,
-        apply: add_profile_revocation_and_requeue_v3,
+        apply: add_unschedulable_reason_v3,
+    },
+    MigrationStep {
+        target_version: 4,
+        apply: add_profile_revocation_and_requeue_v4,
     },
 ];
 
@@ -668,8 +672,17 @@ fn add_event_payload_columns_v2(tx: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Step 3: explicit profile revocation (V03) and the durable job requeue link (V03).
-fn add_profile_revocation_and_requeue_v3(tx: &Transaction<'_>) -> Result<()> {
+/// Step 3: Add unschedulable_reason column to reminders table for D05.
+fn add_unschedulable_reason_v3(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute(
+        "ALTER TABLE reminders ADD COLUMN unschedulable_reason TEXT",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Step 4: explicit profile revocation (V03) and the durable job requeue link (V03).
+fn add_profile_revocation_and_requeue_v4(tx: &Transaction<'_>) -> Result<()> {
     tx.execute(
         "ALTER TABLE provider_profiles ADD COLUMN revoked_at TEXT",
         [],
