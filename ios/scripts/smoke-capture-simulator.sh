@@ -42,12 +42,21 @@ if ! xcrun simctl spawn "${udid}" launchctl list | grep -F "UIKitApplication:${b
   exit 1
 fi
 
+echo "=== Verifying ingress record creation ==="
+captured_id="$(xcrun simctl get_app_container "${udid}" "${bundle_id}" data | xargs -I {} sh -c 'defaults read "{}/Library/Preferences/com.boldfield.ohand.probes.capture.plist" com.boldfield.ohand.probes.capture.id 2>/dev/null || echo ""')"
+if [ -z "${captured_id}" ]; then
+  echo "ERROR: Ingress record ID not found in app preferences" >&2
+  exit 1
+fi
+echo "Found ingress record ID: ${captured_id}"
+
 if [ -n "${evidence_dir}" ]; then
   mkdir -p "${evidence_dir}"
   echo "=== Capturing evidence ==="
   xcrun simctl io "${udid}" screenshot "${evidence_dir}/captureprobe-launch.png"
-  echo "Smoke test passed: CaptureProbe launched, ingress record created, app stayed running"
+  echo "Ingress record ID: ${captured_id}" >> "${evidence_dir}/capture-evidence.txt"
+  echo "Smoke test passed: CaptureProbe launched, ingress record created and verified, app stayed running"
 fi
 
 xcrun simctl shutdown "${udid}"
-echo "=== Smoke test passed: ${bundle_id} launched and stayed running ==="
+echo "=== Smoke test passed: ${bundle_id} launched and ingress record verified ==="

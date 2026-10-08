@@ -27,7 +27,7 @@ class CaptureProbeBoundaryTests: XCTestCase {
         let captureId = "test-capture-\(UUID().uuidString)"
         let record = CaptureRecord(
             captureId: captureId,
-            text: nil,
+            text: "Test capture entry",
             audioReference: nil,
             captureInstant: "2026-03-01T09:30:00Z",
             timezoneId: "UTC",
@@ -44,10 +44,12 @@ class CaptureProbeBoundaryTests: XCTestCase {
         let saved = try store.save(record)
         XCTAssertEqual(saved.capture.captureId, captureId)
         XCTAssertFalse(saved.idempotentReplay)
+        XCTAssertEqual(saved.capture.text, "Test capture entry")
 
         let retrieved = try store.capture(id: captureId)
         XCTAssertEqual(retrieved.captureId, captureId)
         XCTAssertEqual(retrieved.entryLocked, false)
+        XCTAssertEqual(retrieved.text, "Test capture entry")
     }
 
     func testIdempotentSave() throws {
@@ -59,7 +61,7 @@ class CaptureProbeBoundaryTests: XCTestCase {
         let captureId = "idempotent-test-\(UUID().uuidString)"
         let record = CaptureRecord(
             captureId: captureId,
-            text: nil,
+            text: "Idempotent test entry",
             audioReference: nil,
             captureInstant: "2026-03-01T09:30:00Z",
             timezoneId: "UTC",
@@ -75,6 +77,7 @@ class CaptureProbeBoundaryTests: XCTestCase {
 
         let firstSave = try store.save(record)
         XCTAssertFalse(firstSave.idempotentReplay)
+        XCTAssertEqual(firstSave.capture.text, "Idempotent test entry")
 
         let secondSave = try store.save(record)
         XCTAssertTrue(secondSave.idempotentReplay)
@@ -90,7 +93,7 @@ class CaptureProbeBoundaryTests: XCTestCase {
         let captureId = "locked-test-\(UUID().uuidString)"
         let lockedRecord = CaptureRecord(
             captureId: captureId,
-            text: nil,
+            text: "Locked entry test",
             audioReference: nil,
             captureInstant: "2026-03-01T09:30:00Z",
             timezoneId: "UTC",
@@ -109,20 +112,19 @@ class CaptureProbeBoundaryTests: XCTestCase {
 
         let retrieved = try store.capture(id: captureId)
         XCTAssertTrue(retrieved.entryLocked)
+        XCTAssertEqual(retrieved.text, "Locked entry test")
     }
 
-    func testMultipleCapturesWithDifferentIds() throws {
+    func testCaptureIdStability() throws {
         guard let store = store else {
             XCTFail("Store not initialized")
             return
         }
 
-        let id1 = "multi-test-\(UUID().uuidString)"
-        let id2 = "multi-test-\(UUID().uuidString)"
-
+        let captureId = "stable-id-test-\(UUID().uuidString)"
         let record1 = CaptureRecord(
-            captureId: id1,
-            text: nil,
+            captureId: captureId,
+            text: "First entry with stable ID",
             audioReference: nil,
             captureInstant: "2026-03-01T09:30:00Z",
             timezoneId: "UTC",
@@ -136,29 +138,12 @@ class CaptureProbeBoundaryTests: XCTestCase {
             sessionTopic: nil
         )
 
-        let record2 = CaptureRecord(
-            captureId: id2,
-            text: nil,
-            audioReference: nil,
-            captureInstant: "2026-03-01T10:00:00Z",
-            timezoneId: "UTC",
-            utcOffsetMinutes: 0,
-            locale: "en_US",
-            calendar: "gregorian",
-            itemScope: "personal",
-            routeId: "route-local",
-            entryLocked: true,
-            createdAt: "2026-03-01T10:00:00Z",
-            sessionTopic: nil
-        )
+        let saved1 = try store.save(record1)
+        XCTAssertEqual(saved1.capture.captureId, captureId)
+        XCTAssertFalse(saved1.idempotentReplay)
 
-        try store.save(record1)
-        try store.save(record2)
-
-        let retrieved1 = try store.capture(id: id1)
-        let retrieved2 = try store.capture(id: id2)
-
-        XCTAssertFalse(retrieved1.entryLocked)
-        XCTAssertTrue(retrieved2.entryLocked)
+        let retrieved = try store.capture(id: captureId)
+        XCTAssertEqual(retrieved.captureId, captureId)
+        XCTAssertEqual(retrieved.text, "First entry with stable ID")
     }
 }

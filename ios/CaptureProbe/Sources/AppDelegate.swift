@@ -38,7 +38,28 @@ class CaptureProbeSceneDelegate: UIResponder, UIWindowSceneDelegate {
 class CaptureProbeViewController: UIViewController {
     private var ingressLabel: UILabel!
     private var statusLabel: UILabel!
-    private let captureId = UUID().uuidString
+    private let captureId: String
+
+    override init(nibName nibNameOrNil: String?, bundle nibBundleOrNil: Bundle?) {
+        captureId = Self.loadOrCreateCaptureId()
+        super.init(nibName: nibNameOrNil, bundle: nibBundleOrNil)
+    }
+
+    required init?(coder: NSCoder) {
+        captureId = Self.loadOrCreateCaptureId()
+        super.init(coder: coder)
+    }
+
+    private static let captureIdKey = "com.boldfield.ohand.probes.capture.id"
+
+    private static func loadOrCreateCaptureId() -> String {
+        if let existing = UserDefaults.standard.string(forKey: captureIdKey) {
+            return existing
+        }
+        let newId = UUID().uuidString
+        UserDefaults.standard.set(newId, forKey: captureIdKey)
+        return newId
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -101,23 +122,23 @@ class CaptureProbeViewController: UIViewController {
         Task {
             do {
                 let store = try ProbeStore()
-                defer { store.close() }
 
                 let now = ISO8601DateFormatter().string(from: Date())
                 let calendar = Calendar.current
                 let timeZone = TimeZone.current
                 let locale = Locale.current
                 let isLocked = !UIApplication.shared.isProtectedDataAvailable
+                let calendarString = "\(calendar.identifier)"
 
                 let record = CaptureRecord(
                     captureId: captureId,
-                    text: nil,
+                    text: "Capture probe ingress entry",
                     audioReference: nil,
                     captureInstant: now,
                     timezoneId: timeZone.identifier,
                     utcOffsetMinutes: Int32(timeZone.secondsFromGMT() / 60),
                     locale: locale.identifier,
-                    calendar: calendar.identifier,
+                    calendar: calendarString,
                     itemScope: "personal",
                     routeId: "route-local",
                     entryLocked: isLocked,
@@ -132,7 +153,7 @@ class CaptureProbeViewController: UIViewController {
                     Capture ID: \(self.captureId)
                     Entry Time: \(now)
                     Locked: \(isLocked)
-                    Idempotent: \(!result.idempotentReplay)
+                    Idempotent: \(result.idempotentReplay)
                     """
                     self.statusLabel.text = "Ingress record persisted"
                 }
