@@ -3,8 +3,10 @@ use ohand_core::reminders::state::{
     apply_resolution, record_operation, AcknowledgmentState, DeliveryState, OperationState,
     OperationType, ReminderState, RequestState, ScheduleState,
 };
+use ohand_core::store::schema::{Database, Clock};
 use ohand_core::time::resolver::{AmbiguityKind, ResolutionResult, TimeContext};
 use rusqlite::Connection;
+use std::sync::Arc;
 
 fn make_reminder_state(reminder_id: &str, item_id: &str) -> ReminderState {
     ReminderState {
@@ -602,4 +604,119 @@ fn test_create_then_complete_produces_different_operations() {
     );
 
     tx.commit().unwrap();
+}
+
+// Test against real Database schema to verify production behavior
+struct TestClock {
+    instant: chrono::DateTime<chrono::Utc>,
+}
+
+impl Clock for TestClock {
+    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        self.instant
+    }
+}
+
+#[test]
+fn test_production_schema_create_cancel_idempotency() {
+    let db_path = format!(
+        "{}/test_prod_schema_{}.db",
+        std::env::temp_dir().display(),
+        uuid::Uuid::new_v4()
+    );
+    let _ = std::fs::remove_file(&db_path);
+
+    let instant =
+        chrono::DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00").unwrap().with_timezone(&Utc);
+    let clock: Arc<dyn Clock> = Arc::new(TestClock { instant });
+
+    // Open database with real migrations - this exercises the production schema
+    let mut db = Database::open(&db_path, clock).expect("open database");
+
+    // Create prerequisite data: capture and item
+    db.conn()
+        .execute(
+            "INSERT INTO captures (capture_id, text, capture_instant, timezone_id, utc_offset_minutes, locale, calendar, item_scope, route_id, entry_locked, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rusqlite::params![
+                "cap1",
+                "test text",
+                instant.to_rfc3339(),
+                "UTC",
+                0,
+                "en",
+                "gregorian",
+                "personal",
+                "route-1",
+                0,
+                instant.to_rfc3339(),
+            ],
+        )
+        .expect("insert capture");
+
+    db.conn()
+        .execute(
+            "INSERT INTO items (item_id, capture_id, lifecycle_state, save_state, sync_state, processing_state, transcription_state, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rusqlite::params![
+                "i1",
+                "cap1",
+                "saved",
+                "confirmed",
+                "local_only",
+                "none",
+                "completed",
+                instant.to_rfc3339(),
+                instant.to_rfc3339(),
+            ],
+        )
+        .expect("insert item");
+
+    // Create the reminder state table (this is normally done by the app, but for this test we do it)
+    db.conn()
+        .execute(
+            "INSERT INTO reminders (reminder_id, item_id, request_state, schedule_state, delivery_state, acknowledgment_state, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            rusqlite::params![
+                "r1",
+                "i1",
+                "not_requested",
+                "not_scheduled",
+                "unknown",
+                "not_acknowledged",
+                instant.to_rfc3339(),
+                instant.to_rfc3339(),
+            ],
+        )
+        .expect("insert reminder");
+
+    let tx = db.transaction().expect("transaction");
+
+    // Create operation at generation 0
+    let create_op = record_operation(&tx, "r1", "r1#0", OperationType::Create, Some(instant))
+        .expect("create should succeed");
+    assert_eq!(create_op.operation_type, OperationType::Create);
+
+    // Cancel operation with same effect_identity - this would fail with the old schema
+    let cancel_op = record_operation(&tx, "r1", "r1#0", OperationType::Cancel, None)
+        .expect("cancel should succeed on fixed schema");
+    assert_eq!(cancel_op.operation_type, OperationType::Cancel);
+    assert_ne!(
+        create_op.operation_id, cancel_op.operation_id,
+        "Create and Cancel must be separate operations"
+    );
+
+    // Verify both operations exist in the database
+    let row_count: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM reminder_operations WHERE reminder_id = 'r1'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count operations");
+    assert_eq!(row_count, 2, "Both Create and Cancel should be recorded");
+
+    tx.commit().expect("commit");
+
+    let _ = std::fs::remove_file(&db_path);
 }
