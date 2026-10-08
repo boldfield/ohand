@@ -69,3 +69,7 @@ temporary_library="${output_dir}/libohand_bindings.a.tmp.$$"
 lipo -create ${built_libraries} -output "${temporary_library}"
 mv -f "${temporary_library}" "${output_dir}/libohand_bindings.a"
 echo "Built ${output_dir}/libohand_bindings.a for ${platform_name} (${architectures})"
+
+# Generate the C bindings header for the iOS build
+"${repo_root}/tools/bindings/generate.sh" "${output_dir}"
+echo "Generated ${output_dir}/ohand_bindings.h for ${platform_name}"

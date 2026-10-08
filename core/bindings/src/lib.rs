@@ -1,7 +1,7 @@
 //! C ABI of the P01 Rust-to-Swift boundary probe.
 //!
-//! This file is the whole exported surface; `include/ohand_bindings.h` is generated from it
-//! by cbindgen (see `tests/header_drift.rs`). Contract:
+//! This file is the whole exported surface; `ohand_bindings.h` is generated from it
+//! by cbindgen and placed in build output (see `tests/header_drift.rs`). Contract:
 //!
 //! * Requests and responses are UTF-8 JSON byte buffers with explicit lengths, so embedded
 //!   NUL bytes never truncate content and no function relies on NUL termination.
