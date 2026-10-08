@@ -19,9 +19,10 @@ pub fn rebuild_index(tx: &Transaction<'_>) -> Result<()> {
     // Only include records that are:
     // - Not deleted (accessible)
     // - Have searchable text (original)
+    // Privacy scope uses effective scope: COALESCE(items.current_scope, captures.item_scope).
     tx.execute(
         "INSERT INTO search_index (item_id, capture_id, item_scope, original_text, text_basis)
-         SELECT i.item_id, i.capture_id, c.item_scope, c.text, 'original'
+         SELECT i.item_id, i.capture_id, COALESCE(i.current_scope, c.item_scope), c.text, 'original'
          FROM items i
          JOIN captures c ON i.capture_id = c.capture_id
          WHERE i.lifecycle_state != 'deleted' AND c.text IS NOT NULL AND c.text != ''",
@@ -32,7 +33,7 @@ pub fn rebuild_index(tx: &Transaction<'_>) -> Result<()> {
     // Each item should have at most one current_text entry (the latest correction).
     tx.execute(
         "INSERT INTO search_index (item_id, capture_id, item_scope, current_text, text_basis)
-         SELECT DISTINCT i.item_id, i.capture_id, c.item_scope, corr.new_value, 'corrected'
+         SELECT DISTINCT i.item_id, i.capture_id, COALESCE(i.current_scope, c.item_scope), corr.new_value, 'corrected'
          FROM items i
          JOIN captures c ON i.capture_id = c.capture_id
          JOIN corrections corr ON i.item_id = corr.item_id
@@ -54,13 +55,34 @@ pub fn rebuild_index(tx: &Transaction<'_>) -> Result<()> {
 /// Index a newly captured item's original text.
 /// Called transactionally when a capture is first stored.
 /// Idempotent: safe to call multiple times for the same item.
+/// Skips indexing if the item has been deleted to prevent resurrecting deleted content on retry.
 pub fn index_capture(tx: &Transaction<'_>, item_id: &str, capture_id: &str) -> Result<()> {
-    // Fetch the capture record to get text and item_scope.
-    let (text, item_scope): (Option<String>, String) = tx.query_row(
-        "SELECT text, item_scope FROM captures WHERE capture_id = ?",
-        [capture_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
+    // Check if the item is deleted; don't index deleted items to prevent retry resurrection.
+    let is_deleted: bool = tx
+        .query_row(
+            "SELECT lifecycle_state = 'deleted' FROM items WHERE item_id = ?",
+            [item_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(false);
+
+    if is_deleted {
+        return Ok(());
+    }
+
+    // Fetch the capture record and effective item scope.
+    let (text, capture_scope, current_scope): (Option<String>, String, Option<String>) = tx
+        .query_row(
+            "SELECT c.text, c.item_scope, i.current_scope
+             FROM captures c
+             JOIN items i ON i.item_id = ?
+             WHERE c.capture_id = ?",
+            rusqlite::params![item_id, capture_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+
+    let effective_scope = current_scope.unwrap_or(capture_scope);
 
     // Index only if text is present and non-empty.
     if let Some(text) = text {
@@ -76,7 +98,7 @@ pub fn index_capture(tx: &Transaction<'_>, item_id: &str, capture_id: &str) -> R
                 tx.execute(
                     "INSERT INTO search_index (item_id, capture_id, item_scope, original_text, text_basis)
                      VALUES (?, ?, ?, ?, 'original')",
-                    rusqlite::params![item_id, capture_id, item_scope, text],
+                    rusqlite::params![item_id, capture_id, effective_scope, text],
                 )?;
             }
         }
@@ -110,19 +132,22 @@ pub fn index_text_correction(tx: &Transaction<'_>, item_id: &str) -> Result<()> 
     // Index the new corrected text if it's non-empty.
     if let Some(text) = new_text {
         if !text.is_empty() {
-            // Get capture_id and item_scope from items and captures.
-            let (capture_id, item_scope): (String, String) = tx.query_row(
-                "SELECT i.capture_id, c.item_scope FROM items i
-                 JOIN captures c ON i.capture_id = c.capture_id
-                 WHERE i.item_id = ?",
+            // Get capture_id and effective item scope from items and captures.
+            let (capture_id, capture_scope, current_scope): (String, String, Option<String>) = tx
+                .query_row(
+                "SELECT i.capture_id, c.item_scope, i.current_scope FROM items i
+                JOIN captures c ON i.capture_id = c.capture_id
+                WHERE i.item_id = ?",
                 [item_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )?;
+
+            let effective_scope = current_scope.unwrap_or(capture_scope);
 
             tx.execute(
                 "INSERT INTO search_index (item_id, capture_id, item_scope, current_text, text_basis)
                  VALUES (?, ?, ?, ?, 'corrected')",
-                rusqlite::params![item_id, capture_id, item_scope, text],
+                rusqlite::params![item_id, capture_id, effective_scope, text],
             )?;
         } else {
             // Empty correction: keep only the original, don't add an empty corrected row.
@@ -200,6 +225,7 @@ impl SearchResult {
 /// Provides an authoritative fallback for comparison with index results.
 /// Uses case-insensitive substring matching (LIKE) with proper escaping.
 /// Only returns accessible (non-deleted) items.
+/// Privacy scope uses effective scope: COALESCE(items.current_scope, captures.item_scope).
 pub fn search_source_direct(tx: &Transaction<'_>, query: &str) -> Result<Vec<SearchResult>> {
     // Escape LIKE special characters (% and _) to ensure literal matching.
     let escaped_query = query
@@ -210,14 +236,14 @@ pub fn search_source_direct(tx: &Transaction<'_>, query: &str) -> Result<Vec<Sea
 
     // Query captures for original text matching the query pattern.
     let mut stmt = tx.prepare(
-        "SELECT DISTINCT i.item_id, i.capture_id, c.item_scope, c.text as text, NULL as corrected_text, 'original' as source_type
+        "SELECT DISTINCT i.item_id, i.capture_id, COALESCE(i.current_scope, c.item_scope) as item_scope, c.text as text, NULL as corrected_text, 'original' as source_type
          FROM items i
          JOIN captures c ON i.capture_id = c.capture_id
          WHERE i.lifecycle_state != 'deleted'
            AND c.text IS NOT NULL
            AND c.text LIKE ? ESCAPE '\\'
          UNION
-         SELECT DISTINCT i.item_id, i.capture_id, c.item_scope, NULL as text, corr.new_value as corrected_text, 'corrected' as source_type
+         SELECT DISTINCT i.item_id, i.capture_id, COALESCE(i.current_scope, c.item_scope) as item_scope, NULL as text, corr.new_value as corrected_text, 'corrected' as source_type
          FROM items i
          JOIN captures c ON i.capture_id = c.capture_id
          JOIN corrections corr ON i.item_id = corr.item_id
