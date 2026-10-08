@@ -139,20 +139,21 @@ pub fn compare_header_with_library(
 pub fn check_library_matches_header(header_file: &Path, library_file: &Path) -> Result<(), String> {
     let header = std::fs::read_to_string(header_file)
         .map_err(|error| format!("read {}: {error}", header_file.display()))?;
+    // Apple's nm exits non-zero when it cannot read the toolchain's prebuilt standard library
+    // objects (embedded bitcode from a newer LLVM) but still lists every readable object,
+    // including this project's. A genuinely unreadable library yields no symbols and fails the
+    // comparison below.
     let nm_output = Command::new("nm")
         .arg("-g")
         .arg(library_file)
         .output()
         .map_err(|error| format!("run nm: {error}"))?;
-    if !nm_output.status.success() {
-        return Err(format!(
-            "nm failed on {}: {}",
-            library_file.display(),
-            String::from_utf8_lossy(&nm_output.stderr)
-        ));
+    let exported = exported_functions(&String::from_utf8_lossy(&nm_output.stdout));
+    let mut comparison = compare_header_with_library(&declared_functions(&header), &exported);
+    if let (Err(message), false) = (&mut comparison, nm_output.status.success()) {
+        let stderr = String::from_utf8_lossy(&nm_output.stderr);
+        let first_line = stderr.lines().next().unwrap_or_default();
+        message.push_str(&format!("; nm reported: {first_line}"));
     }
-    compare_header_with_library(
-        &declared_functions(&header),
-        &exported_functions(&String::from_utf8_lossy(&nm_output.stdout)),
-    )
+    comparison
 }
