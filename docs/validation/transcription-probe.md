@@ -13,16 +13,17 @@ P04 probes native on-device speech recognition and language model availability i
 
 ## Outcome contract
 
-The probe loads audio files (WAV format, typically from the AudioProbe P03) and attempts transcription using `SFSpeechRecognizer` initialized for en-US locale. Results report:
+The probe loads audio files (WAV format) and attempts transcription using `SFSpeechRecognizer` initialized for en-US locale with `requiresOnDeviceRecognition = true`. This setting prevents cloud fallback; if on-device recognition is unavailable or unsupported, the request fails and returns an error. Results report:
 
 - `Transcribed: <text>` — on-device recognition succeeded; text is the `bestTranscription.formattedString` and confidence is reported as a percentage of the first recognized segment.
 - `Partial: <text>` — intermediate result (displayed during active recognition before final result).
-- `Speech recognizer not available` — the recognizer is unavailable (may need model download on-device; simulator models are frequently outdated or missing).
-- `Error: <reason>` — recognition failed with a specific error (timeout, audio engine failure, unreadable file, or unsupported format).
+- `Recognizer not available` — the recognizer is unavailable (may need model download on-device).
+- `On-device speech recognition not supported on this device` — the device does not support on-device speech recognition.
+- `Error: <reason>` — recognition failed with a specific error (timeout, audio read failure, model not available, or internal service error).
 - `Speech recognition permission denied` — user denied the speech recognition permission.
 - `Speech recognition restricted` — system has restricted speech recognition access.
 - `No audio file loaded` — no WAV file was loaded before transcription was attempted.
-- `Recognizer not available` — recognizer is `nil` or not `isAvailable`.
+- `Speech recognition permission not authorized` — transcription was attempted without authorization (permission not yet requested or explicitly denied).
 
 Duration is measured from transcription start to final result, excluding partial results.
 
@@ -30,49 +31,54 @@ Duration is measured from transcription start to final result, excluding partial
 
 `SFSpeechRecognizer.isAvailable` returns false when:
 
-- The device does not support on-device speech recognition (very rare on current iOS devices, but possible on older hardware).
+- The device does not support on-device speech recognition.
 - The language model for the requested locale has not been downloaded on the device.
 - The system is in a state that does not permit on-device recognition (e.g., setup/recovery mode).
 
-A missing model is reported as `Speech recognizer not available` and requires explicit user download via Settings > General > Keyboard > Dictation on physical devices. Simulators inherit the host macOS model status.
+When a recognizer is unavailable, transcription fails with an error. Model availability on simulators is unpredictable and may not match host system state; physical-device testing is required to verify actual model availability.
 
-### Offline verification
+### On-device recognition guarantee
 
-The probe intentionally does NOT disable network access. Because Apple's Speech framework is designed to silently fall back to cloud recognition, the probe documentation states what **can** be verified on simulator and what requires physical-device testing:
+The probe sets `requiresOnDeviceRecognition = true`, which instructs the Speech framework to fail the request if on-device recognition is unavailable or not supported on the device. This prevents silent fallback to cloud recognition; if on-device is not available, the probe reports an error instead of sending audio to a remote service.
 
-- **Simulator:** Build and app launch work; recognizer availability is checkable; permission prompts and denials work.
-- **Physical device:** Actual offline recognition with network unavailable (airplane mode), language/model availability after explicit download, confidence scoring, interruption handling.
+**Simulator verification (CI):**
+- Build and app launch work.
+- Recognizer availability and on-device support checks are functional.
+- Permission prompts and denials work.
+- The UI responds to button interactions and displays transcription/error states.
 
-A cloud-fallback-detection test would require network interception (proxy, VPN, or real network isolation), which is outside the scope of the probe; it is noted as evidence requirement for later integration.
+**Physical device verification (P09):**
+- Actual offline recognition with network unavailable (airplane mode).
+- Language/model availability for non-en-US locales.
+- Confidence scoring and interruption handling.
 
 ## Audio format and constraints
 
-- **Format:** 16 kHz, mono, 16-bit signed little-endian Linear PCM in a WAV file. The AudioProbe (P03) produces this format natively.
-- **Locale:** en-US (hardcoded for this probe; additional locales can be added to support language model availability testing).
-- **Audio path:** Load any `.wav` file from the app's Documents directory. The Load Test Audio button loads a WAV file from the app container (typically from AudioProbe).
+- **Format:** 16 kHz, mono, 16-bit signed little-endian Linear PCM in a WAV file.
+- **Locale:** en-US (hardcoded for this probe).
+- **Audio path:** Load any `.wav` file from the app's Documents directory. Test files can be created independently or transferred via airdrop or other mechanisms.
 - **Duration bound:** No enforced maximum; `SFSpeechURLRecognitionRequest` has platform-dependent timeouts.
 
 ### Permission and model state
 
 - **Speech recognition permission:** Requested at app launch. Denial is reported immediately; revocation in Settings appears only after app relaunch.
-- **Language model:** Checked via `SFSpeechRecognizer.isAvailable` and `supportsOnDeviceRecognition` after initialization. If unavailable or on-device recognition is not supported, the status is reported with a visible UI indication. The simulator may report unavailable or unsupported even if the OS version ostensibly supports it.
+- **Language model:** Checked via `SFSpeechRecognizer.isAvailable` and `supportsOnDeviceRecognition` after initialization. If unavailable or on-device recognition is not supported, the status is reported with a visible UI indication. On simulators, model availability is not guaranteed and should not be relied upon.
 
 ## What the automated checks assert
 
-The `ios.yml` build compiles the probe app and runs a smoke test on a simulator, which validates:
+The `ios.yml` workflow compiles the probe app and runs a smoke test on a simulator, which validates:
 
 - The app builds without error with the Speech framework and `SFSpeechRecognizer` integration.
-- Recognizer initialization with `supportsOnDeviceRecognition` check and permission request flow work (no crashes).
-- The app launches and displays the probe UI.
-- The Xcode build environment and iOS SDK are functional for Speech framework use.
+- The app launches on a simulator without crashing.
+- The probe UI is visible and responsive.
 
 The simulator checks do NOT prove:
 
-- Actual offline recognition (simulator may lack model data or have outdated models).
+- Actual offline recognition or transcription functionality (simulator may lack model data or have outdated models).
 - Language/model availability for locales other than en-US.
-- Cloud-fallback prevention (requires network isolation; the probe sets `requiresOnDeviceRecognition = true` but network availability is not controlled in CI).
-- Button interactions or transcription end-to-end (smoke test only checks launch).
-- Actual microphone recording (the probe loads pre-recorded audio files, not live capture).
+- Button interactions or transcription end-to-end flows.
+- Behavior with no audio loaded or permission denial.
+- Recovery from interruption (background/foreground transitions).
 
 ## Needs a physical device (not measured)
 

@@ -44,6 +44,9 @@ class TranscriptionProbeViewController: UIViewController {
     private var recognitionTask: SFSpeechRecognitionTask?
     private let speechRecognitionQueue = DispatchQueue(label: "com.boldfield.transcription.queue")
     private var transcriptionStartTime: Date?
+    private var authorizationStatus: SFSpeechRecognizerAuthorizationStatus = .notDetermined
+    private var recognizerAvailable: Bool = false
+    private var supportsOnDevice: Bool = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -156,24 +159,38 @@ class TranscriptionProbeViewController: UIViewController {
 
         guard let recognizer = recognizer else {
             updateStatus("Speech recognizer initialization failed", color: .systemRed)
+            recognizerAvailable = false
+            supportsOnDevice = false
             return
         }
 
-        guard recognizer.isAvailable else {
-            if recognizer.supportsOnDeviceRecognition {
-                updateStatus("Speech recognizer available but not ready (may need model download)", color: .systemOrange)
+        recognizerAvailable = recognizer.isAvailable
+        supportsOnDevice = recognizer.supportsOnDeviceRecognition
+
+        updateRecognizerStatus()
+    }
+
+    private func updateRecognizerStatus() {
+        let statusText: String
+        let statusColor: UIColor
+
+        if !recognizerAvailable {
+            if supportsOnDevice {
+                statusText = "Speech recognizer available but not ready (may need model download)"
+                statusColor = .systemOrange
             } else {
-                updateStatus("On-device speech recognition not supported on this device", color: .systemRed)
+                statusText = "On-device speech recognition not supported on this device"
+                statusColor = .systemRed
             }
-            return
+        } else if !supportsOnDevice {
+            statusText = "On-device recognition unavailable (model may need download)"
+            statusColor = .systemOrange
+        } else {
+            statusText = "Recognizer ready for on-device recognition"
+            statusColor = .systemGreen
         }
 
-        guard recognizer.supportsOnDeviceRecognition else {
-            updateStatus("On-device recognition unavailable (model may need download)", color: .systemOrange)
-            return
-        }
-
-        updateStatus("Recognizer ready for on-device recognition", color: .systemGreen)
+        updateStatus(statusText, color: statusColor)
     }
 
     private func updateStatus(_ text: String, color: UIColor) {
@@ -186,23 +203,36 @@ class TranscriptionProbeViewController: UIViewController {
     private func requestSpeechRecognitionPermission() {
         SFSpeechRecognizer.requestAuthorization { [weak self] status in
             DispatchQueue.main.async {
-                switch status {
-                case .authorized:
-                    self?.statusLabel?.text = "Speech recognition authorized"
-                    self?.statusLabel?.textColor = .systemGreen
-                case .denied:
-                    self?.statusLabel?.text = "Speech recognition permission denied"
-                    self?.statusLabel?.textColor = .systemRed
-                case .restricted:
-                    self?.statusLabel?.text = "Speech recognition restricted"
-                    self?.statusLabel?.textColor = .systemOrange
-                case .notDetermined:
-                    self?.statusLabel?.text = "Speech recognition not yet determined"
-                    self?.statusLabel?.textColor = .systemOrange
-                @unknown default:
-                    self?.statusLabel?.text = "Unknown authorization status"
-                    self?.statusLabel?.textColor = .systemOrange
+                guard let self = self else { return }
+                self.authorizationStatus = status
+
+                guard status == .authorized else {
+                    let statusText: String
+                    let statusColor: UIColor
+
+                    switch status {
+                    case .authorized:
+                        statusText = "Speech recognition authorized"
+                        statusColor = .systemGreen
+                    case .denied:
+                        statusText = "Speech recognition permission denied"
+                        statusColor = .systemRed
+                    case .restricted:
+                        statusText = "Speech recognition restricted"
+                        statusColor = .systemOrange
+                    case .notDetermined:
+                        statusText = "Speech recognition not yet determined"
+                        statusColor = .systemOrange
+                    @unknown default:
+                        statusText = "Unknown authorization status"
+                        statusColor = .systemOrange
+                    }
+
+                    self.updateStatus(statusText, color: statusColor)
+                    return
                 }
+
+                self.updateRecognizerStatus()
             }
         }
     }
@@ -234,13 +264,19 @@ class TranscriptionProbeViewController: UIViewController {
             return
         }
 
-        guard let recognizer = recognizer, recognizer.isAvailable else {
+        guard authorizationStatus == .authorized else {
+            resultLabel?.text = "Speech recognition permission not authorized"
+            resultLabel?.textColor = .systemRed
+            return
+        }
+
+        guard let recognizer = recognizer, recognizerAvailable else {
             resultLabel?.text = "Recognizer not available"
             resultLabel?.textColor = .systemRed
             return
         }
 
-        guard recognizer.supportsOnDeviceRecognition else {
+        guard supportsOnDevice else {
             resultLabel?.text = "On-device transcription not supported (model may need download)"
             resultLabel?.textColor = .systemOrange
             return
@@ -250,43 +286,48 @@ class TranscriptionProbeViewController: UIViewController {
         resultLabel?.textColor = .systemBlue
         transcriptionStartTime = Date()
 
-        speechRecognitionQueue.async { [weak self] in
+        let request = SFSpeechURLRecognitionRequest(url: audioURL)
+        request.shouldReportPartialResults = true
+        request.requiresOnDeviceRecognition = true
+
+        var taskAssigned = false
+        let task = recognizer.recognitionTask(with: request) { [weak self] result, error in
             guard let self = self else { return }
-            let request = SFSpeechURLRecognitionRequest(url: audioURL)
-            request.shouldReportPartialResults = true
-            request.requiresOnDeviceRecognition = true
 
-            let task = self.recognizer?.recognitionTask(with: request) { [weak self] result, error in
-                guard let self = self else { return }
+            DispatchQueue.main.async {
+                if let error = error {
+                    self.handleTranscriptionError(error)
+                } else if let result = result {
+                    let isFinal = result.isFinal
+                    let transcript = result.bestTranscription.formattedString
+                    let confidence = result.bestTranscription.segments.first?.confidence ?? 0
 
-                DispatchQueue.main.async {
-                    if let error = error {
-                        self.handleTranscriptionError(error)
-                    } else if let result = result {
-                        let isFinal = result.isFinal
-                        let transcript = result.bestTranscription.formattedString
-                        let confidence = result.bestTranscription.segments.first?.confidence ?? 0
-
-                        if isFinal {
-                            let duration = Date().timeIntervalSince(self.transcriptionStartTime ?? Date())
-                            self.transcriptionDurationLabel?.text = String(format: "Duration: %.2fs", duration)
-                            self.resultLabel?.text = "Transcribed: \(transcript)\n(Confidence: \(String(format: "%.0f%%", confidence * 100)))"
-                            self.resultLabel?.textColor = .systemGreen
-                        } else {
-                            self.resultLabel?.text = "Partial: \(transcript)"
-                            self.resultLabel?.textColor = .systemBlue
-                        }
+                    if isFinal {
+                        let duration = Date().timeIntervalSince(self.transcriptionStartTime ?? Date())
+                        self.transcriptionDurationLabel?.text = String(format: "Duration: %.2fs", duration)
+                        self.resultLabel?.text = "Transcribed: \(transcript)\n(Confidence: \(String(format: "%.0f%%", confidence * 100)))"
+                        self.resultLabel?.textColor = .systemGreen
+                    } else {
+                        self.resultLabel?.text = "Partial: \(transcript)"
+                        self.resultLabel?.textColor = .systemBlue
                     }
                 }
             }
+        }
 
+        speechRecognitionQueue.async { [weak self] in
+            guard let self = self else { return }
             self.recognitionTask = task
         }
     }
 
     @objc private func cancelTranscription() {
-        recognitionTask?.cancel()
-        recognitionTask = nil
+        speechRecognitionQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.recognitionTask?.cancel()
+            self.recognitionTask = nil
+        }
+
         transcriptionDurationLabel?.text = "Duration: —"
         resultLabel?.text = "Transcription cancelled"
         resultLabel?.textColor = .systemOrange
@@ -297,20 +338,22 @@ class TranscriptionProbeViewController: UIViewController {
         transcriptionDurationLabel?.text = String(format: "Duration: %.2fs", duration)
 
         let errorText: String
-        if let sfError = error as? SFSpeechRecognitionError {
-            switch sfError.code {
-            case .network:
-                errorText = "Network error during recognition"
-            case .notAuthorizedToPerformSpeechRecognition:
-                errorText = "Speech recognition permission denied"
-            case .noSpeechInputDetected:
-                errorText = "No speech detected in audio"
-            case .requestTimedOut:
-                errorText = "Recognition request timed out"
-            case .unspecified:
-                errorText = "Unspecified speech recognition error"
-            @unknown default:
-                errorText = "Error: \(sfError.localizedDescription)"
+        if #available(iOS 17, *) {
+            if let sfError = error as? SFSpeechError {
+                switch sfError.code {
+                case .audioReadFailed:
+                    errorText = "Failed to read audio file"
+                case .timeout:
+                    errorText = "Recognition request timed out"
+                case .noModel:
+                    errorText = "Speech recognition model not available"
+                case .internalServiceError:
+                    errorText = "Internal speech recognition error"
+                @unknown default:
+                    errorText = "Error: \(sfError.localizedDescription)"
+                }
+            } else {
+                errorText = "Error: \(error.localizedDescription)"
             }
         } else {
             errorText = "Error: \(error.localizedDescription)"
