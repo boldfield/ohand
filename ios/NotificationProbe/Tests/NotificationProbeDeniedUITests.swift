@@ -10,8 +10,13 @@ final class NotificationProbeDeniedUITests: NotificationProbeUITestCase {
         XCTAssertEqual(denied["authorizationStatus"], "denied")
         XCTAssertEqual(denied["secondRequestGranted"], "false", "a repeated request returns the recorded denial without prompting")
 
+        XCTAssertEqual(denied["alertSetting"], "disabled")
+        XCTAssertEqual(denied["soundSetting"], "disabled")
+        XCTAssertEqual(denied["badgeSetting"], "disabled")
+
         let scheduling = run("schedulingProbe")
-        XCTAssertNotNil(scheduling["addError"], "add outcome while denied must be recorded")
-        XCTAssertNotNil(scheduling["pendingCountAfterAdd"], "pending count while denied must be recorded")
+        XCTAssertEqual(scheduling["addError"], "none", "add reports no error while denied")
+        XCTAssertEqual(scheduling["pendingCountAfterAdd"], "0", "a request added while denied is not retained")
+        XCTAssertEqual(scheduling["pendingContainsRequest"], "false")
     }
 }

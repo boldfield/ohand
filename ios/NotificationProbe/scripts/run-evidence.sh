@@ -31,12 +31,6 @@ for suite in "${suites[@]}"; do
     -only-testing:"NotificationProbeUITests/${suite}" \
     CODE_SIGNING_ALLOWED=NO 2>&1 | tee "${evidence_dir}/${suite}.log" || suite_status=$?
 
-  container="$(xcrun simctl get_app_container "${udid}" "${bundle_id}" data 2>/dev/null || true)"
-  if [ -n "${container}" ] && [ -f "${container}/Documents/notification-probe-report.jsonl" ]; then
-    cp "${container}/Documents/notification-probe-report.jsonl" "${evidence_dir}/${suite}-report.jsonl"
-  else
-    echo "no report file found for ${suite}" | tee -a "${evidence_dir}/${suite}.log"
-  fi
   if [ "${suite_status}" -ne 0 ]; then
     overall_status="${suite_status}"
   fi

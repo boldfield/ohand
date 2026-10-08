@@ -46,8 +46,6 @@ class NotificationProbeSceneDelegate: UIResponder, UIWindowSceneDelegate {
 }
 
 class NotificationProbeViewController: UIViewController {
-    static let reportFileName = "notification-probe-report.jsonl"
-
     private let scenarios = NotificationProbeScenarios()
     private let resultLabel = UILabel()
     private let logger = Logger(subsystem: "com.boldfield.ohand.probes.notification", category: "report")
@@ -118,19 +116,5 @@ class NotificationProbeViewController: UIViewController {
         resultLabel.text = json
         resultLabel.accessibilityLabel = json
         logger.info("\(json, privacy: .public)")
-        appendToReportFile(json)
-    }
-
-    private func appendToReportFile(_ json: String) {
-        guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return }
-        let reportURL = documents.appendingPathComponent(Self.reportFileName)
-        let line = Data((json + "\n").utf8)
-        if let handle = try? FileHandle(forWritingTo: reportURL) {
-            defer { try? handle.close() }
-            _ = try? handle.seekToEnd()
-            try? handle.write(contentsOf: line)
-        } else {
-            try? line.write(to: reportURL)
-        }
     }
 }

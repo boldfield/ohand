@@ -47,9 +47,12 @@ final class NotificationProbeAuthorizedUITests: NotificationProbeUITestCase {
                 XCTAssertEqual(calendar["\(zone).deltaSeconds"], "0", "\(zone) trigger must fire at the requested wall-clock time in its zone")
             }
             XCTAssertEqual(calendar["floating.deltaSeconds"], "0")
-            for key in ["springForwardGap.nextTriggerUTC", "fallBackOverlap.nextTriggerUTC", "past.addError", "past.nextTriggerUTC"] {
-                XCTAssertNotNil(calendar[key], "\(key) was not recorded")
-            }
+            // America/New_York: 02:30 in the spring-forward gap fires at 03:30 EDT (07:30Z); 01:30 in the fall-back overlap fires at its first occurrence, 01:30 EDT (05:30Z).
+            XCTAssertTrue(calendar["springForwardGap.nextTriggerUTC"]?.hasSuffix("T07:30:00Z") == true, "gap: \(calendar["springForwardGap.nextTriggerUTC"] ?? "nil")")
+            XCTAssertTrue(calendar["fallBackOverlap.nextTriggerUTC"]?.hasSuffix("T05:30:00Z") == true, "overlap: \(calendar["fallBackOverlap.nextTriggerUTC"] ?? "nil")")
+            XCTAssertEqual(calendar["past.addError"], "none", "adding a one-shot calendar trigger in the past reports no error")
+            XCTAssertEqual(calendar["past.nextTriggerUTC"], "nil")
+            XCTAssertEqual(calendar["past.pendingContainsRequest"], "false", "a one-shot calendar trigger in the past is not retained")
         }
 
         XCTContext.runActivity(named: "pending request capacity") { _ in
