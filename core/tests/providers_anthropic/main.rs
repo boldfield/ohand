@@ -219,7 +219,7 @@ fn request_is_built_from_profile_and_protocol_settings() {
                 "description": "Report the interpretation of the captured note.",
                 "input_schema": expected_schema,
             }],
-            "tool_choice": { "type": "tool", "name": INTERPRETATION_TOOL_NAME },
+            "tool_choice": { "type": "auto" },
         })
     );
 }
@@ -288,10 +288,7 @@ fn tool_schema_follows_the_declared_structured_output_mode() {
             body["tools"][0]["input_schema"], expected_schema,
             "{mode:?}"
         );
-        assert_eq!(
-            body["tool_choice"],
-            json!({ "type": "tool", "name": INTERPRETATION_TOOL_NAME })
-        );
+        assert_eq!(body["tool_choice"], json!({ "type": "auto" }));
     }
 }
 
@@ -374,7 +371,7 @@ fn malformed_and_unexpected_replies_are_invalid_output() {
             ),
         ),
         (
-            "text only despite forced tool",
+            "text only without the interpret call",
             FakeAnthropicStep::respond_json(
                 200,
                 &message(
@@ -862,6 +859,29 @@ fn oversized_http_body_is_rejected_by_the_size_bound() {
     };
     let failure = harness.run_with(&limits).unwrap_err();
     assert_eq!(failure.kind, FailureKind::OutputTooLarge);
+}
+
+#[test]
+fn oversized_error_envelope_is_bounded_before_it_is_parsed() {
+    for (status, error_type) in [(429, "rate_limit_error"), (401, "authentication_error")] {
+        let mut envelope = error_envelope(error_type);
+        envelope["error"]["message"] = json!("x".repeat(200));
+        let harness = Harness::new(vec![FakeAnthropicStep::respond_json(status, &envelope)]);
+        let limits = DispatchLimits {
+            max_response_bytes: 64,
+        };
+        let failure = harness.run_with(&limits).unwrap_err();
+        assert_eq!(failure.kind, FailureKind::OutputTooLarge, "{error_type}");
+    }
+}
+
+#[test]
+fn request_never_forces_a_tool_choice() {
+    let harness = Harness::new(vec![ok_reply(valid_proposal())]);
+    harness.run().expect("valid reply");
+    let body = body_of(&harness.transport.calls()[0]);
+    assert_eq!(body["tool_choice"]["type"], "auto");
+    assert!(body["tool_choice"].get("name").is_none());
 }
 
 // ---- capability claims ----

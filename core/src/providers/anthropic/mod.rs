@@ -29,7 +29,7 @@ pub const ANTHROPIC_MESSAGES_ENDPOINT: &str = "https://api.anthropic.com/v1/mess
 /// Value of the `anthropic-version` header the documented protocol requires.
 pub const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 1024;
-/// Name of the single tool the model is forced to call to return structured output.
+/// Name of the single tool the model must call to return structured output.
 pub const INTERPRETATION_TOOL_NAME: &str = "interpret";
 /// Header the native layer fills with the secret behind the credential reference.
 pub const CREDENTIAL_HEADER: &str = "x-api-key";
@@ -48,7 +48,7 @@ pub struct AnthropicSettings {
     pub endpoint: String,
     pub api_version: String,
     pub max_output_tokens: u32,
-    /// Input schema of the forced tool for profiles declaring `JsonSchema` output. The default
+    /// Input schema of the `interpret` tool for profiles declaring `JsonSchema` output. The default
     /// enforces only the versioned envelope (`schema_version`); the interpretation contract
     /// supplies the full proposal schema.
     pub proposal_schema: Value,

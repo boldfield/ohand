@@ -1,4 +1,4 @@
-//! Minimal structural JSON-schema check for the forced `interpret` tool input.
+//! Minimal structural JSON-schema check for the `interpret` tool input.
 //!
 //! Supports `type`, `enum`, `required`, `properties`, `additionalProperties: false` and
 //! `items`. Semantic validation of the proposal belongs to interpretation; this only keeps

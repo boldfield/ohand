@@ -10,7 +10,7 @@ use crate::providers::contracts::{
     InterpretationRequest, ProviderProfile, StructuredOutputMode, TransportError,
 };
 
-/// Schema the forced tool advertises and the extracted input must satisfy. Only a profile
+/// Schema the `interpret` tool advertises and the extracted input must satisfy. Only a profile
 /// declaring `JsonSchema` gets the full proposal schema; other modes ask for any JSON object.
 pub(super) fn effective_schema(mode: StructuredOutputMode, settings: &AnthropicSettings) -> Value {
     match mode {
@@ -21,6 +21,9 @@ pub(super) fn effective_schema(mode: StructuredOutputMode, settings: &AnthropicS
     }
 }
 
+/// `tool_choice` is `auto`: current Anthropic models reject forced tool use (`type: tool` or
+/// `any`) with HTTP 400, so the system prompt instructs the call and [`decode_response`]
+/// accepts only a reply that actually made exactly one `interpret` call.
 pub(super) fn build_messages_body(
     profile: &ProviderProfile,
     request: &InterpretationRequest,
@@ -56,7 +59,7 @@ pub(super) fn build_messages_body(
             "description": "Report the interpretation of the captured note.",
             "input_schema": effective_schema(mode, settings),
         }],
-        "tool_choice": { "type": "tool", "name": INTERPRETATION_TOOL_NAME },
+        "tool_choice": { "type": "auto" },
     });
     serde_json::to_vec(&body).map_err(|_| TransportError::Rejected)
 }
@@ -106,15 +109,15 @@ pub(super) fn decode_response(
     max_response_bytes: usize,
     schema: &Value,
 ) -> Result<Vec<u8>, TransportError> {
+    if response.body.len() > max_response_bytes {
+        // Handed back undecoded so the shared harness applies its size bound before any parsing.
+        return Ok(response.body.clone());
+    }
     if let Some(error_type) = error_envelope_type(&response.body) {
         return Err(map_error_type(&error_type).unwrap_or_else(|| map_status(response.status)));
     }
     if !(200..300).contains(&response.status) {
         return Err(map_status(response.status));
-    }
-    if response.body.len() > max_response_bytes {
-        // Handed back undecoded so the shared harness applies its size bound.
-        return Ok(response.body.clone());
     }
     let Ok(envelope) = serde_json::from_slice::<Value>(&response.body) else {
         return invalid_output();
