@@ -18,11 +18,13 @@ use thiserror::Error;
 /// Text basis is always immutable: the original source text, or a specific text-correction record
 /// at the item revision where it was current.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum TextBasis {
     /// Original source text from capture.
     Original,
     /// A user text-correction record, identified by its correction record ID.
     /// The basis is valid only at the item revision when the correction was stored.
+    #[serde(rename_all = "lowercase")]
     Correction { correction_id: String },
 }
 
@@ -57,6 +59,19 @@ impl TextBasis {
         match self {
             TextBasis::Original => ("original", None),
             TextBasis::Correction { correction_id } => ("correction", Some(correction_id.clone())),
+        }
+    }
+
+    /// Validate that the text basis has non-empty required fields.
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            TextBasis::Original => Ok(()),
+            TextBasis::Correction { correction_id } => {
+                if correction_id.is_empty() {
+                    return Err(anyhow!("correction_id must be non-empty"));
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -98,6 +113,7 @@ impl FromStr for TimeResolutionQuality {
 
 /// Proposed reminder: an absolute instant with quality and source span.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReminderProposal {
     /// Resolved absolute instant (UTC, RFC 3339 format).
     pub instant: String,
@@ -111,6 +127,7 @@ pub struct ReminderProposal {
 
 /// Reason for abstaining from a proposal.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum AbstentionReason {
     /// Unable to determine the target or value from the source.
     UncertainTarget,
@@ -126,6 +143,7 @@ pub enum AbstentionReason {
 
 /// Proposed session-topic with optional source evidence.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionTopicProposal {
     /// The proposed session-topic string.
     pub topic: String,
@@ -136,6 +154,7 @@ pub struct SessionTopicProposal {
 /// Character offset span into a text basis.
 /// Offsets are Unicode scalar values (character count), not bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SourceSpan {
     pub start: usize,
     pub end: usize,
@@ -148,10 +167,11 @@ impl SourceSpan {
 
     /// Check if this span is valid within the given text.
     /// Offsets are character positions (Unicode scalar values), not byte positions.
+    /// The span must be non-empty (start < end) to be valid.
     pub fn is_valid(&self, text: &str) -> Result<()> {
-        if self.start > self.end {
+        if self.start >= self.end {
             return Err(anyhow!(
-                "source span start {} > end {}",
+                "source span [{}, {}) must be non-empty (start < end)",
                 self.start,
                 self.end
             ));
@@ -284,6 +304,13 @@ impl Proposal {
         if self.request_version.is_empty() {
             return Err(anyhow!("request_version must be non-empty"));
         }
+        if self.source_revision < 0 {
+            return Err(anyhow!(
+                "source_revision must be non-negative, got {}",
+                self.source_revision
+            ));
+        }
+        self.text_basis.validate()?;
         Ok(())
     }
 
@@ -299,7 +326,7 @@ impl Proposal {
     }
 
     /// Validate the reminder proposal if present.
-    /// Checks that the instant is RFC 3339, timezone is IANA, and span is within text bounds.
+    /// Checks that the instant is RFC 3339, timezone is IANA, and span is required and within text bounds.
     pub fn validate_reminder_proposal(&self, text: &str) -> Result<()> {
         if let Some(reminder) = &self.reminder_proposal {
             if reminder.instant.is_empty() {
@@ -321,9 +348,14 @@ impl Proposal {
                 )
             })?;
 
-            // Validate source span if present.
-            if let Some(span) = &reminder.source_span {
-                span.is_valid(text)?;
+            // Validate source span is required and valid.
+            match &reminder.source_span {
+                Some(span) => span.is_valid(text)?,
+                None => {
+                    return Err(anyhow!(
+                        "reminder proposal must have source evidence (source_span)"
+                    ))
+                }
             }
         }
         Ok(())
@@ -382,6 +414,24 @@ impl Proposal {
         Ok(())
     }
 
+    /// Validate that non-abstaining facets have required source evidence.
+    /// - Type-only proposals require source_spans.
+    /// - Reminders require source_span (validated separately in validate_reminder_proposal).
+    /// - Session-topic requires source_span (validated separately in validate_session_topic_proposal).
+    pub fn validate_evidence_requirements(&self, _text: &str) -> Result<()> {
+        if self.abstention.is_none()
+            && self.item_type.is_some()
+            && self.reminder_proposal.is_none()
+            && self.session_topic_proposal.is_none()
+            && (self.source_spans.is_none() || self.source_spans.as_ref().unwrap().is_empty())
+        {
+            return Err(anyhow!(
+                "type-only proposal must have at least one source span"
+            ));
+        }
+        Ok(())
+    }
+
     /// Validate all fields of the proposal for semantic correctness.
     /// This checks schema version, identifier presence, span bounds, field invariants,
     /// but does NOT check database constraints (existence of captures/items)
@@ -394,6 +444,7 @@ impl Proposal {
         self.validate_session_topic_proposal(text)?;
         self.validate_abstention_exclusivity()?;
         self.validate_at_least_one_field()?;
+        self.validate_evidence_requirements(text)?;
         Ok(())
     }
 }

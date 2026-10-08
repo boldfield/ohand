@@ -192,6 +192,7 @@ mod proposal_tests {
     #[test]
     fn test_proposal_validate_type_only() {
         let text = "Maybe a roof garden would be nice";
+        let spans = vec![SourceSpan::new(0, 5)]; // "Maybe"
 
         let proposal = Proposal::new(
             "prop-1".to_string(),
@@ -202,7 +203,8 @@ mod proposal_tests {
             TextBasis::Original,
             "req-1".to_string(),
         )
-        .with_item_type(Some(ItemType::Idea));
+        .with_item_type(Some(ItemType::Idea))
+        .with_source_spans(Some(spans));
 
         let result = proposal.validate(text);
         assert!(result.is_ok());
@@ -354,10 +356,10 @@ mod proposal_tests {
     // === Acceptance Criterion 1: Character Offsets and Bounds ===
 
     #[test]
-    fn test_source_span_end_of_text_valid() {
+    fn test_source_span_end_of_text_empty_rejected() {
         let text = "abc";
         let span = SourceSpan::new(3, 3);
-        assert!(span.is_valid(text).is_ok());
+        assert!(span.is_valid(text).is_err());
     }
 
     #[test]
@@ -495,7 +497,7 @@ mod proposal_tests {
             instant: "2026-10-10T15:00:00Z".to_string(),
             timezone_id: "America/New_York".to_string(),
             quality: TimeResolutionQuality::Explicit,
-            source_span: None,
+            source_span: Some(SourceSpan::new(0, 4)), // "Some"
         };
 
         let proposal = Proposal::new(
@@ -794,5 +796,227 @@ mod proposal_tests {
 
         let result = proposal.validate(text);
         assert!(result.is_ok());
+    }
+
+    // === Nested Unknown Fields Rejection ===
+
+    #[test]
+    fn test_json_nested_unknown_fields_in_reminder_proposal() {
+        let json = r#"{
+            "proposal_id": "prop-1",
+            "item_id": "item-1",
+            "capture_id": "cap-1",
+            "source_revision": 0,
+            "schema_version": 1,
+            "text_basis": "Original",
+            "request_version": "req-1",
+            "reminder_proposal": {
+                "instant": "2026-10-10T15:00:00Z",
+                "timezone_id": "America/New_York",
+                "quality": "explicit",
+                "source_span": {"start": 0, "end": 5},
+                "evil_extra": "should fail"
+            },
+            "session_topic_proposal": null,
+            "source_spans": null,
+            "abstention": null
+        }"#;
+
+        let result: serde_json::Result<Proposal> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_json_nested_unknown_fields_in_source_span() {
+        let json = r#"{
+            "proposal_id": "prop-1",
+            "item_id": "item-1",
+            "capture_id": "cap-1",
+            "source_revision": 0,
+            "schema_version": 1,
+            "text_basis": "Original",
+            "request_version": "req-1",
+            "reminder_proposal": {
+                "instant": "2026-10-10T15:00:00Z",
+                "timezone_id": "America/New_York",
+                "quality": "explicit",
+                "source_span": {"start": 0, "end": 5, "bogus": 1}
+            },
+            "session_topic_proposal": null,
+            "source_spans": null,
+            "abstention": null
+        }"#;
+
+        let result: serde_json::Result<Proposal> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_json_nested_unknown_fields_in_text_basis_correction() {
+        let json = r#"{
+            "proposal_id": "prop-1",
+            "item_id": "item-1",
+            "capture_id": "cap-1",
+            "source_revision": 0,
+            "schema_version": 1,
+            "text_basis": {"correction": {"correction_id": "corr-1", "extra_field": "bad"}},
+            "request_version": "req-1",
+            "item_type": "Action",
+            "reminder_proposal": null,
+            "session_topic_proposal": null,
+            "source_spans": [{"start": 0, "end": 5}],
+            "abstention": null
+        }"#;
+
+        let result: serde_json::Result<Proposal> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    // === Negative Revision Validation ===
+
+    #[test]
+    fn test_proposal_negative_source_revision_rejected() {
+        let text = "Some text";
+        let proposal = Proposal::new(
+            "prop-1".to_string(),
+            "item-1".to_string(),
+            "cap-1".to_string(),
+            -5,
+            SUPPORTED_PROPOSAL_SCHEMA_VERSION,
+            TextBasis::Original,
+            "req-1".to_string(),
+        )
+        .with_item_type(Some(ItemType::Action));
+
+        let result = proposal.validate(text);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("non-negative"));
+    }
+
+    // === Empty Correction ID Validation ===
+
+    #[test]
+    fn test_empty_correction_id_rejected() {
+        let text = "Some text";
+        let basis = TextBasis::Correction {
+            correction_id: "".to_string(),
+        };
+
+        let proposal = Proposal::new(
+            "prop-1".to_string(),
+            "item-1".to_string(),
+            "cap-1".to_string(),
+            0,
+            SUPPORTED_PROPOSAL_SCHEMA_VERSION,
+            basis,
+            "req-1".to_string(),
+        )
+        .with_item_type(Some(ItemType::Action));
+
+        let result = proposal.validate(text);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("correction_id"));
+    }
+
+    // === Type-Only Proposal Must Have Source Spans ===
+
+    #[test]
+    fn test_type_only_proposal_without_source_spans_rejected() {
+        let text = "Some text";
+        let proposal = Proposal::new(
+            "prop-1".to_string(),
+            "item-1".to_string(),
+            "cap-1".to_string(),
+            0,
+            SUPPORTED_PROPOSAL_SCHEMA_VERSION,
+            TextBasis::Original,
+            "req-1".to_string(),
+        )
+        .with_item_type(Some(ItemType::Action));
+
+        let result = proposal.validate(text);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("source span"));
+    }
+
+    #[test]
+    fn test_type_only_proposal_with_empty_source_spans_rejected() {
+        let text = "Some text";
+        let proposal = Proposal::new(
+            "prop-1".to_string(),
+            "item-1".to_string(),
+            "cap-1".to_string(),
+            0,
+            SUPPORTED_PROPOSAL_SCHEMA_VERSION,
+            TextBasis::Original,
+            "req-1".to_string(),
+        )
+        .with_item_type(Some(ItemType::Action))
+        .with_source_spans(Some(vec![]));
+
+        let result = proposal.validate(text);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("source span"));
+    }
+
+    // === Reminder Must Have Source Span ===
+
+    #[test]
+    fn test_reminder_without_source_span_rejected() {
+        let text = "Some text";
+        let reminder = ReminderProposal {
+            instant: "2026-10-10T15:00:00Z".to_string(),
+            timezone_id: "America/New_York".to_string(),
+            quality: TimeResolutionQuality::Explicit,
+            source_span: None,
+        };
+
+        let proposal = Proposal::new(
+            "prop-1".to_string(),
+            "item-1".to_string(),
+            "cap-1".to_string(),
+            0,
+            SUPPORTED_PROPOSAL_SCHEMA_VERSION,
+            TextBasis::Original,
+            "req-1".to_string(),
+        )
+        .with_reminder_proposal(Some(reminder));
+
+        let result = proposal.validate(text);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("source evidence"));
+    }
+
+    // === Session Topic With Null Source Span ===
+
+    #[test]
+    fn test_session_topic_with_null_source_span_rejected() {
+        let text = "meeting notes";
+        let proposal = Proposal::new(
+            "prop-1".to_string(),
+            "item-1".to_string(),
+            "cap-1".to_string(),
+            0,
+            SUPPORTED_PROPOSAL_SCHEMA_VERSION,
+            TextBasis::Original,
+            "req-1".to_string(),
+        )
+        .with_session_topic_proposal(Some(SessionTopicProposal {
+            topic: "work".to_string(),
+            source_span: None,
+        }));
+
+        let result = proposal.validate(text);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("source evidence"));
     }
 }
