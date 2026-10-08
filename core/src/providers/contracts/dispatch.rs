@@ -90,6 +90,7 @@ pub enum TransportError {
     RateLimited,
     Unauthorized,
     Rejected,
+    InvalidOutput,
 }
 
 impl From<TransportError> for FailureKind {
@@ -101,6 +102,7 @@ impl From<TransportError> for FailureKind {
             TransportError::RateLimited => FailureKind::RateLimited,
             TransportError::Unauthorized => FailureKind::Unauthorized,
             TransportError::Rejected => FailureKind::Rejected,
+            TransportError::InvalidOutput => FailureKind::InvalidOutput,
         }
     }
 }
