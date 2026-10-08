@@ -1,7 +1,11 @@
 use anyhow::Result;
 use chrono::DateTime;
 use ohand_core::retrieval::phrases::{parse_phrase, ClarificationKind};
+use ohand_core::retrieval::query::{scoped_query, QueryPagination};
+use ohand_core::store::captures::Capture;
+use ohand_core::store::schema::{Clock, Database};
 use ohand_core::time::TimeContext;
+use std::sync::Arc;
 
 fn make_context() -> TimeContext {
     TimeContext {
@@ -13,6 +17,76 @@ fn make_context() -> TimeContext {
         utc_offset_at_capture: 0,
         calendar: "gregorian".to_string(),
     }
+}
+
+struct FixedClock;
+impl Clock for FixedClock {
+    fn now(&self) -> DateTime<chrono::Utc> {
+        DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+}
+
+fn temp_db_path(label: &str) -> String {
+    format!(
+        "{}/test_phrase_query_{}_{}.db",
+        std::env::temp_dir().display(),
+        label,
+        uuid::Uuid::new_v4()
+    )
+}
+
+fn new_db(label: &str) -> Result<Database> {
+    let clock: Arc<dyn Clock> = Arc::new(FixedClock);
+    Database::open(&temp_db_path(label), clock)
+}
+
+fn add_test_item(
+    db: &mut Database,
+    item_id: &str,
+    text: &str,
+    item_type: Option<&str>,
+    session_topic: Option<&str>,
+    capture_instant: &str,
+) -> Result<()> {
+    use ohand_core::retrieval::index::sync_item_in_tx;
+    use rusqlite::params;
+
+    let capture_id = format!("cap-{item_id}");
+    let tx = db.immediate_transaction()?;
+    let capture = Capture::new(
+        capture_id.clone(),
+        Some(text.to_string()),
+        None,
+        capture_instant.to_string(),
+        "UTC".to_string(),
+        0,
+        "en".to_string(),
+        "gregorian".to_string(),
+        "personal".to_string(),
+        "test-route".to_string(),
+        false,
+        "2026-01-15T10:30:00Z".to_string(),
+        session_topic.map(str::to_string),
+    )?;
+
+    ohand_core::store::captures::save_capture_in_tx(&tx, &capture)?;
+    tx.execute(
+        "INSERT INTO items (item_id, capture_id, revision, item_type, lifecycle_state,
+                           save_state, sync_state, processing_state, transcription_state, created_at, updated_at)
+         VALUES (?, ?, 0, ?, 'active', 'saved', 'not_synced', 'unprocessed', 'unprocessed', ?, ?)",
+        params![
+            item_id,
+            &capture_id,
+            item_type,
+            "2026-01-15T10:30:00Z",
+            "2026-01-15T10:30:00Z"
+        ],
+    )?;
+    sync_item_in_tx(&tx, item_id)?;
+    tx.commit()?;
+    Ok(())
 }
 
 #[test]
@@ -175,6 +249,19 @@ fn test_unrecognized_phrase_fallback_to_literal() -> Result<()> {
 }
 
 #[test]
+fn test_compound_type_and_date_filter() -> Result<()> {
+    let context = make_context();
+    // "action notes since friday" should combine both type and date filters
+    let resolution = parse_phrase("action notes since friday", &context)?;
+
+    assert!(resolution.filter.is_some());
+    let filter = resolution.filter.unwrap();
+    assert_eq!(filter.item_types, vec!["action"]);
+    assert!(filter.captured_after.is_some());
+    Ok(())
+}
+
+#[test]
 fn test_no_model_routing_for_simple_phrases() -> Result<()> {
     let context = make_context();
 
@@ -296,13 +383,21 @@ fn test_fallback_search_text_with_unsupported_repeat() -> Result<()> {
 }
 
 #[test]
-fn test_since_multiple_days_past() -> Result<()> {
+fn test_since_weekday_resolves_past_occurrence() -> Result<()> {
     let context = make_context();
-    // Today is Wed 2026-01-15; "since monday" should be most recent monday (2026-01-12)
+    // Today is Thursday 2026-01-15; "since monday" should resolve to most recent Monday (2026-01-12)
     let resolution = parse_phrase("notes since monday", &context)?;
 
     assert!(resolution.filter.is_some());
-    // The date should be in the past
+    let filter = resolution.filter.unwrap();
+    assert!(filter.captured_after.is_some());
+    let captured_after = filter.captured_after.unwrap();
+    // Should contain 2026-01-12 (the most recent Monday)
+    assert!(
+        captured_after.contains("2026-01-12"),
+        "Expected 2026-01-12 but got {}",
+        captured_after
+    );
     Ok(())
 }
 
@@ -335,5 +430,134 @@ fn test_private_prefix_variations() -> Result<()> {
     assert_eq!(res1.filter.unwrap().session_topics, vec!["therapy"]);
     assert_eq!(res2.filter.unwrap().session_topics, vec!["work"]);
     assert_eq!(res3.filter.unwrap().session_topics, vec!["research"]);
+    Ok(())
+}
+
+#[test]
+fn test_compound_private_therapy_notes_since_monday() -> Result<()> {
+    let context = make_context();
+    // "private therapy notes since monday" should combine session_topic + date filters
+    let resolution = parse_phrase("private therapy notes since monday", &context)?;
+
+    assert!(resolution.filter.is_some());
+    let filter = resolution.filter.unwrap();
+    assert_eq!(filter.session_topics, vec!["therapy"]);
+    assert!(filter.captured_after.is_some());
+    assert!(
+        filter.captured_after.unwrap().contains("2026-01-12"),
+        "Should resolve to most recent Monday"
+    );
+    Ok(())
+}
+
+#[test]
+fn test_retrieval_through_date_filter() -> Result<()> {
+    let mut db = new_db("retrieval_date")?;
+    let context = make_context();
+
+    // Add an item from yesterday
+    add_test_item(
+        &mut db,
+        "item-old",
+        "old therapy notes from yesterday",
+        None,
+        Some("therapy"),
+        "2026-01-14T10:00:00Z",
+    )?;
+
+    // Add an item from a week ago
+    add_test_item(
+        &mut db,
+        "item-week-ago",
+        "therapy notes from a week ago",
+        None,
+        Some("therapy"),
+        "2026-01-08T10:00:00Z",
+    )?;
+
+    // Add an item from the future
+    add_test_item(
+        &mut db,
+        "item-future",
+        "therapy notes from tomorrow",
+        None,
+        Some("therapy"),
+        "2026-01-16T10:00:00Z",
+    )?;
+
+    let resolution = parse_phrase("private therapy notes since monday", &context)?;
+    assert!(resolution.filter.is_some());
+
+    let filter = resolution.filter.unwrap();
+    let pagination = QueryPagination::default();
+
+    let result = scoped_query(db.conn(), "therapy", &filter, &pagination)?;
+
+    // Should retrieve items from monday (2026-01-12) and later
+    // This includes: old (2026-01-14), week-ago (2026-01-08 is before monday), and future (2026-01-16)
+    // So we expect: old and future (2 items)
+    assert!(
+        !result.hits.is_empty(),
+        "Should retrieve items matching the date filter"
+    );
+
+    // Verify we can find the expected original text
+    let found_old = result.hits.iter().any(|h| h.current_text.contains("old"));
+    assert!(found_old, "Should find the item with 'old' in text");
+
+    Ok(())
+}
+
+#[test]
+fn test_type_filter_distinguishes_items() -> Result<()> {
+    let context = make_context();
+    let resolution = parse_phrase("action notes since monday", &context)?;
+
+    assert!(resolution.filter.is_some());
+    let filter = resolution.filter.unwrap();
+
+    // Verify the filter has both type and date components
+    assert_eq!(filter.item_types, vec!["action"]);
+    assert!(filter.captured_after.is_some());
+    assert!(
+        filter.captured_after.unwrap().contains("2026-01-12"),
+        "Should resolve to most recent Monday"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_literal_fallback_for_unsupported_phrase() -> Result<()> {
+    let mut db = new_db("retrieval_literal")?;
+    let context = make_context();
+
+    add_test_item(
+        &mut db,
+        "item-1",
+        "therapy notes since last week",
+        None,
+        Some("therapy"),
+        "2026-01-15T10:00:00Z",
+    )?;
+
+    let resolution = parse_phrase("notes since last week", &context)?;
+
+    // "since last week" is not a recognized pattern, so should fall back to literal
+    assert!(resolution.filter.is_none());
+    assert_eq!(resolution.fallback_search_text, "notes since last week");
+
+    // Verify literal search still works
+    let filter = ohand_core::retrieval::query::QueryFilter::personal_only();
+    let pagination = QueryPagination::default();
+
+    let result = scoped_query(db.conn(), "last week", &filter, &pagination)?;
+
+    // Should find the item through literal search
+    assert!(
+        result.hits.iter().any(|h| h.item_id == "item-1"),
+        "Should retrieve through literal fallback"
+    );
+
     Ok(())
 }

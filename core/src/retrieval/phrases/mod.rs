@@ -1,6 +1,8 @@
 use crate::retrieval::query::QueryFilter;
 use crate::time::{ResolutionError, TimeContext, TimeResolver};
 use anyhow::Result;
+use chrono::TimeZone;
+use std::str::FromStr;
 
 /// Parse result from a natural-language query phrase.
 /// Filters are constructed when phrases match known patterns.
@@ -34,24 +36,62 @@ pub enum ClarificationKind {
 /// - "notes/items/reminders since DATE" → date filter with captured_after
 /// - "TYPE notes/items" (where TYPE is action/note/idea/etc.) → item_type filter
 /// - "private SESSION notes" → session_topic filter
-/// - Combination of above patterns
+/// - Combination of above patterns (e.g., "private therapy notes since monday")
 ///
 /// Non-matching phrases return None filter and the original text as fallback_search_text.
 pub fn parse_phrase(phrase: &str, context: &TimeContext) -> Result<PhraseResolution> {
     let original = phrase.to_string();
     let normalized = phrase.trim().to_lowercase();
 
-    // Try to match known patterns
-    if let Some(resolution) = try_parse_date_phrase(&normalized, &original, context)? {
-        return Ok(resolution);
+    // Check for unsupported repeat patterns first
+    if is_unsupported_repeat(&normalized) {
+        return Ok(PhraseResolution {
+            original_phrase: original.clone(),
+            filter: None,
+            clarification_needed: Some(ClarificationKind::UnsupportedRepeat {
+                phrase: original.clone(),
+            }),
+            fallback_search_text: original,
+        });
     }
 
-    if let Some(resolution) = try_parse_type_phrase(&normalized, &original) {
-        return Ok(resolution);
+    // Try to combine multiple patterns into a single filter
+    let mut combined_filter = None;
+    let mut clarification = None;
+
+    // First try to extract date/since component
+    if let Some((date_filter, date_clarification)) = extract_date_filter(&normalized, context)? {
+        combined_filter = Some(date_filter);
+        clarification = date_clarification;
     }
 
-    if let Some(resolution) = try_parse_scope_phrase(&normalized, &original) {
-        return Ok(resolution);
+    // Try to extract type component
+    if let Some(type_filter) = extract_type_filter(&normalized) {
+        if let Some(ref mut filter) = combined_filter {
+            // Merge type into existing filter
+            filter.item_types = type_filter.item_types;
+        } else {
+            combined_filter = Some(type_filter);
+        }
+    }
+
+    // Try to extract scope/session component
+    if let Some(scope_filter) = extract_scope_filter(&normalized) {
+        if let Some(ref mut filter) = combined_filter {
+            // Merge scope into existing filter
+            filter.session_topics = scope_filter.session_topics;
+        } else {
+            combined_filter = Some(scope_filter);
+        }
+    }
+
+    if combined_filter.is_some() {
+        return Ok(PhraseResolution {
+            original_phrase: original.clone(),
+            filter: combined_filter,
+            clarification_needed: clarification,
+            fallback_search_text: original,
+        });
     }
 
     // No pattern matched; use literal fallback
@@ -63,121 +103,133 @@ pub fn parse_phrase(phrase: &str, context: &TimeContext) -> Result<PhraseResolut
     })
 }
 
-/// Try to parse date-based phrases like "since monday", "since 2026-01-15", etc.
-/// Returns Some(resolution) if matched, None if pattern not recognized, or Err if pattern matched but resolution failed.
-fn try_parse_date_phrase(
-    normalized: &str,
-    original: &str,
-    context: &TimeContext,
-) -> Result<Option<PhraseResolution>> {
-    // Pattern: "(notes/items) since DATE"
-    if let Some(rest) = normalized.strip_prefix("notes since ") {
-        return parse_since_date_phrase(rest, original, context, "notes");
+fn is_unsupported_repeat(normalized: &str) -> bool {
+    let tokens: Vec<&str> = normalized.split_whitespace().collect();
+    for token in tokens {
+        if token == "every"
+            || token == "recurring"
+            || token == "daily"
+            || token == "weekly"
+            || token == "monthly"
+            || token == "yearly"
+        {
+            return true;
+        }
     }
-    if let Some(rest) = normalized.strip_prefix("items since ") {
-        return parse_since_date_phrase(rest, original, context, "items");
-    }
-    if let Some(rest) = normalized.strip_prefix("reminders since ") {
-        return parse_since_date_phrase(rest, original, context, "reminders");
-    }
+    false
+}
 
-    // Bare "since DATE" (without notes/items/reminders prefix)
-    if let Some(rest) = normalized.strip_prefix("since ") {
-        return parse_since_date_phrase(rest, original, context, "");
+fn is_weekday(date_part: &str) -> bool {
+    matches!(
+        date_part.trim().to_lowercase().as_str(),
+        "monday" | "tuesday" | "wednesday" | "thursday" | "friday" | "saturday" | "sunday"
+    )
+}
+
+/// Extract date filter from a phrase like "since DATE".
+/// Returns (filter, clarification) if a date pattern matched.
+fn extract_date_filter(
+    normalized: &str,
+    context: &TimeContext,
+) -> Result<Option<(QueryFilter, Option<ClarificationKind>)>> {
+    // Look for " since DATE" patterns anywhere in the phrase
+    let date_phrase = if let Some(idx) = normalized.rfind(" since ") {
+        Some(&normalized[idx + 7..]) // Skip " since " (7 chars)
+    } else {
+        normalized.strip_prefix("since ")
+    };
+
+    if let Some(date_part) = date_phrase {
+        // For weekday names, preserve "since" for correct past semantics
+        // For explicit dates/times, resolve without "since" prefix
+        let phrase_to_resolve = if is_weekday(date_part) {
+            format!("since {}", date_part)
+        } else {
+            date_part.to_string()
+        };
+        match TimeResolver::resolve(&phrase_to_resolve, context) {
+            Ok(result) => {
+                let mut filter = QueryFilter::personal_only();
+
+                // If we have a resolved UTC time, use it as captured_after
+                if let Some(resolved_utc) = result.resolved_time {
+                    filter.captured_after = Some(resolved_utc.to_rfc3339());
+                } else if let Some(resolved_date) = result.resolved_date {
+                    // Date-only result: convert to start of day in the user's timezone, then to UTC
+                    if let Ok(tz) = chrono_tz::Tz::from_str(&context.timezone) {
+                        if let Some(naive_midnight) = resolved_date.and_hms_opt(0, 0, 0) {
+                            // Convert naive datetime to the user's local timezone, then to UTC
+                            match tz.from_local_datetime(&naive_midnight) {
+                                chrono::LocalResult::Single(local_dt) => {
+                                    filter.captured_after =
+                                        Some(local_dt.with_timezone(&chrono::Utc).to_rfc3339());
+                                }
+                                _ => {
+                                    // Fallback if ambiguous or nonexistent
+                                    filter.captured_after =
+                                        Some(format!("{}T00:00:00Z", resolved_date));
+                                }
+                            }
+                        } else {
+                            filter.captured_after = Some(format!("{}T00:00:00Z", resolved_date));
+                        }
+                    } else {
+                        // Fallback to UTC midnight if timezone conversion fails
+                        filter.captured_after = Some(format!("{}T00:00:00Z", resolved_date));
+                    }
+                }
+
+                // If ambiguous due to missing time, expose clarification
+                let clarification = if result.is_ambiguous && result.ambiguity_kind.is_some() {
+                    if let Some(ambiguity) = result.ambiguity_kind {
+                        match ambiguity {
+                            crate::time::AmbiguityKind::MissingHour => {
+                                Some(ClarificationKind::MissingTime {
+                                    date_str: date_part.to_string(),
+                                })
+                            }
+                            crate::time::AmbiguityKind::DstGap
+                            | crate::time::AmbiguityKind::DstFold => {
+                                Some(ClarificationKind::AmbiguousTime {
+                                    phrase: result.original_phrase.clone(),
+                                    reason: result.ambiguity_reason.unwrap_or_default(),
+                                })
+                            }
+                            crate::time::AmbiguityKind::Past => None,
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                return Ok(Some((filter, clarification)));
+            }
+            Err(ResolutionError::UnsupportedRepeat(_)) => {
+                return Ok(None); // Unsupported repeats are handled in parse_phrase
+            }
+            Err(_) => {
+                return Ok(None); // Not a recognized date phrase
+            }
+        }
     }
 
     Ok(None)
 }
 
-/// Parse "since DATE" phrases using the TimeResolver.
-fn parse_since_date_phrase(
-    date_phrase: &str,
-    original: &str,
-    context: &TimeContext,
-    _prefix: &str,
-) -> Result<Option<PhraseResolution>> {
-    match TimeResolver::resolve(date_phrase, context) {
-        Ok(result) => {
-            // Convert the resolved date into a filter
-            let mut filter = QueryFilter::personal_only();
-
-            // If we have a resolved UTC time, use it as captured_after
-            if let Some(resolved_utc) = result.resolved_time {
-                filter.captured_after = Some(resolved_utc.to_rfc3339());
-            } else if let Some(resolved_date) = result.resolved_date {
-                // Date-only result: convert to start of day in UTC
-                // User captured in their timezone, so we need context.timezone to get start-of-day UTC
-                filter.captured_after = Some(format!("{}T00:00:00Z", resolved_date));
-            }
-
-            // If ambiguous due to missing time, expose clarification
-            let clarification = if result.is_ambiguous && result.ambiguity_kind.is_some() {
-                if let Some(ambiguity) = result.ambiguity_kind {
-                    match ambiguity {
-                        crate::time::AmbiguityKind::MissingHour => {
-                            Some(ClarificationKind::MissingTime {
-                                date_str: result.original_phrase.clone(),
-                            })
-                        }
-                        crate::time::AmbiguityKind::DstGap
-                        | crate::time::AmbiguityKind::DstFold => {
-                            Some(ClarificationKind::AmbiguousTime {
-                                phrase: result.original_phrase.clone(),
-                                reason: result.ambiguity_reason.unwrap_or_default(),
-                            })
-                        }
-                        crate::time::AmbiguityKind::Past => {
-                            // Past is ambiguous but not clarification-worthy; just let the filter stand
-                            None
-                        }
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            Ok(Some(PhraseResolution {
-                original_phrase: original.to_string(),
-                filter: Some(filter),
-                clarification_needed: clarification,
-                fallback_search_text: original.to_string(),
-            }))
-        }
-        Err(ResolutionError::UnsupportedRepeat(_)) => Ok(Some(PhraseResolution {
-            original_phrase: original.to_string(),
-            filter: None,
-            clarification_needed: Some(ClarificationKind::UnsupportedRepeat {
-                phrase: original.to_string(),
-            }),
-            fallback_search_text: original.to_string(),
-        })),
-        Err(_) => {
-            // Resolution failed; not a recognized date phrase
-            Ok(None)
-        }
-    }
-}
-
-/// Try to parse item-type phrases like "action notes", "idea items", etc.
-fn try_parse_type_phrase(normalized: &str, original: &str) -> Option<PhraseResolution> {
+/// Extract item-type filter from phrases like "action notes", "idea items", etc.
+fn extract_type_filter(normalized: &str) -> Option<QueryFilter> {
     let item_types = ["action", "note", "idea", "broad_intention"];
     let nouns = ["notes", "items", "reminders"];
 
     for item_type in &item_types {
         for noun in &nouns {
             let pattern = format!("{} {}", item_type, noun);
-            if normalized.starts_with(&pattern) {
+            if normalized.contains(&pattern) {
                 let mut filter = QueryFilter::personal_only();
                 filter.item_types = vec![item_type.to_string()];
-
-                return Some(PhraseResolution {
-                    original_phrase: original.to_string(),
-                    filter: Some(filter),
-                    clarification_needed: None,
-                    fallback_search_text: original.to_string(),
-                });
+                return Some(filter);
             }
         }
     }
@@ -185,49 +237,48 @@ fn try_parse_type_phrase(normalized: &str, original: &str) -> Option<PhraseResol
     None
 }
 
-/// Try to parse scope/session phrases like "private session notes", "work notes", etc.
-fn try_parse_scope_phrase(normalized: &str, original: &str) -> Option<PhraseResolution> {
-    // Pattern: "SESSION session notes" (e.g., "therapy session notes", "work notes")
-    // If it looks like "WORD session notes", treat WORD as session_topic
-
+/// Extract scope/session filter from phrases like "private session notes", "work notes", etc.
+fn extract_scope_filter(normalized: &str) -> Option<QueryFilter> {
     let nouns = ["notes", "items", "reminders"];
 
+    // Pattern 1: "WORD session notes/items/reminders" (e.g., "work session notes")
     for noun in &nouns {
         let pattern = format!(" session {}", noun);
-        if let Some(session_part) = normalized.strip_suffix(&pattern) {
-            // Extract the session topic (everything before "session notes/items/reminders")
+        if let Some(idx) = normalized.find(&pattern) {
+            let session_part = &normalized[..idx];
             let parts: Vec<&str> = session_part.split_whitespace().collect();
             if !parts.is_empty() {
                 let session_topic = parts.join(" ");
                 let mut filter = QueryFilter::personal_only();
                 filter.session_topics = vec![session_topic];
-
-                return Some(PhraseResolution {
-                    original_phrase: original.to_string(),
-                    filter: Some(filter),
-                    clarification_needed: None,
-                    fallback_search_text: original.to_string(),
-                });
+                return Some(filter);
             }
         }
+    }
 
-        // Pattern: "private WORD notes" (e.g., "private therapy notes")
-        if normalized.starts_with("private ") && normalized.ends_with(noun) {
-            if let Some(middle) = normalized
-                .strip_prefix("private ")
-                .and_then(|s| s.strip_suffix(noun))
-            {
-                let session_topic = middle.trim_end_matches(' ');
-                if !session_topic.is_empty() {
-                    let mut filter = QueryFilter::personal_only();
-                    filter.session_topics = vec![session_topic.to_string()];
-
-                    return Some(PhraseResolution {
-                        original_phrase: original.to_string(),
-                        filter: Some(filter),
-                        clarification_needed: None,
-                        fallback_search_text: original.to_string(),
-                    });
+    // Pattern 2: "private WORD notes/items/reminders" (e.g., "private therapy notes")
+    if normalized.starts_with("private ") {
+        for noun in &nouns {
+            let pattern = format!(" {}", noun);
+            if let Some(idx) = normalized.rfind(&pattern) {
+                let middle_part = &normalized[8..idx]; // Skip "private " (8 chars)
+                let session_topic = middle_part.trim();
+                if !session_topic.is_empty()
+                    && session_topic
+                        .chars()
+                        .all(|c| c.is_alphabetic() || c == '_' || c == ' ')
+                {
+                    // Validate that this looks like a single word or phrase (no "since", "every", etc.)
+                    if !session_topic.contains("since")
+                        && !session_topic.contains("every")
+                        && session_topic
+                            .chars()
+                            .all(|c| c.is_alphabetic() || c == '_' || c == ' ')
+                    {
+                        let mut filter = QueryFilter::personal_only();
+                        filter.session_topics = vec![session_topic.to_string()];
+                        return Some(filter);
+                    }
                 }
             }
         }
