@@ -625,3 +625,44 @@ fn fully_skipped_local_date_withholds_the_bound_instead_of_using_the_next_day() 
     assert!(filter.captured_after.is_some());
     Ok(())
 }
+
+#[test]
+fn filter_only_retrieval_pages_newest_capture_first_across_precision_and_offsets() -> Result<()> {
+    let (_directory, mut db) = new_db()?;
+    // Text order of these RFC3339 strings is not chronological order.
+    for (item_id, capture_instant) in [
+        ("whole-second", "2026-01-15T10:30:00Z"),
+        ("fractional", "2026-01-15T10:30:00.900Z"),
+        ("offset-newest", "2026-01-15T05:30:00.950-05:00"),
+        ("offset-oldest", "2026-01-15T11:00:00+02:00"),
+    ] {
+        seed(
+            &mut db,
+            SeedItem::personal(item_id, "synthetic note", capture_instant),
+        )?;
+    }
+    let resolution = parse_phrase("notes since today", &utc_context())?;
+    assert!(resolution.filter.is_some());
+
+    let expected_order = [
+        "offset-newest",
+        "fractional",
+        "whole-second",
+        "offset-oldest",
+    ];
+    let all = retrieve_phrase(db.conn(), &resolution, &QueryPagination::default())?;
+    let all_ids: Vec<&str> = all.hits.iter().map(|hit| hit.item_id.as_str()).collect();
+    assert_eq!(all_ids, expected_order);
+
+    for (offset, expected_id) in expected_order.iter().enumerate() {
+        let page = retrieve_phrase(
+            db.conn(),
+            &resolution,
+            &QueryPagination { limit: 1, offset },
+        )?;
+        let page_ids: Vec<&str> = page.hits.iter().map(|hit| hit.item_id.as_str()).collect();
+        assert_eq!(page_ids, [*expected_id], "page at offset {offset}");
+        assert_eq!(page.total_accessible, expected_order.len());
+    }
+    Ok(())
+}
