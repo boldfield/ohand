@@ -1,210 +1,80 @@
-# M1 Intent Interpretation Fixture Schema
+# M1 Intent Fixture Schema
 
-This document defines the structure and semantics of test fixtures in `fixtures/intent/contrastive-fixtures.json`. Fixtures are synthetic test cases used to validate the M1 interpretation proposal contract against the I01/I02 specifications.
+Schema and semantics of `fixtures/intent/contrastive-fixtures.json`, the synthetic oracle for the M1 interpretation contract (I01 proposals, I02 time resolution). `core/tests/fixture_validation/main.rs` enforces everything below; run it with `cargo test --locked -p ohand-core --test fixture_validation` (also part of `make test`). The fixture list and rationale are in [intent-fixtures.md](../validation/intent-fixtures.md).
 
-## Fixture Structure
+The file is `{"fixtures": [...]}`. Every object below rejects unknown keys and duplicate keys. Absent and `null` mean the same thing.
 
-Each fixture is a JSON object with the following fields:
+## Fixture
 
-```json
-{
-  "id": "unique-fixture-identifier",
-  "category": "design|dates|mixed|corrections|ambiguity|broad-intention|negation|prompt-injection|dropped-asr-word",
-  "input": "The text or voice capture to be interpreted",
-  "provenance": "synthetic, [source description]",
-  "capture_context": {
-    "capture_type": "text|voice",
-    "capture_instant": "2026-10-08T14:00:00Z",
-    "device_timezone": "America/New_York",
-    "notes": "Optional context notes"
-  },
-  "expected": {
-    "item_type": "action|note|idea|null",
-    "abstention": "abstention-reason|null",
-    "reminder_proposal": { ... },
-    "session_topic_proposal": { ... },
-    "source_spans": [ ... ]
-  },
-  "forbidden": { ... },
-  "recoverable": true|false,
-  "recovery_notes": "Optional explanation if recoverable=false",
-  "notes": "Explanation of the fixture's intent"
-}
-```
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `id` | lowercase kebab-case string | Unique. Must be listed in `docs/validation/intent-fixtures.md`. |
+| `category` | enum | `design`, `dates`, `mixed`, `corrections`, `ambiguity`, `broad-intention`, `negation` (negation and quoted speech), `prompt-injection`, `dropped-asr-word`. Every category must have a fixture. |
+| `input` | string | The raw capture or transcript, untrusted data. Always preserved verbatim. |
+| `provenance` | string | Must start with `synthetic`. No fixture comes from live account traffic. |
+| `text_basis` | `original` or `corrected` | The text every span indexes into and the proposal's `TextBasis` (`Original` or `Correction`). Spans count Unicode scalar values. `corrected` exactly when `capture_context.user_correction` exists. |
+| `preserve` | `{raw_input, user_correction}` | Storage invariants. `raw_input` is always `true` (raw captures are never overwritten). `user_correction` is `true` exactly when a correction exists, meaning both raw and corrected text are kept. |
+| `capture_context` | object | See below. |
+| `expected` | object | The reference outcome, below. |
+| `forbidden` | object | Outcomes that are always wrong, below. At least one rule per fixture. |
+| `recoverable` | bool | `false` means the transcript alone lacks the information needed to recover what the user meant (dropped words, garbled or missing time, quoted speech, no content, an unsupported operation). The expected outcome is then the conservative one. |
+| `recovery_notes` | string | Required exactly when `recoverable` is `false`: what is missing. |
+| `notes` | string | Why the expected and forbidden values are right. |
 
-## Field Definitions
+`capture_context`: `capture_type` (`text` or `voice`), optional `notes`, and:
 
-### Top-Level Fields
+- `capture_instant` (RFC 3339) and `device_timezone` (IANA): the I02 time context. Required whenever `expected.reminder_proposal` exists, so every instant can be recomputed.
+- `user_correction` (string) and `correction_spans` (`[{original, corrected}]`): the user's corrected text. Applying each `original`→`corrected` replacement to `input` must produce `user_correction` exactly.
 
-- **id** (string, required): Unique identifier for the fixture, used for test reporting. Format: `category-description` (e.g., `date-relative-next-monday`).
-- **category** (string, required): Categorization of the fixture for coverage validation. Valid values: `design` (DESIGN.md examples), `dates` (date/timezone cases), `mixed` (mixed note/action captures), `corrections` (user corrections), `ambiguity` (ambiguous cases), `broad-intention` (broad intentions), `negation` (negation/quoted cases), `prompt-injection` (adversarial inputs), `dropped-asr-word` (ASR dropout scenarios).
-- **input** (string, required): The source text or transcript to be interpreted. This is the untrusted data that the interpreter processes.
-- **provenance** (string, required): Metadata describing the origin. Must be `synthetic, [source]` for all fixtures in this file (e.g., `synthetic, from DESIGN.md intent examples`).
-- **capture_context** (object, required): Context metadata about the capture.
-  - **capture_type** (string, required): `text` for written input, `voice` for transcribed speech.
-  - **capture_instant** (string, optional): RFC 3339 instant when the capture was made. Required for fixtures with time resolution. Example: `2026-10-08T14:00:00Z`.
-  - **device_timezone** (string, optional): IANA timezone identifier of the device. Used for inferring timezone when not explicit in input. Example: `America/New_York`.
-  - **user_correction** (string, optional): Corrected transcription if the original input was from ASR. Present only for correction scenarios.
-  - **correction_spans** (array, optional): Array of `{original: string, corrected: string}` objects marking which parts were corrected.
-  - **notes** (string, optional): Free-form context about the capture.
-- **expected** (object, required): The outcome the interpreter SHOULD produce.
-  - **item_type** (`action|note|idea|null`, optional): The type of item proposed. If set, **source_spans** is required.
-  - **abstention** (string, optional): Abstention reason if proposal does not proceed. Valid values: `UncertainTarget`, `Negated`, `Ambiguous`, `UnsupportedOperation`, or `{"Other": "reason"}`, or `null`.
-  - **reminder_proposal** (object, optional): Proposed reminder with I01 contract structure (see below). Always requires source_span.
-  - **session_topic_proposal** (object, optional): Proposed session topic with contract structure (see below). Always requires source_span.
-  - **source_spans** (array, optional): Array of source span objects identifying evidence for the item_type. Each span must have `{start, end, text}` where `text` is the actual Unicode slice `input[start..end]`.
-- **forbidden** (object, required): Outcomes the interpreter MUST NOT produce. Structure mirrors `expected` but lists what is prohibited.
-- **recoverable** (boolean, required): Whether the transcript contains enough information to confidently recover intent. Used to distinguish cases where transcript dropout or ambiguity makes intent unrecoverable.
-- **recovery_notes** (string, optional): Explanation of why `recoverable: false`. Present only when `recoverable` is false.
-- **notes** (string, required): Explanation of the fixture's purpose, the edge case it tests, and why the expected/forbidden outcomes are correct.
+## Expected (full match)
 
-### Expected/Forbidden Structures
+`expected` holds the facets of the reference proposal. It is a full match: a facet that is absent must also be absent in the evaluated proposal. It uses the I01 names and serde forms, and the test rebuilds it as a real `Proposal` and requires `Proposal::validate` to pass, so it obeys every I01 rule (evidence spans for `item_type`, a span on every reminder and topic, abstention excludes all facets, no instant on an ambiguous reminder, an RFC 3339 instant plus IANA zone on a resolved one).
 
-#### reminder_proposal
+- `item_type`: `broad_intention`, `note`, `idea` or `action`; needs `source_spans`.
+- `source_spans`: evidence for the item type, `[{start, end, text}]`.
+- `reminder_proposal`: `{quality, instant, timezone_id, source_span}`; `source_span` is the time phrase only, not "Remind me".
+- `session_topic_proposal`: `{topic, source_span}`.
+- `abstention`: `"UncertainTarget"`, `"Negated"`, `"Ambiguous"`, `"UnsupportedOperation"` or `{"Other": "reason"}` (I01's serde form). Only the variant is compared; the `Other` text is free. An abstention means the capture's item still exists with the source preserved, but no derived facet is applied.
 
-Maps to I01 `ReminderProposal`:
+`text` in a span is oracle-only: the exact slice `basis[start..end]`, checked by the test. Evaluators compare spans by overlap, not equality.
 
-```json
-{
-  "quality": "explicit|inferred|ambiguous",
-  "instant": "RFC 3339 timestamp",
-  "timezone_id": "IANA timezone ID",
-  "source_span": {
-    "start": 0,
-    "end": 27,
-    "text": "the time phrase text"
-  }
-}
-```
+### Time semantics
 
-- **quality** (string, required): One of:
-  - `explicit`: Unambiguous time from source (e.g., "3 p.m." or "tomorrow at 10 a.m.").
-  - `inferred`: Resolvable with context (e.g., "next Monday" with a reference date).
-  - `ambiguous`: Too unclear to resolve (e.g., "maybe Friday" or "fiveish").
-- **instant** (string, optional): RFC 3339-formatted absolute instant. Required for `explicit` and `inferred` quality; must be absent for `ambiguous`.
-- **timezone_id** (string, optional): IANA timezone identifier. Optional only when quality is `ambiguous`.
-- **source_span** (object, required): Character offset span in the input marking the time phrase. Must have `start`, `end`, and `text` fields. Text must equal `input[start..end]` and should identify the time portion only (not "Remind me " prefix), except for correction fixtures where `text_basis` field specifies whether text is from `original` or `corrected` basis.
+- `explicit`: date and hour are both stated. A device-default timezone does not lower this.
+- `inferred`: reserved for a time with a stated component filled by a documented default. No M1 fixture needs it, but it is legal and forbidden where it would be wrong.
+- `ambiguous`: no instant, no timezone. A date without an hour ("Remind me Friday") is `ambiguous`, matching I02 `MissingHour`; a midnight or default hour is never invented. Hedged or garbled phrases and an abbreviation that conflicts with the device zone (EST on an EDT date) are also `ambiguous`.
+- A deadline or dated fact without a reminder request ("finalize by next Friday") is never a reminder.
 
-#### session_topic_proposal
+The test recomputes every resolved instant: its UTC offset must be the one the named zone observes, it must be after `capture_instant`, and the phrase's weekday, "today"/"tomorrow" and `N a.m./p.m.` hour must match the local result.
 
-Maps to I01 `SessionTopicProposal`:
+## Forbidden rules
 
-```json
-{
-  "topic": "string",
-  "source_span": {
-    "start": 0,
-    "end": 7,
-    "text": "evidence"
-  }
-}
-```
+Each key is a rule; an evaluated proposal violates `forbidden` if it matches any of them. The expected outcome must violate none (checked).
 
-- **topic** (string, required): The proposed session topic string.
-- **source_span** (object, required): Character offset span marking the evidence. Must have `start`, `end`, and `text` fields. Text must equal `input[start..end]`.
+| Key | Value | Violated when the proposal... |
+| --- | --- | --- |
+| `item_types` | list of item types | has one of these `item_type`s. |
+| `reminder` | `"any"` | has any `reminder_proposal`. |
+| | `"any_instant"` | has a reminder with a resolved `instant` (an ambiguous reminder without one is allowed). |
+| `reminder_qualities` | list of `explicit`/`inferred`/`ambiguous` | has a reminder of one of these qualities. |
+| `reminder_timezones` | list of IANA zones | has a reminder in one of these zones. |
+| `session_topic` | `true` | has a `session_topic_proposal`. |
+| `facets` | `"any"` | has any `item_type`, reminder or topic (only an abstention is acceptable). |
+| `operations` | list of `update`/`create` | uses that operation, unless it is the I01-legal degenerate form: abstention `UnsupportedOperation` and no facets. |
 
-## Testing and Validation
+A fixture that expects "no target mutation" (an unsupported spoken update such as "Done with the roofer call") expects `UnsupportedOperation`, forbids `facets: "any"` and `operations: ["update", "create"]`, and keeps `preserve.raw_input`.
 
-### Schema Validation
+## Validation performed
 
-Fixtures are validated by a test suite that:
+1. Strict typed parse (unknown or duplicate keys, bad enum values and missing required fields fail).
+2. Unique kebab-case ids; `synthetic` provenance; labels (`recoverable`/`recovery_notes`), `preserve` and `text_basis` consistency; correction replay.
+3. Span text equals the basis slice and is in bounds.
+4. The expected facets rebuilt as an I01 `Proposal` pass `Proposal::validate` (abstention exclusivity, evidence, RFC 3339, IANA zone, ambiguous reminder without instant).
+5. Reminder instants recomputed against the time context.
+6. Expected does not violate its own `forbidden`; each forbidden rule is exercised against synthetic violating proposals.
+7. Corpus coverage: all categories, the DESIGN examples, the unsupported-update, negation, injection, correction and dropped-ASR requirements.
+8. Mutation tests: bad vocabulary, extra keys, broken evidence, wrong instants and dropped labels are each rejected with the expected error.
 
-1. Parses each fixture as JSON.
-2. Verifies required fields are present.
-3. Checks field types match the schema.
-4. Validates that `expected` and `forbidden` do not contain contradictions (e.g., expecting and forbidding the same value).
-5. For time fixtures, ensures `source_span` character offsets are valid within the input.
-6. Verifies that abstention is mutually exclusive with item_type and facet proposals.
+## Maintenance
 
-### Semantic Validation
-
-Fixtures must:
-
-1. **Map to I01/I02 contract**: Expected outcomes must be expressible as valid I01 `Proposal` objects.
-2. **Cover required categories**:
-   - DESIGN examples (explicit intent semantics)
-   - Mixed captures (multiple intents in one input)
-   - Corrections (user-corrected transcriptions)
-   - Ambiguity and uncertain targets (unrecoverable intent)
-   - Broad intentions (exploratory, hypothetical, reflective)
-   - Negation and quotation (preventing interpretation)
-   - Prompt injection (treating source as untrusted data)
-   - Date and timezone resolution (with various levels of clarity)
-   - ASR errors (dropped words, garbled time)
-3. **Provide complete TimeContext**: For fixtures expecting time resolution, `capture_instant` and `device_timezone` must be present so instants are reproducible.
-4. **Document recoverability**: The `recoverable` flag indicates whether the transcript, by itself, contains enough information for a human to recover the intended meaning. This distinguishes recoverable ASR errors (clear intent despite dropout) from unrecoverable ones (intent is genuinely unclear).
-
-## Category Reference
-
-Fixtures are organized by testing category:
-
-- **design-***: Scenarios from DESIGN.md intent examples.
-- **mixed-***: Multiple intents in one capture.
-- **correction-***: User-corrected transcriptions.
-- **date-*, timezone-***: Time resolution with various clarity levels.
-- **asr-***: Automatic speech recognition errors.
-- **negation-*, quoted-***: Negation, quotation, hypothetical phrasing.
-- **prompt-injection-***: Adversarial prompt injection attempts.
-- **abstract-*, question-*, comparison-***: Broad exploratory intent.
-- **already-completed-*, empty-or-noise***: Edge cases (past tense, filler).
-
-## Example: Date-Only Fixture
-
-```json
-{
-  "id": "date-relative-next-monday",
-  "input": "Remind me next Monday",
-  "provenance": "synthetic, relative date",
-  "capture_context": {
-    "capture_type": "text",
-    "capture_instant": "2026-10-08T14:00:00Z",
-    "device_timezone": "America/New_York",
-    "notes": "relative weekday reference; reference_date 2026-10-08 is Thursday"
-  },
-  "expected": {
-    "reminder_proposal": {
-      "quality": "ambiguous"
-    }
-  },
-  "forbidden": {
-    "reminder_proposal": {
-      "instant": "any"
-    }
-  },
-  "recoverable": true,
-  "notes": "Date without explicit time is ambiguous per I02 MissingHour. 'Next Monday' is identified but no time is provided. Must abstain or mark as ambiguous. No instant should be inferred."
-}
-```
-
-## Clarification: Date-Only vs Date+Time Reminders
-
-Per I02 specification, reminders fall into two categories:
-
-1. **With time (explicit/inferred)**: When the input specifies or clearly implies a time, quality is `explicit` or `inferred`, and `instant` is required (RFC 3339 format).
-2. **Date-only (ambiguous)**: When only a date is provided without a time, the reminder is marked `ambiguous` and no `instant` is included. I02 returns `MissingHour` for such cases, indicating the time cannot be resolved from the transcript.
-
-## Fixture Maintenance
-
-### Adding New Fixtures
-
-1. Identify the decision point or edge case to test.
-2. Choose an input that clearly exposes the case.
-3. Set `capture_instant` and `device_timezone` for reproducible time resolution.
-4. Define `expected` outcomes aligned with I01/I02.
-5. Define `forbidden` outcomes (what must NOT happen).
-6. Set `recoverable` accurately (would a human understand intent from this transcript alone?).
-7. Use clear `notes` explaining the fixture's purpose.
-
-### Updating Fixtures
-
-Fixture updates must preserve `provenance: "synthetic"` and all category/identification fields. Only update `expected`, `forbidden`, or `notes` when:
-
-- The I01/I02 contract changes and the fixture must align.
-- The fixture had an error that testing discovered.
-- A clarification is needed in the notes.
-
-Document the reason for any update in the PR description.
-
-## No Fixture Implies LLM Agreement
-
-Each fixture is authored based on DESIGN.md intent examples, I01/I02 specifications, and property-based reasoning. No fixture is a claim that a particular LLM agrees with it—the fixtures define the baseline intent semantics for M1.
+Add fixtures with an exact `text` for every span, a full time context for reminders, a concrete `forbidden` rule, and an entry in `docs/validation/intent-fixtures.md`. No fixture claims a particular LLM agrees with it. Never add recorded or live-account content.
