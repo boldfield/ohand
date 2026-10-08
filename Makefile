@@ -1,7 +1,7 @@
 PYTHON ?= python3
 export PYTHONDONTWRITEBYTECODE := 1
 
-.PHONY: check test contract-check contract-test ios-check
+.PHONY: check test contract-check contract-test ios-check hygiene-check hygiene-test
 
 # check: Validate contract correctness, compile, format, and lint.
 # F01 establishes contract-check and contract-test. F02 adds cargo targets and lint.
@@ -9,7 +9,7 @@ export PYTHONDONTWRITEBYTECODE := 1
 check: contract-check cargo-check cargo-fmt-check cargo-clippy ios-check
 
 # test: Run contract validation tests and cargo test suite.
-test: contract-test cargo-test
+test: contract-test hygiene-test cargo-test
 
 .PHONY: cargo-check cargo-test cargo-build cargo-fmt-check cargo-clippy
 
@@ -44,3 +44,13 @@ contract-test:
 ios-check:
 	$(PYTHON) ios/scripts/check_project_config.py
 	$(PYTHON) -m unittest discover --start-directory ios/scripts --pattern 'test_*.py' --verbose
+
+# hygiene-test: Policy and scanner tests. Scanner tests skip locally when gitleaks is absent;
+# hygiene.yml sets HYGIENE_REQUIRE_GITLEAKS=1 so CI never skips them.
+hygiene-test:
+	$(PYTHON) -m unittest discover --start-directory tools/hygiene --pattern 'test_*.py' --verbose
+
+# hygiene-check: Pinned gitleaks over reachable history plus tracked-file policy checks.
+# Requires gitleaks (see docs/contributing.md); fails closed when it is missing.
+hygiene-check:
+	$(PYTHON) tools/hygiene/check_hygiene.py
