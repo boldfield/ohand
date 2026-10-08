@@ -69,9 +69,31 @@ fn reminder_of(proposal: &Proposal) -> &ReminderProposal {
         .expect("expected a reminder proposal")
 }
 
+/// Every reminder rides on an action: the proposal must be an `Action` with a non-empty
+/// content span (`docs/validation/intent-fixtures.md`, "A reminder always rides on an action").
+fn assert_rides_on_action(proposal: &Proposal, text: &str) {
+    assert_eq!(proposal.item_type, Some(ItemType::Action), "{text:?}");
+    let spans = proposal
+        .source_spans
+        .as_ref()
+        .unwrap_or_else(|| panic!("{text:?} must carry a content span"));
+    assert_eq!(spans.len(), 1, "{text:?}");
+    assert!(
+        !selected(text, spans[0]).trim().is_empty(),
+        "{text:?} must select a target"
+    );
+}
+
+fn assert_action_target(proposal: &Proposal, text: &str, content: &str) {
+    assert_rides_on_action(proposal, text);
+    let spans = proposal.source_spans.as_ref().unwrap();
+    assert_eq!(selected(text, spans[0]), content, "{text:?}");
+}
+
 fn expect_explicit(text: &str, instant: &str, time_phrase: &str) -> Proposal {
     let proposal = recognize(text).unwrap_or_else(|| panic!("{text:?} should be recognized"));
     assert_eq!(proposal.abstention, None, "{text:?}");
+    assert_rides_on_action(&proposal, text);
     let reminder = reminder_of(&proposal);
     assert_eq!(
         reminder.quality,
@@ -92,6 +114,7 @@ fn expect_explicit(text: &str, instant: &str, time_phrase: &str) -> Proposal {
 fn expect_ambiguous(text: &str, time_phrase: &str) -> Proposal {
     let proposal = recognize(text).unwrap_or_else(|| panic!("{text:?} should be recognized"));
     assert_eq!(proposal.abstention, None, "{text:?}");
+    assert_rides_on_action(&proposal, text);
     let reminder = reminder_of(&proposal);
     assert_eq!(
         reminder.quality,
@@ -119,29 +142,53 @@ fn expect_unrecognized(text: &str) {
 
 const FUTURE_INSTANT: &str = "2025-10-20T18:30:00Z";
 const FUTURE_PHRASE: &str = "2025-10-20 14:30:00";
+const COMMAND: &str = "remind me 2025-10-20 14:30:00 to call mom";
 
 #[test]
 fn explicit_datetime_produces_exact_sourced_instant() {
-    expect_explicit(
+    let proposal = expect_explicit(COMMAND, FUTURE_INSTANT, FUTURE_PHRASE);
+    assert_action_target(&proposal, COMMAND, "call mom");
+    let text = "Remind me 2025-10-20 14:30:00 to call mom.";
+    let proposal = expect_explicit(text, FUTURE_INSTANT, FUTURE_PHRASE);
+    assert_action_target(&proposal, text, "call mom");
+    let text = "REMIND ME 2025-10-20 14:30:00 TO CALL MOM";
+    let proposal = expect_explicit(text, FUTURE_INSTANT, FUTURE_PHRASE);
+    assert_action_target(&proposal, text, "CALL MOM");
+    let text = "Please remind me on 2025-10-20 14:30:00, to call mom!";
+    let proposal = expect_explicit(text, FUTURE_INSTANT, FUTURE_PHRASE);
+    assert_action_target(&proposal, text, "call mom");
+}
+
+#[test]
+fn absent_target_minimal_pair() {
+    let proposal = expect_explicit(COMMAND, FUTURE_INSTANT, FUTURE_PHRASE);
+    assert_action_target(&proposal, COMMAND, "call mom");
+    let text = "remind me to call mom on 2025-10-20 14:30:00";
+    let proposal = expect_explicit(text, FUTURE_INSTANT, FUTURE_PHRASE);
+    assert_action_target(&proposal, text, "call mom");
+    // A bare time phrase has nothing to remind about: it is not the grammar and is left for
+    // the approved interpreter rather than becoming a reminder without an action target.
+    for text in [
         "remind me 2025-10-20 14:30:00",
-        FUTURE_INSTANT,
-        FUTURE_PHRASE,
-    );
-    expect_explicit(
         "Remind me 2025-10-20 14:30:00.",
-        FUTURE_INSTANT,
-        FUTURE_PHRASE,
-    );
-    expect_explicit(
         "REMIND ME 2025-10-20 14:30:00",
-        FUTURE_INSTANT,
-        FUTURE_PHRASE,
-    );
-    expect_explicit(
         "Please remind me on 2025-10-20 14:30:00!",
-        FUTURE_INSTANT,
-        FUTURE_PHRASE,
-    );
+        "remind me 2025-10-20 14:30:00,",
+        "remind me 2025-10-20 14:30:00 to",
+        "remind me 2025-10-20 14:30:00 to, please",
+        "remind me 2025-10-20 14:30:00 please",
+        "remind me tomorrow",
+        "remind me next friday",
+        "remind me 2025-10-20",
+        "remind me on 2025-10-20 14:30:00",
+        "remind me 2025-10-01 10:00:00",
+        "\u{1F514} remind me 2025-10-20 14:30:00",
+        "Note to self: remind me tomorrow",
+        "Hey, remind me 2025-10-20 14:30:00",
+        "remind me 2025-10-20 14:30:00\"",
+    ] {
+        expect_unrecognized(text);
+    }
 }
 
 #[test]
@@ -170,38 +217,55 @@ fn date_without_hour_is_ambiguous_and_never_guessed() {
         selected(text, proposal.source_spans.unwrap()[0]),
         "call mom"
     );
-    expect_ambiguous("remind me tomorrow", "tomorrow");
+    expect_ambiguous("remind me tomorrow to call mom", "tomorrow");
     expect_ambiguous("Please remind me Friday to call the roofer.", "Friday");
-    expect_ambiguous("remind me next friday", "next friday");
-    expect_ambiguous("remind me 2025-10-20", "2025-10-20");
+    expect_ambiguous("remind me next friday to call mom", "next friday");
+    expect_ambiguous("remind me 2025-10-20 to call mom", "2025-10-20");
 }
 
 #[test]
 fn past_time_is_ambiguous_without_an_instant() {
-    expect_ambiguous("remind me 2025-10-01 10:00:00", "2025-10-01 10:00:00");
+    expect_ambiguous(
+        "remind me 2025-10-01 10:00:00 to call mom",
+        "2025-10-01 10:00:00",
+    );
+    expect_ambiguous(
+        "remind me to call mom on 2025-10-01 10:00:00",
+        "2025-10-01 10:00:00",
+    );
 }
 
 #[test]
 fn dst_fold_and_gap_are_ambiguous_without_an_instant() {
-    expect_ambiguous("remind me 2025-11-02 01:30:00", "2025-11-02 01:30:00");
-    let proposal = recognize_in(
-        "remind me 2025-03-09 02:30:00",
-        &context_at("2025-03-08T10:00:00Z"),
-    )
-    .unwrap();
+    expect_ambiguous(
+        "remind me 2025-11-02 01:30:00 to call mom",
+        "2025-11-02 01:30:00",
+    );
+    let text = "remind me 2025-03-09 02:30:00 to call mom";
+    let proposal = recognize_in(text, &context_at("2025-03-08T10:00:00Z")).unwrap();
+    assert_action_target(&proposal, text, "call mom");
     let reminder = reminder_of(&proposal);
     assert_eq!(reminder.quality, TimeResolutionQuality::Ambiguous);
     assert_eq!(reminder.instant, None);
+    assert_eq!(
+        selected(text, reminder.source_span.unwrap()),
+        "2025-03-09 02:30:00"
+    );
 }
 
 #[test]
 fn spans_are_unicode_scalar_offsets_in_the_original_text() {
-    let bell = "\u{1F514} remind me 2025-10-20 14:30:00";
+    let bell = "\u{1F514} remind me 2025-10-20 14:30:00 to call mom";
     let proposal = expect_explicit(bell, FUTURE_INSTANT, FUTURE_PHRASE);
     assert_eq!(
         reminder_of(&proposal).source_span,
         Some(SourceSpan::new(12, 31))
     );
+    assert_eq!(
+        proposal.source_spans.as_deref(),
+        Some(&[SourceSpan::new(35, 43)][..])
+    );
+    assert_action_target(&proposal, bell, "call mom");
 
     let symbols = "\u{1F514}\u{1F514} \u{2014} remind me tomorrow to buy milk";
     let proposal = expect_ambiguous(symbols, "tomorrow");
@@ -217,48 +281,36 @@ fn spans_are_unicode_scalar_offsets_in_the_original_text() {
 
 #[test]
 fn leading_text_that_is_not_a_command_prefix_is_not_the_grammar() {
-    expect_unrecognized("it's fine, remind me 2025-10-20 14:30:00");
+    expect_unrecognized("it's fine, remind me 2025-10-20 14:30:00 to call mom");
     expect_explicit(
-        "Hey, remind me 2025-10-20 14:30:00",
+        "Hey, remind me 2025-10-20 14:30:00 to call mom",
         FUTURE_INSTANT,
         FUTURE_PHRASE,
     );
     expect_explicit(
-        "Note to self: remind me 2025-10-20 14:30:00",
+        "Note to self: remind me 2025-10-20 14:30:00 to call mom",
         FUTURE_INSTANT,
         FUTURE_PHRASE,
     );
-    expect_unrecognized("unremind me 2025-10-20 14:30:00");
-    expect_unrecognized("reminded me 2025-10-20 14:30:00");
-    expect_unrecognized("can the calendar remind me 2025-10-20 14:30:00");
-    expect_unrecognized("I need to remind me 2025-10-20 14:30:00");
-    expect_unrecognized("will you remind me 2025-10-20 14:30:00");
+    expect_unrecognized("unremind me 2025-10-20 14:30:00 to call mom");
+    expect_unrecognized("reminded me 2025-10-20 14:30:00 to call mom");
+    expect_unrecognized("can the calendar remind me 2025-10-20 14:30:00 to call mom");
+    expect_unrecognized("I need to remind me 2025-10-20 14:30:00 to call mom");
+    expect_unrecognized("will you remind me 2025-10-20 14:30:00 to call mom");
 }
 
 #[test]
 fn negation_minimal_pair() {
-    expect_explicit(
-        "remind me 2025-10-20 14:30:00",
-        FUTURE_INSTANT,
-        FUTURE_PHRASE,
-    );
-    expect_abstention(
-        "don't remind me 2025-10-20 14:30:00",
-        AbstentionReason::Negated,
-    );
-    expect_abstention(
-        "Do not remind me 2025-10-20 14:30:00",
-        AbstentionReason::Negated,
-    );
-    expect_abstention(
-        "never remind me 2025-10-20 14:30:00",
-        AbstentionReason::Negated,
-    );
-    expect_abstention(
-        "I don\u{2019}t want you to remind me 2025-10-20 14:30:00",
-        AbstentionReason::Negated,
-    );
-    expect_unrecognized("whenever you can, remind me 2025-10-20 14:30:00");
+    expect_explicit(COMMAND, FUTURE_INSTANT, FUTURE_PHRASE);
+    for text in [
+        "don't remind me 2025-10-20 14:30:00 to call mom",
+        "Do not remind me 2025-10-20 14:30:00 to call mom",
+        "never remind me 2025-10-20 14:30:00 to call mom",
+        "I don\u{2019}t want you to remind me 2025-10-20 14:30:00 to call mom",
+    ] {
+        expect_abstention(text, AbstentionReason::Negated);
+    }
+    expect_unrecognized("whenever you can, remind me 2025-10-20 14:30:00 to call mom");
 }
 
 #[test]
@@ -278,38 +330,25 @@ fn retraction_after_the_command_minimal_pair() {
 
 #[test]
 fn quotation_minimal_pair() {
-    expect_explicit(
-        "remind me 2025-10-20 14:30:00",
-        FUTURE_INSTANT,
-        FUTURE_PHRASE,
-    );
-    expect_abstention(
-        "He wrote \"remind me 2025-10-20 14:30:00\"",
-        AbstentionReason::UncertainTarget,
-    );
-    expect_abstention(
-        "The sign says 'remind me 2025-10-20 14:30:00'",
-        AbstentionReason::UncertainTarget,
-    );
-    expect_abstention(
-        "\u{201C}Remind me 2025-10-20 14:30:00\u{201D}",
-        AbstentionReason::UncertainTarget,
-    );
-    expect_unrecognized("\"Fine.\" Then remind me 2025-10-20 14:30:00");
+    expect_explicit(COMMAND, FUTURE_INSTANT, FUTURE_PHRASE);
+    for text in [
+        "He wrote \"remind me 2025-10-20 14:30:00 to call mom\"",
+        "The sign says 'remind me 2025-10-20 14:30:00 to call mom'",
+        "\u{201C}Remind me 2025-10-20 14:30:00 to call mom\u{201D}",
+    ] {
+        expect_abstention(text, AbstentionReason::UncertainTarget);
+    }
+    expect_unrecognized("\"Fine.\" Then remind me 2025-10-20 14:30:00 to call mom");
 }
 
 #[test]
 fn hypothetical_minimal_pair() {
-    expect_explicit(
-        "remind me 2025-10-20 14:30:00",
-        FUTURE_INSTANT,
-        FUTURE_PHRASE,
-    );
+    expect_explicit(COMMAND, FUTURE_INSTANT, FUTURE_PHRASE);
     for text in [
-        "what if you remind me 2025-10-20 14:30:00",
-        "maybe remind me 2025-10-20 14:30:00",
-        "if it rains remind me 2025-10-20 14:30:00",
-        "you could remind me 2025-10-20 14:30:00",
+        "what if you remind me 2025-10-20 14:30:00 to call mom",
+        "maybe remind me 2025-10-20 14:30:00 to call mom",
+        "if it rains remind me 2025-10-20 14:30:00 to call mom",
+        "you could remind me 2025-10-20 14:30:00 to call mom",
     ] {
         expect_abstention(text, AbstentionReason::UncertainTarget);
     }
@@ -321,16 +360,12 @@ fn hypothetical_minimal_pair() {
 
 #[test]
 fn reported_speech_minimal_pair() {
-    expect_explicit(
-        "remind me 2025-10-20 14:30:00",
-        FUTURE_INSTANT,
-        FUTURE_PHRASE,
-    );
+    expect_explicit(COMMAND, FUTURE_INSTANT, FUTURE_PHRASE);
     for text in [
-        "Sam said remind me 2025-10-20 14:30:00",
-        "Sam said, remind me 2025-10-20 14:30:00",
-        "my friend asked me to remind me 2025-10-20 14:30:00",
-        "\u{fc}nder the cap he said remind me 2025-10-20 14:30:00",
+        "Sam said remind me 2025-10-20 14:30:00 to call mom",
+        "Sam said, remind me 2025-10-20 14:30:00 to call mom",
+        "my friend asked me to remind me 2025-10-20 14:30:00 to call mom",
+        "\u{fc}nder the cap he said remind me 2025-10-20 14:30:00 to call mom",
     ] {
         expect_abstention(text, AbstentionReason::UncertainTarget);
     }
@@ -338,20 +373,16 @@ fn reported_speech_minimal_pair() {
 
 #[test]
 fn completed_work_minimal_pair() {
-    expect_explicit(
-        "remind me 2025-10-20 14:30:00",
-        FUTURE_INSTANT,
-        FUTURE_PHRASE,
-    );
+    expect_explicit(COMMAND, FUTURE_INSTANT, FUTURE_PHRASE);
     expect_abstention(
-        "I already did it, remind me 2025-10-20 14:30:00",
+        "I already did it, remind me 2025-10-20 14:30:00 to call mom",
         AbstentionReason::UncertainTarget,
     );
     expect_abstention(
-        "It is done so remind me 2025-10-20 14:30:00",
+        "It is done so remind me 2025-10-20 14:30:00 to call mom",
         AbstentionReason::UncertainTarget,
     );
-    expect_unrecognized("I already did it. Remind me 2025-10-20 14:30:00");
+    expect_unrecognized("I already did it. Remind me 2025-10-20 14:30:00 to call mom");
 }
 
 #[test]
@@ -407,7 +438,7 @@ fn unmatched_language_is_left_for_the_interpreter() {
 
 #[test]
 fn proposals_carry_trusted_provenance_and_a_fresh_proposal_id() {
-    let text = "remind me 2025-10-20 14:30:00";
+    let text = COMMAND;
     let first = recognize(text).unwrap();
     let second = recognize(text).unwrap();
     assert_eq!(first.item_id, ITEM_ID);
@@ -424,7 +455,7 @@ fn correction_basis_is_preserved() {
         correction_record_id: "550e8400-e29b-41d4-a716-446655440009".to_string(),
         item_revision: 3,
     };
-    let text = "remind me 2025-10-20 14:30:00";
+    let text = COMMAND;
     let proposal = recognize_reminder(
         text,
         ITEM_ID,
@@ -436,6 +467,7 @@ fn correction_basis_is_preserved() {
     )
     .unwrap();
     assert_eq!(proposal.text_basis, basis);
+    assert_action_target(&proposal, text, "call mom");
     proposal.validate(text).unwrap();
 }
 
@@ -452,9 +484,11 @@ fn unusual_text_never_panics_and_every_proposal_validates() {
         "2025-10-20 14:30:00",
         "to",
         "on",
+        "to call mom",
         "ma\u{f1}ana",
         ",",
         ".",
+        "...",
         "?",
         "\n",
         "never mind",
@@ -900,6 +934,11 @@ fn quotes_and_brackets_after_the_command_never_schedule() {
         FUTURE_INSTANT,
         FUTURE_PHRASE,
     );
+    expect_explicit(
+        &format!("{positive} please please, thanks!!"),
+        FUTURE_INSTANT,
+        FUTURE_PHRASE,
+    );
     for text in [
         format!("{positive}\""),
         format!("{positive}\u{201D}"),
@@ -907,7 +946,6 @@ fn quotes_and_brackets_after_the_command_never_schedule() {
         format!("{positive})"),
         format!("({positive})"),
         format!("[{positive}]"),
-        "remind me 2025-10-20 14:30:00\"".to_string(),
         "remind me to call mom on 2025-10-20 14:30:00\u{201D}".to_string(),
     ] {
         expect_abstention(&text, AbstentionReason::UncertainTarget);
@@ -917,11 +955,23 @@ fn quotes_and_brackets_after_the_command_never_schedule() {
 #[test]
 fn trailing_clause_marks_are_not_trimmed_away() {
     let positive = "remind me 2025-10-20 14:30:00 to call mom";
-    for suffix in [":", ";", " \u{2014}", "\u{2026}", ":("] {
+    expect_explicit(&format!("{positive}."), FUTURE_INSTANT, FUTURE_PHRASE);
+    for suffix in [
+        ":",
+        ";",
+        " \u{2014}",
+        "\u{2026}",
+        " \u{2026}",
+        "...",
+        " ...",
+        "..",
+        ":(",
+    ] {
         expect_no_reminder(&format!("{positive}{suffix}"));
     }
     expect_unrecognized("remind me 2025-10-20 14:30:00:");
     expect_unrecognized("remind me to call mom 2025-10-20 14:30:00 \u{2014}");
+    expect_unrecognized("remind me to call mom 2025-10-20 14:30:00 ...");
 }
 
 #[test]
@@ -944,6 +994,8 @@ fn markup_and_symbol_prefixes_are_not_the_grammar() {
         "[ ",
         "? ",
         "\u{2026} ",
+        "... ",
+        "Hey... ",
     ] {
         assert!(
             recognize(&format!("{prefix}{command}"))
@@ -951,7 +1003,20 @@ fn markup_and_symbol_prefixes_are_not_the_grammar() {
             "{prefix:?} must never schedule"
         );
     }
-    for prefix in ["> ", "` ", "``` ", "* ", "# ", "| ", "- ", "( ", "[ "] {
+    for prefix in [
+        "> ",
+        "` ",
+        "``` ",
+        "* ",
+        "# ",
+        "| ",
+        "- ",
+        "( ",
+        "[ ",
+        "\u{2026} ",
+        "... ",
+        "Hey... ",
+    ] {
         expect_unrecognized(&format!("{prefix}{command}"));
     }
 }
@@ -992,12 +1057,12 @@ fn only_neutral_reminder_pictographs_may_precede_the_command() {
         "\u{274C},",
     ] {
         expect_unrecognized(&format!("{symbol} {command}"));
-        expect_unrecognized(&format!("{symbol} remind me 2025-10-20 14:30:00"));
+        expect_unrecognized(&format!("{symbol} remind me tomorrow to buy milk"));
     }
-    expect_unrecognized("\u{274C} \u{1F514} remind me 2025-10-20 14:30:00");
-    expect_unrecognized("Note to self: \u{274C} remind me 2025-10-20 14:30:00");
+    expect_unrecognized("\u{274C} \u{1F514} remind me 2025-10-20 14:30:00 to call mom");
+    expect_unrecognized("Note to self: \u{274C} remind me 2025-10-20 14:30:00 to call mom");
     expect_explicit(
-        "\u{1F514} Note to self: remind me 2025-10-20 14:30:00",
+        "\u{1F514} Note to self: remind me 2025-10-20 14:30:00 to call mom",
         FUTURE_INSTANT,
         FUTURE_PHRASE,
     );

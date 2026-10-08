@@ -5,11 +5,11 @@
 //! same text, so spans always select exactly the evidence they describe.
 //!
 //! ```text
-//! text     := prefix "remind" "me" ( timed | topic-first ) ["please" | "thanks"] ["," | "." | "!"]*
+//! text     := prefix "remind" "me" ( timed | topic-first ) ( "please" | "thanks" | "," | "." | "!" )*
 //! prefix   := (filler | pictograph)* [ self-label ( "," | ":" | dash ) filler* ]
 //! pictograph := U+1F514 bell | U+23F0 alarm clock | U+1F4CC pushpin | U+1F4DD memo
 //!             | U+1F5D3 spiral calendar      (each optionally followed by U+FE0F)
-//! timed    := ["on"] time ["," ] [ "to" content ]
+//! timed    := ["on"] time [","] "to" content
 //! topic-first := "to" content ["on"] time
 //! content  := verb particle? object*      (closed content lexicon, at most six words)
 //! object   := determiner noun | noun | object-pronoun | particle
@@ -17,6 +17,16 @@
 //! filler   := "please" | "hey" | "ok" | ... (closed list)
 //! self-label := "note to self" | "note" | "memo" | "reminder" | "todo" | "siri" | ...
 //! ```
+//!
+//! The content is mandatory. A reminder always rides on an action with a sourced target (see
+//! `docs/validation/intent-fixtures.md`, "A reminder always rides on an action"), and the
+//! reminder state machine only applies a reminder to an item that can carry an obligation. A
+//! bare time phrase ("remind me tomorrow") therefore has nothing to remind about and is not this
+//! grammar, exactly like a command without a time ("remind me to buy milk").
+//!
+//! Trailing "please" or "thanks", commas, full stops and exclamation marks may repeat after the
+//! command. An ellipsis ("..." or U+2026) is a clause mark, not terminal punctuation: the user
+//! trails off, so the command abstains instead of being scheduled.
 //!
 //! Both open ends of the command are closed by allowlists, not by deny-lists. Nothing but
 //! fillers, the five neutral reminder pictographs named above and a self-addressed label may come
@@ -40,9 +50,10 @@
 //! Outcomes of [`recognize_reminder`]:
 //! - `None`: the text is not the supported grammar. Nothing is derived, nothing is scheduled and
 //!   the full text remains available to the approved interpreter.
-//! - `Some(proposal)` with a reminder: a supported command. An exact future time is `Explicit`
-//!   with an instant; date-only, past, DST-gap and DST-fold times are `Ambiguous` without an
-//!   instant (never guessed) and keep their evidence span for the correction path.
+//! - `Some(proposal)` with a reminder: a supported command. The proposal is an `Action` whose
+//!   source span selects the content exactly. An exact future time is `Explicit` with an
+//!   instant; date-only, past, DST-gap and DST-fold times are `Ambiguous` without an instant
+//!   (never guessed) and keep their evidence span for the correction path.
 //! - `Some(proposal)` with an abstention: the grammar matched but a safety guard applies
 //!   (negation, quotation, hypothetical or reported speech, completed work, a retraction,
 //!   negation, quote, clause break, condition, attribution or second predicate inside the content,
@@ -604,7 +615,15 @@ fn classify_punctuation(chars: &[char], index: usize) -> Option<TokenKind> {
         '"' | '\u{201C}' | '\u{201D}' | '\u{AB}' | '\u{BB}' => Some(TokenKind::Quote),
         '\'' | '\u{2018}' | '\u{2019}' => (!inside_word).then_some(TokenKind::Quote),
         '!' | '?' => Some(TokenKind::SentenceBreak),
-        '.' => (!inside_word).then_some(TokenKind::SentenceBreak),
+        '.' => {
+            let adjacent_full_stop =
+                (index > 0 && chars[index - 1] == '.') || chars.get(index + 1) == Some(&'.');
+            if adjacent_full_stop {
+                Some(TokenKind::ClauseBreak)
+            } else {
+                (!inside_word).then_some(TokenKind::SentenceBreak)
+            }
+        }
         ',' | ';' | ':' => (!inside_word).then_some(TokenKind::ClauseBreak),
         '(' | ')' | '[' | ']' | '\u{2014}' | '\u{2013}' | '\u{2026}' => {
             Some(TokenKind::ClauseBreak)
@@ -875,7 +894,8 @@ fn is_closing_delimiter(token: &Token) -> bool {
 /// The command without terminal "please", "thanks", commas, full stops, exclamation marks and
 /// closing quotes or brackets. Closing quotes and brackets are only set aside to find the shape:
 /// any quote or bracket after the command makes [`recognize_reminder`] abstain. A trailing colon,
-/// semicolon, dash or ellipsis is kept, so the content checks still see it.
+/// semicolon, dash or ellipsis ("..." or U+2026, tokenized as clause breaks) is kept, so the
+/// content checks still see it.
 fn command_body(rest: &[Token]) -> &[Token] {
     let mut end = rest.len();
     while end > 0 {
@@ -960,14 +980,12 @@ fn parse_shape<'a>(rest: &'a [Token], time_context: &TimeContext) -> Option<Shap
     if body.get(next).is_some_and(|token| token.ch == ',') {
         next += 1;
     }
-    if next >= body.len() {
-        return Some(Shape::Scheduled(Box::new(ParsedCommand {
-            time,
-            content: &[],
-            dangling_relation: false,
-        })));
-    }
-    if !body[next].is_word_equal_to("to") {
+    // A bare time ("remind me tomorrow") has no target to remind about, so it is not this
+    // grammar; the content after "to" is mandatory.
+    if !body
+        .get(next)
+        .is_some_and(|token| token.is_word_equal_to("to"))
+    {
         return None;
     }
     let content = trim_trailing_commas(&body[next + 1..]);
@@ -1197,10 +1215,11 @@ fn in_lexicon(token: &Token, vocabulary: &[&str]) -> bool {
 
 /// The content grammar: `verb particle? object*`, where an object word is a determiner followed
 /// by a noun, a noun, an object pronoun or a particle, every word comes from the closed content
-/// lexicon, and the content ends in a noun, pronoun or particle.
+/// lexicon, and the content ends in a noun, pronoun or particle. Empty content is never a
+/// target.
 fn content_is_in_lexicon(content: &[Token]) -> bool {
     let Some((verb, objects)) = content.split_first() else {
-        return true;
+        return false;
     };
     if !in_lexicon(verb, CONTENT_VERBS) || content.len() > MAX_LEXICON_CONTENT_WORDS {
         return false;
@@ -1355,13 +1374,14 @@ pub fn recognize_reminder(
         return None;
     }
 
-    let mut proposal = provenance
-        .proposal()
-        .with_reminder_proposal(Some(reminder_from(&time, time_context)));
-    if let (Some(first), Some(last)) = (content.first(), content.last()) {
-        proposal = proposal
+    // The lexicon check above guarantees a non-empty content; a reminder is only ever proposed
+    // on an action with sourced target evidence.
+    let (first, last) = (content.first()?, content.last()?);
+    Some(
+        provenance
+            .proposal()
+            .with_reminder_proposal(Some(reminder_from(&time, time_context)))
             .with_item_type(Some(ItemType::Action))
-            .with_source_spans(Some(vec![SourceSpan::new(first.start, last.end)]));
-    }
-    Some(proposal)
+            .with_source_spans(Some(vec![SourceSpan::new(first.start, last.end)])),
+    )
 }
