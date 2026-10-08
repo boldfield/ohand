@@ -826,6 +826,65 @@ const PAST_EVENT_WORDS: &[&str] = &[
     "expired", "happened", "occurred", "ended", "started", "began", "finished", "closed", "passed",
     "arrived", "left", "went", "came", "ago",
 ];
+/// Later clauses that withdraw a request made earlier in the same capture ("..., never mind",
+/// "..., scratch that", "..., no need").
+const RETRACTION_PHRASES: &[&[&str]] = &[
+    &["never", "mind"],
+    &["nevermind"],
+    &["forget", "it"],
+    &["forget", "that"],
+    &["forget", "this"],
+    &["scratch", "that"],
+    &["scratch", "this"],
+    &["strike", "that"],
+    &["cancel", "that"],
+    &["cancel", "this"],
+    &["cancel", "it"],
+    &["cancel", "the"],
+    &["disregard"],
+    &["ignore", "that"],
+    &["ignore", "this"],
+    &["skip", "that"],
+    &["skip", "it"],
+    &["on", "second", "thought"],
+    &["no", "need"],
+    &["no", "reminder"],
+    &["no", "reminders"],
+    &["no", "alert"],
+    &["no", "notification"],
+];
+/// Plain negations (not reporting or opinion words) that withdraw an earlier request when they
+/// govern a reminder word ("actually don't remind me") or close their clause ("..., actually
+/// don't").
+const RETRACTING_NEGATIONS: &[&str] = &[
+    "not", "no", "never", "dont", "don't", "doesnt", "doesn't", "wont", "won't", "cant", "can't",
+    "cannot", "nope", "nah",
+];
+/// Words a retracting negation may govern: the reminder itself or the act of being reminded.
+const RETRACTION_TARGETS: &[&str] = &[
+    "remind",
+    "reminding",
+    "reminder",
+    "reminders",
+    "set",
+    "add",
+    "alert",
+    "alerts",
+    "notify",
+    "notification",
+    "notifications",
+    "ping",
+    "schedule",
+    "need",
+    "bother",
+    "worry",
+];
+/// Words that may sit between a retracting negation and the word it governs ("don't actually
+/// remind me", "don't you remind me").
+const RETRACTION_FILLERS: &[&str] = &[
+    "actually", "really", "please", "pls", "kindly", "ever", "even", "just", "then", "now",
+    "after", "all", "you", "ok", "okay", "wait", "um", "uh", "hmm",
+];
 const COMPLETED_WORDS: &[&str] = &[
     "already",
     "had",
@@ -929,6 +988,10 @@ fn tokenize_intent_text(text: &str) -> Vec<IntentToken> {
 /// "happened") shows the date lies in the past. The model's candidate is never evidence of
 /// intent, and its choice of span cannot attach an unrelated date ("the quote expires 2026-01-16
 /// 09:00:00") to a request made elsewhere in the text.
+///
+/// The rest of the capture after the quoted time (or after the cue, without a span) must not
+/// withdraw the request ([`retracted_after`]): "remind me to call the roofer 2026-01-16 09:00:00,
+/// actually don't remind me" ends with the intent not to schedule, so nothing is scheduled.
 fn states_reminder_intent(text: &str, time_span: Option<SourceSpan>) -> bool {
     let tokens = tokenize_intent_text(text);
     (0..tokens.len()).any(|start| {
@@ -949,7 +1012,47 @@ fn states_reminder_intent(text: &str, time_span: Option<SourceSpan>) -> bool {
                 return false;
             }
             let cue_end = window[cue.len() - 1].end;
-            time_span.is_none_or(|span| request_governs_span(&tokens, cue_end, span))
+            let governs = time_span.is_none_or(|span| request_governs_span(&tokens, cue_end, span));
+            governs && !retracted_after(&tokens, time_span.map_or(cue_end, |span| span.end))
+        })
+    })
+}
+
+/// Whether the capture withdraws the request after character offset `after` (the end of the
+/// quoted time, or of the cue when no time was quoted). A withdrawal is an unquoted retraction
+/// phrase ("never mind", "scratch that", "forget it", "no need") or a plain negation that governs
+/// a reminder word ("actually don't remind me", "no reminder", "don't bother"), possibly through a
+/// filler ("don't actually remind me"), or that closes its clause ("..., actually don't"). A
+/// negation governing anything else ("don't forget the ladder", "I don't want to miss it") keeps
+/// the request. Rejecting too much is safe: the reminder stays unscheduled and the original
+/// intention is kept with the item.
+fn retracted_after(tokens: &[IntentToken], after: usize) -> bool {
+    let later: Vec<&IntentToken> = tokens.iter().filter(|token| token.start >= after).collect();
+    (0..later.len()).any(|index| {
+        let token = later[index];
+        if token.quoted || token.clause_break {
+            return false;
+        }
+        let phrase_matches = RETRACTION_PHRASES.iter().any(|phrase| {
+            later
+                .get(index..index + phrase.len())
+                .is_some_and(|window| {
+                    window.iter().zip(phrase.iter()).all(|(token, expected)| {
+                        !token.quoted && !token.clause_break && token.text == *expected
+                    })
+                })
+        });
+        if phrase_matches {
+            return true;
+        }
+        if !RETRACTING_NEGATIONS.contains(&token.text.as_str()) {
+            return false;
+        }
+        let governed = later[index + 1..]
+            .iter()
+            .find(|next| next.clause_break || !RETRACTION_FILLERS.contains(&next.text.as_str()));
+        governed.is_none_or(|next| {
+            next.clause_break || (!next.quoted && RETRACTION_TARGETS.contains(&next.text.as_str()))
         })
     })
 }
