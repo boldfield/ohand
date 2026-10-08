@@ -28,6 +28,7 @@ final class RealKeychain: KeychainBoundary {
 
 final class FakeKeychain: KeychainBoundary {
     private var items: [String: Data] = [:]
+    private var itemAccessibility: [String: String] = [:]
     private let lock = NSLock()
 
     var nextAddStatus: OSStatus?
@@ -61,6 +62,9 @@ final class FakeKeychain: KeychainBoundary {
         }
 
         items[key] = value
+        if let accessibility = dict[kSecAttrAccessible as String] as? String {
+            itemAccessibility[key] = accessibility
+        }
         return errSecSuccess
     }
 
@@ -138,6 +142,15 @@ final class FakeKeychain: KeychainBoundary {
 
         if queryDict[kSecReturnData as String] as? Bool == true {
             result?.pointee = value as CFData
+        } else if queryDict[kSecReturnAttributes as String] as? Bool == true {
+            var attributes: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrAccount as String: key
+            ]
+            if let accessibility = itemAccessibility[key] {
+                attributes[kSecAttrAccessible as String] = accessibility
+            }
+            result?.pointee = attributes as CFDictionary
         }
 
         return errSecSuccess
@@ -147,5 +160,12 @@ final class FakeKeychain: KeychainBoundary {
         lock.lock()
         defer { lock.unlock() }
         items.removeAll()
+        itemAccessibility.removeAll()
+    }
+
+    func getAccessibilityClass(for key: String) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return itemAccessibility[key]
     }
 }
