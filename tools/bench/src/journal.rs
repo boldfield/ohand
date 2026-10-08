@@ -195,7 +195,12 @@ impl JournalWriter {
     }
 
     /// Append a raw record, serializing as JSON and flushing.
+    /// Validates the record before writing to prevent bad data from being persisted.
     fn write_record(&mut self, record: &JournalRecord) -> Result<(), JournalError> {
+        // Validate before writing to ensure the journal stays readable
+        JournalReader::validate_schema_version(record)?;
+        JournalReader::validate_record_invariants(record)?;
+
         let json = serde_json::to_string(record)
             .map_err(|e| JournalError::Serialization(e.to_string()))?;
         writeln!(self.file, "{}", json).map_err(|e| JournalError::Io(e.to_string()))?;
@@ -513,7 +518,7 @@ mod tests {
         let exp = Experiment::new("v1", "ctx", "instr", "pa", "1", "pb", "1", "build")?;
         let case = Case::new(&exp.id, "case-1", "content")?;
         let mut attempt = Attempt::new(&case.id, "a")?;
-        attempt.complete(1000, None);
+        attempt.complete(1000, None)?;
 
         let mut writer = JournalWriter::open(file.path())?;
         writer.write_experiment(&exp)?;
@@ -563,7 +568,7 @@ mod tests {
         let exp = Experiment::new("v1", "ctx", "instr", "pa", "1", "pb", "1", "build")?;
         let case = Case::new(&exp.id, "case-1", "content")?;
         let mut attempt_a = Attempt::new(&case.id, "a")?;
-        attempt_a.complete(1000, None);
+        attempt_a.complete(1000, None)?;
 
         let mut writer = JournalWriter::open(file.path())?;
         writer.write_experiment(&exp)?;
@@ -597,7 +602,7 @@ mod tests {
         let exp = Experiment::new("v1", "ctx", "instr", "pa", "1", "pb", "1", "build")?;
         let case = Case::new(&exp.id, "case-1", "content")?;
         let mut attempt_a = Attempt::new(&case.id, "a")?;
-        attempt_a.complete(1000, None);
+        attempt_a.complete(1000, None)?;
 
         {
             let mut writer = JournalWriter::open(file.path())?;
@@ -615,7 +620,7 @@ mod tests {
         {
             let mut writer = JournalWriter::open(file.path())?;
             let mut attempt_b = Attempt::new(&case.id, "b")?;
-            attempt_b.complete(2000, None);
+            attempt_b.complete(2000, None)?;
             writer.write_attempt(&attempt_b)?;
         }
 
@@ -681,7 +686,7 @@ mod tests {
         let exp = Experiment::new("v1", "ctx", "instr", "pa", "1", "pb", "1", "build")?;
         let case = Case::new(&exp.id, "case-1", "content")?;
         let mut attempt_a = Attempt::new(&case.id, "a")?;
-        attempt_a.complete(1000, None);
+        attempt_a.complete(1000, None)?;
         let attempt_b = Attempt::new(&case.id, "b")?;
 
         let mut writer = JournalWriter::open(file.path())?;
@@ -753,7 +758,7 @@ mod tests {
         {
             let mut writer = JournalWriter::open(file.path())?;
             let mut attempt = Attempt::new(&case.id, "a")?;
-            attempt.complete(1000, None);
+            attempt.complete(1000, None)?;
             writer.write_attempt(&attempt)?;
         }
 
@@ -791,7 +796,7 @@ mod tests {
         {
             let mut writer = JournalWriter::open(file.path())?;
             let mut attempt = Attempt::new(&case.id, "a")?;
-            attempt.complete(1000, None);
+            attempt.complete(1000, None)?;
             writer.write_attempt(&attempt)?;
         }
 
@@ -841,8 +846,8 @@ mod tests {
         let mut attempt_b = Attempt::new(&case.id, "b")?;
         let attempt_c = Attempt::new(&case.id, "a")?;
 
-        attempt_a.complete(1000, None);
-        attempt_b.complete(1500, None);
+        attempt_a.complete(1000, None)?;
+        attempt_b.complete(1500, None)?;
         // attempt_c left as Started
 
         let mut writer = JournalWriter::open(file.path())?;
@@ -956,6 +961,103 @@ mod tests {
                 assert_ne!(att.id, "truncated");
             }
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_boundary_rejects_credentials_in_provider_output(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let file = NamedTempFile::new()?;
+
+        let exp = Experiment::new("v1", "ctx", "instr", "pa", "1", "pb", "1", "build")?;
+        let case = Case::new(&exp.id, "case-1", "content")?;
+        let mut attempt = Attempt::new(&case.id, "a")?;
+
+        // Try to complete with provider_output containing an API key
+        let result = attempt.complete(
+            1000,
+            Some(serde_json::json!({"api_key": "canary123", "endpoint": "https://api.internal"})),
+        );
+        assert!(result.is_err());
+
+        // The journal should still be writable and readable with the bad attempt not added
+        let mut writer = JournalWriter::open(file.path())?;
+        writer.write_experiment(&exp)?;
+        writer.write_case(&case)?;
+
+        // After rejecting a credential-bearing attempt, verify the journal is still valid
+        let reader = JournalReader::open(file.path())?;
+        assert_eq!(reader.experiments().len(), 1);
+        assert_eq!(reader.cases().len(), 1);
+        assert_eq!(reader.attempts().len(), 0); // Bad attempt was never written
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_boundary_rejects_private_endpoint_in_profile_id(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let file = NamedTempFile::new()?;
+
+        // Attempt to create an experiment with a private endpoint in profile_a_id
+        let result = Experiment::new(
+            "v1",
+            "ctx",
+            "instr",
+            "https://10.0.0.1:8080/api",
+            "1",
+            "pb",
+            "1",
+            "build",
+        );
+        assert!(result.is_err());
+
+        // Try to write with JournalWriter to confirm write boundary validation
+        let mut writer = JournalWriter::open(file.path())?;
+        let exp = Experiment::new("v1", "ctx", "instr", "pa", "1", "pb", "1", "build")?;
+        writer.write_experiment(&exp)?;
+
+        // Journal should remain clean and readable
+        let reader = JournalReader::open(file.path())?;
+        assert_eq!(reader.experiments().len(), 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_rejects_json_key_pattern_api_key() -> Result<(), Box<dyn std::error::Error>> {
+        let mut attempt = Attempt::new("case-1", "a")?;
+
+        // Try to complete with JSON containing "api_key": pattern
+        let result = attempt.complete(1000, Some(serde_json::json!({"api_key": "sk-abc123"})));
+        assert!(result.is_err() && result.unwrap_err().contains("credentials"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_accepts_normal_provider_output() -> Result<(), Box<dyn std::error::Error>> {
+        let file = NamedTempFile::new()?;
+
+        let exp = Experiment::new("v1", "ctx", "instr", "pa", "1", "pb", "1", "build")?;
+        let case = Case::new(&exp.id, "case-1", "content")?;
+        let mut attempt = Attempt::new(&case.id, "a")?;
+
+        // Normal provider output should be accepted
+        attempt.complete(
+            1000,
+            Some(serde_json::json!({"result": "success", "tokens_used": 42})),
+        )?;
+
+        let mut writer = JournalWriter::open(file.path())?;
+        writer.write_experiment(&exp)?;
+        writer.write_case(&case)?;
+        writer.write_attempt(&attempt)?;
+
+        let reader = JournalReader::open(file.path())?;
+        assert_eq!(reader.attempts().len(), 1);
+        assert!(reader.attempts()[0].provider_output.is_some());
 
         Ok(())
     }

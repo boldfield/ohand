@@ -25,19 +25,51 @@ pub fn is_secret_or_endpoint(value: &str) -> bool {
         return true;
     }
 
-    // API key patterns
-    if value.contains("api_key=") || value.contains("api-key=") || value.contains("apikey=") {
+    // API key patterns (query string, form data, JSON keys)
+    if value.contains("api_key=")
+        || value.contains("api-key=")
+        || value.contains("apikey=")
+        || value.contains("\"api_key\":")
+        || value.contains("\"apiKey\":")
+    {
         return true;
     }
 
-    // Password pattern (password=)
-    if value.contains("password=") {
+    // Authorization/token patterns in JSON
+    if value.contains("\"authorization\":")
+        || value.contains("\"token\":")
+        || value.contains("\"auth\":")
+        || value.contains("\"access_token\":")
+        || value.contains("\"secret\":")
+    {
+        return true;
+    }
+
+    // Password pattern (password= and JSON)
+    if value.contains("password=") || value.contains("\"password\":") {
         return true;
     }
 
     // Secret pattern
     if value.to_lowercase().contains("secret=") || value.to_lowercase().contains("_secret") {
         return true;
+    }
+
+    // Endpoint-shaped values: private IPs and .internal/.local domains
+    if value.contains("https://") || value.contains("http://") {
+        // Check for private IP ranges or internal/local domains
+        if value.contains("10.0.0.")
+            || value.contains("172.16.")
+            || value.contains("192.168.")
+            || value.contains(".internal")
+            || value.contains(".local")
+            || value.contains(".private")
+        {
+            // But exclude common public suffixes and false positives
+            if !value.contains("example.com") && !value.contains("localhost") {
+                return true;
+            }
+        }
     }
 
     // Production database paths
@@ -136,17 +168,42 @@ impl Experiment {
         if profile_a_id.is_empty() {
             return Err("profile_a_id must not be empty".to_string());
         }
+        if is_secret_or_endpoint(&profile_a_id) {
+            return Err(
+                "profile_a_id must not contain credentials or private endpoints".to_string(),
+            );
+        }
         if profile_a_version.is_empty() {
             return Err("profile_a_version must not be empty".to_string());
+        }
+        if is_secret_or_endpoint(&profile_a_version) {
+            return Err(
+                "profile_a_version must not contain credentials or private endpoints".to_string(),
+            );
         }
         if profile_b_id.is_empty() {
             return Err("profile_b_id must not be empty".to_string());
         }
+        if is_secret_or_endpoint(&profile_b_id) {
+            return Err(
+                "profile_b_id must not contain credentials or private endpoints".to_string(),
+            );
+        }
         if profile_b_version.is_empty() {
             return Err("profile_b_version must not be empty".to_string());
         }
+        if is_secret_or_endpoint(&profile_b_version) {
+            return Err(
+                "profile_b_version must not contain credentials or private endpoints".to_string(),
+            );
+        }
         if build_revision.is_empty() {
             return Err("build_revision must not be empty".to_string());
+        }
+        if is_secret_or_endpoint(&build_revision) {
+            return Err(
+                "build_revision must not contain credentials or private endpoints".to_string(),
+            );
         }
 
         Ok(Experiment {
@@ -298,10 +355,23 @@ impl Attempt {
     }
 
     /// Mark this attempt as completed with elapsed time.
-    pub fn complete(&mut self, elapsed_ms: u64, output: Option<serde_json::Value>) {
+    /// Returns error if output contains credentials or secret patterns.
+    pub fn complete(
+        &mut self,
+        elapsed_ms: u64,
+        output: Option<serde_json::Value>,
+    ) -> Result<(), String> {
+        if let Some(ref out) = output {
+            let output_str = serde_json::to_string(out)
+                .map_err(|_| "failed to serialize provider_output".to_string())?;
+            if is_secret_or_endpoint(&output_str) {
+                return Err("provider_output must not contain credentials or endpoints".to_string());
+            }
+        }
         self.state = AttemptState::Completed;
         self.elapsed_ms = Some(elapsed_ms);
         self.provider_output = output;
+        Ok(())
     }
 
     /// Mark this attempt as failed with a reason.
@@ -503,6 +573,71 @@ mod tests {
     }
 
     #[test]
+    fn test_experiment_rejects_credentials_in_profile_fields() {
+        let base_args = ("v1", "ctx", "instr", "1", "pb", "1", "build");
+
+        let result = Experiment::new(
+            "v1",
+            "ctx",
+            "instr",
+            "https://10.0.0.1:8080/api",
+            "1",
+            "pb",
+            "1",
+            "build",
+        );
+        assert!(result.is_err() && result.unwrap_err().contains("credentials"));
+
+        let result = Experiment::new(
+            "v1",
+            "ctx",
+            "instr",
+            "pa",
+            "https://api.internal/token",
+            "pb",
+            "1",
+            "build",
+        );
+        assert!(result.is_err() && result.unwrap_err().contains("credentials"));
+
+        let result = Experiment::new(
+            "v1",
+            "ctx",
+            "instr",
+            "pa",
+            "1",
+            "http://user:pass@api.internal",
+            "1",
+            "build",
+        );
+        assert!(result.is_err() && result.unwrap_err().contains("credentials"));
+
+        let result = Experiment::new(
+            "v1",
+            "ctx",
+            "instr",
+            "pa",
+            "1",
+            "pb",
+            "Bearer sk-secret123",
+            "build",
+        );
+        assert!(result.is_err() && result.unwrap_err().contains("credentials"));
+
+        let result = Experiment::new(
+            "v1",
+            "ctx",
+            "instr",
+            "pa",
+            "1",
+            "pb",
+            "1",
+            "/var/mobile/ohand/production.sqlite",
+        );
+        assert!(result.is_err() && result.unwrap_err().contains("credentials"));
+    }
+
+    #[test]
     fn test_experiment_unknown_metadata_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         let mut exp = Experiment::new(
             "v1.0",
@@ -555,7 +690,9 @@ mod tests {
         assert_eq!(attempt.state, AttemptState::Started);
         assert_eq!(attempt.arm, "a");
 
-        attempt.complete(1500, Some(serde_json::json!({"result": "ok"})));
+        assert!(attempt
+            .complete(1500, Some(serde_json::json!({"result": "ok"})))
+            .is_ok());
         assert_eq!(attempt.state, AttemptState::Completed);
         assert_eq!(attempt.elapsed_ms, Some(1500));
 
@@ -672,7 +809,7 @@ mod tests {
 
         let case = Case::new(&exp.id, "case-001", "test content")?;
         let mut attempt = Attempt::new(&case.id, "a")?;
-        attempt.complete(1500, Some(serde_json::json!({"result": "ok"})));
+        attempt.complete(1500, Some(serde_json::json!({"result": "ok"})))?;
 
         let exp_json = serde_json::to_string(&exp)?;
         let case_json = serde_json::to_string(&case)?;

@@ -15,6 +15,12 @@
 mod journal;
 mod records;
 
+// Reserved modules for future implementation
+pub mod cli;
+pub mod executor;
+pub mod report;
+pub mod transport;
+
 pub use journal::{JournalError, JournalReader, JournalRecord, JournalWriter, TruncationRecovery};
 pub use records::{
     is_secret_or_endpoint, Attempt, AttemptState, Case, Experiment, UnknownMetadata, UsageMetadata,
