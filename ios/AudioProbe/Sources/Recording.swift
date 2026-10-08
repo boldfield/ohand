@@ -23,8 +23,7 @@ class AudioRecorder: NSObject, AVAudioRecorderDelegate {
     var recordingStartTime: Date?
     var recordingDestination: URL?
     var lastInterruptionReason: String?
-    private var recordingFinalized = false
-    private let recordingFinalizationLock = NSLock()
+    var hadInterruptionGap: Bool = false
 
     override init() {
         super.init()
@@ -84,9 +83,16 @@ class AudioRecorder: NSObject, AVAudioRecorderDelegate {
             recordingStartTime = Date()
             recordingDestination = destination
             lastInterruptionReason = nil
-            recordingFinalized = false
+            hadInterruptionGap = false
 
-            return recorder?.record() ?? false
+            if recorder?.record() ?? false {
+                return true
+            } else {
+                recorder = nil
+                recordingStartTime = nil
+                lastInterruptionReason = "Recording start failed"
+                return false
+            }
         } catch {
             lastInterruptionReason = "Record start failed: \(error)"
             recorder = nil
@@ -114,15 +120,34 @@ class AudioRecorder: NSObject, AVAudioRecorderDelegate {
             defer {
                 self.recorder = nil
                 recordingStartTime = nil
-                recordingFinalized = true
             }
-            return AudioRecordingResult(
-                success: false,
-                durationSeconds: duration,
-                filePath: recorder.url.path,
-                fileSize: getFileSize(at: recorder.url),
-                interruption: interruptionReason
-            )
+            let filePath = recorder.url.path
+            let fileSize = getFileSize(at: recorder.url)
+
+            var isRecoverable = false
+            if fileSize > 0 {
+                if let audioFile = try? AVAudioFile(forReading: recorder.url) {
+                    isRecoverable = audioFile.length > 0
+                }
+            }
+
+            if isRecoverable {
+                return AudioRecordingResult(
+                    success: false,
+                    durationSeconds: duration,
+                    filePath: filePath,
+                    fileSize: fileSize,
+                    interruption: interruptionReason
+                )
+            } else {
+                return AudioRecordingResult(
+                    success: false,
+                    durationSeconds: duration,
+                    filePath: nil,
+                    fileSize: 0,
+                    interruption: interruptionReason
+                )
+            }
         }
 
         let filePath = recorder.url.path
@@ -138,7 +163,26 @@ class AudioRecorder: NSObject, AVAudioRecorderDelegate {
         defer {
             self.recorder = nil
             recordingStartTime = nil
-            recordingFinalized = true
+        }
+
+        if hadInterruptionGap {
+            if isRecoverable {
+                return AudioRecordingResult(
+                    success: false,
+                    durationSeconds: duration,
+                    filePath: filePath,
+                    fileSize: fileSize,
+                    interruption: "Interrupted and resumed"
+                )
+            } else {
+                return AudioRecordingResult(
+                    success: false,
+                    durationSeconds: duration,
+                    filePath: nil,
+                    fileSize: 0,
+                    interruption: "Interrupted and resumed"
+                )
+            }
         }
 
         if isRecoverable {
@@ -187,7 +231,6 @@ class AudioRecorder: NSObject, AVAudioRecorderDelegate {
         defer {
             self.recorder = nil
             recordingStartTime = nil
-            recordingFinalized = true
         }
 
         if isRecoverable {
@@ -221,18 +264,15 @@ class AudioRecorder: NSObject, AVAudioRecorderDelegate {
         }
 
         if type == .began {
-            if let optionsValue = userInfo[AVAudioSession.interruptionOptionKey] as? UInt {
-                let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
-                lastInterruptionReason = "Audio interrupted"
-            } else {
-                lastInterruptionReason = "Audio interrupted"
-            }
+            lastInterruptionReason = "Audio interrupted"
         } else if type == .ended {
             if let optionsValue = userInfo[AVAudioSession.interruptionOptionKey] as? UInt {
                 let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
                 if options.contains(.shouldResume) {
-                    lastInterruptionReason = nil
-                    _ = recorder?.record()
+                    hadInterruptionGap = true
+                    if recorder?.record() ?? false {
+                        lastInterruptionReason = nil
+                    }
                 }
             }
         }

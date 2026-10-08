@@ -143,6 +143,59 @@ class AudioProbeRecordingTests: XCTestCase {
         XCTAssertFalse(result.success, "Recording interrupted should not be marked as successful")
         XCTAssertNotNil(result.filePath, "Interrupted recording should have a partial file")
         XCTAssertEqual(result.interruption, "Audio interrupted", "Interruption reason should be recorded")
+
+        if let filePath = result.filePath {
+            let audioFileURL = URL(fileURLWithPath: filePath)
+            if let audioFile = try? AVAudioFile(forReading: audioFileURL) {
+                XCTAssertGreaterThan(audioFile.length, 0, "Interrupted partial file should be readable and contain audio")
+            }
+        }
+    }
+
+    func testInterruptionWithResume() {
+        let started = recorder.startRecording(to: testRecordingURL)
+        XCTAssertTrue(started)
+
+        let waitExpectation1 = XCTestExpectation(description: "Record before interruption")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            waitExpectation1.fulfill()
+        }
+        wait(for: [waitExpectation1], timeout: 2)
+
+        let beganNotification = Notification(
+            name: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance(),
+            userInfo: [
+                AVAudioSession.interruptionTypeKey: AVAudioSession.InterruptionType.began.rawValue
+            ]
+        )
+        NotificationCenter.default.post(beganNotification)
+
+        let waitExpectation2 = XCTestExpectation(description: "Interrupted")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            waitExpectation2.fulfill()
+        }
+        wait(for: [waitExpectation2], timeout: 2)
+
+        let endedNotification = Notification(
+            name: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance(),
+            userInfo: [
+                AVAudioSession.interruptionTypeKey: AVAudioSession.InterruptionType.ended.rawValue,
+                AVAudioSession.interruptionOptionKey: AVAudioSession.InterruptionOptions.shouldResume.rawValue
+            ]
+        )
+        NotificationCenter.default.post(endedNotification)
+
+        let waitExpectation3 = XCTestExpectation(description: "Resume and record")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            waitExpectation3.fulfill()
+        }
+        wait(for: [waitExpectation3], timeout: 2)
+
+        let result = recorder.stopRecording()
+        XCTAssertFalse(result.success, "Recording with interruption and resume should not report clean success")
+        XCTAssertEqual(result.interruption, "Interrupted and resumed", "Should track that interruption occurred despite resume")
     }
 
     func testCancelledRecovery() {
@@ -171,5 +224,38 @@ class AudioProbeRecordingTests: XCTestCase {
                 }
             }
         }
+    }
+
+    func testDoubleStopDoesNotReportSuccessTwice() {
+        let started = recorder.startRecording(to: testRecordingURL)
+        XCTAssertTrue(started)
+
+        let waitExpectation = XCTestExpectation(description: "Recording duration")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            waitExpectation.fulfill()
+        }
+        wait(for: [waitExpectation], timeout: 2)
+
+        let result1 = recorder.stopRecording()
+        XCTAssertTrue(result1.success, "First stop should succeed")
+
+        let result2 = recorder.stopRecording()
+        XCTAssertFalse(result2.success, "Second stop should fail because recording is no longer active")
+        XCTAssertEqual(result2.interruption, "No active recording", "Second stop should report no active recording")
+    }
+
+    func testFailedStartClearsState() {
+        let tempURL1 = FileManager.default.temporaryDirectory.appendingPathComponent("test-invalid-\(UUID().uuidString).wav")
+        let invalidParentURL = tempURL1.deletingLastPathComponent().appendingPathComponent("nonexistent").appendingPathComponent("test.wav")
+
+        let started = recorder.startRecording(to: invalidParentURL)
+        XCTAssertFalse(started, "Recording should fail with invalid destination")
+
+        let result = recorder.stopRecording()
+        XCTAssertFalse(result.success, "Stop after failed start should fail")
+        XCTAssertNil(result.filePath, "No file path should be available after failed start")
+
+        let result2 = recorder.stopRecording()
+        XCTAssertFalse(result2.success, "Second stop should also fail")
     }
 }
