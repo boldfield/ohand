@@ -584,6 +584,14 @@ fn enqueue_for_item(
     job_schema_version: i32,
     now: DateTime<Utc>,
 ) -> Result<Job> {
+    // Jobs pinned to a missing profile are retired at claim (V03), so the pin must exist.
+    db.conn().execute(
+        "INSERT OR IGNORE INTO provider_profiles (
+            profile_id, profile_version, provider_type, model, timeout_seconds,
+            retry_policy, authorized_destinations, capabilities, created_at
+        ) VALUES ('profile', 'profile-1', 'anthropic', 'synthetic-model', 30, '{}', '[]', '{}', ?)",
+        [now.to_rfc3339()],
+    )?;
     enqueue_job(
         db,
         format!("job-{}-{}", item_id, job_type),
