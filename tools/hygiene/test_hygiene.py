@@ -103,6 +103,11 @@ class TempRepoTestCase(unittest.TestCase):
         record.update(overrides)
         self.write(media_path + ".provenance.json", json.dumps(record))
 
+    def replace_with_dangling_symlink(self, relative_path):
+        full_path = os.path.join(self.repo_dir, relative_path)
+        os.remove(full_path)
+        os.symlink("target-that-does-not-exist", full_path)
+
     def run_cli(self, *extra_args):
         return subprocess.run(
             [sys.executable, SCRIPT_PATH, "--repo", self.repo_dir, *extra_args],
@@ -312,6 +317,60 @@ class MediaPolicyTests(TempRepoTestCase):
         self.write("fixtures/audio/tone.m4a.provenance.json", json.dumps(record))
         self.commit_all()
         self.assertEqual(self.policy_findings(), [])
+
+    def test_recording_replaced_by_dangling_symlink_still_fails(self):
+        self.write("recordings/call.m4a", b"sixteen byte rec")
+        self.commit_all()
+        self.replace_with_dangling_symlink("recordings/call.m4a")
+        self.commit_all()
+        findings = self.policy_findings()
+        self.assertIn("recordings/call.m4a", [finding.path for finding in findings])
+        self.assertTrue(any("private capture" in finding.message for finding in findings))
+
+    def test_signing_material_replaced_by_dangling_symlink_still_fails(self):
+        self.write("ios/Signing/dist.p12", b"x")
+        self.commit_all()
+        self.replace_with_dangling_symlink("ios/Signing/dist.p12")
+        self.commit_all()
+        self.assertEqual([finding.path for finding in self.policy_findings()], ["ios/Signing/dist.p12"])
+
+    def test_tracked_dangling_symlink_in_private_directory_fails(self):
+        os.makedirs(os.path.join(self.repo_dir, "captures"))
+        os.symlink("target-that-does-not-exist", os.path.join(self.repo_dir, "captures/note.txt"))
+        self.commit_all()
+        self.assertEqual([finding.path for finding in self.policy_findings()], ["captures/note.txt"])
+
+    def test_unprovenanced_fixture_replaced_by_dangling_symlink_still_fails(self):
+        self.write("fixtures/audio/tone.m4a", b"real private voice")
+        self.commit_all()
+        self.replace_with_dangling_symlink("fixtures/audio/tone.m4a")
+        self.commit_all()
+        messages = [finding.message for finding in self.policy_findings()]
+        self.assertTrue(any("no provenance record" in message and "reachable history" in message for message in messages))
+        self.assertTrue(any("must be a regular file" in message for message in messages))
+
+    def test_symlinked_fixture_with_matching_provenance_fails(self):
+        link_target = "../../elsewhere/voice.m4a"
+        os.makedirs(os.path.join(self.repo_dir, "fixtures/audio"))
+        os.symlink(link_target, os.path.join(self.repo_dir, "fixtures/audio/tone.m4a"))
+        record = {
+            "synthetic": True,
+            "contains_personal_data": False,
+            "generator": "sine-tone script",
+            "description": "One second 440 Hz tone",
+            "sha256": hashlib.sha256(link_target.encode()).hexdigest(),
+        }
+        self.write("fixtures/audio/tone.m4a.provenance.json", json.dumps(record))
+        self.commit_all()
+        findings = self.policy_findings()
+        self.assertTrue(findings)
+        self.assertTrue(all("must be a regular file" in finding.message for finding in findings))
+
+    def test_index_is_checked_even_when_worktree_file_is_missing(self):
+        self.write("recordings/call.m4a", b"private")
+        self.commit_all()
+        os.remove(os.path.join(self.repo_dir, "recordings/call.m4a"))
+        self.assertIn("recordings/call.m4a", [finding.path for finding in self.policy_findings()])
 
     def test_shallow_clone_fails_closed(self):
         self.write("recordings/call.m4a", b"private")
@@ -533,6 +592,16 @@ class RealGitleaksTests(TempRepoTestCase):
         self.assertEqual(completed.returncode, check_hygiene.EXIT_FINDINGS)
         self.assertIn("fixtures/audio/tone.m4a", completed.stderr)
         self.assertIn("reachable history", completed.stderr)
+
+    def test_recording_replaced_by_dangling_symlink_fails_through_cli(self):
+        self.write("recordings/call.m4a", b"sixteen byte rec")
+        self.commit_all()
+        self.replace_with_dangling_symlink("recordings/call.m4a")
+        self.commit_all()
+        completed = self.run_cli()
+        self.assertEqual(completed.returncode, check_hygiene.EXIT_FINDINGS)
+        self.assertIn("recordings/call.m4a", completed.stderr)
+        self.assertNotIn("No hygiene issues", completed.stdout)
 
     def test_run_gitleaks_returns_redacted_findings(self):
         self.write("leak.txt", seeded_aws_access_key() + "\n")

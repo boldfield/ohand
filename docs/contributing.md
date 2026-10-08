@@ -16,6 +16,8 @@ This repository is public. Commit only synthetic fixtures; keep credentials, per
 
 ### Policy checks on tracked files
 
+These rules are evaluated against the git index and the recorded tree of each commit, not the working tree. Every index entry is checked whatever its type, so replacing a prohibited file with a symlink (dangling or not) or deleting it only from the working tree does not hide it. Audio/video fixtures must be regular files; a symlinked fixture fails even if its sidecar digest matches the link.
+
 - **Signing material and secrets files** are never allowed: `.p12`, `.pfx`, `.p8`, `.mobileprovision`, `.provisionprofile`, `.cer`, `.crt`, `.der`, `.pem`, `.key`, `.jks`, `.keystore`, `.gpg`, `.asc`, `.certSigningRequest`, keychains, SSH private key names such as `id_ed25519`, and `.env` / `.env.*` files (use `.env.example`, `.env.sample` or `.env.template`).
 - **Audio and video** (`.m4a`, `.wav`, `.mp3`, `.aac`, `.flac`, `.ogg`, `.opus`, `.caf`, `.aiff`, `.mp4`, `.mov` and similar) is allowed only under these documented synthetic fixture roots:
   - `fixtures/`

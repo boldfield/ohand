@@ -19,7 +19,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import PurePosixPath
-from typing import List, NamedTuple, Optional, Set
+from typing import Dict, List, NamedTuple, Optional, Set
 
 GITLEAKS_VERSION = "8.21.2"
 GITLEAKS_FINDINGS_EXIT_CODE = 2
@@ -69,11 +69,52 @@ class ScannerError(RuntimeError):
     """The maintained scanner could not produce a trustworthy result."""
 
 
-def list_tracked_files(repo_dir: str) -> List[str]:
+class TreeEntry(NamedTuple):
+    path: str
+    mode: str
+    object_id: str
+
+
+REGULAR_FILE_MODES = {"100644", "100755"}
+
+
+def list_tracked_entries(repo_dir: str) -> List[TreeEntry]:
+    """Every index entry (regular file, symlink or gitlink), independent of what the worktree holds."""
     result = subprocess.run(
-        ["git", "ls-files", "-z"], capture_output=True, cwd=repo_dir, check=True
+        ["git", "ls-files", "--stage", "-z"], capture_output=True, cwd=repo_dir, check=True
     )
-    return sorted(entry.decode("utf-8", "surrogateescape") for entry in result.stdout.split(b"\0") if entry)
+    entries = {}
+    for record in result.stdout.split(b"\0"):
+        if not record:
+            continue
+        metadata, _, raw_path = record.partition(b"\t")
+        mode, object_id, _stage = metadata.decode("ascii").split()
+        path = raw_path.decode("utf-8", "surrogateescape")
+        entries[path] = TreeEntry(path, mode, object_id)
+    return [entries[path] for path in sorted(entries)]
+
+
+def read_tree_entry(repo_dir: str, commit: str, path: str) -> Optional[TreeEntry]:
+    """The blob or gitlink recorded for path in commit, or None if the commit has no such file."""
+    result = subprocess.run(
+        ["git", "--literal-pathspecs", "ls-tree", "-z", "--full-tree", commit, "--", path],
+        capture_output=True, cwd=repo_dir, check=True,
+    )
+    for record in result.stdout.split(b"\0"):
+        metadata, _, raw_path = record.partition(b"\t")
+        if raw_path.decode("utf-8", "surrogateescape") != path:
+            continue
+        mode, object_type, object_id = metadata.decode("ascii").split()
+        if object_type == "tree":
+            return None
+        return TreeEntry(path, mode, object_id)
+    return None
+
+
+def read_blob(repo_dir: str, object_id: str) -> bytes:
+    return subprocess.run(
+        ["git", "cat-file", "blob", object_id], capture_output=True, cwd=repo_dir, check=True
+    ).stdout
 
 
 def check_signing_material(path: str) -> List[str]:
@@ -111,14 +152,6 @@ def is_under_fixture_root(path: str) -> bool:
     return path.startswith(SYNTHETIC_FIXTURE_ROOTS)
 
 
-def sha256_of_file(file_path: str) -> str:
-    digest = hashlib.sha256()
-    with open(file_path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def check_path_policy(path: str) -> List[str]:
     return check_signing_material(path) + check_scanner_suppression(path) + check_private_path(path)
 
@@ -148,25 +181,25 @@ def validate_provenance_bytes(sidecar_bytes: bytes, media_digest: str, sidecar_n
     return []
 
 
-def check_provenance_record(path: str, repo_dir: str, tracked: Set[str]) -> List[str]:
-    sidecar_path = path + PROVENANCE_SUFFIX
-    sidecar_name = PurePosixPath(sidecar_path).name
-    if sidecar_path not in tracked:
+def check_media_version(repo_dir: str, media_entry: TreeEntry, sidecar_entry: Optional[TreeEntry]) -> List[str]:
+    """Check one recorded version of a fixture media file against the sidecar recorded beside it."""
+    sidecar_name = PurePosixPath(media_entry.path + PROVENANCE_SUFFIX).name
+    if media_entry.mode not in REGULAR_FILE_MODES:
+        return [f"audio/video fixture must be a regular file, not git mode {media_entry.mode}"]
+    if sidecar_entry is None:
         return [f"missing tracked provenance record {sidecar_name}"]
-    try:
-        with open(os.path.join(repo_dir, sidecar_path), "rb") as handle:
-            sidecar_bytes = handle.read()
-    except OSError:
-        return [f"provenance record {sidecar_name} is not readable JSON"]
-    return validate_provenance_bytes(sidecar_bytes, sha256_of_file(os.path.join(repo_dir, path)), sidecar_name)
+    if sidecar_entry.mode not in REGULAR_FILE_MODES:
+        return [f"provenance record {sidecar_name} must be a regular file, not git mode {sidecar_entry.mode}"]
+    media_digest = hashlib.sha256(read_blob(repo_dir, media_entry.object_id)).hexdigest()
+    return validate_provenance_bytes(read_blob(repo_dir, sidecar_entry.object_id), media_digest, sidecar_name)
 
 
-def check_media_file(path: str, repo_dir: str, tracked: Set[str]) -> List[str]:
-    if not path.lower().endswith(MEDIA_SUFFIXES):
+def check_media_file(entry: TreeEntry, repo_dir: str, tracked: Dict[str, TreeEntry]) -> List[str]:
+    if not entry.path.lower().endswith(MEDIA_SUFFIXES):
         return []
-    if not is_under_fixture_root(path):
+    if not is_under_fixture_root(entry.path):
         return ["audio/video file outside documented synthetic fixture roots"]
-    return check_provenance_record(path, repo_dir, tracked)
+    return check_media_version(repo_dir, entry, tracked.get(entry.path + PROVENANCE_SUFFIX))
 
 
 def list_historical_paths(repo_dir: str) -> List[str]:
@@ -176,11 +209,6 @@ def list_historical_paths(repo_dir: str) -> List[str]:
     )
     names = (entry.decode("utf-8", "surrogateescape").strip("\n") for entry in result.stdout.split(b"\0"))
     return sorted({name for name in names if name})
-
-
-def read_git_object(repo_dir: str, revision_and_path: str) -> Optional[bytes]:
-    result = subprocess.run(["git", "show", revision_and_path], capture_output=True, cwd=repo_dir)
-    return result.stdout if result.returncode == 0 else None
 
 
 def list_commits_touching(repo_dir: str, path: str) -> List[str]:
@@ -194,18 +222,17 @@ def list_commits_touching(repo_dir: str, path: str) -> List[str]:
 def check_fixture_media_history(path: str, repo_dir: str) -> List[Finding]:
     """Require a valid, hash-matching sidecar in the same tree for every reachable version of a fixture."""
     sidecar_path = path + PROVENANCE_SUFFIX
-    sidecar_name = PurePosixPath(sidecar_path).name
     reported_messages: Set[str] = set()
     findings = []
     for commit in list_commits_touching(repo_dir, path):
-        media_bytes = read_git_object(repo_dir, f"{commit}:{path}")
-        if media_bytes is None:
+        media_entry = read_tree_entry(repo_dir, commit, path)
+        if media_entry is None:
             continue
-        sidecar_bytes = read_git_object(repo_dir, f"{commit}:{sidecar_path}")
-        if sidecar_bytes is None:
-            problems = [f"audio/video file version had no provenance record {sidecar_name}"]
+        sidecar_entry = read_tree_entry(repo_dir, commit, sidecar_path)
+        if sidecar_entry is None:
+            problems = [f"audio/video file version had no provenance record {PurePosixPath(sidecar_path).name}"]
         else:
-            problems = validate_provenance_bytes(sidecar_bytes, hashlib.sha256(media_bytes).hexdigest(), sidecar_name)
+            problems = check_media_version(repo_dir, media_entry, sidecar_entry)
         for problem in problems:
             if problem not in reported_messages:
                 reported_messages.add(problem)
@@ -213,8 +240,13 @@ def check_fixture_media_history(path: str, repo_dir: str) -> List[Finding]:
     return findings
 
 
-def check_history_paths(repo_dir: str, tracked: Set[str]) -> List[Finding]:
-    """Apply path and media policy to every path reachable from HEAD, including deleted and overwritten versions."""
+def check_history_paths(repo_dir: str, tracked: Dict[str, TreeEntry]) -> List[Finding]:
+    """Apply path and media policy to every path reachable from HEAD, including deleted and overwritten versions.
+
+    Path rules for a path still in the index are already reported by check_tracked_files, which checks
+    every index entry whatever its type, so only paths gone from the index are reported here. Fixture
+    media versions are checked from the recorded blobs whatever now occupies the path.
+    """
     findings = []
     for path in list_historical_paths(repo_dir):
         if path not in tracked:
@@ -232,17 +264,12 @@ def check_history_paths(repo_dir: str, tracked: Set[str]) -> List[Finding]:
 
 
 def check_tracked_files(repo_dir: str) -> List[Finding]:
-    tracked_files = list_tracked_files(repo_dir)
-    tracked = set(tracked_files)
+    tracked_entries = list_tracked_entries(repo_dir)
+    tracked = {entry.path: entry for entry in tracked_entries}
     findings = []
-    for path in tracked_files:
-        if not os.path.isfile(os.path.join(repo_dir, path)):
-            continue
-        messages = (
-            check_path_policy(path) + check_media_file(path, repo_dir, tracked)
-        )
-        for message in messages:
-            findings.append(Finding(path, message))
+    for entry in tracked_entries:
+        for message in check_path_policy(entry.path) + check_media_file(entry, repo_dir, tracked):
+            findings.append(Finding(entry.path, message))
     findings.extend(check_history_paths(repo_dir, tracked))
     return findings
 
