@@ -287,6 +287,19 @@ targets:
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.capture.control
       INFOPLIST_FILE: CaptureProbe/Control/Info.plist
 
+  HandoffValidatorTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: ../probes/tauri-handoff/Sources
+        createIntermediateGroups: true
+      - path: ../probes/tauri-handoff/tests
+        createIntermediateGroups: true
+    settings:
+      PRODUCT_NAME: HandoffValidatorTests
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.handoff.tests
+      GENERATE_INFOPLIST_FILE: YES
+
 schemes:
   OhAndApp:
     build:
@@ -298,11 +311,13 @@ schemes:
         OhAndTests: all
         BridgeProbeTests: all
         CaptureProbeTests: all
+        HandoffValidatorTests: all
     test:
       targets:
         - OhAndTests
         - BridgeProbeTests
         - CaptureProbeTests
+        - HandoffValidatorTests
   CaptureProbeTests:
     build:
       targets:
@@ -324,6 +339,13 @@ schemes:
     test:
       targets:
         - BridgeProbeTests
+  HandoffValidatorTests:
+    build:
+      targets:
+        HandoffValidatorTests: all
+    test:
+      targets:
+        - HandoffValidatorTests
   BridgeProbe:
     build:
       targets:

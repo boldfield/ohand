@@ -23,21 +23,24 @@ P07 probes the handoff from the native capture entry (P02) to the candidate Taur
 
 ## What the automated checks assert
 
-Rust tests (`cargo test --package ohand-tauri-handoff`):
+Rust tests (via `make test` on the workspace):
 
 - Valid `ohand-tauri://capture?captureId=<uuid>` parses and yields the capture ID and timestamp;
+- Non-UUID `captureId` (e.g., `evil`, `<script>`) returns `InvalidCaptureId`;
 - Missing, empty or wrong-typed `captureId` parameter returns `MissingCaptureId`;
+- Duplicate `captureId` parameters return `DuplicateCaptureId`;
 - Invalid route paths (e.g., `invalid`, `../../settings`) return `InvalidRoute`;
-- URL with no path component or only `/` returns `MissingRoute`;
+- URL with no host component returns `MissingRoute`;
 - Wrong scheme (e.g., `ohand://` or `http://`) returns `InvalidUrl`;
 - Case-insensitive scheme matching (`OHAND-TAURI://...` works);
 - Malicious path injection (`../../settings`) is rejected;
-- Multiple `captureId` parameters use the first one (first-wins semantics);
 - Timestamp is a valid ISO8601 datetime string.
 
-Swift tests (`CaptureProbeTests` in `ios/CaptureProbe/Tests`, run as part of `OhAndTests`):
+Swift tests (`HandoffValidatorTests` in `ios/project.yml`, run as part of `OhAndTests` scheme):
 
-- Valid handoff URL validates to a `HandoffRequest` with the correct capture ID and route;
+- Valid handoff URL with valid UUID validates to a `HandoffRequest` with the correct capture ID and route;
+- Non-UUID `captureId` values return `InvalidCaptureId`;
+- Duplicate `captureId` parameters return `DuplicateCaptureId`;
 - Invalid capture ID, route, or missing query parameters return appropriate errors;
 - Case-insensitive scheme matching works in Swift;
 - Malicious route paths are rejected.
@@ -99,7 +102,9 @@ Document the results, toolchain version, device model and OS build. Link any vid
 
 ## Reuse notes
 
-- The `HandoffValidator` accepts any valid UUID as a capture ID. Production code may want to validate the ID against the native store (P02) to confirm it exists before opening the handoff target.
+- The `HandoffValidator` (Rust) and `HandoffValidator` (Swift) require a valid UUID as the capture ID. Any non-UUID string (including empty, arbitrary text, or injection attempts) is rejected.
+- Duplicate `captureId` query parameters are rejected with `DuplicateCaptureId` to prevent ambiguous identities.
 - The `ohand-tauri` scheme must be registered in the app's `Info.plist` so the system can route handoff URLs to the Tauri app.
 - The Tauri app should decode the query parameter in JavaScript (`new URL(window.location).searchParams.get('captureId')`) or via a Tauri command that the webview invokes.
+- Production code should validate the capture ID against the native store (P02) to confirm it exists before displaying it in the UI.
 - If the app is not running, the system queues the handoff and delivers it as a cold launch. If the app is already foreground, the handoff is a warm launch. The Tauri app should distinguish these for logging and testing.
