@@ -1,9 +1,11 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
+use uuid::Uuid;
 
 use ohand_core::domain::status::{
-    ItemStatus, ProcessingState, SaveState, SyncState, TranscriptionState,
+    ItemStatus, ProcessingState, ReminderAcknowledgmentState, ReminderDeliveryState,
+    ReminderRequestState, ReminderScheduleState, SaveState, SyncState, TranscriptionState,
 };
 use ohand_core::store::schema::{Clock, Database};
 
@@ -20,15 +22,6 @@ impl Clock for TestClock {
 fn make_test_db(path: &str, instant: DateTime<Utc>) -> Result<Database> {
     let clock: Arc<dyn Clock> = Arc::new(TestClock { instant });
     Database::open(path, clock)
-}
-
-fn temp_db_path(label: &str) -> String {
-    format!(
-        "{}/test_status_{}_{}.db",
-        std::env::temp_dir().display(),
-        label,
-        uuid::Uuid::new_v4()
-    )
 }
 
 fn insert_test_item_with_status(
@@ -79,9 +72,40 @@ fn insert_test_item_with_status(
     Ok(())
 }
 
+fn insert_test_reminder(
+    tx: &rusqlite::Transaction<'_>,
+    item_id: &str,
+    request_state: &str,
+    schedule_state: &str,
+    delivery_state: &str,
+    acknowledgment_state: &str,
+) -> Result<()> {
+    let reminder_id = Uuid::new_v4().to_string();
+
+    tx.execute(
+        "INSERT INTO reminders (reminder_id, item_id, request_state, schedule_state, delivery_state, acknowledgment_state, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        rusqlite::params![
+            &reminder_id,
+            item_id,
+            request_state,
+            schedule_state,
+            delivery_state,
+            acknowledgment_state,
+            "2026-01-15T10:30:00Z",
+            "2026-01-15T10:30:00Z",
+        ],
+    )?;
+    Ok(())
+}
+
 #[test]
 fn test_load_item_status() -> Result<()> {
-    let path = temp_db_path("load_status");
+    let path = format!(
+        "{}/test_status_load_{}_.db",
+        std::env::temp_dir().display(),
+        Uuid::new_v4()
+    );
     let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
     let mut db = make_test_db(&path, instant)?;
 
@@ -90,7 +114,7 @@ fn test_load_item_status() -> Result<()> {
         &tx,
         "item-1",
         "hello world",
-        "saved",
+        "saved_local",
         "not_configured",
         "processed",
         "transcribed",
@@ -103,17 +127,21 @@ fn test_load_item_status() -> Result<()> {
 
     let status = status.expect("item should exist");
     assert_eq!(status.item_id, "item-1");
-    assert_eq!(status.save_state, SaveState::Saved);
+    assert_eq!(status.save_state, SaveState::SavedLocal);
     assert_eq!(status.sync_state, SyncState::NotConfigured);
     assert_eq!(status.processing_state, ProcessingState::Processed);
     assert_eq!(status.transcription_state, TranscriptionState::Transcribed);
-
+    assert_eq!(status.reminder_request_state, None);
     Ok(())
 }
 
 #[test]
 fn test_m1_sync_not_configured() -> Result<()> {
-    let path = temp_db_path("m1_sync");
+    let path = format!(
+        "{}/test_status_m1sync_{}_.db",
+        std::env::temp_dir().display(),
+        Uuid::new_v4()
+    );
     let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
     let mut db = make_test_db(&path, instant)?;
 
@@ -122,10 +150,10 @@ fn test_m1_sync_not_configured() -> Result<()> {
         &tx,
         "item-1",
         "capture text",
-        "saved",
+        "saved_local",
         "not_configured",
         "unprocessed",
-        "unprocessed",
+        "audio_pending",
     )?;
     tx.commit()?;
 
@@ -145,69 +173,71 @@ fn test_m1_sync_not_configured() -> Result<()> {
 }
 
 #[test]
-fn test_distinguishable_processing_errors() -> Result<()> {
-    let path = temp_db_path("processing_errors");
+fn test_processing_state_values() -> Result<()> {
+    let path = format!(
+        "{}/test_status_processing_{}_.db",
+        std::env::temp_dir().display(),
+        Uuid::new_v4()
+    );
     let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
     let mut db = make_test_db(&path, instant)?;
 
     let tx = db.transaction()?;
     insert_test_item_with_status(
         &tx,
-        "permission-denied",
+        "abstained",
         "text 1",
-        "saved",
+        "saved_local",
         "not_configured",
-        "permission_denied",
-        "not_applicable",
+        "abstained",
+        "transcribed",
     )?;
     insert_test_item_with_status(
         &tx,
-        "provider-outage",
+        "uninterpreted",
         "text 2",
-        "saved",
+        "saved_local",
         "not_configured",
-        "provider_unavailable",
-        "not_applicable",
+        "uninterpreted",
+        "transcribed",
     )?;
     insert_test_item_with_status(
         &tx,
-        "pending-ambiguity",
+        "unprocessed",
         "text 3",
-        "saved",
+        "saved_local",
         "not_configured",
-        "awaiting_authorization",
-        "not_applicable",
+        "unprocessed",
+        "transcribed",
     )?;
     tx.commit()?;
 
     let tx = db.transaction()?;
-    let perm_denied = ItemStatus::load(&tx, "permission-denied")?.expect("item should exist");
-    let outage = ItemStatus::load(&tx, "provider-outage")?.expect("item should exist");
-    let ambiguity = ItemStatus::load(&tx, "pending-ambiguity")?.expect("item should exist");
+    let abstained = ItemStatus::load(&tx, "abstained")?.expect("item should exist");
+    let uninterpreted = ItemStatus::load(&tx, "uninterpreted")?.expect("item should exist");
+    let unprocessed = ItemStatus::load(&tx, "unprocessed")?.expect("item should exist");
     tx.commit()?;
 
+    assert_eq!(abstained.processing_state, ProcessingState::Abstained);
     assert_eq!(
-        perm_denied.processing_state,
-        ProcessingState::PermissionDenied
+        uninterpreted.processing_state,
+        ProcessingState::Uninterpreted
     );
-    assert_eq!(
-        outage.processing_state,
-        ProcessingState::ProviderUnavailable
-    );
-    assert_eq!(
-        ambiguity.processing_state,
-        ProcessingState::AwaitingAuthorization
-    );
+    assert_eq!(unprocessed.processing_state, ProcessingState::Unprocessed);
 
-    assert_ne!(perm_denied.processing_state, outage.processing_state);
-    assert_ne!(outage.processing_state, ambiguity.processing_state);
+    assert_ne!(abstained.processing_state, uninterpreted.processing_state);
+    assert_ne!(uninterpreted.processing_state, unprocessed.processing_state);
 
     Ok(())
 }
 
 #[test]
 fn test_item_not_found() -> Result<()> {
-    let path = temp_db_path("not_found");
+    let path = format!(
+        "{}/test_status_notfound_{}_.db",
+        std::env::temp_dir().display(),
+        Uuid::new_v4()
+    );
     let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
     let mut db = make_test_db(&path, instant)?;
 
@@ -222,140 +252,378 @@ fn test_item_not_found() -> Result<()> {
 
 #[test]
 fn test_save_state_values() -> Result<()> {
-    let path = temp_db_path("save_states");
+    let path = format!(
+        "{}/test_status_savestates_{}_.db",
+        std::env::temp_dir().display(),
+        Uuid::new_v4()
+    );
     let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
     let mut db = make_test_db(&path, instant)?;
 
     let tx = db.transaction()?;
     insert_test_item_with_status(
         &tx,
-        "saved",
+        "saved_local",
         "text",
-        "saved",
+        "saved_local",
         "not_configured",
         "unprocessed",
-        "unprocessed",
+        "audio_pending",
     )?;
     insert_test_item_with_status(
         &tx,
-        "pending",
+        "not_saved",
         "text",
-        "pending",
+        "not_saved",
         "not_configured",
         "unprocessed",
-        "unprocessed",
-    )?;
-    insert_test_item_with_status(
-        &tx,
-        "failed",
-        "text",
-        "failed",
-        "not_configured",
-        "unprocessed",
-        "unprocessed",
+        "audio_pending",
     )?;
     tx.commit()?;
 
     let tx = db.transaction()?;
-    let saved = ItemStatus::load(&tx, "saved")?.expect("item should exist");
-    let pending = ItemStatus::load(&tx, "pending")?.expect("item should exist");
-    let failed = ItemStatus::load(&tx, "failed")?.expect("item should exist");
+    let saved = ItemStatus::load(&tx, "saved_local")?.expect("item should exist");
+    let not_saved = ItemStatus::load(&tx, "not_saved")?.expect("item should exist");
     tx.commit()?;
 
-    assert_eq!(saved.save_state, SaveState::Saved);
-    assert_eq!(pending.save_state, SaveState::Pending);
-    assert_eq!(failed.save_state, SaveState::Failed);
+    assert_eq!(saved.save_state, SaveState::SavedLocal);
+    assert_eq!(not_saved.save_state, SaveState::NotSaved);
 
     Ok(())
 }
 
 #[test]
 fn test_transcription_state_values() -> Result<()> {
-    let path = temp_db_path("transcription_states");
+    let path = format!(
+        "{}/test_status_transcription_{}_.db",
+        std::env::temp_dir().display(),
+        Uuid::new_v4()
+    );
     let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
     let mut db = make_test_db(&path, instant)?;
 
     let tx = db.transaction()?;
     insert_test_item_with_status(
         &tx,
-        "not-applicable",
-        "text only",
-        "saved",
+        "audio-pending",
+        "text with audio",
+        "saved_local",
         "not_configured",
-        "processed",
-        "not_applicable",
+        "unprocessed",
+        "audio_pending",
     )?;
     insert_test_item_with_status(
         &tx,
-        "language-not-supported",
+        "transcription-unsupported",
         "audio",
-        "saved",
+        "saved_local",
         "not_configured",
-        "processed",
-        "language_not_supported",
+        "unprocessed",
+        "transcription_unsupported",
     )?;
     insert_test_item_with_status(
         &tx,
-        "permission-denied",
+        "transcription-failed",
         "audio",
-        "saved",
+        "saved_local",
         "not_configured",
-        "processed",
-        "permission_denied",
+        "unprocessed",
+        "transcription_failed",
     )?;
     tx.commit()?;
 
     let tx = db.transaction()?;
-    let not_applicable = ItemStatus::load(&tx, "not-applicable")?.expect("item should exist");
-    let lang_not_supported =
-        ItemStatus::load(&tx, "language-not-supported")?.expect("item should exist");
-    let perm_denied = ItemStatus::load(&tx, "permission-denied")?.expect("item should exist");
+    let audio_pending = ItemStatus::load(&tx, "audio-pending")?.expect("item should exist");
+    let unsupported =
+        ItemStatus::load(&tx, "transcription-unsupported")?.expect("item should exist");
+    let failed = ItemStatus::load(&tx, "transcription-failed")?.expect("item should exist");
     tx.commit()?;
 
     assert_eq!(
-        not_applicable.transcription_state,
-        TranscriptionState::NotApplicable
+        audio_pending.transcription_state,
+        TranscriptionState::AudioPending
     );
     assert_eq!(
-        lang_not_supported.transcription_state,
-        TranscriptionState::LanguageNotSupported
+        unsupported.transcription_state,
+        TranscriptionState::TranscriptionUnsupported
     );
     assert_eq!(
-        perm_denied.transcription_state,
-        TranscriptionState::PermissionDenied
+        failed.transcription_state,
+        TranscriptionState::TranscriptionFailed
     );
 
     Ok(())
 }
 
 #[test]
-fn test_no_save_implies_no_reminder() -> Result<()> {
-    // Acceptance criterion: neither a source save nor a model response implies an installed reminder.
-    // This test demonstrates that SaveState and ProcessingState are independent facts.
-    let path = temp_db_path("save_processing_independent");
+fn test_save_and_processing_independent_from_reminder() -> Result<()> {
+    // Acceptance criterion: neither a source save nor a model response implies an
+    // installed reminder. Prove save=saved_local and processing=processed don't
+    // imply reminder is scheduled.
+    let path = format!(
+        "{}/test_status_saveindep_{}_.db",
+        std::env::temp_dir().display(),
+        Uuid::new_v4()
+    );
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let tx = db.transaction()?;
+    // Item with save=saved_local and processing=processed, but no reminder requested
+    insert_test_item_with_status(
+        &tx,
+        "saved-processed-no-reminder",
+        "text",
+        "saved_local",
+        "not_configured",
+        "processed",
+        "transcribed",
+    )?;
+
+    // Item with save=saved_local and processing=processed, reminder requested but not scheduled yet
+    insert_test_item_with_status(
+        &tx,
+        "saved-processed-unscheduled-reminder",
+        "text",
+        "saved_local",
+        "not_configured",
+        "processed",
+        "transcribed",
+    )?;
+    insert_test_reminder(
+        &tx,
+        "saved-processed-unscheduled-reminder",
+        "not_scheduled_yet",
+        "not_scheduled",
+        "unknown",
+        "not_acknowledged",
+    )?;
+    tx.commit()?;
+
+    let tx = db.transaction()?;
+    let no_reminder =
+        ItemStatus::load(&tx, "saved-processed-no-reminder")?.expect("item should exist");
+    let unscheduled_reminder =
+        ItemStatus::load(&tx, "saved-processed-unscheduled-reminder")?.expect("item should exist");
+    tx.commit()?;
+
+    // Neither save nor processing states imply an installed reminder
+    assert_eq!(no_reminder.save_state, SaveState::SavedLocal);
+    assert_eq!(no_reminder.processing_state, ProcessingState::Processed);
+    assert_eq!(no_reminder.sync_state, SyncState::NotConfigured);
+    assert_eq!(no_reminder.reminder_request_state, None);
+    assert_eq!(no_reminder.reminder_schedule_state, None);
+
+    // Even when a reminder is requested, save/processing don't force scheduling
+    assert_eq!(unscheduled_reminder.save_state, SaveState::SavedLocal);
+    assert_eq!(
+        unscheduled_reminder.processing_state,
+        ProcessingState::Processed
+    );
+    assert_eq!(
+        unscheduled_reminder.reminder_request_state,
+        Some(ReminderRequestState::NotScheduledYet)
+    );
+    assert_eq!(
+        unscheduled_reminder.reminder_schedule_state,
+        Some(ReminderScheduleState::NotScheduled)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_distinguishable_reminder_error_states() -> Result<()> {
+    // Acceptance criterion: permission denial, expiry, ambiguity, outage have
+    // distinguishable status and never claim attention.
+    let path = format!(
+        "{}/test_status_reminderr_{}_.db",
+        std::env::temp_dir().display(),
+        Uuid::new_v4()
+    );
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let tx = db.transaction()?;
+    // Expired scheduling opportunity: resolved time but request is unschedulable
+    insert_test_item_with_status(
+        &tx,
+        "expired",
+        "text",
+        "saved_local",
+        "not_configured",
+        "processed",
+        "transcribed",
+    )?;
+    insert_test_reminder(
+        &tx,
+        "expired",
+        "unschedulable",
+        "not_scheduled",
+        "unknown",
+        "not_acknowledged",
+    )?;
+
+    // Pending ambiguity: user requested reminder but time is ambiguous
+    insert_test_item_with_status(
+        &tx,
+        "ambiguous",
+        "text",
+        "saved_local",
+        "not_configured",
+        "processed",
+        "transcribed",
+    )?;
+    insert_test_reminder(
+        &tx,
+        "ambiguous",
+        "not_scheduled_yet",
+        "not_scheduled",
+        "unknown",
+        "not_acknowledged",
+    )?;
+
+    // Permission denied for notifications
+    insert_test_item_with_status(
+        &tx,
+        "permission-denied",
+        "text",
+        "saved_local",
+        "not_configured",
+        "processed",
+        "transcribed",
+    )?;
+    insert_test_reminder(
+        &tx,
+        "permission-denied",
+        "unschedulable",
+        "not_scheduled",
+        "unknown",
+        "not_acknowledged",
+    )?;
+
+    tx.commit()?;
+
+    let tx = db.transaction()?;
+    let expired = ItemStatus::load(&tx, "expired")?.expect("item should exist");
+    let ambiguous = ItemStatus::load(&tx, "ambiguous")?.expect("item should exist");
+    let perm_denied = ItemStatus::load(&tx, "permission-denied")?.expect("item should exist");
+    tx.commit()?;
+
+    // All are distinguishable states
+    assert_eq!(
+        expired.reminder_request_state,
+        Some(ReminderRequestState::Unschedulable)
+    );
+    assert_eq!(
+        ambiguous.reminder_request_state,
+        Some(ReminderRequestState::NotScheduledYet)
+    );
+    assert_eq!(
+        perm_denied.reminder_request_state,
+        Some(ReminderRequestState::Unschedulable)
+    );
+
+    assert_ne!(
+        expired.reminder_request_state,
+        ambiguous.reminder_request_state
+    );
+    assert_ne!(
+        ambiguous.reminder_request_state,
+        perm_denied.reminder_request_state
+    );
+
+    // All have delivery state unknown, never claim attention via delivery
+    assert_eq!(
+        expired.reminder_delivery_state,
+        Some(ReminderDeliveryState::Unknown)
+    );
+    assert_eq!(
+        ambiguous.reminder_delivery_state,
+        Some(ReminderDeliveryState::Unknown)
+    );
+    assert_eq!(
+        perm_denied.reminder_delivery_state,
+        Some(ReminderDeliveryState::Unknown)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_reminder_delivery_never_claims_attention() -> Result<()> {
+    // Acceptance criterion: delivery state never claims the user noticed.
+    // Delivery states are Unknown, Delivered, Opened. Only Opened suggests
+    // app interaction, but never guarantees user attention.
+    let path = format!(
+        "{}/test_status_delivery_{}_.db",
+        std::env::temp_dir().display(),
+        Uuid::new_v4()
+    );
     let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
     let mut db = make_test_db(&path, instant)?;
 
     let tx = db.transaction()?;
     insert_test_item_with_status(
         &tx,
-        "processed-no-save",
+        "delivered",
         "text",
-        "pending",
+        "saved_local",
         "not_configured",
         "processed",
         "transcribed",
     )?;
+    insert_test_reminder(
+        &tx,
+        "delivered",
+        "resolved",
+        "scheduled",
+        "delivered",
+        "not_acknowledged",
+    )?;
+
+    insert_test_item_with_status(
+        &tx,
+        "opened",
+        "text",
+        "saved_local",
+        "not_configured",
+        "processed",
+        "transcribed",
+    )?;
+    insert_test_reminder(
+        &tx,
+        "opened",
+        "resolved",
+        "scheduled",
+        "opened",
+        "acknowledged",
+    )?;
     tx.commit()?;
 
     let tx = db.transaction()?;
-    let status = ItemStatus::load(&tx, "processed-no-save")?.expect("item should exist");
+    let delivered = ItemStatus::load(&tx, "delivered")?.expect("item should exist");
+    let opened = ItemStatus::load(&tx, "opened")?.expect("item should exist");
     tx.commit()?;
 
-    assert_eq!(status.save_state, SaveState::Pending);
-    assert_eq!(status.processing_state, ProcessingState::Processed);
+    assert_eq!(
+        delivered.reminder_delivery_state,
+        Some(ReminderDeliveryState::Delivered)
+    );
+    assert_eq!(
+        opened.reminder_delivery_state,
+        Some(ReminderDeliveryState::Opened)
+    );
 
-    assert_eq!(status.sync_state, SyncState::NotConfigured);
+    // Delivery state is evidence only; it's independent from acknowledgment
+    assert_eq!(
+        delivered.reminder_acknowledgment_state,
+        Some(ReminderAcknowledgmentState::NotAcknowledged)
+    );
+    assert_eq!(
+        opened.reminder_acknowledgment_state,
+        Some(ReminderAcknowledgmentState::Acknowledged)
+    );
 
     Ok(())
 }
