@@ -160,6 +160,13 @@ jobs:
           cd ios
           ./scripts/build-simulator.sh CaptureProbe 2>&1 | tee .evidence/CaptureProbe-build.log
 
+      - name: Build AudioProbe
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd ios
+          ./scripts/build-simulator.sh AudioProbe 2>&1 | tee .evidence/AudioProbe-build.log
+
       - name: CaptureProbe handoff UI test and ingress smoke test
         shell: bash
         env:
