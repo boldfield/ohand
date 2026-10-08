@@ -353,10 +353,9 @@ pub fn deletion_progress(db: &mut Database, item_id: &str) -> Result<DeletionPro
 
 /// Mark a deletion work task as completed. Idempotent for an already-completed task; rejected
 /// for a terminally failed task. Completing `CancelNotifications` is refused while any reminder
-/// operation for the item is still pending or a cancel operation has failed (a failed native
-/// cancel means the notification may still be installed; a failed schedule means nothing was
-/// installed and does not block cleanup), and completing `RemoveAudio` releases the
-/// audio reference held on the tombstoned capture.
+/// operation for the item is still pending or the cancel of the reminder's final generation
+/// has failed (see `unfinished_notification_operations`), and completing `RemoveAudio` releases
+/// the audio reference held on the tombstoned capture.
 pub fn mark_deletion_work_completed(
     db: &mut Database,
     deletion_work_id: &str,
@@ -380,16 +379,7 @@ pub fn mark_deletion_work_completed(
 
     match work.work_type {
         DeletionWorkType::CancelNotifications => {
-            let unfinished_operations: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM reminder_operations
-                 JOIN reminders ON reminders.reminder_id = reminder_operations.reminder_id
-                 WHERE reminders.item_id = ?
-                   AND (reminder_operations.operation_state = 'pending'
-                        OR (reminder_operations.operation_state = 'failed'
-                            AND reminder_operations.operation_type = 'cancel'))",
-                [&work.item_id],
-                |row| row.get(0),
-            )?;
+            let unfinished_operations = unfinished_notification_operations(&tx, &work.item_id)?;
             if unfinished_operations > 0 {
                 return Err(anyhow!(
                     "Cannot complete notification cleanup: {} reminder operation(s) pending or failed",
@@ -422,6 +412,34 @@ pub fn mark_deletion_work_completed(
         attempted_at: Some(now),
         ..work
     })
+}
+
+/// Count the reminder operations that keep notification cleanup unfinished: every pending
+/// operation, plus a failed cancel of the reminder's current generation. Once the item is
+/// deleted its generation can no longer change, so that cancel is the one removing whatever
+/// the deletion left installed; a failure means the notification may still be on the device.
+/// Failed schedules installed nothing, and failed cancels of earlier generations belong to
+/// effects the current generation's cancel does not depend on, so neither strands deletion.
+fn unfinished_notification_operations(tx: &Transaction<'_>, item_id: &str) -> Result<usize> {
+    let Some(reminder) =
+        state::get_reminder(tx, item_id).map_err(|e| anyhow!("Failed to load reminder: {}", e))?
+    else {
+        return Ok(0);
+    };
+    let final_notification_id = reminder.notification_id();
+    let operations = state::list_operations(tx, &reminder.reminder_id)
+        .map_err(|e| anyhow!("Failed to load reminder operations: {}", e))?;
+    Ok(operations
+        .iter()
+        .filter(|operation| match operation.operation_state {
+            state::OperationState::Pending => true,
+            state::OperationState::Failed => {
+                operation.operation_type == state::OperationType::Cancel
+                    && final_notification_id.as_deref() == Some(operation.notification_id.as_str())
+            }
+            _ => false,
+        })
+        .count())
 }
 
 /// Record that a cleanup task terminally failed. Idempotent for an already-failed task; a

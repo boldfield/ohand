@@ -13,8 +13,9 @@ use ohand_core::lifecycle::delete_intent::{
     DeletionProgress, DeletionWork, DeletionWorkStatus, DeletionWorkType,
 };
 use ohand_core::reminders::state::{
-    apply_derived_request, get_reminder, list_operations, DerivedReminderRequest, OperationState,
-    OperationType, RequestState,
+    apply_derived_request, apply_user_time_correction, cancel_reminder, get_reminder,
+    list_operations, DerivedReminderRequest, OperationState, OperationType, ReminderCancellation,
+    RequestState, UserTimeCorrection,
 };
 use ohand_core::retrieval::index;
 use ohand_core::store::captures::save_capture;
@@ -698,6 +699,142 @@ fn historical_failed_schedule_does_not_strand_notification_cleanup() {
         }
     }
     assert!(matches!(
+        deletion_progress(&mut db, &item_id).unwrap(),
+        DeletionProgress::Complete
+    ));
+}
+
+fn item_revision(db: &mut Database, item_id: &str) -> i32 {
+    let tx = db.transaction().expect("transaction");
+    load_item_state(&tx, item_id)
+        .expect("load")
+        .expect("item exists")
+        .revision
+}
+
+fn reminder_version(db: &mut Database, item_id: &str) -> i64 {
+    let tx = db.transaction().expect("transaction");
+    get_reminder(&tx, item_id)
+        .expect("reminder")
+        .expect("reminder exists")
+        .state_version
+}
+
+/// The user cancels the reminder while the item stays active; the native cancel then fails.
+fn user_cancel_with_failed_native_cancel(db: &mut TestDb, item_id: &str) {
+    let cancellation = ReminderCancellation {
+        command_id: format!("cancel-{item_id}"),
+        item_id: item_id.to_string(),
+        expected_revision: item_revision(db, item_id),
+        expected_reminder_version: reminder_version(db, item_id),
+    };
+    let clock = FixedClock {
+        instant: fixed_instant(1),
+    };
+    let tx = db.immediate_transaction().unwrap();
+    cancel_reminder(&tx, &clock, &cancellation).expect("user cancel");
+    tx.commit().unwrap();
+    db.conn()
+        .execute(
+            "UPDATE reminder_operations SET operation_state = 'failed'
+             WHERE operation_type = 'cancel' AND operation_state = 'pending'",
+            [],
+        )
+        .unwrap();
+}
+
+fn complete_all_work(db: &mut Database, intent: &DeletionIntent, now: DateTime<Utc>) {
+    for work in &intent.work {
+        mark_deletion_work_completed(db, &work.deletion_work_id, now).expect("cleanup completes");
+    }
+}
+
+#[test]
+fn failed_cancel_of_an_earlier_generation_does_not_strand_notification_cleanup() {
+    let mut db = create_test_db();
+    let item_id = create_item_with_reminder(&mut db, "remind-old-gen");
+    user_cancel_with_failed_native_cancel(&mut db, &item_id);
+
+    // The user restores the reminder, which schedules a new generation.
+    let restore = UserTimeCorrection {
+        command_id: format!("restore-{item_id}"),
+        item_id: item_id.clone(),
+        expected_revision: item_revision(&mut db, &item_id),
+        expected_reminder_version: reminder_version(&mut db, &item_id),
+        instant: fixed_instant(0) + Duration::days(2),
+        timezone_id: "UTC".to_string(),
+    };
+    let clock = FixedClock {
+        instant: fixed_instant(2),
+    };
+    let tx = db.immediate_transaction().unwrap();
+    let restored = apply_user_time_correction(&tx, &clock, &restore).expect("restore");
+    tx.commit().unwrap();
+    assert_eq!(restored.schedule_generation, 2);
+
+    let revision = item_revision(&mut db, &item_id);
+    let intent =
+        mark_deletion_intent(&mut db, &item_id, revision, fixed_instant(5)).expect("deletion");
+    let notifications = work_of_type(&intent, DeletionWorkType::CancelNotifications);
+
+    assert!(
+        mark_deletion_work_completed(&mut db, &notifications.deletion_work_id, fixed_instant(6))
+            .is_err(),
+        "the deletion's own cancel is still pending"
+    );
+
+    // Acknowledge only the cancel of generation 2; generation 1's cancel stays failed.
+    db.conn()
+        .execute(
+            "UPDATE reminder_operations SET operation_state = 'acknowledged'
+             WHERE operation_type = 'cancel' AND operation_state = 'pending'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        count_rows(
+            &db,
+            "SELECT COUNT(*) FROM reminder_operations WHERE operation_type = 'cancel'
+             AND operation_state = 'failed' AND reminder_id IN
+             (SELECT reminder_id FROM reminders WHERE item_id = ?)",
+            &item_id,
+        ),
+        1
+    );
+
+    complete_all_work(&mut db, &intent, fixed_instant(7));
+    assert!(matches!(
+        deletion_progress(&mut db, &item_id).unwrap(),
+        DeletionProgress::Complete
+    ));
+}
+
+#[test]
+fn failed_cancel_of_the_final_generation_blocks_cleanup_when_already_cancelled() {
+    let mut db = create_test_db();
+    let item_id = create_item_with_reminder(&mut db, "remind-precancelled");
+    user_cancel_with_failed_native_cancel(&mut db, &item_id);
+
+    // The reminder was already cancelled, so deletion records no new cancel: the failed
+    // cancel of the same generation is the effect still standing between the device and
+    // a removed notification.
+    let revision = item_revision(&mut db, &item_id);
+    let intent =
+        mark_deletion_intent(&mut db, &item_id, revision, fixed_instant(5)).expect("deletion");
+    let notifications = work_of_type(&intent, DeletionWorkType::CancelNotifications);
+
+    assert!(
+        mark_deletion_work_completed(&mut db, &notifications.deletion_work_id, fixed_instant(6))
+            .is_err(),
+        "a failed cancel of the final generation blocks completion"
+    );
+    for work in &intent.work {
+        if work.work_type != DeletionWorkType::CancelNotifications {
+            mark_deletion_work_completed(&mut db, &work.deletion_work_id, fixed_instant(7))
+                .expect("other cleanup completes");
+        }
+    }
+    assert!(!matches!(
         deletion_progress(&mut db, &item_id).unwrap(),
         DeletionProgress::Complete
     ));
