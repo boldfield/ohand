@@ -252,7 +252,11 @@ final class CoreHandleTests: XCTestCase {
         }
         let cancelled = expectation(description: "cancelled off the main thread")
         DispatchQueue.global().async {
-            XCTAssertNoThrow(try core.cancel())
+            do {
+                try core.cancel()
+            } catch {
+                XCTFail("cancel failed: \(error)")
+            }
             cancelled.fulfill()
         }
         wait(for: [cancelled], timeout: 20)
