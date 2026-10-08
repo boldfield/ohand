@@ -115,11 +115,13 @@ class Redactor:
 
 
 class ProfileInfo:
-    def __init__(self, name: str, uuid: str, team_identifier: str, expires_at: datetime.datetime):
+    def __init__(self, name: str, uuid: str, team_identifier: str, expires_at: datetime.datetime,
+                 provisioned_devices: List[str]):
         self.name = name
         self.uuid = uuid
         self.team_identifier = team_identifier
         self.expires_at = expires_at
+        self.provisioned_devices = provisioned_devices
 
 
 def profile_covers_bundle(application_identifier: str, team_identifier: str, bundle_identifier: str) -> bool:
@@ -143,6 +145,9 @@ def parse_profile(profile: dict, bundle_identifier: str, now: datetime.datetime)
     if not isinstance(team_identifiers, list) or not team_identifiers or not isinstance(team_identifiers[0], str):
         raise input_error("provisioning profile has no usable TeamIdentifier")
     entitlements = profile["Entitlements"]
+    if profile.get("IsXcodeManaged"):
+        raise input_error("provisioning profile is Xcode managed; export signs manually, so create a manual Development "
+                          "profile in the developer portal for the bundle identifier and device")
     if profile.get("ProvisionsAllDevices"):
         raise input_error("provisioning profile is an enterprise profile; the development route needs a device-scoped profile")
     if not profile.get("ProvisionedDevices"):
@@ -158,7 +163,8 @@ def parse_profile(profile: dict, bundle_identifier: str, now: datetime.datetime)
         expires_at = expires_at.replace(tzinfo=datetime.timezone.utc)
     if expires_at <= now:
         raise input_error("provisioning profile has expired")
-    return ProfileInfo(profile["Name"], profile["UUID"], team_identifiers[0], expires_at)
+    devices = [device for device in profile["ProvisionedDevices"] if isinstance(device, str)]
+    return ProfileInfo(profile["Name"], profile["UUID"], team_identifiers[0], expires_at, devices)
 
 
 class SigningRun:
@@ -286,13 +292,11 @@ class SigningRun:
         self.redactor.register(self.profile_info.name, "profile-name", forbid_in_evidence=False)
         self.redactor.register(self.profile_info.uuid, "profile-uuid")
         self.redactor.register(self.profile_info.team_identifier, "team-id")
+        for device in self.profile_info.provisioned_devices:
+            self.redactor.register(device, "device-udid")
 
     def profiles_directory(self) -> Path:
-        library = Path.home() / "Library"
-        xcode_directory = library / "Developer" / "Xcode" / "UserData" / "Provisioning Profiles"
-        if xcode_directory.is_dir():
-            return xcode_directory
-        return library / "MobileDevice" / "Provisioning Profiles"
+        return Path.home() / "Library" / "Developer" / "Xcode" / "UserData" / "Provisioning Profiles"
 
     def install_profile(self) -> None:
         directory = self.profiles_directory()
@@ -335,6 +339,9 @@ class SigningRun:
         keychain = str(self.keychain_path)
         listing = self.run_tool("list-keychains", ["security", "list-keychains", "-d", "user"], capture_output_in_log=False)
         self.original_keychains = self.parse_keychain_list(listing.stdout)
+        if not self.original_keychains:
+            self.original_keychains = None
+            raise input_error("could not read the user keychain search list; refusing to change it because it could not be restored")
 
         self.run_tool("create-keychain", ["security", "create-keychain", "-p", keychain_password, keychain])
         self.run_tool("keychain-settings", ["security", "set-keychain-settings", "-lut", str(KEYCHAIN_TIMEOUT_SECONDS), keychain])
@@ -363,8 +370,12 @@ class SigningRun:
         if self.installed_profile_path is not None:
             with contextlib.suppress(OSError):
                 self.installed_profile_path.unlink()
+            if self.installed_profile_path.exists():
+                problems.append("installed provisioning profile could not be removed")
         if self.work_dir is not None:
             shutil.rmtree(self.work_dir, ignore_errors=True)
+            if self.work_dir.exists():
+                problems.append("temporary working directory could not be removed")
         return problems
 
     def _cleanup_step(self, argv: List[str]) -> bool:
@@ -547,6 +558,7 @@ def execute(run: SigningRun) -> int:
             print(f"error: {problem}", file=sys.stderr)
         if problems and exit_code == EXIT_OK:
             exit_code = EXIT_FAILURE
+            run.failed_stage = "cleanup"
 
     if reached_build and run.profile_info is not None:
         try:

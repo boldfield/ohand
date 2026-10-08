@@ -9,6 +9,9 @@ Every call is appended to $STUB_STATE_DIR/calls.jsonl. Behaviour is selected thr
   STUB_IDENTITIES / STUB_LOGIN_IDENTITIES   comma separated identity names in an imported / the user keychain
   STUB_P12_PASSWORD                         password the synthetic .p12 expects
   STUB_UNSIGNED_EXPORT=1                    export an .ipa without _CodeSignature
+  STUB_LEAK_TEXT=<text>                     print this text to stderr on every call (simulates a tool echoing identifiers)
+  STUB_EMPTY_KEYCHAIN_LIST=1                `security list-keychains -d user` prints nothing parseable
+  STUB_FAIL_RESTORE_SEARCH_LIST=1           fail only the call that restores the original keychain search list
 """
 
 import json
@@ -27,12 +30,9 @@ SYNTHETIC_IDENTITY_NAME = "Apple Development: Synthetic Person (SYNTHETIC1)"
 def record_call(tool, arguments):
     entry = {"tool": tool, "argv": arguments}
     if tool == "xcodebuild" and "-exportArchive" in arguments:
-        profile_directories = [
-            Path(os.environ["HOME"]) / "Library" / "MobileDevice" / "Provisioning Profiles",
-            Path(os.environ["HOME"]) / "Library" / "Developer" / "Xcode" / "UserData" / "Provisioning Profiles",
-        ]
+        home = Path(os.environ["HOME"])
         entry["installed_profiles_at_call"] = sorted(
-            path.name for directory in profile_directories if directory.is_dir() for path in directory.iterdir())
+            str(path.relative_to(home)) for path in (home / "Library").rglob("*.mobileprovision"))
     with open(STATE_DIR / "calls.jsonl", "a") as handle:
         handle.write(json.dumps(entry) + "\n")
 
@@ -67,8 +67,12 @@ def security(arguments):
         sys.stdout.write(Path(option_value(arguments, "-i")).read_text())
     elif command == "list-keychains":
         if "-s" in arguments:
+            restored_list = arguments[arguments.index("-s") + 1:]
+            if os.environ.get("STUB_FAIL_RESTORE_SEARCH_LIST") == "1" and not any("ohand-signing-" in path for path in restored_list):
+                print("synthetic restore failure", file=sys.stderr)
+                sys.exit(1)
             (STATE_DIR / "search-list.json").write_text(json.dumps(arguments[arguments.index("-s") + 1:]))
-        else:
+        elif os.environ.get("STUB_EMPTY_KEYCHAIN_LIST") != "1":
             for path in keychain_search_list():
                 print(f'    "{path}"')
     elif command == "create-keychain":
@@ -127,6 +131,8 @@ def main():
     record_call(tool, arguments)
     if os.environ.get("STUB_ECHO_ARGS") == "1":
         print("stub saw: " + " ".join(arguments), file=sys.stderr)
+    if os.environ.get("STUB_LEAK_TEXT"):
+        print(os.environ["STUB_LEAK_TEXT"], file=sys.stderr)
     if configured("STUB_HANG", tool, arguments):
         (STATE_DIR / "hanging").write_text("hanging")
         time.sleep(120)

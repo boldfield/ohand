@@ -20,7 +20,9 @@ Signing at export keeps each bundle identifier's profile separate. Passing a pro
 
 ## Prerequisites
 
-Only the maintainer can provide these; see [the external prerequisites](../features/m1-external-prerequisites.md#signed-build-evidence-for-p08b) for the account, Xcode, device and profile steps. In short: the Xcode version pinned in `ios/project.yml` selected with `xcode-select`, an Apple Development identity, a Development profile that covers the bundle identifier and lists the iPhone, Developer Mode enabled on the iPhone, and the iPhone attached. XcodeGen (or `mint`) at the pinned version is needed because the tool runs `ios/scripts/generate.sh`.
+Only the maintainer can provide these; see [the external prerequisites](../features/m1-external-prerequisites.md#signed-build-evidence-for-p08b) for the account, Xcode, device and profile steps. In short: the Xcode version pinned in `ios/project.yml` selected with `xcode-select`, an Apple Development identity, a **manually managed** Development profile that covers the bundle identifier and lists the iPhone, Developer Mode enabled on the iPhone, and the iPhone attached. XcodeGen (or `mint`) at the pinned version is needed because the tool runs `ios/scripts/generate.sh`.
+
+The export signs manually, and `xcodebuild` is expected to reject an Xcode-managed profile (the "iOS Team Provisioning Profile" that Xcode's automatic signing creates) under manual signing. The tool therefore refuses a profile with `IsXcodeManaged` set, with exit status `2`. Create the profile in the Apple Developer portal instead: a Development profile for the probe's bundle identifier (an explicit App ID, or a wildcard that covers it), the Apple Development certificate, and the iPhone. Download it and point `OHAND_SIGNING_PROFILE_PATH` at it. This replaces the automatic-signing profile source in step 3 of the external prerequisites document for the profile file only; registering the device with the team is still needed.
 
 Command Line Tools alone cannot sign or reach a device.
 
@@ -50,15 +52,15 @@ Export these in the same shell step that runs the tool. Do not pass them on a co
    ```
 
    Without `--install` it builds and exports only. With `--install` it requires `OHAND_DEVICE_ID` and exits non-zero without touching anything when that is missing.
-4. Read the exit status: `0` success; `1` a build, signing or install stage failed (or cleanup could not remove the keychain); `2` an input was missing or unusable, with the variable named in the message. A failed `devicectl install` is exit `1`.
-5. The tool prints the name of the sanitized evidence record it wrote. By default that is `docs/validation/evidence/apple-signing/apple-signing-<UTC timestamp>-<run id>.json`, anchored to the repository root regardless of the caller's working directory (override with `--evidence-dir`). A failed run also writes a record with `"status": "failed"` and the failed stage; only a record with `"status": "succeeded"` and `install.succeeded` true counts as an install.
+4. Read the exit status: `0` success; `1` a build, signing or install stage failed, or cleanup could not restore the keychain search list or remove the temporary keychain, installed profile or working directory; `2` an input was missing or unusable, with the variable named in the message. A failed `devicectl install` is exit `1`.
+5. The tool prints the name of the sanitized evidence record it wrote. By default that is `docs/validation/evidence/apple-signing/apple-signing-<UTC timestamp>-<run id>.json`, anchored to the repository root regardless of the caller's working directory (override with `--evidence-dir`). A failed run also writes a record with `"status": "failed"` and `failed_stage` naming where it stopped (`cleanup` when only the cleanup after an otherwise successful run failed; the original stage is kept when cleanup fails after another failure); only a record with `"status": "succeeded"` and `install.succeeded` true counts as an install.
 6. Commit the sanitized record and follow the P08b steps in the external prerequisites document. Do not commit anything from the private evidence directory.
 
 ## What the tool does
 
 - Resolves the profile with `security cms -D -i`, parses the result in memory, and takes name, UUID, team and expiry from it. The profile contents are never logged. It refuses a profile that is expired, lists no devices, provisions all devices, is not a Development profile (`get-task-allow`), or does not cover the probe's bundle identifier.
-- With a `.p12`: creates a keychain with a random per-run password under a private temporary directory, imports the identity, runs `set-key-partition-list` so `codesign` can use the key without a prompt, puts the keychain first in the user search list, and requires exactly one `Apple Development` identity in it. A `.p12` that provides only another identity class (for example Apple Distribution) is refused.
-- Installs the profile under its UUID in the Xcode profile directory for the run, then removes it afterwards unless that UUID was already installed.
+- With a `.p12`: creates a keychain with a random per-run password under a private temporary directory, imports the identity, runs `set-key-partition-list` so `codesign` can use the key without a prompt, puts the keychain first in the user search list (refusing, before changing anything, if the current list cannot be read, because it could then not be restored), and requires exactly one `Apple Development` identity in it. A `.p12` that provides only another identity class (for example Apple Distribution) is refused.
+- Installs the profile under its UUID in `~/Library/Developer/Xcode/UserData/Provisioning Profiles` (created if missing; the location Xcode 16 and later read) for the run, then removes it afterwards unless that UUID was already installed.
 - Archives unsigned, exports with the options above, checks the exported `.ipa` holds one signed `.app`, and installs that `.app` with `xcrun devicectl device install app`.
 - Cleans up on every exit it can handle: success, a failing stage, bad input after setup, and `SIGTERM`, `SIGHUP` or `SIGINT`. It restores the original keychain search list, deletes the temporary keychain (and removes the file itself if `delete-keychain` fails), removes the installed profile and the working directory, and exits non-zero if the keychain could not be removed. `SIGKILL` or power loss cannot be handled; if that happens, look for `ohand-signing-*` directories under the temporary directory, delete the keychain inside with `security delete-keychain`, and check `security list-keychains -d user`.
 
@@ -66,7 +68,7 @@ The `.p12` password and the temporary keychain password are passed to `security`
 
 ## Output handling
 
-- Stdout and stderr carry fixed messages only. Output of `security`, `xcodebuild` and `devicectl` is written to `run.log` in the private evidence directory (mode `0600` in a `0700` directory), with the passwords, device identifier, team identifier and profile name/UUID replaced by labelled placeholders. The log may still include other text those tools print, such as the certificate's common name, so keep it local and out of Git.
+- Stdout and stderr carry fixed messages only. Output of `security`, `xcodebuild` and `devicectl` is written to `run.log` in the private evidence directory (mode `0600` in a `0700` directory), with the passwords, device identifier, the hardware identifiers listed in the profile, team identifier and profile name/UUID replaced by labelled placeholders. The log may still include other text those tools print, such as the certificate's common name, so keep it local and out of Git.
 - The sanitized record has fixed fields only: schema, status, failed stage, collection time, build revision and whether the tree was clean, a build identifier (`<revision prefix>-<run id>`), scheme and bundle identifier, route and identity class, Xcode version, the profile's expiry date, the device label, whether install was requested/performed/succeeded, and the run id naming the private log. It carries no team identifier, certificate detail, raw device identifier, profile content, or any hash of them. The tool refuses to write the record if a registered sensitive value would appear in it.
 - The device label is not derived from the device identifier. It identifies the device only to the maintainer, who chose it.
 
@@ -79,7 +81,9 @@ The `.p12` password and the temporary keychain password are passed to `security`
 These could not be tested here and are expected to be corrected by the first real run if wrong:
 
 - `xcodebuild -exportArchive` accepts an unsigned archive with `method` `debugging` and the manual options above under the pinned Xcode.
-- A profile placed in `~/Library/Developer/Xcode/UserData/Provisioning Profiles` (when that directory exists) or `~/Library/MobileDevice/Provisioning Profiles` is found by name-independent UUID lookup during export.
+- A profile placed in `~/Library/Developer/Xcode/UserData/Provisioning Profiles` is found by name-independent UUID lookup during export, including on a Mac where Xcode has not yet stored a profile.
+- A manually created Development profile satisfies the manual export options, and an Xcode-managed profile really is rejected (which is why the tool refuses it up front).
+- `security list-keychains -d user` prints each keychain as a quoted path on its own line, which the tool parses to restore the search list.
 - `devicectl device install app` accepts the extracted `.app` and the identifier format of `OHAND_DEVICE_ID`.
 
 ## Evidence and validity

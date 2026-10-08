@@ -16,6 +16,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import sign_probe
 
@@ -31,6 +32,8 @@ SYNTHETIC_TEAM = "SYNTHTEAM9"
 SYNTHETIC_PROFILE_UUID = "11111111-2222-3333-4444-555555555555"
 SYNTHETIC_PROFILE_NAME = "Synthetic Development Profile Name"
 SYNTHETIC_DEVICE_ID = "SYNTHETIC-DEVICE-ID-0001"
+SYNTHETIC_HARDWARE_UDIDS = ["synthetic-udid-a", "synthetic-udid-b"]
+USER_DATA_PROFILE_DIRECTORY = "Library/Developer/Xcode/UserData/Provisioning Profiles"
 SYNTHETIC_P12_PASSWORD = "synthetic-p12-password"
 PROFILE_CONTENT_SENTINEL = "PROFILE-CONTENT-SENTINEL-5150"
 PROFILE_FILE_STEM = "downloaded-profile-file-name"
@@ -49,7 +52,7 @@ def profile_plist(**overrides):
         "UUID": SYNTHETIC_PROFILE_UUID,
         "TeamIdentifier": [SYNTHETIC_TEAM],
         "ExpirationDate": PROFILE_EXPIRY,
-        "ProvisionedDevices": ["synthetic-udid-a", "synthetic-udid-b"],
+        "ProvisionedDevices": list(SYNTHETIC_HARDWARE_UDIDS),
         "Entitlements": {"application-identifier": f"{SYNTHETIC_TEAM}.{BUNDLE_IDENTIFIER}", "get-task-allow": True},
         "Sentinel": PROFILE_CONTENT_SENTINEL,
     }
@@ -205,6 +208,7 @@ class InputValidationTests(SigningToolTestCase):
             "profile has expired": {"ExpirationDate": datetime.datetime(2001, 1, 1)},
             "lists no devices": {"ProvisionedDevices": []},
             "enterprise profile": {"ProvisionsAllDevices": True},
+            "Xcode managed": {"IsXcodeManaged": True, "Name": "iOS Team Provisioning Profile: *"},
             "not a Development profile": {"Entitlements": {
                 "application-identifier": f"{SYNTHETIC_TEAM}.{BUNDLE_IDENTIFIER}", "get-task-allow": False}},
             "does not cover the probe's bundle identifier": {"Entitlements": wrong_application_identifier},
@@ -299,8 +303,18 @@ class SigningRouteTests(SigningToolTestCase):
     def test_profile_is_installed_under_its_uuid_during_export_only(self):
         self.assertEqual(self.sign().returncode, 0)
         export_call = self.calls_of("xcodebuild", "-exportArchive")[0]
-        self.assertEqual(export_call["installed_profiles_at_call"], [f"{SYNTHETIC_PROFILE_UUID}.mobileprovision"])
+        self.assertEqual(export_call["installed_profiles_at_call"],
+                         [f"{USER_DATA_PROFILE_DIRECTORY}/{SYNTHETIC_PROFILE_UUID}.mobileprovision"])
         self.assertEqual(self.installed_profile_files(), [])
+
+    def test_profile_goes_to_the_pinned_xcode_directory_even_when_the_legacy_directory_exists(self):
+        legacy = self.home / "Library" / "MobileDevice" / "Provisioning Profiles"
+        legacy.mkdir(parents=True)
+        self.assertEqual(self.sign().returncode, 0)
+        export_call = self.calls_of("xcodebuild", "-exportArchive")[0]
+        self.assertEqual(export_call["installed_profiles_at_call"],
+                         [f"{USER_DATA_PROFILE_DIRECTORY}/{SYNTHETIC_PROFILE_UUID}.mobileprovision"])
+        self.assertEqual(list(legacy.iterdir()), [])
 
     def test_device_install_targets_the_device_and_a_signed_app_bundle(self):
         self.assertEqual(self.sign("--install").returncode, 0)
@@ -395,6 +409,98 @@ class FailureAndCleanupTests(SigningToolTestCase):
                 self.assertFalse(evidence["install"]["succeeded"])
                 self.assertEqual(evidence["install"]["performed"], stage == "install")
 
+    def test_unreadable_keychain_search_list_is_refused_before_it_is_changed(self):
+        result = self.sign("--install", STUB_EMPTY_KEYCHAIN_LIST="1")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("could not read the user keychain search list", result.stderr)
+        self.assertEqual(self.calls_of("security", "create-keychain"), [])
+        self.assertEqual([call for call in self.calls_of("security", "list-keychains") if "-s" in call["argv"]], [])
+        self.assertEqual(self.calls_of("xcodebuild", "archive"), [])
+        self.assertFalse((self.state / "search-list.json").exists())
+        self.assertEqual(self.installed_profile_files(), [])
+
+    def test_failure_to_restore_the_search_list_fails_the_run_at_the_cleanup_stage(self):
+        result = self.sign("--install", STUB_FAIL_RESTORE_SEARCH_LIST="1")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("could not restore the keychain search list", result.stderr)
+        self.assertNotIn("signed build complete", result.stdout)
+        created = self.created_keychain_paths()
+        self.assertEqual(len(created), 1)
+        self.assertFalse(created[0].exists())
+        self.assertEqual(self.installed_profile_files(), [])
+        evidence = self.only_evidence()
+        self.assertEqual(set(evidence), EVIDENCE_KEYS)
+        self.assertEqual((evidence["status"], evidence["failed_stage"]), ("failed", "cleanup"))
+        self.assertTrue(evidence["install"]["succeeded"])
+
+    def test_failed_stage_is_kept_when_cleanup_also_fails(self):
+        result = self.sign("--install", STUB_FAIL="xcodebuild:archive", STUB_FAIL_RESTORE_SEARCH_LIST="1")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("archive failed", result.stderr)
+        self.assertIn("could not restore the keychain search list", result.stderr)
+        self.assertEqual(self.only_evidence()["failed_stage"], "archive")
+
+    def test_failed_delete_keychain_still_removes_the_temporary_keychain_file(self):
+        result = self.sign("--install", STUB_FAIL="security:delete-keychain")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        created = self.created_keychain_paths()
+        self.assertEqual(len(created), 1)
+        self.assertFalse(created[0].exists())
+        self.assertEqual(self.only_evidence()["status"], "succeeded")
+
+    def run_in_process(self, **environment_overrides):
+        run = sign_probe.SigningRun("BridgeProbe", True, self.evidence, self.environment(**environment_overrides))
+        saved_handlers = {number: signal.getsignal(number) for number in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+        self.addCleanup(lambda: [signal.signal(number, handler) for number, handler in saved_handlers.items()])
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}), mock.patch("sys.stderr") as stderr, mock.patch("sys.stdout"):
+            exit_code = sign_probe.execute(run)
+        printed = "".join(call.args[0] for call in stderr.write.call_args_list)
+        return exit_code, printed
+
+    def assert_failed_at_cleanup(self, exit_code, printed, message):
+        self.assertEqual(exit_code, 1)
+        self.assertIn(message, printed)
+        evidence = self.only_evidence()
+        self.assertEqual(set(evidence), EVIDENCE_KEYS)
+        self.assertEqual((evidence["status"], evidence["failed_stage"]), ("failed", "cleanup"))
+
+    def test_unremovable_temporary_keychain_fails_the_run_at_the_cleanup_stage(self):
+        real_unlink = Path.unlink
+
+        def refuse_keychain_unlink(path, *arguments, **keywords):
+            if path.name.endswith(".keychain-db"):
+                raise PermissionError("synthetic refusal")
+            return real_unlink(path, *arguments, **keywords)
+
+        with mock.patch.object(Path, "unlink", refuse_keychain_unlink):
+            exit_code, printed = self.run_in_process(STUB_FAIL="security:delete-keychain")
+        self.assert_failed_at_cleanup(exit_code, printed, "temporary keychain could not be removed")
+
+    def test_unremovable_installed_profile_fails_the_run_at_the_cleanup_stage(self):
+        real_unlink = Path.unlink
+
+        def refuse_profile_unlink(path, *arguments, **keywords):
+            if path.suffix == ".mobileprovision" and path.parent.name == "Provisioning Profiles":
+                raise PermissionError("synthetic refusal")
+            return real_unlink(path, *arguments, **keywords)
+
+        with mock.patch.object(Path, "unlink", refuse_profile_unlink):
+            exit_code, printed = self.run_in_process()
+        self.assert_failed_at_cleanup(exit_code, printed, "installed provisioning profile could not be removed")
+
+    def test_unremovable_working_directory_fails_the_run_at_the_cleanup_stage(self):
+        real_rmtree = sign_probe.shutil.rmtree
+        leftovers = []
+
+        def refuse_rmtree(path, *arguments, **keywords):
+            leftovers.append(path)
+
+        with mock.patch.object(sign_probe.shutil, "rmtree", refuse_rmtree):
+            exit_code, printed = self.run_in_process()
+        for leftover in leftovers:
+            real_rmtree(leftover, ignore_errors=True)
+        self.assert_failed_at_cleanup(exit_code, printed, "temporary working directory could not be removed")
+
     def test_unsigned_export_is_a_failure(self):
         result = self.sign("--install", STUB_UNSIGNED_EXPORT="1")
         self.assertEqual(result.returncode, 1)
@@ -426,10 +532,10 @@ class FailureAndCleanupTests(SigningToolTestCase):
 
 class RedactionAndEvidenceTests(SigningToolTestCase):
     SENSITIVE_VALUES = (SYNTHETIC_TEAM, SYNTHETIC_PROFILE_UUID, SYNTHETIC_PROFILE_NAME, SYNTHETIC_DEVICE_ID,
-                        SYNTHETIC_P12_PASSWORD, PROFILE_CONTENT_SENTINEL, "synthetic-udid-a")
+                        SYNTHETIC_P12_PASSWORD, PROFILE_CONTENT_SENTINEL, *SYNTHETIC_HARDWARE_UDIDS)
 
     def test_sensitive_values_never_reach_stdout_stderr_logs_or_evidence(self):
-        result = self.sign("--install", STUB_ECHO_ARGS="1")
+        result = self.sign("--install", STUB_ECHO_ARGS="1", STUB_LEAK_TEXT="stub error naming " + " and ".join(SYNTHETIC_HARDWARE_UDIDS))
         self.assertEqual(result.returncode, 0, result.stderr)
         keychain_password = self.calls_of("security", "create-keychain")[0]["argv"][2]
         for surface in self.all_text_surfaces(result):
@@ -437,12 +543,12 @@ class RedactionAndEvidenceTests(SigningToolTestCase):
                 self.assertNotIn(sensitive, surface)
 
     def test_private_log_keeps_labelled_placeholders_so_it_is_still_debuggable(self):
-        result = self.sign("--install", STUB_ECHO_ARGS="1")
+        result = self.sign("--install", STUB_ECHO_ARGS="1", STUB_LEAK_TEXT=SYNTHETIC_HARDWARE_UDIDS[0])
         self.assertEqual(result.returncode, 0, result.stderr)
         log_files = list(self.private.glob("*/run.log"))
         self.assertEqual(len(log_files), 1)
         log = log_files[0].read_text()
-        for placeholder in ("<certificate-password>", "<keychain-password>", "<device-id>"):
+        for placeholder in ("<certificate-password>", "<keychain-password>", "<device-id>", "<device-udid>"):
             self.assertIn(placeholder, log)
         self.assertEqual(log_files[0].stat().st_mode & 0o777, 0o600)
         self.assertEqual(log_files[0].parent.stat().st_mode & 0o777, 0o700)
