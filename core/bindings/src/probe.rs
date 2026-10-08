@@ -281,9 +281,9 @@ pub fn get_capture_json(
     serde_json::to_vec(&CaptureWire::from(capture)).map_err(|_| Failure::INTERNAL)
 }
 
-/// Module-local export test: exported from probe module to verify crate-wide discovery.
-/// This function is used only to test that the bindings generator discovers exports
-/// from modules other than the central lib.rs. It has no runtime purpose.
+/// Test marker: verifies that module-local exports in modules declared in lib.rs
+/// are discovered by cbindgen and included in the generated header.
+/// Removed once real production exports from later-owned modules appear in the ABI.
 #[no_mangle]
 pub extern "C" fn ohand_probe_module_export_test_marker() -> u32 {
     42
