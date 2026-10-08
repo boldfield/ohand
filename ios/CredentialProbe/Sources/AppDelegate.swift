@@ -185,6 +185,7 @@ class CredentialProbeViewController: UIViewController {
     private let scrollView = UIScrollView()
     private let contentView = UIView()
     private var resultLabels: [UILabel] = []
+    private var statusLabel: UILabel?
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -192,7 +193,7 @@ class CredentialProbeViewController: UIViewController {
 
         setupScrollView()
         setupUI()
-        runTests()
+        displayStoredStatus()
     }
 
     private func setupScrollView() {
@@ -253,6 +254,13 @@ class CredentialProbeViewController: UIViewController {
             resultLabels.append(resultLabel)
         }
 
+        let statusLbl = UILabel()
+        statusLbl.font = UIFont.systemFont(ofSize: 11, weight: .regular)
+        statusLbl.numberOfLines = 0
+        statusLbl.textColor = .tertiaryLabel
+        container.addArrangedSubview(statusLbl)
+        self.statusLabel = statusLbl
+
         let noteLabel = UILabel()
         noteLabel.text = "Note: Synthetic credentials only. Lock/unlock and relaunch tests require manual verification on physical device."
         noteLabel.font = UIFont.systemFont(ofSize: 12, weight: .light)
@@ -261,10 +269,15 @@ class CredentialProbeViewController: UIViewController {
         noteLabel.textColor = .tertiaryLabel
         container.addArrangedSubview(noteLabel)
 
-        let refreshButton = UIButton(type: .system)
-        refreshButton.setTitle("Refresh Tests", for: .normal)
-        refreshButton.addTarget(self, action: #selector(runTests), for: .touchUpInside)
-        container.addArrangedSubview(refreshButton)
+        let storeButton = UIButton(type: .system)
+        storeButton.setTitle("Store All Credentials", for: .normal)
+        storeButton.addTarget(self, action: #selector(storeAllCredentials), for: .touchUpInside)
+        container.addArrangedSubview(storeButton)
+
+        let retrieveButton = UIButton(type: .system)
+        retrieveButton.setTitle("Retrieve & Check", for: .normal)
+        retrieveButton.addTarget(self, action: #selector(retrieveAndCheck), for: .touchUpInside)
+        container.addArrangedSubview(retrieveButton)
 
         let clearButton = UIButton(type: .system)
         clearButton.setTitle("Clear Test Credentials", for: .normal)
@@ -281,22 +294,77 @@ class CredentialProbeViewController: UIViewController {
     }
 
     @objc
-    private func runTests() {
-        let results = KeychainTester.runAllTests()
-        for (index, result) in results.enumerated() {
+    private func storeAllCredentials() {
+        let accessibilityClasses: [KeychainTester.AccessibilityClass] = [
+            .whenUnlocked,
+            .afterFirstUnlock,
+            .afterFirstUnlockThisDeviceOnly,
+            .whenUnlockedThisDeviceOnly,
+            .whenPasscodeSetThisDeviceOnly,
+        ]
+
+        let dateFormatter = DateFormatter()
+        dateFormatter.timeStyle = .medium
+        let timestamp = dateFormatter.string(from: Date())
+
+        for (index, accessClass) in accessibilityClasses.enumerated() {
+            let syntheticValue = "synthetic-credential-\(accessClass.displayName)"
+            let result = KeychainTester.storeCredential(value: syntheticValue, accessibility: accessClass)
             if index < resultLabels.count {
-                resultLabels[index].text = result.summary + "\n\(result.timestamp)"
-                resultLabels[index].textColor = result.retrieved ? .systemGreen : .systemRed
+                let statusStr = result.status != errSecSuccess ? " (status: \(result.status))" : ""
+                let text = result.success ? "✓ Stored" : "✗ Failed to store\(statusStr)"
+                resultLabels[index].text = "\(accessClass.displayName): \(text)\n\(timestamp)"
+                resultLabels[index].textColor = result.success ? .systemGreen : .systemRed
             }
         }
+
+        statusLabel?.text = "Credentials stored. Tap 'Retrieve & Check' to test access."
+    }
+
+    @objc
+    private func retrieveAndCheck() {
+        let accessibilityClasses: [KeychainTester.AccessibilityClass] = [
+            .whenUnlocked,
+            .afterFirstUnlock,
+            .afterFirstUnlockThisDeviceOnly,
+            .whenUnlockedThisDeviceOnly,
+            .whenPasscodeSetThisDeviceOnly,
+        ]
+
+        let dateFormatter = DateFormatter()
+        dateFormatter.timeStyle = .medium
+        let timestamp = dateFormatter.string(from: Date())
+
+        for (index, accessClass) in accessibilityClasses.enumerated() {
+            let syntheticValue = "synthetic-credential-\(accessClass.displayName)"
+            let result = KeychainTester.retrieveCredential(accessibility: accessClass)
+            let retrieved = result.value == syntheticValue
+            if index < resultLabels.count {
+                let statusStr = result.status != errSecSuccess ? " (status: \(result.status))" : ""
+                let text = retrieved ? "✓ Retrieved" : "✗ Not found\(statusStr)"
+                resultLabels[index].text = "\(accessClass.displayName): \(text)\n\(timestamp)"
+                resultLabels[index].textColor = retrieved ? .systemGreen : .systemRed
+            }
+        }
+
+        statusLabel?.text = "Retrieve complete. Store again to reset tests."
     }
 
     @objc
     private func clearCredentials() {
         KeychainTester.deleteAllTestCredentials()
         for label in resultLabels {
-            label.text = "Cleared"
+            label.text = "(Cleared)"
             label.textColor = .tertiaryLabel
         }
+        statusLabel?.text = "All test credentials removed."
+    }
+
+    private func displayStoredStatus() {
+        for (index, label) in resultLabels.enumerated() {
+            label.text = "(Tap 'Store All Credentials' to begin)"
+            label.textColor = .tertiaryLabel
+        }
+        statusLabel?.text = "Ready. Tap buttons to store and retrieve credentials separately."
     }
 }

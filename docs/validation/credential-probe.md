@@ -19,7 +19,7 @@ The probe evaluates five standard iOS Keychain accessibility classes:
 **Accessibility**: Data is accessible only when the device is unlocked.
 
 - **Simulator behavior**: Accessible during normal app execution.
-- **Lock/relaunch on device**: Data is accessible immediately after unlock and becomes inaccessible while locked. Requires device to be unlocked; permissions do not require biometric/passcode on each access.
+- **Lock/relaunch on device**: Data is accessible immediately after unlock and becomes inaccessible while locked. Requires only that the device be unlocked once per session.
 - **Use case in M1**: Not suitable for credentials needed while device is locked.
 - **Test outcome**: Not run in simulator CI; physical lock behavior validated on device by P09.
 
@@ -46,7 +46,7 @@ The probe evaluates five standard iOS Keychain accessibility classes:
 **Accessibility**: Data is accessible only while the device is unlocked, bound to this device.
 
 - **Simulator behavior**: Accessible during normal execution.
-- **Lock/relaunch on device**: Becomes inaccessible while locked but is not cleared from storage. Accessible again after unlock. Not transferred via backup.
+- **Lock/relaunch on device**: Becomes inaccessible (unreadable) while locked but is not deleted from storage. Accessible again after unlock. Not transferred via backup.
 - **Use case in M1**: High security for temporary session data or recently entered credentials.
 - **Test outcome**: Not run in simulator CI; lock-mediated access validated on device by P09.
 
@@ -55,8 +55,8 @@ The probe evaluates five standard iOS Keychain accessibility classes:
 **Accessibility**: Accessible only if the device has a passcode set, and only while unlocked.
 
 - **Simulator behavior**: Accessible (no passcode requirement enforced).
-- **Lock/relaunch on device**: Requires both a set passcode and device unlock. Becomes inaccessible if passcode is removed.
-- **Use case in M1**: Credentials that require strong device protection.
+- **Lock/relaunch on device**: Requires both a set passcode and device unlock. Items are deleted (not merely inaccessible) if the passcode is removed; changing the passcode does not affect accessibility.
+- **Use case in M1**: Credentials that require strong device protection and are tied to the device's security configuration.
 - **Test outcome**: Not run in simulator CI; passcode requirement tested on device by P09.
 
 ## Implementation Details
@@ -81,9 +81,10 @@ No real API keys, passwords, or sensitive data are used. Test credentials are ea
 
 The probe provides:
 
-1. **Refresh Tests**: Attempts to store and retrieve each synthetic credential, displaying immediate access results with error status codes (e.g., `-25308` for `errSecInteractionNotAllowed` indicating a locked device).
-2. **Clear Test Credentials**: Removes all probe test credentials from the Keychain, leaving production data untouched. Credentials persist in Keychain until explicitly cleared.
-3. **Status Display**: Shows timestamp of last test run and accessibility class results. On device, lock-related access denials are shown with their OSStatus code for diagnostic purposes.
+1. **Store All Credentials**: Stores synthetic test credentials for each accessibility class. Credentials persist until explicitly cleared, allowing separate retrieval tests.
+2. **Retrieve & Check**: Attempts to retrieve previously stored credentials without modifying them, displaying immediate access results with error status codes (e.g., `-25308` for `errSecInteractionNotAllowed` indicating a locked device).
+3. **Clear Test Credentials**: Removes all probe test credentials from the Keychain, leaving production data untouched.
+4. **Status Display**: Shows timestamp of each operation and accessibility class results. On device, lock-related access denials are shown with their OSStatus code for diagnostic purposes.
 
 ## Lock/Relaunch Tests for P09
 
@@ -155,7 +156,7 @@ Physical device testing must cover:
 - **Simulator**: All accessibility classes appear accessible (no enforced locking).
 - **Device**: Lock state, reboot, and passcode requirements are enforced and vary by class.
 - **Backup/Restore**: `...ThisDeviceOnly` classes do not transfer; others may be restored (unless excluded via backup API).
-- **Passcode**: Removal or change invalidates `WhenPasscodeSetThisDeviceOnly` credentials.
+- **Passcode**: Removal of a passcode deletes `WhenPasscodeSetThisDeviceOnly` credentials permanently; changing the passcode does not affect accessibility.
 
 ## Probe Build and Execution
 
@@ -185,18 +186,20 @@ xcodebuild build \
 
 ```bash
 cd ios
-xcodebuild clean -scheme CredentialProbe
+xcodebuild clean \
+  -project OhAnd.xcodeproj \
+  -scheme CredentialProbe
 ```
 
 ## Simulator Build and Results
 
-The CI build (`ios/scripts/build-simulator.sh CredentialProbe`) verifies that:
+The `make ios-credential-probe` target (which invokes `ios/scripts/build-simulator.sh CredentialProbe`) compiles CredentialProbe for simulator testing. The macOS CI workflow includes this build step and launches the probe on the simulator to verify:
 
 1. The CredentialProbe target compiles without production schema/bridge dependencies.
-2. The probe starts on the simulator and returns OSStatus codes for failed operations.
-3. All five accessibility classes can be exercised through the UI (with all returning accessible state on simulator, as expected).
+2. The probe starts on the simulator and returns OSStatus codes for access attempts.
+3. UI controls (Store, Retrieve, Clear) are functional.
 
-**Important**: Simulator results show theoretical accessibility only. The simulator does not enforce lock state, so all classes appear accessible even though `WhenUnlocked`, `WhenUnlockedThisDeviceOnly` and `WhenPasscodeSetThisDeviceOnly` would be inaccessible on a real locked device.
+All five accessibility classes appear accessible in the simulator because the simulator does not enforce device lock state. Testing actual lock behavior (where `WhenUnlocked`, `WhenUnlockedThisDeviceOnly`, and `WhenPasscodeSetThisDeviceOnly` become inaccessible or require device unlock) is deferred to P09 physical device testing.
 
 ## Results Recording for P09
 
@@ -213,8 +216,8 @@ P09 must record actual device behavior using the lock/relaunch procedures in thi
 ## Privacy and Hygiene
 
 - **No real credentials in public evidence**: All test data is synthetic and easily removable.
-- **Probe credential cleanup**: Credentials are removed after each test session or via the "Clear" button.
-- **No default credentials on fresh install**: The probe creates test data only when run.
+- **Probe credential cleanup**: Credentials persist in the Keychain until explicitly cleared via the "Clear Test Credentials" button. Manual deletion is required for cleanup.
+- **No default credentials on fresh install**: The probe creates test data only when "Store All Credentials" is tapped.
 - **Device-local testing**: All tests execute on the local device; no credentials leave the device.
 
 ## See Also
@@ -225,5 +228,4 @@ P09 must record actual device behavior using the lock/relaunch procedures in thi
 ## Related Tasks
 
 - **P05** — Probe native notification scheduling
-- **P01** — Prove the Rust-to-Swift boundary
 - **P09** — Collect actual-device feasibility evidence (uses this probe's lock/relaunch procedure)
