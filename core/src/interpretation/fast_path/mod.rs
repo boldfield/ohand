@@ -66,18 +66,17 @@
 //! Session-topic phrases are explicit offline commands that annotate an action or context with a bounded
 //! session topic. The recognizer accepts a small, closed grammar: action phrases paired with explicit
 //! session types. A topic must be one of the documented session types (therapy, counseling, coaching,
-//! supervision, 1:1, or "my next session"). Every offset is a Unicode scalar offset into the original
-//! text, so spans always select exactly the evidence they describe.
+//! supervision, 1:1). Every offset is a Unicode scalar offset into the original text, so spans always
+//! select exactly the evidence they describe.
 //!
 //! ```text
 //! session-phrase := prefix phrase [ suffix ]
 //! phrase         := verb-pattern session-topic
-//! verb-pattern   := "bring" "this" ("up" | <none>) "in" | "bring" "this" "in"
+//! verb-pattern   := "bring" "this" ("up" | <none>) "in"
 //!                | "discuss" "this" ("in" | "at")
 //!                | "mention" "this" ("in" | "at")
 //!                | "talk" "about" "this" ("in" | "at")
 //! session-topic  := "therapy" | "counseling" | "coaching" | "supervision" | "1:1"
-//!                | "my" "next" "session"
 //! prefix        := (filler | pictograph)* [ self-label ( "," | ":" | dash ) filler* ]
 //! suffix        := ( "please" | "thanks" | "," | "." | "!" )*
 //! ```
@@ -523,7 +522,7 @@ const SELF_LABELS: &[&[&str]] = &[
 const CONTENT_VERBS: &[&str] = &[
     "call", "phone", "text", "email", "buy", "get", "pick", "pay", "book", "check", "take",
     "bring", "return", "water", "feed", "walk", "clean", "wash", "pack", "send", "renew", "charge",
-    "refill", "order", "mail", "visit", "fix", "submit", "print", "read", "review", "ask", "discuss",
+    "refill", "order", "mail", "visit", "fix", "submit", "print", "read", "review", "ask",
 ];
 
 // Verb particles ("pick up", "take out", "call back"). They may follow the verb or end the content.
@@ -591,7 +590,6 @@ const CONTENT_NOUNS: &[&str] = &[
     "form",
     "appointment",
     "roof",
-    "therapy",
 ];
 
 const MAX_LEXICON_CONTENT_WORDS: usize = 6;
@@ -1251,6 +1249,11 @@ fn in_lexicon(token: &Token, vocabulary: &[&str]) -> bool {
 /// lexicon, and the content ends in a noun, pronoun or particle. Empty content is never a
 /// target.
 fn content_is_in_lexicon(content: &[Token]) -> bool {
+    // If content contains a session-topic phrase, allow it even if not in the reminder lexicon
+    if extract_session_topic_from_reminder_content(content).is_some() {
+        return true;
+    }
+
     let Some((verb, objects)) = content.split_first() else {
         return false;
     };
@@ -1354,6 +1357,37 @@ fn reminder_from(matched: &MatchedTime, time_context: &TimeContext) -> ReminderP
     }
 }
 
+fn extract_session_topic_from_reminder_content(content: &[Token]) -> Option<(String, SourceSpan)> {
+    // Look for session-topic verb patterns in the content
+    for start in 0..content.len() {
+        for verb_pattern in SESSION_TOPIC_VERBS {
+            let pattern_len = verb_pattern.len();
+            if let Some(window) = content.get(start..start + pattern_len) {
+                if window
+                    .iter()
+                    .zip(verb_pattern.iter())
+                    .all(|(token, &word)| token.is_word_equal_to(word))
+                {
+                    // Found a pattern, now look for the topic word
+                    if let Some(rest) = content.get(start + pattern_len..) {
+                        if let Some(topic_token) = rest.iter().find(|token| token.is_word()) {
+                            let topic = topic_token.lower.clone();
+                            if SESSION_TOPICS.contains(&topic.as_str()) {
+                                return Some((
+                                    topic,
+                                    SourceSpan::new(topic_token.start, topic_token.end),
+                                ));
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Recognize an explicit offline reminder command in `text`, the exact text identified by
 /// `text_basis`. See the module documentation for the grammar and the meaning of the outcomes.
 pub fn recognize_reminder(
@@ -1410,13 +1444,24 @@ pub fn recognize_reminder(
     // The lexicon check above guarantees a non-empty content; a reminder is only ever proposed
     // on an action with sourced target evidence.
     let (first, last) = (content.first()?, content.last()?);
-    Some(
-        provenance
-            .proposal()
-            .with_reminder_proposal(Some(reminder_from(&time, time_context)))
-            .with_item_type(Some(ItemType::Action))
-            .with_source_spans(Some(vec![SourceSpan::new(first.start, last.end)])),
-    )
+
+    // Extract session-topic from content if present
+    let session_topic = extract_session_topic_from_reminder_content(content);
+
+    let mut proposal = provenance
+        .proposal()
+        .with_reminder_proposal(Some(reminder_from(&time, time_context)))
+        .with_item_type(Some(ItemType::Action))
+        .with_source_spans(Some(vec![SourceSpan::new(first.start, last.end)]));
+
+    if let Some((topic, span)) = session_topic {
+        proposal = proposal.with_session_topic_proposal(Some(SessionTopicProposal {
+            topic,
+            source_span: Some(span),
+        }));
+    }
+
+    Some(proposal)
 }
 
 // Session-topic phrase recognition:

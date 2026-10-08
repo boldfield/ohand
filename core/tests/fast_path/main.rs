@@ -1425,3 +1425,112 @@ fn composed_recognizer_topic_only() {
         "should not have reminder for topic-only input"
     );
 }
+
+#[test]
+fn reminder_with_session_topic_in_content() {
+    // Test that remind recognizer extracts session-topic from content
+    let text = "Remind me tomorrow to bring this up in therapy";
+    let proposal = recognize_reminder(
+        text,
+        ITEM_ID,
+        CAPTURE_ID,
+        0,
+        TextBasis::Original { item_revision: 0 },
+        REQUEST_VERSION,
+        &context(),
+    )
+    .expect("should recognize reminder with topic in content");
+
+    // Should have both reminder and topic facets
+    assert!(
+        proposal.reminder_proposal.is_some(),
+        "should have reminder facet"
+    );
+    assert!(
+        proposal.session_topic_proposal.is_some(),
+        "should have topic facet"
+    );
+
+    // Verify topic is correct
+    let topic = proposal.session_topic_proposal.as_ref().unwrap();
+    assert_eq!(topic.topic, "therapy", "topic should be therapy");
+}
+
+#[test]
+fn composed_recognizer_mixed_reminder_and_topic() {
+    // Test the composed recognizer with mixed reminder and topic input.
+    let text = "Remind me tomorrow to bring this up in therapy";
+    let proposal = recognize_with_composed_topics(
+        text,
+        ITEM_ID,
+        CAPTURE_ID,
+        0,
+        TextBasis::Original { item_revision: 0 },
+        REQUEST_VERSION,
+        &context(),
+    )
+    .expect("should recognize mixed reminder/topic");
+
+    // Should have both reminder and topic facets
+    assert!(
+        proposal.reminder_proposal.is_some(),
+        "should have reminder facet"
+    );
+    assert!(
+        proposal.session_topic_proposal.is_some(),
+        "should have topic facet"
+    );
+
+    // Verify topic is correct
+    let topic = proposal.session_topic_proposal.as_ref().unwrap();
+    assert_eq!(topic.topic, "therapy", "topic should be therapy");
+
+    // Verify the topic span points to the word "therapy" in the original text
+    if let Some(span) = &topic.source_span {
+        assert_eq!(
+            &text[span.start..span.end],
+            "therapy",
+            "span should select 'therapy'"
+        );
+    } else {
+        panic!("topic should have a source span");
+    }
+}
+
+#[test]
+fn composed_recognizer_mixed_with_explicit_time() {
+    // Test with explicit datetime in reminder with session-topic.
+    let text = "Remind me 2025-10-20 14:30:00 to discuss this in supervision";
+    let proposal = recognize_with_composed_topics(
+        text,
+        ITEM_ID,
+        CAPTURE_ID,
+        0,
+        TextBasis::Original { item_revision: 0 },
+        REQUEST_VERSION,
+        &context(),
+    )
+    .expect("should recognize mixed reminder with explicit time");
+
+    // Should have both facets
+    let reminder = proposal
+        .reminder_proposal
+        .as_ref()
+        .expect("should have reminder");
+    assert_eq!(
+        reminder.quality,
+        TimeResolutionQuality::Explicit,
+        "time should be explicit"
+    );
+
+    let topic = proposal
+        .session_topic_proposal
+        .as_ref()
+        .expect("should have topic");
+    assert_eq!(topic.topic, "supervision", "topic should be supervision");
+    assert_eq!(
+        &text[topic.source_span.unwrap().start..topic.source_span.unwrap().end],
+        "supervision",
+        "topic span should select 'supervision'"
+    );
+}
