@@ -21,8 +21,19 @@ mkdir -p "${evidence_dir}"
 evidence_dir="$(cd "${evidence_dir}" && pwd)"
 console_log="${evidence_dir}/keychain-selftest-console.log"
 
+# The unsigned simulator build carries no application-identifier, so every Keychain call fails with
+# errSecMissingEntitlement (-34018). Re-sign a copy ad hoc with synthetic Keychain entitlements.
+signed_dir="$(mktemp -d)"
+trap 'rm -rf "${signed_dir}"' EXIT
+signed_app="${signed_dir}/$(basename "${app_path}")"
+cp -R "${app_path}" "${signed_app}"
+codesign --force --sign - \
+  --entitlements "$(dirname "$0")/credential-probe-simulator.entitlements" \
+  "${signed_app}"
+codesign -d --entitlements - "${signed_app}" 2>&1 | tee "${evidence_dir}/credentialprobe-entitlements.txt"
+
 xcrun simctl bootstatus "${udid}" -b
-xcrun simctl install "${udid}" "${app_path}"
+xcrun simctl install "${udid}" "${signed_app}"
 
 echo "=== Launching ${bundle_id} -runKeychainSelfTest ==="
 : > "${console_log}"
