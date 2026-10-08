@@ -20,7 +20,8 @@ use ohand_core::reminders::state::{
 use ohand_core::retrieval::index;
 use ohand_core::store::captures::save_capture;
 use ohand_core::store::events::{
-    save_event, save_event_in_tx, Correction, CorrectionKind, Event, EventPayload, EventType,
+    get_event, get_events_for_item, save_event, save_event_in_tx, Correction, CorrectionKind,
+    Event, EventPayload, EventType,
 };
 use ohand_core::store::schema::{Clock, Database};
 
@@ -538,6 +539,58 @@ fn deletion_erases_every_content_bearing_row() {
     // The same state is visible after a restart.
     db.reopen();
     assert_eq!(secret_hits(&db), 0);
+}
+
+#[test]
+fn event_history_stays_readable_after_deletion_without_exposing_content() {
+    let mut db = create_test_db();
+    create_test_capture(&mut db, "cap-history", SECRET, None);
+    create_test_item(&mut db, "item-history", "cap-history");
+    save_event(
+        &mut db,
+        &correction_event(
+            "evt-history",
+            "item-history",
+            0,
+            Some(SECRET),
+            "CORRECTED SECRET",
+        ),
+        0,
+    )
+    .unwrap();
+
+    mark_deletion_intent(&mut db, "item-history", 1, fixed_instant(5)).expect("deletion");
+
+    for _ in 0..2 {
+        let tx = db.transaction().unwrap();
+        let correction = get_event(&tx, "evt-history")
+            .expect("redacted correction event decodes")
+            .expect("correction event is retained as metadata");
+        assert_eq!(correction.event_type, EventType::Correction);
+        assert_eq!(
+            correction.payload,
+            EventPayload::Correction(Correction {
+                kind: CorrectionKind::Text,
+                old_value: None,
+                new_value: String::new(),
+            })
+        );
+
+        let history = get_events_for_item(&tx, "item-history").expect("history decodes");
+        let types: Vec<EventType> = history
+            .iter()
+            .map(|event| event.event_type.clone())
+            .collect();
+        assert_eq!(types, vec![EventType::Correction, EventType::Deletion]);
+        assert!(
+            !format!("{history:?}").contains(SECRET)
+                && !format!("{history:?}").contains("CORRECTED SECRET"),
+            "event reads must not expose removed content"
+        );
+        tx.commit().unwrap();
+        // The same holds after a restart.
+        db.reopen();
+    }
 }
 
 // ---------------------------------------------------------------------------

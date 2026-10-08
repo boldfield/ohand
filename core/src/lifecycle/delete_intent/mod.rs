@@ -356,7 +356,7 @@ pub fn deletion_progress(db: &mut Database, item_id: &str) -> Result<DeletionPro
 
 /// Mark a deletion work task as completed. Idempotent for an already-completed task; rejected
 /// for a terminally failed task. Completing `CancelNotifications` is refused while any reminder
-/// operation for the item is still pending or the cancel of the reminder's final generation
+/// operation for the item is still pending or a cancel of any of the reminder's generations
 /// has failed (see `unfinished_notification_operations`), and completing `RemoveAudio` releases
 /// the audio reference held on the tombstoned capture.
 pub fn mark_deletion_work_completed(
@@ -594,10 +594,12 @@ fn remove_readable_content_in_tx(tx: &Transaction<'_>, item_id: &str) -> Result<
         rusqlite::params![item_id],
     )?;
 
-    // Clear correction values and proposal content from events table
+    // Redact correction values in the events table. The event reader requires a non-null
+    // new value for correction events, so redact to an empty string (like capture text) and
+    // keep the non-content kind/revision metadata readable.
     tx.execute(
-        "UPDATE events SET correction_new_value = NULL, correction_old_value = NULL
-         WHERE item_id = ?",
+        "UPDATE events SET correction_new_value = '', correction_old_value = NULL
+         WHERE item_id = ? AND event_type = 'correction'",
         rusqlite::params![item_id],
     )?;
 
