@@ -24,6 +24,9 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 anyhow = "1.0"
 thiserror = "1.0"
 
+# Hashing
+sha2 = "0.10"
+
 # Testing
 tempfile = "3.0"
 
