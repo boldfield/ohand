@@ -54,18 +54,20 @@ impl HandleState {
 
     /// Invoke the registered callback if one exists and the handle is not cancelled.
     /// Returns true if callback was invoked, false if cancelled or no callback registered.
+    /// Holds the callback lock during both the cancellation check and invocation to prevent races.
     pub fn invoke_callback_if_active(
         &self,
         closure: *const std::ffi::c_void,
     ) -> Result<bool, &'static str> {
-        if self.is_cancelled() {
-            return Ok(false);
-        }
-
         let cb = self
             .callback
             .lock()
             .map_err(|_| "callback mutex poisoned")?;
+
+        if self.is_cancelled() {
+            return Ok(false);
+        }
+
         if let Some(callback) = *cb {
             callback(closure);
             Ok(true)
@@ -139,6 +141,26 @@ mod tests {
             (*ptr).cancel();
             let result = (*ptr).invoke_callback_if_active(std::ptr::null());
             assert_eq!(result, Ok(false));
+            let _ = Box::from_raw(ptr);
+        }
+    }
+
+    #[test]
+    fn test_repeated_callback_invocation() {
+        let state = Box::new(HandleState::new());
+        let ptr = Box::into_raw(state);
+
+        extern "C" fn test_callback(_closure: *const std::ffi::c_void) {}
+
+        unsafe {
+            (*ptr).register_callback(test_callback).unwrap();
+
+            let result1 = (*ptr).invoke_callback_if_active(std::ptr::null());
+            assert_eq!(result1, Ok(true));
+
+            let result2 = (*ptr).invoke_callback_if_active(std::ptr::null());
+            assert_eq!(result2, Ok(true));
+
             let _ = Box::from_raw(ptr);
         }
     }

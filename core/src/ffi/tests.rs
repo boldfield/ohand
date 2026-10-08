@@ -219,3 +219,103 @@ mod handle_single_ownership_tests {
         assert!(null_ptr.is_null());
     }
 }
+
+#[cfg(test)]
+mod exported_ffi_tests {
+    use crate::ffi;
+
+    #[test]
+    fn test_exported_create_and_destroy_handle() {
+        unsafe {
+            let handle = ffi::ohand_create_handle();
+            assert!(!handle.is_null());
+
+            ffi::ohand_destroy_handle(handle);
+        }
+    }
+
+    #[test]
+    fn test_exported_destroy_null_handle() {
+        unsafe {
+            ffi::ohand_destroy_handle(std::ptr::null_mut());
+        }
+    }
+
+    #[test]
+    fn test_exported_cancel_handle() {
+        unsafe {
+            let handle = ffi::ohand_create_handle();
+            let result = ffi::ohand_cancel_handle(handle);
+            assert_eq!(result, 0);
+
+            let is_cancelled = ffi::ohand_is_handle_cancelled(handle);
+            assert_eq!(is_cancelled, 1);
+
+            ffi::ohand_destroy_handle(handle);
+        }
+    }
+
+    #[test]
+    fn test_exported_invalid_handle_returns_error() {
+        unsafe {
+            let result = ffi::ohand_is_handle_cancelled(std::ptr::null_mut());
+            assert_eq!(result, -1);
+
+            let result = ffi::ohand_cancel_handle(std::ptr::null_mut());
+            assert_eq!(result, -1);
+        }
+    }
+
+    #[test]
+    fn test_exported_callback_registration() {
+        unsafe {
+            let handle = ffi::ohand_create_handle();
+
+            extern "C" fn test_callback(_: *const std::ffi::c_void) {}
+
+            let result = ffi::ohand_register_callback(handle, test_callback);
+            assert_eq!(result, 0);
+
+            ffi::ohand_destroy_handle(handle);
+        }
+    }
+
+    #[test]
+    fn test_exported_error_classification() {
+        unsafe {
+            let unauthorized = "unauthorized access\0";
+            let result =
+                ffi::ohand_classify_error(unauthorized.as_ptr() as *const std::ffi::c_char);
+            assert_eq!(result, 3); // Unauthorized
+
+            let cancelled = "operation cancelled\0";
+            let result = ffi::ohand_classify_error(cancelled.as_ptr() as *const std::ffi::c_char);
+            assert_eq!(result, 4); // Cancelled
+
+            let transient = "network timeout\0";
+            let result = ffi::ohand_classify_error(transient.as_ptr() as *const std::ffi::c_char);
+            assert_eq!(result, 1); // Transient
+
+            let permanent = "database error\0";
+            let result = ffi::ohand_classify_error(permanent.as_ptr() as *const std::ffi::c_char);
+            assert_eq!(result, 2); // Permanent
+        }
+    }
+
+    #[test]
+    fn test_exported_invoke_callback_not_invoked_when_cancelled() {
+        unsafe {
+            let handle = ffi::ohand_create_handle();
+
+            extern "C" fn test_callback(_: *const std::ffi::c_void) {}
+
+            let _ = ffi::ohand_register_callback(handle, test_callback);
+            let _ = ffi::ohand_cancel_handle(handle);
+
+            let result = ffi::ohand_invoke_callback(handle, std::ptr::null());
+            assert_eq!(result, 1); // Cancelled
+
+            ffi::ohand_destroy_handle(handle);
+        }
+    }
+}

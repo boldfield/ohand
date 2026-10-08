@@ -168,4 +168,85 @@ class CoreCallbackTests: XCTestCase {
 
         handles.removeAll()
     }
+
+    /// Test callback registration and invocation on main thread.
+    func testCallbackRegistration() {
+        let handle = OhAndCoreHandle()
+        let expectation = XCTestExpectation(description: "Callback invoked")
+        var callbackExecuted = false
+
+        let callback: CoreCallback = { _ in
+            callbackExecuted = true
+            expectation.fulfill()
+        }
+
+        let registered = handle.registerCallback(callback)
+        XCTAssertTrue(registered, "Callback registration should succeed")
+
+        let invokeResult = handle.invokeCallback()
+        XCTAssertEqual(invokeResult, 0, "Callback should be invoked (result 0)")
+
+        wait(for: [expectation], timeout: 1.0)
+        XCTAssertTrue(callbackExecuted, "Callback should have been executed")
+    }
+
+    /// Test that callbacks are not invoked after cancellation.
+    func testCallbackPreventedAfterCancellation() {
+        let handle = OhAndCoreHandle()
+        var callbackExecuted = false
+
+        let callback: CoreCallback = { _ in
+            callbackExecuted = true
+        }
+
+        let registered = handle.registerCallback(callback)
+        XCTAssertTrue(registered, "Callback registration should succeed")
+
+        handle.cancel()
+        XCTAssertTrue(handle.isCancelled() ?? false, "Handle should be cancelled")
+
+        let invokeResult = handle.invokeCallback()
+        XCTAssertEqual(invokeResult, 1, "Callback should not be invoked when cancelled (result 1)")
+        XCTAssertFalse(callbackExecuted, "Callback should not be executed after cancellation")
+    }
+
+    /// Test error classification.
+    func testErrorClassification() {
+        XCTAssertEqual(OhAndCoreHandle.classifyError("unauthorized access"), .unauthorized)
+        XCTAssertEqual(OhAndCoreHandle.classifyError("permission denied"), .unauthorized)
+        XCTAssertEqual(OhAndCoreHandle.classifyError("operation cancelled"), .cancelled)
+        XCTAssertEqual(OhAndCoreHandle.classifyError("network timeout"), .transient)
+        XCTAssertEqual(OhAndCoreHandle.classifyError("temporary failure"), .transient)
+        XCTAssertEqual(OhAndCoreHandle.classifyError("unsupported feature"), .unsupported)
+        XCTAssertEqual(OhAndCoreHandle.classifyError("database error"), .permanent)
+        XCTAssertEqual(OhAndCoreHandle.classifyError("unknown error"), .permanent)
+    }
+
+    /// Test callback delivery on background thread still delivers to core.
+    func testCallbackDeliveryThreadSafety() {
+        let handle = OhAndCoreHandle()
+        let expectation = XCTestExpectation(description: "Background thread callback")
+
+        let callback: CoreCallback = { _ in
+            expectation.fulfill()
+        }
+
+        let registered = handle.registerCallback(callback)
+        XCTAssertTrue(registered, "Callback registration should succeed")
+
+        DispatchQueue.global().async {
+            let invokeResult = handle.invokeCallback()
+            XCTAssertEqual(invokeResult, 0, "Callback should be invoked from background thread")
+        }
+
+        wait(for: [expectation], timeout: 1.0)
+    }
+
+    /// Test that invocation with no registered callback returns correct status.
+    func testCallbackInvocationWithoutRegistration() {
+        let handle = OhAndCoreHandle()
+
+        let invokeResult = handle.invokeCallback()
+        XCTAssertEqual(invokeResult, 2, "Should return 2 when no callback is registered")
+    }
 }
