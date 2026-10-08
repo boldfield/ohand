@@ -65,6 +65,8 @@ Targets include whole directories, so owners add files under their F01 paths wit
 | `<Name>Probe/` | the same-named probe application (whole directory except `Info.plist`) |
 | `CaptureProbe/Control/` | `CaptureProbeControl` control extension embedded in `CaptureProbe` (P02); excluded from the probe app itself |
 | `CaptureProbe/Shared/` | compiled into both `CaptureProbe` and `CaptureProbeControl`; holds the app-opening `ProbeOpenCaptureIntent` |
+| `CaptureProbe/Tests/` | `CaptureProbeTests` (P02), which also compiles `CaptureProbe/Shared/`; excluded from the probe app |
+| `CaptureProbe/UITests/` | `CaptureProbeUITests` (P02) UI test of the handoff, run by `scripts/smoke-capture-simulator.sh`; excluded from the probe app |
 
 `Capture/` is app-side code and may import `OhAndServices`; `Services/` cannot import `Capture/`. B02's composition root in `Services/Assembly/` therefore wires service dependencies, and U01 in `AppAssembly/` composes `Capture/` views with it.
 
@@ -74,5 +76,5 @@ Every target's usage strings live in its own `Info.plist`: the app has microphon
 
 - `OhAndApp`: production app. Production capture uses a foreground native surface: `Capture/` views are presented from the foreground app scene, and no background-launched recording is assumed.
 - `OhAndCaptureControl`: production system-control extension (`com.apple.widgetkit-extension`, bundle id `com.boldfield.ohand.app.capture-control`), embedded in `OhAndApp`. Its sources are `Capture/Entry/Control/` (C06); the button runs `OpenCaptureIntent`, an `OpenIntent` whose `target` is a `CaptureDestination` app enum (currently only `.capture`). It is defined in `Capture/Entry/Shared/` so it is a member of both the app and the extension, which Apple's control guidance requires for an action that launches the host app; the legacy `openAppWhenRun` mechanism is not used because it errors when run from an app extension. Whether the foreground handoff actually opens the app is unverified until C06/P02 test it on a device; no native build has been run here. Put any further intent shared between the app and control in a `Shared/` directory, not in `Control/`. It currently contains a minimal `ControlWidget` so the extension links.
-- `CaptureProbeControl`: the P02 probe's control extension (`com.boldfield.ohand.probes.capture.control`), embedded in `CaptureProbe`, sources in `CaptureProbe/Control/` plus the shared `ProbeOpenCaptureIntent` (`OpenIntent`) in `CaptureProbe/Shared/`. P02 may replace its contents freely; the handoff itself is unverified until P02 probes it.
+- `CaptureProbeControl`: the P02 probe's control extension (`com.boldfield.ohand.probes.capture.control`), embedded in `CaptureProbe`, sources in `CaptureProbe/Control/` plus the shared `ProbeOpenCaptureIntent` (`OpenIntent`) in `CaptureProbe/Shared/`. P02 added a per-handoff ingress ID, a shortcut URL scheme, a file-backed record store and simulator tests (see `docs/validation/capture-entry.md`); a real control activation is unverified until it is run on a device.
 - Probes: minimal apps each showing a foreground native screen for the capability named in the F01 ownership map.
