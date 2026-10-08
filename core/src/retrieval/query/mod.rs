@@ -228,14 +228,8 @@ fn filter_hits_in_db(
         where_clauses.push(format!("i.item_type IN ({})", type_placeholders));
     }
 
-    // Add date range filters if specified (compare as UTC).
-    // Use julianday() to preserve fractional seconds in the comparison.
-    if captured_after_utc.is_some() {
-        where_clauses.push("julianday(c.capture_instant) >= julianday(?)".to_string());
-    }
-    if captured_before_utc.is_some() {
-        where_clauses.push("julianday(c.capture_instant) <= julianday(?)".to_string());
-    }
+    // Note: Date range filtering is applied in Rust (below) to preserve sub-second precision.
+    // The SQL query does not apply date filters; we fetch capture_instant and filter in Rust.
 
     // Add session_topic filter if specified.
     if !filter.session_topics.is_empty() {
@@ -268,7 +262,7 @@ fn filter_hits_in_db(
 
     let mut stmt = conn.prepare(&sql)?;
 
-    // Build parameter list in order.
+    // Build parameter list in order (excluding date bounds - those are applied in Rust below).
     let mut params: Vec<&dyn rusqlite::ToSql> = Vec::new();
     for id in &item_ids {
         params.push(id);
@@ -276,25 +270,62 @@ fn filter_hits_in_db(
     for type_str in &filter.item_types {
         params.push(type_str);
     }
-    if let Some(after_utc) = &captured_after_utc {
-        params.push(after_utc);
-    }
-    if let Some(before_utc) = &captured_before_utc {
-        params.push(before_utc);
-    }
     for topic in &filter.session_topics {
         params.push(topic);
     }
 
-    let allowed_item_ids: std::collections::HashSet<String> = stmt
+    // Fetch items with their capture instants.
+    let sql_items: Vec<(String, String)> = stmt
         .query_map(rusqlite::params_from_iter(params), |row| {
-            row.get::<_, String>(0)
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(2)?))
         })?
-        .collect::<rusqlite::Result<Vec<_>>>()?
-        .into_iter()
-        .collect();
+        .collect::<rusqlite::Result<Vec<_>>>()?;
 
-    // Retain only hits that passed the database filters.
+    // Filter by date bounds in Rust to preserve sub-second precision.
+    let mut allowed_item_ids = std::collections::HashSet::new();
+    for (item_id, capture_instant) in sql_items {
+        // Parse the stored capture instant.
+        match DateTime::parse_from_rfc3339(&capture_instant) {
+            Ok(stored_dt) => {
+                let stored_utc = stored_dt.with_timezone(&Utc);
+                let mut include = true;
+
+                // Check captured_after bound.
+                if let Some(after_dt_str) = &captured_after_utc {
+                    if let Ok(after_dt_str_parsed) = DateTime::parse_from_rfc3339(after_dt_str) {
+                        let after_utc = after_dt_str_parsed.with_timezone(&Utc);
+                        if stored_utc < after_utc {
+                            include = false;
+                        }
+                    }
+                }
+
+                // Check captured_before bound.
+                if include {
+                    if let Some(before_dt_str) = &captured_before_utc {
+                        if let Ok(before_dt_str_parsed) =
+                            DateTime::parse_from_rfc3339(before_dt_str)
+                        {
+                            let before_utc = before_dt_str_parsed.with_timezone(&Utc);
+                            if stored_utc > before_utc {
+                                include = false;
+                            }
+                        }
+                    }
+                }
+
+                if include {
+                    allowed_item_ids.insert(item_id);
+                }
+            }
+            Err(_) => {
+                // If we can't parse the capture instant, exclude it.
+                // This matches the SQL datetime() behavior where invalid dates are dropped.
+            }
+        }
+    }
+
+    // Retain only hits that passed all filters.
     hits.retain(|hit| allowed_item_ids.contains(&hit.item_id));
 
     // Return the count AFTER all filters have been applied (before pagination).
@@ -303,11 +334,12 @@ fn filter_hits_in_db(
 
 /// Parse and normalize an RFC3339 datetime string to UTC.
 /// Returns an error if the string is not valid RFC3339.
+/// Preserves sub-second precision for accurate date filtering.
 fn parse_and_normalize_rfc3339(rfc3339_str: &str) -> Result<String> {
     let dt = DateTime::parse_from_rfc3339(rfc3339_str)
         .map_err(|e| anyhow!("Invalid RFC3339 datetime '{}': {}", rfc3339_str, e))?
         .with_timezone(&Utc);
-    Ok(dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+    Ok(dt.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true))
 }
 
 #[cfg(test)]
@@ -1057,6 +1089,136 @@ mod tests {
         );
         assert_eq!(result_direct.hits[0].item_id, "item-200ms");
         assert_eq!(result_direct.total_accessible, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn date_filter_sub_millisecond_precision_before_both_paths() -> Result<()> {
+        // Test that sub-millisecond precision is preserved in date filtering.
+        // This reproduces the issue: capture at .500400Z should be excluded by captured_before=.500100Z.
+        let mut db = new_db("date_filter_sub_millisecond_before")?;
+
+        let add_item_with_capture = |db: &mut Database, id: &str, instant: &str| -> Result<()> {
+            let capture_id = format!("cap-{id}");
+            let tx = db.immediate_transaction()?;
+            let capture = Capture::new(
+                capture_id.clone(),
+                Some("test".to_string()),
+                None,
+                instant.to_string(),
+                "UTC".to_string(),
+                0,
+                "en".to_string(),
+                "gregorian".to_string(),
+                "personal".to_string(),
+                "route-1".to_string(),
+                false,
+                instant.to_string(),
+                None,
+            )?;
+            crate::store::captures::save_capture_in_tx(&tx, &capture)?;
+            tx.execute(
+                "INSERT INTO items (item_id, capture_id, revision, item_type, lifecycle_state,
+                                   save_state, sync_state, processing_state, transcription_state, created_at, updated_at)
+                 VALUES (?, ?, 0, 'note', 'active', 'saved', 'not_synced', 'unprocessed', 'unprocessed', ?, ?)",
+                rusqlite::params![id, &capture_id, instant, instant],
+            )?;
+            sync_item_in_tx(&tx, id)?;
+            tx.commit()?;
+            Ok(())
+        };
+
+        // Capture at 500400 microseconds (which is 300 microseconds after the query bound)
+        add_item_with_capture(&mut db, "item-sub-ms", "2026-01-15T10:30:00.500400Z")?;
+
+        // Query with bound at 500100 microseconds
+        let mut filter = QueryFilter::personal_only();
+        filter.captured_before = Some("2026-01-15T10:30:00.500100Z".to_string());
+        let pagination = QueryPagination::default();
+
+        // Test scoped_query: capture is after the bound, should be excluded
+        let result = scoped_query(db.conn(), "test", &filter, &pagination)?;
+        assert_eq!(
+            result.hits.len(),
+            0,
+            "scoped_query: capture at .500400Z should be excluded by before=.500100Z"
+        );
+        assert_eq!(result.total_accessible, 0);
+
+        // Test scoped_query_direct: same expectation
+        let result_direct = scoped_query_direct(db.conn(), "test", &filter, &pagination)?;
+        assert_eq!(
+            result_direct.hits.len(),
+            0,
+            "scoped_query_direct: capture at .500400Z should be excluded by before=.500100Z"
+        );
+        assert_eq!(result_direct.total_accessible, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn date_filter_sub_millisecond_precision_after_both_paths() -> Result<()> {
+        // Test that sub-millisecond precision is preserved in date filtering.
+        // Capture at .500100Z should be excluded by captured_after=.500400Z.
+        let mut db = new_db("date_filter_sub_millisecond_after")?;
+
+        let add_item_with_capture = |db: &mut Database, id: &str, instant: &str| -> Result<()> {
+            let capture_id = format!("cap-{id}");
+            let tx = db.immediate_transaction()?;
+            let capture = Capture::new(
+                capture_id.clone(),
+                Some("test".to_string()),
+                None,
+                instant.to_string(),
+                "UTC".to_string(),
+                0,
+                "en".to_string(),
+                "gregorian".to_string(),
+                "personal".to_string(),
+                "route-1".to_string(),
+                false,
+                instant.to_string(),
+                None,
+            )?;
+            crate::store::captures::save_capture_in_tx(&tx, &capture)?;
+            tx.execute(
+                "INSERT INTO items (item_id, capture_id, revision, item_type, lifecycle_state,
+                                   save_state, sync_state, processing_state, transcription_state, created_at, updated_at)
+                 VALUES (?, ?, 0, 'note', 'active', 'saved', 'not_synced', 'unprocessed', 'unprocessed', ?, ?)",
+                rusqlite::params![id, &capture_id, instant, instant],
+            )?;
+            sync_item_in_tx(&tx, id)?;
+            tx.commit()?;
+            Ok(())
+        };
+
+        // Capture at 500100 microseconds
+        add_item_with_capture(&mut db, "item-sub-ms", "2026-01-15T10:30:00.500100Z")?;
+
+        // Query with bound at 500400 microseconds
+        let mut filter = QueryFilter::personal_only();
+        filter.captured_after = Some("2026-01-15T10:30:00.500400Z".to_string());
+        let pagination = QueryPagination::default();
+
+        // Test scoped_query: capture is before the bound, should be excluded
+        let result = scoped_query(db.conn(), "test", &filter, &pagination)?;
+        assert_eq!(
+            result.hits.len(),
+            0,
+            "scoped_query: capture at .500100Z should be excluded by after=.500400Z"
+        );
+        assert_eq!(result.total_accessible, 0);
+
+        // Test scoped_query_direct: same expectation
+        let result_direct = scoped_query_direct(db.conn(), "test", &filter, &pagination)?;
+        assert_eq!(
+            result_direct.hits.len(),
+            0,
+            "scoped_query_direct: capture at .500100Z should be excluded by after=.500400Z"
+        );
+        assert_eq!(result_direct.total_accessible, 0);
 
         Ok(())
     }
