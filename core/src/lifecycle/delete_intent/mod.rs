@@ -200,7 +200,8 @@ pub struct CleanupTarget {
 /// 2. Removes readable/indexed content: clears capture text and correction content
 /// 3. Removes the item from the search index
 /// 4. Cancels all pending jobs for this item
-/// 5. Cancels all reminders (moves to cancelled state and enqueues reminder cancellation)
+/// 5. Cancels all reminders (moves to cancelled state and enqueues reminder cancellation),
+///    re-arming any earlier generation's failed native cancel so it is retried
 /// 6. Enqueues cleanup work for audio (only when the capture has audio), ingress and
 ///    notifications
 ///
@@ -287,6 +288,8 @@ pub fn mark_deletion_intent(
     cancel_item_jobs_in_tx(&tx, item_id).map_err(|e| anyhow!("Failed to cancel jobs: {}", e))?;
     cancel_item_reminders_in_tx(&tx, item_id, &now)
         .map_err(|e| anyhow!("Failed to cancel reminders: {}", e))?;
+    retry_failed_notification_cancels_in_tx(&tx, item_id)
+        .map_err(|e| anyhow!("Failed to retry notification cancels: {}", e))?;
 
     let mut required_work = Vec::new();
     if has_audio {
@@ -415,18 +418,16 @@ pub fn mark_deletion_work_completed(
 }
 
 /// Count the reminder operations that keep notification cleanup unfinished: every pending
-/// operation, plus a failed cancel of the reminder's current generation. Once the item is
-/// deleted its generation can no longer change, so that cancel is the one removing whatever
-/// the deletion left installed; a failure means the notification may still be on the device.
-/// Failed schedules installed nothing, and failed cancels of earlier generations belong to
-/// effects the current generation's cancel does not depend on, so neither strands deletion.
+/// operation, plus every failed cancel of any generation. Each generation has its own native
+/// identifier, so a failed cancel means that generation's notification may still be on the
+/// device whatever happened to later generations. Failed schedules installed nothing and do
+/// not block.
 fn unfinished_notification_operations(tx: &Transaction<'_>, item_id: &str) -> Result<usize> {
     let Some(reminder) =
         state::get_reminder(tx, item_id).map_err(|e| anyhow!("Failed to load reminder: {}", e))?
     else {
         return Ok(0);
     };
-    let final_notification_id = reminder.notification_id();
     let operations = state::list_operations(tx, &reminder.reminder_id)
         .map_err(|e| anyhow!("Failed to load reminder operations: {}", e))?;
     Ok(operations
@@ -435,11 +436,28 @@ fn unfinished_notification_operations(tx: &Transaction<'_>, item_id: &str) -> Re
             state::OperationState::Pending => true,
             state::OperationState::Failed => {
                 operation.operation_type == state::OperationType::Cancel
-                    && final_notification_id.as_deref() == Some(operation.notification_id.as_str())
             }
             _ => false,
         })
         .count())
+}
+
+/// Re-arm every failed cancel of the item's reminder, from any generation, as pending so the
+/// native layer retries removing each notification that may still be installed. Without this
+/// an earlier generation's failed cancel would leave its notification on the device with no
+/// durable effect left to remove it.
+fn retry_failed_notification_cancels_in_tx(tx: &Transaction<'_>, item_id: &str) -> Result<usize> {
+    Ok(tx.execute(
+        "UPDATE reminder_operations SET operation_state = ?
+         WHERE operation_type = ? AND operation_state = ? AND reminder_id IN
+         (SELECT reminder_id FROM reminders WHERE item_id = ?)",
+        rusqlite::params![
+            state::OperationState::Pending.as_str(),
+            state::OperationType::Cancel.as_str(),
+            state::OperationState::Failed.as_str(),
+            item_id,
+        ],
+    )?)
 }
 
 /// Record that a cleanup task terminally failed. Idempotent for an already-failed task; a
