@@ -138,6 +138,7 @@ pub enum EventType {
     Completion,
     Cancellation,
     SuggestionControl,
+    Deletion,
 }
 
 impl EventType {
@@ -147,6 +148,7 @@ impl EventType {
             EventType::Completion => "completion",
             EventType::Cancellation => "cancellation",
             EventType::SuggestionControl => "suggestion_control",
+            EventType::Deletion => "deletion",
         }
     }
 }
@@ -160,6 +162,7 @@ impl FromStr for EventType {
             "completion" => Ok(EventType::Completion),
             "cancellation" => Ok(EventType::Cancellation),
             "suggestion_control" => Ok(EventType::SuggestionControl),
+            "deletion" => Ok(EventType::Deletion),
             _ => Err(anyhow!("Unknown event type: {}", s)),
         }
     }
@@ -245,6 +248,7 @@ pub enum EventPayload {
     SuggestionControl(SuggestionControlPayload),
     Completion,
     Cancellation,
+    Deletion,
 }
 
 #[derive(Clone, Debug)]
@@ -320,6 +324,7 @@ impl Event {
             (EventType::SuggestionControl, EventPayload::SuggestionControl(_)) => Ok(()),
             (EventType::Completion, EventPayload::Completion) => Ok(()),
             (EventType::Cancellation, EventPayload::Cancellation) => Ok(()),
+            (EventType::Deletion, EventPayload::Deletion) => Ok(()),
             _ => Err(EventError::Invalid(format!(
                 "Invalid event type and payload combination: {:?} with {:?}",
                 self.event_type, self.payload
@@ -394,6 +399,7 @@ fn event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
         }
         EventType::Completion => EventPayload::Completion,
         EventType::Cancellation => EventPayload::Cancellation,
+        EventType::Deletion => EventPayload::Deletion,
     };
 
     Ok(Event {
@@ -560,10 +566,12 @@ pub fn save_event_in_tx(
 
     // Deleted items accept nothing (a racing correction must not restore readable text).
     // Completed and cancelled items stay correctable but take no further lifecycle or
-    // suggestion events.
+    // suggestion events, except they can be deleted.
     let allowed = match current.lifecycle_state.as_str() {
         "deleted" => false,
-        "completed" | "cancelled" => matches!(event.event_type, EventType::Correction),
+        "completed" | "cancelled" => {
+            matches!(event.event_type, EventType::Correction | EventType::Deletion)
+        }
         _ => true,
     };
     if !allowed {
@@ -597,6 +605,7 @@ pub fn save_event_in_tx(
             EventPayload::SuggestionControl(s) => (None, None, None, Some(s.kind.as_str())),
             EventPayload::Completion => (None, None, None, None),
             EventPayload::Cancellation => (None, None, None, None),
+            EventPayload::Deletion => (None, None, None, None),
         };
 
     tx.execute(
@@ -662,6 +671,12 @@ pub fn save_event_in_tx(
         EventType::Cancellation => {
             tx.execute(
                 "UPDATE items SET lifecycle_state = 'cancelled' WHERE item_id = ?",
+                [event.item_id.as_str()],
+            )?;
+        }
+        EventType::Deletion => {
+            tx.execute(
+                "UPDATE items SET lifecycle_state = 'deleted' WHERE item_id = ?",
                 [event.item_id.as_str()],
             )?;
         }
