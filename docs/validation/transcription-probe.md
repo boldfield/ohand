@@ -6,10 +6,10 @@ P04 probes native on-device speech recognition and language model availability i
 
 | Path | Role |
 | --- | --- |
-| `ios/TranscriptionProbe/Sources/AppDelegate.swift` | Probe screen with Load Test Audio / Transcribe / Cancel, live transcription status, duration measurement, and result text. Uses `SFSpeechRecognizer` for on-device recognition. |
+| `ios/TranscriptionProbe/Sources/AppDelegate.swift` | Probe screen with Load Test Audio / Transcribe / Cancel, live transcription status, duration measurement, and result text. Uses `SFSpeechRecognizer` for on-device recognition with `requiresOnDeviceRecognition = true` to prevent cloud fallback. |
 | `ios/TranscriptionProbe/Info.plist` | App metadata, `NSSpeechRecognitionUsageDescription` and `NSMicrophoneUsageDescription`. |
 | `ios/project.yml` | `TranscriptionProbe` app target and build configuration. |
-| `.github/workflows/ios.yml` | Builds the `TranscriptionProbe` app target so `AppDelegate.swift` and the native Speech framework integration compile in CI. |
+| `.github/workflows/ios.yml` | Builds and smoke-tests the `TranscriptionProbe` app target on simulator to verify Speech framework integration compiles and the UI initializes. |
 
 ## Outcome contract
 
@@ -49,30 +49,30 @@ A cloud-fallback-detection test would require network interception (proxy, VPN, 
 
 - **Format:** 16 kHz, mono, 16-bit signed little-endian Linear PCM in a WAV file. The AudioProbe (P03) produces this format natively.
 - **Locale:** en-US (hardcoded for this probe; additional locales can be added to support language model availability testing).
-- **Audio path:** Load any `.wav` file from the app's Documents directory. The Load Test Audio button discovers and loads the most recent WAV file saved there (typically from AudioProbe).
-- **Duration bound:** No enforced maximum; `SFSpeechURLRecognitionRequest` has platform-dependent timeouts (typically ~60 s for on-device recognition).
+- **Audio path:** Load any `.wav` file from the app's Documents directory. The Load Test Audio button loads a WAV file from the app container (typically from AudioProbe).
+- **Duration bound:** No enforced maximum; `SFSpeechURLRecognitionRequest` has platform-dependent timeouts.
 
 ### Permission and model state
 
 - **Speech recognition permission:** Requested at app launch. Denial is reported immediately; revocation in Settings appears only after app relaunch.
-- **Language model:** Checked via `SFSpeechRecognizer.isAvailable` after initialization. If unavailable, the error is reported and the user cannot proceed without downloading the model on a physical device. The simulator may report unavailable even if the OS version ostensibly supports it; this is a known simulator limitation.
+- **Language model:** Checked via `SFSpeechRecognizer.isAvailable` and `supportsOnDeviceRecognition` after initialization. If unavailable or on-device recognition is not supported, the status is reported with a visible UI indication. The simulator may report unavailable or unsupported even if the OS version ostensibly supports it.
 
 ## What the automated checks assert
 
-The `ios.yml` build runs the probe app on a simulator, which validates:
+The `ios.yml` build compiles the probe app and runs a smoke test on a simulator, which validates:
 
-- The app builds with the Speech framework and `SFSpeechRecognizer` integration.
-- Recognizer initialization and permission request flow work (no crashes).
-- The Load Test Audio button discovers WAV files from the app container.
-- The Transcribe button initiates recognition and displays status/results.
-- The Cancel button cleanly stops recognition without crashing.
+- The app builds without error with the Speech framework and `SFSpeechRecognizer` integration.
+- Recognizer initialization with `supportsOnDeviceRecognition` check and permission request flow work (no crashes).
+- The app launches and displays the probe UI.
+- The Xcode build environment and iOS SDK are functional for Speech framework use.
 
 The simulator checks do NOT prove:
 
-- Actual offline recognition (simulator may lack model data).
+- Actual offline recognition (simulator may lack model data or have outdated models).
 - Language/model availability for locales other than en-US.
-- Cloud-fallback prevention (network isolation testing is separate).
-- Actual microphone recording (the probe expects pre-recorded audio files).
+- Cloud-fallback prevention (requires network isolation; the probe sets `requiresOnDeviceRecognition = true` but network availability is not controlled in CI).
+- Button interactions or transcription end-to-end (smoke test only checks launch).
+- Actual microphone recording (the probe loads pre-recorded audio files, not live capture).
 
 ## Needs a physical device (not measured)
 

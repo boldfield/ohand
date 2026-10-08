@@ -1,6 +1,5 @@
 import UIKit
 import Speech
-import AVFoundation
 
 @main
 class TranscriptionProbeDelegateAdapter: UIResponder, UIApplicationDelegate {
@@ -43,7 +42,6 @@ class TranscriptionProbeViewController: UIViewController {
     private var transcriptionDurationLabel: UILabel?
     private var recognizer: SFSpeechRecognizer?
     private var recognitionTask: SFSpeechRecognitionTask?
-    private var audioEngine = AVAudioEngine()
     private let speechRecognitionQueue = DispatchQueue(label: "com.boldfield.transcription.queue")
     private var transcriptionStartTime: Date?
 
@@ -156,15 +154,32 @@ class TranscriptionProbeViewController: UIViewController {
     private func initializeRecognizer() {
         recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
 
-        if recognizer == nil {
-            statusLabel?.text = "Speech recognizer not available"
-            statusLabel?.textColor = .systemRed
-        } else if !SFSpeechRecognizer.authorizationStatus().isAvailable {
-            statusLabel?.text = "Speech recognition not available on this device"
-            statusLabel?.textColor = .systemOrange
-        } else {
-            statusLabel?.text = "Recognizer ready"
-            statusLabel?.textColor = .systemGreen
+        guard let recognizer = recognizer else {
+            updateStatus("Speech recognizer initialization failed", color: .systemRed)
+            return
+        }
+
+        guard recognizer.isAvailable else {
+            if recognizer.supportsOnDeviceRecognition {
+                updateStatus("Speech recognizer available but not ready (may need model download)", color: .systemOrange)
+            } else {
+                updateStatus("On-device speech recognition not supported on this device", color: .systemRed)
+            }
+            return
+        }
+
+        guard recognizer.supportsOnDeviceRecognition else {
+            updateStatus("On-device recognition unavailable (model may need download)", color: .systemOrange)
+            return
+        }
+
+        updateStatus("Recognizer ready for on-device recognition", color: .systemGreen)
+    }
+
+    private func updateStatus(_ text: String, color: UIColor) {
+        DispatchQueue.main.async { [weak self] in
+            self?.statusLabel?.text = text
+            self?.statusLabel?.textColor = color
         }
     }
 
@@ -225,23 +240,30 @@ class TranscriptionProbeViewController: UIViewController {
             return
         }
 
+        guard recognizer.supportsOnDeviceRecognition else {
+            resultLabel?.text = "On-device transcription not supported (model may need download)"
+            resultLabel?.textColor = .systemOrange
+            return
+        }
+
         resultLabel?.text = "Transcribing..."
         resultLabel?.textColor = .systemBlue
         transcriptionStartTime = Date()
 
         speechRecognitionQueue.async { [weak self] in
+            guard let self = self else { return }
             let request = SFSpeechURLRecognitionRequest(url: audioURL)
             request.shouldReportPartialResults = true
+            request.requiresOnDeviceRecognition = true
 
-            self?.recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
+            let task = self.recognizer?.recognitionTask(with: request) { [weak self] result, error in
                 guard let self = self else { return }
-
-                let isFinal = result?.isFinal ?? false
 
                 DispatchQueue.main.async {
                     if let error = error {
                         self.handleTranscriptionError(error)
                     } else if let result = result {
+                        let isFinal = result.isFinal
                         let transcript = result.bestTranscription.formattedString
                         let confidence = result.bestTranscription.segments.first?.confidence ?? 0
 
@@ -257,6 +279,8 @@ class TranscriptionProbeViewController: UIViewController {
                     }
                 }
             }
+
+            self.recognitionTask = task
         }
     }
 
@@ -273,17 +297,19 @@ class TranscriptionProbeViewController: UIViewController {
         transcriptionDurationLabel?.text = String(format: "Duration: %.2fs", duration)
 
         let errorText: String
-        if let sfError = error as? NSError {
+        if let sfError = error as? SFSpeechRecognitionError {
             switch sfError.code {
-            case SFSpeechRecognizer.Error.availabilityNotDetermined.rawValue:
-                errorText = "Speech recognition availability not determined"
-            case SFSpeechRecognizer.Error.requestTimedOut.rawValue:
-                errorText = "Request timed out"
-            case SFSpeechRecognizer.Error.audioEngineFailed.rawValue:
-                errorText = "Audio engine failed"
-            case SFSpeechRecognizer.Error.speechRecognizerNotAvailable.rawValue:
-                errorText = "Speech recognizer not available (may need model download)"
-            default:
+            case .network:
+                errorText = "Network error during recognition"
+            case .notAuthorizedToPerformSpeechRecognition:
+                errorText = "Speech recognition permission denied"
+            case .noSpeechInputDetected:
+                errorText = "No speech detected in audio"
+            case .requestTimedOut:
+                errorText = "Recognition request timed out"
+            case .unspecified:
+                errorText = "Unspecified speech recognition error"
+            @unknown default:
                 errorText = "Error: \(sfError.localizedDescription)"
             }
         } else {
