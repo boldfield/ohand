@@ -3,99 +3,149 @@
 //! Represents note/action/idea annotations, reminder proposals and updates as validated,
 //! source-linked candidates rather than unrestricted state writes. Each candidate
 //! references a capture ID/revision, source spans, and processing version.
+//!
+//! Every type here rejects unknown fields at every nesting level, so model output cannot carry
+//! item scope, session read scope, route, permission or any other authorization: those are
+//! explicit policy owned elsewhere. Schema validity is never proof of semantic intent;
+//! [`Proposal::validate`] performs the semantic checks and, even when it passes, the result is
+//! only a candidate until the separate application logic accepts it.
 
 use crate::domain::items::SUPPORTED_PROPOSAL_SCHEMA_VERSION;
 use crate::store::events::ItemType;
-use anyhow::{anyhow, Result};
 use chrono::DateTime;
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
+use thiserror::Error;
 use uuid::Uuid;
+
+/// Why a proposal was rejected. Rejected output mutates nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ProposalError {
+    #[error("proposal is not valid JSON for this schema: {0}")]
+    Malformed(String),
+    #[error("unsupported proposal schema version {received}, expected {supported}")]
+    UnsupportedSchemaVersion { received: i32, supported: i32 },
+    #[error("{field} must be a UUID")]
+    InvalidIdentifier { field: &'static str },
+    #[error("source_revision must be non-negative, got {0}")]
+    NegativeRevision(i32),
+    #[error("unknown text basis kind: {0}")]
+    UnknownTextBasisKind(String),
+    #[error("correction text basis requires a correction ID")]
+    MissingCorrectionId,
+    #[error("{field} must not be empty")]
+    EmptyField { field: &'static str },
+    #[error("source span [{start}, {end}) must be non-empty")]
+    EmptySpan { start: usize, end: usize },
+    #[error("source span [{start}, {end}) is out of bounds for text with {char_count} characters")]
+    SpanOutOfBounds {
+        start: usize,
+        end: usize,
+        char_count: usize,
+    },
+    #[error("{facet} proposal requires source evidence")]
+    MissingEvidence { facet: &'static str },
+    #[error("reminder {field} is required unless the time quality is ambiguous")]
+    MissingReminderResolution { field: &'static str },
+    #[error("an ambiguous reminder time must not carry a resolved instant")]
+    AmbiguousReminderHasInstant,
+    #[error("reminder instant is not valid RFC 3339")]
+    InvalidInstant,
+    #[error("reminder timezone is not a valid IANA timezone")]
+    InvalidTimezone,
+    #[error("abstention cannot coexist with a {facet} proposal")]
+    AbstentionWithContent { facet: &'static str },
+    #[error("proposal must carry at least one facet or an explicit abstention")]
+    NoContent,
+    #[error("{operation} is not supported in M1 and must be an explicit abstention")]
+    UnsupportedOperationNotAbstained { operation: &'static str },
+    #[error("{operation} must abstain with the unsupported-operation reason")]
+    UnsupportedOperationWrongReason { operation: &'static str },
+    #[error("update target must be the proposal's own item")]
+    UpdateTargetMismatch,
+}
+
+fn parse_uuid(value: &str, field: &'static str) -> Result<(), ProposalError> {
+    Uuid::parse_str(value)
+        .map(|_| ())
+        .map_err(|_| ProposalError::InvalidIdentifier { field })
+}
 
 /// Identifies the text basis used for source spans and validation.
 /// Text basis is always immutable: the original source text, or a specific text-correction record
 /// at the item revision where it was current.
+/// Variants are struct-like (`{}`) so serde's `deny_unknown_fields` also applies to them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TextBasis {
     /// Original source text from capture.
-    Original,
+    Original {},
     /// A user text-correction record, identified by its correction record ID.
-    /// The basis is valid only at the item revision when the correction was stored.
-    #[serde(rename_all = "lowercase")]
     Correction { correction_id: String },
 }
 
 impl fmt::Display for TextBasis {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TextBasis::Original => write!(f, "original"),
-            TextBasis::Correction { correction_id } => {
-                write!(f, "correction:{}", correction_id)
-            }
+            TextBasis::Original {} => write!(f, "original"),
+            TextBasis::Correction { correction_id } => write!(f, "correction:{correction_id}"),
         }
     }
 }
 
 impl TextBasis {
     /// Parse from database representation (kind + optional id).
-    pub fn from_db(kind: &str, id: Option<&str>) -> Result<Self> {
+    pub fn from_db(kind: &str, id: Option<&str>) -> Result<Self, ProposalError> {
         match kind {
-            "original" => Ok(TextBasis::Original),
+            "original" => Ok(TextBasis::Original {}),
             "correction" => {
-                let correction_id = id
-                    .ok_or_else(|| anyhow!("correction basis requires correction_id"))?
-                    .to_string();
+                let correction_id = id.ok_or(ProposalError::MissingCorrectionId)?.to_string();
                 Ok(TextBasis::Correction { correction_id })
             }
-            _ => Err(anyhow!("unknown text basis kind: {}", kind)),
+            other => Err(ProposalError::UnknownTextBasisKind(other.to_string())),
         }
     }
 
     /// Convert to database representation (kind, optional id).
     pub fn to_db(&self) -> (&'static str, Option<String>) {
         match self {
-            TextBasis::Original => ("original", None),
+            TextBasis::Original {} => ("original", None),
             TextBasis::Correction { correction_id } => ("correction", Some(correction_id.clone())),
         }
     }
 
-    /// Validate that the text basis has non-empty required fields.
-    pub fn validate(&self) -> Result<()> {
+    /// A correction basis must name its correction record by UUID.
+    pub fn validate(&self) -> Result<(), ProposalError> {
         match self {
-            TextBasis::Original => Ok(()),
-            TextBasis::Correction { correction_id } => {
-                if correction_id.is_empty() {
-                    return Err(anyhow!("correction_id must be non-empty"));
-                }
-                Ok(())
-            }
+            TextBasis::Original {} => Ok(()),
+            TextBasis::Correction { correction_id } => parse_uuid(correction_id, "correction_id"),
         }
     }
 }
 
-/// Supported proposal operations.
-/// Represents the type of change being proposed to an item or its facets.
+/// The operation a proposal asks for. Only [`Operation::Annotate`], which attaches derived
+/// facets to the item created by the capture, is supported in M1. Everything else is an
+/// unsupported spoken change and must be an explicit abstention; UI corrections and completion
+/// do not pass through proposals.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
-    /// Create a new item with the proposed facets.
-    Create,
-    /// Annotate an existing item with the proposed facets.
-    Annotate,
-    /// Update an existing item or its reminder by ID.
-    #[serde(rename_all = "lowercase")]
+    /// Annotate the item created by the capture with derived facets.
+    Annotate {},
+    /// Create another item from model output (unsupported: captures create items).
+    Create {},
+    /// Change an existing item (unsupported by spoken request in M1).
     Update { item_id: String },
 }
 
-impl fmt::Display for Operation {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Operation {
+    fn unsupported_name(&self) -> Option<&'static str> {
         match self {
-            Operation::Create => write!(f, "create"),
-            Operation::Annotate => write!(f, "annotate"),
-            Operation::Update { item_id } => write!(f, "update({})", item_id),
+            Operation::Annotate {} => None,
+            Operation::Create {} => Some("create"),
+            Operation::Update { .. } => Some("update"),
         }
     }
 }
@@ -108,7 +158,7 @@ pub enum TimeResolutionQuality {
     Explicit,
     /// Inferred or partially stated (e.g. "next Monday" when the day is ambiguous).
     Inferred,
-    /// Ambiguous or incomplete (e.g. "maybe Friday" or "next week").
+    /// Ambiguous or incomplete (e.g. "maybe Friday" or "next week"); never guessed.
     Ambiguous,
 }
 
@@ -123,39 +173,37 @@ impl TimeResolutionQuality {
 }
 
 impl FromStr for TimeResolutionQuality {
-    type Err = anyhow::Error;
+    type Err = ProposalError;
 
-    fn from_str(s: &str) -> Result<Self> {
+    fn from_str(s: &str) -> Result<Self, ProposalError> {
         match s {
             "explicit" => Ok(TimeResolutionQuality::Explicit),
             "inferred" => Ok(TimeResolutionQuality::Inferred),
             "ambiguous" => Ok(TimeResolutionQuality::Ambiguous),
-            _ => Err(anyhow!("unknown resolution quality: {}", s)),
+            other => Err(ProposalError::Malformed(format!(
+                "unknown resolution quality: {other}"
+            ))),
         }
     }
 }
 
-/// Proposed reminder: an absolute instant with quality and source span.
-/// When quality is Ambiguous, instant and timezone_id are optional;
-/// the proposal represents an unresolved or uncertain time.
+/// Proposed reminder time. An ambiguous time carries no resolved instant and is never guessed;
+/// explicit and inferred times carry both an RFC 3339 instant and an IANA timezone.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReminderProposal {
-    /// Resolved absolute instant (UTC, RFC 3339 format).
-    /// Optional when quality is Ambiguous (unresolved time).
+    /// Resolved absolute instant (RFC 3339). Must be absent when quality is ambiguous.
     pub instant: Option<String>,
-    /// Timezone identifier for display (IANA timezone).
-    /// Optional when quality is Ambiguous.
+    /// Timezone identifier for display (IANA). Optional only when quality is ambiguous.
     pub timezone_id: Option<String>,
     /// Quality of the resolution.
     pub quality: TimeResolutionQuality,
-    /// Character offsets [start, end) into the text basis.
+    /// Character span of the time phrase in the text basis. Required.
     pub source_span: Option<SourceSpan>,
 }
 
 /// Reason for abstaining from a proposal.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub enum AbstentionReason {
     /// Unable to determine the target or value from the source.
     UncertainTarget,
@@ -169,14 +217,47 @@ pub enum AbstentionReason {
     Other(String),
 }
 
-/// Proposed session-topic with optional source evidence.
+/// Proposed session-topic: an independent derived facet with source evidence. A user-assigned
+/// topic always wins over it; see [`resolve_session_topic`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionTopicProposal {
     /// The proposed session-topic string.
     pub topic: String,
-    /// Source span where the topic was found, if available.
+    /// Character span of the evidence in the text basis. Required.
     pub source_span: Option<SourceSpan>,
+}
+
+/// The session-topic in effect after combining the user's assignment with a proposal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResolvedSessionTopic {
+    /// Assigned or corrected by the user; survives reprocessing.
+    UserAssigned { topic: String },
+    /// Derived from source evidence by an interpretation proposal.
+    Derived { topic: String, evidence: SourceSpan },
+}
+
+/// The user's assignment always wins and survives reprocessing; a proposal only supplies a
+/// topic when the user has not assigned one. A proposal without evidence is never used. Neither
+/// input can change item scope, session read scope or any permission.
+pub fn resolve_session_topic(
+    user_assigned: Option<&str>,
+    proposal: Option<&SessionTopicProposal>,
+) -> Option<ResolvedSessionTopic> {
+    if let Some(topic) = user_assigned
+        .map(str::trim)
+        .filter(|topic| !topic.is_empty())
+    {
+        return Some(ResolvedSessionTopic::UserAssigned {
+            topic: topic.to_string(),
+        });
+    }
+    let proposal = proposal?;
+    let evidence = proposal.source_span?;
+    Some(ResolvedSessionTopic::Derived {
+        topic: proposal.topic.trim().to_string(),
+        evidence,
+    })
 }
 
 /// Character offset span into a text basis.
@@ -193,25 +274,21 @@ impl SourceSpan {
         SourceSpan { start, end }
     }
 
-    /// Check if this span is valid within the given text.
-    /// Offsets are character positions (Unicode scalar values), not byte positions.
-    /// The span must be non-empty (start < end) to be valid.
-    pub fn is_valid(&self, text: &str) -> Result<()> {
+    /// The span must be non-empty and lie within the text, counted in characters.
+    pub fn is_valid(&self, text: &str) -> Result<(), ProposalError> {
         if self.start >= self.end {
-            return Err(anyhow!(
-                "source span [{}, {}) must be non-empty (start < end)",
-                self.start,
-                self.end
-            ));
+            return Err(ProposalError::EmptySpan {
+                start: self.start,
+                end: self.end,
+            });
         }
         let char_count = text.chars().count();
-        if self.start > char_count || self.end > char_count {
-            return Err(anyhow!(
-                "source span [{}, {}) is out of bounds for text with {} characters",
-                self.start,
-                self.end,
-                char_count
-            ));
+        if self.end > char_count {
+            return Err(ProposalError::SpanOutOfBounds {
+                start: self.start,
+                end: self.end,
+                char_count,
+            });
         }
         Ok(())
     }
@@ -222,11 +299,11 @@ impl SourceSpan {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Proposal {
-    /// Immutable proposal identifier (non-empty, UUID format required).
+    /// Immutable proposal identifier (UUID).
     pub proposal_id: String,
-    /// Item ID this proposal applies to (non-empty, UUID format required).
+    /// Item ID this proposal applies to (UUID).
     pub item_id: String,
-    /// Capture ID (for audit trail and to reject unknown captures, non-empty, UUID format required).
+    /// Capture ID (UUID) for the audit trail.
     pub capture_id: String,
     /// Item revision when this proposal was created (compare-and-set, non-negative).
     pub source_revision: i32,
@@ -234,24 +311,24 @@ pub struct Proposal {
     pub schema_version: i32,
     /// Text basis and immutable identification.
     pub text_basis: TextBasis,
-    /// Versioned interpretation request that produced this proposal (non-empty, UUID format required).
+    /// Versioned interpretation request that produced this proposal (UUID).
     pub request_version: String,
-    /// The supported operation being proposed (create, annotate, or update).
-    pub operation: Option<Operation>,
-    /// Optional note, action, or idea annotation.
+    /// The operation being proposed. Required; only annotation is supported in M1.
+    pub operation: Operation,
+    /// Optional note, action, or idea annotation. Requires `source_spans`.
     pub item_type: Option<ItemType>,
     /// Optional proposed reminder with quality and source span.
     pub reminder_proposal: Option<ReminderProposal>,
-    /// Optional proposed session-topic with source span and evidence.
+    /// Optional proposed session-topic with source span.
     pub session_topic_proposal: Option<SessionTopicProposal>,
-    /// Source spans for extracted elements (required for type-only proposals).
+    /// Evidence spans for the item type facet.
     pub source_spans: Option<Vec<SourceSpan>>,
-    /// Explicit abstention: source could not be interpreted, with optional reason.
+    /// Explicit abstention; excludes every proposed facet.
     pub abstention: Option<AbstentionReason>,
 }
 
 impl Proposal {
-    /// Create a new proposal with validation of required fields.
+    /// Create a new annotate proposal with no facets; use the `with_*` setters to add them.
     pub fn new(
         proposal_id: String,
         item_id: String,
@@ -269,7 +346,7 @@ impl Proposal {
             schema_version,
             text_basis,
             request_version,
-            operation: None,
+            operation: Operation::Annotate {},
             item_type: None,
             reminder_proposal: None,
             session_topic_proposal: None,
@@ -278,259 +355,209 @@ impl Proposal {
         }
     }
 
-    /// Set the operation being proposed.
-    pub fn with_operation(mut self, operation: Option<Operation>) -> Self {
+    /// Decode untrusted JSON and run full semantic validation against the basis text.
+    /// Unknown fields at any level, including scope or permission fields, are rejected.
+    pub fn parse(json: &str, text: &str) -> Result<Self, ProposalError> {
+        let proposal: Proposal = serde_json::from_str(json)
+            .map_err(|error| ProposalError::Malformed(error.to_string()))?;
+        proposal.validate(text)?;
+        Ok(proposal)
+    }
+
+    pub fn with_operation(mut self, operation: Operation) -> Self {
         self.operation = operation;
         self
     }
 
-    /// Set an optional item type annotation.
     pub fn with_item_type(mut self, item_type: Option<ItemType>) -> Self {
         self.item_type = item_type;
         self
     }
 
-    /// Set an optional reminder proposal.
     pub fn with_reminder_proposal(mut self, reminder_proposal: Option<ReminderProposal>) -> Self {
         self.reminder_proposal = reminder_proposal;
         self
     }
 
-    /// Set an optional session-topic proposal.
     pub fn with_session_topic_proposal(mut self, topic: Option<SessionTopicProposal>) -> Self {
         self.session_topic_proposal = topic;
         self
     }
 
-    /// Set source spans for extracted elements.
     pub fn with_source_spans(mut self, spans: Option<Vec<SourceSpan>>) -> Self {
         self.source_spans = spans;
         self
     }
 
-    /// Mark this proposal with an explicit abstention reason.
     pub fn with_abstention(mut self, reason: Option<AbstentionReason>) -> Self {
         self.abstention = reason;
         self
     }
 
-    /// Validate schema version compatibility.
-    /// Returns an error if the schema version is unknown or unsupported.
-    pub fn validate_schema_version(&self) -> Result<()> {
+    /// Unknown schema versions are rejected without mutation.
+    pub fn validate_schema_version(&self) -> Result<(), ProposalError> {
         if self.schema_version != SUPPORTED_PROPOSAL_SCHEMA_VERSION {
-            return Err(anyhow!(
-                "unsupported proposal schema version {}, expected {}",
-                self.schema_version,
-                SUPPORTED_PROPOSAL_SCHEMA_VERSION
-            ));
+            return Err(ProposalError::UnsupportedSchemaVersion {
+                received: self.schema_version,
+                supported: SUPPORTED_PROPOSAL_SCHEMA_VERSION,
+            });
         }
         Ok(())
     }
 
-    /// Validate that an identifier is a valid UUID.
-    fn validate_uuid(id: &str, field_name: &str) -> Result<()> {
-        Uuid::parse_str(id)
-            .map_err(|_| anyhow!("{} must be a valid UUID, got '{}'", field_name, id))?;
-        Ok(())
-    }
-
-    /// Validate required identifier fields are non-empty and in UUID format.
-    pub fn validate_identifiers(&self) -> Result<()> {
-        if self.proposal_id.is_empty() {
-            return Err(anyhow!("proposal_id must be non-empty"));
-        }
-        Self::validate_uuid(&self.proposal_id, "proposal_id")?;
-
-        if self.item_id.is_empty() {
-            return Err(anyhow!("item_id must be non-empty"));
-        }
-        Self::validate_uuid(&self.item_id, "item_id")?;
-
-        if self.capture_id.is_empty() {
-            return Err(anyhow!("capture_id must be non-empty"));
-        }
-        Self::validate_uuid(&self.capture_id, "capture_id")?;
-
-        if self.request_version.is_empty() {
-            return Err(anyhow!("request_version must be non-empty"));
-        }
-        Self::validate_uuid(&self.request_version, "request_version")?;
-
+    /// Identifiers must be UUIDs and the revision non-negative. Existence of the capture and
+    /// item and freshness of the revision are checked by application against current state.
+    pub fn validate_identifiers(&self) -> Result<(), ProposalError> {
+        parse_uuid(&self.proposal_id, "proposal_id")?;
+        parse_uuid(&self.item_id, "item_id")?;
+        parse_uuid(&self.capture_id, "capture_id")?;
+        parse_uuid(&self.request_version, "request_version")?;
         if self.source_revision < 0 {
-            return Err(anyhow!(
-                "source_revision must be non-negative, got {}",
-                self.source_revision
-            ));
+            return Err(ProposalError::NegativeRevision(self.source_revision));
         }
-        self.text_basis.validate()?;
-        Ok(())
+        self.text_basis.validate()
     }
 
-    /// Validate that source spans are within bounds of the given text.
-    /// Spans are character offsets, not byte offsets.
-    pub fn validate_source_spans(&self, text: &str) -> Result<()> {
-        if let Some(spans) = &self.source_spans {
-            for span in spans {
-                span.is_valid(text)?;
+    /// Unsupported operations (create, update of existing items) must be explicit abstentions
+    /// carrying the unsupported-operation reason and no facets. An update may only name the
+    /// proposal's own item.
+    pub fn validate_operation(&self) -> Result<(), ProposalError> {
+        if let Operation::Update { item_id } = &self.operation {
+            parse_uuid(item_id, "update item_id")?;
+            if *item_id != self.item_id {
+                return Err(ProposalError::UpdateTargetMismatch);
             }
         }
-        Ok(())
-    }
-
-    /// Validate the reminder proposal if present.
-    /// Checks that the instant is RFC 3339, timezone is IANA, and span is required and within text bounds.
-    /// When quality is Ambiguous, instant and timezone_id are optional (representing unresolved time).
-    pub fn validate_reminder_proposal(&self, text: &str) -> Result<()> {
-        if let Some(reminder) = &self.reminder_proposal {
-            // When quality is Ambiguous, instant/timezone are optional; otherwise required.
-            match reminder.quality {
-                TimeResolutionQuality::Ambiguous => {
-                    if let Some(instant) = &reminder.instant {
-                        DateTime::parse_from_rfc3339(instant).map_err(|e| {
-                            anyhow!("reminder proposal instant is not valid RFC 3339: {}", e)
-                        })?;
-                    }
-                    if let Some(tz) = &reminder.timezone_id {
-                        tz.parse::<Tz>().map_err(|e| {
-                            anyhow!(
-                                "reminder proposal timezone_id is not a valid IANA timezone: {}",
-                                e
-                            )
-                        })?;
-                    }
-                }
-                TimeResolutionQuality::Explicit | TimeResolutionQuality::Inferred => {
-                    if let Some(instant) = &reminder.instant {
-                        DateTime::parse_from_rfc3339(instant).map_err(|e| {
-                            anyhow!("reminder proposal instant is not valid RFC 3339: {}", e)
-                        })?;
-                    } else {
-                        return Err(anyhow!(
-                            "reminder proposal instant is required for non-Ambiguous quality"
-                        ));
-                    }
-
-                    if let Some(tz) = &reminder.timezone_id {
-                        tz.parse::<Tz>().map_err(|e| {
-                            anyhow!(
-                                "reminder proposal timezone_id is not a valid IANA timezone: {}",
-                                e
-                            )
-                        })?;
-                    } else {
-                        return Err(anyhow!(
-                            "reminder proposal timezone_id is required for non-Ambiguous quality"
-                        ));
-                    }
-                }
-            }
-
-            // Validate source span is required and valid.
-            match &reminder.source_span {
-                Some(span) => span.is_valid(text)?,
+        if let Some(operation) = self.operation.unsupported_name() {
+            match &self.abstention {
                 None => {
-                    return Err(anyhow!(
-                        "reminder proposal must have source evidence (source_span)"
-                    ))
+                    return Err(ProposalError::UnsupportedOperationNotAbstained { operation });
+                }
+                Some(AbstentionReason::UnsupportedOperation) => {}
+                Some(_) => {
+                    return Err(ProposalError::UnsupportedOperationWrongReason { operation });
                 }
             }
         }
         Ok(())
     }
 
-    /// Validate session-topic proposal if present.
-    /// Requires source evidence (source_span) to be present.
-    pub fn validate_session_topic_proposal(&self, text: &str) -> Result<()> {
-        if let Some(topic) = &self.session_topic_proposal {
-            if topic.topic.is_empty() {
-                return Err(anyhow!("session-topic proposal topic cannot be empty"));
+    /// Item type evidence spans must lie within the basis text.
+    pub fn validate_source_spans(&self, text: &str) -> Result<(), ProposalError> {
+        for span in self.source_spans.iter().flatten() {
+            span.is_valid(text)?;
+        }
+        Ok(())
+    }
+
+    fn validate_item_type_evidence(&self) -> Result<(), ProposalError> {
+        if self.item_type.is_some() && self.source_spans.as_deref().unwrap_or_default().is_empty() {
+            return Err(ProposalError::MissingEvidence { facet: "item type" });
+        }
+        Ok(())
+    }
+
+    /// A resolved reminder instant must be RFC 3339 and its timezone IANA; an ambiguous time
+    /// carries no instant. Every reminder needs an in-bounds source span.
+    pub fn validate_reminder_proposal(&self, text: &str) -> Result<(), ProposalError> {
+        let Some(reminder) = &self.reminder_proposal else {
+            return Ok(());
+        };
+        match (reminder.quality, &reminder.instant) {
+            (TimeResolutionQuality::Ambiguous, Some(_)) => {
+                return Err(ProposalError::AmbiguousReminderHasInstant);
             }
-            // Source evidence is required for session-topic proposals.
-            match &topic.source_span {
-                Some(span) => span.is_valid(text)?,
-                None => {
-                    return Err(anyhow!(
-                        "session-topic proposal must have source evidence (source_span)"
-                    ))
+            (TimeResolutionQuality::Ambiguous, None) => {}
+            (_, None) => {
+                return Err(ProposalError::MissingReminderResolution { field: "instant" });
+            }
+            (_, Some(instant)) => {
+                DateTime::parse_from_rfc3339(instant).map_err(|_| ProposalError::InvalidInstant)?;
+                if reminder.timezone_id.is_none() {
+                    return Err(ProposalError::MissingReminderResolution { field: "timezone" });
                 }
             }
         }
-        Ok(())
+        if let Some(timezone) = &reminder.timezone_id {
+            timezone
+                .parse::<Tz>()
+                .map_err(|_| ProposalError::InvalidTimezone)?;
+        }
+        reminder
+            .source_span
+            .ok_or(ProposalError::MissingEvidence { facet: "reminder" })?
+            .is_valid(text)
     }
 
-    /// Validate abstention/content exclusivity.
-    /// If abstained, no proposed field (type, reminder, session-topic) may be present.
-    pub fn validate_abstention_exclusivity(&self) -> Result<()> {
-        if self.abstention.is_some() {
-            if self.item_type.is_some() {
-                return Err(anyhow!("abstention cannot coexist with item_type proposal"));
-            }
-            if self.reminder_proposal.is_some() {
-                return Err(anyhow!("abstention cannot coexist with reminder_proposal"));
-            }
-            if self.session_topic_proposal.is_some() {
-                return Err(anyhow!(
-                    "abstention cannot coexist with session_topic_proposal"
-                ));
+    /// The topic must be non-empty and carry an in-bounds source span.
+    pub fn validate_session_topic_proposal(&self, text: &str) -> Result<(), ProposalError> {
+        let Some(topic) = &self.session_topic_proposal else {
+            return Ok(());
+        };
+        if topic.topic.trim().is_empty() {
+            return Err(ProposalError::EmptyField {
+                field: "session topic",
+            });
+        }
+        topic
+            .source_span
+            .ok_or(ProposalError::MissingEvidence {
+                facet: "session topic",
+            })?
+            .is_valid(text)
+    }
+
+    /// An abstention excludes every proposed facet.
+    pub fn validate_abstention_exclusivity(&self) -> Result<(), ProposalError> {
+        let Some(reason) = &self.abstention else {
+            return Ok(());
+        };
+        if let AbstentionReason::Other(text) = reason {
+            if text.trim().is_empty() {
+                return Err(ProposalError::EmptyField {
+                    field: "abstention reason",
+                });
             }
         }
-        Ok(())
+        let present_facet = if self.item_type.is_some() {
+            Some("item type")
+        } else if self.reminder_proposal.is_some() {
+            Some("reminder")
+        } else if self.session_topic_proposal.is_some() {
+            Some("session topic")
+        } else {
+            None
+        };
+        match present_facet {
+            Some(facet) => Err(ProposalError::AbstentionWithContent { facet }),
+            None => Ok(()),
+        }
     }
 
-    /// Validate that at least one field (type, reminder, session-topic) or abstention is present.
-    pub fn validate_at_least_one_field(&self) -> Result<()> {
+    /// A proposal must propose something or explicitly abstain.
+    pub fn validate_at_least_one_field(&self) -> Result<(), ProposalError> {
         if self.abstention.is_none()
             && self.item_type.is_none()
             && self.reminder_proposal.is_none()
             && self.session_topic_proposal.is_none()
         {
-            return Err(anyhow!(
-                "proposal must have at least one field (type, reminder, session-topic) or an explicit abstention"
-            ));
+            return Err(ProposalError::NoContent);
         }
         Ok(())
     }
 
-    /// Validate that non-abstaining facets have required source evidence.
-    /// - Type-only proposals require source_spans.
-    /// - Reminders require source_span (validated separately in validate_reminder_proposal).
-    /// - Session-topic requires source_span (validated separately in validate_session_topic_proposal).
-    /// - When multiple facets are present, each contributes its own evidence requirement.
-    pub fn validate_evidence_requirements(&self, _text: &str) -> Result<()> {
-        // If abstaining, evidence is not required.
-        if self.abstention.is_some() {
-            return Ok(());
-        }
-
-        // Type-only proposals must have source_spans.
-        if self.item_type.is_some()
-            && self.reminder_proposal.is_none()
-            && self.session_topic_proposal.is_none()
-            && (self.source_spans.is_none() || self.source_spans.as_ref().unwrap().is_empty())
-        {
-            return Err(anyhow!(
-                "type-only proposal must have at least one source span"
-            ));
-        }
-
-        // Each non-abstaining facet must have its own evidence (validated separately for reminder and session-topic).
-        // This validation is co-located with the facet-specific validators.
-        Ok(())
-    }
-
-    /// Validate all fields of the proposal for semantic correctness.
-    /// This checks schema version, identifier presence, span bounds, field invariants,
-    /// but does NOT check database constraints (existence of captures/items)
-    /// or policy (whether the proposal can be applied to the current item state).
-    pub fn validate(&self, text: &str) -> Result<()> {
+    /// Validate all fields for semantic correctness against the basis text. This does not check
+    /// database state (capture/item existence, revision freshness) or whether the proposal may
+    /// be applied; passing is not proof of semantic intent.
+    pub fn validate(&self, text: &str) -> Result<(), ProposalError> {
         self.validate_schema_version()?;
         self.validate_identifiers()?;
-        self.validate_source_spans(text)?;
-        self.validate_reminder_proposal(text)?;
-        self.validate_session_topic_proposal(text)?;
+        self.validate_operation()?;
         self.validate_abstention_exclusivity()?;
         self.validate_at_least_one_field()?;
-        self.validate_evidence_requirements(text)?;
-        Ok(())
+        self.validate_source_spans(text)?;
+        self.validate_item_type_evidence()?;
+        self.validate_reminder_proposal(text)?;
+        self.validate_session_topic_proposal(text)
     }
 }
