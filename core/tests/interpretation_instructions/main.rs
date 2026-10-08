@@ -7,10 +7,17 @@
 //! 4. Response mapping properly validates proposals
 //! 5. Golden fixtures from I04 demonstrate expected behavior
 
+use chrono::{TimeZone, Utc};
 use ohand_core::interpretation::instructions::{
     InstructionSet, InterpretationMapping, RequestContext, INSTRUCTION_SCHEMA_VERSION,
     M1_INSTRUCTION_TEXT,
 };
+use ohand_core::providers::contracts::TextBasis;
+use ohand_core::providers::contracts::{
+    CapabilityMetadata, InterpretationOutput, ProviderCapability, ProviderProfileBuilder,
+    ProviderProtocol, StructuredOutputMode,
+};
+use ohand_core::time::TimeContext;
 use uuid::Uuid;
 
 /// Helper to create the M1 instruction set with a valid matching context.
@@ -819,4 +826,133 @@ fn test_m1_instruction_version_pinned_constant() {
     // For now, we only check that the version is stable and correctly formatted.
     // The expected_m1_version above documents what the pinned hash should be;
     // if M1_INSTRUCTION_TEXT changes, this will help detect it.
+}
+
+#[test]
+fn test_map_to_proposal_enriches_with_provenance() {
+    // Demonstrates that map_to_proposal adds provenance fields to provider output.
+    // This test constructs a real InterpretationRequest and InterpretationOutput,
+    // then verifies that the mapping enrichment produces a valid Proposal.
+    use ohand_core::providers::contracts::InterpretationRequest;
+
+    // Create a provider profile for the test
+    fn build_test_profile() -> ohand_core::providers::contracts::ProviderProfile {
+        let text_capability = CapabilityMetadata::supported(
+            ProviderCapability::TextInterpretation,
+            "interpretation_instructions:test",
+        )
+        .with_input_size_limit(10000)
+        .with_structured_output(StructuredOutputMode::JsonObject);
+
+        ProviderProfileBuilder::new(
+            "test-self-hosted",
+            ProviderProtocol::SelfHosted,
+            "test-model",
+        )
+        .credential_ref("test-cred")
+        .timeout_seconds(30)
+        .authorized_destination("https://example.test")
+        .endpoint("https://example.test/v1")
+        .capability(text_capability)
+        .build()
+        .expect("valid test profile")
+    }
+
+    fn test_time_context() -> TimeContext {
+        TimeContext {
+            timezone: "UTC".to_string(),
+            locale: "en-US".to_string(),
+            reference_time: Utc.with_ymd_and_hms(2026, 10, 8, 14, 0, 0).unwrap(),
+            utc_offset_at_capture: 0,
+            calendar: "gregorian".to_string(),
+        }
+    }
+
+    let profile = build_test_profile();
+    let capture_id = Uuid::new_v4().to_string();
+    let request_version = Uuid::new_v4().to_string();
+    let instruction_version = InstructionSet::m1().expect("M1").version;
+    let item_id = Uuid::new_v4().to_string();
+
+    // Create a real InterpretationRequest
+    let request = InterpretationRequest::new(
+        &capture_id,
+        1,
+        TextBasis::Original { item_revision: 1 },
+        "Call mom tomorrow",
+        &request_version,
+        &instruction_version,
+        &profile,
+        "test-route",
+        test_time_context(),
+    )
+    .expect("valid request");
+
+    // Create a provider output with operation + abstention (no provenance)
+    // At least one facet or an abstention is required by the proposal validation
+    let mut proposal_json = serde_json::Map::new();
+    proposal_json.insert(
+        "operation".to_string(),
+        serde_json::json!({"kind": "annotate"}),
+    );
+    proposal_json.insert(
+        "abstention".to_string(),
+        serde_json::json!("UncertainTarget"),
+    );
+
+    let output = InterpretationOutput {
+        request_version: request_version.clone(),
+        proposal: proposal_json,
+        elapsed_ms: 100,
+    };
+
+    // Create a mapping with matching context
+    let instructions = InstructionSet::m1().expect("M1");
+    let mapping = InterpretationMapping {
+        instructions,
+        context: RequestContext {
+            request_id: Uuid::new_v4().to_string(),
+            capture_id: capture_id.clone(),
+            item_id: item_id.clone(),
+            source_revision: 1,
+            instruction_version,
+            profile_version: profile.profile_version().to_string(),
+            route_id: "test-route".to_string(),
+            capture_instant: "2026-10-08T14:00:00Z".to_string(),
+            device_timezone: "UTC".to_string(),
+        },
+        source_text: "Call mom tomorrow".to_string(),
+    };
+
+    // Verify the mapping is valid
+    assert!(mapping.validate().is_ok(), "mapping validates");
+
+    // Call map_to_proposal - this should add provenance fields
+    let result = mapping.map_to_proposal(&request, &output, &item_id);
+
+    // The mapping should succeed and produce a Proposal with all provenance
+    match result {
+        Ok(proposal) => {
+            // Verify provenance fields were added by the mapping
+            assert_eq!(proposal.item_id, item_id, "proposal has correct item_id");
+            assert_eq!(
+                proposal.capture_id, capture_id,
+                "proposal has correct capture_id"
+            );
+            assert_eq!(
+                proposal.source_revision, 1,
+                "proposal has correct source_revision"
+            );
+            assert_eq!(
+                proposal.request_version, request_version,
+                "proposal has correct request_version"
+            );
+        }
+        Err(e) => {
+            panic!(
+                "map_to_proposal should succeed with enriched provenance: {:?}",
+                e
+            );
+        }
+    }
 }
