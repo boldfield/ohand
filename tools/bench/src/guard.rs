@@ -36,8 +36,8 @@ const PRIVATE_PATH_PREFIXES: &[&str] = &[
 const SENSITIVE_KEY_SUFFIXES: &[&str] = &["authorization", "token", "pwd"];
 
 /// Normalized key-name stems that mark a credential wherever they appear in the key, so compound
-/// names such as `secret_key`, `aws_secret_access_key`, `access_key_id`, `x_auth_key` or
-/// `db_password_hash` are caught as well as plain `secret` or `password`.
+/// names such as `secret_key`, `aws_secret_access_key`, `access_key_id`, `x_auth_key`,
+/// `connection_string` or `db_password_hash` are caught as well as plain `secret` or `password`.
 const SENSITIVE_KEY_STEMS: &[&str] = &[
     "apikey",
     "password",
@@ -58,6 +58,40 @@ const SENSITIVE_KEY_STEMS: &[&str] = &[
     "masterkey",
     "hmackey",
     "sharedkey",
+    "sshkey",
+    "deploykey",
+    "licensekey",
+    "subscriptionkey",
+    "accountkey",
+    "connectionstring",
+    "connstr",
+    "passcode",
+];
+
+/// Normalized key names ending in `key` that are structural rather than credentials, so the
+/// generic `*key` rule in [`is_sensitive_key_name`] leaves them alone. Any other compound
+/// `<something>key` name (`subscription_key`, `deploy_key`, `license_key`, ...) is a credential.
+const BENIGN_KEY_NAMES: &[&str] = &[
+    "key",
+    "foreignkey",
+    "sortkey",
+    "partitionkey",
+    "rowkey",
+    "hashkey",
+    "rangekey",
+    "cachekey",
+    "idempotencykey",
+    "publickey",
+    "hotkey",
+    "shortcutkey",
+    "monkey",
+    "turkey",
+    "donkey",
+    "whiskey",
+    "hockey",
+    "jockey",
+    "lackey",
+    "mickey",
 ];
 
 /// Normalized key-name suffixes whose string value must be an approved synthetic endpoint.
@@ -66,7 +100,18 @@ const ENDPOINT_KEY_SUFFIXES: &[&str] = &[
 ];
 
 /// Normalized key names that are sensitive only when they match exactly.
-const SENSITIVE_EXACT_KEYS: &[&str] = &["token", "auth", "session", "cookie", "setcookie"];
+const SENSITIVE_EXACT_KEYS: &[&str] = &[
+    "token",
+    "auth",
+    "session",
+    "cookie",
+    "setcookie",
+    "bearer",
+    "jwt",
+    "dsn",
+    "otp",
+    "totp",
+];
 
 /// Normalized key-name suffixes whose `key: value` header form (no quotes) is a credential for
 /// any non-empty value.
@@ -125,7 +170,18 @@ fn is_sensitive_key_name(normalized: &str, exact_names_too: bool) -> bool {
         || SENSITIVE_KEY_STEMS
             .iter()
             .any(|stem| normalized.contains(stem))
+        || is_compound_key_name(normalized)
         || (exact_names_too && SENSITIVE_EXACT_KEYS.contains(&normalized))
+}
+
+/// True for `<qualifier>key` names such as `subscription_key` or `deploy_key`. A credential key
+/// is almost always named this way, so every compound form is sensitive unless it is a known
+/// structural or ordinary word listed in [`BENIGN_KEY_NAMES`].
+fn is_compound_key_name(normalized: &str) -> bool {
+    let Some(qualifier) = normalized.strip_suffix("key") else {
+        return false;
+    };
+    qualifier.len() >= 2 && !BENIGN_KEY_NAMES.contains(&normalized)
 }
 
 fn is_endpoint_key_name(normalized: &str) -> bool {
@@ -177,11 +233,27 @@ fn looks_like_host(value: &str) -> bool {
 
 /// True if a string contains a credential, a private/unapproved endpoint, or a database input.
 pub fn is_secret_or_endpoint(value: &str) -> bool {
-    contains_unapproved_url(value)
+    contains_private_key_block(value)
+        || contains_unapproved_url(value)
         || contains_private_network_address(value)
         || contains_private_hostname(value)
         || contains_database_or_private_path(value)
         || contains_secret_material(value)
+}
+
+/// True if the text carries a PEM/OpenSSH/PGP private-key armor header or a PuTTY key file.
+/// Every PEM variant (`RSA`, `EC`, `DSA`, `OPENSSH`, `ENCRYPTED`, `PGP ... BLOCK`) places the
+/// words "PRIVATE KEY" between `-----BEGIN` and the closing dashes.
+fn contains_private_key_block(text: &str) -> bool {
+    let lowered = text.to_ascii_lowercase();
+    if lowered.contains("putty-user-key-file") {
+        return true;
+    }
+    lowered.match_indices("-----begin").any(|(index, marker)| {
+        let label = &lowered[index + marker.len()..];
+        let label = &label[..label.find("-----").unwrap_or(label.len())];
+        label.contains("private key")
+    })
 }
 
 /// True if any string or key anywhere in the JSON tree trips [`is_secret_or_endpoint`], or any
@@ -383,6 +455,14 @@ fn has_known_secret_prefix(word: &str) -> bool {
         || long_enough_after("xoxp-", 6)
         || long_enough_after("xoxa-", 6)
         || long_enough_after("eyJ", 13)
+        || long_enough_after("npm_", 8)
+        || long_enough_after("glpat-", 8)
+        || long_enough_after("hf_", 12)
+        || long_enough_after("pypi-AgEI", 8)
+        || long_enough_after("dop_v1_", 8)
+        || long_enough_after("xapp-", 6)
+        || long_enough_after("shpat_", 8)
+        || long_enough_after("shpss_", 8)
         || (word.starts_with("AKIA")
             && word.len() == 20
             && word
@@ -762,5 +842,148 @@ mod tests {
             value = json!([value]);
         }
         assert!(json_is_secret_or_endpoint(&value));
+    }
+
+    #[test]
+    fn rejects_private_key_blocks_built_at_runtime() {
+        let openssh = [
+            "-----BEGIN ",
+            "OPENSSH PRIVATE KEY-----\n",
+            "b3BlbnNzaC1rZXktdjEAAAAA\n",
+            "-----END ",
+            "OPENSSH PRIVATE KEY-----",
+        ]
+        .concat();
+        let rsa = ["-----BEGIN ", "RSA PRIVATE KEY-----"].concat();
+        let encrypted = ["-----BEGIN ", "ENCRYPTED PRIVATE KEY-----"].concat();
+        let pkcs8 = ["-----BEGIN ", "PRIVATE KEY-----\nMIIEvQ"].concat();
+        let pgp = ["-----BEGIN ", "PGP PRIVATE KEY BLOCK-----"].concat();
+        let lowercase = ["-----begin ", "ec private key-----"].concat();
+        let putty = ["PuTTY-User-", "Key-File-3: ssh-ed25519"].concat();
+        for value in [&openssh, &rsa, &encrypted, &pkcs8, &pgp, &lowercase, &putty] {
+            assert!(is_secret_or_endpoint(value), "should reject {value}");
+            assert!(
+                json_is_secret_or_endpoint(&json!({ "note": value })),
+                "should reject json {value}"
+            );
+        }
+        for value in [
+            "-----BEGIN CERTIFICATE-----",
+            "-----BEGIN PUBLIC KEY-----",
+            "the private key stays on device",
+            "-----BEGIN ----- is an incomplete marker",
+        ] {
+            assert!(!is_secret_or_endpoint(value), "should accept {value}");
+        }
+    }
+
+    #[test]
+    fn rejects_common_credential_key_names_in_text_and_json() {
+        let account_key_assignment = ["Account", "Key=", "abcdef"].concat();
+        let connection_string = format!("connection_string: {account_key_assignment}");
+        let azure_connection = format!(
+            "DefaultEndpointsProtocol=https;AccountName=synthetic;{account_key_assignment}=="
+        );
+        for value in [
+            "ssh_key=abcdef",
+            "deploy_key: abcdef",
+            "license_key=ABCD-1234",
+            "subscription_key=abcdef",
+            "Ocp-Apim-Subscription-Key: abcdef",
+            "account_key: abcdef",
+            account_key_assignment.as_str(),
+            connection_string.as_str(),
+            azure_connection.as_str(),
+            "connectionString=Server=db;User=u;Pwd=p",
+            "dsn=user:pw@tcp(db)/app",
+            "jwt=abcdef",
+            "jwt: abcdef",
+            "bearer=abcdef",
+            "primary_key=abcdef",
+            "passcode=123456",
+            "otp: 123456",
+        ] {
+            assert!(is_secret_or_endpoint(value), "should reject {value}");
+        }
+        for key in [
+            "ssh_key",
+            "sshKey",
+            "deploy_key",
+            "deployKey",
+            "license_key",
+            "subscription_key",
+            "Ocp-Apim-Subscription-Key",
+            "account_key",
+            "AccountKey",
+            "connection_string",
+            "connectionString",
+            "conn_str",
+            "dsn",
+            "bearer",
+            "jwt",
+            "primaryKey",
+            "storage_key",
+        ] {
+            let mut output = serde_json::Map::new();
+            output.insert(key.to_string(), json!("abcdef"));
+            assert!(
+                json_is_secret_or_endpoint(&Value::Object(output)),
+                "should reject key {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_structural_and_ordinary_key_words() {
+        for value in [
+            "monkey: see, monkey: do",
+            "hotkey: cmd-k",
+            "the turkey: roasted",
+            "keyword: milk",
+            "foreign_key: experiment_id",
+            "sort_key: created_at",
+            "public_key: shared openly",
+            "keys were rotated",
+            "jwt tokens are described in the doc",
+            "dsn format is documented",
+        ] {
+            assert!(!is_secret_or_endpoint(value), "should accept {value}");
+        }
+        assert!(!json_is_secret_or_endpoint(&json!({
+            "key": "content",
+            "foreign_key": "experiment_id",
+            "sort_key": "created_at",
+            "partition_key": "arm",
+            "row_key": "7",
+            "cache_key": "case-1",
+            "idempotency_key": "attempt-1",
+            "public_key": "shared openly",
+            "hotkey": "cmd-k",
+            "ssh_key": null,
+            "jwt": "",
+            "dsn": false
+        })));
+    }
+
+    #[test]
+    fn rejects_additional_known_token_prefixes() {
+        for value in [
+            ["npm_", "abcdefghijklmnop"].concat(),
+            ["glpat-", "abcdefghijklmnop"].concat(),
+            ["hf_", "abcdefghijklmnop"].concat(),
+            ["dop_v1_", "abcdefghijklmnop"].concat(),
+            ["xapp-", "1-abcdefgh"].concat(),
+            ["shpat_", "abcdefghijklmnop"].concat(),
+        ] {
+            assert!(is_secret_or_endpoint(&value), "should reject {value}");
+        }
+        for value in [
+            "npm_install failed",
+            "hf_dataset loaded",
+            "glpat-",
+            "shpat_x",
+        ] {
+            assert!(!is_secret_or_endpoint(value), "should accept {value}");
+        }
     }
 }

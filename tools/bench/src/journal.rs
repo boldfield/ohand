@@ -1438,4 +1438,126 @@ mod tests {
         assert_eq!(reader.records().len(), 3);
         Ok(())
     }
+
+    #[test]
+    fn test_boundary_rejects_private_key_blocks_and_credential_key_names(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let file = NamedTempFile::new()?;
+        let (experiment, case, attempt) = sample_chain();
+        {
+            let mut writer = JournalWriter::open(file.path())?;
+            writer.write_experiment(&experiment)?;
+            writer.write_case(&case)?;
+        }
+
+        for key in [
+            "ssh_key",
+            "deploy_key",
+            "license_key",
+            "subscription_key",
+            "account_key",
+            "connection_string",
+            "dsn",
+            "bearer",
+            "jwt",
+        ] {
+            let mut map = serde_json::Map::new();
+            map.insert(key.to_string(), serde_json::json!("abcdef"));
+            let output = serde_json::Value::Object(map);
+            assert!(
+                attempt.clone().complete(5, Some(output.clone())).is_err(),
+                "complete should reject key {key}"
+            );
+            let mut forged = attempt.clone();
+            forged.state = crate::records::AttemptState::Completed;
+            forged.provider_output = Some(output);
+            assert_write_rejected_and_journal_unchanged(&file, |w| w.write_attempt(&forged));
+
+            let assignment = format!("{key}=abcdef");
+            let mut with_unknown = experiment.clone();
+            with_unknown.unknown_metadata.unknown_fields = vec![assignment.clone()];
+            assert_write_rejected_and_journal_unchanged(&file, |w| {
+                w.write_experiment(&with_unknown)
+            });
+            let mut forged_case = case.clone();
+            forged_case.content = assignment;
+            assert_write_rejected_and_journal_unchanged(&file, |w| w.write_case(&forged_case));
+        }
+
+        let azure_connection = [
+            "DefaultEndpointsProtocol=https;AccountName=synthetic;Account",
+            "Key=",
+            "abcdef==",
+        ]
+        .concat();
+        let private_key_block = [
+            "-----BEGIN ",
+            "OPENSSH PRIVATE KEY-----\n",
+            "b3BlbnNzaC1rZXktdjEAAAAA\n",
+            "-----END ",
+            "OPENSSH PRIVATE KEY-----",
+        ]
+        .concat();
+        let putty_key = ["PuTTY-User-", "Key-File-3: ssh-ed25519"].concat();
+        for canary in [&azure_connection, &private_key_block, &putty_key] {
+            let output = serde_json::json!({ "note": canary });
+            assert!(attempt.clone().complete(5, Some(output.clone())).is_err());
+            assert!(attempt.clone().fail(canary.as_str()).is_err());
+            let mut forged = attempt.clone();
+            forged.state = crate::records::AttemptState::Completed;
+            forged.provider_output = Some(output);
+            assert_write_rejected_and_journal_unchanged(&file, |w| w.write_attempt(&forged));
+
+            let mut failed = attempt.clone();
+            failed.state = crate::records::AttemptState::Failed;
+            failed.failure_reason = Some(canary.clone());
+            assert_write_rejected_and_journal_unchanged(&file, |w| w.write_attempt(&failed));
+
+            let mut with_unknown = experiment.clone();
+            assert!(with_unknown
+                .set_unknown_fields(vec![canary.clone()])
+                .is_err());
+            with_unknown.unknown_metadata.unknown_fields = vec![canary.clone()];
+            assert_write_rejected_and_journal_unchanged(&file, |w| {
+                w.write_experiment(&with_unknown)
+            });
+            let mut forged_case = case.clone();
+            forged_case.content = canary.clone();
+            assert_write_rejected_and_journal_unchanged(&file, |w| w.write_case(&forged_case));
+        }
+
+        let reader = JournalReader::open(file.path())?;
+        assert_eq!(reader.records().len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn test_boundary_accepts_structural_key_names_and_certificate_markers(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let file = NamedTempFile::new()?;
+        let (mut experiment, case, mut attempt) = sample_chain();
+        experiment.set_unknown_fields(vec![
+            "foreign_key: experiment_id".into(),
+            "jwt tokens are described in the doc".into(),
+        ])?;
+        attempt.complete(
+            5,
+            Some(serde_json::json!({
+                "key": "content",
+                "partition_key": "arm",
+                "idempotency_key": "attempt-1",
+                "note": "-----BEGIN CERTIFICATE----- is public material",
+                "hotkey": "cmd-k"
+            })),
+        )?;
+
+        let mut writer = JournalWriter::open(file.path())?;
+        writer.write_experiment(&experiment)?;
+        writer.write_case(&case)?;
+        writer.write_attempt(&attempt)?;
+
+        let reader = JournalReader::open(file.path())?;
+        assert_eq!(reader.records().len(), 3);
+        Ok(())
+    }
 }
