@@ -6,9 +6,16 @@
 set -euo pipefail
 
 output_dir="${1:-.}"
+caller_cwd="$(pwd)"
 
 # Build and run the binding generator from repo root
 repo_root="$(git rev-parse --show-toplevel)"
+
+# Resolve output_dir to absolute path before changing directories
+if [[ ! "$output_dir" = /* ]]; then
+    output_dir="${caller_cwd}/${output_dir}"
+fi
+
 cd "${repo_root}"
 
 config_file="tools/bindings/cbindgen.toml"

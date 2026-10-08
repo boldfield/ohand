@@ -6,9 +6,10 @@
 //!
 //! # Generated Bindings
 //!
-//! The canonical C header is generated from `core/bindings/src/lib.rs` using cbindgen.
-//! All FFI exports must be present in that file (either directly defined or re-exported from
-//! other modules). cbindgen parses only that single source file.
+//! The canonical C header is generated from the `ohand-bindings` crate using cbindgen, which
+//! parses the entire crate including all modules. FFI exports are declared as `#[no_mangle] pub extern "C"`
+//! functions anywhere within the crate structure; they are automatically discovered and included
+//! in the generated header.
 //!
 //! Generated files:
 //! - `build/ohand_bindings.h` (or target platform equivalent) — build output, not committed
@@ -16,9 +17,14 @@
 //!   by `core/bindings/build-ios.sh` during iOS builds
 //! - Verified against source via `cargo test -p ohand-bindings --test header_drift`
 //!
-//! # Future Module-Local Export Pattern
+//! # Module-Local Export Pattern
 //!
-//! Planned: Modules will be able to declare FFI exports locally via a registration mechanism
-//! (e.g., cbindgen discovery or a separate per-module export registry) to avoid concurrent
-//! central-file edits. This is not yet implemented. For now, all exports must be added to
-//! `core/bindings/src/lib.rs`.
+//! Modules can declare FFI exports locally without editing the central `core/bindings/src/lib.rs`.
+//! To export a C function from a submodule:
+//!
+//! 1. Define the function with `#[no_mangle] pub extern "C"` in the module
+//! 2. The function will be automatically discovered and included in the generated header
+//! 3. No central-file edits are required; later owned modules follow the same pattern
+//!
+//! The cbindgen generator uses crate-wide parsing (`with_crate`) to ensure all exports
+//! are discovered across the entire module tree.

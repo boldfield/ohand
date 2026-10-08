@@ -28,20 +28,20 @@ fn main() {
         }
     };
 
-    // Determine source file from config or default
+    // Determine bindings crate directory from config or default
     let repo_root = env::current_dir().expect("current directory");
-    let src_file = repo_root.join("core/bindings/src/lib.rs");
+    let bindings_crate = repo_root.join("core/bindings");
 
-    if !src_file.exists() {
-        eprintln!("FFI source not found: {}", src_file.display());
+    if !bindings_crate.exists() {
+        eprintln!("Bindings crate not found: {}", bindings_crate.display());
         process::exit(1);
     }
 
-    // Generate bindings
+    // Generate bindings using crate-wide parsing to discover all module-local exports
     let mut output = Vec::new();
     match Builder::new()
         .with_config(config)
-        .with_src(&src_file)
+        .with_crate(&bindings_crate)
         .generate()
     {
         Ok(bindings) => {
