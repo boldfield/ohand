@@ -178,6 +178,17 @@ final class CredentialServiceTests: XCTestCase {
         XCTAssertEqual(status, .absent)
     }
 
+    func testStatusDistinguishesAbsentFromInvalidated() throws {
+        let absentReference = UUID().uuidString
+        let absentStatus = try credentialService.credentialStatus(reference: absentReference)
+        XCTAssertEqual(absentStatus, .absent, "Never-added credential should be absent")
+
+        let secret = "test-secret".data(using: .utf8)!
+        let addedReference = try credentialService.addCredential(secret)
+        let presentStatus = try credentialService.credentialStatus(reference: addedReference)
+        XCTAssertEqual(presentStatus, .present, "Added credential should be present")
+    }
+
     func testStatusWithEmptyReferenceThrows() throws {
         XCTAssertThrowsError(try credentialService.credentialStatus(reference: "")) { error in
             if case let .invalidReference(msg) = error as? CredentialError {
@@ -375,9 +386,32 @@ final class CredentialServiceTests: XCTestCase {
             let accessibleValue = attributes[kSecAttrAccessible as String]
             XCTAssertEqual(
                 accessibleValue as? String,
-                kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String,
-                "Credential should use WhenUnlocked accessibility class"
+                kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String,
+                "Credential should use AfterFirstUnlock accessibility class"
             )
+        }
+    }
+
+    // MARK: - Invalidated Status Tests
+
+    func testInvalidatedStatusForInaccessibleCredential() throws {
+        let secret = "inaccessible-secret".data(using: .utf8)!
+        let reference = try credentialService.addCredential(secret)
+
+        let status = try credentialService.credentialStatus(reference: reference)
+        XCTAssertEqual(status, .present, "Credential should be present before device lock simulation")
+
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: testKeychainService,
+            kSecAttrAccount as String: reference,
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        ]
+
+        let updateResult = SecItemUpdate(query as CFDictionary, [:] as CFDictionary)
+        if updateResult == errSecSuccess {
+            let invalidatedStatus = try credentialService.credentialStatus(reference: reference)
+            XCTAssertEqual(invalidatedStatus, .invalidated, "Credential stored with stricter class should become invalidated")
         }
     }
 
@@ -391,7 +425,7 @@ final class CredentialServiceTests: XCTestCase {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: testKeychainService,
             kSecAttrAccount as String: reference,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
             kSecValueData as String: secret
         ]
 
@@ -426,6 +460,60 @@ final class CredentialServiceTests: XCTestCase {
                 XCTAssertTrue(msg.contains("Keychain") || msg.contains("access"), "Error should explain the issue")
                 XCTAssertFalse(msg.contains("secret"), "Error should not contain secret value")
             }
+        }
+    }
+
+    func testSecretNeverLeakedInStatusError() throws {
+        let sensitiveSecret = "api-key-12345-secret-token".data(using: .utf8)!
+        let reference = try credentialService.addCredential(sensitiveSecret)
+
+        do {
+            _ = try credentialService.credentialStatus(reference: reference)
+        } catch let error as CredentialError {
+            let errorMessage = error.errorDescription ?? ""
+            XCTAssertFalse(errorMessage.contains("api-key"), "Error should not leak credential content")
+            XCTAssertFalse(errorMessage.contains("secret-token"), "Error should not leak credential content")
+            XCTAssertFalse(errorMessage.contains("12345"), "Error should not leak credential content")
+        }
+    }
+
+    func testSecretNeverLeakedInAddError() throws {
+        let sensitiveSecret = "oauth-token-xyz789".data(using: .utf8)!
+
+        do {
+            _ = try credentialService.addCredential(sensitiveSecret)
+        } catch let error as CredentialError {
+            let errorMessage = error.errorDescription ?? ""
+            XCTAssertFalse(errorMessage.contains("oauth-token"), "Error should not leak credential content")
+            XCTAssertFalse(errorMessage.contains("xyz789"), "Error should not leak credential content")
+        }
+    }
+
+    func testSecretNeverLeakedInUpdateError() throws {
+        let originalSecret = "original-secret".data(using: .utf8)!
+        let reference = try credentialService.addCredential(originalSecret)
+
+        let sensitiveUpdate = "new-api-secret-key".data(using: .utf8)!
+
+        do {
+            _ = try credentialService.updateCredential(sensitiveUpdate, reference: reference)
+        } catch let error as CredentialError {
+            let errorMessage = error.errorDescription ?? ""
+            XCTAssertFalse(errorMessage.contains("api-secret"), "Error should not leak credential content")
+            XCTAssertFalse(errorMessage.contains("secret-key"), "Error should not leak credential content")
+        }
+    }
+
+    func testSecretNeverLeakedInDeleteError() throws {
+        let sensitiveSecret = "delete-test-secret-123".data(using: .utf8)!
+        let reference = try credentialService.addCredential(sensitiveSecret)
+
+        do {
+            _ = try credentialService.deleteCredential(reference: reference)
+        } catch let error as CredentialError {
+            let errorMessage = error.errorDescription ?? ""
+            XCTAssertFalse(errorMessage.contains("delete-test"), "Error should not leak credential content")
+            XCTAssertFalse(errorMessage.contains("secret-123"), "Error should not leak credential content")
         }
     }
 

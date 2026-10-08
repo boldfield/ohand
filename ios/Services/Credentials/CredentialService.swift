@@ -35,6 +35,7 @@ public enum CredentialError: LocalizedError {
 public enum CredentialStatus: Equatable {
     case present
     case absent
+    case invalidated
 }
 
 /// Manages provider secrets in native Keychain behind opaque references.
@@ -117,7 +118,7 @@ public class CredentialService {
 
     /// Gets the current status of a credential without retrieving the secret
     /// - Parameter reference: The credential reference to check
-    /// - Returns: CredentialStatus indicating presence or absence
+    /// - Returns: CredentialStatus indicating presence, absence, or invalidation
     /// - Throws: CredentialError if status check fails
     public func credentialStatus(reference: String) throws -> CredentialStatus {
         guard !reference.isEmpty else {
@@ -135,10 +136,8 @@ public class CredentialService {
             return .present
         case errSecItemNotFound:
             return .absent
-        case errSecUserCanceled:
-            throw CredentialError.statusError("User cancelled Keychain access")
-        case errSecInteractionNotAllowed:
-            throw CredentialError.statusError("Keychain interaction not allowed")
+        case errSecInteractionNotAllowed, errSecUserCanceled:
+            return .invalidated
         case errSecAuthFailed:
             throw CredentialError.statusError("Keychain authentication failed")
         default:
@@ -190,7 +189,7 @@ public class CredentialService {
 
     private func keychainAddAttributes(for reference: String) -> [String: Any] {
         var attributes = keychainQueryAttributes(for: reference)
-        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         return attributes
     }
 
