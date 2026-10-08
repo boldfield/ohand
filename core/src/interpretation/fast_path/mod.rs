@@ -23,8 +23,9 @@
 //!   with an instant; date-only, past, DST-gap and DST-fold times are `Ambiguous` without an
 //!   instant (never guessed) and keep their evidence span for the correction path.
 //! - `Some(proposal)` with an abstention: the grammar matched but a safety guard applies
-//!   (negation, quotation, hypothetical or reported speech, completed work, a retraction or
-//!   condition after the command, two competing times, or recurrence). Nothing is scheduled; the
+//!   (negation, quotation, hypothetical or reported speech, completed work, a retraction,
+//!   negation, quote, clause break or condition inside the content, two competing times, or a
+//!   recurrence request). Nothing is scheduled; the
 //!   abstention only records why and never suppresses later interpretation of the same text.
 
 use crate::domain::items::SUPPORTED_PROPOSAL_SCHEMA_VERSION;
@@ -102,16 +103,62 @@ const CONTENT_CONDITION_WORDS: &[&str] = &[
     "nevermind",
 ];
 
+const CONTENT_RETRACTION_WORDS: &[&str] = &[
+    "actually",
+    "kidding",
+    "joking",
+    "jk",
+    "nvm",
+    "nope",
+    "nevermind",
+    "no",
+];
+
 const CONTENT_RETRACTION_SEQUENCES: &[&[&str]] = &[
     &["never", "mind"],
     &["scratch", "that"],
     &["forget", "it"],
+    &["forget", "that"],
+    &["cancel", "that"],
+    &["cancel", "it"],
     &["or", "not"],
     &["or", "maybe"],
 ];
 
-const RECURRENCE_WORDS: &[&str] = &[
-    "every",
+// Past or third-person forms only: the base forms ("tell", "ask", "want") are ordinary reminder
+// verbs ("remind me to ask the landlord ...").
+const CONTENT_REPORTING_WORDS: &[&str] = &[
+    "said",
+    "says",
+    "told",
+    "tells",
+    "asked",
+    "asks",
+    "wants",
+    "wanted",
+    "thinks",
+    "thought",
+    "claims",
+    "claimed",
+    "mentioned",
+    "mentions",
+    "wrote",
+    "writes",
+    "texted",
+    "replied",
+    "suggested",
+    "suggests",
+];
+
+const CONTENT_COMPLETED_WORDS: &[&str] = &["already", "did"];
+
+const CONTENT_COMPLETION_AUXILIARIES: &[&str] = &[
+    "is", "was", "been", "has", "had", "have", "i", "we", "all", "it's", "that's",
+];
+
+const CONTENT_COMPLETION_PARTICIPLES: &[&str] = &["done", "finished", "completed"];
+
+const RECURRENCE_ADVERBS: &[&str] = &[
     "daily",
     "weekly",
     "monthly",
@@ -125,6 +172,22 @@ const RECURRENCE_WORDS: &[&str] = &[
     "repeatedly",
     "weekdays",
     "weekends",
+];
+
+const RECURRENCE_UNITS: &[&str] = &[
+    "day",
+    "week",
+    "month",
+    "year",
+    "hour",
+    "minute",
+    "morning",
+    "afternoon",
+    "evening",
+    "night",
+    "weekday",
+    "weekend",
+    "other",
 ];
 
 const WEEKDAYS: &[&str] = &[
@@ -276,9 +339,21 @@ fn is_plural_weekday(word: &str) -> bool {
         .is_some_and(|singular| weekday_from(singular).is_some())
 }
 
-fn is_recurrence_word(token: &Token) -> bool {
-    token.is_word()
-        && (RECURRENCE_WORDS.contains(&token.lower.as_str()) || is_plural_weekday(&token.lower))
+fn is_plural_weekday_token(token: &Token) -> bool {
+    token.is_word() && is_plural_weekday(&token.lower)
+}
+
+fn is_recurrence_adverb(token: &Token) -> bool {
+    token.is_word() && RECURRENCE_ADVERBS.contains(&token.lower.as_str())
+}
+
+fn is_every_unit(first: &Token, second: &Token) -> bool {
+    (first.is_word_equal_to("every") || first.is_word_equal_to("each"))
+        && second.is_word()
+        && (RECURRENCE_UNITS.contains(&second.lower.as_str())
+            || weekday_from(&second.lower).is_some()
+            || is_plural_weekday(&second.lower)
+            || second.lower.starts_with(|ch: char| ch.is_ascii_digit()))
 }
 
 fn is_digits(text: &str, expected_length: usize) -> bool {
@@ -407,13 +482,51 @@ fn command_body(rest: &[Token]) -> &[Token] {
     &rest[..end]
 }
 
+fn is_every_unit_lead(rest: &[Token]) -> bool {
+    rest.first().is_some_and(|first| {
+        (first.is_word_equal_to("every") || first.is_word_equal_to("each")) && rest.len() > 1
+    })
+}
+
+fn leading_time_length(rest: &[Token], first_index: usize) -> usize {
+    [2, 1]
+        .into_iter()
+        .find(|count| {
+            rest.get(first_index..first_index + count)
+                .is_some_and(looks_like_time_phrase)
+        })
+        .unwrap_or(0)
+}
+
+/// Recurrence is a request, not vocabulary: "every <unit>", plural weekdays, or a recurrence
+/// adverb in the time position (right after the command, right after a leading time, or as the
+/// final word). "the weekly report" inside the content is just a noun phrase.
+fn is_recurrence_request(rest: &[Token]) -> bool {
+    if rest.iter().any(is_plural_weekday_token)
+        || rest
+            .windows(2)
+            .any(|pair| is_every_unit(&pair[0], &pair[1]))
+    {
+        return true;
+    }
+    let time_start = usize::from(rest.first().is_some_and(|t| t.is_word_equal_to("on")));
+    let after_time = time_start + leading_time_length(rest, time_start);
+    let final_word = rest.iter().rposition(Token::is_word);
+    [Some(time_start), Some(after_time), final_word]
+        .into_iter()
+        .flatten()
+        .any(|index| rest.get(index).is_some_and(is_recurrence_adverb))
+}
+
 fn parse_shape<'a>(rest: &'a [Token], time_context: &TimeContext) -> Option<Shape<'a>> {
     let first = rest.first()?;
     let lead_is_grammar = first.is_word_equal_to("to")
         || first.is_word_equal_to("on")
-        || is_recurrence_word(first)
+        || is_recurrence_adverb(first)
+        || is_every_unit_lead(rest)
+        || is_plural_weekday_token(first)
         || looks_like_time_phrase(&rest[..1]);
-    if lead_is_grammar && rest.iter().any(is_recurrence_word) {
+    if lead_is_grammar && is_recurrence_request(rest) {
         return Some(Shape::Recurrence);
     }
 
@@ -512,15 +625,49 @@ fn starts_its_clause(prefix: &[Token]) -> bool {
     })
 }
 
+fn has_completion(content: &[Token]) -> bool {
+    has_word(content, CONTENT_COMPLETED_WORDS)
+        || content.windows(2).any(|pair| {
+            pair[0].is_word()
+                && CONTENT_COMPLETION_AUXILIARIES.contains(&pair[0].lower.as_str())
+                && pair[1].is_word()
+                && CONTENT_COMPLETION_PARTICIPLES.contains(&pair[1].lower.as_str())
+        })
+}
+
+fn has_time_phrase(content: &[Token]) -> bool {
+    (0..content.len()).any(|first_token| {
+        [2, 1].into_iter().any(|count| {
+            content
+                .get(first_token..first_token + count)
+                .is_some_and(looks_like_time_phrase)
+        })
+    })
+}
+
+/// The reminder content is bounded: it must be a single plain clause. Negation, retraction,
+/// reported speech, completed work, conditions, quotes, brackets, clause breaks and any further
+/// time all mean the user may not be asking for this schedule, so nothing is scheduled.
 fn content_abstention(content: &[Token]) -> Option<AbstentionReason> {
-    if CONTENT_RETRACTION_SEQUENCES
-        .iter()
-        .any(|sequence| has_sequence(content, sequence))
+    if content.iter().any(is_negation_word)
+        || has_word(content, CONTENT_RETRACTION_WORDS)
+        || CONTENT_RETRACTION_SEQUENCES
+            .iter()
+            .any(|sequence| has_sequence(content, sequence))
     {
         return Some(AbstentionReason::Negated);
     }
-    if has_word(content, CONTENT_CONDITION_WORDS) {
+    if content
+        .iter()
+        .any(|token| matches!(token.kind, TokenKind::ClauseBreak | TokenKind::Quote))
+        || has_word(content, CONTENT_CONDITION_WORDS)
+        || has_word(content, CONTENT_REPORTING_WORDS)
+        || has_completion(content)
+    {
         return Some(AbstentionReason::UncertainTarget);
+    }
+    if has_time_phrase(content) {
+        return Some(AbstentionReason::Ambiguous);
     }
     None
 }
@@ -607,9 +754,6 @@ pub fn recognize_reminder(
     };
     if let Some(reason) = content_abstention(content) {
         return Some(provenance.abstention(reason));
-    }
-    if time_ending_at_end(content, time_context).is_some() {
-        return Some(provenance.abstention(AbstentionReason::Ambiguous));
     }
 
     let mut proposal = provenance

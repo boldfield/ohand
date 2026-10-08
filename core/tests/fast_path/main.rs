@@ -491,3 +491,86 @@ fn unusual_text_never_panics_and_every_proposal_validates() {
 fn unanchored_unicode_prefix_is_not_the_grammar() {
     expect_unrecognized("\u{130}\u{130}\u{130}\u{130} remind me 2025-10-20 14:30:00");
 }
+
+#[test]
+fn trailing_retraction_negation_and_reported_speech_never_schedule() {
+    expect_explicit(
+        "remind me 2025-10-20 14:30:00 to call mom",
+        FUTURE_INSTANT,
+        FUTURE_PHRASE,
+    );
+    for text in [
+        "remind me 2025-10-20 14:30:00 to call mom, actually don't",
+        "remind me 2025-10-20 14:30:00 to call mom, no wait, cancel that",
+        "remind me 2025-10-20 14:30:00 to call mom, just kidding",
+        "remind me 2025-10-20 14:30:00 to call mom, I don't want to",
+        "remind me 2025-10-20 14:30:00 to call mom (not really)",
+        "remind me 2025-10-20 14:30:00 to call mom; never",
+        "remind me 2025-10-20 14:30:00 to call mom, he said",
+        "remind me 2025-10-20 14:30:00 to call mom\" he said",
+        "remind me 2025-10-20 14:30:00 to call mom actually",
+        "remind me 2025-10-20 14:30:00 to not call mom",
+        "remind me to call mom, actually don't 2025-10-20 14:30:00",
+    ] {
+        let proposal = recognize(text).unwrap_or_else(|| panic!("{text:?} should abstain"));
+        assert!(proposal.reminder_proposal.is_none(), "{text:?}");
+        assert!(proposal.abstention.is_some(), "{text:?}");
+    }
+}
+
+#[test]
+fn trailing_completed_work_and_reported_speech_minimal_pairs() {
+    expect_ambiguous("remind me tomorrow to buy milk", "tomorrow");
+    expect_ambiguous("remind me tomorrow to ask the landlord", "tomorrow");
+    expect_ambiguous("remind me tomorrow to tell Sam", "tomorrow");
+    expect_ambiguous("remind me tomorrow to get this done", "tomorrow");
+    for text in [
+        "remind me tomorrow to buy milk, which I already did",
+        "remind me tomorrow to buy milk which I already did",
+        "remind me tomorrow to buy milk which is done",
+        "remind me tomorrow to call mom, Sam said",
+        "remind me tomorrow to call mom Sam said",
+        "remind me tomorrow to call mom as Sam told me",
+    ] {
+        let proposal = recognize(text).unwrap_or_else(|| panic!("{text:?} should abstain"));
+        assert!(proposal.reminder_proposal.is_none(), "{text:?}");
+        assert!(
+            proposal.abstention.is_some(),
+            "{text:?} must record an abstention"
+        );
+    }
+}
+
+#[test]
+fn competing_times_in_the_content_never_pick_one() {
+    expect_explicit(
+        "remind me 2025-10-20 14:30:00 to call mom",
+        FUTURE_INSTANT,
+        FUTURE_PHRASE,
+    );
+    for text in [
+        "remind me to call mom on 2025-10-20 14:30:00 or 2025-10-21 09:00:00",
+        "remind me to call mom 2025-10-21 09:00:00 or on 2025-10-20 14:30:00",
+        "remind me 2025-10-20 14:30:00 to call mom 2025-10-22 10:00:00 at the latest",
+        "remind me 2025-10-20 14:30:00 to call mom on tuesday at the office",
+        "remind me tomorrow to call mom or friday",
+    ] {
+        expect_abstention(text, AbstentionReason::Ambiguous);
+    }
+}
+
+#[test]
+fn recurrence_is_a_request_not_content_vocabulary() {
+    expect_ambiguous("remind me tomorrow to read the weekly report", "tomorrow");
+    expect_ambiguous("remind me to read the monthly report tomorrow", "tomorrow");
+    expect_unrecognized("remind me to read the monthly report");
+    for text in [
+        "remind me tomorrow to read the report weekly",
+        "remind me to read the report every week",
+        "remind me tomorrow to stretch each morning",
+        "remind me to take pills every 8 hours",
+        "remind me tomorrow weekly to read the report",
+    ] {
+        expect_abstention(text, AbstentionReason::UnsupportedOperation);
+    }
+}
