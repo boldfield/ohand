@@ -20,22 +20,60 @@ class CaptureProbeDelegateAdapter: UIResponder, UIApplicationDelegate {
 
 class CaptureProbeSceneDelegate: UIResponder, UIWindowSceneDelegate {
     var window: UIWindow?
+    private let captureViewController = CaptureProbeViewController()
+    private let session = IngressSession(flow: IngressFlow.live)
+
+    private var protectedDataAvailable: Bool { UIApplication.shared.isProtectedDataAvailable }
 
     func scene(
         _ scene: UIScene,
-        willConnectTo session: UISceneSession,
+        willConnectTo sceneSession: UISceneSession,
         options connectionOptions: UIScene.ConnectionOptions
     ) {
         guard let windowScene = (scene as? UIWindowScene) else { return }
         let window = UIWindow(windowScene: windowScene)
-        let rootViewController = CaptureProbeViewController()
-        window.rootViewController = rootViewController
+        window.rootViewController = captureViewController
         self.window = window
         window.makeKeyAndVisible()
+        session.observeHandoffs(
+            protectedDataAvailable: { UIApplication.shared.isProtectedDataAvailable },
+            onOutcome: { [weak self] outcome in self?.present(outcome) }
+        )
+        // Cold launch from the shortcut URL: the scene is not foreground yet, so this only registers the handoff
+        // and the foreground callback commits it.
+        receive(urls: connectionOptions.urlContexts.map(\.url))
+    }
+
+    func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
+        receive(urls: URLContexts.map(\.url))
+    }
+
+    func sceneWillEnterForeground(_ scene: UIScene) {
+        present(session.willEnterForeground(protectedDataAvailable: protectedDataAvailable))
+    }
+
+    func sceneDidEnterBackground(_ scene: UIScene) {
+        session.didEnterBackground()
+    }
+
+    private func receive(urls: [URL]) {
+        for url in urls {
+            if let outcome = session.receive(url: url, protectedDataAvailable: protectedDataAvailable) {
+                present(outcome)
+            }
+        }
+    }
+
+    private func present(_ outcome: IngressOutcome?) {
+        captureViewController.render(outcome)
+        IngressFlow.live.recordPresentation(outcome)
     }
 }
 
 class CaptureProbeViewController: UIViewController {
+    private let statusLabel = UILabel()
+    private let detailLabel = UILabel()
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
@@ -54,25 +92,38 @@ class CaptureProbeViewController: UIViewController {
         container.addArrangedSubview(titleLabel)
 
         let descriptionLabel = UILabel()
-        descriptionLabel.text = "System control handoff and entry validation\nCapture entry point and production surface flow"
+        descriptionLabel.text = "System control handoff and protected ingress probe.\nShows only the current entry."
         descriptionLabel.font = UIFont.systemFont(ofSize: 14, weight: .regular)
         descriptionLabel.numberOfLines = 0
         descriptionLabel.textAlignment = .center
         descriptionLabel.textColor = .secondaryLabel
         container.addArrangedSubview(descriptionLabel)
 
-        let statusLabel = UILabel()
-        statusLabel.text = "Probe screen initialized"
-        statusLabel.font = UIFont.systemFont(ofSize: 12, weight: .light)
-        statusLabel.textColor = .tertiaryLabel
+        statusLabel.text = "Waiting for entry"
+        statusLabel.font = UIFont.systemFont(ofSize: 16, weight: .semibold)
+        statusLabel.accessibilityIdentifier = "capture-status"
         container.addArrangedSubview(statusLabel)
+
+        detailLabel.numberOfLines = 0
+        detailLabel.textAlignment = .center
+        detailLabel.font = UIFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        detailLabel.textColor = .secondaryLabel
+        detailLabel.accessibilityIdentifier = "capture-detail"
+        container.addArrangedSubview(detailLabel)
 
         view.addSubview(container)
         NSLayoutConstraint.activate([
             container.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             container.centerYAnchor.constraint(equalTo: view.centerYAnchor),
             container.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 20),
-            container.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -20)
+            container.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -20),
         ])
+    }
+
+    /// Renders the current entry, or the idle screen when there is none.
+    func render(_ outcome: IngressOutcome?) {
+        loadViewIfNeeded()
+        statusLabel.text = outcome?.statusText ?? IngressOutcome.idleStatusText
+        detailLabel.text = (outcome?.displayLines ?? IngressOutcome.idleDisplayLines).joined(separator: "\n")
     }
 }
