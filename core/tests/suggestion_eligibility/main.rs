@@ -574,10 +574,10 @@ fn test_dated_action_with_reminder_not_selected() -> anyhow::Result<()> {
         rusqlite::params![
             reminder_id,
             item_id,
-            "configured",
+            "resolved",
             "scheduled",
-            "pending",
-            "unacknowledged",
+            "unknown",
+            "not_acknowledged",
             "2026-10-09T10:00:00Z",
             "2026-10-08T10:00:00Z",
             "2026-10-08T10:00:00Z",
@@ -857,10 +857,10 @@ fn test_dated_action_reason_is_has_reminder() -> anyhow::Result<()> {
         rusqlite::params![
             reminder_id,
             item_id,
-            "configured",
+            "resolved",
             "scheduled",
-            "pending",
-            "unacknowledged",
+            "unknown",
+            "not_acknowledged",
             "2026-10-09T10:00:00Z",
             "2026-10-08T10:00:00Z",
             "2026-10-08T10:00:00Z",
@@ -1175,6 +1175,117 @@ fn test_malformed_last_selected_at_is_an_error() -> anyhow::Result<()> {
          VALUES ('item-bad-stamp', 1, 0, 0, 'not-a-timestamp', '2026-10-08T10:00:00Z', '2026-10-08T10:00:00Z')",
         [],
     )?;
+    assert!(eligibility::select_eligible_item(&tx, eval_time, None).is_err());
+    Ok(())
+}
+
+fn setup_undated_action_with_reminder_row(
+    db: &mut Database,
+    suffix: &str,
+    request_state: &str,
+    schedule_state: &str,
+) -> anyhow::Result<String> {
+    let capture_id = format!("capture-{suffix}");
+    let item_id = format!("item-{suffix}");
+    let capture = make_test_capture(&capture_id, "Task with a reminder row")?;
+    captures::save_capture(db, &capture)?;
+
+    let tx = db.immediate_transaction()?;
+    create_test_item(&tx, &item_id, &capture_id)?;
+    let event = Event::new(
+        format!("event-{suffix}"),
+        item_id.clone(),
+        0,
+        events::EventType::Correction,
+        EventPayload::Correction(Correction {
+            kind: CorrectionKind::Type,
+            old_value: None,
+            new_value: "action".to_string(),
+        }),
+        "2026-10-08T10:00:00Z".to_string(),
+    )?;
+    events::save_event_in_tx(&tx, &event, 0)?;
+    tx.execute(
+        "INSERT INTO reminders (
+            reminder_id, item_id, request_state, schedule_state, delivery_state,
+            acknowledgment_state, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'unknown', 'not_acknowledged', ?, ?)",
+        rusqlite::params![
+            format!("reminder-{suffix}"),
+            item_id,
+            request_state,
+            schedule_state,
+            "2026-10-08T10:00:00Z",
+            "2026-10-08T10:00:00Z",
+        ],
+    )?;
+    tx.commit()?;
+    Ok(item_id)
+}
+
+#[test]
+fn test_cancelled_reminder_row_does_not_exclude_action() -> anyhow::Result<()> {
+    let mut db = test_db()?;
+    let eval_time = "2026-10-08T10:00:00Z".parse::<DateTime<Utc>>()?;
+    let item_id =
+        setup_undated_action_with_reminder_row(&mut db, "cancelled", "cancelled", "not_scheduled")?;
+
+    let tx = db.immediate_transaction()?;
+    let selected = eligibility::select_eligible_item(&tx, eval_time, None)?;
+    assert_eq!(selected, Some(item_id));
+    Ok(())
+}
+
+#[test]
+fn test_not_requested_reminder_row_does_not_exclude_action() -> anyhow::Result<()> {
+    let mut db = test_db()?;
+    let eval_time = "2026-10-08T10:00:00Z".parse::<DateTime<Utc>>()?;
+    let item_id = setup_undated_action_with_reminder_row(
+        &mut db,
+        "not-requested",
+        "not_requested",
+        "not_scheduled",
+    )?;
+
+    let tx = db.immediate_transaction()?;
+    let selected = eligibility::select_eligible_item(&tx, eval_time, None)?;
+    assert_eq!(selected, Some(item_id));
+    Ok(())
+}
+
+#[test]
+fn test_live_reminder_request_states_exclude_action() -> anyhow::Result<()> {
+    let eval_time = "2026-10-08T10:00:00Z".parse::<DateTime<Utc>>()?;
+    for (suffix, request_state, schedule_state) in [
+        ("resolved", "resolved", "scheduled"),
+        ("ambiguous", "not_scheduled_yet", "not_scheduled"),
+        ("recurring", "unsupported_recurrence", "not_scheduled"),
+        ("unschedulable", "unschedulable", "schedule_failed"),
+    ] {
+        let mut db = test_db()?;
+        let item_id =
+            setup_undated_action_with_reminder_row(&mut db, suffix, request_state, schedule_state)?;
+        let tx = db.immediate_transaction()?;
+        let elig = eligibility::check_eligibility(&tx, &item_id, eval_time)?;
+        assert!(!elig.eligible, "{request_state} should exclude");
+        assert_eq!(elig.reason, EligibilityReason::HasReminder);
+        assert_eq!(
+            eligibility::select_eligible_item(&tx, eval_time, None)?,
+            None
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn test_unknown_reminder_request_state_is_an_error() -> anyhow::Result<()> {
+    let mut db = test_db()?;
+    let eval_time = "2026-10-08T10:00:00Z".parse::<DateTime<Utc>>()?;
+    let item_id =
+        setup_undated_action_with_reminder_row(&mut db, "bogus", "configured", "not_scheduled")?;
+
+    let tx = db.immediate_transaction()?;
+    assert!(eligibility::check_eligibility(&tx, &item_id, eval_time).is_err());
     assert!(eligibility::select_eligible_item(&tx, eval_time, None).is_err());
     Ok(())
 }

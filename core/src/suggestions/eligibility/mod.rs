@@ -3,6 +3,7 @@
 // and deterministic clock-controlled rotation.
 
 use crate::domain::items::LifecycleState;
+use crate::domain::status::ReminderRequestState;
 use crate::store::events::{self, ItemScope, SuggestionControlKind};
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
@@ -149,12 +150,35 @@ pub fn check_eligibility_with_scope(
         }
     }
 
-    // Check for reminders (dated actions are not eligible for suggestions)
-    let has_reminder: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM reminders WHERE item_id = ?)",
-        [item_id],
-        |row| row.get(0),
-    )?;
+    // Dated/reminder-bearing actions are not undated suggestions. Only a reminder row whose
+    // request state is still a live request excludes the item. `not_requested` and `cancelled`
+    // mean no reminder is active (the row is retained because reminders.item_id is unique), so
+    // those items stay eligible. `resolved`, `not_scheduled_yet`, `unsupported_recurrence` and
+    // `unschedulable` conservatively exclude: the user asked for a time, so the action is not
+    // undated even if the reminder cannot be installed. An unknown stored state is an error.
+    let reminder_request_state: Option<String> = tx
+        .query_row(
+            "SELECT request_state FROM reminders WHERE item_id = ?",
+            [item_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    let has_reminder = match reminder_request_state {
+        None => false,
+        Some(raw_state) => {
+            let state = raw_state
+                .parse::<ReminderRequestState>()
+                .map_err(|e| anyhow!("Invalid reminder request_state for {}: {}", item_id, e))?;
+            match state {
+                ReminderRequestState::NotRequested | ReminderRequestState::Cancelled => false,
+                ReminderRequestState::Resolved
+                | ReminderRequestState::NotScheduledYet
+                | ReminderRequestState::UnsupportedRecurrence
+                | ReminderRequestState::Unschedulable => true,
+            }
+        }
+    };
 
     if has_reminder {
         return Ok(Eligibility {
