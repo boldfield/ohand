@@ -9,7 +9,9 @@ use ohand_core::jobs::configuration::{
     resolve_execution_target, revoke_profile, revoke_profile_and_retire_jobs_in_tx,
     ExecutionResolution,
 };
-use ohand_core::jobs::queue::{claim_job_with_lease, complete_job_in_tx, enqueue_job, JobStatus};
+use ohand_core::jobs::queue::{
+    claim_job_with_lease, complete_job, complete_job_in_tx, enqueue_job, JobStatus,
+};
 use ohand_core::privacy::routing::DenialReason;
 use ohand_core::store::schema::{Clock, Database};
 use std::sync::{Arc, RwLock};
@@ -1156,5 +1158,42 @@ fn test_revoke_unknown_profile_fails_and_missing_pin_is_unavailable() -> Result<
     )?;
     assert!(!is_profile_available(db.conn(), profile)?);
     assert!(is_job_profile_revoked(db.conn(), "job-vanish")?);
+    Ok(())
+}
+
+/// A pinned profile that disappears while a job is leased makes the late result ineligible and
+/// leaves the job in an inspectable terminal state.
+#[test]
+fn test_late_completion_rejected_after_pinned_profile_disappears() -> Result<()> {
+    let clock = Arc::new(MockClock::new(Utc::now()));
+    let (mut db, item_id) = setup_test_db(&clock)?;
+    let now = clock.now();
+
+    let profile = "profile-disappearing-eeee";
+    create_profile(&mut db, "p-disappear", profile)?;
+    enqueue_interpret(&mut db, "job-disappear", &item_id, profile, now)?;
+    let claimed_job =
+        claim_job_with_lease(&mut db, Duration::minutes(5), now)?.expect("job should be claimable");
+    assert_eq!(claimed_job.status, JobStatus::Running);
+
+    db.conn().execute(
+        "DELETE FROM provider_profiles WHERE profile_version = ?",
+        [profile],
+    )?;
+
+    let error = complete_job(&mut db, "job-disappear", claimed_job.attempt_count)
+        .expect_err("late result must be rejected")
+        .to_string();
+    assert!(
+        error.contains("no longer exists"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        job_state(&db, "job-disappear")?,
+        ("cancelled".to_string(), Some("profile_missing".to_string()))
+    );
+
+    let later = now + Duration::minutes(10);
+    assert!(claim_job_with_lease(&mut db, Duration::minutes(5), later)?.is_none());
     Ok(())
 }
