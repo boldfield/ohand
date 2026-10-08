@@ -1,969 +1,493 @@
 use anyhow::Result;
-use chrono::DateTime;
-use ohand_core::retrieval::phrases::{parse_phrase, ClarificationKind};
-use ohand_core::retrieval::query::{scoped_query, QueryPagination};
+use chrono::{DateTime, Offset, TimeZone, Utc};
+use ohand_core::retrieval::index::sync_item_in_tx;
+use ohand_core::retrieval::phrases::{parse_phrase, retrieve_phrase, ClarificationKind};
+use ohand_core::retrieval::query::QueryPagination;
 use ohand_core::store::captures::Capture;
 use ohand_core::store::schema::{Clock, Database};
 use ohand_core::time::TimeContext;
+use rusqlite::params;
+use std::str::FromStr;
 use std::sync::Arc;
+use tempfile::TempDir;
 
-fn make_context() -> TimeContext {
+const REFERENCE: &str = "2026-01-15T10:30:00Z"; // a Thursday
+
+fn context_in(timezone: &str, reference_rfc3339: &str) -> TimeContext {
+    let reference_time = DateTime::parse_from_rfc3339(reference_rfc3339)
+        .unwrap()
+        .with_timezone(&Utc);
+    let tz = chrono_tz::Tz::from_str(timezone).unwrap();
     TimeContext {
-        timezone: "UTC".to_string(),
+        timezone: timezone.to_string(),
         locale: "en".to_string(),
-        reference_time: DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")
-            .unwrap()
-            .with_timezone(&chrono::Utc),
-        utc_offset_at_capture: 0,
+        reference_time,
+        utc_offset_at_capture: tz
+            .offset_from_utc_datetime(&reference_time.naive_utc())
+            .fix()
+            .local_minus_utc(),
         calendar: "gregorian".to_string(),
     }
 }
 
+fn utc_context() -> TimeContext {
+    context_in("UTC", REFERENCE)
+}
+
 struct FixedClock;
 impl Clock for FixedClock {
-    fn now(&self) -> DateTime<chrono::Utc> {
-        DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")
+    fn now(&self) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(REFERENCE)
             .unwrap()
-            .with_timezone(&chrono::Utc)
+            .with_timezone(&Utc)
     }
 }
 
-fn temp_db_path(label: &str) -> String {
-    format!(
-        "{}/test_phrase_query_{}_{}.db",
-        std::env::temp_dir().display(),
-        label,
-        uuid::Uuid::new_v4()
-    )
-}
-
-fn new_db(label: &str) -> Result<Database> {
+fn new_db() -> Result<(TempDir, Database)> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("phrases.db");
     let clock: Arc<dyn Clock> = Arc::new(FixedClock);
-    Database::open(&temp_db_path(label), clock)
+    let db = Database::open(path.to_str().unwrap(), clock)?;
+    Ok((directory, db))
 }
 
-fn add_test_item(
-    db: &mut Database,
-    item_id: &str,
-    text: &str,
-    item_type: Option<&str>,
-    session_topic: Option<&str>,
-    capture_instant: &str,
-) -> Result<()> {
-    use ohand_core::retrieval::index::sync_item_in_tx;
-    use rusqlite::params;
+struct SeedItem<'a> {
+    item_id: &'a str,
+    text: &'a str,
+    item_type: Option<&'a str>,
+    session_topic: Option<&'a str>,
+    scope: &'a str,
+    capture_instant: &'a str,
+}
 
-    let capture_id = format!("cap-{item_id}");
+impl<'a> SeedItem<'a> {
+    fn personal(item_id: &'a str, text: &'a str, capture_instant: &'a str) -> Self {
+        Self {
+            item_id,
+            text,
+            item_type: None,
+            session_topic: None,
+            scope: "personal",
+            capture_instant,
+        }
+    }
+
+    fn topic(mut self, topic: &'a str) -> Self {
+        self.session_topic = Some(topic);
+        self
+    }
+
+    fn item_type(mut self, item_type: &'a str) -> Self {
+        self.item_type = Some(item_type);
+        self
+    }
+
+    fn scope(mut self, scope: &'a str) -> Self {
+        self.scope = scope;
+        self
+    }
+}
+
+fn seed(db: &mut Database, item: SeedItem<'_>) -> Result<()> {
+    let capture_id = format!("cap-{}", item.item_id);
     let tx = db.immediate_transaction()?;
     let capture = Capture::new(
         capture_id.clone(),
-        Some(text.to_string()),
+        Some(item.text.to_string()),
         None,
-        capture_instant.to_string(),
+        item.capture_instant.to_string(),
         "UTC".to_string(),
         0,
         "en".to_string(),
         "gregorian".to_string(),
-        "personal".to_string(),
+        item.scope.to_string(),
         "test-route".to_string(),
         false,
-        "2026-01-15T10:30:00Z".to_string(),
-        session_topic.map(str::to_string),
+        REFERENCE.to_string(),
+        item.session_topic.map(str::to_string),
     )?;
-
     ohand_core::store::captures::save_capture_in_tx(&tx, &capture)?;
     tx.execute(
         "INSERT INTO items (item_id, capture_id, revision, item_type, lifecycle_state,
                            save_state, sync_state, processing_state, transcription_state, created_at, updated_at)
          VALUES (?, ?, 0, ?, 'active', 'saved', 'not_synced', 'unprocessed', 'unprocessed', ?, ?)",
-        params![
-            item_id,
-            &capture_id,
-            item_type,
-            "2026-01-15T10:30:00Z",
-            "2026-01-15T10:30:00Z"
-        ],
+        params![item.item_id, &capture_id, item.item_type, REFERENCE, REFERENCE],
     )?;
-    sync_item_in_tx(&tx, item_id)?;
+    sync_item_in_tx(&tx, item.item_id)?;
     tx.commit()?;
     Ok(())
 }
 
-#[test]
-fn test_since_tomorrow_gives_clarification() -> Result<()> {
-    let context = make_context();
-    // "since tomorrow" is a future bound and should not be applied automatically
-    let resolution = parse_phrase("notes since tomorrow", &context)?;
+fn retrieved_ids(
+    db: &Database,
+    phrase: &str,
+    context: &TimeContext,
+) -> Result<Vec<(String, String)>> {
+    let resolution = parse_phrase(phrase, context)?;
+    let result = retrieve_phrase(db.conn(), &resolution, &QueryPagination::default())?;
+    let mut hits: Vec<(String, String)> = result
+        .hits
+        .into_iter()
+        .map(|hit| (hit.item_id, hit.current_text))
+        .collect();
+    hits.sort();
+    Ok(hits)
+}
 
-    // Should not have a filter (or have a filter with no captured_after)
-    if let Some(filter) = resolution.filter {
-        assert!(
-            filter.captured_after.is_none(),
-            "Should not apply future captured_after filter"
-        );
+fn ids(hits: &[(String, String)]) -> Vec<&str> {
+    hits.iter().map(|(id, _)| id.as_str()).collect()
+}
+
+fn seed_session_notes(db: &mut Database) -> Result<()> {
+    seed(
+        db,
+        SeedItem::personal(
+            "therapy-after",
+            "Bring up the roof worry with my counselor",
+            "2026-01-14T10:00:00Z",
+        )
+        .topic("therapy"),
+    )?;
+    seed(
+        db,
+        SeedItem::personal(
+            "therapy-before",
+            "Talked about sleep last week",
+            "2026-01-08T10:00:00Z",
+        )
+        .topic("therapy"),
+    )?;
+    seed(
+        db,
+        SeedItem::personal(
+            "work-topic-after",
+            "Draft the planning outline",
+            "2026-01-13T09:00:00Z",
+        )
+        .topic("work"),
+    )?;
+    seed(
+        db,
+        SeedItem::personal(
+            "no-topic-after",
+            "Buy milk and eggs",
+            "2026-01-14T11:00:00Z",
+        ),
+    )?;
+    seed(
+        db,
+        SeedItem::personal(
+            "work-scope-therapy",
+            "Employer-visible therapy scheduling",
+            "2026-01-14T12:00:00Z",
+        )
+        .topic("therapy")
+        .scope("work"),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn headline_phrase_retrieves_original_words_of_any_session_topic_since_monday() -> Result<()> {
+    let (_directory, mut db) = new_db()?;
+    seed_session_notes(&mut db)?;
+
+    let hits = retrieved_ids(&db, "private session notes since monday", &utc_context())?;
+
+    assert_eq!(ids(&hits), vec!["therapy-after", "work-topic-after"]);
+    let therapy = hits.iter().find(|(id, _)| id == "therapy-after").unwrap();
+    assert_eq!(therapy.1, "Bring up the roof worry with my counselor");
+    Ok(())
+}
+
+#[test]
+fn named_topic_is_matched_and_other_topics_scopes_and_dates_are_excluded() -> Result<()> {
+    let (_directory, mut db) = new_db()?;
+    seed_session_notes(&mut db)?;
+
+    let hits = retrieved_ids(&db, "private therapy notes since monday", &utc_context())?;
+    assert_eq!(ids(&hits), vec!["therapy-after"]);
+
+    let without_date = retrieved_ids(&db, "private therapy notes", &utc_context())?;
+    assert_eq!(ids(&without_date), vec!["therapy-after", "therapy-before"]);
+    Ok(())
+}
+
+#[test]
+fn topic_matches_stored_capitalization() -> Result<()> {
+    let (_directory, mut db) = new_db()?;
+    seed(
+        &mut db,
+        SeedItem::personal(
+            "capitalized",
+            "Ask about boundaries",
+            "2026-01-14T10:00:00Z",
+        )
+        .topic("Therapy"),
+    )?;
+    seed(
+        &mut db,
+        SeedItem::personal("lowercase", "Ask about homework", "2026-01-14T10:00:00Z")
+            .topic("therapy"),
+    )?;
+
+    for phrase in ["Private Therapy notes", "private therapy notes"] {
+        let hits = retrieved_ids(&db, phrase, &utc_context())?;
+        assert_eq!(ids(&hits), vec!["capitalized", "lowercase"], "{phrase}");
     }
-    // Should ask for clarification instead
-    assert!(
-        resolution.clarification_needed.is_some(),
-        "Should ask for clarification for future 'since' bound"
+    Ok(())
+}
+
+#[test]
+fn type_and_date_combine() -> Result<()> {
+    let (_directory, mut db) = new_db()?;
+    seed(
+        &mut db,
+        SeedItem::personal("action-new", "Call the plumber", "2026-01-14T10:00:00Z")
+            .item_type("action"),
+    )?;
+    seed(
+        &mut db,
+        SeedItem::personal("action-old", "Renew the passport", "2026-01-05T10:00:00Z")
+            .item_type("action"),
+    )?;
+    seed(
+        &mut db,
+        SeedItem::personal("idea-new", "Try a standing desk", "2026-01-14T10:00:00Z")
+            .item_type("idea"),
+    )?;
+
+    let hits = retrieved_ids(&db, "action notes since friday", &utc_context())?;
+    assert_eq!(ids(&hits), vec!["action-new"]);
+
+    let ideas = retrieved_ids(&db, "ideas since 2026-01-01", &utc_context())?;
+    assert_eq!(ids(&ideas), vec!["idea-new"]);
+    Ok(())
+}
+
+#[test]
+fn date_bound_is_local_midnight_in_the_context_timezone() -> Result<()> {
+    let (_directory, mut db) = new_db()?;
+    // 2026-01-14 00:00 America/Los_Angeles is 08:00Z.
+    seed(
+        &mut db,
+        SeedItem::personal(
+            "just-before",
+            "Before local midnight",
+            "2026-01-14T07:59:59Z",
+        ),
+    )?;
+    seed(
+        &mut db,
+        SeedItem::personal("at-midnight", "At local midnight", "2026-01-14T08:00:00Z"),
+    )?;
+    let los_angeles = context_in("America/Los_Angeles", "2026-01-15T10:30:00Z");
+
+    let hits = retrieved_ids(&db, "notes since 2026-01-14", &los_angeles)?;
+    assert_eq!(ids(&hits), vec!["at-midnight"]);
+
+    let utc_hits = retrieved_ids(&db, "notes since 2026-01-14", &utc_context())?;
+    assert_eq!(
+        ids(&utc_hits),
+        vec!["at-midnight", "just-before"],
+        "UTC midnight is earlier, so the same query includes both"
     );
     Ok(())
 }
 
 #[test]
-fn test_since_explicit_date_resolves() -> Result<()> {
-    let context = make_context();
-    // Use a past date: 2026-01-10 at 14:00 (before reference_time)
-    let resolution = parse_phrase("notes since 2026-01-10 14:00:00", &context)?;
+fn today_near_utc_midnight_uses_the_local_day() -> Result<()> {
+    let (_directory, mut db) = new_db()?;
+    // Local time is 2026-01-14 19:30 in Los Angeles; local today began at 2026-01-14T08:00Z.
+    seed(
+        &mut db,
+        SeedItem::personal(
+            "earlier-today",
+            "Local morning note",
+            "2026-01-14T16:00:00Z",
+        ),
+    )?;
+    seed(
+        &mut db,
+        SeedItem::personal(
+            "yesterday",
+            "Local previous day note",
+            "2026-01-13T20:00:00Z",
+        ),
+    )?;
+    let context = context_in("America/Los_Angeles", "2026-01-15T03:30:00Z");
 
-    assert!(resolution.filter.is_some());
-    let filter = resolution.filter.unwrap();
-    assert!(filter.captured_after.is_some());
+    let today = retrieved_ids(&db, "notes since today", &context)?;
+    assert_eq!(ids(&today), vec!["earlier-today"]);
+
+    let since_yesterday = retrieved_ids(&db, "notes since yesterday", &context)?;
+    assert_eq!(ids(&since_yesterday), vec!["earlier-today", "yesterday"]);
     Ok(())
 }
 
 #[test]
-fn test_date_without_time_clarification() -> Result<()> {
-    let context = make_context();
-    let resolution = parse_phrase("notes since 2026-01-10", &context)?;
+fn unsupported_phrasing_falls_back_to_literal_search_of_the_original_words() -> Result<()> {
+    let (_directory, mut db) = new_db()?;
+    seed(
+        &mut db,
+        SeedItem::personal(
+            "roof",
+            "something about the roof leak needs a plumber",
+            "2026-01-14T10:00:00Z",
+        ),
+    )?;
+    seed(
+        &mut db,
+        SeedItem::personal("other", "Buy milk", "2026-01-14T10:00:00Z"),
+    )?;
 
-    // Date-only phrases use local midnight as the unambiguous boundary
-    // No clarification needed
-    assert!(
-        resolution.clarification_needed.is_none(),
-        "Date-only phrases should use local midnight as unambiguous boundary"
-    );
-    assert!(resolution.filter.is_some());
-    let filter = resolution.filter.unwrap();
-    assert!(filter.captured_after.is_some());
-    Ok(())
-}
-
-#[test]
-fn test_unsupported_repeat_pattern_clarification() -> Result<()> {
-    let context = make_context();
-    let resolution = parse_phrase("notes since every monday", &context)?;
-
-    assert!(resolution.clarification_needed.is_some());
-    match resolution.clarification_needed {
-        Some(ClarificationKind::UnsupportedRepeat { .. }) => {}
-        _ => panic!("Expected UnsupportedRepeat clarification"),
-    }
-    // Fallback search should still be available
-    assert!(!resolution.fallback_search_text.is_empty());
-    Ok(())
-}
-
-#[test]
-fn test_action_items_type_filter() -> Result<()> {
-    let context = make_context();
-    let resolution = parse_phrase("action notes", &context)?;
-
-    assert!(resolution.filter.is_some());
-    let filter = resolution.filter.unwrap();
-    assert_eq!(filter.item_types, vec!["action"]);
-    // Should default to personal scope only
-    assert!(filter
-        .read_scopes
-        .iter()
-        .any(|s| matches!(s, ohand_core::store::events::ItemScope::Personal)));
-    Ok(())
-}
-
-#[test]
-fn test_idea_items_type_filter() -> Result<()> {
-    let context = make_context();
-    let resolution = parse_phrase("idea items", &context)?;
-
-    assert!(resolution.filter.is_some());
-    let filter = resolution.filter.unwrap();
-    assert_eq!(filter.item_types, vec!["idea"]);
-    Ok(())
-}
-
-#[test]
-fn test_note_items_type_filter() -> Result<()> {
-    let context = make_context();
-    let resolution = parse_phrase("note reminders", &context)?;
-
-    assert!(resolution.filter.is_some());
-    let filter = resolution.filter.unwrap();
-    assert_eq!(filter.item_types, vec!["note"]);
-    Ok(())
-}
-
-#[test]
-fn test_broad_intention_type_filter() -> Result<()> {
-    let context = make_context();
-    let resolution = parse_phrase("broad_intention notes", &context)?;
-
-    assert!(resolution.filter.is_some());
-    let filter = resolution.filter.unwrap();
-    assert_eq!(filter.item_types, vec!["broad_intention"]);
-    Ok(())
-}
-
-#[test]
-fn test_private_session_topic_filter() -> Result<()> {
-    let context = make_context();
-    let resolution = parse_phrase("private therapy notes", &context)?;
-
-    assert!(resolution.filter.is_some());
-    let filter = resolution.filter.unwrap();
-    assert_eq!(filter.session_topics, vec!["therapy"]);
-    Ok(())
-}
-
-#[test]
-fn test_session_context_topic_filter() -> Result<()> {
-    let context = make_context();
-    let resolution = parse_phrase("work session notes", &context)?;
-
-    assert!(resolution.filter.is_some());
-    let filter = resolution.filter.unwrap();
-    assert_eq!(filter.session_topics, vec!["work"]);
-    Ok(())
-}
-
-#[test]
-fn test_session_topic_with_multiple_words() -> Result<()> {
-    let context = make_context();
-    let resolution = parse_phrase("client meeting session notes", &context)?;
-
-    assert!(resolution.filter.is_some());
-    let filter = resolution.filter.unwrap();
-    assert_eq!(filter.session_topics, vec!["client meeting"]);
-    Ok(())
-}
-
-#[test]
-fn test_unrecognized_phrase_fallback_to_literal() -> Result<()> {
-    let context = make_context();
-    let resolution = parse_phrase("something about the roof", &context)?;
-
-    assert!(
-        resolution.filter.is_none(),
-        "Should not create filter for unrecognized phrase"
-    );
+    let resolution = parse_phrase("something about the roof", &utc_context())?;
+    assert!(resolution.filter.is_none());
     assert!(resolution.clarification_needed.is_none());
     assert_eq!(resolution.fallback_search_text, "something about the roof");
+
+    let hits = retrieved_ids(&db, "something about the roof", &utc_context())?;
+    assert_eq!(ids(&hits), vec!["roof"]);
+    assert_eq!(hits[0].1, "something about the roof leak needs a plumber");
     Ok(())
 }
 
 #[test]
-fn test_compound_type_and_date_filter() -> Result<()> {
-    let context = make_context();
-    // "action notes since friday" should combine both type and date filters
-    let resolution = parse_phrase("action notes since friday", &context)?;
-
-    assert!(resolution.filter.is_some());
-    let filter = resolution.filter.unwrap();
-    assert_eq!(filter.item_types, vec!["action"]);
-    assert!(filter.captured_after.is_some());
-    Ok(())
-}
-
-#[test]
-fn test_no_model_routing_for_simple_phrases() -> Result<()> {
-    let context = make_context();
-
-    // Parse the same phrase twice; should be deterministic (no model dependency)
-    let res1 = parse_phrase("action notes since friday", &context)?;
-    let res2 = parse_phrase("action notes since friday", &context)?;
-
-    // Both should produce the same filter
-    assert_eq!(res1.filter.is_some(), res2.filter.is_some());
-    if let (Some(f1), Some(f2)) = (res1.filter, res2.filter) {
-        assert_eq!(f1.item_types, f2.item_types);
-        assert_eq!(f1.captured_after, f2.captured_after);
-    }
-    Ok(())
-}
-
-#[test]
-fn test_private_session_remains_retrievable_without_model() -> Result<()> {
-    let context = make_context();
-    let resolution = parse_phrase("private therapy notes", &context)?;
-
-    // This should not require routing to a model; it's a deterministic parse
-    assert!(resolution.filter.is_some());
-    let filter = resolution.filter.unwrap();
-    assert_eq!(filter.session_topics, vec!["therapy"]);
-    // Verify it's personal-scope only (not routing to providers)
-    assert!(filter
-        .read_scopes
-        .iter()
-        .any(|s| matches!(s, ohand_core::store::events::ItemScope::Personal)));
-    Ok(())
-}
-
-#[test]
-fn test_case_insensitive_parsing() -> Result<()> {
-    let context = make_context();
-
-    let lower = parse_phrase("action notes", &context)?;
-    let upper = parse_phrase("ACTION NOTES", &context)?;
-    let mixed = parse_phrase("Action Notes", &context)?;
-
-    assert_eq!(lower.filter.is_some(), upper.filter.is_some());
-    assert_eq!(lower.filter.is_some(), mixed.filter.is_some());
-    Ok(())
-}
-
-#[test]
-fn test_whitespace_trimmed() -> Result<()> {
-    let context = make_context();
-
-    let padded = parse_phrase("  action notes  ", &context)?;
-    let normal = parse_phrase("action notes", &context)?;
-
-    assert_eq!(padded.filter.is_some(), normal.filter.is_some());
-    Ok(())
-}
-
-#[test]
-fn test_since_bare_weekday() -> Result<()> {
-    let context = make_context();
-    // "since monday" without "notes" prefix should still work
-    let resolution = parse_phrase("since monday", &context)?;
-
-    assert!(resolution.filter.is_some());
-    let filter = resolution.filter.unwrap();
-    assert!(filter.captured_after.is_some());
-    Ok(())
-}
-
-#[test]
-fn test_items_suffix_variant() -> Result<()> {
-    let context = make_context();
-
-    let res1 = parse_phrase("action items since tomorrow", &context)?;
-    let res2 = parse_phrase("action notes since tomorrow", &context)?;
-    let res3 = parse_phrase("action reminders since tomorrow", &context)?;
-
-    // All should parse successfully
-    assert!(res1.filter.is_some());
-    assert!(res2.filter.is_some());
-    assert!(res3.filter.is_some());
-    Ok(())
-}
-
-#[test]
-fn test_original_phrase_preserved_unchanged() -> Result<()> {
-    let context = make_context();
-    let original = "Private Therapy Notes Since Friday";
-    let resolution = parse_phrase(original, &context)?;
-
-    assert_eq!(
-        resolution.original_phrase, original,
-        "Original phrase should be preserved exactly"
-    );
-    Ok(())
-}
-
-#[test]
-fn test_fallback_search_text_when_no_match() -> Result<()> {
-    let context = make_context();
-    let phrase = "remind me about the roof repair estimate";
-    let resolution = parse_phrase(phrase, &context)?;
-
-    // Should have fallback search text for literal retrieval
-    assert_eq!(resolution.fallback_search_text, phrase);
-    Ok(())
-}
-
-#[test]
-fn test_fallback_search_text_with_unsupported_repeat() -> Result<()> {
-    let context = make_context();
-    let phrase = "notes since every friday";
-    let resolution = parse_phrase(phrase, &context)?;
-
-    // Even though it's unsupported, fallback should be available
-    assert_eq!(resolution.fallback_search_text, phrase);
-    assert!(resolution.clarification_needed.is_some());
-    Ok(())
-}
-
-#[test]
-fn test_since_weekday_resolves_past_occurrence() -> Result<()> {
-    let context = make_context();
-    // Today is Thursday 2026-01-15; "since monday" should resolve to most recent Monday (2026-01-12)
-    let resolution = parse_phrase("notes since monday", &context)?;
-
-    assert!(resolution.filter.is_some());
-    let filter = resolution.filter.unwrap();
-    assert!(filter.captured_after.is_some());
-    let captured_after = filter.captured_after.unwrap();
-    // Should contain 2026-01-12 (the most recent Monday)
-    assert!(
-        captured_after.contains("2026-01-12"),
-        "Expected 2026-01-12 but got {}",
-        captured_after
-    );
-    Ok(())
-}
-
-#[test]
-fn test_explicit_iso_date_time() -> Result<()> {
-    let context = make_context();
-    // Use a past date/time: 2026-01-10 at 14:30
-    let resolution = parse_phrase("notes since 2026-01-10 14:30:00", &context)?;
-
-    assert!(resolution.filter.is_some());
-    let filter = resolution.filter.unwrap();
-    assert!(filter.captured_after.is_some());
-    let captured_after = filter.captured_after.unwrap();
-    assert!(captured_after.contains("2026-01-10"));
-    assert!(captured_after.contains("14:30"));
-    Ok(())
-}
-
-#[test]
-fn test_private_prefix_variations() -> Result<()> {
-    let context = make_context();
-
-    let res1 = parse_phrase("private therapy notes", &context)?;
-    let res2 = parse_phrase("private work items", &context)?;
-    let res3 = parse_phrase("private research reminders", &context)?;
-
-    assert!(res1.filter.is_some());
-    assert!(res2.filter.is_some());
-    assert!(res3.filter.is_some());
-
-    assert_eq!(res1.filter.unwrap().session_topics, vec!["therapy"]);
-    assert_eq!(res2.filter.unwrap().session_topics, vec!["work"]);
-    assert_eq!(res3.filter.unwrap().session_topics, vec!["research"]);
-    Ok(())
-}
-
-#[test]
-fn test_compound_private_therapy_notes_since_monday() -> Result<()> {
-    let context = make_context();
-    // "private therapy notes since monday" should combine session_topic + date filters
-    let resolution = parse_phrase("private therapy notes since monday", &context)?;
-
-    assert!(resolution.filter.is_some());
-    let filter = resolution.filter.unwrap();
-    assert_eq!(filter.session_topics, vec!["therapy"]);
-    assert!(filter.captured_after.is_some());
-    assert!(
-        filter.captured_after.unwrap().contains("2026-01-12"),
-        "Should resolve to most recent Monday"
-    );
-    Ok(())
-}
-
-#[test]
-fn test_retrieval_through_date_filter() -> Result<()> {
-    let mut db = new_db("retrieval_date")?;
-    let context = make_context();
-
-    // Add an item from yesterday
-    add_test_item(
+fn uncertain_date_clarifies_and_literal_fallback_uses_the_parsers_text() -> Result<()> {
+    let (_directory, mut db) = new_db()?;
+    seed(
         &mut db,
-        "item-old",
-        "old therapy notes from yesterday",
-        None,
-        Some("therapy"),
-        "2026-01-14T10:00:00Z",
+        SeedItem::personal(
+            "literal",
+            "Reminder: notes since last week were messy",
+            "2026-01-14T10:00:00Z",
+        ),
+    )?;
+    seed(
+        &mut db,
+        SeedItem::personal("unrelated", "Buy milk", "2026-01-14T10:00:00Z"),
     )?;
 
-    // Add an item from a week ago
-    add_test_item(
-        &mut db,
-        "item-week-ago",
-        "therapy notes from a week ago",
-        None,
-        Some("therapy"),
-        "2026-01-08T10:00:00Z",
-    )?;
-
-    // Add an item from the future
-    add_test_item(
-        &mut db,
-        "item-future",
-        "therapy notes from tomorrow",
-        None,
-        Some("therapy"),
-        "2026-01-16T10:00:00Z",
-    )?;
-
-    let resolution = parse_phrase("private therapy notes since monday", &context)?;
-    assert!(resolution.filter.is_some());
-
-    let filter = resolution.filter.unwrap();
-    let pagination = QueryPagination::default();
-
-    let result = scoped_query(db.conn(), "therapy", &filter, &pagination)?;
-
-    // Should retrieve items from monday (2026-01-12) and later
-    // This includes: old (2026-01-14), week-ago (2026-01-08 is before monday), and future (2026-01-16)
-    // So we expect: old and future (2 items)
-    assert!(
-        !result.hits.is_empty(),
-        "Should retrieve items matching the date filter"
-    );
-
-    // Verify we can find the expected original text
-    let found_old = result.hits.iter().any(|h| h.current_text.contains("old"));
-    assert!(found_old, "Should find the item with 'old' in text");
-
-    Ok(())
-}
-
-#[test]
-fn test_type_filter_distinguishes_items() -> Result<()> {
-    let context = make_context();
-    let resolution = parse_phrase("action notes since monday", &context)?;
-
-    assert!(resolution.filter.is_some());
-    let filter = resolution.filter.unwrap();
-
-    // Verify the filter has both type and date components
-    assert_eq!(filter.item_types, vec!["action"]);
-    assert!(filter.captured_after.is_some());
-    assert!(
-        filter.captured_after.unwrap().contains("2026-01-12"),
-        "Should resolve to most recent Monday"
-    );
-
-    Ok(())
-}
-
-#[test]
-fn test_literal_fallback_for_unsupported_phrase() -> Result<()> {
-    let mut db = new_db("retrieval_literal")?;
-    let context = make_context();
-
-    add_test_item(
-        &mut db,
-        "item-1",
-        "therapy notes since last week",
-        None,
-        Some("therapy"),
-        "2026-01-15T10:00:00Z",
-    )?;
-
+    let context = utc_context();
     let resolution = parse_phrase("notes since last week", &context)?;
-
-    // "since last week" is not a recognized pattern, so should fall back to literal
     assert!(resolution.filter.is_none());
+    assert_eq!(
+        resolution.clarification_needed,
+        Some(ClarificationKind::UnrecognizedDate {
+            phrase: "last week".to_string()
+        })
+    );
     assert_eq!(resolution.fallback_search_text, "notes since last week");
 
-    // Verify literal search still works
-    let filter = ohand_core::retrieval::query::QueryFilter::personal_only();
-    let pagination = QueryPagination::default();
-
-    let result = scoped_query(db.conn(), "last week", &filter, &pagination)?;
-
-    // Should find the item through literal search
-    assert!(
-        result.hits.iter().any(|h| h.item_id == "item-1"),
-        "Should retrieve through literal fallback"
-    );
-
+    let hits = retrieved_ids(&db, "notes since last week", &context)?;
+    assert_eq!(ids(&hits), vec!["literal"]);
     Ok(())
 }
 
 #[test]
-fn test_private_notes_alone_does_not_panic() -> Result<()> {
-    let context = make_context();
-    // "private notes" by itself should not panic (regression test for slice bounds issue)
-    let resolution = parse_phrase("private notes", &context)?;
+fn ambiguous_and_future_dates_do_not_commit_a_bound() -> Result<()> {
+    let context = utc_context();
 
-    // It should fall back to literal search (no pattern match)
-    assert!(resolution.filter.is_none());
-    assert_eq!(resolution.fallback_search_text, "private notes");
+    let same_weekday = parse_phrase("notes since thursday", &context)?;
+    assert!(same_weekday.filter.is_none());
+    assert!(matches!(
+        same_weekday.clarification_needed,
+        Some(ClarificationKind::AmbiguousDate { ref candidate_dates, .. })
+            if candidate_dates == &["2026-01-15".to_string(), "2026-01-08".to_string()]
+    ));
+
+    let future = parse_phrase("private session notes since tomorrow", &context)?;
+    assert!(future.filter.is_none());
+    assert!(matches!(
+        future.clarification_needed,
+        Some(ClarificationKind::FutureSinceBound { .. })
+    ));
+
+    let fold = context_in("America/New_York", "2025-11-10T12:00:00Z");
+    let ambiguous = parse_phrase("notes since 2025-11-02 01:30:00", &fold)?;
+    assert!(ambiguous.filter.is_none());
+    assert!(matches!(
+        ambiguous.clarification_needed,
+        Some(ClarificationKind::AmbiguousTime { .. })
+    ));
     Ok(())
 }
 
 #[test]
-fn test_private_notes_since_monday_parses_correctly() -> Result<()> {
-    let context = make_context();
-    // The headline phrase: "private session notes since monday"
-    let resolution = parse_phrase("private session notes since monday", &context)?;
+fn invalid_time_context_is_surfaced_instead_of_dropping_the_date() {
+    let mut bad_timezone = utc_context();
+    bad_timezone.timezone = "Not/A_Zone".to_string();
+    let mut bad_calendar = utc_context();
+    bad_calendar.calendar = "hebrew".to_string();
+    let mut bad_offset = context_in("America/Los_Angeles", REFERENCE);
+    bad_offset.utc_offset_at_capture = 0;
 
-    assert!(resolution.filter.is_some());
-    let filter = resolution.filter.unwrap();
-    // Should recognize "session" as the topic, not "private"
+    for context in [&bad_timezone, &bad_calendar, &bad_offset] {
+        for phrase in [
+            "action notes since today",
+            "action notes since yesterday",
+            "action notes since monday",
+            "action notes since 2026-01-10",
+        ] {
+            assert!(parse_phrase(phrase, context).is_err(), "{phrase}");
+        }
+    }
+}
+
+#[test]
+fn parsing_and_retrieval_create_no_jobs_events_or_provider_requests() -> Result<()> {
+    let (_directory, mut db) = new_db()?;
+    seed_session_notes(&mut db)?;
+
+    let table_names: Vec<String> = {
+        let mut statement = db.conn().prepare(
+            "SELECT name FROM sqlite_master
+              WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'search_index%'
+              ORDER BY name",
+        )?;
+        let names = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        names
+    };
+    assert!(table_names.iter().any(|name| name == "jobs"));
+    let snapshot = |db: &Database| -> Result<Vec<(String, i64)>> {
+        table_names
+            .iter()
+            .map(|name| {
+                let count: i64 = db.conn().query_row(
+                    &format!("SELECT COUNT(*) FROM \"{name}\""),
+                    [],
+                    |row| row.get(0),
+                )?;
+                Ok((name.clone(), count))
+            })
+            .collect()
+    };
+
+    let before = snapshot(&db)?;
+    for phrase in [
+        "private session notes since monday",
+        "private therapy notes",
+        "something about the roof",
+    ] {
+        retrieved_ids(&db, phrase, &utc_context())?;
+    }
+    assert_eq!(snapshot(&db)?, before);
+    Ok(())
+}
+
+#[test]
+fn original_phrase_is_preserved_and_case_is_ignored_for_keywords() -> Result<()> {
+    let original = "  Private Session Notes SINCE Monday  ";
+    let resolution = parse_phrase(original, &utc_context())?;
+    assert_eq!(resolution.original_phrase, original);
+    assert_eq!(resolution.fallback_search_text, original);
+    let filter = resolution.filter.expect("keywords are case-insensitive");
+    assert!(filter.require_session_topic);
     assert_eq!(
-        filter.session_topics,
-        vec!["session"],
-        "Should extract 'session' as the topic"
+        filter.captured_after.as_deref(),
+        Some("2026-01-12T00:00:00+00:00")
     );
-    assert!(filter.captured_after.is_some());
-    Ok(())
-}
-
-#[test]
-fn test_since_tomorrow_gives_clarification_not_filter() -> Result<()> {
-    let context = make_context();
-    // Tomorrow is 2026-01-16, which is after reference_time (2026-01-15)
-    let resolution = parse_phrase("notes since tomorrow", &context)?;
-
-    // Should not apply a future filter; ask for clarification instead
-    if let Some(filter) = resolution.filter {
-        assert!(
-            filter.captured_after.is_none(),
-            "Should not apply future captured_after filter"
-        );
-    }
-    assert!(
-        resolution.clarification_needed.is_some(),
-        "Should ask for clarification for future 'since' bound"
-    );
-    Ok(())
-}
-
-#[test]
-fn test_since_yesterday_resolves() -> Result<()> {
-    let context = make_context();
-    // Yesterday is 2026-01-14, which is before reference_time
-    let resolution = parse_phrase("notes since yesterday", &context)?;
-
-    assert!(resolution.filter.is_some());
-    let filter = resolution.filter.unwrap();
-    assert!(filter.captured_after.is_some());
-    let captured_after = filter.captured_after.unwrap();
-    assert!(
-        captured_after.contains("2026-01-14"),
-        "Expected 2026-01-14 but got {}",
-        captured_after
-    );
-    Ok(())
-}
-
-#[test]
-fn test_since_today_resolves() -> Result<()> {
-    let context = make_context();
-    // Today is 2026-01-15
-    let resolution = parse_phrase("notes since today", &context)?;
-
-    assert!(resolution.filter.is_some());
-    let filter = resolution.filter.unwrap();
-    assert!(filter.captured_after.is_some());
-    let captured_after = filter.captured_after.unwrap();
-    assert!(
-        captured_after.contains("2026-01-15"),
-        "Expected 2026-01-15 but got {}",
-        captured_after
-    );
-    Ok(())
-}
-
-#[test]
-fn test_retrieval_through_date_filter_excludes_older_items() -> Result<()> {
-    let mut db = new_db("retrieval_date_exclude")?;
-    let context = make_context();
-
-    // Add items at different dates
-    add_test_item(
-        &mut db,
-        "item-before-monday",
-        "therapy notes from wednesday of previous week",
-        None,
-        Some("therapy"),
-        "2026-01-08T10:00:00Z", // Before Monday 2026-01-12
-    )?;
-
-    add_test_item(
-        &mut db,
-        "item-on-monday",
-        "therapy notes from monday",
-        None,
-        Some("therapy"),
-        "2026-01-12T10:00:00Z", // On Monday 2026-01-12
-    )?;
-
-    add_test_item(
-        &mut db,
-        "item-after-monday",
-        "therapy notes from thursday",
-        None,
-        Some("therapy"),
-        "2026-01-15T10:00:00Z", // After Monday 2026-01-12
-    )?;
-
-    let resolution = parse_phrase("private therapy notes since monday", &context)?;
-    assert!(resolution.filter.is_some());
-
-    let filter = resolution.filter.unwrap();
-    let pagination = QueryPagination::default();
-
-    let result = scoped_query(db.conn(), "therapy", &filter, &pagination)?;
-
-    // Should include items from monday and after, but exclude before-monday
-    let found_before = result
-        .hits
-        .iter()
-        .any(|h| h.item_id == "item-before-monday");
-    let found_on = result.hits.iter().any(|h| h.item_id == "item-on-monday");
-    let found_after = result.hits.iter().any(|h| h.item_id == "item-after-monday");
-
-    assert!(
-        !found_before,
-        "Should exclude item from before Monday (2026-01-08)"
-    );
-    assert!(
-        found_on || found_after,
-        "Should include items from Monday onwards"
-    );
-    Ok(())
-}
-
-#[test]
-fn test_timezone_aware_date_conversion() -> Result<()> {
-    let context = TimeContext {
-        timezone: "America/Los_Angeles".to_string(),
-        locale: "en".to_string(),
-        reference_time: DateTime::parse_from_rfc3339("2026-01-15T10:30:00-08:00")
-            .unwrap()
-            .with_timezone(&chrono::Utc),
-        utc_offset_at_capture: -8 * 3600,
-        calendar: "gregorian".to_string(),
-    };
-
-    let resolution = parse_phrase("notes since 2026-01-10", &context)?;
-
-    assert!(resolution.filter.is_some());
-    let filter = resolution.filter.unwrap();
-    assert!(filter.captured_after.is_some());
-
-    let captured_after = filter.captured_after.unwrap();
-    // 2026-01-10 00:00:00 LA time should be 2026-01-10T08:00:00Z (8 hours ahead for PST)
-    // The RFC3339 format may include timezone offset, so just check the essential parts
-    assert!(
-        captured_after.contains("2026-01-10") && captured_after.contains("08:00:00"),
-        "Expected 2026-01-10T08:00:00 for LA timezone but got {}",
-        captured_after
-    );
-    Ok(())
-}
-
-#[test]
-fn test_fallback_search_uses_resolution_text() -> Result<()> {
-    let mut db = new_db("fallback_search")?;
-    let context = make_context();
-
-    add_test_item(
-        &mut db,
-        "item-1",
-        "notes since last week about the project",
-        None,
-        None,
-        "2026-01-15T10:00:00Z",
-    )?;
-
-    let resolution = parse_phrase("notes since last week", &context)?;
-
-    // Should have fallback_search_text
-    assert_eq!(resolution.fallback_search_text, "notes since last week");
-
-    // The fallback search should use the resolution's fallback_search_text
-    let filter = ohand_core::retrieval::query::QueryFilter::personal_only();
-    let pagination = QueryPagination::default();
-
-    let result = scoped_query(
-        db.conn(),
-        &resolution.fallback_search_text,
-        &filter,
-        &pagination,
-    )?;
-
-    assert!(
-        result.hits.iter().any(|h| h.item_id == "item-1"),
-        "Should retrieve through fallback search text"
-    );
-
-    Ok(())
-}
-
-#[test]
-fn test_today_uses_local_date_not_utc() -> Result<()> {
-    let context = TimeContext {
-        timezone: "America/Los_Angeles".to_string(),
-        locale: "en".to_string(),
-        // 2026-01-15T03:30Z (UTC) = 2026-01-14T19:30 (LA, UTC-8)
-        reference_time: DateTime::parse_from_rfc3339("2026-01-15T03:30:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc),
-        utc_offset_at_capture: -8 * 3600,
-        calendar: "gregorian".to_string(),
-    };
-
-    let resolution = parse_phrase("notes since today", &context)?;
-    assert!(resolution.filter.is_some());
-
-    let filter = resolution.filter.unwrap();
-    assert!(filter.captured_after.is_some());
-    let captured_after = filter.captured_after.unwrap();
-    // With LA timezone, "today" should be 2026-01-14 (not 2026-01-15)
-    // Local midnight 2026-01-14T00:00:00-08:00 = 2026-01-14T08:00:00Z
-    assert!(
-        captured_after.contains("2026-01-14"),
-        "Expected 2026-01-14 for LA local 'today', got {}",
-        captured_after
-    );
-    Ok(())
-}
-
-#[test]
-fn test_yesterday_uses_local_date_not_utc() -> Result<()> {
-    let context = TimeContext {
-        timezone: "America/Los_Angeles".to_string(),
-        locale: "en".to_string(),
-        // 2026-01-15T03:30Z (UTC) = 2026-01-14T19:30 (LA, UTC-8)
-        reference_time: DateTime::parse_from_rfc3339("2026-01-15T03:30:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc),
-        utc_offset_at_capture: -8 * 3600,
-        calendar: "gregorian".to_string(),
-    };
-
-    let resolution = parse_phrase("notes since yesterday", &context)?;
-    assert!(resolution.filter.is_some());
-
-    let filter = resolution.filter.unwrap();
-    assert!(filter.captured_after.is_some());
-    let captured_after = filter.captured_after.unwrap();
-    // With LA timezone at 2026-01-14T19:30 local, yesterday is 2026-01-13
-    // Local midnight 2026-01-13T00:00:00-08:00 = 2026-01-13T08:00:00Z
-    assert!(
-        captured_after.contains("2026-01-13"),
-        "Expected 2026-01-13 for LA local 'yesterday', got {}",
-        captured_after
-    );
-    Ok(())
-}
-
-#[test]
-fn test_word_boundary_matching_for_item_types() -> Result<()> {
-    let context = make_context();
-
-    // "inaction notes" should NOT match "action notes"
-    let resolution = parse_phrase("inaction notes", &context)?;
-    assert!(
-        resolution.filter.is_none(),
-        "Should not match 'inaction' as 'action'"
-    );
-
-    // But "action notes" should still match
-    let resolution2 = parse_phrase("action notes", &context)?;
-    assert!(resolution2.filter.is_some());
-    assert_eq!(resolution2.filter.unwrap().item_types, vec!["action"]);
-
-    Ok(())
-}
-
-#[test]
-fn test_dst_fold_explicit_time_withholds_filter() -> Result<()> {
-    let context = TimeContext {
-        timezone: "America/New_York".to_string(),
-        locale: "en".to_string(),
-        // Reference time after DST fold
-        reference_time: DateTime::parse_from_rfc3339("2026-01-15T10:30:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc),
-        utc_offset_at_capture: -5 * 3600,
-        calendar: "gregorian".to_string(),
-    };
-
-    // A time during DST fold (2025-11-02 01:30:00 exists twice in America/New_York)
-    let resolution = parse_phrase("notes since 2025-11-02 01:30:00", &context)?;
-
-    // Should ask for clarification, not apply a filter
-    if let Some(filter) = resolution.filter {
-        assert!(
-            filter.captured_after.is_none(),
-            "Should not apply filter for ambiguous DST time"
-        );
-    }
-    assert!(
-        resolution.clarification_needed.is_some(),
-        "Should ask for clarification on DST ambiguity"
-    );
-    match resolution.clarification_needed {
-        Some(ClarificationKind::AmbiguousTime { .. }) => {}
-        _ => panic!("Expected AmbiguousTime clarification"),
-    }
-    Ok(())
-}
-
-#[test]
-fn test_future_since_bound_asks_for_clarification() -> Result<()> {
-    let context = make_context();
-    // Tomorrow is 2026-01-16, which is after reference_time 2026-01-15T10:30Z
-    let resolution = parse_phrase("notes since tomorrow", &context)?;
-
-    // Should not apply a future filter
-    if let Some(filter) = resolution.filter {
-        assert!(
-            filter.captured_after.is_none(),
-            "Should not apply future captured_after"
-        );
-    }
-    assert!(
-        resolution.clarification_needed.is_some(),
-        "Should ask for clarification on future 'since' bound"
-    );
-    Ok(())
-}
-
-#[test]
-fn test_retrieval_with_non_utc_timezone() -> Result<()> {
-    let mut db = new_db("retrieval_nonuts")?;
-    let context = TimeContext {
-        timezone: "America/Los_Angeles".to_string(),
-        locale: "en".to_string(),
-        reference_time: DateTime::parse_from_rfc3339("2026-01-15T10:30:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc),
-        utc_offset_at_capture: -8 * 3600,
-        calendar: "gregorian".to_string(),
-    };
-
-    // Add items at specific UTC times
-    add_test_item(
-        &mut db,
-        "item-before-boundary",
-        "therapy notes from before local midnight",
-        None,
-        Some("therapy"),
-        "2026-01-14T07:59:59Z", // Before 2026-01-14T08:00Z (local midnight)
-    )?;
-
-    add_test_item(
-        &mut db,
-        "item-after-boundary",
-        "therapy notes from after local midnight",
-        None,
-        Some("therapy"),
-        "2026-01-14T08:00:00Z", // At 2026-01-14T08:00Z (local midnight)
-    )?;
-
-    let resolution = parse_phrase("private therapy notes since 2026-01-14", &context)?;
-    assert!(resolution.filter.is_some());
-
-    let filter = resolution.filter.unwrap();
-    let pagination = QueryPagination::default();
-
-    let result = scoped_query(db.conn(), "therapy", &filter, &pagination)?;
-
-    // Should retrieve item at/after the local midnight, not the one before
-    let found_after = result
-        .hits
-        .iter()
-        .any(|h| h.item_id == "item-after-boundary");
-    let found_before = result
-        .hits
-        .iter()
-        .any(|h| h.item_id == "item-before-boundary");
-
-    assert!(
-        found_after,
-        "Should include item at or after local midnight"
-    );
-    assert!(!found_before, "Should exclude item before local midnight");
-
     Ok(())
 }

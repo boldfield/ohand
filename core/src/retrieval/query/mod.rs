@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 
-use crate::retrieval::index::{search_index, search_source_direct, SearchHit};
+use crate::retrieval::index::{list_index, search_index, search_source_direct, SearchHit};
 use crate::store::events::ItemScope;
 
 /// Query filters for scoped text retrieval. All filters are optional (None = no filter).
@@ -22,6 +22,8 @@ pub struct QueryFilter {
     pub session_topics: Vec<String>,
     /// Include items with no session topic set.
     pub include_no_session_topic: bool,
+    /// Only include items that have some session topic (any value).
+    pub require_session_topic: bool,
     /// Date range filter: RFC3339 datetime strings.
     /// If specified, includes items captured within this range (inclusive).
     pub captured_after: Option<String>,
@@ -80,6 +82,26 @@ pub fn scoped_query(
     let date_bounds = parse_date_bounds(filter)?;
     let allowed_scopes = allowed_read_scopes(filter);
     let candidate_hits = search_index(conn, search_text, &allowed_scopes)?;
+    finish_query(
+        conn,
+        candidate_hits,
+        filter,
+        &date_bounds,
+        pagination,
+        CANDIDATE_ID_BATCH_SIZE,
+    )
+}
+
+/// Filter-only retrieval: every accessible item satisfying the filter, with no search terms.
+/// Scope, lifecycle, type, topic and date rules are identical to `scoped_query`.
+pub fn scoped_list(
+    conn: &Connection,
+    filter: &QueryFilter,
+    pagination: &QueryPagination,
+) -> Result<QueryResult> {
+    let date_bounds = parse_date_bounds(filter)?;
+    let allowed_scopes = allowed_read_scopes(filter);
+    let candidate_hits = list_index(conn, &allowed_scopes)?;
     finish_query(
         conn,
         candidate_hits,
@@ -273,6 +295,11 @@ fn query_candidate_batch(
     } else if filter.include_no_session_topic {
         where_clauses
             .push("(i.current_session_topic IS NULL AND c.session_topic IS NULL)".to_string());
+    }
+
+    if filter.require_session_topic {
+        where_clauses
+            .push("COALESCE(i.current_session_topic, c.session_topic) IS NOT NULL".to_string());
     }
 
     let sql = format!(

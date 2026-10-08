@@ -248,6 +248,72 @@ pub fn search_source_direct(
     outcome
 }
 
+/// Every readable, non-deleted indexed item under `allowed_scopes`, newest capture first.
+/// Used for filter-only queries that name no search terms; scope is evaluated in SQL exactly as
+/// in `search_index`, so private text cannot leak through an unfiltered listing.
+pub fn list_index(conn: &Connection, allowed_scopes: &[ItemScope]) -> Result<Vec<SearchHit>> {
+    if allowed_scopes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let scope_placeholders = vec!["?"; allowed_scopes.len()].join(", ");
+    let sql = format!(
+        "SELECT search_index.item_id, i.capture_id, COALESCE(i.current_scope, c.item_scope),
+                c.route_id, i.lifecycle_state, search_index.current_text,
+                search_index.text_basis, search_index.original_text
+           FROM search_index
+           JOIN items i ON i.item_id = search_index.item_id
+           JOIN captures c ON c.capture_id = i.capture_id
+          WHERE i.lifecycle_state != 'deleted'
+            AND COALESCE(i.current_scope, c.item_scope) IN ({scope_placeholders})
+          ORDER BY c.capture_instant DESC, search_index.item_id"
+    );
+    let scope_names: Vec<String> = allowed_scopes
+        .iter()
+        .map(|scope| scope.as_str().to_string())
+        .collect();
+    let mut statement = conn.prepare(&sql)?;
+    let rows = statement
+        .query_map(rusqlite::params_from_iter(scope_names.iter()), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, Option<String>>(7)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.into_iter()
+        .map(
+            |(
+                item_id,
+                capture_id,
+                scope,
+                route_id,
+                lifecycle_state,
+                current_text,
+                text_basis,
+                original_text,
+            )| {
+                Ok(SearchHit {
+                    item_id,
+                    capture_id,
+                    scope: scope.parse::<ItemScope>()?,
+                    route_id,
+                    lifecycle_state,
+                    current_text: current_text.unwrap_or_default(),
+                    text_basis: TextBasis::parse(&text_basis)?,
+                    original_text,
+                    matched: MatchedText::Current,
+                })
+            },
+        )
+        .collect()
+}
+
 fn search_table(
     conn: &Connection,
     table: &str,

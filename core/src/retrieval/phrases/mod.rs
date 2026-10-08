@@ -1,593 +1,631 @@
-use crate::retrieval::query::QueryFilter;
-use crate::time::{ResolutionError, TimeContext, TimeResolver};
-use anyhow::Result;
-use chrono::TimeZone;
+// Deterministic, local translation of documented query phrases into `QueryFilter`s.
+//
+// Supported grammar (case-insensitive, no model or network involved):
+//
+//   [private] [TOPIC...] [session] [TYPE] NOUN [since DATE]
+//   since DATE
+//
+// NOUN is `notes` or `items`, or a plural type (`actions`, `ideas`, `broad_intentions`).
+// TYPE is `action`, `note`, `idea` or `broad_intention`. TOPIC words are only read when the
+// phrase says `private` or `session`; `session` without a topic means "any session topic".
+// Retrieval is always personal-scope only; `private` never widens it.
+//
+// DATE is `today`, `yesterday`, a weekday name, `YYYY-MM-DD`, `YYYY-MM-DD HH:MM[:SS]`, or
+// `<month> <day> [<year>]`. A date-only bound is the start of that day in `TimeContext.timezone`.
+//
+// A phrase is either resolved completely or not at all: if any clause cannot be resolved
+// without guessing (future bound, ambiguous weekday, DST gap/fold time, unknown date words),
+// no filter is returned, a clarification describes the problem, and the original words remain
+// available for literal search. Phrases outside the grammar fall back to literal search with
+// no clarification. Invalid time contexts are errors, never silently ignored.
+
+use crate::retrieval::query::{
+    scoped_list, scoped_query, QueryFilter, QueryPagination, QueryResult,
+};
+use crate::time::{TimeContext, TimeResolver};
+use anyhow::{anyhow, Result};
+use chrono::{DateTime, Datelike, Duration, LocalResult, NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{TimeZone, Utc, Weekday};
+use chrono_tz::Tz;
+use rusqlite::Connection;
 use std::str::FromStr;
 
 /// Parse result from a natural-language query phrase.
-/// Filters are constructed when phrases match known patterns.
-/// Non-matching phrases are suitable for literal full-text search fallback.
 #[derive(Clone, Debug)]
 pub struct PhraseResolution {
     /// The original input phrase (unchanged).
     pub original_phrase: String,
-    /// Resolved filters if the phrase matched a known pattern (None for literal fallback).
+    /// Complete filter when the whole phrase resolved; `None` means use literal search.
     pub filter: Option<QueryFilter>,
-    /// Clarification needed if the phrase is ambiguous (e.g., missing hour after date-only phrase).
+    /// Set when a clause is uncertain and no filter was committed for it.
     pub clarification_needed: Option<ClarificationKind>,
-    /// Full-text search text when the phrase doesn't match a known pattern.
-    /// This is used for literal fallback retrieval.
+    /// Text for literal full-text search: always the original words.
     pub fallback_search_text: String,
 }
 
-/// Kinds of clarification needed when a phrase is ambiguous.
+/// Kinds of optional clarification a caller can offer instead of guessing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClarificationKind {
-    /// A date was parsed but no time was specified; user should clarify the time.
-    MissingTime { date_str: String },
-    /// A date phrase is ambiguous (e.g., DST fold); clarify which interpretation.
+    /// An explicit local time is ambiguous or nonexistent (DST fold or gap).
     AmbiguousTime { phrase: String, reason: String },
-    /// Unsupported repeat pattern (e.g., "every day"); clarify if they want a one-shot reminder instead.
+    /// A date phrase has several plausible dates (local dates, `YYYY-MM-DD`).
+    AmbiguousDate {
+        phrase: String,
+        candidate_dates: Vec<String>,
+    },
+    /// The "since" bound would be after the reference time, so it could match nothing.
+    FutureSinceBound { phrase: String },
+    /// The words after "since" are not a supported date expression.
+    UnrecognizedDate { phrase: String },
+    /// Repeating patterns are not supported (e.g. "every day").
     UnsupportedRepeat { phrase: String },
 }
 
-/// Parse a natural-language query phrase into filter(s) and optional clarification.
-/// Recognized patterns:
-/// - "notes/items/reminders since DATE" → date filter with captured_after
-/// - "TYPE notes/items" (where TYPE is action/note/idea/etc.) → item_type filter
-/// - "private SESSION notes" → session_topic filter
-/// - Combination of above patterns (e.g., "private therapy notes since monday")
-///
-/// Non-matching phrases return None filter and the original text as fallback_search_text.
+const NOUNS: [&str; 2] = ["notes", "items"];
+const REPEAT_WORDS: [&str; 6] = ["every", "recurring", "daily", "weekly", "monthly", "yearly"];
+const ITEM_TYPES: [&str; 4] = ["action", "note", "idea", "broad_intention"];
+
+#[derive(Default)]
+struct HeadFilter {
+    item_type: Option<String>,
+    topic_tokens: Vec<String>,
+    any_session_topic: bool,
+}
+
+impl HeadFilter {
+    fn restricts_anything(&self) -> bool {
+        self.item_type.is_some() || !self.topic_tokens.is_empty() || self.any_session_topic
+    }
+
+    fn apply_to(&self, filter: &mut QueryFilter) {
+        if let Some(item_type) = &self.item_type {
+            filter.item_types = vec![item_type.clone()];
+        }
+        if !self.topic_tokens.is_empty() {
+            filter.session_topics = topic_variants(&self.topic_tokens);
+        }
+        filter.require_session_topic = self.any_session_topic || !self.topic_tokens.is_empty();
+    }
+}
+
+enum SinceOutcome {
+    Bound(DateTime<Utc>),
+    Clarify(ClarificationKind),
+}
+
+/// Parse a query phrase into a complete filter, a clarification, or a literal fallback.
+/// Errors only for an invalid `TimeContext` when the phrase contains a "since" clause.
 pub fn parse_phrase(phrase: &str, context: &TimeContext) -> Result<PhraseResolution> {
     let original = phrase.to_string();
-    let normalized = phrase.trim().to_lowercase();
-
-    // Check for unsupported repeat patterns first
-    if is_unsupported_repeat(&normalized) {
-        return Ok(PhraseResolution {
-            original_phrase: original.clone(),
-            filter: None,
-            clarification_needed: Some(ClarificationKind::UnsupportedRepeat {
-                phrase: original.clone(),
-            }),
-            fallback_search_text: original,
-        });
-    }
-
-    // Try to combine multiple patterns into a single filter
-    let mut combined_filter = None;
-    let mut clarification = None;
-
-    // First try to extract date/since component
-    if let Some((date_filter, date_clarification)) = extract_date_filter(&normalized, context)? {
-        combined_filter = Some(date_filter);
-        clarification = date_clarification;
-    }
-
-    // Try to extract type component
-    if let Some(type_filter) = extract_type_filter(&normalized) {
-        if let Some(ref mut filter) = combined_filter {
-            // Merge type into existing filter
-            filter.item_types = type_filter.item_types;
-        } else {
-            combined_filter = Some(type_filter);
-        }
-    }
-
-    // Try to extract scope/session component
-    if let Some(scope_filter) = extract_scope_filter(&normalized) {
-        if let Some(ref mut filter) = combined_filter {
-            // Merge scope into existing filter
-            filter.session_topics = scope_filter.session_topics;
-        } else {
-            combined_filter = Some(scope_filter);
-        }
-    }
-
-    if combined_filter.is_some() {
-        return Ok(PhraseResolution {
-            original_phrase: original.clone(),
-            filter: combined_filter,
-            clarification_needed: clarification,
-            fallback_search_text: original,
-        });
-    }
-
-    // No pattern matched; use literal fallback
-    Ok(PhraseResolution {
+    let literal = |clarification: Option<ClarificationKind>| PhraseResolution {
         original_phrase: original.clone(),
         filter: None,
-        clarification_needed: None,
-        fallback_search_text: original,
-    })
-}
-
-fn is_unsupported_repeat(normalized: &str) -> bool {
-    let tokens: Vec<&str> = normalized.split_whitespace().collect();
-    for token in tokens {
-        if token == "every"
-            || token == "recurring"
-            || token == "daily"
-            || token == "weekly"
-            || token == "monthly"
-            || token == "yearly"
-        {
-            return true;
-        }
-    }
-    false
-}
-
-fn is_weekday(date_part: &str) -> bool {
-    matches!(
-        date_part.trim().to_lowercase().as_str(),
-        "monday" | "tuesday" | "wednesday" | "thursday" | "friday" | "saturday" | "sunday"
-    )
-}
-
-/// Extract date filter from a phrase like "since DATE".
-/// Returns (filter, clarification) if a date pattern matched.
-fn extract_date_filter(
-    normalized: &str,
-    context: &TimeContext,
-) -> Result<Option<(QueryFilter, Option<ClarificationKind>)>> {
-    // Look for " since DATE" patterns anywhere in the phrase
-    let date_phrase = if let Some(idx) = normalized.rfind(" since ") {
-        Some(&normalized[idx + 7..]) // Skip " since " (7 chars)
-    } else {
-        normalized.strip_prefix("since ")
+        clarification_needed: clarification,
+        fallback_search_text: original.clone(),
     };
 
-    if let Some(date_part) = date_phrase {
-        // Handle special relative phrases that TimeResolver doesn't support
-        if date_part.trim() == "yesterday" {
-            if let Ok(tz) = chrono_tz::Tz::from_str(&context.timezone) {
-                // Convert reference_time to local timezone first, then get the date
-                let local_ref = context.reference_time.with_timezone(&tz);
-                let yesterday = (local_ref - chrono::Duration::days(1)).date_naive();
-                let mut filter = QueryFilter::personal_only();
+    let trimmed = phrase.trim().trim_end_matches(['?', '.', '!']).trim_end();
+    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+    let lowered: Vec<String> = tokens.iter().map(|token| token.to_lowercase()).collect();
 
-                if let Some(naive_midnight) = yesterday.and_hms_opt(0, 0, 0) {
-                    match tz.from_local_datetime(&naive_midnight) {
-                        chrono::LocalResult::Single(local_dt) => {
-                            filter.captured_after =
-                                Some(local_dt.with_timezone(&chrono::Utc).to_rfc3339());
-                            return Ok(Some((filter, None)));
-                        }
-                        _ => {
-                            // DST ambiguity/gap; don't apply filter
-                            return Ok(None);
-                        }
-                    }
-                }
-            }
-            return Ok(None);
-        } else if date_part.trim() == "today" {
-            if let Ok(tz) = chrono_tz::Tz::from_str(&context.timezone) {
-                // Convert reference_time to local timezone first, then get the date
-                let local_ref = context.reference_time.with_timezone(&tz);
-                let today = local_ref.date_naive();
-                let mut filter = QueryFilter::personal_only();
+    if lowered
+        .iter()
+        .any(|token| REPEAT_WORDS.contains(&token.as_str()))
+    {
+        return Ok(literal(Some(ClarificationKind::UnsupportedRepeat {
+            phrase: original.clone(),
+        })));
+    }
 
-                if let Some(naive_midnight) = today.and_hms_opt(0, 0, 0) {
-                    match tz.from_local_datetime(&naive_midnight) {
-                        chrono::LocalResult::Single(local_dt) => {
-                            filter.captured_after =
-                                Some(local_dt.with_timezone(&chrono::Utc).to_rfc3339());
-                            return Ok(Some((filter, None)));
-                        }
-                        _ => {
-                            // DST ambiguity/gap; don't apply filter
-                            return Ok(None);
-                        }
-                    }
-                }
-            }
-            return Ok(None);
+    let since_position = lowered.iter().rposition(|token| token == "since");
+    let head_end = since_position.unwrap_or(tokens.len());
+    let Some(head) = parse_head(&tokens[..head_end], &lowered[..head_end]) else {
+        return Ok(literal(None));
+    };
+
+    let mut filter = QueryFilter::personal_only();
+    head.apply_to(&mut filter);
+
+    let Some(since_position) = since_position else {
+        if !head.restricts_anything() {
+            return Ok(literal(None));
         }
+        return Ok(PhraseResolution {
+            original_phrase: original.clone(),
+            filter: Some(filter),
+            clarification_needed: None,
+            fallback_search_text: original,
+        });
+    };
 
-        // Determine how to phrase the date for resolution
-        // Relative phrases need "since" for proper semantics, explicit dates don't
-        let phrase_to_resolve = if is_weekday(date_part) {
-            format!("since {}", date_part)
-        } else {
-            date_part.to_string()
+    let date_tokens = &lowered[since_position + 1..];
+    if date_tokens.is_empty() {
+        return Ok(literal(None));
+    }
+
+    TimeResolver::validate_context(context)?;
+    match resolve_since(&date_tokens.join(" "), context)? {
+        SinceOutcome::Bound(bound) => {
+            filter.captured_after = Some(bound.to_rfc3339());
+            Ok(PhraseResolution {
+                original_phrase: original.clone(),
+                filter: Some(filter),
+                clarification_needed: None,
+                fallback_search_text: original,
+            })
+        }
+        SinceOutcome::Clarify(clarification) => Ok(literal(Some(clarification))),
+    }
+}
+
+/// Run a resolution: the filter alone when it resolved, else literal search over the original
+/// words. Both paths are personal-scope only and never leave the local database.
+pub fn retrieve_phrase(
+    conn: &Connection,
+    resolution: &PhraseResolution,
+    pagination: &QueryPagination,
+) -> Result<QueryResult> {
+    match &resolution.filter {
+        Some(filter) => scoped_list(conn, filter, pagination),
+        None => scoped_query(
+            conn,
+            &resolution.fallback_search_text,
+            &QueryFilter::personal_only(),
+            pagination,
+        ),
+    }
+}
+
+fn parse_head(tokens: &[&str], lowered: &[String]) -> Option<HeadFilter> {
+    let mut head = HeadFilter::default();
+    if tokens.is_empty() {
+        return Some(head);
+    }
+
+    let private = lowered[0] == "private";
+    let start = usize::from(private);
+    let mut end = tokens.len();
+    if end <= start {
+        return None;
+    }
+
+    let last = lowered[end - 1].as_str();
+    if NOUNS.contains(&last) {
+        end -= 1;
+    } else {
+        let item_type = last.strip_suffix('s').filter(|t| ITEM_TYPES.contains(t))?;
+        head.item_type = Some(item_type.to_string());
+        end -= 1;
+    }
+
+    if head.item_type.is_none() && end > start && ITEM_TYPES.contains(&lowered[end - 1].as_str()) {
+        head.item_type = Some(lowered[end - 1].clone());
+        end -= 1;
+    }
+
+    let mut session = false;
+    if end > start && lowered[end - 1] == "session" {
+        session = true;
+        end -= 1;
+    }
+
+    let topic_tokens = &tokens[start..end];
+    if !topic_tokens.is_empty() {
+        if !(private || session) {
+            return None;
+        }
+        let is_topic_word = |token: &&str| {
+            token
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '\'')
+                && !matches!(token.to_lowercase().as_str(), "private" | "session")
         };
-
-        match TimeResolver::resolve(&phrase_to_resolve, context) {
-            Ok(result) => {
-                let mut filter = QueryFilter::personal_only();
-                let tz_result = chrono_tz::Tz::from_str(&context.timezone).ok();
-
-                // Check if the resolved date is in the future for "since" queries
-                // A "since" query should not have a future lower bound
-                let is_future = if let Some(resolved_utc) = result.resolved_time {
-                    resolved_utc > context.reference_time
-                } else if let Some(resolved_date) = result.resolved_date {
-                    // Convert resolved_date to UTC midnight and check against reference
-                    let mut is_future_bound = false;
-                    if let Some(tz) = tz_result.as_ref() {
-                        if let Some(naive_midnight) = resolved_date.and_hms_opt(0, 0, 0) {
-                            if let chrono::LocalResult::Single(local_dt) =
-                                tz.from_local_datetime(&naive_midnight)
-                            {
-                                is_future_bound =
-                                    local_dt.with_timezone(&chrono::Utc) > context.reference_time;
-                            }
-                        }
-                    }
-                    is_future_bound
-                } else {
-                    false
-                };
-
-                // Determine clarification needed (check BEFORE applying filter)
-                let clarification = if is_future {
-                    // Future "since" bounds are unsupported; ask for clarification
-                    Some(ClarificationKind::MissingTime {
-                        date_str: format!("since {}", date_part),
-                    })
-                } else if result.is_ambiguous && result.ambiguity_kind.is_some() {
-                    if let Some(ambiguity) = result.ambiguity_kind {
-                        match ambiguity {
-                            crate::time::AmbiguityKind::MissingHour => {
-                                // For date-only "since" phrases, the local midnight is the unambiguous boundary
-                                // Apply the filter and don't ask for clarification
-                                None
-                            }
-                            crate::time::AmbiguityKind::DstGap
-                            | crate::time::AmbiguityKind::DstFold => {
-                                // Withhold the filter when there's DST ambiguity
-                                Some(ClarificationKind::AmbiguousTime {
-                                    phrase: result.original_phrase.clone(),
-                                    reason: result.ambiguity_reason.clone().unwrap_or_default(),
-                                })
-                            }
-                            crate::time::AmbiguityKind::Past => None,
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-
-                // Only apply the filter if it's not in the future
-                // (If there's a non-DST-ambiguity clarification needed, don't apply the filter)
-                let has_dst_ambiguity =
-                    matches!(clarification, Some(ClarificationKind::AmbiguousTime { .. }));
-
-                if !is_future && !has_dst_ambiguity {
-                    // If we have a resolved UTC time, use it as captured_after
-                    if let Some(resolved_utc) = result.resolved_time {
-                        filter.captured_after = Some(resolved_utc.to_rfc3339());
-                        return Ok(Some((filter, clarification)));
-                    } else if let Some(resolved_date) = result.resolved_date {
-                        // Date-only result: convert to start of day in the user's timezone, then to UTC
-                        if let Some(tz) = tz_result {
-                            if let Some(naive_midnight) = resolved_date.and_hms_opt(0, 0, 0) {
-                                // Convert naive datetime to the user's local timezone, then to UTC
-                                match tz.from_local_datetime(&naive_midnight) {
-                                    chrono::LocalResult::Single(local_dt) => {
-                                        filter.captured_after =
-                                            Some(local_dt.with_timezone(&chrono::Utc).to_rfc3339());
-                                        return Ok(Some((filter, clarification)));
-                                    }
-                                    _ => {
-                                        // DST ambiguity; withhold filter and ask for clarification
-                                        return Ok(Some((
-                                            QueryFilter::personal_only(),
-                                            Some(ClarificationKind::AmbiguousTime {
-                                                phrase: result.original_phrase.clone(),
-                                                reason: result
-                                                    .ambiguity_reason
-                                                    .clone()
-                                                    .unwrap_or_default(),
-                                            }),
-                                        )));
-                                    }
-                                }
-                            }
-                        } else {
-                            // Fallback if timezone is invalid
-                            return Ok(None);
-                        }
-                    }
-                    return Ok(Some((filter, clarification)));
-                } else if has_dst_ambiguity || is_future {
-                    // Return no filter but request clarification
-                    return Ok(Some((QueryFilter::personal_only(), clarification)));
-                }
-
-                return Ok(None);
-            }
-            Err(ResolutionError::UnsupportedRepeat(_)) => {
-                return Ok(None); // Unsupported repeats are handled in parse_phrase
-            }
-            Err(ResolutionError::InvalidTimezone(_))
-            | Err(ResolutionError::InconsistentContext(_)) => {
-                // Surface context errors so callers know something went wrong
-                return Err(anyhow::anyhow!(
-                    "Invalid timezone or context in phrase resolution"
-                ));
-            }
-            Err(_) => {
-                return Ok(None); // Not a recognized date phrase
-            }
+        if !topic_tokens.iter().all(is_topic_word) {
+            return None;
         }
+        head.topic_tokens = topic_tokens.iter().map(|t| t.to_string()).collect();
     }
-
-    Ok(None)
+    head.any_session_topic = session;
+    Some(head)
 }
 
-/// Extract item-type filter from phrases like "action notes", "idea items", etc.
-fn extract_type_filter(normalized: &str) -> Option<QueryFilter> {
-    let item_types = ["action", "note", "idea", "broad_intention"];
-    let nouns = ["notes", "items", "reminders"];
-
-    for item_type in &item_types {
-        for noun in &nouns {
-            // Use word-boundary matching to avoid matching substrings like "inaction" as "action"
-            let tokens: Vec<&str> = normalized.split_whitespace().collect();
-            for i in 0..tokens.len().saturating_sub(1) {
-                if tokens[i] == *item_type && tokens[i + 1] == *noun {
-                    let mut filter = QueryFilter::personal_only();
-                    filter.item_types = vec![item_type.to_string()];
-                    return Some(filter);
-                }
+/// Session topics are matched exactly and case-sensitively, so offer the spellings a user is
+/// likely to have stored: as typed, lowercase and title case.
+fn topic_variants(topic_tokens: &[String]) -> Vec<String> {
+    let as_typed = topic_tokens.join(" ");
+    let lowercase = as_typed.to_lowercase();
+    let title_case = topic_tokens
+        .iter()
+        .map(|token| {
+            let lower = token.to_lowercase();
+            let mut chars = lower.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().chain(chars).collect::<String>(),
+                None => String::new(),
             }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut variants: Vec<String> = Vec::new();
+    for variant in [as_typed, lowercase, title_case] {
+        if !variants.contains(&variant) {
+            variants.push(variant);
         }
     }
-
-    None
+    variants
 }
 
-/// Extract scope/session filter from phrases like "private session notes", "work notes", etc.
-fn extract_scope_filter(normalized: &str) -> Option<QueryFilter> {
-    let nouns = ["notes", "items", "reminders"];
+fn resolve_since(date_text: &str, context: &TimeContext) -> Result<SinceOutcome> {
+    let tz = Tz::from_str(&context.timezone)
+        .map_err(|_| anyhow!("invalid timezone: {}", context.timezone))?;
+    let today = context.reference_time.with_timezone(&tz).date_naive();
+    let phrase = date_text.to_string();
+    let unrecognized = || {
+        Ok(SinceOutcome::Clarify(ClarificationKind::UnrecognizedDate {
+            phrase: phrase.clone(),
+        }))
+    };
 
-    // Pattern 2 (checked first): "private WORD notes/items/reminders" (e.g., "private therapy notes")
-    if normalized.starts_with("private ") {
-        for noun in &nouns {
-            let pattern = format!(" {}", noun);
-            if let Some(idx) = normalized.rfind(&pattern) {
-                // Only process if idx >= 8 (to avoid slice panic on "private notes" where idx=7)
-                if idx >= 8 {
-                    let middle_part = &normalized[8..idx]; // Skip "private " (8 chars)
-                    let session_topic = middle_part.trim();
-                    if !session_topic.is_empty()
-                        && session_topic
-                            .chars()
-                            .all(|c| c.is_alphabetic() || c == '_' || c == ' ')
-                    {
-                        // Validate that this looks like a single word or phrase (no "since", "every", etc.)
-                        if !session_topic.contains("since")
-                            && !session_topic.contains("every")
-                            && session_topic
-                                .chars()
-                                .all(|c| c.is_alphabetic() || c == '_' || c == ' ')
-                        {
-                            let mut filter = QueryFilter::personal_only();
-                            filter.session_topics = vec![session_topic.to_string()];
-                            return Some(filter);
-                        }
-                    }
-                }
+    if date_text == "tomorrow" || date_text.starts_with("next ") {
+        return Ok(SinceOutcome::Clarify(ClarificationKind::FutureSinceBound {
+            phrase,
+        }));
+    }
+
+    let date = if date_text == "today" {
+        today
+    } else if date_text == "yesterday" {
+        today - Duration::days(1)
+    } else if let Some(weekday) = parse_weekday(date_text) {
+        let days_back =
+            (7 + today.weekday().num_days_from_monday() - weekday.num_days_from_monday()) % 7;
+        if days_back == 0 {
+            return Ok(SinceOutcome::Clarify(ClarificationKind::AmbiguousDate {
+                phrase,
+                candidate_dates: vec![
+                    today.format("%Y-%m-%d").to_string(),
+                    (today - Duration::days(7)).format("%Y-%m-%d").to_string(),
+                ],
+            }));
+        }
+        today - Duration::days(i64::from(days_back))
+    } else if let Some(local) = parse_local_datetime(date_text) {
+        return explicit_time_bound(local, tz, context.reference_time, phrase);
+    } else if let Ok(date) = NaiveDate::parse_from_str(date_text, "%Y-%m-%d") {
+        date
+    } else if let Some(date) = parse_month_day(date_text, today) {
+        date
+    } else {
+        return unrecognized();
+    };
+
+    let bound = start_of_local_day(tz, date)?;
+    if bound > context.reference_time {
+        return Ok(SinceOutcome::Clarify(ClarificationKind::FutureSinceBound {
+            phrase,
+        }));
+    }
+    Ok(SinceOutcome::Bound(bound))
+}
+
+fn explicit_time_bound(
+    local: NaiveDateTime,
+    tz: Tz,
+    reference_time: DateTime<Utc>,
+    phrase: String,
+) -> Result<SinceOutcome> {
+    match tz.from_local_datetime(&local) {
+        LocalResult::Single(instant) => {
+            let bound = instant.with_timezone(&Utc);
+            if bound > reference_time {
+                Ok(SinceOutcome::Clarify(ClarificationKind::FutureSinceBound {
+                    phrase,
+                }))
+            } else {
+                Ok(SinceOutcome::Bound(bound))
+            }
+        }
+        LocalResult::None => Ok(SinceOutcome::Clarify(ClarificationKind::AmbiguousTime {
+            phrase,
+            reason: "Nonexistent time in DST gap".to_string(),
+        })),
+        LocalResult::Ambiguous(first, second) => {
+            Ok(SinceOutcome::Clarify(ClarificationKind::AmbiguousTime {
+                phrase,
+                reason: format!(
+                    "Ambiguous time in DST fold: could be {} or {}",
+                    first.with_timezone(&Utc).to_rfc3339(),
+                    second.with_timezone(&Utc).to_rfc3339()
+                ),
+            }))
+        }
+    }
+}
+
+/// Earliest instant of the local calendar day; when local midnight does not exist (DST gap),
+/// the first instant that does.
+fn start_of_local_day(tz: Tz, date: NaiveDate) -> Result<DateTime<Utc>> {
+    let midnight = date.and_time(NaiveTime::MIN);
+    for minutes_after_midnight in 0..=(24 * 60) {
+        let candidate = midnight + Duration::minutes(minutes_after_midnight);
+        match tz.from_local_datetime(&candidate) {
+            LocalResult::Single(instant) | LocalResult::Ambiguous(instant, _) => {
+                return Ok(instant.with_timezone(&Utc));
+            }
+            LocalResult::None => {}
+        }
+    }
+    Err(anyhow!("no valid local time on {date} in {tz}"))
+}
+
+fn parse_weekday(text: &str) -> Option<Weekday> {
+    match text {
+        "monday" => Some(Weekday::Mon),
+        "tuesday" => Some(Weekday::Tue),
+        "wednesday" => Some(Weekday::Wed),
+        "thursday" => Some(Weekday::Thu),
+        "friday" => Some(Weekday::Fri),
+        "saturday" => Some(Weekday::Sat),
+        "sunday" => Some(Weekday::Sun),
+        _ => None,
+    }
+}
+
+fn parse_local_datetime(text: &str) -> Option<NaiveDateTime> {
+    NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S")
+        .or_else(|_| NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M"))
+        .ok()
+}
+
+/// `<month> <day> [<year>]`. Without a year, the most recent such date that is not after today.
+fn parse_month_day(text: &str, today: NaiveDate) -> Option<NaiveDate> {
+    let cleaned = text.replace(',', " ");
+    let words: Vec<&str> = cleaned.split_whitespace().collect();
+    if words.len() != 2 && words.len() != 3 {
+        return None;
+    }
+    let month = parse_month(words[0])?;
+    let day_digits = words[1].trim_end_matches(|c: char| c.is_alphabetic());
+    let day: u32 = day_digits.parse().ok()?;
+    match words.get(2) {
+        Some(year_text) => {
+            if year_text.len() != 4 {
+                return None;
+            }
+            NaiveDate::from_ymd_opt(year_text.parse().ok()?, month, day)
+        }
+        None => {
+            let this_year = NaiveDate::from_ymd_opt(today.year(), month, day)?;
+            if this_year <= today {
+                Some(this_year)
+            } else {
+                NaiveDate::from_ymd_opt(today.year() - 1, month, day)
             }
         }
     }
+}
 
-    // Pattern 1: "WORD session notes/items/reminders" (e.g., "work session notes")
-    // Only try this if the phrase doesn't start with "private" (to avoid capturing "private" from "private session notes")
-    if !normalized.starts_with("private ") {
-        for noun in &nouns {
-            let pattern = format!(" session {}", noun);
-            if let Some(idx) = normalized.find(&pattern) {
-                let session_part = &normalized[..idx];
-                let parts: Vec<&str> = session_part.split_whitespace().collect();
-                if !parts.is_empty() {
-                    let session_topic = parts.join(" ");
-                    let mut filter = QueryFilter::personal_only();
-                    filter.session_topics = vec![session_topic];
-                    return Some(filter);
-                }
-            }
-        }
+fn parse_month(word: &str) -> Option<u32> {
+    const MONTHS: [&str; 12] = [
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+    ];
+    if word.len() < 3 {
+        return None;
     }
-
-    None
+    let word = if word == "sept" { "sep" } else { word };
+    MONTHS
+        .iter()
+        .position(|month| *month == word || (word.len() == 3 && month.starts_with(word)))
+        .map(|index| index as u32 + 1)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::DateTime;
+    use chrono::Offset;
 
-    fn make_context() -> TimeContext {
+    fn context_in(timezone: &str, reference_rfc3339: &str) -> TimeContext {
+        let reference_time = DateTime::parse_from_rfc3339(reference_rfc3339)
+            .unwrap()
+            .with_timezone(&Utc);
+        let tz = Tz::from_str(timezone).unwrap();
         TimeContext {
-            timezone: "UTC".to_string(),
+            timezone: timezone.to_string(),
             locale: "en".to_string(),
-            reference_time: DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")
-                .unwrap()
-                .with_timezone(&chrono::Utc),
-            utc_offset_at_capture: 0,
+            reference_time,
+            utc_offset_at_capture: tz
+                .offset_from_utc_datetime(&reference_time.naive_utc())
+                .fix()
+                .local_minus_utc(),
             calendar: "gregorian".to_string(),
         }
     }
 
-    #[test]
-    fn since_date_resolves_to_captured_after() -> Result<()> {
-        let context = make_context();
-        // Use a past date instead of tomorrow (which is rejected as a future bound)
-        let resolution = parse_phrase("notes since 2026-01-10", &context)?;
+    // Thursday 2026-01-15
+    fn utc_context() -> TimeContext {
+        context_in("UTC", "2026-01-15T10:30:00Z")
+    }
 
-        assert!(resolution.filter.is_some());
-        let filter = resolution.filter.unwrap();
-        assert!(filter.captured_after.is_some());
-        // Should contain 2026-01-10
-        assert!(filter
-            .captured_after
-            .as_ref()
+    fn captured_after(phrase: &str, context: &TimeContext) -> Option<String> {
+        parse_phrase(phrase, context)
             .unwrap()
-            .contains("2026-01-10"));
-        Ok(())
+            .filter
+            .and_then(|filter| filter.captured_after)
     }
 
     #[test]
-    fn since_weekday_resolves_past_occurrence() -> Result<()> {
-        let context = make_context();
-        // Today is Thursday 2026-01-15
-        // "since monday" should resolve to the most recent monday (2026-01-12)
-        let resolution = parse_phrase("notes since monday", &context)?;
-
-        assert!(resolution.filter.is_some());
-        let filter = resolution.filter.unwrap();
-        assert!(filter.captured_after.is_some());
-        Ok(())
-    }
-
-    #[test]
-    fn date_only_without_time_applies_local_midnight() -> Result<()> {
-        let context = make_context();
-        // Use a past date (2026-01-10 is before reference_time 2026-01-15)
-        let resolution = parse_phrase("notes since 2026-01-10", &context)?;
-
-        assert!(resolution.filter.is_some());
-        let filter = resolution.filter.unwrap();
-        // Date-only phrases use local midnight as the unambiguous boundary
-        assert!(filter.captured_after.is_some());
-        assert!(filter
-            .captured_after
-            .as_ref()
-            .unwrap()
-            .contains("2026-01-10"));
-        // No clarification needed since local midnight is unambiguous
-        assert!(resolution.clarification_needed.is_none());
-        Ok(())
-    }
-
-    #[test]
-    fn unsupported_repeat_exposes_clarification() -> Result<()> {
-        let context = make_context();
-        let resolution = parse_phrase("notes since every monday", &context)?;
-
-        assert!(resolution.filter.is_none());
-        assert!(resolution.clarification_needed.is_some());
-        if let Some(ClarificationKind::UnsupportedRepeat { phrase }) =
-            resolution.clarification_needed
-        {
-            assert!(phrase.contains("every"));
-        } else {
-            panic!("Expected UnsupportedRepeat clarification");
+    fn private_notes_without_topic_does_not_panic() {
+        let context = utc_context();
+        for phrase in ["private notes", "private", "private notes since monday", ""] {
+            parse_phrase(phrase, &context).unwrap();
         }
-        Ok(())
     }
 
     #[test]
-    fn action_type_phrase_sets_item_type_filter() -> Result<()> {
-        let context = make_context();
-        let resolution = parse_phrase("action notes", &context)?;
-
-        assert!(resolution.filter.is_some());
+    fn headline_phrase_requires_any_session_topic_not_a_topic_named_session() {
+        let resolution =
+            parse_phrase("private session notes since monday", &utc_context()).unwrap();
         let filter = resolution.filter.unwrap();
-        assert_eq!(filter.item_types, vec!["action"]);
-        Ok(())
+        assert!(filter.session_topics.is_empty());
+        assert!(filter.require_session_topic);
+        assert_eq!(
+            filter.captured_after.as_deref(),
+            Some("2026-01-12T00:00:00+00:00")
+        );
+        assert!(resolution.clarification_needed.is_none());
     }
 
     #[test]
-    fn idea_type_phrase_sets_item_type_filter() -> Result<()> {
-        let context = make_context();
-        let resolution = parse_phrase("idea items", &context)?;
-
-        assert!(resolution.filter.is_some());
-        let filter = resolution.filter.unwrap();
-        assert_eq!(filter.item_types, vec!["idea"]);
-        Ok(())
+    fn topic_words_become_case_variants() {
+        let filter = parse_phrase("Private Therapy notes", &utc_context())
+            .unwrap()
+            .filter
+            .unwrap();
+        assert_eq!(filter.session_topics, vec!["Therapy", "therapy"]);
     }
 
     #[test]
-    fn private_session_phrase_sets_session_topic() -> Result<()> {
-        let context = make_context();
-        let resolution = parse_phrase("private therapy notes", &context)?;
-
-        assert!(resolution.filter.is_some());
-        let filter = resolution.filter.unwrap();
-        assert_eq!(filter.session_topics, vec!["therapy"]);
-        Ok(())
+    fn weekday_looks_backward_and_today_is_ambiguous() {
+        let context = utc_context();
+        assert_eq!(
+            captured_after("notes since friday", &context).as_deref(),
+            Some("2026-01-09T00:00:00+00:00")
+        );
+        let thursday = parse_phrase("notes since thursday", &context).unwrap();
+        assert!(thursday.filter.is_none());
+        assert_eq!(
+            thursday.clarification_needed,
+            Some(ClarificationKind::AmbiguousDate {
+                phrase: "thursday".to_string(),
+                candidate_dates: vec!["2026-01-15".to_string(), "2026-01-08".to_string()],
+            })
+        );
     }
 
     #[test]
-    fn session_context_phrase_sets_session_topic() -> Result<()> {
-        let context = make_context();
-        let resolution = parse_phrase("work session notes", &context)?;
-
-        assert!(resolution.filter.is_some());
-        let filter = resolution.filter.unwrap();
-        assert_eq!(filter.session_topics, vec!["work"]);
-        Ok(())
+    fn today_and_yesterday_use_the_local_date() {
+        let context = context_in("America/Los_Angeles", "2026-01-15T03:30:00Z");
+        assert_eq!(
+            captured_after("notes since today", &context).as_deref(),
+            Some("2026-01-14T08:00:00+00:00")
+        );
+        assert_eq!(
+            captured_after("notes since yesterday", &context).as_deref(),
+            Some("2026-01-13T08:00:00+00:00")
+        );
     }
 
     #[test]
-    fn unrecognized_phrase_falls_back_to_literal_search() -> Result<()> {
-        let context = make_context();
-        let resolution = parse_phrase("something about the roof", &context)?;
+    fn dst_gap_at_local_midnight_uses_first_valid_instant() {
+        let context = context_in("America/Santiago", "2026-09-06T12:00:00Z");
+        assert_eq!(
+            captured_after("notes since today", &context).as_deref(),
+            Some("2026-09-06T04:00:00+00:00")
+        );
+    }
 
+    #[test]
+    fn month_day_without_year_is_most_recent_past_occurrence() {
+        let context = utc_context();
+        assert_eq!(
+            captured_after("notes since jan 10", &context).as_deref(),
+            Some("2026-01-10T00:00:00+00:00")
+        );
+        assert_eq!(
+            captured_after("notes since december 25", &context).as_deref(),
+            Some("2025-12-25T00:00:00+00:00")
+        );
+    }
+
+    #[test]
+    fn future_and_unknown_dates_withhold_the_whole_filter() {
+        let context = utc_context();
+        for phrase in [
+            "action notes since tomorrow",
+            "action notes since 2026-02-01",
+            "action notes since next friday",
+        ] {
+            let resolution = parse_phrase(phrase, &context).unwrap();
+            assert!(resolution.filter.is_none(), "{phrase}");
+            assert!(
+                matches!(
+                    resolution.clarification_needed,
+                    Some(ClarificationKind::FutureSinceBound { .. })
+                ),
+                "{phrase}"
+            );
+        }
+        let vague = parse_phrase("action notes since last week", &context).unwrap();
+        assert!(vague.filter.is_none());
+        assert_eq!(
+            vague.clarification_needed,
+            Some(ClarificationKind::UnrecognizedDate {
+                phrase: "last week".to_string()
+            })
+        );
+        assert_eq!(vague.fallback_search_text, "action notes since last week");
+    }
+
+    #[test]
+    fn dst_fold_time_is_withheld_with_ambiguous_time() {
+        let context = context_in("America/New_York", "2025-11-10T12:00:00Z");
+        let resolution = parse_phrase("notes since 2025-11-02 01:30:00", &context).unwrap();
+        assert!(resolution.filter.is_none());
+        assert!(matches!(
+            resolution.clarification_needed,
+            Some(ClarificationKind::AmbiguousTime { .. })
+        ));
+    }
+
+    #[test]
+    fn invalid_context_is_an_error_for_every_date_form() {
+        let mut bad_timezone = utc_context();
+        bad_timezone.timezone = "Not/A_Zone".to_string();
+        let mut bad_calendar = utc_context();
+        bad_calendar.calendar = "hebrew".to_string();
+        let mut bad_offset = context_in("America/Los_Angeles", "2026-01-15T10:30:00Z");
+        bad_offset.utc_offset_at_capture = 0;
+        for context in [&bad_timezone, &bad_calendar, &bad_offset] {
+            for phrase in [
+                "action notes since today",
+                "action notes since monday",
+                "notes since 2026-01-10",
+                "notes since last week",
+            ] {
+                assert!(parse_phrase(phrase, context).is_err(), "{phrase}");
+            }
+            assert!(parse_phrase("something about the roof", context).is_ok());
+        }
+    }
+
+    #[test]
+    fn type_words_match_on_word_boundaries() {
+        let context = utc_context();
+        let resolution = parse_phrase("inaction notes", &context).unwrap();
         assert!(resolution.filter.is_none());
         assert!(resolution.clarification_needed.is_none());
-        assert_eq!(resolution.fallback_search_text, "something about the roof");
-        Ok(())
+        let resolution = parse_phrase("private keynotes", &context).unwrap();
+        assert!(resolution.filter.is_none());
     }
 
     #[test]
-    fn non_private_query_not_routed_to_model() -> Result<()> {
-        let context = make_context();
-        // Verify that parsing does not require model inference
-        let resolution = parse_phrase("notes since 2026-01-16 14:00:00", &context)?;
-
-        assert!(resolution.filter.is_some());
-        // If this resolved without calling a model, the test passes.
-        // We can't directly test "no model call", but we can verify deterministic output.
-        let resolution2 = parse_phrase("notes since 2026-01-16 14:00:00", &context)?;
-        assert_eq!(resolution.filter, resolution2.filter);
-        Ok(())
-    }
-
-    #[test]
-    fn unsupported_phrase_still_has_useful_literal_search() -> Result<()> {
-        let context = make_context();
-        let resolution = parse_phrase("notes since every friday", &context)?;
-
-        // Unsupported repeat should be exposed as clarification
-        assert!(resolution.clarification_needed.is_some());
-        // But the fallback search text is still present
-        assert_eq!(resolution.fallback_search_text, "notes since every friday");
-        Ok(())
-    }
-
-    #[test]
-    fn multiple_filters_can_be_combined() -> Result<()> {
-        // While the current implementation handles one pattern at a time,
-        // verify that combined patterns work (e.g., "action notes since friday")
-        let context = make_context();
-        let resolution = parse_phrase("action notes since friday", &context)?;
-
-        // This should match "action notes" pattern first
-        assert!(resolution.filter.is_some());
-        let filter = resolution.filter.unwrap();
-        assert_eq!(filter.item_types, vec!["action"]);
-        // The "since friday" part is not currently combined in this implementation
-        // but the filter is still useful for retrieving action items
-        Ok(())
-    }
-
-    #[test]
-    fn original_phrase_preserved_in_resolution() -> Result<()> {
-        let context = make_context();
-        let original = "Private therapy notes since Monday";
-        let resolution = parse_phrase(original, &context)?;
-
-        assert_eq!(resolution.original_phrase, original);
-        Ok(())
+    fn repeat_patterns_ask_for_clarification() {
+        let resolution = parse_phrase("notes since every monday", &utc_context()).unwrap();
+        assert!(resolution.filter.is_none());
+        assert!(matches!(
+            resolution.clarification_needed,
+            Some(ClarificationKind::UnsupportedRepeat { .. })
+        ));
     }
 }
