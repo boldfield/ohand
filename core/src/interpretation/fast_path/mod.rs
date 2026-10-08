@@ -485,12 +485,62 @@ const CONTENT_DETERMINERS: &[&str] = &["the", "a", "an", "my", "our", "some"];
 const CONTENT_OBJECT_PRONOUNS: &[&str] = &["her", "him", "them"];
 
 const CONTENT_NOUNS: &[&str] = &[
-    "mom", "dad", "grandma", "grandpa", "sister", "brother", "landlord", "dentist", "doctor",
-    "roofer", "plumber", "vet", "bank", "pharmacy", "school", "milk", "bread", "eggs", "groceries",
-    "coffee", "rent", "bill", "bills", "taxes", "invoice", "report", "prescription", "medicine",
-    "pills", "plants", "dog", "cat", "kids", "trash", "laundry", "dishes", "car", "bike", "package",
-    "parcel", "library", "books", "passport", "license", "insurance", "gift", "flowers", "tickets",
-    "umbrella", "keys", "charger", "recycling", "letter", "form", "appointment", "roof",
+    "mom",
+    "dad",
+    "grandma",
+    "grandpa",
+    "sister",
+    "brother",
+    "landlord",
+    "dentist",
+    "doctor",
+    "roofer",
+    "plumber",
+    "vet",
+    "bank",
+    "pharmacy",
+    "school",
+    "milk",
+    "bread",
+    "eggs",
+    "groceries",
+    "coffee",
+    "rent",
+    "bill",
+    "bills",
+    "taxes",
+    "invoice",
+    "report",
+    "prescription",
+    "medicine",
+    "pills",
+    "plants",
+    "dog",
+    "cat",
+    "kids",
+    "trash",
+    "laundry",
+    "dishes",
+    "car",
+    "bike",
+    "package",
+    "parcel",
+    "library",
+    "books",
+    "passport",
+    "license",
+    "insurance",
+    "gift",
+    "flowers",
+    "tickets",
+    "umbrella",
+    "keys",
+    "charger",
+    "recycling",
+    "letter",
+    "form",
+    "appointment",
+    "roof",
 ];
 
 const MAX_LEXICON_CONTENT_WORDS: usize = 6;
@@ -1003,7 +1053,9 @@ fn prefix_is_allowed(prefix: &[Token]) -> bool {
                 && matches!(token.ch, ',' | ':' | '\u{2014}' | '\u{2013}')
         });
     ends_with_label_break
-        && prefix.iter().all(|token| token.kind != TokenKind::SentenceBreak)
+        && prefix
+            .iter()
+            .all(|token| token.kind != TokenKind::SentenceBreak)
         && SELF_LABELS[1..].contains(&label.as_slice())
 }
 
