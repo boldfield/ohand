@@ -34,6 +34,8 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
 
 - P08 conflated signing automation, which the Linux fleet can build and test against stubbed `security`, `xcodebuild` and `devicectl`, with a signed build installed on a physical iPhone, which only the maintainer can produce on a Mac with Xcode, an Apple Development identity and a device profile. Apple Developer Program enrollment completed on 2026-10-08; this Mac still has no Xcode, identity or profile. P08a owns the tooling, its behaviour tests and the signing document's procedure sections; P08b owns the evidence record and the validity/renewal statement. P09, T05 and T10 depend on P08b, the last child.
 
+- The Xcode 16.4 pin in `ios/project.yml` and `.github/workflows/ios.yml` was the macos-15 runner image default when F03 and F05 ran; no rationale was recorded. It ships the iOS 18.5 SDK and cannot install on the maintainer's iPhone, which runs iOS 26.6.2, so it blocks P08b outright. New task F08 moves native CI to the `macos-26` image and Xcode 26.6, the newest version on GitHub-hosted runners as of 2026-10-08 (Xcode 27 is not yet on hosted images), and re-proves every probe under that SDK. F08 waits for P07, which edits `ios/project.yml`; B01b and P08a wait for F08. Bump again to Xcode 27 when the hosted image carries it.
+
 - V06 and V07 now depend on V01 alone: they implement Rust adapters against its transport interface using fixtures. V05 is the native effect implementation and remains required by app composition/integration, not by independent protocol adapter implementation. This is an explicit dependency override for those retained tasks.
 
 ## Why some tasks stay together
@@ -285,7 +287,7 @@ Owned paths: `tools/apple-build/`, `docs/validation/signing.md` (procedure secti
 
 Dependencies: F03, F05.
 
-Context: PR #27 on branch `mr/7d4836ee` holds the retired P08 attempt. Its code may be reused, but every finding from both review rounds recorded on task `7d4836ee` must be resolved; those findings are the defect list for this slice. The target toolchain is Xcode 16.4 as pinned in `ios/project.yml`. The intended route for the two-week trial is Development signing with the paid account's one-year profile; keep ad-hoc and App Store routes only if they are implemented correctly or remove them.
+Context: PR #27 on branch `mr/7d4836ee` holds the retired P08 attempt. Its code may be reused, but every finding from both review rounds recorded on task `7d4836ee` must be resolved; those findings are the defect list for this slice. The target toolchain is the Xcode version pinned in `ios/project.yml`, which F08 moves to 26.6; P08a waits for F08. The intended route for the two-week trial is Development signing with the paid account's one-year profile; keep ad-hoc and App Store routes only if they are implemented correctly or remove them.
 
 Acceptance:
 
@@ -318,6 +320,24 @@ Acceptance:
 Source pointers (baseline above): `docs/features/m1-external-prerequisites.md`, `docs/validation/m1-protocol.md:122`.
 
 Contributes to original P08 criteria: 2, 4, 5.
+
+### F08
+
+Move native CI to macOS 26 and Xcode 26.6
+
+Replace the unexplained Xcode 16.4 pin with the newest toolchain on GitHub-hosted runners so that simulator evidence and the maintainer's device signing use the same SDK generation as the trial iPhone.
+
+Owned paths: `ios/project.yml` (`options.xcodeVersion` only), `.github/workflows/ios.yml`, `ios/scripts/select_simulator.py`, `ios/scripts/test_select_simulator.py`, `ios/scripts/check_project_config.py`, the "Required checks for macOS workers" section of `AGENTS.md`.
+
+Dependencies: P07.
+
+Acceptance:
+
+1. Both jobs in `ios.yml` run on `macos-26` with Xcode 26.6 selected, the simulator ceiling follows the selected SDK, and the config check enforces that the workflow pin and `options.xcodeVersion` agree.
+2. An exact-head `ios.yml` run on the submitted commit is green: OhAndTests pass, every probe app builds, the launch smoke test passes, and the Tauri probe round-trip passes under the new SDK. Any probe that breaks under iOS 26 is fixed in this task only if the fix is confined to the owned paths; otherwise record the exact failure and block.
+3. `AGENTS.md` names the new runner, Xcode and SDK, and the evidence requirements are unchanged.
+
+Source pointers (baseline above): `.github/workflows/ios.yml:18`, `.github/workflows/ios.yml:26`, `ios/project.yml:6`, `ios/scripts/select_simulator.py:71`, `AGENTS.md:65`.
 
 ### I03a
 

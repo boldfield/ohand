@@ -40,7 +40,7 @@ V08a reads `/etc/ohand-provider/models.json` (or the non-secret `OHAND_PROVIDER_
 
 Only the maintainer can produce this, on a Mac with the pinned Xcode and the iPhone attached. Steps, in order:
 
-1. Install Xcode 16.4, the version pinned in `ios/project.yml`, select it with `xcode-select`, and accept the license. Command Line Tools alone cannot sign or talk to a device.
+1. Install the Xcode version pinned in `ios/project.yml` (26.6 once F08 lands; 16.4 cannot install on an iOS 26 device), select it with `xcode-select`, and accept the license. Command Line Tools alone cannot sign or talk to a device.
 2. In Xcode, add the Apple ID that holds the enrolled team under Settings, Accounts. Let Xcode create the Apple Development certificate. Confirm with `security find-identity -v -p codesigning` that one valid identity exists.
 3. On the iPhone, enable Developer Mode, connect it by cable, trust the Mac, and let Xcode register the device with the team. Automatic signing on the probe target then produces a development profile that covers the device. Export that profile, or note its name and UUID, for the P08a tooling.
 4. Run the P08a tooling with the identity, profile and device supplied through its documented environment inputs, never on the command line, and let it build the signed probe, install it, and write its evidence record.

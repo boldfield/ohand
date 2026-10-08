@@ -1636,6 +1636,36 @@
         "docs/validation/m1-protocol.md:122"
       ],
       "starts_blocked": "maintainer signed-build and device-install evidence"
+    },
+    {
+      "key": "F08",
+      "parent": null,
+      "title": "Move native CI to macOS 26 and Xcode 26.6",
+      "file_scope": [
+        "ios/project.yml",
+        ".github/workflows/ios.yml",
+        "ios/scripts/select_simulator.py",
+        "ios/scripts/test_select_simulator.py",
+        "ios/scripts/check_project_config.py",
+        "AGENTS.md"
+      ],
+      "intent": "Replace the unexplained Xcode 16.4 pin with the newest toolchain on GitHub-hosted runners so that simulator evidence and device signing use the same SDK generation as the trial iPhone.",
+      "acceptance": [
+        "Both ios.yml jobs run on macos-26 with Xcode 26.6; simulator ceiling follows the selected SDK; config check enforces workflow pin equals options.xcodeVersion.",
+        "Exact-head ios.yml run green on the submitted commit: OhAndTests, every probe build, launch smoke, Tauri round-trip; out-of-scope iOS 26 breakage recorded and blocked rather than fixed outside owned paths.",
+        "AGENTS.md names the new runner, Xcode and SDK with evidence requirements unchanged."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "P07"
+      ],
+      "source_pointers": [
+        ".github/workflows/ios.yml:18",
+        ".github/workflows/ios.yml:26",
+        "ios/project.yml:6",
+        "ios/scripts/select_simulator.py:71",
+        "AGENTS.md:65"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -1769,6 +1799,7 @@
     "B01b": [
       "B01a",
       "D05",
+      "F08",
       "P07",
       "V01"
     ],
@@ -2153,10 +2184,14 @@
     ],
     "P08a": [
       "F03",
-      "F05"
+      "F05",
+      "F08"
     ],
     "P08b": [
       "P08a"
+    ],
+    "F08": [
+      "P07"
     ]
   },
   "retained_dependency_overrides": {
@@ -2179,6 +2214,10 @@
     {
       "date": "2026-10-08",
       "change": "Split P08 into P08a (Linux-testable signing tooling) and P08b (maintainer signed-build and device-install evidence); P09, T05 and T10 now depend on P08b. Original task 7d4836ee-0236-4f17-9f21-bc3ec1d3d7e0 retired after two rejected review rounds on PR #27."
+    },
+    {
+      "date": "2026-10-08",
+      "change": "Added F08: move native CI to macos-26 and Xcode 26.6 (the 16.4 pin cannot install on the iOS 26.6.2 trial iPhone). F08 depends on P07; B01b and P08a depend on F08."
     }
   ]
 }
