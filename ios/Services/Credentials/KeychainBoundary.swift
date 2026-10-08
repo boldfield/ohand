@@ -27,11 +27,15 @@ struct KeychainReadResult {
     let secret: Data?
 }
 
-/// Narrow seam over the four Security calls the credential service needs. Production uses `SecurityKeychain`;
+/// Narrow seam over the Security calls the credential service needs. Production uses `SecurityKeychain`;
 /// tests inject a fake to produce exact `OSStatus` outcomes that the simulator cannot be made to return.
 protocol KeychainBoundary {
     func insert(key: KeychainItemKey, secret: Data, accessibility: KeychainAccessibility) -> OSStatus
     func replace(key: KeychainItemKey, secret: Data, accessibility: KeychainAccessibility) -> OSStatus
+    /// Reports whether an item exists and its metadata is readable. Returns only an `OSStatus`, so the health query
+    /// can never receive secret bytes.
+    func inspect(key: KeychainItemKey) -> OSStatus
+    /// Reads the secret. Reserved for dispatch-time resolution.
     func read(key: KeychainItemKey) -> KeychainReadResult
     func remove(key: KeychainItemKey) -> OSStatus
 }
@@ -61,6 +65,14 @@ struct SecurityKeychain: KeychainBoundary {
             kSecAttrAccessible as String: accessibility.attributeValue,
         ]
         return SecItemUpdate(identityQuery(for: key) as CFDictionary, changes as CFDictionary)
+    }
+
+    func inspect(key: KeychainItemKey) -> OSStatus {
+        var query = identityQuery(for: key)
+        query[kSecReturnAttributes as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        return SecItemCopyMatching(query as CFDictionary, &result)
     }
 
     func read(key: KeychainItemKey) -> KeychainReadResult {

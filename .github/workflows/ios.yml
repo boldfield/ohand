@@ -76,6 +76,15 @@ jobs:
             -resultBundlePath .evidence/OhAndTests.xcresult \
             CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= 2>&1 | tee .evidence/OhAndTests.log
 
+      - name: Run credential cross-process relaunch check
+        shell: bash
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+        run: |
+          set -euo pipefail
+          cd ios
+          ./scripts/credential-relaunch-simulator.sh "${SIMULATOR_UDID}" .evidence 2>&1 | tee .evidence/credential-relaunch.log
+
       - name: Run NotificationProbe UI tests (allow and deny permission decisions)
         shell: bash
         env:

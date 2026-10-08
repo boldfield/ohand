@@ -115,7 +115,7 @@ final class CredentialServiceTests: XCTestCase {
             XCTAssertThrowsError(try service.credentialStatus(reference: reference)) { XCTAssertEqual($0 as? CredentialError, .invalidReference) }
             XCTAssertThrowsError(try service.resolveSecret(reference: reference)) { XCTAssertEqual($0 as? CredentialError, .invalidReference) }
         }
-        for operation in [FakeKeychainOperation.insert, .replace, .read, .remove] {
+        for operation in [FakeKeychainOperation.insert, .replace, .inspect, .read, .remove] {
             XCTAssertEqual(keychain.callCount(operation), 0)
         }
     }
@@ -132,9 +132,9 @@ final class CredentialServiceTests: XCTestCase {
     func testStatusDistinguishesPresentAbsentAndInvalidated() throws {
         let present = try service.addCredential(syntheticSecret)
         let absent = UUID().uuidString
-        let invalidated = UUID().uuidString
-        keychain.plant(key: key(for: invalidated), secret: Data())
+        let invalidated = try service.addCredential(syntheticSecret)
 
+        keychain.scriptedStatuses[.inspect] = [errSecSuccess, errSecItemNotFound, errSecDecode]
         XCTAssertEqual(try service.credentialStatus(reference: present), .present)
         XCTAssertEqual(try service.credentialStatus(reference: absent), .absent)
         XCTAssertEqual(try service.credentialStatus(reference: invalidated), .invalidated)
@@ -143,9 +143,24 @@ final class CredentialServiceTests: XCTestCase {
     func testUnreadableItemStatusesMapToInvalidated() throws {
         let reference = try service.addCredential(syntheticSecret)
         for status in [errSecDecode, errSecAuthFailed] {
-            keychain.forcedStatus[.read] = status
+            keychain.forcedStatus[.inspect] = status
             XCTAssertEqual(try service.credentialStatus(reference: reference), .invalidated, "status \(status)")
         }
+    }
+
+    func testStatusPathNeverReadsSecretBytes() throws {
+        let reference = try service.addCredential(syntheticSecret)
+        let emptyValue = UUID().uuidString
+        keychain.plant(key: key(for: emptyValue), secret: Data())
+
+        XCTAssertEqual(try service.credentialStatus(reference: reference), .present)
+        XCTAssertEqual(try service.credentialStatus(reference: UUID().uuidString), .absent)
+        XCTAssertEqual(try service.credentialStatus(reference: emptyValue), .present)
+        keychain.forcedStatus[.inspect] = errSecDecode
+        XCTAssertEqual(try service.credentialStatus(reference: reference), .invalidated)
+
+        XCTAssertEqual(keychain.callCount(.inspect), 4)
+        XCTAssertEqual(keychain.callCount(.read), 0, "health queries must not read the secret")
     }
 
     func testResolveFailsExplicitlyForAbsentAndInvalidatedCredentials() throws {
@@ -178,10 +193,11 @@ final class CredentialServiceTests: XCTestCase {
     func testLockedDeviceIsTransientAndNeverReportedAsInvalidated() throws {
         let reference = try service.addCredential(syntheticSecret)
 
-        keychain.forcedStatus[.read] = errSecInteractionNotAllowed
+        keychain.forcedStatus[.inspect] = errSecInteractionNotAllowed
         XCTAssertThrowsError(try service.credentialStatus(reference: reference)) {
             XCTAssertEqual($0 as? CredentialError, .deviceLocked(.status))
         }
+        keychain.forcedStatus[.read] = errSecInteractionNotAllowed
         XCTAssertThrowsError(try service.resolveSecret(reference: reference)) {
             XCTAssertEqual($0 as? CredentialError, .deviceLocked(.resolve))
         }
@@ -209,7 +225,7 @@ final class CredentialServiceTests: XCTestCase {
         let storageStatuses: [OSStatus] = [errSecMissingEntitlement, errSecNotAvailable, errSecAllocate, 424_242]
 
         for status in storageStatuses {
-            keychain.forcedStatus = [.insert: status, .replace: status, .read: status, .remove: status]
+            keychain.forcedStatus = [.insert: status, .replace: status, .inspect: status, .read: status, .remove: status]
 
             XCTAssertThrowsError(try service.addCredential(syntheticSecret)) {
                 XCTAssertEqual($0 as? CredentialError, .storage(.add, status))

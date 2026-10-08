@@ -5,6 +5,7 @@ import Security
 enum FakeKeychainOperation: Hashable {
     case insert
     case replace
+    case inspect
     case read
     case remove
 }
@@ -52,6 +53,11 @@ final class FakeKeychain: KeychainBoundary {
         if items[key] == nil { return errSecItemNotFound }
         items[key] = StoredItem(secret: secret, accessibility: accessibility)
         return errSecSuccess
+    }
+
+    func inspect(key: KeychainItemKey) -> OSStatus {
+        if let injected = injectedStatus(for: .inspect) { return injected }
+        return items[key] == nil ? errSecItemNotFound : errSecSuccess
     }
 
     func read(key: KeychainItemKey) -> KeychainReadResult {

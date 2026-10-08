@@ -106,20 +106,22 @@ public final class CredentialService {
         try requireSuccess(status, operation: .delete)
     }
 
-    /// Reports whether a usable secret exists. The value is read only to verify it can be decrypted and is
-    /// non-empty; it is never stored, returned or logged.
+    /// Reports the health of the item behind a reference from its metadata only. Secret bytes are never read on
+    /// this path (`KeychainBoundary.inspect` returns just a status), so a health query cannot materialize them.
+    /// An item whose value is empty can only come from outside this service (add and update reject empty
+    /// secrets); it reports `present` here and fails explicitly with `invalidated` in `resolveSecret`.
     public func credentialStatus(reference: String) throws -> CredentialStatus {
         let key = try validatedItemKey(for: reference)
-        let result = keychain.read(key: key)
-        switch result.status {
+        let status = keychain.inspect(key: key)
+        switch status {
         case errSecSuccess:
-            return Self.hasUsableSecret(result.secret) ? .present : .invalidated
+            return .present
         case errSecItemNotFound:
             return .absent
         case errSecDecode, errSecAuthFailed:
             return .invalidated
         default:
-            throw Self.failure(for: result.status, operation: .status)
+            throw Self.failure(for: status, operation: .status)
         }
     }
 

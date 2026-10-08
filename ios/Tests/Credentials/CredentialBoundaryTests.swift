@@ -54,7 +54,7 @@ final class CredentialBoundaryTests: XCTestCase {
             errSecInteractionNotAllowed, errSecDecode, errSecAuthFailed, errSecMissingEntitlement, 424_242,
         ]
         for status in faults {
-            keychain.forcedStatus = [.insert: status, .replace: status, .read: status, .remove: status]
+            keychain.forcedStatus = [.insert: status, .replace: status, .inspect: status, .read: status, .remove: status]
             let failures: [() throws -> Any] = [
                 { try service.addCredential(self.canary) },
                 { try service.updateCredential(self.canary, reference: reference) },
@@ -141,6 +141,18 @@ final class CredentialBoundaryTests: XCTestCase {
                 XCTAssertFalse(source.text.contains(call), "\(source.name) uses \(call)")
             }
         }
+    }
+
+    func testHealthQueryOfTheRealKeychainRequestsNoSecretData() throws {
+        let boundarySource = try XCTUnwrap(credentialSources().first { $0.name == "KeychainBoundary.swift" })
+        let text = boundarySource.text
+        let start = try XCTUnwrap(text.range(of: "func inspect(key: KeychainItemKey) -> OSStatus {\n"))
+        let afterStart = text[start.upperBound...]
+        let end = try XCTUnwrap(afterStart.range(of: "\n    }\n"))
+        let inspectBody = String(afterStart[..<end.lowerBound])
+        XCTAssertTrue(inspectBody.contains("kSecReturnAttributes"))
+        XCTAssertFalse(inspectBody.contains("kSecReturnData"), "inspect must not request secret bytes")
+        XCTAssertFalse(inspectBody.contains("kSecValueData"), "inspect must not request secret bytes")
     }
 
     func testSecretResolutionIsNotPublic() throws {

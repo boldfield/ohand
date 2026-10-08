@@ -114,7 +114,7 @@ final class CredentialKeychainIntegrationTests: XCTestCase {
         XCTAssertEqual(try relaunched.resolveSecret(reference: reference), syntheticSecret)
     }
 
-    func testEmptyStoredValueIsReportedInvalidatedByTheRealKeychainPath() throws {
+    func testEmptyStoredValueFailsExplicitlyAtResolveAndRecoversOnUpdate() throws {
         let reference = UUID().uuidString
         references.append(reference)
         let seed: [String: Any] = [
@@ -127,7 +127,7 @@ final class CredentialKeychainIntegrationTests: XCTestCase {
         XCTAssertEqual(SecItemAdd(seed as CFDictionary, nil), errSecSuccess)
 
         let service = CredentialService(serviceName: serviceName)
-        XCTAssertEqual(try service.credentialStatus(reference: reference), .invalidated)
+        XCTAssertEqual(try service.credentialStatus(reference: reference), .present)
         XCTAssertThrowsError(try service.resolveSecret(reference: reference)) {
             XCTAssertEqual($0 as? CredentialError, .invalidated)
         }
