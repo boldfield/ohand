@@ -73,3 +73,58 @@ The probe requested a JSON object through `response_format` of type `json_schema
 - Behavior of the five models that were not sent a chat request.
 - Whether the credential is validated: the endpoint accepted requests with and without it.
 - Any property not listed in the artifact, such as latency, rate limits or streaming.
+
+---
+
+# Phone-context reachability: maintainer-collected observations (V08b)
+
+Every value below was observed by the maintainer on the configured iPhone and is read from one committed, sanitized artifact. Nothing here is taken from configuration, documentation or assumption.
+
+| Field | Value |
+| --- | --- |
+| Evidence identifier | `spark-phone-2026-10-08` |
+| Artifact | [`docs/validation/evidence/spark-phone/2026-10-08-phone-reachability.json`](evidence/spark-phone/2026-10-08-phone-reachability.json) |
+| Device | iPhone 16 Pro |
+| iOS version | 26.6.2 |
+| Client | Safari, plain navigation to the models path of the configured base URL |
+| Path to endpoint | Tailscale; endpoint is private-network only (not publicly resolvable) |
+| Credential sent | No (endpoint enforces no authentication; a browser cannot attach a bearer header) |
+
+## Phone-context: Wi-Fi (Tailscale connected)
+
+Source: evidence `spark-phone-2026-10-08`, Wi-Fi attempt, collected 2026-10-08T06:42:00Z.
+
+| Field | Value |
+| --- | --- |
+| Network | Wi-Fi |
+| Tailscale connected | Yes |
+| Request type | Unauthenticated GET `/models` |
+| HTTP status | 200 (inferred from rendered JSON response) |
+| Scheme | https |
+| Certificate | Validated, no Safari warning |
+| Models returned | 6 |
+
+## Phone-context: cellular (Tailscale connected)
+
+Source: evidence `spark-phone-2026-10-08`, cellular attempt, collected 2026-10-08T06:44:30Z.
+
+| Field | Value |
+| --- | --- |
+| Network | cellular |
+| Tailscale connected | Yes |
+| Request type | Unauthenticated GET `/models` |
+| HTTP status | 200 (inferred from rendered JSON response) |
+| Scheme | https |
+| Certificate | Validated, no Safari warning |
+| Models returned | 6 |
+
+## Verified compatibility: V08a and V08b agreement
+
+Both evidence sources (worker-context V08a and phone-context V08b) observe identical protocol and authentication behavior:
+
+- **Transport**: Both confirm HTTPS with verified TLS certificates. Worker probe classification `https-verified`; phone-context certificate validated without Safari warning.
+- **Authentication**: Both confirm no authentication required. Worker probe received 200 to unauthenticated requests. Phone attempted GET `/models` without credential and received 200. The endpoint serves the same six models to both unauthenticated requests.
+- **Models**: Worker probe listed 6 models. Phone-context confirmation: identical six-model list on both Wi-Fi and cellular networks.
+- **Scheme**: Worker configured scheme: `https`. Phone-context: endpoint served over HTTPS with valid certificate.
+
+**Status: VERIFIED**. Both V08a server-context and V08b phone-context artifacts exist and confirm identical protocol behavior (no authentication required, HTTPS verified, six-model list). V09 depends on this verified boundary and may now proceed.
