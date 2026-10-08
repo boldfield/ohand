@@ -19,6 +19,7 @@ use ohand_core::interpretation::contracts::{
 use ohand_core::jobs::queue::{claim_job_with_lease, enqueue_job};
 use ohand_core::privacy::routing::{DenialReason, JOB_TYPE_INTERPRET};
 use ohand_core::providers::contracts::{FailureKind, ProviderFailure};
+use ohand_core::reminders::state::{get_reminder, list_operations, OperationType};
 use ohand_core::retrieval::index::search_source_direct;
 use ohand_core::store::events::{
     save_event, Correction, CorrectionKind, Event, EventPayload, EventType, ItemScope, ItemType,
@@ -291,9 +292,18 @@ impl Fixture {
         eligibility.reason
     }
 
-    fn correct(&mut self, kind: CorrectionKind, old: Option<&str>, new: &str, revision: i32) {
+    /// Save a user correction through the public event path; returns the correction event's id,
+    /// which is the correction record identity a request carries.
+    fn correct(
+        &mut self,
+        kind: CorrectionKind,
+        old: Option<&str>,
+        new: &str,
+        revision: i32,
+    ) -> String {
+        let event_id = Uuid::new_v4().to_string();
         let event = Event::new(
-            Uuid::new_v4().to_string(),
+            event_id.clone(),
             self.item_id.clone(),
             revision,
             EventType::Correction,
@@ -306,6 +316,24 @@ impl Fixture {
         )
         .unwrap();
         save_event(&mut self.db, &event, revision).unwrap();
+        event_id
+    }
+
+    /// Reminder desired state and its operations, read through a fresh connection.
+    fn reminder_effects(&self) -> Option<(i64, i64, Vec<OperationType>, Option<String>)> {
+        let mut db = open(&self.path);
+        let tx = db.immediate_transaction().unwrap();
+        let record = get_reminder(&tx, &self.item_id).unwrap()?;
+        let operations = list_operations(&tx, &record.reminder_id).unwrap();
+        Some((
+            record.state_version,
+            record.schedule_generation,
+            operations
+                .iter()
+                .map(|operation| operation.operation_type)
+                .collect(),
+            record.source_phrase,
+        ))
     }
 }
 
@@ -430,7 +458,7 @@ fn crash_before_commit_leaves_no_partial_effect_and_retry_applies_exactly_once()
 
 #[test]
 fn redelivery_after_commit_is_a_duplicate_with_no_second_effect() {
-    let text = "call the roofer 2026-01-16 09:00:00";
+    let text = "remind me to call the roofer 2026-01-16 09:00:00";
     let mut fixture = Fixture::new(text);
     let lease = fixture.claim_job(0, capture_instant());
     let proposal = fixture
@@ -660,16 +688,7 @@ fn text_basis_must_be_the_items_current_effective_text() {
     let text = "call the roofer";
     let corrected = "call the plumber tomorrow";
     let mut fixture = Fixture::new(text);
-    fixture.correct(CorrectionKind::Text, Some(text), corrected, 0);
-    let correction_id = Uuid::new_v4().to_string();
-    fixture
-        .db
-        .conn()
-        .execute(
-            "UPDATE corrections SET correction_id = ? WHERE item_id = ? AND kind = 'text'",
-            rusqlite::params![correction_id, fixture.item_id],
-        )
-        .unwrap();
+    let correction_id = fixture.correct(CorrectionKind::Text, Some(text), corrected, 0);
     let lease = fixture.claim_job(1, capture_instant());
     let before = fixture.durable();
 
@@ -917,7 +936,10 @@ fn apply_reminder_candidate(
     let proposal = fixture
         .proposal_for(&lease, 0)
         .with_item_type(Some(item_type))
-        .with_source_spans(Some(vec![span_of(text, "call")]))
+        .with_source_spans(Some(vec![span_of(
+            text,
+            text.split_whitespace().next().unwrap(),
+        )]))
         .with_reminder_proposal(Some(reminder_candidate(text, phrase, instant, quality)));
     let outcome = fixture.apply(&lease, &proposal).unwrap();
     (fixture, applied_reminder(outcome))
@@ -925,7 +947,7 @@ fn apply_reminder_candidate(
 
 #[test]
 fn explicit_future_datetime_resolves_to_a_pending_one_shot_reminder() {
-    let text = "call the roofer 2026-01-16 09:00:00";
+    let text = "remind me to call the roofer 2026-01-16 09:00:00";
     let (mut fixture, disposition) = apply_reminder_candidate(
         text,
         "2026-01-16 09:00:00",
@@ -943,9 +965,19 @@ fn explicit_future_datetime_resolves_to_a_pending_one_shot_reminder() {
     assert_eq!(reminder.schedule_state, "pending_schedule");
     assert_eq!(
         reminder.resolved_instant.as_deref(),
-        Some("2026-01-16T09:00:00+00:00")
+        Some("2026-01-16T09:00:00Z")
     );
     assert_eq!(reminder.schedule_generation, 1);
+    assert_eq!(
+        fixture.reminder_effects(),
+        Some((
+            1,
+            1,
+            vec![OperationType::Schedule],
+            Some("2026-01-16 09:00:00".to_string())
+        )),
+        "a resolved reminder carries its phrase and exactly one schedule operation"
+    );
     let tx = fixture.db.immediate_transaction().unwrap();
     let status = ItemStatus::load(&tx, &fixture.item_id).unwrap().unwrap();
     tx.commit().unwrap();
@@ -962,7 +994,7 @@ fn explicit_future_datetime_resolves_to_a_pending_one_shot_reminder() {
 
 #[test]
 fn a_date_without_an_hour_stays_unscheduled_and_keeps_the_phrase() {
-    let text = "call the roofer 2026-01-16";
+    let text = "remind me to call the roofer 2026-01-16";
     let (fixture, disposition) = apply_reminder_candidate(
         text,
         "2026-01-16",
@@ -979,13 +1011,18 @@ fn a_date_without_an_hour_stays_unscheduled_and_keeps_the_phrase() {
     assert_eq!(reminder.request_state, "not_scheduled_yet");
     assert_eq!(reminder.schedule_state, "not_scheduled");
     assert_eq!(reminder.resolved_instant, None);
-    assert!(reminder.ambiguity_reason.unwrap().contains("2026-01-16"));
+    assert!(reminder.ambiguity_reason.is_some());
+    assert_eq!(
+        fixture.reminder_effects().unwrap().3.as_deref(),
+        Some("2026-01-16")
+    );
+    assert_eq!(fixture.reminder_effects().unwrap().2, vec![]);
     assert_eq!(fixture.durable().item_type.as_deref(), Some("action"));
 }
 
 #[test]
 fn unsupported_grammar_is_unscheduled_with_the_intention_intact() {
-    let text = "call the roofer after lunch";
+    let text = "remind me to call the roofer after lunch";
     let (fixture, disposition) = apply_reminder_candidate(
         text,
         "after lunch",
@@ -1001,14 +1038,18 @@ fn unsupported_grammar_is_unscheduled_with_the_intention_intact() {
     let reminder = fixture.reminder_row();
     assert_eq!(reminder.request_state, "not_scheduled_yet");
     assert_eq!(reminder.resolved_instant, None);
-    assert!(reminder.ambiguity_reason.unwrap().contains("after lunch"));
+    assert!(reminder.ambiguity_reason.is_some());
+    assert_eq!(
+        fixture.reminder_effects().unwrap().3.as_deref(),
+        Some("after lunch")
+    );
     assert_eq!(fixture.durable().item_type.as_deref(), Some("action"));
     assert_eq!(fixture.durable().processing_state, "processed");
 }
 
 #[test]
 fn recurrence_is_recorded_as_unsupported_never_reduced_to_a_one_shot() {
-    let text = "call the roofer every Monday";
+    let text = "remind me to call the roofer every Monday";
     let (fixture, disposition) = apply_reminder_candidate(
         text,
         "every Monday",
@@ -1025,15 +1066,17 @@ fn recurrence_is_recorded_as_unsupported_never_reduced_to_a_one_shot() {
     assert_eq!(reminder.request_state, "unsupported_recurrence");
     assert_eq!(reminder.schedule_state, "not_scheduled");
     assert_eq!(reminder.resolved_instant, None);
-    assert!(reminder
-        .unsupported_reason
-        .unwrap()
-        .contains("every Monday"));
+    assert!(reminder.unsupported_reason.is_some());
+    assert_eq!(
+        fixture.reminder_effects().unwrap().3.as_deref(),
+        Some("every Monday")
+    );
+    assert_eq!(fixture.reminder_effects().unwrap().2, vec![]);
 }
 
 #[test]
 fn an_instant_the_source_does_not_support_is_never_scheduled() {
-    let text = "call the roofer 2026-01-16 09:00:00";
+    let text = "remind me to call the roofer 2026-01-16 09:00:00";
     let (fixture, disposition) = apply_reminder_candidate(
         text,
         "2026-01-16 09:00:00",
@@ -1042,16 +1085,43 @@ fn an_instant_the_source_does_not_support_is_never_scheduled() {
         ItemType::Action,
     );
 
-    assert_eq!(
+    assert!(matches!(
         disposition,
-        ReminderDisposition::Recorded(ReminderRequestState::NotScheduledYet)
+        ReminderDisposition::CandidateRejected(_)
+    ));
+    assert_eq!(fixture.durable().reminders, 0);
+    assert_eq!(fixture.reminder_effects(), None);
+    assert_eq!(fixture.durable().processing_state, "processed");
+}
+
+#[test]
+fn a_candidate_in_another_timezone_than_the_capture_is_never_scheduled() {
+    let text = "remind me to call the roofer 2026-01-16 09:00:00";
+    let mut fixture = Fixture::new(text);
+    let lease = fixture.claim_job(0, capture_instant());
+    let mut candidate = reminder_candidate(
+        text,
+        "2026-01-16 09:00:00",
+        Some("2026-01-16T09:00:00Z"),
+        TimeResolutionQuality::Explicit,
     );
-    assert_eq!(fixture.reminder_row().resolved_instant, None);
+    candidate.timezone_id = Some("America/New_York".to_string());
+    let proposal = fixture
+        .action_proposal(&lease, text, "call the roofer")
+        .with_reminder_proposal(Some(candidate));
+
+    let disposition = applied_reminder(fixture.apply(&lease, &proposal).unwrap());
+
+    assert!(matches!(
+        disposition,
+        ReminderDisposition::CandidateRejected(_)
+    ));
+    assert_eq!(fixture.reminder_effects(), None);
 }
 
 #[test]
 fn a_time_already_past_at_capture_is_unschedulable_without_adjustment() {
-    let text = "call the roofer 2026-01-10 09:00:00";
+    let text = "remind me to call the roofer 2026-01-10 09:00:00";
     let (mut fixture, disposition) = apply_reminder_candidate(
         text,
         "2026-01-10 09:00:00",
@@ -1072,7 +1142,7 @@ fn a_time_already_past_at_capture_is_unschedulable_without_adjustment() {
     );
     assert_eq!(
         reminder.resolved_instant.as_deref(),
-        Some("2026-01-10T09:00:00+00:00")
+        Some("2026-01-10T09:00:00Z")
     );
     let tx = fixture.db.immediate_transaction().unwrap();
     let status = ItemStatus::load(&tx, &fixture.item_id).unwrap().unwrap();
@@ -1085,7 +1155,7 @@ fn a_time_already_past_at_capture_is_unschedulable_without_adjustment() {
 
 #[test]
 fn a_reminder_on_an_item_that_is_not_an_action_is_not_recorded() {
-    let text = "call the roofer 2026-01-16 09:00:00";
+    let text = "remind me to call the roofer 2026-01-16 09:00:00";
     let (fixture, disposition) = apply_reminder_candidate(
         text,
         "2026-01-16 09:00:00",
@@ -1100,28 +1170,35 @@ fn a_reminder_on_an_item_that_is_not_an_action_is_not_recorded() {
 }
 
 #[test]
-fn a_later_proposal_replaces_an_unresolved_reminder_but_never_a_resolved_one() {
-    let text = "call the roofer 2026-01-16 09:00:00";
+fn a_later_proposal_refines_an_unresolved_reminder_but_never_replaces_a_committed_time() {
+    let text = "remind me to call the roofer 2026-01-16 09:00:00 or 2026-01-17 09:00:00";
     let mut fixture = Fixture::new(text);
-    let phrase = "2026-01-16 09:00:00";
-    let build = |fixture: &Fixture, lease: &Lease, instant: Option<&str>, quality| {
+    let build = |fixture: &Fixture, lease: &Lease, phrase: &str, instant: Option<&str>, quality| {
         fixture
             .action_proposal(lease, text, "call the roofer")
             .with_reminder_proposal(Some(reminder_candidate(text, phrase, instant, quality)))
     };
 
     let first = fixture.claim_job(0, capture_instant());
-    let unresolved = build(&fixture, &first, None, TimeResolutionQuality::Ambiguous);
+    let date_only = build(
+        &fixture,
+        &first,
+        "2026-01-16",
+        None,
+        TimeResolutionQuality::Ambiguous,
+    );
     assert_eq!(
-        applied_reminder(fixture.apply(&first, &unresolved).unwrap()),
+        applied_reminder(fixture.apply(&first, &date_only).unwrap()),
         ReminderDisposition::Recorded(ReminderRequestState::NotScheduledYet)
     );
     assert_eq!(fixture.reminder_row().schedule_generation, 0);
+    assert_eq!(fixture.reminder_effects().unwrap().2, vec![]);
 
     let second = fixture.claim_job(0, capture_instant());
     let resolved = build(
         &fixture,
         &second,
+        "2026-01-16 09:00:00",
         Some("2026-01-16T09:00:00Z"),
         TimeResolutionQuality::Explicit,
     );
@@ -1130,16 +1207,28 @@ fn a_later_proposal_replaces_an_unresolved_reminder_but_never_a_resolved_one() {
         ReminderDisposition::Recorded(ReminderRequestState::Resolved)
     );
     assert_eq!(fixture.reminder_row().schedule_generation, 1);
+    let committed = fixture.reminder_effects().unwrap();
+    assert_eq!(committed.2, vec![OperationType::Schedule]);
 
     let third = fixture.claim_job(0, capture_instant());
-    let ambiguous_again = build(&fixture, &third, None, TimeResolutionQuality::Ambiguous);
+    let different_time = build(
+        &fixture,
+        &third,
+        "2026-01-17 09:00:00",
+        Some("2026-01-17T09:00:00Z"),
+        TimeResolutionQuality::Explicit,
+    );
     assert_eq!(
-        applied_reminder(fixture.apply(&third, &ambiguous_again).unwrap()),
+        applied_reminder(fixture.apply(&third, &different_time).unwrap()),
         ReminderDisposition::ExistingKept
     );
     let reminder = fixture.reminder_row();
     assert_eq!(reminder.request_state, "resolved");
-    assert_eq!(reminder.schedule_generation, 1);
+    assert_eq!(
+        reminder.resolved_instant.as_deref(),
+        Some("2026-01-16T09:00:00Z")
+    );
+    assert_eq!(fixture.reminder_effects().unwrap(), committed);
     assert_eq!(fixture.job_status(&third).0, "completed");
     let durable = fixture.durable();
     assert_eq!(
@@ -1149,5 +1238,193 @@ fn a_later_proposal_replaces_an_unresolved_reminder_but_never_a_resolved_one() {
             .map(|p| p.1.as_str())
             .collect::<Vec<_>>(),
         ["superseded", "superseded", "applied"]
+    );
+}
+
+#[test]
+fn reapplying_the_same_resolved_request_keeps_one_schedule_operation_and_its_version() {
+    let text = "remind me to call the roofer 2026-01-16 09:00:00";
+    let mut fixture = Fixture::new(text);
+    let phrase = "2026-01-16 09:00:00";
+    let build = |fixture: &Fixture, lease: &Lease| {
+        fixture
+            .action_proposal(lease, text, "call the roofer")
+            .with_reminder_proposal(Some(reminder_candidate(
+                text,
+                phrase,
+                Some("2026-01-16T09:00:00Z"),
+                TimeResolutionQuality::Explicit,
+            )))
+    };
+
+    let first = fixture.claim_job(0, capture_instant());
+    fixture.apply(&first, &build(&fixture, &first)).unwrap();
+    let after_first = fixture.reminder_effects().unwrap();
+    assert_eq!(after_first.2, vec![OperationType::Schedule]);
+
+    let second = fixture.claim_job(0, capture_instant());
+    let disposition = applied_reminder(fixture.apply(&second, &build(&fixture, &second)).unwrap());
+
+    assert_eq!(
+        disposition,
+        ReminderDisposition::Recorded(ReminderRequestState::Resolved)
+    );
+    assert_eq!(
+        fixture.reminder_effects().unwrap(),
+        after_first,
+        "a retry reaching the same time changes neither the version, the generation nor the operations"
+    );
+}
+
+#[test]
+fn a_crash_before_commit_leaves_neither_reminder_nor_schedule_operation() {
+    let text = "remind me to call the roofer 2026-01-16 09:00:00";
+    let mut fixture = Fixture::new(text);
+    let lease = fixture.claim_job(0, capture_instant());
+    let proposal = fixture
+        .action_proposal(&lease, text, "call the roofer")
+        .with_reminder_proposal(Some(reminder_candidate(
+            text,
+            "2026-01-16 09:00:00",
+            Some("2026-01-16T09:00:00Z"),
+            TimeResolutionQuality::Explicit,
+        )));
+
+    {
+        let tx = fixture.db.immediate_transaction().unwrap();
+        apply_interpretation_proposal_in_tx(
+            &tx,
+            &lease.job_id,
+            lease.attempt,
+            &proposal,
+            capture_instant(),
+        )
+        .unwrap();
+    }
+
+    assert_eq!(fixture.reminder_effects(), None);
+    assert_eq!(fixture.job_status(&lease).0, "running");
+    fixture.apply(&lease, &proposal).unwrap();
+    assert_eq!(
+        fixture.reminder_effects().unwrap().2,
+        vec![OperationType::Schedule]
+    );
+}
+
+#[test]
+fn a_later_proposal_cannot_turn_an_unsupported_recurrence_into_a_one_shot() {
+    let text = "remind me to call the roofer every Monday 2026-01-16 09:00:00";
+    let mut fixture = Fixture::new(text);
+
+    let first = fixture.claim_job(0, capture_instant());
+    let recurring = fixture
+        .action_proposal(&first, text, "call the roofer")
+        .with_reminder_proposal(Some(reminder_candidate(
+            text,
+            "every Monday",
+            None,
+            TimeResolutionQuality::Ambiguous,
+        )));
+    assert_eq!(
+        applied_reminder(fixture.apply(&first, &recurring).unwrap()),
+        ReminderDisposition::Recorded(ReminderRequestState::UnsupportedRecurrence)
+    );
+    let stored = fixture.reminder_effects().unwrap();
+
+    let second = fixture.claim_job(0, capture_instant());
+    let one_shot = fixture
+        .action_proposal(&second, text, "call the roofer")
+        .with_reminder_proposal(Some(reminder_candidate(
+            text,
+            "2026-01-16 09:00:00",
+            Some("2026-01-16T09:00:00Z"),
+            TimeResolutionQuality::Explicit,
+        )));
+    fixture.apply(&second, &one_shot).unwrap();
+
+    let reminder = fixture.reminder_row();
+    assert_eq!(reminder.request_state, "unsupported_recurrence");
+    assert_eq!(reminder.resolved_instant, None);
+    assert_eq!(reminder.schedule_state, "not_scheduled");
+    assert_eq!(fixture.reminder_effects().unwrap(), stored);
+    assert!(stored.2.is_empty());
+}
+
+#[test]
+fn a_repeat_marker_elsewhere_in_the_text_is_never_reduced_to_a_one_shot() {
+    let text = "remind me to call the roofer every Monday starting 2026-01-16 09:00:00";
+    let (fixture, disposition) = apply_reminder_candidate(
+        text,
+        "2026-01-16 09:00:00",
+        Some("2026-01-16T09:00:00Z"),
+        TimeResolutionQuality::Explicit,
+        ItemType::Action,
+    );
+
+    assert_eq!(
+        disposition,
+        ReminderDisposition::Recorded(ReminderRequestState::UnsupportedRecurrence)
+    );
+    let reminder = fixture.reminder_row();
+    assert_eq!(reminder.request_state, "unsupported_recurrence");
+    assert_eq!(reminder.resolved_instant, None);
+    assert_eq!(fixture.reminder_effects().unwrap().2, vec![]);
+}
+
+#[test]
+fn a_dated_fact_that_does_not_ask_for_a_reminder_stays_unscheduled() {
+    for text in [
+        "the roof quote expires 2026-01-16 09:00:00",
+        "call the roofer 2026-01-16 09:00:00",
+        "don't remind me to call the roofer 2026-01-16 09:00:00",
+        "she said \"remind me to call the roofer 2026-01-16 09:00:00\"",
+        "if you remind me call the roofer 2026-01-16 09:00:00",
+    ] {
+        let (fixture, disposition) = apply_reminder_candidate(
+            text,
+            "2026-01-16 09:00:00",
+            Some("2026-01-16T09:00:00Z"),
+            TimeResolutionQuality::Explicit,
+            ItemType::Action,
+        );
+
+        assert_eq!(disposition, ReminderDisposition::NoExplicitIntent, "{text}");
+        assert_eq!(fixture.reminder_effects(), None, "{text}");
+        assert_eq!(fixture.durable().item_type.as_deref(), Some("action"));
+        assert_eq!(fixture.durable().processing_state, "processed");
+    }
+}
+
+#[test]
+fn a_reminder_request_on_a_corrected_text_resolves_against_the_correction() {
+    let text = "call the roofer";
+    let corrected = "remind me to call the plumber 2026-01-16 09:00:00";
+    let mut fixture = Fixture::new(text);
+    let correction_id = fixture.correct(CorrectionKind::Text, Some(text), corrected, 0);
+    let lease = fixture.claim_job(1, capture_instant());
+    let mut proposal = fixture.proposal_for(&lease, 1);
+    proposal.text_basis = TextBasis::Correction {
+        correction_record_id: correction_id,
+        item_revision: 1,
+    };
+    let proposal = proposal
+        .with_item_type(Some(ItemType::Action))
+        .with_source_spans(Some(vec![span_of(corrected, "plumber")]))
+        .with_reminder_proposal(Some(reminder_candidate(
+            corrected,
+            "2026-01-16 09:00:00",
+            Some("2026-01-16T09:00:00Z"),
+            TimeResolutionQuality::Explicit,
+        )));
+
+    let disposition = applied_reminder(fixture.apply(&lease, &proposal).unwrap());
+
+    assert_eq!(
+        disposition,
+        ReminderDisposition::Recorded(ReminderRequestState::Resolved)
+    );
+    assert_eq!(
+        fixture.reminder_effects().unwrap().2,
+        vec![OperationType::Schedule]
     );
 }

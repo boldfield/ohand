@@ -15,6 +15,12 @@
 //! the failure rules below); stale, unauthorized or mismatched results are
 //! rejected with an error and record nothing.
 //!
+//! A text-correction basis names its correction by the correction event's UUID; the store keeps
+//! that record as `<event id>-correction` and the two are matched by that rule. A reminder
+//! candidate is recorded only when the source text itself asks to be reminded and the model's
+//! instant agrees with the deterministic resolver; the write then goes through the N01 reminder
+//! desired-state API in the same savepoint, so the schedule operation is atomic with the rest.
+//!
 //! Processing-state rules: the first usable result decides the state (`processed` for an applied
 //! proposal, `abstained` for an explicit abstention, `uninterpreted` for a permanent failure or
 //! invalid output). A later abstention never replaces `processed`; a later failure never replaces
@@ -25,22 +31,21 @@
 use crate::domain::items::{
     apply_proposal, load_item_state, ItemState, LifecycleState, ProposalApplicationError,
 };
-use crate::domain::status::{
-    ProcessingState, ReminderAcknowledgmentState, ReminderDeliveryState, ReminderRequestState,
-    ReminderScheduleState,
-};
+use crate::domain::status::{ProcessingState, ReminderRequestState};
 use crate::interpretation::contracts::{
     Proposal, ReminderProposal, TextBasis, TimeResolutionQuality,
 };
 use crate::jobs::queue::{complete_job_in_tx, get_job_internal, Job, JobStatus};
 use crate::privacy::routing::{authorize_job, DenialReason, JOB_TYPE_INTERPRET};
 use crate::providers::contracts::{ErrorClass, ProviderFailure};
-use crate::store::schema::Database;
-use crate::time::resolver::{ResolutionError, TimeContext, TimeResolver};
+use crate::reminders::state::{
+    apply_derived_request, DerivedReminderRequest, ReminderStateError, RequestState,
+};
+use crate::store::schema::{Clock, Database};
+use crate::time::resolver::{TimeContext, TimeResolver};
 use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, Transaction};
 use thiserror::Error;
-use uuid::Uuid;
 
 /// Failure reason recorded on a job whose output failed semantic validation.
 pub const INVALID_OUTPUT_REASON: &str = "invalid_output";
@@ -83,6 +88,8 @@ pub enum ApplyError {
     DuplicateProposalId(String),
     #[error("proposal rejected by item state: {0}")]
     Rejected(ProposalApplicationError),
+    #[error("reminder state: {0}")]
+    Reminder(ReminderStateError),
 }
 
 /// How the reminder candidate of an applied proposal was recorded.
@@ -90,9 +97,16 @@ pub enum ApplyError {
 pub enum ReminderDisposition {
     /// No reminder candidate, or the item is not an action and cannot carry one.
     NotRecorded,
-    /// An existing resolved, unschedulable or cancelled reminder was left untouched.
+    /// The item's text never asks to be reminded (or the request is negated or quoted), so the
+    /// candidate is dropped and no reminder exists.
+    NoExplicitIntent,
+    /// The candidate contradicts the deterministic resolver (different instant or timezone, or a
+    /// time the resolver itself calls ambiguous); nothing is scheduled and no reminder is created.
+    CandidateRejected(&'static str),
+    /// The reminder was already committed, recurring or cancelled; derived output cannot replace
+    /// it, so it was left exactly as it was.
     ExistingKept,
-    /// Recorded with the given request state.
+    /// Recorded through the reminder desired-state API with the given request state.
     Recorded(ReminderRequestState),
 }
 
@@ -272,6 +286,13 @@ fn load_source_context(tx: &Transaction<'_>, job: &Job) -> Result<SourceContext,
     })
 }
 
+/// The store names a correction `<correction event id>-correction`, while the proposal contract
+/// requires its correction record identity to be a UUID. The identity a request carries is
+/// therefore the correction event's id, and it matches the stored record by that suffix rule.
+fn correction_matches(proposal_correction_id: &str, stored_correction_id: &str) -> bool {
+    stored_correction_id.strip_suffix("-correction") == Some(proposal_correction_id)
+}
+
 /// The text a proposal's span offsets refer to, which must be the item's current effective text:
 /// the original capture text until a text correction exists, afterwards the latest correction.
 fn resolve_basis_text(
@@ -299,7 +320,7 @@ fn resolve_basis_text(
                 ..
             },
             Some((current_id, current_text)),
-        ) if *correction_record_id == current_id => Ok(current_text),
+        ) if correction_matches(correction_record_id, &current_id) => Ok(current_text),
         _ => Err(ApplyError::TextBasisStale),
     }
 }
@@ -573,10 +594,10 @@ fn fail_job(
         )
         .map_err(anyhow::Error::from)?;
     if affected == 0 {
-        return Err(ApplyError::StaleLease {
-            presented: job.attempt_count,
-            current: job.attempt_count,
-        });
+        let status = get_job_internal(tx, &job.job_id)?
+            .map(|current| current.status.as_str())
+            .unwrap_or("missing");
+        return Err(ApplyError::JobNotRunning { status });
     }
     Ok(ApplyOutcome::Failed { processing_state })
 }
@@ -635,11 +656,16 @@ pub fn record_interpretation_failure_in_tx(
     })
 }
 
-/// Derive the reminder request of an applied proposal. A reminder needs an item that can carry an
-/// obligation, and it is `resolved` only when the deterministic resolver, given the quoted source
-/// phrase and the capture's own time context, produces exactly the one future instant the
-/// proposal claims. Everything else is recorded as unscheduled with its reason, never guessed,
-/// and never reduced to a one-shot.
+/// Derive the reminder request of an applied proposal.
+///
+/// A candidate is only a claim. It is dropped unless the item can carry an obligation and the
+/// source text itself explicitly asks to be reminded ([`states_reminder_intent`]). The model's
+/// instant and timezone must equal what the deterministic resolver produces from the quoted
+/// phrase; a contradiction creates nothing. Once it agrees, the write goes through the reminder
+/// desired-state API (N01), which re-resolves the phrase against the capture context, refuses to
+/// reduce text with a repeat marker to a one-shot, never replaces a committed time, and records
+/// the schedule operation in the same transaction. Unparseable, ambiguous or recurring phrases
+/// are stored there as not scheduled with the phrase kept.
 fn record_reminder(
     tx: &Transaction<'_>,
     proposal: &Proposal,
@@ -658,128 +684,47 @@ fn record_reminder(
     {
         return Ok(ReminderDisposition::NotRecorded);
     }
-
-    let existing: Option<(String, String, Option<String>, i64)> = tx
-        .query_row(
-            "SELECT reminder_id, request_state, resolved_instant, schedule_generation
-               FROM reminders WHERE item_id = ?",
-            [&item.item_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .optional()
-        .map_err(anyhow::Error::from)?;
-    if let Some((_, state, _, _)) = &existing {
-        let state = state
-            .parse::<ReminderRequestState>()
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
-        if matches!(
-            state,
-            ReminderRequestState::Resolved
-                | ReminderRequestState::Unschedulable
-                | ReminderRequestState::Cancelled
-        ) {
-            return Ok(ReminderDisposition::ExistingKept);
-        }
+    if !states_reminder_intent(basis_text) {
+        return Ok(ReminderDisposition::NoExplicitIntent);
     }
 
     let phrase = quoted_phrase(candidate, basis_text);
-    let decision = decide_reminder(candidate, &phrase, &source.time_context);
-    let (request_state, instant, ambiguity_reason, unsupported_reason, unschedulable_reason) =
-        match decision {
-            ReminderDecision::Resolved(instant) => (
-                ReminderRequestState::Resolved,
-                Some(instant),
-                None,
-                None,
-                None,
-            ),
-            ReminderDecision::InPast(instant) => (
-                ReminderRequestState::Unschedulable,
-                Some(instant),
-                None,
-                None,
-                Some("time_in_past"),
-            ),
-            ReminderDecision::NotScheduledYet(reason) => (
-                ReminderRequestState::NotScheduledYet,
-                None,
-                Some(format!("{reason} (phrase: {phrase:?})")),
-                None,
-                None,
-            ),
-            ReminderDecision::UnsupportedRecurrence => (
-                ReminderRequestState::UnsupportedRecurrence,
-                None,
-                None,
-                Some(format!(
-                    "recurring reminders are not supported (phrase: {phrase:?})"
-                )),
-                None,
-            ),
-        };
-
-    let schedule_state = if request_state == ReminderRequestState::Resolved {
-        ReminderScheduleState::PendingSchedule
-    } else {
-        ReminderScheduleState::NotScheduled
-    };
-    let instant_text = instant.map(|instant| instant.to_rfc3339());
-    let timestamp = now.to_rfc3339();
-    match existing {
-        Some((reminder_id, _, previous_instant, generation)) => {
-            let next_generation = if instant_text.is_some() && instant_text != previous_instant {
-                generation + 1
-            } else {
-                generation
-            };
-            tx.execute(
-                "UPDATE reminders SET request_state = ?, schedule_state = ?, resolved_instant = ?,
-                        timezone_id = ?, ambiguity_reason = ?, unsupported_reason = ?,
-                        unschedulable_reason = ?, schedule_generation = ?, updated_at = ?
-                  WHERE reminder_id = ?",
-                rusqlite::params![
-                    request_state.as_str(),
-                    schedule_state.as_str(),
-                    instant_text,
-                    &source.time_context.timezone,
-                    ambiguity_reason,
-                    unsupported_reason,
-                    unschedulable_reason,
-                    next_generation,
-                    timestamp,
-                    reminder_id,
-                ],
-            )
-            .map_err(anyhow::Error::from)?;
-        }
-        None => {
-            tx.execute(
-                "INSERT INTO reminders (reminder_id, item_id, request_state, schedule_state,
-                        delivery_state, acknowledgment_state, resolved_instant, timezone_id,
-                        ambiguity_reason, unsupported_reason, unschedulable_reason,
-                        schedule_generation, created_at, updated_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                rusqlite::params![
-                    Uuid::new_v4().to_string(),
-                    &item.item_id,
-                    request_state.as_str(),
-                    schedule_state.as_str(),
-                    ReminderDeliveryState::Unknown.as_str(),
-                    ReminderAcknowledgmentState::NotAcknowledged.as_str(),
-                    instant_text,
-                    &source.time_context.timezone,
-                    ambiguity_reason,
-                    unsupported_reason,
-                    unschedulable_reason,
-                    i64::from(instant_text.is_some()),
-                    timestamp,
-                    timestamp,
-                ],
-            )
-            .map_err(anyhow::Error::from)?;
-        }
+    if let Some(contradiction) = candidate_contradiction(candidate, &phrase, &source.time_context) {
+        return Ok(ReminderDisposition::CandidateRejected(contradiction));
     }
-    Ok(ReminderDisposition::Recorded(request_state))
+
+    let request = DerivedReminderRequest {
+        item_id: item.item_id.clone(),
+        source_revision: item.revision,
+        phrase,
+    };
+    match apply_derived_request(tx, &FixedClock(now), &request) {
+        Ok(record) => Ok(ReminderDisposition::Recorded(match record.request_state {
+            RequestState::NotRequested => ReminderRequestState::NotRequested,
+            RequestState::Resolved => ReminderRequestState::Resolved,
+            RequestState::NotScheduledYet => ReminderRequestState::NotScheduledYet,
+            RequestState::UnsupportedRecurrence => ReminderRequestState::UnsupportedRecurrence,
+            RequestState::Unschedulable(_) => ReminderRequestState::Unschedulable,
+            RequestState::Cancelled => ReminderRequestState::Cancelled,
+        })),
+        Err(
+            ReminderStateError::RecurrenceProtected
+            | ReminderStateError::CommittedTimeProtected
+            | ReminderStateError::ReminderCancelled,
+        ) => Ok(ReminderDisposition::ExistingKept),
+        Err(ReminderStateError::FabricatedDeadline(_) | ReminderStateError::Resolution(_)) => Ok(
+            ReminderDisposition::CandidateRejected("the quoted phrase is not a usable time"),
+        ),
+        Err(other) => Err(ApplyError::Reminder(other)),
+    }
+}
+
+struct FixedClock(DateTime<Utc>);
+
+impl Clock for FixedClock {
+    fn now(&self) -> DateTime<Utc> {
+        self.0
+    }
 }
 
 fn quoted_phrase(candidate: &ReminderProposal, basis_text: &str) -> String {
@@ -795,41 +740,18 @@ fn quoted_phrase(candidate: &ReminderProposal, basis_text: &str) -> String {
         .unwrap_or_default()
 }
 
-enum ReminderDecision {
-    Resolved(DateTime<Utc>),
-    InPast(DateTime<Utc>),
-    NotScheduledYet(String),
-    UnsupportedRecurrence,
-}
-
-fn decide_reminder(
+/// Why the model's claim cannot be trusted, or `None` when it agrees with the resolver or the
+/// resolver itself declines to produce one instant (ambiguous, unparseable or recurring phrases,
+/// which the reminder API stores as not scheduled without using the claim).
+fn candidate_contradiction(
     candidate: &ReminderProposal,
     phrase: &str,
     time_context: &TimeContext,
-) -> ReminderDecision {
-    let resolution = match TimeResolver::resolve(phrase, time_context) {
-        Ok(resolution) => resolution,
-        Err(ResolutionError::UnsupportedRepeat(_)) => {
-            return ReminderDecision::UnsupportedRecurrence
-        }
-        Err(ResolutionError::InvalidDateFormat(_)) => {
-            return ReminderDecision::NotScheduledYet(
-                "time phrase is not in a supported form".to_string(),
-            )
-        }
-        Err(other) => return ReminderDecision::NotScheduledYet(other.to_string()),
-    };
-    let Some(resolved) = resolution.resolved_time else {
-        return ReminderDecision::NotScheduledYet(
-            resolution
-                .ambiguity_reason
-                .unwrap_or_else(|| "time is ambiguous".to_string()),
-        );
-    };
+) -> Option<&'static str> {
+    let resolution = TimeResolver::resolve(phrase, time_context).ok()?;
+    let resolved = resolution.resolved_time?;
     if candidate.quality == TimeResolutionQuality::Ambiguous {
-        return ReminderDecision::NotScheduledYet(
-            "the interpreter reported the time as ambiguous".to_string(),
-        );
+        return Some("the interpreter reported the time as ambiguous");
     }
     let claimed = candidate
         .instant
@@ -837,24 +759,103 @@ fn decide_reminder(
         .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
         .map(|instant| instant.with_timezone(&Utc));
     if claimed != Some(resolved) {
-        return ReminderDecision::NotScheduledYet(
-            "the proposed instant is not what the source phrase resolves to".to_string(),
-        );
+        return Some("the proposed instant is not what the source phrase resolves to");
     }
     if candidate.timezone_id.as_deref() != Some(time_context.timezone.as_str()) {
-        return ReminderDecision::NotScheduledYet(
-            "the proposed timezone differs from the capture's timezone".to_string(),
-        );
+        return Some("the proposed timezone differs from the capture's timezone");
     }
-    if resolution.is_past {
-        return ReminderDecision::InPast(resolved);
+    if resolution.is_ambiguous && !resolution.is_past {
+        return Some("the resolver reports the time as ambiguous");
     }
-    if resolution.is_ambiguous {
-        return ReminderDecision::NotScheduledYet(
-            resolution
-                .ambiguity_reason
-                .unwrap_or_else(|| "time is ambiguous".to_string()),
-        );
+    None
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Token<'text> {
+    Word { text: &'text str, quoted: bool },
+    ClauseBreak,
+}
+
+const REMINDER_CUES: &[&[&str]] = &[
+    &["remind", "me"],
+    &["set", "a", "reminder"],
+    &["set", "reminder"],
+    &["add", "a", "reminder"],
+    &["alert", "me"],
+    &["notify", "me"],
+    &["ping", "me"],
+];
+const NEGATING_WORDS: &[&str] = &[
+    "not", "no", "never", "dont", "don't", "doesnt", "doesn't", "didnt", "didn't", "wont", "won't",
+    "cant", "can't", "cannot", "without", "if", "said", "says",
+];
+const NEGATION_LOOKBACK: usize = 4;
+
+fn tokenize_intent_text(text: &str) -> Vec<(String, bool, bool)> {
+    // (lowercased word, quoted, is_clause_break)
+    let mut tokens = Vec::new();
+    let mut word = String::new();
+    let mut quoted = false;
+    let flush = |word: &mut String, quoted: bool, tokens: &mut Vec<(String, bool, bool)>| {
+        if !word.is_empty() {
+            tokens.push((std::mem::take(word), quoted, false));
+        }
+    };
+    for character in text.chars() {
+        match character {
+            '"' | '\u{201c}' | '\u{201d}' => {
+                flush(&mut word, quoted, &mut tokens);
+                quoted = !quoted;
+            }
+            '\'' | '\u{2019}' => word.push('\''),
+            '.' | ',' | ';' | ':' | '!' | '?' | '\n' | '(' | ')' => {
+                flush(&mut word, quoted, &mut tokens);
+                tokens.push((String::new(), quoted, true));
+            }
+            other if other.is_alphanumeric() => word.extend(other.to_lowercase()),
+            _ => flush(&mut word, quoted, &mut tokens),
+        }
     }
-    ReminderDecision::Resolved(resolved)
+    flush(&mut word, quoted, &mut tokens);
+    tokens
+}
+
+/// Whether `text` itself asks for a reminder: a documented cue ("remind me", "set a reminder",
+/// "alert/notify/ping me") outside quotation marks and without a negating or reported-speech word
+/// ("don't", "never", "if", "said", ...) earlier in the same clause. The model's candidate is never
+/// evidence of intent; a dated fact such as "the quote expires 2026-01-16 09:00:00" is not a request.
+fn states_reminder_intent(text: &str) -> bool {
+    let tokens = tokenize_intent_text(text);
+    let words: Vec<Token<'_>> = tokens
+        .iter()
+        .map(|(word, quoted, is_break)| {
+            if *is_break {
+                Token::ClauseBreak
+            } else {
+                Token::Word {
+                    text: word.as_str(),
+                    quoted: *quoted,
+                }
+            }
+        })
+        .collect();
+    (0..words.len()).any(|start| {
+        REMINDER_CUES.iter().any(|cue| {
+            let matches_cue = words.get(start..start + cue.len()).is_some_and(|window| {
+                window.iter().zip(cue.iter()).all(|(token, expected)| {
+                    matches!(token, Token::Word { text, quoted: false } if text == expected)
+                })
+            });
+            matches_cue && !negated_before(&words, start)
+        })
+    })
+}
+
+fn negated_before(words: &[Token<'_>], cue_start: usize) -> bool {
+    words[..cue_start]
+        .iter()
+        .rev()
+        .take(NEGATION_LOOKBACK)
+        .take_while(|token| matches!(token, Token::Word { .. }))
+        .any(|token| matches!(token, Token::Word { text, .. } if NEGATING_WORDS.contains(text)))
 }
