@@ -1,8 +1,9 @@
 use super::contracts::{AdapterCall, ProviderAdapter, TransportError};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[cfg(test)]
-mod tests;
+pub use self::fake::{FakeAnthropicStep, FakeAnthropicTransport};
+
+pub mod fake;
 
 /// Request body for Anthropic Messages API.
 #[derive(Debug, Serialize)]
@@ -18,6 +19,26 @@ struct AnthropicRequest {
 struct AnthropicMessage {
     role: String,
     content: String,
+}
+
+/// Response envelope from Anthropic Messages API.
+#[derive(Debug, Deserialize)]
+struct AnthropicResponse {
+    content: Vec<AnthropicContent>,
+    stop_reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+enum AnthropicContent {
+    Text {
+        text: String,
+    },
+    ToolUse {
+        #[serde(default)]
+        input: serde_json::Value,
+    },
 }
 
 /// Anthropic provider adapter. The actual HTTP transport is delegated to the platform
@@ -64,6 +85,10 @@ impl ProviderAdapter for AnthropicAdapter {
             temperature: Some(0.7),
         };
 
+        if call.cancel.is_cancelled() {
+            return Err(TransportError::Cancelled);
+        }
+
         let body = serde_json::to_vec(&anthropic_request).map_err(|_| TransportError::Rejected)?;
 
         let endpoint = profile
@@ -71,20 +96,43 @@ impl ProviderAdapter for AnthropicAdapter {
             .unwrap_or("https://api.anthropic.com/v1/messages");
         let remaining_ms = call.deadline_ms.saturating_sub(call.clock.now_ms());
 
-        if call.cancel.is_cancelled() {
-            return Err(TransportError::Cancelled);
-        }
-
         if remaining_ms == 0 {
             return Err(TransportError::Timeout);
         }
 
-        self.transport.post(
+        let response_bytes = self.transport.post(
             endpoint,
             profile.credential_ref().as_str(),
             &body,
             remaining_ms,
             call.max_response_bytes,
-        )
+        )?;
+
+        decode_anthropic_response(&response_bytes)
     }
+}
+
+/// Decode the Anthropic Messages API response and extract the structured output.
+fn decode_anthropic_response(response_bytes: &[u8]) -> Result<Vec<u8>, TransportError> {
+    let response: AnthropicResponse =
+        serde_json::from_slice(response_bytes).map_err(|_| TransportError::Rejected)?;
+
+    if response.stop_reason == "max_tokens" {
+        return Err(TransportError::Rejected);
+    }
+
+    for content in response.content {
+        match content {
+            AnthropicContent::Text { text } => {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                    return serde_json::to_vec(&json).map_err(|_| TransportError::Rejected);
+                }
+            }
+            AnthropicContent::ToolUse { input } => {
+                return serde_json::to_vec(&input).map_err(|_| TransportError::Rejected);
+            }
+        }
+    }
+
+    Err(TransportError::Rejected)
 }
