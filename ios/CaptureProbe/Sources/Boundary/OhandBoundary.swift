@@ -140,14 +140,24 @@ final class CancelToken: @unchecked Sendable {
     }
 }
 
-/// An in-memory core capture store. The lock makes `close()` wait for in-flight calls, so a
+/// A file-backed core capture store. The lock makes `close()` wait for in-flight calls, so a
 /// handle is never freed while Rust is using it.
 final class ProbeStore: @unchecked Sendable {
     private var handle: OpaquePointer?
     private let lock = NSLock()
 
     init() throws {
-        guard let opened = ohand_probe_store_open_in_memory() else {
+        let appSupport = try FileManager.default.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        let storePath = appSupport.appendingPathComponent("captures.db").path
+        let pathBytes = [UInt8](storePath.utf8)
+        guard let opened = pathBytes.withUnsafeBufferPointer({ buffer in
+            ohand_probe_store_open_at_path(buffer.baseAddress, buffer.count)
+        }) else {
             throw BoundaryFailure.storeUnavailable
         }
         handle = opened

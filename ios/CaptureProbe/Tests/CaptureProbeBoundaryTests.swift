@@ -146,4 +146,87 @@ class CaptureProbeBoundaryTests: XCTestCase {
         XCTAssertEqual(retrieved.captureId, captureId)
         XCTAssertEqual(retrieved.text, "First entry with stable ID")
     }
+
+    func testPersistenceAcrossReopen() throws {
+        let captureId = "reopen-test-\(UUID().uuidString)"
+        let record = CaptureRecord(
+            captureId: captureId,
+            text: "Entry to persist across reopen",
+            audioReference: nil,
+            captureInstant: "2026-03-01T10:00:00Z",
+            timezoneId: "America/New_York",
+            utcOffsetMinutes: -300,
+            locale: "en_US",
+            calendar: "gregorian",
+            itemScope: "personal",
+            routeId: "route-local",
+            entryLocked: false,
+            createdAt: "2026-03-01T10:00:00Z",
+            sessionTopic: nil
+        )
+
+        // Save in the initial store
+        do {
+            guard let store = store else {
+                XCTFail("Store not initialized")
+                return
+            }
+            let saved = try store.save(record)
+            XCTAssertFalse(saved.idempotentReplay)
+            store.close()
+        }
+
+        // Reopen the store and verify the record persists
+        do {
+            let newStore = try ProbeStore()
+            defer { newStore.close() }
+
+            let retrieved = try newStore.capture(id: captureId)
+            XCTAssertEqual(retrieved.captureId, captureId)
+            XCTAssertEqual(retrieved.text, "Entry to persist across reopen")
+            XCTAssertEqual(retrieved.entryLocked, false)
+            XCTAssertEqual(retrieved.timezoneId, "America/New_York")
+        }
+    }
+
+    func testRetryIdempotencyAcrossReopen() throws {
+        let captureId = "retry-idempotent-\(UUID().uuidString)"
+        let record = CaptureRecord(
+            captureId: captureId,
+            text: "Retry test with stable ID",
+            audioReference: nil,
+            captureInstant: "2026-03-01T10:30:00Z",
+            timezoneId: "UTC",
+            utcOffsetMinutes: 0,
+            locale: "en_US",
+            calendar: "gregorian",
+            itemScope: "personal",
+            routeId: "route-local",
+            entryLocked: false,
+            createdAt: "2026-03-01T10:30:00Z",
+            sessionTopic: nil
+        )
+
+        // Initial save
+        do {
+            guard let store = store else {
+                XCTFail("Store not initialized")
+                return
+            }
+            let saved = try store.save(record)
+            XCTAssertFalse(saved.idempotentReplay)
+            store.close()
+        }
+
+        // Retry after reopen: should be idempotent
+        do {
+            let newStore = try ProbeStore()
+            defer { newStore.close() }
+
+            let retry = try newStore.save(record)
+            XCTAssertTrue(retry.idempotentReplay, "Retry save should be marked as idempotent replay")
+            XCTAssertEqual(retry.capture.captureId, captureId)
+            XCTAssertEqual(retry.capture.text, "Retry test with stable ID")
+        }
+    }
 }

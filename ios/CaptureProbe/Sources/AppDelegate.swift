@@ -28,7 +28,17 @@ class CaptureProbeSceneDelegate: UIResponder, UIWindowSceneDelegate {
     ) {
         guard let windowScene = (scene as? UIWindowScene) else { return }
         let window = UIWindow(windowScene: windowScene)
-        let rootViewController = CaptureProbeViewController()
+
+        // Extract capture ID from the control handoff if available.
+        var captureId: String?
+        for activity in connectionOptions.userActivities {
+            if activity.activityType == "com.boldfield.ohand.probes.capture.intent" {
+                captureId = activity.userInfo?["captureId"] as? String
+                break
+            }
+        }
+
+        let rootViewController = CaptureProbeViewController(captureId: captureId)
         window.rootViewController = rootViewController
         self.window = window
         window.makeKeyAndVisible()
@@ -40,25 +50,14 @@ class CaptureProbeViewController: UIViewController {
     private var statusLabel: UILabel!
     private let captureId: String
 
-    override init(nibName nibNameOrNil: String?, bundle nibBundleOrNil: Bundle?) {
-        captureId = Self.loadOrCreateCaptureId()
-        super.init(nibName: nibNameOrNil, bundle: nibBundleOrNil)
+    init(captureId: String? = nil) {
+        self.captureId = captureId ?? UUID().uuidString
+        super.init(nibName: nil, bundle: nil)
     }
 
     required init?(coder: NSCoder) {
-        captureId = Self.loadOrCreateCaptureId()
+        captureId = UUID().uuidString
         super.init(coder: coder)
-    }
-
-    private static let captureIdKey = "com.boldfield.ohand.probes.capture.id"
-
-    private static func loadOrCreateCaptureId() -> String {
-        if let existing = UserDefaults.standard.string(forKey: captureIdKey) {
-            return existing
-        }
-        let newId = UUID().uuidString
-        UserDefaults.standard.set(newId, forKey: captureIdKey)
-        return newId
     }
 
     override func viewDidLoad() {

@@ -128,6 +128,33 @@ pub extern "C" fn ohand_probe_store_open_in_memory() -> *mut OhandProbeStore {
     }
 }
 
+/// Opens a file-backed core capture store at the given path. Returns null if the store cannot
+/// be opened. Release with `ohand_probe_store_free`.
+///
+/// # Safety
+/// `path` must be a valid null-terminated UTF-8 C string.
+#[no_mangle]
+pub unsafe extern "C" fn ohand_probe_store_open_at_path(
+    path: *const u8,
+    len: usize,
+) -> *mut OhandProbeStore {
+    let borrowed = match borrow_bytes(path, len) {
+        Ok(bytes) => bytes,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    match decode_utf8(borrowed) {
+        Ok(path_str) => match catch_unwind(AssertUnwindSafe(|| ProbeStore::open_at_path(path_str)))
+        {
+            Ok(Ok(store)) => {
+                track_allocation();
+                Box::into_raw(Box::new(OhandProbeStore { store }))
+            }
+            _ => std::ptr::null_mut(),
+        },
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
 /// Releases a store. Null is ignored.
 ///
 /// # Safety

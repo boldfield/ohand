@@ -43,12 +43,18 @@ if ! xcrun simctl spawn "${udid}" launchctl list | grep -F "UIKitApplication:${b
 fi
 
 echo "=== Verifying ingress record creation ==="
-captured_id="$(xcrun simctl get_app_container "${udid}" "${bundle_id}" data | xargs -I {} sh -c 'defaults read "{}/Library/Preferences/com.boldfield.ohand.probes.capture.plist" com.boldfield.ohand.probes.capture.id 2>/dev/null || echo ""')"
+app_container="$(xcrun simctl get_app_container "${udid}" "${bundle_id}" data)"
+if [ -z "${app_container}" ]; then
+  echo "ERROR: Could not determine app container path" >&2
+  exit 1
+fi
+captured_id="$(defaults read "${app_container}/Library/Preferences/com.boldfield.ohand.probes.capture.plist" com.boldfield.ohand.probes.capture.id 2>/dev/null || echo "")"
 if [ -z "${captured_id}" ]; then
   echo "ERROR: Ingress record ID not found in app preferences" >&2
   exit 1
 fi
 echo "Found ingress record ID: ${captured_id}"
+echo "Smoke test verified: ingress record persisted with ID ${captured_id}"
 
 if [ -n "${evidence_dir}" ]; then
   mkdir -p "${evidence_dir}"
@@ -59,4 +65,4 @@ if [ -n "${evidence_dir}" ]; then
 fi
 
 xcrun simctl shutdown "${udid}"
-echo "=== Smoke test passed: ${bundle_id} launched and ingress record verified ==="
+echo "=== Smoke test passed: ${bundle_id} launched, ingress record persisted and verified ==="

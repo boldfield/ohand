@@ -18,9 +18,9 @@ The CaptureProbe target (application) and CaptureProbeControl target (app-extens
 
 ## Ingress record implementation
 
-A capture ingress record is created each time the capture screen is entered. The ViewController loads or generates a stable capture ID from UserDefaults on first init and reuses it across app restarts. The record is saved via the Rust boundary for validation:
+A capture ingress record is created each time the capture screen is entered. The ViewController generates a unique capture ID per entry, accepting one from the intent handoff if available. The record is saved via the Rust boundary for validation:
 
-- **Capture ID**: A UUID generated once on first app install and stored in UserDefaults under key `com.boldfield.ohand.probes.capture.id`, stable across app restarts and relaunch events.
+- **Capture ID**: A UUID generated per entry, or passed through the ProbeOpenCaptureIntent handoff if available. This single ID persists across retries and relaunch for the same entry (idempotency), but a new entry gets a new ID.
 - **Entry timestamp**: ISO8601 timestamp captured at record creation.
 - **Lock state**: Device lock state from `UIApplication.shared.isProtectedDataAvailable`.
 - **Timezone and locale**: System TimeZone and Locale identifiers.
@@ -32,7 +32,7 @@ The record is passed to `ProbeStore.save()` via the Rust boundary:
 
 ```swift
 let record = CaptureRecord(
-    captureId: captureId,
+    captureId: captureId,  // per-entry or from handoff
     text: "Capture probe ingress entry",
     // ... other fields ...
 )
@@ -40,18 +40,21 @@ let result = try store.save(record)
 ```
 
 This ensures:
-- **Stable ID across relaunch**: The captureId persists in UserDefaults and is reused if the app is relaunched.
-- **Idempotency**: Saving the same captureId twice returns `idempotentReplay: true` on the second call.
-- **Boundary validation**: The Rust capture store accepts and validates the record structure; the in-memory store for P02 validates idempotency and retrieval within the same session.
+- **Stable ID per entry**: Each entry (cold launch, warm launch, or control activation) gets a unique ID, or receives one from the handoff and reuses it for retries.
+- **Idempotency**: Saving the same captureId twice returns `idempotentReplay: true` on the second call, but distinct entry IDs create distinct records.
+- **File-backed durability**: The Rust capture store uses a file-backed SQLite database at `Application Support/captures.db` (protected with `.complete` file protection) for persistence across app relaunch.
+- **Boundary validation**: The Rust capture store accepts and validates the record structure, enforcing idempotency and retrieval with durable storage.
 
 ## Tests
 
 Unit tests in `ios/CaptureProbe/Tests/CaptureProbeBoundaryTests.swift` verify:
 
 1. **Save and retrieve**: A record with valid text content can be created and retrieved by its capture ID.
-2. **Idempotent save**: Saving the same ID twice; the second returns `idempotentReplay: true`.
+2. **Idempotent save**: Saving the same ID twice within a session; the second returns `idempotentReplay: true`.
 3. **Lock state capture**: Records correctly capture `entry_locked: true` and `entry_locked: false`.
-4. **Capture ID stability**: A stable ID persists across save and retrieval within the same session.
+4. **Capture ID stability**: A stable ID persists across save and retrieval within a session.
+5. **Persistence across reopen**: A record saved to the durable store remains after the store is closed and reopened; verified by creating a new ProbeStore instance and retrieving the record.
+6. **Retry idempotency across reopen**: After closing and reopening the store, saving the same record again returns `idempotentReplay: true` on the second call, proving durability and idempotency across app relaunch.
 
 These tests run in the `CaptureProbeTests` target on the simulator via Xcode, with results in `ios-evidence/CaptureProbeTests.xcresult`.
 
@@ -59,16 +62,15 @@ These tests run in the `CaptureProbeTests` target on the simulator via Xcode, wi
 
 macOS CI (`.github/workflows/ios.yml` simulator job):
 
-1. **Build**: `./scripts/build-simulator.sh CaptureProbe` compiles the app with Rust bindings.
-2. **Unit tests**: `xcodebuild test -scheme CaptureProbeTests` runs boundary tests including save, retrieve, idempotency, and ID stability.
-3. **Launch smoke test**: `./scripts/smoke-capture-simulator.sh` boots the simulator, installs CaptureProbe, launches it, waits 3 seconds, verifies the process is running, reads and verifies the ingress record ID from app UserDefaults, and captures a screenshot.
+1. **Build**: `./scripts/build-simulator.sh CaptureProbe` compiles the app with Rust bindings and file-backed store.
+2. **Unit tests**: `xcodebuild test -scheme CaptureProbeTests` runs boundary tests including save, retrieve, idempotency, persistence across reopen, and retry idempotency.
+3. **Launch smoke test**: `./scripts/smoke-capture-simulator.sh` boots the simulator, installs CaptureProbe, launches it, waits 3 seconds, verifies the process is running, reads and verifies the ingress record ID from app UserDefaults (where it was stored as a reference), and confirms the record is persisted in the durable store.
 
 Evidence artifacts:
 - `CaptureProbe-build.log` — build output
-- `CaptureProbeTests.log` — unit test output and `CaptureProbeTests.xcresult`
+- `CaptureProbeTests.log` — unit test output including persistence and reopen tests, linked to `CaptureProbeTests.xcresult`
 - `captureprobe-launch.png` — screenshot of the entry screen
-- `capture-evidence.txt` — ingress record ID verified during smoke test
-- `smoke-capture.log` — simulator launch and ingress record verification
+- `smoke-capture.log` — simulator launch, ingress record verification, and confirmation of durable persistence
 
 ## Device evidence (not yet collected)
 
@@ -94,11 +96,11 @@ Device evidence will include device metadata, logs confirming ingress records pe
 ## Findings for B01 (Production capture bridge)
 
 On simulator (verified):
-- The Rust boundary (`ProbeStore`) accepts, validates, and retrieves CaptureRecord values with idempotency tracking.
+- The Rust boundary (`ProbeStore`) accepts, validates, and retrieves CaptureRecord values with idempotency tracking; the file-backed store persists records across app relaunch.
 - Lock state is available at app launch through `UIApplication.shared.isProtectedDataAvailable`.
-- A stable capture ID stored in UserDefaults persists across app relaunch and is reused idempotently.
-- Unit tests verify save, retrieve, idempotency, and ID stability within a session.
-- The smoke test verifies that the app can launch and the ingress record ID is created and readable.
+- Each entry generates a unique capture ID, or accepts one from the intent handoff, and reuses it for retries until persisted.
+- Unit tests verify save, retrieve, idempotency within a session, and persistence across store reopen with retry idempotency.
+- The smoke test verifies that the app can launch, the ingress record ID is created and accessible, and the record is durable in the file-backed store.
 
 On device (pending):
 - System controls (iOS 18+) can reliably launch the app and route through ProbeOpenCaptureIntent.

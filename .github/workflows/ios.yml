@@ -120,7 +120,7 @@ jobs:
             "${SIMULATOR_UDID}" \
             .derived/Build/Products/Debug-iphonesimulator/BridgeProbe.app \
             com.boldfield.ohand.probes.bridge \
-            .evidence 2>&1 | tee .evidence/smoke-bridge.log
+            .evidence 2>&1 | tee .evidence/smoke.log
           ./scripts/smoke-capture-simulator.sh \
             "${SIMULATOR_UDID}" \
             .derived/Build/Products/Debug-iphonesimulator/CaptureProbe.app \

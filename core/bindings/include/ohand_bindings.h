@@ -70,6 +70,15 @@ size_t ohand_bindings_live_allocations(void);
 struct OhandProbeStore *ohand_probe_store_open_in_memory(void);
 
 /**
+ * Opens a file-backed core capture store at the given path. Returns null if the store cannot
+ * be opened. Release with `ohand_probe_store_free`.
+ *
+ * # Safety
+ * `path` must be a valid null-terminated UTF-8 C string.
+ */
+struct OhandProbeStore *ohand_probe_store_open_at_path(const uint8_t *path, size_t len);
+
+/**
  * Releases a store. Null is ignored.
  *
  * # Safety

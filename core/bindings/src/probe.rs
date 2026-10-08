@@ -134,6 +134,13 @@ impl ProbeStore {
         })
     }
 
+    pub fn open_at_path(path: &str) -> Result<Self, Failure> {
+        let database = Database::open(path, Arc::new(SystemClock)).map_err(|_| Failure::STORAGE)?;
+        Ok(ProbeStore {
+            database: Mutex::new(database),
+        })
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Database> {
         self.database.lock().unwrap_or_else(PoisonError::into_inner)
     }
