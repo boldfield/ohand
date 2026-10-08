@@ -497,14 +497,13 @@ fn settle_processing_state(
     wanted: ProcessingState,
     now: DateTime<Utc>,
 ) -> Result<ProcessingState, ApplyError> {
-    let retained = match (source.processing_state, wanted) {
+    let retained = matches!(
+        (source.processing_state, wanted),
         (
             ProcessingState::Processed,
             ProcessingState::Abstained | ProcessingState::Uninterpreted,
-        ) => true,
-        (ProcessingState::Abstained, ProcessingState::Uninterpreted) => true,
-        _ => false,
-    };
+        ) | (ProcessingState::Abstained, ProcessingState::Uninterpreted)
+    );
     if retained {
         return Ok(source.processing_state);
     }
