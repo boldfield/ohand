@@ -360,7 +360,7 @@ final class CredentialServiceTests: XCTestCase {
         let secret = "accessibility-test".data(using: .utf8)!
         let reference = try credentialService.addCredential(secret)
 
-        var query: [String: Any] = [
+        let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: testKeychainService,
             kSecAttrAccount as String: reference,
@@ -391,7 +391,7 @@ final class CredentialServiceTests: XCTestCase {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: testKeychainService,
             kSecAttrAccount as String: reference,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockedThisDeviceOnly,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
             kSecValueData as String: secret
         ] as [String: Any]
 
