@@ -1,0 +1,21 @@
+[package]
+name = "ohand-bindgen"
+version = "0.1.0"
+edition = "2021"
+description = "Reproducible C header generation and export verification for the Rust core ABI"
+publish = false
+
+# A workspace of its own: the generator is build tooling, so it is not a member of the
+# product workspace and does not change the product's dependency graph or Cargo.lock.
+[workspace]
+
+[lib]
+name = "ohand_bindgen"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ohand-bindgen"
+path = "src/main.rs"
+
+[dependencies]
+cbindgen = { version = "0.29", default-features = false }

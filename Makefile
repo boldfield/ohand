@@ -1,15 +1,15 @@
 PYTHON ?= python3
 export PYTHONDONTWRITEBYTECODE := 1
 
-.PHONY: check test contract-check contract-test ios-check ios-credential-probe hygiene-check hygiene-test
+.PHONY: check test contract-check contract-test ios-check ios-credential-probe bindings-check bindings-test hygiene-check hygiene-test
 
 # check: Validate contract correctness, compile, format, and lint.
 # F01 establishes contract-check and contract-test. F02 adds cargo targets and lint.
 # F05 adds native targets and documentation.
-check: contract-check cargo-check cargo-fmt-check cargo-clippy ios-check
+check: contract-check cargo-check cargo-fmt-check cargo-clippy bindings-check ios-check
 
 # test: Run contract validation tests and cargo test suite.
-test: contract-test hygiene-test cargo-test
+test: contract-test hygiene-test cargo-test bindings-test
 
 .PHONY: cargo-check cargo-test cargo-build cargo-fmt-check cargo-clippy
 
@@ -59,3 +59,16 @@ hygiene-test:
 # Requires gitleaks (see docs/contributing.md); fails closed when it is missing.
 hygiene-check:
 	$(PYTHON) tools/hygiene/check_hygiene.py
+
+# bindings-check / bindings-test: B01a. tools/bindings is its own Cargo workspace (build tooling,
+# not a product crate). The C header is generated into target/ and never committed;
+# verify.sh fails when the built static library and the generated header disagree.
+export BINDINGS_TOOL_TARGET_DIR ?= $(CURDIR)/target/bindings-tool
+
+bindings-check:
+	CARGO_TARGET_DIR=$(BINDINGS_TOOL_TARGET_DIR) cargo fmt --manifest-path tools/bindings/Cargo.toml -- --check
+	CARGO_TARGET_DIR=$(BINDINGS_TOOL_TARGET_DIR) cargo clippy --manifest-path tools/bindings/Cargo.toml --all-targets --locked -- -D warnings
+	tools/bindings/verify.sh
+
+bindings-test:
+	CARGO_TARGET_DIR=$(BINDINGS_TOOL_TARGET_DIR) cargo test --manifest-path tools/bindings/Cargo.toml --locked

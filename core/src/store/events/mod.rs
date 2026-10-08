@@ -4,13 +4,15 @@
 use crate::store::schema::Database;
 use anyhow::{anyhow, Result};
 use rusqlite::{OptionalExtension, Transaction};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 use thiserror::Error;
 
 /// Intent classification of an item. Only an explicit `Action` can carry an obligation;
 /// broad intentions, notes and ideas are preserved and searchable but never obligations.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ItemType {
     BroadIntention,
     Note,
@@ -644,6 +646,10 @@ pub fn save_event_in_tx(
                 rusqlite::params![&corr.new_value, &event.item_id],
             )?;
         }
+        if corr.kind == CorrectionKind::Text {
+            crate::retrieval::index::sync_item_in_tx(tx, &event.item_id)
+                .map_err(EventError::Database)?;
+        }
     }
 
     match event.event_type {
@@ -704,6 +710,9 @@ pub fn get_events_for_item(tx: &Transaction<'_>, item_id: &str) -> Result<Vec<Ev
 /// Delete all events for an item.
 pub fn delete_events_for_item(tx: &Transaction<'_>, item_id: &str) -> Result<usize> {
     tx.execute("DELETE FROM corrections WHERE item_id = ?", [item_id])?;
-    tx.execute("DELETE FROM events WHERE item_id = ?", [item_id])
-        .map_err(|e| anyhow!(e))
+    let deleted = tx
+        .execute("DELETE FROM events WHERE item_id = ?", [item_id])
+        .map_err(|e| anyhow!(e))?;
+    crate::retrieval::index::sync_item_in_tx(tx, item_id)?;
+    Ok(deleted)
 }
