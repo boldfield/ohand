@@ -1387,6 +1387,8 @@ mod tests {
             "credential",
             "passphrase",
             "session_id",
+            "auth_key",
+            "x_auth_key",
         ] {
             let mut map = serde_json::Map::new();
             map.insert(key.to_string(), serde_json::json!("abcdef"));

@@ -36,8 +36,8 @@ const PRIVATE_PATH_PREFIXES: &[&str] = &[
 const SENSITIVE_KEY_SUFFIXES: &[&str] = &["authorization", "token", "pwd"];
 
 /// Normalized key-name stems that mark a credential wherever they appear in the key, so compound
-/// names such as `secret_key`, `aws_secret_access_key`, `access_key_id` or `db_password_hash`
-/// are caught as well as plain `secret` or `password`.
+/// names such as `secret_key`, `aws_secret_access_key`, `access_key_id`, `x_auth_key` or
+/// `db_password_hash` are caught as well as plain `secret` or `password`.
 const SENSITIVE_KEY_STEMS: &[&str] = &[
     "apikey",
     "password",
@@ -52,6 +52,12 @@ const SENSITIVE_KEY_STEMS: &[&str] = &[
     "sessionid",
     "encryptionkey",
     "clientkey",
+    "authkey",
+    "authcode",
+    "authheader",
+    "masterkey",
+    "hmackey",
+    "sharedkey",
 ];
 
 /// Normalized key-name suffixes whose string value must be an approved synthetic endpoint.
@@ -592,7 +598,11 @@ mod tests {
             "pwd=hunter",
             "session_id=abcdef",
             "signing_key=abcdef",
+            "auth_key=abcdef",
+            "x-auth-key: abcdef",
+            "master_key=abcdef",
             "{\"secret_key\":\"abcdef\"}",
+            "{\"x_auth_key\":\"abcdef\"}",
         ] {
             assert!(is_secret_or_endpoint(value), "should reject {value}");
         }
@@ -608,6 +618,13 @@ mod tests {
             "session",
             "sessionId",
             "encryption_key",
+            "auth_key",
+            "x_auth_key",
+            "authKey",
+            "X-Auth-Key",
+            "auth_code",
+            "hmac_key",
+            "shared_key",
         ] {
             let mut output = serde_json::Map::new();
             output.insert(key.to_string(), json!("abcdef"));
@@ -627,6 +644,8 @@ mod tests {
             "password: required",
             "access key was rotated",
             "keyboard shortcut pressed",
+            "author: synthetic fixture",
+            "authenticated session resumed",
         ] {
             assert!(!is_secret_or_endpoint(value), "should accept {value}");
         }
