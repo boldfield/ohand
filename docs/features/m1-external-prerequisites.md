@@ -10,7 +10,7 @@ The original blocker description below is historical and superseded for worker S
 
 ## Current blockers
 
-P08 (`7d4836ee-0236-4f17-9f21-bc3ec1d3d7e0`) requires real Apple signing and device-install evidence. Developer enrollment is still pending, as corrected by the maintainer on 2026-10-07. This Mac currently selects Command Line Tools, has no valid code-signing identity and has no installed provisioning profiles. Do not unblock P08 based on enrollment alone. The existing PR #27 also has unresolved review findings; preserve that work and fix those findings before resubmission. Do not claim a signed installation from simulator results or fixture tests.
+P08 was split on 2026-10-08 after two rejected review rounds on PR #27; see the replacement map in [the task refinement overlay](m1-task-refinement.md). The original task `7d4836ee-0236-4f17-9f21-bc3ec1d3d7e0` is retired. P08a (signing tooling with stubbed Apple tools) is executable on the Linux fleet now. P08b (signed build and device install) starts blocked on the maintainer evidence described in "Signed-build evidence for P08b" below. Apple Developer Program enrollment completed on 2026-10-08. As of that date this Mac still selects Command Line Tools, has no Xcode installed, no valid code-signing identity and no provisioning profiles. Do not claim a signed installation from simulator results or fixture tests.
 
 V08 was split on 2026-10-08 after two rejected review rounds on PR #60; see the replacement map in [the task refinement overlay](m1-task-refinement.md). The original task `939fe62e-5074-45e5-ad67-156834129c13` is retired. V08a (server-side probe from the worker) is executable now that worker configuration access is verified. V08b (phone-context reachability) starts blocked on the maintainer evidence described in "Phone-context evidence for V08b" below. The maintainer authorized the provider configuration from their Pi models file to be stored in Kubernetes. Secret `ohand-spark-provider` exists in namespace `odonian-fleet`, with key `models.json`, and is mounted read-only in the workers. No endpoint, credential, model configuration contents or device identifiers belong in this public repository.
 
@@ -35,6 +35,19 @@ Acceptance: record exact deployed manifest revision and collection time, read-on
 ## Consumer instructions
 
 V08a reads `/etc/ohand-provider/models.json` (or the non-secret `OHAND_PROVIDER_CONFIG_PATH`) inside the worker. Treat its protocol declaration as configuration to test, not proof of compatibility. Use authorized bounded synthetic requests and keep credentials and addresses out of every output, including the committed sanitized evidence artifact. The endpoint may be served over cleartext HTTP on the private network; record the configured scheme as observed and never report TLS that was not negotiated and verified. Worker, Mac or simulator reachability is not phone-context evidence.
+
+## Signed-build evidence for P08b
+
+Only the maintainer can produce this, on a Mac with the pinned Xcode and the iPhone attached. Steps, in order:
+
+1. Install Xcode 16.4, the version pinned in `ios/project.yml`, select it with `xcode-select`, and accept the license. Command Line Tools alone cannot sign or talk to a device.
+2. In Xcode, add the Apple ID that holds the enrolled team under Settings, Accounts. Let Xcode create the Apple Development certificate. Confirm with `security find-identity -v -p codesigning` that one valid identity exists.
+3. On the iPhone, enable Developer Mode, connect it by cable, trust the Mac, and let Xcode register the device with the team. Automatic signing on the probe target then produces a development profile that covers the device. Export that profile, or note its name and UUID, for the P08a tooling.
+4. Run the P08a tooling with the identity, profile and device supplied through its documented environment inputs, never on the command line, and let it build the signed probe, install it, and write its evidence record.
+5. Commit the sanitized record under `docs/validation/evidence/apple-signing/` named with the collection date. It carries the build revision, collection time, the content-free build and device identifiers the tooling emits, and the profile's observed expiry date. It must not carry the team identifier, certificate serial, raw device UDID, profile contents, or any hash of them. Keep the tooling's raw private evidence outside Git with a reference in the record.
+6. Unblock P08b with a transition note naming that file.
+
+The paid-account development profile is expected to be valid for about a year, which covers the two-week trial, but P08b records the observed expiry rather than this expectation.
 
 ## Phone-context evidence for V08b
 
