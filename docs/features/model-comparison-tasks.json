@@ -1,0 +1,691 @@
+{
+  "feature": "paired-model-comparison",
+  "source_baseline": "aabfab150eba59ece79646edb78799a7dcba6aba",
+  "model": "haiku",
+  "escalate": true,
+  "priority": 750,
+  "review_models": [
+    "opus",
+    "gpt-5.6-sol"
+  ],
+  "agent_merge": true,
+  "target_state": "ready",
+  "existing_dependency_additions": {
+    "E02": [
+      "V05b",
+      "B02",
+      "U05b"
+    ]
+  },
+  "tasks": [
+    {
+      "key": "XB01",
+      "milestone": "M1 optional",
+      "title": "Define synthetic benchmark records and recoverable run journals",
+      "depends_on": [
+        "V01"
+      ],
+      "file_scope": [
+        "tools/bench/",
+        "Cargo.toml",
+        "Cargo.lock"
+      ],
+      "intent": "Create the developer-only Rust bench crate and its versioned experiment/case/attempt records; reserve sibling modules and crate dependencies without implementing execution.",
+      "acceptance": [
+        "Round-trip synthetic run records with pinned corpus, source/context, prompt/profile/build identities and explicit unknown metadata; reject missing identifiers and private/production database inputs. Journal records contain no credentials or private endpoint values.",
+        "Append/reopen detects a truncated tail, preserves completed records and records ambiguous started attempts as unknown. Tests cover corruption/schema mismatch and no silent overwrite. Register the crate in normal workspace checks while keeping it out of app dependencies."
+      ],
+      "source_pointers": [
+        "core/src/providers/contracts/mod.rs:16",
+        "core/src/providers/contracts/dispatch.rs:124",
+        "core/src/providers/contracts/request.rs:43"
+      ]
+    },
+    {
+      "key": "XB02",
+      "milestone": "M1 optional",
+      "title": "Add backward-compatible diagnostic request and call metadata contracts",
+      "depends_on": [
+        "I06",
+        "V05b",
+        "XB01"
+      ],
+      "file_scope": [
+        "core/src/providers/contracts/",
+        "core/tests/provider_contract/"
+      ],
+      "intent": "Extend provider contracts additively for explicit rendered instructions/settings and optional observations, preserving existing production invocation APIs.",
+      "acceptance": [
+        "A diagnostic request carries canonical instructions, normalized context and requested settings without another model answer; outcome metadata distinguishes requested/effective/unknown settings, usage availability and safe provider provenance. Keep credentials and raw request IDs out of public reports.",
+        "Existing callers and fake adapters compile unchanged; unsupported diagnostic capability fails explicitly rather than invoking a legacy hardcoded prompt. Focused contract tests cover metadata absence, unsupported settings and cancellation/failure with no invented zero usage."
+      ],
+      "source_pointers": [
+        "core/src/providers/contracts/mod.rs:16",
+        "core/src/providers/contracts/dispatch.rs:124",
+        "core/src/providers/contracts/request.rs:43"
+      ]
+    },
+    {
+      "key": "XB03",
+      "milestone": "M1 optional",
+      "title": "Use canonical diagnostic instructions and metadata in Anthropic",
+      "depends_on": [
+        "XB02",
+        "I07"
+      ],
+      "file_scope": [
+        "core/src/providers/anthropic/",
+        "core/tests/providers_anthropic/"
+      ],
+      "intent": "Implement the additive diagnostic call using the actual Anthropic adapter and I07 rendered instructions; preserve normal API compatibility.",
+      "acceptance": [
+        "Wire fixtures inspect the exact sent instructions, source/context, model and supported requested settings; no hidden hardcoded prompt or temperature overrides a declared experiment setting. Unsupported settings are explicit.",
+        "Normalize available usage/effective metadata from the same response while absent values remain unknown; existing protocol, refusal, timeout and size-bound tests still pass. Do not build a second Anthropic parser in the CLI."
+      ],
+      "source_pointers": [
+        "core/src/providers/contracts/mod.rs:16",
+        "core/src/providers/contracts/dispatch.rs:124",
+        "core/src/providers/contracts/request.rs:43",
+        "core/src/interpretation/instructions/mod.rs:1"
+      ]
+    },
+    {
+      "key": "XB04",
+      "milestone": "M1 optional",
+      "title": "Use canonical diagnostic instructions and metadata in OpenAI",
+      "depends_on": [
+        "XB02",
+        "I07"
+      ],
+      "file_scope": [
+        "core/src/providers/openai/",
+        "core/tests/providers_openai/"
+      ],
+      "intent": "Implement the corresponding diagnostic call through the existing OpenAI adapter.",
+      "acceptance": [
+        "Wire fixtures prove rendered I07 instructions rather than a version label reach the provider with the frozen input/context and explicit supported settings. Unsupported options fail explicitly rather than disappear.",
+        "Available usage and actual configuration metadata are associated with this attempt; unknown usage remains unknown. Preserve existing error/refusal/cancellation bounds and production callers without introducing a separate CLI vendor implementation."
+      ],
+      "source_pointers": [
+        "core/src/providers/contracts/mod.rs:16",
+        "core/src/providers/contracts/dispatch.rs:124",
+        "core/src/providers/contracts/request.rs:43",
+        "core/src/interpretation/instructions/mod.rs:1"
+      ]
+    },
+    {
+      "key": "XB05",
+      "milestone": "M1 optional",
+      "title": "Derive independent authorized paired requests",
+      "depends_on": [
+        "XB02",
+        "V02",
+        "V03",
+        "I07"
+      ],
+      "file_scope": [
+        "core/src/review/compare/",
+        "core/src/review/mod.rs"
+      ],
+      "intent": "Create pure request derivation and comparability checks usable by both benchmark and later live comparisons; register only this new module in its parent.",
+      "acceptance": [
+        "From one frozen source revision/time context/rendered instruction bundle derive two profile-pinned requests whose model-visible content is equivalent; no type accepts the opposing answer/rationale. Test mismatched revisions, instructions and unsupported settings.",
+        "Each arm requires an independent current destination/capability authorization. Reject revoked or unverified profiles; report known configuration differences/unknown defaults and never call agreement accuracy. No authoritative store/apply handle is available."
+      ],
+      "source_pointers": [
+        "core/src/providers/contracts/mod.rs:16",
+        "core/src/providers/contracts/dispatch.rs:124",
+        "core/src/providers/contracts/request.rs:43",
+        "docs/architecture/m1-contracts.md:139",
+        "docs/architecture/m1-contracts.md:205",
+        "core/src/store/schema/mod.rs:28"
+      ]
+    },
+    {
+      "key": "XB06",
+      "milestone": "M1 optional",
+      "title": "Implement bounded credential-safe host transport",
+      "depends_on": [
+        "XB01",
+        "XB03",
+        "XB04",
+        "XB05"
+      ],
+      "file_scope": [
+        "tools/bench/src/transport/",
+        "tools/bench/src/lib.rs",
+        "tools/bench/Cargo.toml",
+        "Cargo.lock"
+      ],
+      "intent": "Supply one secure host HTTP effect with thin bindings to the landed provider transport traits; secret bytes exist only in this developer crate.",
+      "acceptance": [
+        "Local fixture servers exercise TLS verification, destination allowlisting, no redirects, body bounds, deadline/cancellation and per-dispatch credential resolution. Reject cross-origin credential use and unapproved destinations; never fall back to another profile.",
+        "Secret references resolve out of band and values never enter arguments, journals, stdout/stderr or error reports, including error bodies. Tests use synthetic canaries. App-linked Rust and native credential ownership stay unchanged."
+      ],
+      "source_pointers": [
+        "core/src/providers/contracts/mod.rs:16",
+        "core/src/providers/contracts/dispatch.rs:124",
+        "core/src/providers/contracts/request.rs:43",
+        "docs/architecture/m1-contracts.md:237",
+        "docs/architecture/m1-contracts.md:250"
+      ]
+    },
+    {
+      "key": "XB07",
+      "milestone": "M1 optional",
+      "title": "Execute bounded resumable comparison pairs",
+      "depends_on": [
+        "XB05",
+        "XB06"
+      ],
+      "file_scope": [
+        "tools/bench/src/executor/",
+        "tools/bench/src/lib.rs"
+      ],
+      "intent": "Execute synthetic paired cases via normalized diagnostic adapters and the journal, with explicit attempt budgets and deterministic recorded arm order.",
+      "acceptance": [
+        "Counterbalanced sequential arms share the frozen case but not responses; authorize and reserve each attempt before dispatch. Bound retry counts and concurrency; fakes prove budget, cancellation and no real-item/reminder mutation.",
+        "Resume preserves completed sides and missing/failed/unknown sides with reasons. A crash after sending cannot silently issue another paid attempt; explicit rerun consumes a new allowance and preserves provenance. Never merge results from changed experiment configurations."
+      ],
+      "source_pointers": [
+        "core/src/providers/contracts/mod.rs:16",
+        "core/src/providers/contracts/dispatch.rs:124",
+        "core/src/providers/contracts/request.rs:43",
+        "docs/features/model-comparison.md:1"
+      ]
+    },
+    {
+      "key": "XB08",
+      "milestone": "M1 optional",
+      "title": "Score paired synthetic outcomes with existing evaluation rubrics",
+      "depends_on": [
+        "XB07",
+        "E01",
+        "I05"
+      ],
+      "file_scope": [
+        "tools/evaluation/comparison/"
+      ],
+      "intent": "Extend existing E01 evaluation behavior for matched pairs, retaining its semantic guard oracle and separate scratch state per arm.",
+      "acceptance": [
+        "Score each arm against known fixture expectations using actual validator/guard behavior in isolated synthetic scratch stores. Separate false actions/deadlines/completions, missed supported intent, abstentions and invalid outputs; no real store is opened.",
+        "Report eligible/matched/missing/failed counts with reasons and denominators; unknown or failed arms cannot become passing abstentions. Disagreement, preference and objective correctness remain separate; CI uses fixtures, never paid live calls."
+      ],
+      "source_pointers": [
+        "docs/features/m1-plan.md:722",
+        "core/src/interpretation/apply/mod.rs:1"
+      ]
+    },
+    {
+      "key": "XB09",
+      "milestone": "M1 optional",
+      "title": "Compose explicit synthetic benchmark CLI commands",
+      "depends_on": [
+        "XB08"
+      ],
+      "file_scope": [
+        "tools/bench/src/cli/",
+        "tools/bench/src/main.rs",
+        "tools/bench/src/lib.rs",
+        "docs/validation/model-benchmark.md"
+      ],
+      "intent": "Wire existing modules into a developer command for dry-run, explicit live execution and safe resume.",
+      "acceptance": [
+        "Command selects exactly two supported profiles and a validated synthetic corpus, displays planned attempts and requires explicit network execution. Dry-run and help require no credentials; neither mode discovers or opens production data.",
+        "Exercise the complete CLI against fixture servers and cancellation/missing credentials. Results identify fake/recorded/live mode and build/config revisions honestly. Publish minimal usage and secret-reference instructions, with no claim that fixture runs validate actual provider quality."
+      ],
+      "source_pointers": [
+        "docs/features/model-comparison.md:1"
+      ]
+    },
+    {
+      "key": "XB10",
+      "milestone": "M1 optional",
+      "title": "Render readable paired benchmark reports",
+      "depends_on": [
+        "XB09"
+      ],
+      "file_scope": [
+        "tools/bench/src/report/",
+        "tools/bench/src/cli/",
+        "tools/bench/src/lib.rs"
+      ],
+      "intent": "Present a bounded local text/JSON report from existing scored records, without adding an application dashboard.",
+      "acceptance": [
+        "Show per-arm rubric results, matched denominators, missing outcomes and comparable latency/usage summaries. Cost stays unknown without supplied versioned rates; estimates identify provenance and are never presented as billed cost.",
+        "Reports flag settings/prompt comparability limits and do not choose or activate a winner. Golden synthetic examples cover empty/incomplete/error runs and escaping/redaction, while tests assert substantive counts rather than only substrings."
+      ],
+      "source_pointers": [
+        "docs/features/model-comparison.md:1"
+      ]
+    },
+    {
+      "key": "XB11",
+      "milestone": "M1 optional",
+      "title": "Register verified self-hosted profiles in the benchmark",
+      "depends_on": [
+        "XB10",
+        "V09"
+      ],
+      "file_scope": [
+        "tools/bench/src/adapters/",
+        "tools/bench/src/cli/",
+        "tools/bench/src/lib.rs"
+      ],
+      "intent": "Add only the verified self-hosted adapter to the existing optional benchmark registry.",
+      "acceptance": [
+        "Use the landed V09 adapter/capabilities and existing transport/security rules, preserving the independent cloud-only benchmark path. Unsupported diagnostic instructions/settings fail explicitly; a protocol label alone is not evidence.",
+        "Fixtures verify configured profile/model selection, missing credentials and network failure with no silent fallback. Live self-hosted quality claims require actual run provenance; do not require a reachable Spark to run existing cloud or fake comparisons."
+      ],
+      "source_pointers": [
+        "core/src/providers/contracts/mod.rs:16",
+        "core/src/providers/contracts/dispatch.rs:124",
+        "core/src/providers/contracts/request.rs:43",
+        "core/src/providers/self_hosted/mod.rs:1"
+      ]
+    },
+    {
+      "key": "XL01",
+      "milestone": "M2 core",
+      "title": "Add protected comparison configuration and record storage",
+      "depends_on": [
+        "T06",
+        "XB05"
+      ],
+      "file_scope": [
+        "core/src/review/compare/store/",
+        "core/src/review/compare/mod.rs",
+        "core/src/store/schema/"
+      ],
+      "intent": "Add the minimal versioned experiment/sample schema within the protected application database, with source/revision links and authenticated scoped access.",
+      "acceptance": [
+        "Persist default-off experiment settings and normalized proposal/span metadata using existing migrations and transactions. No API accepts duplicated capture text, raw provider response or secret values; private display joins source only through authorized reads.",
+        "Migration/reopen tests cover scope isolation, stale/deleted source guards, unknown metadata and failed writes. This module remains unreachable by live sampling until XL02 lifecycle integration and later native registration pass."
+      ],
+      "source_pointers": [
+        "docs/architecture/m1-contracts.md:139",
+        "docs/architecture/m1-contracts.md:205",
+        "core/src/store/schema/mod.rs:28"
+      ]
+    },
+    {
+      "key": "XL02",
+      "milestone": "M2 core",
+      "title": "Bind comparison lifetime to source deletion reset and retention",
+      "depends_on": [
+        "XL01",
+        "L05b"
+      ],
+      "file_scope": [
+        "core/src/review/compare/lifecycle/",
+        "core/src/review/compare/mod.rs",
+        "core/src/lifecycle/delete_intent/",
+        "core/src/lifecycle/reset/",
+        "core/src/lifecycle/retention/"
+      ],
+      "intent": "Attach diagnostic lifetime rules before any real sample can be written.",
+      "acceptance": [
+        "Per-item delete/reset atomically fences comparison results and cancels associated jobs; authenticated queries immediately hide diagnostics and preferences. Retention expires samples and related labels, and default exports exclude them.",
+        "Race/restart tests cover late results, queued selected cases and recreated identifiers without resurrection or orphaned readable records. Reuse existing transaction/reset hooks; no independent tombstone authority or plaintext sidecar."
+      ],
+      "source_pointers": [
+        "docs/architecture/m1-contracts.md:139",
+        "docs/architecture/m1-contracts.md:205",
+        "core/src/store/schema/mod.rs:28"
+      ]
+    },
+    {
+      "key": "XL03",
+      "milestone": "M2 core",
+      "title": "Select eligible comparisons and reserve request budgets",
+      "depends_on": [
+        "XL02",
+        "E03a",
+        "J01"
+      ],
+      "file_scope": [
+        "core/src/review/compare/selection/",
+        "core/src/review/compare/mod.rs"
+      ],
+      "intent": "Implement comparison-specific eligibility plus atomic reservation/enqueue using the existing job queue; reuse suitable pure E03 policy primitives without treating reviewer verdicts as challenger output.",
+      "acceptance": [
+        "Off/default, paused, unknown/session-topic, scope and route exclusions are checked after primary interpretation and again later at dispatch. Explicit session inclusion never grants destination permission. Fast-path cases and unavailable primary traces are reported separately.",
+        "Atomically reserve a bounded attempt allowance with an idempotent comparison job. Duplicate callbacks, crash/replay and budget exhaustion cannot exceed the cap or block capture. Report post-primary selection bias; unknown monetary cost cannot disable request limits."
+      ],
+      "source_pointers": [
+        "docs/architecture/m1-contracts.md:139",
+        "docs/architecture/m1-contracts.md:205",
+        "core/src/store/schema/mod.rs:28",
+        "core/src/jobs/queue/mod.rs:1"
+      ]
+    },
+    {
+      "key": "XL04",
+      "milestone": "M2 core",
+      "title": "Yield diagnostic jobs to primary processing",
+      "depends_on": [
+        "XL03",
+        "J02b"
+      ],
+      "file_scope": [
+        "core/src/jobs/queue/",
+        "core/src/jobs/runner/",
+        "core/tests/job_queue/",
+        "core/tests/job_runner/"
+      ],
+      "intent": "Add a bounded low-priority diagnostic job class to the existing runner, preserving its lease/retry implementation.",
+      "acceptance": [
+        "Eligible primary work wins over comparison work; diagnostic starvation is allowed and reported without catch-up bursts. No second scheduler, lease store or background service is introduced.",
+        "Deterministic queue/runner tests prove primary progress during queued diagnostics, bounded concurrent requests, lease recovery and pause/cancellation. Never claim that scheduler priority eliminates shared remote-server resource contention."
+      ],
+      "source_pointers": [
+        "core/src/jobs/queue/mod.rs:1",
+        "core/src/jobs/runner/mod.rs:1"
+      ]
+    },
+    {
+      "key": "XL05",
+      "milestone": "M2 core",
+      "title": "Run independent challenger jobs without apply authority",
+      "depends_on": [
+        "XL04",
+        "XB03",
+        "XB04"
+      ],
+      "file_scope": [
+        "core/src/review/compare/handler/",
+        "core/src/review/compare/mod.rs"
+      ],
+      "intent": "Execute the challenger from an immutable primary-request trace after eligibility, storing only guarded diagnostic outcome fields.",
+      "acceptance": [
+        "Re-authorize destination, source revision, experiment and reset generation immediately before dispatch and before accepting results. The handler receives diagnostic storage/effects but no authoritative apply/reminder write capability; forged proposals cannot obtain one.",
+        "Fakes exercise independent request bodies, revoked profiles, stale/deleted sources, timeout and retry budgets. Primary outcome is the actual recorded result for that request, never a relabeled rerun; insufficient trace metadata makes the pair explicitly ineligible."
+      ],
+      "source_pointers": [
+        "core/src/providers/contracts/mod.rs:16",
+        "core/src/providers/contracts/dispatch.rs:124",
+        "core/src/providers/contracts/request.rs:43",
+        "docs/architecture/m1-contracts.md:139",
+        "docs/architecture/m1-contracts.md:205",
+        "core/src/store/schema/mod.rs:28"
+      ]
+    },
+    {
+      "key": "XL06a",
+      "milestone": "M2 core",
+      "title": "Observe frozen primary requests without blocking interpretation",
+      "depends_on": [
+        "XL05",
+        "I06"
+      ],
+      "file_scope": [
+        "core/src/interpretation/dispatch/",
+        "core/tests/interpretation_dispatch/"
+      ],
+      "intent": "Add the primary request/outcome observation seam used by comparison, with frozen input before the answer and eligibility only after its result.",
+      "acceptance": [
+        "Record the actual normalized primary request/context/settings and actual outcome identity without duplicating source text or leaking credentials. Production processing/apply does not await comparison and preserves its chosen profile/settings; an insufficient or incompatible trace is explicitly excluded rather than substituted with a rerun.",
+        "Tests prove after-primary eligibility, unknown/session exclusions, no primary-output field in challenger requests, and primary progress during diagnostic storage or enqueue failure. Private writes require the existing XL02 lifecycle guard; feature remains off without later native registration."
+      ],
+      "source_pointers": [
+        "core/src/interpretation/dispatch/mod.rs:1",
+        "docs/features/model-comparison.md:1"
+      ]
+    },
+    {
+      "key": "XL06b",
+      "milestone": "M2 enablement",
+      "title": "Register native comparison effects after the base trial",
+      "depends_on": [
+        "XL06a",
+        "T08",
+        "B02",
+        "V05b",
+        "C01b"
+      ],
+      "file_scope": [
+        "ios/Services/ModelComparison/",
+        "ios/Tests/ModelComparison/",
+        "ios/AppAssembly/"
+      ],
+      "intent": "Register the completed core comparison observer/handler with existing native effects after the base trial exit, keeping comparison default off.",
+      "acceptance": [
+        "Wire real transport, credentials, authentication and lifecycle to the existing core observer/runner without adding a second scheduler or wait on the capture path. Missing capability leaves comparison disabled.",
+        "Exact-revision real-core simulator tests inspect outgoing bodies for absence of the opposing answer and verify revocation/relock/deletion plus no diagnostic authoritative mutations. Identify the new candidate revision; do not claim an older signed trial binary has this feature."
+      ],
+      "source_pointers": [
+        "core/src/providers/contracts/mod.rs:16",
+        "core/src/providers/contracts/dispatch.rs:124",
+        "core/src/providers/contracts/request.rs:43",
+        "docs/architecture/m1-contracts.md:260"
+      ]
+    },
+    {
+      "key": "XL07",
+      "milestone": "M2 UI",
+      "title": "Build opt-in model comparison settings",
+      "depends_on": [
+        "XL06b",
+        "U05b"
+      ],
+      "file_scope": [
+        "app/model-comparison/settings/",
+        "app/model-comparison/navigation/",
+        "ios/AppAssembly/"
+      ],
+      "intent": "Expose existing experiment configuration as a small optional settings surface and register the feature entry after the base app exists. Use the shell actually chosen by P10; do not assume TypeScript, Tauri or SwiftUI in advance.",
+      "acceptance": [
+        "Choose challenger, explicit eligible scopes, sample rate and hard attempt cap; default off with separate session-content inclusion and existing destination authorization. Pause and delete-results call durable operations, not local-only UI toggles.",
+        "Interaction tests cover cancellation, revoked/missing profiles, unknown cost and restart persistence with accessible labels. No setup wizard, badge or recurring grading obligation is introduced."
+      ],
+      "source_pointers": [
+        "docs/features/model-comparison.md:1"
+      ]
+    },
+    {
+      "key": "XL08",
+      "milestone": "M2 core",
+      "title": "Query comparison summaries with explicit denominators",
+      "depends_on": [
+        "XL05"
+      ],
+      "file_scope": [
+        "core/src/review/compare/summary/",
+        "core/src/review/compare/mod.rs"
+      ],
+      "intent": "Compute bounded scoped aggregate queries from stored diagnostic outcomes.",
+      "acceptance": [
+        "Expose eligible/selected/completed/matched/failed/skipped/unknown counts and per-arm validation, latency and available usage summaries with defined denominators; no unlabeled accuracy or inferred zero cost.",
+        "Queries respect authentication/scope/deletion and bound work on empty/large datasets. Fixture tests include missing arms, stale revisions and biased sampling without deriving correctness from agreement or lack of corrections."
+      ],
+      "source_pointers": [
+        "docs/architecture/m1-contracts.md:139",
+        "docs/architecture/m1-contracts.md:205",
+        "core/src/store/schema/mod.rs:28"
+      ]
+    },
+    {
+      "key": "XL09",
+      "milestone": "M2 core",
+      "title": "Query bounded independent-result disagreements",
+      "depends_on": [
+        "XL08"
+      ],
+      "file_scope": [
+        "core/src/review/compare/disagreements/",
+        "core/src/review/compare/mod.rs"
+      ],
+      "intent": "Identify meaningful normalized outcome differences without changing authoritative state or inventing a grading backlog.",
+      "acceptance": [
+        "Provide a bounded cursor query of current eligible pairs, differing fields and source references, resolving private text only via existing authenticated reads. Unknown/missing arms are not reported as substantive model agreement.",
+        "Tests cover deleted/stale pairs, paging, duplicate outcomes and meaningful reminder/type differences. Do not persist a second source-text copy or leak hidden model identity through blind-preview fields."
+      ],
+      "source_pointers": [
+        "docs/architecture/m1-contracts.md:139",
+        "docs/architecture/m1-contracts.md:205",
+        "core/src/store/schema/mod.rs:28"
+      ]
+    },
+    {
+      "key": "XL10",
+      "milestone": "M2 core",
+      "title": "Record blinded preferences against immutable pairs",
+      "depends_on": [
+        "XL09"
+      ],
+      "file_scope": [
+        "core/src/review/compare/preferences/",
+        "core/src/review/compare/mod.rs"
+      ],
+      "intent": "Persist optional A/B/both/neither/skip judgments with stable counterbalanced display order and versioned pair linkage.",
+      "acceptance": [
+        "Persist side assignment without exposing provider identity until a judgment is saved or explicitly revealed; retries and reopening preserve assignment. Each judgment references exact output revisions and rubric.",
+        "Preference/delete/relock race tests prove stale pairs cannot receive misleading labels; choices never modify captures, reminders, processing permissions or provider defaults. Deletion/reset removes preferences with the linked sample."
+      ],
+      "source_pointers": [
+        "docs/architecture/m1-contracts.md:139",
+        "docs/architecture/m1-contracts.md:205",
+        "core/src/store/schema/mod.rs:28"
+      ]
+    },
+    {
+      "key": "XL11",
+      "milestone": "M2 UI",
+      "title": "Show a bounded optional disagreement list",
+      "depends_on": [
+        "XL07",
+        "XL09"
+      ],
+      "file_scope": [
+        "app/model-comparison/disagreements/"
+      ],
+      "intent": "Present the existing disagreement query as an optional pull-only view.",
+      "acceptance": [
+        "Show meaningful differences and explicit missing/stale outcomes with authenticated source access; paging is bounded and empty state is calm. No badge, unsolicited notification or must-clear count is introduced.",
+        "UI tests cover relock, deletion during display, unavailable results and accessible navigation without leaking model identity in blinded summaries."
+      ],
+      "source_pointers": [
+        "docs/features/model-comparison.md:1"
+      ]
+    },
+    {
+      "key": "XL12",
+      "milestone": "M2 UI",
+      "title": "Add a blinded pair preference card",
+      "depends_on": [
+        "XL11",
+        "XL10"
+      ],
+      "file_scope": [
+        "app/model-comparison/preference/"
+      ],
+      "intent": "Present one immutable comparison pair and record a voluntary preference via existing operations.",
+      "acceptance": [
+        "Offer A/B/both/neither/skip with stable randomized order and explicit identity reveal; display source/context through authenticated access. The card sends neither answer to an external judge.",
+        "Interaction tests verify labels, skip, retry, stale/deleted pairs and relock; saving a choice never changes the item or chosen provider and does not create another user task."
+      ],
+      "source_pointers": [
+        "docs/features/model-comparison.md:1"
+      ]
+    },
+    {
+      "key": "XL14",
+      "milestone": "M2 core",
+      "title": "Associate later corrections as weak observational signals",
+      "depends_on": [
+        "XL10",
+        "D03"
+      ],
+      "file_scope": [
+        "core/src/review/compare/corrections/",
+        "core/src/review/compare/mod.rs"
+      ],
+      "intent": "Associate relevant existing correction events with comparison revisions without treating them as ground truth.",
+      "acceptance": [
+        "Link only an observed correction lineage to its actual primary request/sample and preserve event timing; distinguish correction from completion/new intent or unrelated revision where evidence permits, otherwise mark unknown.",
+        "Query results explicitly identify one-sided primary-exposure bias and missing observations. No correction never counts as success; deletion/retention removes links and tests cover changed intent, duplicate events and stale revisions."
+      ],
+      "source_pointers": [
+        "docs/architecture/m1-contracts.md:139",
+        "docs/architecture/m1-contracts.md:205",
+        "core/src/store/schema/mod.rs:28",
+        "core/src/store/events/mod.rs:1"
+      ]
+    },
+    {
+      "key": "XL13",
+      "milestone": "M2 UI",
+      "title": "Show comparison summaries and measurement limits",
+      "depends_on": [
+        "XL12",
+        "XL08",
+        "XL14"
+      ],
+      "file_scope": [
+        "app/model-comparison/summary/",
+        "app/model-comparison/navigation/"
+      ],
+      "intent": "Render existing aggregate metrics and deliberate navigation between settings, comparisons and summaries.",
+      "acceptance": [
+        "Display sample/matched/missing counts, failure and latency outcomes, available usage/cost and optional preferences with clear unknown states. Explain post-primary eligibility and one-sided correction bias.",
+        "UI tests cover empty/small/incomplete samples and accessibility. No automatic winner/default switch, model-agreement accuracy or claim that the sample represents all captures."
+      ],
+      "source_pointers": [
+        "docs/features/model-comparison.md:1"
+      ]
+    },
+    {
+      "key": "XL15",
+      "milestone": "M2 core",
+      "title": "Replay explicitly selected private examples inside protected storage",
+      "depends_on": [
+        "XL14",
+        "XL05"
+      ],
+      "file_scope": [
+        "core/src/review/compare/selection_replay/",
+        "core/src/review/compare/mod.rs"
+      ],
+      "intent": "Use an authenticated explicit source selection to enqueue independent diagnostic replay pairs through the existing protected queue/store.",
+      "acceptance": [
+        "Pin source revision, original time context and both authorized profiles; enforce explicit session inclusion, per-arm permission and attempt budgets. Label replay separately from the historical primary outcome; do not export to developer run directories.",
+        "Fixtures prove deletion/revocation/reset races cancel selection and reject late writes, independent arms share no outputs and neither applies state. Historical user corrections remain optional weak context/labels, not silently leaked into the opposing request."
+      ],
+      "source_pointers": [
+        "docs/architecture/m1-contracts.md:139",
+        "docs/architecture/m1-contracts.md:205",
+        "core/src/store/schema/mod.rs:28",
+        "core/src/providers/contracts/mod.rs:16",
+        "core/src/providers/contracts/dispatch.rs:124",
+        "core/src/providers/contracts/request.rs:43"
+      ]
+    },
+    {
+      "key": "XL16",
+      "milestone": "M2 UI",
+      "title": "Select private examples for an explicit comparison replay",
+      "depends_on": [
+        "XL13",
+        "XL15"
+      ],
+      "file_scope": [
+        "app/model-comparison/selection/",
+        "app/model-comparison/navigation/"
+      ],
+      "intent": "Add a bounded authenticated selection and run-confirmation flow for optional personal-example comparisons.",
+      "acceptance": [
+        "User deliberately chooses source revisions and approved profiles, sees planned attempts and explicitly includes session material when wanted. This flow stores references in protected diagnostics and never writes an unmanaged private export.",
+        "Interaction tests cover cancellation, stale/deleted selection, revoked destinations, budget failure and relock; show honest queued/partial/failure results and keep source capture usable throughout."
+      ],
+      "source_pointers": [
+        "docs/features/model-comparison.md:1"
+      ]
+    }
+  ],
+  "validation": {
+    "acyclic": true,
+    "overlapping_paths_serialized": true,
+    "base_m1_has_no_feature_dependency": true,
+    "effective_task_count": 151
+  }
+}

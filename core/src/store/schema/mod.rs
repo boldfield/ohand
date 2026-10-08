@@ -49,7 +49,7 @@ pub const MIGRATIONS: &[MigrationStep] = &[
     },
     MigrationStep {
         target_version: 2,
-        apply: add_job_lease_id_v2,
+        apply: add_event_payload_columns_v2,
     },
 ];
 
@@ -372,7 +372,8 @@ fn create_tables_v1(tx: &Transaction<'_>) -> Result<()> {
         [],
     )?;
 
-    // Events table: lifecycle events (completion, cancellation, deletion, session-topic).
+    // Events table: lifecycle events (completion, cancellation, correction, suggestion-control).
+    // Payload columns added in v2 migration.
     tx.execute(
         "CREATE TABLE events (
             event_id TEXT PRIMARY KEY,
@@ -645,8 +646,20 @@ fn create_tables_v1(tx: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
-fn add_job_lease_id_v2(tx: &Transaction<'_>) -> Result<()> {
-    // Add lease_id column to jobs table for lease fencing
-    tx.execute("ALTER TABLE jobs ADD COLUMN lease_id TEXT", [])?;
+/// Step 2: Add event payload columns to events table for D03.
+fn add_event_payload_columns_v2(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute("ALTER TABLE events ADD COLUMN correction_kind TEXT", [])?;
+    tx.execute(
+        "ALTER TABLE events ADD COLUMN correction_old_value TEXT",
+        [],
+    )?;
+    tx.execute(
+        "ALTER TABLE events ADD COLUMN correction_new_value TEXT",
+        [],
+    )?;
+    tx.execute(
+        "ALTER TABLE events ADD COLUMN suggestion_control_kind TEXT",
+        [],
+    )?;
     Ok(())
 }

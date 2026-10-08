@@ -27,6 +27,8 @@ Credentials, account enrollment/legal actions, and genuine device experiences ar
 
 For P08/V08 external execution inputs, read [the prerequisite status and provider configuration reference](docs/features/m1-external-prerequisites.md). Neither task is complete until its original real-evidence criteria pass.
 
+For optional paired-model comparison tasks, read [the comparison specification](docs/features/model-comparison.md) and [task ownership/dependency overlay](docs/features/model-comparison-tasks.json). These authorize only listed additive/shared-file changes, preserve baseline acceptance, and keep benchmark work off the base M1 dependency graph.
+
 ## Implementation and review
 
 - Use descriptive variable names and keep provider protocols separate from domain behavior.

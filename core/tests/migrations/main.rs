@@ -108,12 +108,12 @@ fn test_forward_incompatible_database_not_modified() -> Result<()> {
 
     let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
 
-    // Create a v2 database (v1 + v2 migrations).
+    // Create a v1 database.
     {
         let _db = make_test_db(&path, instant)?;
     }
 
-    // Manually insert a v3 record (forward-incompatible).
+    // Manually insert a v2 record.
     {
         let conn = Connection::open(&path)?;
         conn.execute(
@@ -166,7 +166,7 @@ fn test_migration_from_version_zero() -> Result<()> {
         )?;
     }
 
-    // Open with migration: should create v1 tables, add v2 columns, and update version.
+    // Open with migration: should create v1 tables and update version.
     {
         let db = make_test_db(&path, instant)?;
         let version = db.schema_version()?;
@@ -279,7 +279,7 @@ fn test_synthetic_step_success_records_own_version() -> Result<()> {
         );
     }
 
-    // The default (v2-only) list now refuses the v3 database.
+    // The default (v1-only) list now refuses the v2 database.
     let refused = make_test_db(&path, instant);
     assert!(refused
         .unwrap_err()
@@ -541,10 +541,7 @@ fn test_version_zero_with_conflicting_late_table_rolls_back() -> Result<()> {
     let version: u32 = conn.query_row("SELECT MAX(version) FROM _schema_metadata", [], |row| {
         row.get(0)
     })?;
-    assert_eq!(
-        version, 0,
-        "Version should stay at 0 when initial migration is blocked by late constraint"
-    );
+    assert_eq!(version, 0);
 
     let _ = std::fs::remove_file(&path);
     Ok(())
@@ -972,75 +969,68 @@ fn test_unexpected_index_and_table_rejected() -> Result<()> {
 }
 
 #[test]
-fn test_v1_to_v2_migration_preserves_job_rows() -> Result<()> {
-    let path = temp_db_path("v1_to_v2_jobs");
-    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+fn test_v1_to_v2_migration_preserves_data() -> Result<()> {
+    let path = temp_db_path("v1_to_v2_upgrade");
+    let instant = instant_for_tests()?;
 
-    // Create a full v2 database with existing job rows
+    // Create a v1 database with source data
     {
-        let clock: Arc<dyn Clock> = Arc::new(TestClock { instant });
-        let db = Database::open(&path, clock)?;
+        let db = open_with(&path, instant, &MIGRATIONS[..1])?;
+        assert_eq!(db.schema_version()?, 1);
 
-        // Insert a capture and item
-        insert_source_capture(db.conn(), "capture-1")?;
+        insert_source_capture(db.conn(), "cap-1")?;
         db.conn().execute(
-            "INSERT INTO items (
-                item_id, capture_id, revision, lifecycle_state, save_state,
-                sync_state, processing_state, transcription_state, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            rusqlite::params![
-                "item-1",
-                "capture-1",
-                0,
-                "active",
-                "saved",
-                "not_configured",
-                "uninterpreted",
-                "none",
-                "2026-01-15T10:30:00Z",
-                "2026-01-15T10:30:00Z"
-            ],
+            "INSERT INTO items (item_id, capture_id, revision, lifecycle_state, save_state, sync_state, processing_state, transcription_state, created_at, updated_at)
+             VALUES (?, ?, 0, 'active', 'saved', 'not_synced', 'unprocessed', 'unprocessed', ?, ?)",
+            rusqlite::params!["item-1", "cap-1", "2026-01-15T10:30:00Z", "2026-01-15T10:30:00Z"],
         )?;
-
-        // Insert a job row (will have lease_id as NULL since we don't claim it)
         db.conn().execute(
-            "INSERT INTO jobs (
-                job_id, job_schema_version, item_id, job_type, source_revision,
-                profile_version, request_version, status, attempt_count, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            rusqlite::params![
-                "job-1",
-                1,
-                "item-1",
-                "interpretation",
-                0,
-                None::<String>,
-                None::<String>,
-                "queued",
-                0,
-                "2026-01-15T10:30:00Z"
-            ],
+            "INSERT INTO events (event_id, item_id, revision, event_type, happened_at)
+             VALUES (?, ?, ?, ?, ?)",
+            rusqlite::params!["evt-1", "item-1", 0, "completion", "2026-01-15T10:30:00Z"],
         )?;
-
-        drop(db);
     }
 
-    // Reopen the database - it should already be at v2 from the first open
+    // Reopen the database with full migration list: should upgrade from v1 to v2
     {
-        let clock: Arc<dyn Clock> = Arc::new(TestClock { instant });
-        let db = Database::open(&path, clock)?;
+        let db = make_test_db(&path, instant)?;
         assert_eq!(db.schema_version()?, 2);
 
-        // Verify the job row still exists and lease_id is NULL
-        let (job_id, status, lease_id): (String, String, Option<String>) = db.conn().query_row(
-            "SELECT job_id, status, lease_id FROM jobs WHERE job_id = 'job-1'",
+        // Verify source data is intact
+        let capture_count: i64 = db.conn().query_row(
+            "SELECT COUNT(*) FROM captures WHERE capture_id = 'cap-1'",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| row.get(0),
         )?;
+        assert_eq!(
+            capture_count, 1,
+            "Capture should be preserved after upgrade"
+        );
 
-        assert_eq!(job_id, "job-1");
-        assert_eq!(status, "queued");
-        assert_eq!(lease_id, None, "lease_id should be NULL for jobs inserted before the column");
+        let item_count: i64 = db.conn().query_row(
+            "SELECT COUNT(*) FROM items WHERE item_id = 'item-1'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(item_count, 1, "Item should be preserved after upgrade");
+
+        let event_count: i64 = db.conn().query_row(
+            "SELECT COUNT(*) FROM events WHERE event_id = 'evt-1'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(event_count, 1, "Event should be preserved after upgrade");
+
+        // Verify v2 columns now exist (but are NULL for existing events)
+        let correction_kind: Option<String> = db.conn().query_row(
+            "SELECT correction_kind FROM events WHERE event_id = 'evt-1'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            correction_kind, None,
+            "v2 payload columns should exist and be NULL for existing events"
+        );
     }
 
     let _ = std::fs::remove_file(&path);
