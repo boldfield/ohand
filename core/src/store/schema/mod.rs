@@ -51,6 +51,10 @@ pub const MIGRATIONS: &[MigrationStep] = &[
         target_version: 2,
         apply: add_event_payload_columns_v2,
     },
+    MigrationStep {
+        target_version: 3,
+        apply: add_source_attribution_to_search_index_v3,
+    },
 ];
 
 /// Database handle with schema validation.
@@ -457,9 +461,12 @@ fn create_tables_v1(tx: &Transaction<'_>) -> Result<()> {
     )?;
 
     // Search index table: full-text search on original and corrected text.
+    // Includes capture_id and item_scope for privacy scope and attribution.
     tx.execute(
         "CREATE VIRTUAL TABLE search_index USING fts5(
             item_id UNINDEXED,
+            capture_id UNINDEXED,
+            item_scope UNINDEXED,
             original_text,
             current_text,
             text_basis
@@ -661,5 +668,43 @@ fn add_event_payload_columns_v2(tx: &Transaction<'_>) -> Result<()> {
         "ALTER TABLE events ADD COLUMN suggestion_control_kind TEXT",
         [],
     )?;
+    Ok(())
+}
+
+/// Step 3: Add source attribution to search_index for privacy scope and capture tracking.
+fn add_source_attribution_to_search_index_v3(tx: &Transaction<'_>) -> Result<()> {
+    // FTS5 tables don't support ALTER TABLE, so we must recreate.
+    // Create new search_index with capture_id and item_scope columns.
+    tx.execute(
+        "CREATE VIRTUAL TABLE search_index_new USING fts5(
+            item_id UNINDEXED,
+            capture_id UNINDEXED,
+            item_scope UNINDEXED,
+            original_text,
+            current_text,
+            text_basis
+        )",
+        [],
+    )?;
+
+    // Copy existing data, populating capture_id and item_scope from items and captures.
+    tx.execute(
+        "INSERT INTO search_index_new (item_id, capture_id, item_scope, original_text, current_text, text_basis)
+         SELECT si.item_id,
+                i.capture_id,
+                c.item_scope,
+                si.original_text,
+                si.current_text,
+                si.text_basis
+         FROM search_index si
+         JOIN items i ON si.item_id = i.item_id
+         JOIN captures c ON i.capture_id = c.capture_id",
+        [],
+    )?;
+
+    // Drop old table and rename new one.
+    tx.execute("DROP TABLE search_index", [])?;
+    tx.execute("ALTER TABLE search_index_new RENAME TO search_index", [])?;
+
     Ok(())
 }

@@ -6,7 +6,7 @@
 // summaries as original quotations.
 
 use anyhow::Result;
-use rusqlite::Transaction;
+use rusqlite::{OptionalExtension, Transaction};
 
 /// Rebuild the FTS index from authoritative source records.
 /// Idempotent: safe to call multiple times. Verifies that every indexed record corresponds
@@ -20,8 +20,8 @@ pub fn rebuild_index(tx: &Transaction<'_>) -> Result<()> {
     // - Not deleted (accessible)
     // - Have searchable text (original)
     tx.execute(
-        "INSERT INTO search_index (item_id, original_text, text_basis)
-         SELECT i.item_id, c.text, 'original'
+        "INSERT INTO search_index (item_id, capture_id, item_scope, original_text, text_basis)
+         SELECT i.item_id, i.capture_id, c.item_scope, c.text, 'original'
          FROM items i
          JOIN captures c ON i.capture_id = c.capture_id
          WHERE i.lifecycle_state != 'deleted' AND c.text IS NOT NULL AND c.text != ''",
@@ -31,9 +31,10 @@ pub fn rebuild_index(tx: &Transaction<'_>) -> Result<()> {
     // Add corrected text entries. User corrections override original text in the current_text column.
     // Each item should have at most one current_text entry (the latest correction).
     tx.execute(
-        "INSERT INTO search_index (item_id, current_text, text_basis)
-         SELECT DISTINCT i.item_id, corr.new_value, 'corrected'
+        "INSERT INTO search_index (item_id, capture_id, item_scope, current_text, text_basis)
+         SELECT DISTINCT i.item_id, i.capture_id, c.item_scope, corr.new_value, 'corrected'
          FROM items i
+         JOIN captures c ON i.capture_id = c.capture_id
          JOIN corrections corr ON i.item_id = corr.item_id
          WHERE i.lifecycle_state != 'deleted'
            AND corr.kind = 'text'
@@ -52,22 +53,32 @@ pub fn rebuild_index(tx: &Transaction<'_>) -> Result<()> {
 
 /// Index a newly captured item's original text.
 /// Called transactionally when a capture is first stored.
+/// Idempotent: safe to call multiple times for the same item.
 pub fn index_capture(tx: &Transaction<'_>, item_id: &str, capture_id: &str) -> Result<()> {
-    // Fetch the capture record to get text.
-    let text: Option<String> = tx.query_row(
-        "SELECT text FROM captures WHERE capture_id = ?",
+    // Fetch the capture record to get text and item_scope.
+    let (text, item_scope): (Option<String>, String) = tx.query_row(
+        "SELECT text, item_scope FROM captures WHERE capture_id = ?",
         [capture_id],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
 
     // Index only if text is present and non-empty.
     if let Some(text) = text {
         if !text.is_empty() {
-            tx.execute(
-                "INSERT INTO search_index (item_id, original_text, text_basis)
-                 VALUES (?, ?, 'original')",
-                rusqlite::params![item_id, text],
-            )?;
+            // Check if we already indexed this item's original text (idempotency).
+            let existing: Option<i64> = tx.query_row(
+                "SELECT COUNT(*) FROM search_index WHERE item_id = ? AND text_basis = 'original'",
+                [item_id],
+                |row| row.get(0),
+            ).optional()?;
+
+            if existing.unwrap_or(0) == 0 {
+                tx.execute(
+                    "INSERT INTO search_index (item_id, capture_id, item_scope, original_text, text_basis)
+                     VALUES (?, ?, ?, ?, 'original')",
+                    rusqlite::params![item_id, capture_id, item_scope, text],
+                )?;
+            }
         }
     }
 
@@ -76,23 +87,41 @@ pub fn index_capture(tx: &Transaction<'_>, item_id: &str, capture_id: &str) -> R
 
 /// Index a text correction.
 /// Called transactionally when a user corrects an item's text.
+/// Idempotent: replaces the previous correction (for incremental and rebuild convergence).
 pub fn index_text_correction(tx: &Transaction<'_>, item_id: &str) -> Result<()> {
-    // Fetch the latest user correction.
-    let new_text: String = tx.query_row(
-        "SELECT new_value FROM corrections
+    // Fetch the latest user correction, if it exists.
+    let new_text: Option<String> = tx
+        .query_row(
+            "SELECT new_value FROM corrections
          WHERE item_id = ? AND kind = 'text'
          ORDER BY revision DESC LIMIT 1",
-        [item_id],
-        |row| row.get(0),
-    )?;
+            [item_id],
+            |row| row.get(0),
+        )
+        .optional()?;
 
-    // Index the corrected text.
-    if !new_text.is_empty() {
-        tx.execute(
-            "INSERT INTO search_index (item_id, current_text, text_basis)
-             VALUES (?, ?, 'corrected')",
-            rusqlite::params![item_id, new_text],
-        )?;
+    // Remove all prior entries (both original and old corrected) for this item.
+    // Once corrected, only the latest correction should be indexed.
+    tx.execute("DELETE FROM search_index WHERE item_id = ?", [item_id])?;
+
+    // Index the new corrected text if it's non-empty.
+    if let Some(text) = new_text {
+        if !text.is_empty() {
+            // Get capture_id and item_scope from items and captures.
+            let (capture_id, item_scope): (String, String) = tx.query_row(
+                "SELECT i.capture_id, c.item_scope FROM items i
+                 JOIN captures c ON i.capture_id = c.capture_id
+                 WHERE i.item_id = ?",
+                [item_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+
+            tx.execute(
+                "INSERT INTO search_index (item_id, capture_id, item_scope, current_text, text_basis)
+                 VALUES (?, ?, ?, ?, 'corrected')",
+                rusqlite::params![item_id, capture_id, item_scope, text],
+            )?;
+        }
     }
 
     Ok(())
@@ -108,22 +137,25 @@ pub fn remove_item_from_index(tx: &Transaction<'_>, item_id: &str) -> Result<()>
 
 /// Query the index for searchable items.
 /// Returns items matching the query text across both original and corrected text.
-/// Results explicitly identify whether text is original or corrected.
+/// Results explicitly identify whether text is original or corrected, and include
+/// capture_id and item_scope for source attribution and privacy filtering.
 pub fn search_index(tx: &Transaction<'_>, query: &str) -> Result<Vec<SearchResult>> {
     let mut stmt = tx.prepare(
-        "SELECT item_id, original_text, current_text, text_basis
+        "SELECT item_id, capture_id, item_scope, original_text, current_text, text_basis
          FROM search_index
          WHERE original_text MATCH ? OR current_text MATCH ?
-         ORDER BY rank DESC",
+         ORDER BY rank",
     )?;
 
     let results = stmt
         .query_map(rusqlite::params![query, query], |row| {
             Ok(SearchResult {
                 item_id: row.get(0)?,
-                original_text: row.get(1)?,
-                corrected_text: row.get(2)?,
-                source_type: row.get(3)?,
+                capture_id: row.get(1)?,
+                item_scope: row.get(2)?,
+                original_text: row.get(3)?,
+                corrected_text: row.get(4)?,
+                source_type: row.get(5)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -136,6 +168,10 @@ pub fn search_index(tx: &Transaction<'_>, query: &str) -> Result<Vec<SearchResul
 pub struct SearchResult {
     /// The item_id that matches the search.
     pub item_id: String,
+    /// The capture_id for source attribution.
+    pub capture_id: String,
+    /// The item_scope (privacy classification) of the source capture.
+    pub item_scope: String,
     /// Original capture text (if indexed).
     pub original_text: Option<String>,
     /// User-corrected text (if indexed).
@@ -153,6 +189,52 @@ impl SearchResult {
             .as_deref()
             .or(self.original_text.as_deref())
     }
+}
+
+/// Query the source (captures and corrections) directly, bypassing the FTS index.
+/// Provides an authoritative fallback for comparison with index results.
+/// Only returns accessible (non-deleted) items.
+pub fn search_source_direct(tx: &Transaction<'_>, query: &str) -> Result<Vec<SearchResult>> {
+    // Query captures for original text matching the query pattern.
+    let mut stmt = tx.prepare(
+        "SELECT DISTINCT i.item_id, i.capture_id, c.item_scope, c.text as text, NULL as corrected_text, 'original' as source_type
+         FROM items i
+         JOIN captures c ON i.capture_id = c.capture_id
+         WHERE i.lifecycle_state != 'deleted'
+           AND c.text IS NOT NULL
+           AND c.text LIKE ?
+         UNION
+         SELECT DISTINCT i.item_id, i.capture_id, c.item_scope, NULL as text, corr.new_value as corrected_text, 'corrected' as source_type
+         FROM items i
+         JOIN captures c ON i.capture_id = c.capture_id
+         JOIN corrections corr ON i.item_id = corr.item_id
+         WHERE i.lifecycle_state != 'deleted'
+           AND corr.kind = 'text'
+           AND corr.new_value IS NOT NULL
+           AND corr.new_value LIKE ?
+           AND corr.revision = (
+               SELECT MAX(revision)
+               FROM corrections cor2
+               WHERE cor2.item_id = i.item_id AND cor2.kind = 'text'
+           )
+         ORDER BY item_id, source_type DESC",
+    )?;
+
+    let pattern = format!("%{}%", query);
+    let results = stmt
+        .query_map(rusqlite::params![&pattern, &pattern], |row| {
+            Ok(SearchResult {
+                item_id: row.get(0)?,
+                capture_id: row.get(1)?,
+                item_scope: row.get(2)?,
+                original_text: row.get(3)?,
+                corrected_text: row.get(4)?,
+                source_type: row.get(5)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(results)
 }
 
 /// Verify index integrity: all indexed items exist and have accessible captures.
@@ -214,6 +296,8 @@ mod tests {
     fn test_search_result_display_text_prioritizes_corrected() {
         let result = SearchResult {
             item_id: "item1".to_string(),
+            capture_id: "cap1".to_string(),
+            item_scope: "personal".to_string(),
             original_text: Some("original".to_string()),
             corrected_text: Some("corrected".to_string()),
             source_type: "corrected".to_string(),
@@ -227,6 +311,8 @@ mod tests {
     fn test_search_result_display_text_falls_back_to_original() {
         let result = SearchResult {
             item_id: "item2".to_string(),
+            capture_id: "cap2".to_string(),
+            item_scope: "work".to_string(),
             original_text: Some("original".to_string()),
             corrected_text: None,
             source_type: "original".to_string(),
@@ -240,6 +326,8 @@ mod tests {
     fn test_search_result_display_text_handles_empty() {
         let result = SearchResult {
             item_id: "item3".to_string(),
+            capture_id: "cap3".to_string(),
+            item_scope: "personal".to_string(),
             original_text: None,
             corrected_text: None,
             source_type: "original".to_string(),
