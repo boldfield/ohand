@@ -248,6 +248,96 @@ pub fn search_source_direct(
     outcome
 }
 
+/// Every readable, non-deleted indexed item under `allowed_scopes`, newest capture first.
+/// Used for filter-only queries that name no search terms; scope is evaluated in SQL exactly as
+/// in `search_index`, so private text cannot leak through an unfiltered listing.
+///
+/// Capture instants are RFC3339 text whose precision and offset vary, so text order is not
+/// chronological. They are parsed to UTC instants (full sub-second precision) and ordered in
+/// Rust; any instant that does not parse sorts after every parseable one, then by item id.
+pub fn list_index(conn: &Connection, allowed_scopes: &[ItemScope]) -> Result<Vec<SearchHit>> {
+    if allowed_scopes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let scope_placeholders = vec!["?"; allowed_scopes.len()].join(", ");
+    let sql = format!(
+        "SELECT search_index.item_id, i.capture_id, COALESCE(i.current_scope, c.item_scope),
+                c.route_id, i.lifecycle_state, search_index.current_text,
+                search_index.text_basis, search_index.original_text, c.capture_instant
+           FROM search_index
+           JOIN items i ON i.item_id = search_index.item_id
+           JOIN captures c ON c.capture_id = i.capture_id
+          WHERE i.lifecycle_state != 'deleted'
+            AND COALESCE(i.current_scope, c.item_scope) IN ({scope_placeholders})"
+    );
+    let scope_names: Vec<String> = allowed_scopes
+        .iter()
+        .map(|scope| scope.as_str().to_string())
+        .collect();
+    let mut statement = conn.prepare(&sql)?;
+    let rows = statement
+        .query_map(rusqlite::params_from_iter(scope_names.iter()), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, String>(8)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut ordered_rows: Vec<_> = rows
+        .into_iter()
+        .map(|row| {
+            let captured_at = chrono::DateTime::parse_from_rfc3339(&row.8)
+                .ok()
+                .map(|instant| instant.with_timezone(&chrono::Utc));
+            (captured_at, row)
+        })
+        .collect();
+    // Newest parseable instant first (`None` sorts below every `Some`), then item id.
+    ordered_rows.sort_by(|(left_instant, left_row), (right_instant, right_row)| {
+        right_instant
+            .cmp(left_instant)
+            .then_with(|| left_row.0.cmp(&right_row.0))
+    });
+    ordered_rows
+        .into_iter()
+        .map(
+            |(
+                _,
+                (
+                    item_id,
+                    capture_id,
+                    scope,
+                    route_id,
+                    lifecycle_state,
+                    current_text,
+                    text_basis,
+                    original_text,
+                    _,
+                ),
+            )| {
+                Ok(SearchHit {
+                    item_id,
+                    capture_id,
+                    scope: scope.parse::<ItemScope>()?,
+                    route_id,
+                    lifecycle_state,
+                    current_text: current_text.unwrap_or_default(),
+                    text_basis: TextBasis::parse(&text_basis)?,
+                    original_text,
+                    matched: MatchedText::Current,
+                })
+            },
+        )
+        .collect()
+}
+
 fn search_table(
     conn: &Connection,
     table: &str,

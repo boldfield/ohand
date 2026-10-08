@@ -142,7 +142,7 @@ impl TimeResolver {
             .map_err(|_| ResolutionError::InvalidTimezone(context.timezone.clone()))
     }
 
-    fn validate_context(context: &TimeContext) -> Result<(), ResolutionError> {
+    pub fn validate_context(context: &TimeContext) -> Result<(), ResolutionError> {
         Self::validate_calendar(&context.calendar)?;
         let tz = Self::get_tz(context)?;
         let expected_offset = tz
