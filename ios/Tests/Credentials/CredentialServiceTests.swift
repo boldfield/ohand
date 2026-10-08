@@ -375,7 +375,7 @@ final class CredentialServiceTests: XCTestCase {
             let accessibleValue = attributes[kSecAttrAccessible as String]
             XCTAssertEqual(
                 accessibleValue as? String,
-                kSecAttrAccessibleAfterFirstUnlockedThisDeviceOnly as String,
+                kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String,
                 "Credential should use AfterFirstUnlock accessibility class"
             )
         }

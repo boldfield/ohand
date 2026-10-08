@@ -185,7 +185,7 @@ public class CredentialService {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
             kSecAttrAccount as String: reference,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockedThisDeviceOnly
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         ]
     }
 
