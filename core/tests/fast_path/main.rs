@@ -574,3 +574,126 @@ fn recurrence_is_a_request_not_content_vocabulary() {
         expect_abstention(text, AbstentionReason::UnsupportedOperation);
     }
 }
+
+fn expect_no_reminder(text: &str) {
+    let proposal = recognize(text).unwrap_or_else(|| panic!("{text:?} should abstain"));
+    assert!(proposal.reminder_proposal.is_none(), "{text:?}");
+    assert!(
+        proposal.abstention.is_some(),
+        "{text:?} must record an abstention"
+    );
+}
+
+#[test]
+fn punctuation_free_retractions_in_the_content_never_schedule() {
+    expect_explicit(
+        "remind me 2025-10-20 14:30:00 to call mom",
+        FUTURE_INSTANT,
+        FUTURE_PHRASE,
+    );
+    expect_explicit(
+        "remind me 2025-10-20 14:30:00 to cancel the subscription",
+        FUTURE_INSTANT,
+        FUTURE_PHRASE,
+    );
+    for text in [
+        "remind me 2025-10-20 14:30:00 to call mom forget about it",
+        "remind me 2025-10-20 14:30:00 to call mom cancel the reminder",
+        "remind me 2025-10-20 14:30:00 to call mom I changed my mind",
+        "remind me 2025-10-20 14:30:00 to call mom changed my mind",
+        "remind me 2025-10-20 14:30:00 to call mom ignore that",
+        "remind me 2025-10-20 14:30:00 to call mom disregard this",
+        "remind me 2025-10-20 14:30:00 to call mom or whatever",
+        "remind me 2025-10-20 14:30:00 to call mom but it's fine",
+        "remind me 2025-10-20 14:30:00 to call mom she will understand",
+        "remind me 2025-10-20 14:30:00 to call mom and then tell the whole family about the long day",
+    ] {
+        expect_no_reminder(text);
+    }
+}
+
+#[test]
+fn non_grammar_times_in_the_content_never_schedule() {
+    let positive = "remind me 2025-10-20 14:30:00 to call mom";
+    expect_explicit(positive, FUTURE_INSTANT, FUTURE_PHRASE);
+    for suffix in [
+        "at 5pm",
+        "at 9",
+        "at noon",
+        "at nine",
+        "tonight",
+        "in two hours",
+        "in the morning",
+        "next week",
+        "later",
+        "soon",
+        "on March 5",
+        "this weekend",
+        "on tuesdays",
+        "in october",
+    ] {
+        let text = format!("{positive} {suffix}");
+        expect_no_reminder(&text);
+    }
+}
+
+#[test]
+fn relation_words_before_a_trailing_time_never_schedule() {
+    expect_explicit(
+        "remind me to call mom on 2025-10-20 14:30:00",
+        FUTURE_INSTANT,
+        FUTURE_PHRASE,
+    );
+    expect_explicit(
+        "remind me to call mom 2025-10-20 14:30:00",
+        FUTURE_INSTANT,
+        FUTURE_PHRASE,
+    );
+    expect_ambiguous("remind me to call mom tomorrow", "tomorrow");
+    for time in ["2025-10-20 14:30:00", "tomorrow"] {
+        for relation in [
+            "except",
+            "before",
+            "after",
+            "by",
+            "until",
+            "till",
+            "from",
+            "since",
+            "around",
+            "about",
+            "the day after",
+            "a week before",
+            "an hour after",
+        ] {
+            let text = format!("remind me to call mom {relation} {time}");
+            expect_no_reminder(&text);
+        }
+    }
+}
+
+#[test]
+fn recurrence_is_syntax_aware() {
+    expect_ambiguous(
+        "remind me tomorrow to review the Mondays report",
+        "tomorrow",
+    );
+    expect_ambiguous("remind me tomorrow to check every door", "tomorrow");
+    for text in [
+        "remind me every two days to call mom",
+        "remind me to call mom every two days",
+        "remind me every other day to call mom",
+        "remind me to call mom every other day",
+        "remind me every 2 weeks to call mom",
+        "remind me to call mom on Mondays",
+        "remind me Mondays to call mom",
+    ] {
+        expect_abstention(text, AbstentionReason::UnsupportedOperation);
+    }
+}
+
+#[test]
+fn stop_in_the_content_is_an_ordinary_verb() {
+    expect_ambiguous("remind me to stop by mom's tomorrow", "tomorrow");
+    expect_ambiguous("remind me tomorrow to stop smoking", "tomorrow");
+}

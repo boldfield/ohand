@@ -91,6 +91,130 @@ const REPORTING_WORDS: &[&str] = &[
     "suggests",
 ];
 
+const MAX_CONTENT_WORDS: usize = 8;
+
+const CONTENT_NEGATION_WORDS: &[&str] = &["not", "never", "dont", "wont", "cant", "cannot"];
+
+const CONTENT_TIME_WORDS: &[&str] = &[
+    "today",
+    "tonight",
+    "tomorrow",
+    "yesterday",
+    "noon",
+    "midnight",
+    "morning",
+    "afternoon",
+    "evening",
+    "night",
+    "later",
+    "soon",
+    "now",
+    "asap",
+    "eventually",
+    "someday",
+    "sometime",
+    "am",
+    "pm",
+    "oclock",
+    "second",
+    "seconds",
+    "minute",
+    "minutes",
+    "hour",
+    "hours",
+    "day",
+    "days",
+    "week",
+    "weeks",
+    "weekend",
+    "weekends",
+    "weekday",
+    "weekdays",
+    "month",
+    "months",
+    "year",
+    "years",
+    "fortnight",
+    "ago",
+    "next",
+    "tues",
+    "thurs",
+    "january",
+    "february",
+    "april",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+];
+
+const NUMBER_WORDS: &[&str] = &[
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "eleven",
+    "twelve",
+    "thirteen",
+    "fourteen",
+    "fifteen",
+    "sixteen",
+    "seventeen",
+    "eighteen",
+    "nineteen",
+    "twenty",
+    "thirty",
+    "forty",
+    "fifty",
+    "sixty",
+    "half",
+    "quarter",
+    "couple",
+    "few",
+];
+
+const NUMBER_INTRODUCERS: &[&str] = &[
+    "at", "in", "by", "around", "within", "until", "till", "after", "before", "about",
+];
+
+const TEMPORAL_RELATION_WORDS: &[&str] = &[
+    "before", "after", "by", "until", "till", "except", "from", "since", "around", "about", "at",
+    "in", "within", "during", "past", "through", "thru", "for", "than", "beyond", "ahead",
+];
+
+const CONTENT_CLAUSE_WORDS: &[&str] = &[
+    "i", "we", "he", "she", "they", "or", "but", "though", "however", "anyway", "whatever",
+    "whenever", "instead", "rather",
+];
+
+const CONTENT_SUBJECT_CONTRACTION_PREFIXES: &[&str] =
+    &["i", "we", "he", "she", "they", "it", "that", "there", "let"];
+
+const CONTENT_CONTROL_VERBS: &[&str] = &[
+    "ignore",
+    "disregard",
+    "forget",
+    "cancel",
+    "delete",
+    "remove",
+    "skip",
+    "scrap",
+    "drop",
+    "abort",
+    "undo",
+    "revoke",
+    "mind",
+];
+
 const COMPLETED_WORDS: &[&str] = &["already", "done", "finished", "completed", "did"];
 
 const CONTENT_CONDITION_WORDS: &[&str] = &[
@@ -347,13 +471,50 @@ fn is_recurrence_adverb(token: &Token) -> bool {
     token.is_word() && RECURRENCE_ADVERBS.contains(&token.lower.as_str())
 }
 
-fn is_every_unit(first: &Token, second: &Token) -> bool {
-    (first.is_word_equal_to("every") || first.is_word_equal_to("each"))
-        && second.is_word()
-        && (RECURRENCE_UNITS.contains(&second.lower.as_str())
-            || weekday_from(&second.lower).is_some()
-            || is_plural_weekday(&second.lower)
-            || second.lower.starts_with(|ch: char| ch.is_ascii_digit()))
+fn is_number_token(token: &Token) -> bool {
+    token.is_word()
+        && (NUMBER_WORDS.contains(&token.lower.as_str())
+            || token.lower.starts_with(|ch: char| ch.is_ascii_digit()))
+}
+
+fn is_unit_token(token: &Token) -> bool {
+    token.is_word()
+        && (RECURRENCE_UNITS.contains(&token.lower.as_str())
+            || weekday_from(&token.lower).is_some()
+            || is_plural_weekday(&token.lower)
+            || token
+                .lower
+                .strip_suffix('s')
+                .is_some_and(|singular| RECURRENCE_UNITS.contains(&singular)))
+}
+
+/// Number of tokens in the recurrence phrase starting at `index`, or 0 when there is none.
+fn recurrence_phrase_length(tokens: &[Token], index: usize) -> usize {
+    let Some(first) = tokens.get(index) else {
+        return 0;
+    };
+    if is_recurrence_adverb(first) || is_plural_weekday_token(first) {
+        return 1;
+    }
+    if !(first.is_word_equal_to("every") || first.is_word_equal_to("each")) {
+        return 0;
+    }
+    let Some(second) = tokens.get(index + 1) else {
+        return 0;
+    };
+    if is_unit_token(second) && !second.is_word_equal_to("other") {
+        return 2;
+    }
+    if second.is_word_equal_to("other") || is_number_token(second) {
+        return if tokens.get(index + 2).is_some_and(is_unit_token) {
+            3
+        } else if second.is_word_equal_to("other") {
+            0
+        } else {
+            2
+        };
+    }
+    0
 }
 
 fn is_digits(text: &str, expected_length: usize) -> bool {
@@ -439,6 +600,7 @@ fn time_ending_at_end(tokens: &[Token], time_context: &TimeContext) -> Option<Ma
 struct ParsedCommand<'a> {
     time: MatchedTime,
     content: &'a [Token],
+    dangling_relation: bool,
 }
 
 enum Shape<'a> {
@@ -498,24 +660,20 @@ fn leading_time_length(rest: &[Token], first_index: usize) -> usize {
         .unwrap_or(0)
 }
 
-/// Recurrence is a request, not vocabulary: "every <unit>", plural weekdays, or a recurrence
-/// adverb in the time position (right after the command, right after a leading time, or as the
-/// final word). "the weekly report" inside the content is just a noun phrase.
+/// Recurrence is a request, not vocabulary: a recurrence phrase ("every <unit>", "every two
+/// days", a recurrence adverb, a plural weekday) in the time position (right after the command or
+/// right after a leading time) or ending the command. "the weekly report" or "the Mondays
+/// report" inside the content is just a noun phrase.
 fn is_recurrence_request(rest: &[Token]) -> bool {
-    if rest.iter().any(is_plural_weekday_token)
-        || rest
-            .windows(2)
-            .any(|pair| is_every_unit(&pair[0], &pair[1]))
-    {
-        return true;
-    }
-    let time_start = usize::from(rest.first().is_some_and(|t| t.is_word_equal_to("on")));
-    let after_time = time_start + leading_time_length(rest, time_start);
-    let final_word = rest.iter().rposition(Token::is_word);
-    [Some(time_start), Some(after_time), final_word]
-        .into_iter()
-        .flatten()
-        .any(|index| rest.get(index).is_some_and(is_recurrence_adverb))
+    let body = command_body(rest);
+    let time_start = usize::from(body.first().is_some_and(|t| t.is_word_equal_to("on")));
+    let after_time = time_start + leading_time_length(body, time_start);
+    let command_end = body.iter().rposition(Token::is_word).map(|last| last + 1);
+    (0..body.len()).any(|index| {
+        let length = recurrence_phrase_length(body, index);
+        length > 0
+            && (index == time_start || index == after_time || command_end == Some(index + length))
+    })
 }
 
 fn parse_shape<'a>(rest: &'a [Token], time_context: &TimeContext) -> Option<Shape<'a>> {
@@ -546,7 +704,14 @@ fn parse_shape<'a>(rest: &'a [Token], time_context: &TimeContext) -> Option<Shap
         if !content_is_usable(content) {
             return None;
         }
-        return Some(Shape::Scheduled(Box::new(ParsedCommand { time, content })));
+        let dangling_relation = content.last().is_some_and(|token| {
+            token.is_word() && TEMPORAL_RELATION_WORDS.contains(&token.lower.as_str())
+        });
+        return Some(Shape::Scheduled(Box::new(ParsedCommand {
+            time,
+            content,
+            dangling_relation,
+        })));
     }
 
     let time_start = usize::from(first.is_word_equal_to("on"));
@@ -559,6 +724,7 @@ fn parse_shape<'a>(rest: &'a [Token], time_context: &TimeContext) -> Option<Shap
         return Some(Shape::Scheduled(Box::new(ParsedCommand {
             time,
             content: &[],
+            dangling_relation: false,
         })));
     }
     if !body[next].is_word_equal_to("to") {
@@ -568,7 +734,11 @@ fn parse_shape<'a>(rest: &'a [Token], time_context: &TimeContext) -> Option<Shap
     if !content_is_usable(content) {
         return None;
     }
-    Some(Shape::Scheduled(Box::new(ParsedCommand { time, content })))
+    Some(Shape::Scheduled(Box::new(ParsedCommand {
+        time,
+        content,
+        dangling_relation: false,
+    })))
 }
 
 fn find_command(tokens: &[Token]) -> Option<usize> {
@@ -645,11 +815,56 @@ fn has_time_phrase(content: &[Token]) -> bool {
     })
 }
 
-/// The reminder content is bounded: it must be a single plain clause. Negation, retraction,
-/// reported speech, completed work, conditions, quotes, brackets, clause breaks and any further
-/// time all mean the user may not be asking for this schedule, so nothing is scheduled.
+fn is_content_negation_word(token: &Token) -> bool {
+    token.is_word()
+        && (CONTENT_NEGATION_WORDS.contains(&token.lower.as_str()) || token.lower.ends_with("n't"))
+}
+
+fn is_subject_contraction(token: &Token) -> bool {
+    token.is_word()
+        && token
+            .lower
+            .split_once('\'')
+            .is_some_and(|(prefix, _)| CONTENT_SUBJECT_CONTRACTION_PREFIXES.contains(&prefix))
+}
+
+fn has_competing_time_evidence(content: &[Token]) -> bool {
+    has_time_phrase(content)
+        || content.iter().any(|token| {
+            token.is_word()
+                && (token.lower.chars().any(char::is_numeric)
+                    || CONTENT_TIME_WORDS.contains(&token.lower.as_str())
+                    || weekday_from(&token.lower).is_some())
+        })
+        || content.windows(2).any(|pair| {
+            pair[0].is_word()
+                && NUMBER_INTRODUCERS.contains(&pair[0].lower.as_str())
+                && is_number_token(&pair[1])
+        })
+}
+
+fn has_plain_word_shape(word: &str) -> bool {
+    word.chars()
+        .all(|ch| ch.is_alphabetic() || ch == '\'' || ch == '-')
+}
+
+fn is_single_plain_clause(content: &[Token]) -> bool {
+    let words: Vec<&Token> = content.iter().filter(|token| token.is_word()).collect();
+    words.len() <= MAX_CONTENT_WORDS
+        && words.iter().enumerate().all(|(position, token)| {
+            has_plain_word_shape(&token.lower)
+                && !CONTENT_CLAUSE_WORDS.contains(&token.lower.as_str())
+                && !is_subject_contraction(token)
+                && (position == 0 || !CONTENT_CONTROL_VERBS.contains(&token.lower.as_str()))
+        })
+}
+
+/// The reminder content is bounded: it must be a single short plain clause. Negation,
+/// retraction, reported speech, completed work, conditions, quotes, brackets, clause breaks, any
+/// further time and any second clause all mean the user may not be asking for this schedule, so
+/// nothing is scheduled.
 fn content_abstention(content: &[Token]) -> Option<AbstentionReason> {
-    if content.iter().any(is_negation_word)
+    if content.iter().any(is_content_negation_word)
         || has_word(content, CONTENT_RETRACTION_WORDS)
         || CONTENT_RETRACTION_SEQUENCES
             .iter()
@@ -666,8 +881,11 @@ fn content_abstention(content: &[Token]) -> Option<AbstentionReason> {
     {
         return Some(AbstentionReason::UncertainTarget);
     }
-    if has_time_phrase(content) {
+    if has_competing_time_evidence(content) {
         return Some(AbstentionReason::Ambiguous);
+    }
+    if !is_single_plain_clause(content) {
+        return Some(AbstentionReason::UncertainTarget);
     }
     None
 }
@@ -746,7 +964,11 @@ pub fn recognize_reminder(
     if !starts_its_clause(prefix) {
         return None;
     }
-    let ParsedCommand { time, content } = match shape {
+    let ParsedCommand {
+        time,
+        content,
+        dangling_relation,
+    } = match shape {
         Shape::Recurrence => {
             return Some(provenance.abstention(AbstentionReason::UnsupportedOperation));
         }
@@ -754,6 +976,9 @@ pub fn recognize_reminder(
     };
     if let Some(reason) = content_abstention(content) {
         return Some(provenance.abstention(reason));
+    }
+    if dangling_relation {
+        return Some(provenance.abstention(AbstentionReason::Ambiguous));
     }
 
     let mut proposal = provenance
