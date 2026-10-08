@@ -78,26 +78,6 @@ class KeychainTester {
         }
     }
 
-    struct TestResult {
-        let accessibilityClass: AccessibilityClass
-        let stored: Bool
-        let storeStatus: OSStatus?
-        let retrieved: Bool
-        let retrieveStatus: OSStatus?
-        let timestamp: String
-
-        var summary: String {
-            if stored && retrieved {
-                return "✓ \(accessibilityClass.displayName): Stored & Retrieved"
-            } else if stored && !retrieved {
-                let statusStr = retrieveStatus.map { " (status: \($0))" } ?? ""
-                return "⚠ \(accessibilityClass.displayName): Stored but not retrieved\(statusStr)"
-            } else {
-                let statusStr = storeStatus.map { " (status: \($0))" } ?? ""
-                return "✗ \(accessibilityClass.displayName): Failed to store\(statusStr)"
-            }
-        }
-    }
 
     static func storeCredential(value: String, accessibility: AccessibilityClass) -> (success: Bool, status: OSStatus) {
         let query: [String: Any] = [
@@ -151,34 +131,6 @@ class KeychainTester {
         }
     }
 
-    static func runAllTests() -> [TestResult] {
-        let accessibilityClasses: [AccessibilityClass] = [
-            .whenUnlocked,
-            .afterFirstUnlock,
-            .afterFirstUnlockThisDeviceOnly,
-            .whenUnlockedThisDeviceOnly,
-            .whenPasscodeSetThisDeviceOnly,
-        ]
-
-        let dateFormatter = DateFormatter()
-        dateFormatter.timeStyle = .medium
-        let timestamp = dateFormatter.string(from: Date())
-
-        return accessibilityClasses.map { accessClass in
-            let syntheticValue = "synthetic-credential-\(accessClass.displayName)"
-            let storeResult = storeCredential(value: syntheticValue, accessibility: accessClass)
-            let retrieveResult = retrieveCredential(accessibility: accessClass)
-            let retrieved = retrieveResult.value == syntheticValue
-            return TestResult(
-                accessibilityClass: accessClass,
-                stored: storeResult.success,
-                storeStatus: storeResult.status != errSecSuccess ? storeResult.status : nil,
-                retrieved: retrieved,
-                retrieveStatus: retrieveResult.status != errSecSuccess ? retrieveResult.status : nil,
-                timestamp: timestamp
-            )
-        }
-    }
 }
 
 class CredentialProbeViewController: UIViewController {
@@ -361,7 +313,7 @@ class CredentialProbeViewController: UIViewController {
     }
 
     private func displayStoredStatus() {
-        for (index, label) in resultLabels.enumerated() {
+        for label in resultLabels {
             label.text = "(Tap 'Store All Credentials' to begin)"
             label.textColor = .tertiaryLabel
         }

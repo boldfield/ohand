@@ -103,7 +103,8 @@ jobs:
             "${SIMULATOR_UDID}" \
             .derived/Build/Products/Debug-iphonesimulator/BridgeProbe.app \
             com.boldfield.ohand.probes.bridge \
-            .evidence 2>&1 | tee .evidence/smoke.log
+            .evidence \
+            "bridgeprobe-launch.png" 2>&1 | tee .evidence/smoke.log
 
       - name: Launch CredentialProbe smoke test
         shell: bash
@@ -119,7 +120,8 @@ jobs:
             "${SIMULATOR_UDID}" \
             .derived/Build/Products/Debug-iphonesimulator/CredentialProbe.app \
             com.boldfield.ohand.probes.credential \
-            .evidence credential-smoke 2>&1 | tee .evidence/credential-smoke.log
+            .evidence \
+            "credentialprobe-launch.png" 2>&1 | tee .evidence/credential-smoke.log
 
       - name: Upload evidence
         if: always()
