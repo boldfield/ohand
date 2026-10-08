@@ -1,0 +1,23 @@
+[package]
+name = "ohand-tauri-probe"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "ohand_tauri_probe_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+tauri = "=2.12.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[build-dependencies]
+tauri-build = "=2.7.1"
+
+[profile.dev]
+opt-level = 0
+
+[profile.release]
+opt-level = 3
+lto = true
