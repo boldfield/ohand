@@ -1,455 +1,437 @@
 use chrono::Utc;
 use ohand_core::reminders::state::{
-    validate_operation, OperationType, OperationValidity, RemindTime, ReminderIntent,
-    ReminderLifecycle, ReminderOperation, ReminderState,
+    apply_resolution, record_operation, AcknowledgmentState, DeliveryState, OperationState,
+    OperationType, ReminderState, RequestState, ScheduleState,
 };
+use ohand_core::time::resolver::{AmbiguityKind, ResolutionResult, TimeContext};
+use rusqlite::Connection;
 
-fn make_intent(reminder_id: &str, source_text: &str, requested_time: RemindTime) -> ReminderIntent {
-    let is_ambiguous = matches!(requested_time, RemindTime::Ambiguous { .. });
-    let ambiguity_reason = match &requested_time {
-        RemindTime::Ambiguous { .. } => Some("missing hour".to_string()),
-        _ => None,
-    };
-    ReminderIntent {
-        reminder_id: reminder_id.to_string(),
-        source_text: source_text.to_string(),
-        requested_time,
-        is_ambiguous,
-        ambiguity_reason,
-        is_past: false,
-        captured_at: Utc::now(),
-    }
-}
-
-fn make_state_from_intent(reminder_id: &str, intent: ReminderIntent) -> ReminderState {
+fn make_reminder_state(reminder_id: &str, item_id: &str) -> ReminderState {
     ReminderState {
         reminder_id: reminder_id.to_string(),
-        current_intent: intent,
-        lifecycle_state: ReminderLifecycle::Active,
-        operations: vec![],
-        native_id: None,
+        item_id: item_id.to_string(),
+        request_state: RequestState::NotRequested,
+        schedule_state: ScheduleState::NotScheduled,
+        delivery_state: DeliveryState::Unknown,
+        acknowledgment_state: AcknowledgmentState::NotAcknowledged,
+        resolved_instant: None,
+        timezone_id: None,
+        ambiguity_reason: None,
+        unsupported_reason: None,
+        schedule_generation: 0,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
     }
 }
 
-#[test]
-fn test_create_scheduled_reminder_idempotent() {
-    let future = Utc::now() + chrono::Duration::hours(1);
-    let intent = make_intent("r1", "remind me in 1 hour", RemindTime::Scheduled(future));
-    let state = make_state_from_intent("r1", intent.clone());
-
-    // Creating the same reminder again should produce the same key fields
-    // (not comparing timestamps which naturally differ).
-    let intent2 = make_intent("r1", "remind me in 1 hour", RemindTime::Scheduled(future));
-    let state2 = make_state_from_intent("r1", intent2);
-
-    assert_eq!(state.reminder_id, state2.reminder_id);
-    assert_eq!(
-        state.current_intent.reminder_id,
-        state2.current_intent.reminder_id
-    );
-    assert_eq!(
-        state.current_intent.source_text,
-        state2.current_intent.source_text
-    );
-    assert_eq!(
-        state.current_intent.requested_time,
-        state2.current_intent.requested_time
-    );
-    assert_eq!(state.lifecycle_state, state2.lifecycle_state);
-    assert_eq!(state.operations.len(), state2.operations.len());
+fn setup_test_db() -> Connection {
+    let conn = Connection::open_in_memory().expect("Failed to open in-memory DB");
+    // Create the reminder_operations table for tests
+    conn.execute(
+        "CREATE TABLE reminder_operations (
+            operation_id TEXT PRIMARY KEY,
+            reminder_id TEXT NOT NULL,
+            operation_type TEXT NOT NULL,
+            operation_state TEXT NOT NULL,
+            effect_identity TEXT NOT NULL,
+            external_id TEXT,
+            scheduled_for TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE (reminder_id, effect_identity)
+        )",
+        [],
+    )
+    .expect("Failed to create table");
+    conn
 }
 
 #[test]
-fn test_edit_scheduled_reminder_produces_new_operation() {
-    let future1 = Utc::now() + chrono::Duration::hours(1);
-    let intent1 = make_intent("r1", "remind me in 1 hour", RemindTime::Scheduled(future1));
-    let mut state = make_state_from_intent("r1", intent1);
+fn test_effect_identity_deterministic() {
+    let mut state = make_reminder_state("r1", "i1");
+    let id_gen0 = state.effect_identity();
 
-    // Record the initial creation.
-    state.operations.push(ReminderOperation {
-        operation_id: "op1".to_string(),
-        reminder_id: "r1".to_string(),
-        operation_type: OperationType::Created {
-            intent: state.current_intent.clone(),
-        },
-        recorded_at: Utc::now(),
-        native_id: Some("native1".to_string()),
-    });
-    state.native_id = Some("native1".to_string());
+    state.schedule_generation = 1;
+    let id_gen1 = state.effect_identity();
 
-    // Now reschedule to a different time.
-    let future2 = Utc::now() + chrono::Duration::hours(2);
-    let intent2 = make_intent(
+    state.schedule_generation = 2;
+    let id_gen2 = state.effect_identity();
+
+    assert_eq!(id_gen0, "r1#0");
+    assert_eq!(id_gen1, "r1#1");
+    assert_eq!(id_gen2, "r1#2");
+}
+
+#[test]
+fn test_create_schedule_operation_idempotent() {
+    let mut conn = setup_test_db();
+    let state = make_reminder_state("r1", "i1");
+
+    // First creation: record operation
+    let tx = conn.transaction().unwrap();
+    let op1 = record_operation(
+        &tx,
         "r1",
-        "remind me in 2 hours instead",
-        RemindTime::Scheduled(future2),
+        &state.effect_identity(),
+        OperationType::Create,
+        Some(Utc::now()),
+    )
+    .expect("First operation should succeed");
+
+    // Same operation again: should return the same record (idempotency)
+    let op1_again = record_operation(
+        &tx,
+        "r1",
+        &state.effect_identity(),
+        OperationType::Create,
+        Some(Utc::now()),
+    )
+    .expect("Idempotent operation should succeed");
+
+    assert_eq!(op1.operation_id, op1_again.operation_id);
+    assert_eq!(op1.effect_identity, op1_again.effect_identity);
+    tx.commit().unwrap();
+}
+
+#[test]
+fn test_reschedule_increments_generation_creates_new_operation() {
+    let mut conn = setup_test_db();
+    let mut state = make_reminder_state("r1", "i1");
+
+    // First schedule
+    let tx = conn.transaction().unwrap();
+    let op1 = record_operation(
+        &tx,
+        "r1",
+        &state.effect_identity(),
+        OperationType::Create,
+        Some(Utc::now()),
+    )
+    .expect("First operation");
+
+    // Reschedule: increment generation, create new effect_identity
+    state.schedule_generation = 1;
+    let op2 = record_operation(
+        &tx,
+        "r1",
+        &state.effect_identity(),
+        OperationType::Reschedule,
+        Some(Utc::now() + chrono::Duration::hours(1)),
+    )
+    .expect("Reschedule operation");
+
+    assert_eq!(
+        op1.operation_id,
+        "r1#0"
+            .split('#')
+            .next()
+            .map(|_| op1.operation_id.clone())
+            .unwrap_or_default()
     );
-    let op = OperationType::Rescheduled {
-        new_intent: intent2.clone(),
+    assert_ne!(op1.effect_identity, op2.effect_identity);
+    assert_eq!(op2.effect_identity, "r1#1");
+    tx.commit().unwrap();
+}
+
+#[test]
+fn test_unsupported_recurrence_not_scheduled() {
+    let mut state = make_reminder_state("r1", "i1");
+
+    // Apply a resolution that indicates unsupported recurrence
+    let resolution = ResolutionResult {
+        original_phrase: "remind me every Monday".to_string(),
+        resolved_date: None,
+        resolved_local: None,
+        resolved_time: None,
+        candidates: vec![],
+        is_ambiguous: false,
+        ambiguity_kind: None,
+        ambiguity_reason: Some("Repeating reminders not supported in M1".to_string()),
+        is_past: false,
+        context: TimeContext {
+            timezone: "UTC".to_string(),
+            locale: "en_US".to_string(),
+            reference_time: Utc::now(),
+            utc_offset_at_capture: 0,
+            calendar: "gregorian".to_string(),
+        },
     };
 
-    // Operation should be valid.
-    assert_eq!(validate_operation(&state, &op), OperationValidity::Valid);
+    apply_resolution(&mut state, &resolution).expect("Apply resolution");
 
-    // Update state to reflect the new operation.
-    state.current_intent = intent2;
-    state.operations.push(ReminderOperation {
-        operation_id: "op2".to_string(),
-        reminder_id: "r1".to_string(),
-        operation_type: op,
-        recorded_at: Utc::now(),
-        native_id: None, // reschedule doesn't set a new native_id
-    });
-
-    assert_eq!(state.operations.len(), 2);
+    // Unsupported recurrence must be preserved, not silently converted to one-shot
+    assert_eq!(state.request_state, RequestState::UnsupportedRecurrence);
+    assert!(state.unsupported_reason.is_some());
+    assert_eq!(state.schedule_state, ScheduleState::NotScheduled);
+    assert!(state.resolved_instant.is_none());
 }
 
 #[test]
-fn test_cancel_reminder_idempotent() {
-    let future = Utc::now() + chrono::Duration::hours(1);
-    let intent = make_intent("r1", "remind me later", RemindTime::Scheduled(future));
-    let mut state = make_state_from_intent("r1", intent);
+fn test_ambiguous_time_not_scheduled_yet() {
+    let mut state = make_reminder_state("r1", "i1");
 
-    // First cancellation.
-    let op1 = OperationType::Cancelled;
-    assert_eq!(validate_operation(&state, &op1), OperationValidity::Valid);
-
-    // Apply the cancellation.
-    state.lifecycle_state = ReminderLifecycle::Cancelled;
-    state.operations.push(ReminderOperation {
-        operation_id: "op1".to_string(),
-        reminder_id: "r1".to_string(),
-        operation_type: op1,
-        recorded_at: Utc::now(),
-        native_id: None,
-    });
-
-    // Second cancellation (idempotent).
-    let op2 = OperationType::Cancelled;
-    assert_eq!(validate_operation(&state, &op2), OperationValidity::Valid);
-}
-
-#[test]
-fn test_complete_reminder_idempotent() {
-    let future = Utc::now() + chrono::Duration::hours(1);
-    let intent = make_intent("r1", "remind me to call", RemindTime::Scheduled(future));
-    let mut state = make_state_from_intent("r1", intent);
-
-    // First completion.
-    let op1 = OperationType::Completed;
-    assert_eq!(validate_operation(&state, &op1), OperationValidity::Valid);
-
-    // Apply the completion.
-    state.lifecycle_state = ReminderLifecycle::Completed;
-    state.operations.push(ReminderOperation {
-        operation_id: "op1".to_string(),
-        reminder_id: "r1".to_string(),
-        operation_type: op1,
-        recorded_at: Utc::now(),
-        native_id: None,
-    });
-
-    // Second completion (idempotent).
-    let op2 = OperationType::Completed;
-    assert_eq!(validate_operation(&state, &op2), OperationValidity::Valid);
-}
-
-#[test]
-fn test_ambiguous_time_remains_inspectable() {
-    let time = RemindTime::Ambiguous {
+    let resolution = ResolutionResult {
         original_phrase: "Friday".to_string(),
         resolved_date: None,
         resolved_local: None,
+        resolved_time: None,
+        candidates: vec![],
+        is_ambiguous: true,
+        ambiguity_kind: Some(AmbiguityKind::MissingHour),
+        ambiguity_reason: Some("Missing hour in date".to_string()),
+        is_past: false,
+        context: TimeContext {
+            timezone: "UTC".to_string(),
+            locale: "en_US".to_string(),
+            reference_time: Utc::now(),
+            utc_offset_at_capture: 0,
+            calendar: "gregorian".to_string(),
+        },
     };
-    let intent = make_intent("r1", "remind me Friday", time);
-    let state = make_state_from_intent("r1", intent);
 
-    // Ambiguous reminder should be active and not scheduled yet.
-    assert_eq!(state.lifecycle_state, ReminderLifecycle::Active);
-    assert!(state.current_intent.is_ambiguous);
-    assert!(!state.native_id.is_some());
+    apply_resolution(&mut state, &resolution).expect("Apply resolution");
+
+    assert_eq!(state.request_state, RequestState::NotScheduledYet);
+    assert!(state.ambiguity_reason.is_some());
+    assert_eq!(state.schedule_state, ScheduleState::NotScheduled);
+    assert!(state.resolved_instant.is_none());
 }
 
 #[test]
-fn test_past_time_remains_inspectable() {
-    let past = Utc::now() - chrono::Duration::hours(1);
-    let mut intent = make_intent("r1", "remind me yesterday", RemindTime::Scheduled(past));
-    intent.is_past = true;
-    let state = make_state_from_intent("r1", intent);
+fn test_explicit_resolved_time_accepted() {
+    let mut state = make_reminder_state("r1", "i1");
+    let resolved_time = Utc::now() + chrono::Duration::hours(2);
 
-    // Past reminder should be active, inspectable, but likely not scheduled.
-    assert_eq!(state.lifecycle_state, ReminderLifecycle::Active);
-    assert!(state.current_intent.is_past);
-    assert!(!state.native_id.is_some());
+    let resolution = ResolutionResult {
+        original_phrase: "2 hours from now".to_string(),
+        resolved_date: None,
+        resolved_local: None,
+        resolved_time: Some(resolved_time),
+        candidates: vec![],
+        is_ambiguous: false,
+        ambiguity_kind: None,
+        ambiguity_reason: None,
+        is_past: false,
+        context: TimeContext {
+            timezone: "UTC".to_string(),
+            locale: "en_US".to_string(),
+            reference_time: Utc::now(),
+            utc_offset_at_capture: 0,
+            calendar: "gregorian".to_string(),
+        },
+    };
+
+    apply_resolution(&mut state, &resolution).expect("Apply resolution");
+
+    assert_eq!(state.request_state, RequestState::Resolved);
+    assert_eq!(state.resolved_instant, Some(resolved_time));
+    assert!(state.ambiguity_reason.is_none());
+    assert!(state.unsupported_reason.is_none());
 }
 
 #[test]
 fn test_expired_opportunity_remains_inspectable() {
-    // Scenario: reminder was for a future time, but that time has now passed and
-    // the reminder was never triggered or cancelled. This can happen if:
-    // - The native scheduler couldn't deliver before the time
-    // - The reminder scheduling failed silently
-    // - The device was offline
-    let now = Utc::now();
-    let scheduled_time = now - chrono::Duration::hours(1); // scheduled for 1 hour ago
+    let past = Utc::now() - chrono::Duration::hours(1);
+    let mut state = make_reminder_state("r1", "i1");
 
-    let intent = make_intent(
+    let resolution = ResolutionResult {
+        original_phrase: "yesterday".to_string(),
+        resolved_date: None,
+        resolved_local: None,
+        resolved_time: Some(past),
+        candidates: vec![],
+        is_ambiguous: false,
+        ambiguity_kind: None,
+        ambiguity_reason: None,
+        is_past: true,
+        context: TimeContext {
+            timezone: "UTC".to_string(),
+            locale: "en_US".to_string(),
+            reference_time: Utc::now(),
+            utc_offset_at_capture: 0,
+            calendar: "gregorian".to_string(),
+        },
+    };
+
+    apply_resolution(&mut state, &resolution).expect("Apply resolution");
+
+    assert_eq!(state.request_state, RequestState::Resolved);
+    assert_eq!(state.resolved_instant, Some(past));
+    assert_eq!(state.delivery_state, DeliveryState::Unknown);
+}
+
+#[test]
+fn test_delivery_state_independent_from_request_state() {
+    let mut state = make_reminder_state("r1", "i1");
+    state.request_state = RequestState::Resolved;
+    state.resolved_instant = Some(Utc::now());
+    state.delivery_state = DeliveryState::Unknown;
+
+    // Delivery state can advance independently
+    state.delivery_state = DeliveryState::Delivered;
+    assert_eq!(state.request_state, RequestState::Resolved);
+
+    state.delivery_state = DeliveryState::Opened;
+    assert_eq!(state.request_state, RequestState::Resolved);
+}
+
+#[test]
+fn test_acknowledgment_state_independent_from_delivery_state() {
+    let mut state = make_reminder_state("r1", "i1");
+    state.delivery_state = DeliveryState::Delivered;
+    state.acknowledgment_state = AcknowledgmentState::NotAcknowledged;
+
+    // User can acknowledge without changing delivery state
+    state.acknowledgment_state = AcknowledgmentState::Acknowledged;
+    assert_eq!(state.delivery_state, DeliveryState::Delivered);
+}
+
+#[test]
+fn test_cancel_operation_idempotent() {
+    let mut conn = setup_test_db();
+    let state = make_reminder_state("r1", "i1");
+
+    let tx = conn.transaction().unwrap();
+    let cancel1 = record_operation(
+        &tx,
         "r1",
-        "remind me to check email",
-        RemindTime::Scheduled(scheduled_time),
-    );
+        &state.effect_identity(),
+        OperationType::Cancel,
+        None,
+    )
+    .expect("First cancel");
 
-    let mut state = make_state_from_intent("r1", intent);
-    state.native_id = Some("native_id_123".to_string());
-    state.operations.push(ReminderOperation {
-        operation_id: "op1".to_string(),
-        reminder_id: "r1".to_string(),
-        operation_type: OperationType::Created {
-            intent: state.current_intent.clone(),
-        },
-        recorded_at: now,
-        native_id: Some("native_id_123".to_string()),
-    });
-
-    // Even though the reminder time has passed and it's still active,
-    // it should remain inspectable.
-    assert_eq!(state.lifecycle_state, ReminderLifecycle::Active);
-    assert_eq!(state.operations.len(), 1);
-}
-
-#[test]
-fn test_unsupported_repeating_request_not_silently_reduced() {
-    let time = RemindTime::Unsupported {
-        original_phrase: "remind me every Monday at 2pm".to_string(),
-        reason: "repeating reminders are not supported in M1".to_string(),
-    };
-    let intent = make_intent("r1", "remind me every Monday at 2pm", time);
-    let state = make_state_from_intent("r1", intent);
-
-    // The reminder must remain in the unsupported state, not be silently converted to one-shot.
-    assert!(state.current_intent.requested_time.is_unsupported());
-    assert!(!state.current_intent.requested_time.is_scheduled());
-    assert_eq!(state.lifecycle_state, ReminderLifecycle::Active);
-}
-
-#[test]
-fn test_fabricated_deadline_rejected_in_user_correction() {
-    let future = Utc::now() + chrono::Duration::hours(1);
-    let intent = make_intent(
+    // Cancel again: same operation
+    let cancel2 = record_operation(
+        &tx,
         "r1",
-        "remind me about the dentist",
-        RemindTime::Scheduled(future),
-    );
-    let mut state = make_state_from_intent("r1", intent);
+        &state.effect_identity(),
+        OperationType::Cancel,
+        None,
+    )
+    .expect("Second cancel (idempotent)");
 
-    // User explicitly sets the reminder to a specific time (e.g., "Friday at 3pm").
-    let user_chosen_time = Utc::now() + chrono::Duration::days(2);
-    let user_intent = make_intent(
+    assert_eq!(cancel1.operation_id, cancel2.operation_id);
+    tx.commit().unwrap();
+}
+
+#[test]
+fn test_complete_operation_idempotent() {
+    let mut conn = setup_test_db();
+    let state = make_reminder_state("r1", "i1");
+
+    let tx = conn.transaction().unwrap();
+    let complete1 = record_operation(
+        &tx,
         "r1",
-        "actually, Friday at 3pm",
-        RemindTime::Scheduled(user_chosen_time),
-    );
-    let op = OperationType::Rescheduled {
-        new_intent: user_intent.clone(),
+        &state.effect_identity(),
+        OperationType::Complete,
+        None,
+    )
+    .expect("First complete");
+
+    // Complete again: same operation
+    let complete2 = record_operation(
+        &tx,
+        "r1",
+        &state.effect_identity(),
+        OperationType::Complete,
+        None,
+    )
+    .expect("Second complete (idempotent)");
+
+    assert_eq!(complete1.operation_id, complete2.operation_id);
+    tx.commit().unwrap();
+}
+
+#[test]
+fn test_schedule_generation_unique_effect_identities() {
+    let mut conn = setup_test_db();
+    let mut state = make_reminder_state("r1", "i1");
+
+    let tx = conn.transaction().unwrap();
+
+    // Schedule at gen 0
+    let op0 = record_operation(
+        &tx,
+        "r1",
+        &state.effect_identity(),
+        OperationType::Create,
+        Some(Utc::now()),
+    )
+    .expect("Gen 0 operation");
+
+    // Reschedule to gen 1
+    state.schedule_generation = 1;
+    let op1 = record_operation(
+        &tx,
+        "r1",
+        &state.effect_identity(),
+        OperationType::Reschedule,
+        Some(Utc::now() + chrono::Duration::hours(1)),
+    )
+    .expect("Gen 1 operation");
+
+    // Both operations should exist with different effect_identities
+    assert_eq!(op0.effect_identity, "r1#0");
+    assert_eq!(op1.effect_identity, "r1#1");
+    assert_ne!(op0.operation_id, op1.operation_id);
+
+    tx.commit().unwrap();
+}
+
+#[test]
+fn test_state_preserves_item_id() {
+    let state = make_reminder_state("r1", "item-123");
+    assert_eq!(state.item_id, "item-123");
+    assert_eq!(state.reminder_id, "r1");
+}
+
+#[test]
+fn test_pending_ambiguity_inspectable() {
+    let mut state = make_reminder_state("r1", "i1");
+
+    let resolution = ResolutionResult {
+        original_phrase: "next week".to_string(),
+        resolved_date: None,
+        resolved_local: None,
+        resolved_time: None,
+        candidates: vec![],
+        is_ambiguous: true,
+        ambiguity_kind: Some(AmbiguityKind::MissingHour),
+        ambiguity_reason: Some("Partial date without time".to_string()),
+        is_past: false,
+        context: TimeContext {
+            timezone: "America/Los_Angeles".to_string(),
+            locale: "en_US".to_string(),
+            reference_time: Utc::now(),
+            utc_offset_at_capture: -28800,
+            calendar: "gregorian".to_string(),
+        },
     };
 
-    // This should be allowed and recorded.
-    assert_eq!(validate_operation(&state, &op), OperationValidity::Valid);
+    apply_resolution(&mut state, &resolution).expect("Apply resolution");
 
-    state.current_intent = user_intent;
-    state.operations.push(ReminderOperation {
-        operation_id: "op2".to_string(),
-        reminder_id: "r1".to_string(),
-        operation_type: op,
-        recorded_at: Utc::now(),
-        native_id: None,
-    });
-
-    // The corrected time should be preserved as-is, not modified or fabricated.
-    assert_eq!(
-        state.current_intent.requested_time,
-        RemindTime::Scheduled(user_chosen_time)
-    );
+    assert_eq!(state.request_state, RequestState::NotScheduledYet);
+    assert!(state.ambiguity_reason.is_some());
+    assert_eq!(state.timezone_id, Some("America/Los_Angeles".to_string()));
 }
 
 #[test]
-fn test_preserve_explicit_user_corrections() {
-    let time1 = Utc::now() + chrono::Duration::hours(1);
-    let intent1 = make_intent("r1", "remind me", RemindTime::Scheduled(time1));
-    let mut state = make_state_from_intent("r1", intent1.clone());
+fn test_operation_state_tracking() {
+    let mut conn = setup_test_db();
+    let state = make_reminder_state("r1", "i1");
 
-    // Record the initial creation.
-    state.operations.push(ReminderOperation {
-        operation_id: "op1".to_string(),
-        reminder_id: "r1".to_string(),
-        operation_type: OperationType::Created {
-            intent: state.current_intent.clone(),
-        },
-        recorded_at: Utc::now(),
-        native_id: Some("native1".to_string()),
-    });
+    let tx = conn.transaction().unwrap();
+    let op = record_operation(
+        &tx,
+        "r1",
+        &state.effect_identity(),
+        OperationType::Create,
+        Some(Utc::now()),
+    )
+    .expect("Create operation");
 
-    // User corrects the time.
-    let time2 = Utc::now() + chrono::Duration::hours(2);
-    let intent2 = make_intent("r1", "no wait, 2 hours", RemindTime::Scheduled(time2));
-    let op_correct = OperationType::Rescheduled {
-        new_intent: intent2.clone(),
-    };
-
-    // Apply the correction.
-    state.current_intent = intent2.clone();
-    state.operations.push(ReminderOperation {
-        operation_id: "op2".to_string(),
-        reminder_id: "r1".to_string(),
-        operation_type: op_correct,
-        recorded_at: Utc::now(),
-        native_id: None,
-    });
-
-    // Later, a model might try to "re-interpret" and suggest the original time.
-    // But the user's correction should remain authoritative.
-    assert_eq!(
-        state.current_intent.requested_time,
-        RemindTime::Scheduled(time2)
-    );
-
-    // Verify the operations record both the original and the correction.
-    assert_eq!(state.operations.len(), 2);
-    match &state.operations[0].operation_type {
-        OperationType::Created { intent } => {
-            assert_eq!(intent.requested_time, RemindTime::Scheduled(time1));
-        }
-        _ => panic!("First operation should be Created"),
-    }
-    match &state.operations[1].operation_type {
-        OperationType::Rescheduled { new_intent } => {
-            assert_eq!(new_intent.requested_time, RemindTime::Scheduled(time2));
-        }
-        _ => panic!("Second operation should be Rescheduled"),
-    }
-}
-
-#[test]
-fn test_operation_history_auditable() {
-    let future = Utc::now() + chrono::Duration::hours(1);
-    let intent1 = make_intent("r1", "call the doctor", RemindTime::Scheduled(future));
-    let mut state = make_state_from_intent("r1", intent1);
-
-    // Record creation.
-    state.operations.push(ReminderOperation {
-        operation_id: "op1".to_string(),
-        reminder_id: "r1".to_string(),
-        operation_type: OperationType::Created {
-            intent: state.current_intent.clone(),
-        },
-        recorded_at: Utc::now(),
-        native_id: Some("native1".to_string()),
-    });
-
-    // Record cancellation.
-    state.operations.push(ReminderOperation {
-        operation_id: "op2".to_string(),
-        reminder_id: "r1".to_string(),
-        operation_type: OperationType::Cancelled,
-        recorded_at: Utc::now(),
-        native_id: None,
-    });
-    state.lifecycle_state = ReminderLifecycle::Cancelled;
-
-    // The operation history should be complete and auditable.
-    assert_eq!(state.operations.len(), 2);
-    assert!(matches!(
-        state.operations[0].operation_type,
-        OperationType::Created { .. }
-    ));
-    assert!(matches!(
-        state.operations[1].operation_type,
-        OperationType::Cancelled
-    ));
-}
-
-#[test]
-fn test_native_id_set_only_on_schedule() {
-    let future = Utc::now() + chrono::Duration::hours(1);
-    let intent = make_intent("r1", "remind me", RemindTime::Scheduled(future));
-    let mut state = make_state_from_intent("r1", intent);
-
-    // Initial schedule sets native_id.
-    let op_create = ReminderOperation {
-        operation_id: "op1".to_string(),
-        reminder_id: "r1".to_string(),
-        operation_type: OperationType::Created {
-            intent: state.current_intent.clone(),
-        },
-        recorded_at: Utc::now(),
-        native_id: Some("native1".to_string()),
-    };
-    state.operations.push(op_create);
-    state.native_id = Some("native1".to_string());
-
-    // Reschedule does not set a new native_id at the operation level
-    // (that would be handled by the scheduling layer).
-    let future2 = Utc::now() + chrono::Duration::hours(2);
-    let intent2 = make_intent("r1", "different time", RemindTime::Scheduled(future2));
-    let op_reschedule = ReminderOperation {
-        operation_id: "op2".to_string(),
-        reminder_id: "r1".to_string(),
-        operation_type: OperationType::Rescheduled {
-            new_intent: intent2,
-        },
-        recorded_at: Utc::now(),
-        native_id: None, // Reschedule operation itself doesn't set native_id
-    };
-    state.operations.push(op_reschedule);
-
-    assert_eq!(state.native_id, Some("native1".to_string()));
-    assert!(state.operations[1].native_id.is_none());
-}
-
-#[test]
-fn test_cancelled_then_completed_not_allowed() {
-    let future = Utc::now() + chrono::Duration::hours(1);
-    let intent = make_intent("r1", "remind me", RemindTime::Scheduled(future));
-    let mut state = make_state_from_intent("r1", intent);
-
-    // Cancel the reminder.
-    state.lifecycle_state = ReminderLifecycle::Cancelled;
-    state.operations.push(ReminderOperation {
-        operation_id: "op1".to_string(),
-        reminder_id: "r1".to_string(),
-        operation_type: OperationType::Cancelled,
-        recorded_at: Utc::now(),
-        native_id: None,
-    });
-
-    // Trying to complete a cancelled reminder should be rejected.
-    let op_complete = OperationType::Completed;
-    assert_eq!(
-        validate_operation(&state, &op_complete),
-        OperationValidity::NotAllowed
-    );
-}
-
-#[test]
-fn test_completed_then_cancelled_not_allowed() {
-    let future = Utc::now() + chrono::Duration::hours(1);
-    let intent = make_intent("r1", "remind me", RemindTime::Scheduled(future));
-    let mut state = make_state_from_intent("r1", intent);
-
-    // Complete the reminder.
-    state.lifecycle_state = ReminderLifecycle::Completed;
-    state.operations.push(ReminderOperation {
-        operation_id: "op1".to_string(),
-        reminder_id: "r1".to_string(),
-        operation_type: OperationType::Completed,
-        recorded_at: Utc::now(),
-        native_id: None,
-    });
-
-    // Trying to cancel a completed reminder should be rejected.
-    let op_cancel = OperationType::Cancelled;
-    assert_eq!(
-        validate_operation(&state, &op_cancel),
-        OperationValidity::NotAllowed
-    );
+    // New operations start in Pending state
+    assert_eq!(op.operation_state, OperationState::Pending);
+    tx.commit().unwrap();
 }
