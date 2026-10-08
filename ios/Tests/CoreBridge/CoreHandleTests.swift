@@ -269,6 +269,74 @@ final class CoreHandleTests: XCTestCase {
         XCTAssertEqual(deliveredAfterSettled, 0)
     }
 
+    /// Holds the window between a delivery claiming the handler and invoking it open on the main
+    /// queue, and checks that a lifecycle call from a background thread cannot return inside it.
+    private func assertBackgroundLifecycleCallWaitsForAClaimedHandler(
+        _ lifecycleCall: @escaping (CoreHandle) throws -> Void
+    ) throws {
+        let core = try CoreHandle()
+        defer { core.close() }
+        let claimed = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        CoreHandle.deliveryClaimedHookForTesting = {
+            claimed.signal()
+            _ = release.wait(timeout: .now() + 30)
+        }
+        defer { CoreHandle.deliveryClaimedHookForTesting = nil }
+
+        var handlerRunCount = 0
+        try core.setEventHandler { _ in handlerRunCount += 1 }
+
+        let outcomeLock = NSLock()
+        var returnedWhileClaimed = false
+        var returnedAfterRelease = false
+        let finished = expectation(description: "background lifecycle call settled")
+        DispatchQueue.global().async {
+            defer { finished.fulfill() }
+            guard claimed.wait(timeout: .now() + 30) == .success else {
+                release.signal()
+                XCTFail("the main queue never claimed the handler")
+                return
+            }
+            let callReturned = DispatchSemaphore(value: 0)
+            DispatchQueue.global().async {
+                do {
+                    try lifecycleCall(core)
+                } catch {
+                    XCTFail("lifecycle call failed: \(error)")
+                }
+                callReturned.signal()
+            }
+            let early = callReturned.wait(timeout: .now() + 0.5) == .success
+            release.signal()
+            let late = early || callReturned.wait(timeout: .now() + 30) == .success
+            outcomeLock.lock()
+            returnedWhileClaimed = early
+            returnedAfterRelease = late
+            outcomeLock.unlock()
+        }
+        try core.startStoreCheck(operationID: 1)
+        wait(for: [finished], timeout: 90)
+
+        outcomeLock.lock()
+        defer { outcomeLock.unlock() }
+        XCTAssertFalse(returnedWhileClaimed, "the call returned while a claimed handler had not yet run")
+        XCTAssertTrue(returnedAfterRelease)
+        XCTAssertEqual(handlerRunCount, 1, "the claimed handler ran to completion before the call returned")
+    }
+
+    func testCancelOnABackgroundThreadWaitsForAHandlerAlreadyClaimedOnTheMainQueue() throws {
+        try assertBackgroundLifecycleCallWaitsForAClaimedHandler { try $0.cancel() }
+    }
+
+    func testCloseOnABackgroundThreadWaitsForAHandlerAlreadyClaimedOnTheMainQueue() throws {
+        try assertBackgroundLifecycleCallWaitsForAClaimedHandler { $0.close() }
+    }
+
+    func testReplacingTheHandlerOnABackgroundThreadWaitsForAHandlerAlreadyClaimedOnTheMainQueue() throws {
+        try assertBackgroundLifecycleCallWaitsForAClaimedHandler { try $0.setEventHandler(nil) }
+    }
+
     func testReplacingTheHandlerNeverDeliversToTheOldHandlerAfterwards() throws {
         let core = try CoreHandle()
         defer { core.close() }
