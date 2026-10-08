@@ -35,7 +35,6 @@ public enum CredentialError: LocalizedError {
 public enum CredentialStatus: Equatable {
     case present
     case absent
-    case invalidated
 }
 
 /// Manages provider secrets in native Keychain behind opaque references.
@@ -118,7 +117,7 @@ public class CredentialService {
 
     /// Gets the current status of a credential without retrieving the secret
     /// - Parameter reference: The credential reference to check
-    /// - Returns: CredentialStatus indicating presence, absence, or invalidation
+    /// - Returns: CredentialStatus indicating presence or absence
     /// - Throws: CredentialError if status check fails
     public func credentialStatus(reference: String) throws -> CredentialStatus {
         guard !reference.isEmpty else {
@@ -127,19 +126,12 @@ public class CredentialService {
 
         var query = keychainQueryAttributes(for: reference)
         query[kSecReturnData as String] = false
-        query[kSecReturnAttributes as String] = true
 
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
 
         switch status {
         case errSecSuccess:
-            if let attributes = result as? [String: Any] {
-                if let invalidated = attributes[kSecAttrInvalidated as String] as? Bool {
-                    return invalidated ? .invalidated : .present
-                }
-                return .present
-            }
             return .present
         case errSecItemNotFound:
             return .absent
@@ -193,7 +185,7 @@ public class CredentialService {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
             kSecAttrAccount as String: reference,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockedThisDeviceOnly
         ]
     }
 
@@ -207,8 +199,22 @@ public class CredentialService {
         case errSecSuccess:
             return
         case errSecDuplicateItem:
-            try deleteCredential(reference: reference)
-            try addKeychainItem(secret, reference: reference)
+            let query = keychainQueryAttributes(for: reference)
+            let updateStatus = SecItemUpdate(query as CFDictionary, [kSecValueData as String: secret] as CFDictionary)
+            switch updateStatus {
+            case errSecSuccess:
+                return
+            case errSecItemNotFound:
+                throw CredentialError.addFailed("Item not found during recovery from duplicate")
+            case errSecUserCanceled:
+                throw CredentialError.addFailed("User cancelled Keychain access")
+            case errSecInteractionNotAllowed:
+                throw CredentialError.addFailed("Keychain interaction not allowed (device may be locked)")
+            case errSecAuthFailed:
+                throw CredentialError.addFailed("Keychain authentication failed")
+            default:
+                throw CredentialError.unexpectedStatus(updateStatus)
+            }
         case errSecUserCanceled:
             throw CredentialError.addFailed("User cancelled Keychain access")
         case errSecInteractionNotAllowed:

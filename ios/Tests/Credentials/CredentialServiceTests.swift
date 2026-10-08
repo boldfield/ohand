@@ -128,9 +128,7 @@ final class CredentialServiceTests: XCTestCase {
     func testDeleteNonexistentCredentialDoesNotThrow() throws {
         let reference = UUID().uuidString
 
-        XCTAssertNoThrow {
-            try credentialService.deleteCredential(reference: reference)
-        }
+        try credentialService.deleteCredential(reference: reference)
     }
 
     func testDeleteCredentialTwice() throws {
@@ -138,9 +136,7 @@ final class CredentialServiceTests: XCTestCase {
         let reference = try credentialService.addCredential(secret)
 
         try credentialService.deleteCredential(reference: reference)
-        XCTAssertNoThrow {
-            try credentialService.deleteCredential(reference: reference)
-        }
+        try credentialService.deleteCredential(reference: reference)
 
         let status = try credentialService.credentialStatus(reference: reference)
         XCTAssertEqual(status, .absent)
@@ -340,12 +336,97 @@ final class CredentialServiceTests: XCTestCase {
         let newSecret = "new-secret".data(using: .utf8)!
         try credentialService.updateCredential(newSecret, reference: reference)
 
-        XCTAssertNoThrow {
-            try credentialService.updateCredential(newSecret, reference: reference)
-        }
+        try credentialService.updateCredential(newSecret, reference: reference)
 
         let retrieved = try credentialService.retrieveCredential(reference: reference)
         XCTAssertEqual(retrieved, newSecret)
+    }
+
+    // MARK: - Lock/Relaunch Behavior Tests
+
+    func testCredentialPersistsThroughFreshServiceInstance() throws {
+        let secret = "persistent-secret".data(using: .utf8)!
+        let reference = try credentialService.addCredential(secret)
+
+        let freshService = CredentialService(keychainService: testKeychainService)
+        let status = try freshService.credentialStatus(reference: reference)
+        XCTAssertEqual(status, .present, "Credential should persist through fresh service instance")
+
+        let retrieved = try freshService.retrieveCredential(reference: reference)
+        XCTAssertEqual(retrieved, secret, "Credential value should be retrievable from fresh instance")
+    }
+
+    func testAccessibilityClassIsAfterFirstUnlock() throws {
+        let secret = "accessibility-test".data(using: .utf8)!
+        let reference = try credentialService.addCredential(secret)
+
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: testKeychainService,
+            kSecAttrAccount as String: reference,
+            kSecReturnAttributes as String: true
+        ]
+
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+
+        XCTAssertEqual(status, errSecSuccess, "Should find the credential")
+        if let attributes = result as? [String: Any] {
+            let accessibleValue = attributes[kSecAttrAccessible as String]
+            XCTAssertEqual(
+                accessibleValue as? String,
+                kSecAttrAccessibleAfterFirstUnlockedThisDeviceOnly as String,
+                "Credential should use AfterFirstUnlock accessibility class"
+            )
+        }
+    }
+
+    // MARK: - Storage Error Handling Tests
+
+    func testAddWithDeviceLockedError() throws {
+        let secret = "test-secret".data(using: .utf8)!
+        let reference = UUID().uuidString
+
+        var query = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: testKeychainService,
+            kSecAttrAccount as String: reference,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockedThisDeviceOnly,
+            kSecValueData as String: secret
+        ] as [String: Any]
+
+        let status = SecItemAdd(query as CFDictionary, nil)
+        XCTAssertEqual(status, errSecSuccess, "Test setup: should add item")
+    }
+
+    func testCredentialErrorsDoNotContainSecrets() throws {
+        let secret = "super-secret-value".data(using: .utf8)!
+        let reference = try credentialService.addCredential(secret)
+        try credentialService.deleteCredential(reference: reference)
+
+        do {
+            _ = try credentialService.retrieveCredential(reference: reference)
+            XCTFail("Should throw keyNotFound")
+        } catch let error as CredentialError {
+            if let description = error.errorDescription {
+                XCTAssertFalse(description.contains("super-secret"), "Error description should not contain secret")
+                XCTAssertFalse(description.contains("secret-value"), "Error description should not contain secret")
+            }
+        }
+    }
+
+    func testInteractionNotAllowedErrorHandling() throws {
+        let secret = "secret".data(using: .utf8)!
+        let reference = try credentialService.addCredential(secret)
+
+        do {
+            _ = try credentialService.retrieveCredential(reference: reference)
+        } catch let error as CredentialError {
+            if case .statusError(let msg) = error {
+                XCTAssertTrue(msg.contains("Keychain") || msg.contains("access"), "Error should explain the issue")
+                XCTAssertFalse(msg.contains("secret"), "Error should not contain secret value")
+            }
+        }
     }
 
     // MARK: - Helpers
@@ -356,16 +437,5 @@ final class CredentialServiceTests: XCTestCase {
             kSecAttrService as String: testKeychainService
         ]
         SecItemDelete(query as CFDictionary)
-    }
-}
-
-// Helper for asserting no throw
-extension CredentialServiceTests {
-    func XCTAssertNoThrow(_ expression: @autoclosure () throws -> Void, _ message: @autoclosure () -> String = "", file: StaticString = #filePath, line: UInt = #line) {
-        do {
-            try expression()
-        } catch {
-            XCTFail("Should not throw: \(error)", file: file, line: line)
-        }
     }
 }
