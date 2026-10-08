@@ -318,6 +318,7 @@ schemes:
         - BridgeProbeTests
         - CaptureProbeTests
         - HandoffValidatorTests
+        - HandoffValidatorTests
   CaptureProbeTests:
     build:
       targets:
