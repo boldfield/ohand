@@ -53,19 +53,11 @@ impl InterpretationMapping {
         item_id: impl Into<String>,
         proposal_id: impl Into<String>,
     ) -> Result<Self, InstructionError> {
-        if request.instruction_version() != M1_INSTRUCTION_VERSION {
-            return Err(InstructionError::UnknownInstructionVersion {
-                requested: request.instruction_version().to_string(),
-                expected: M1_INSTRUCTION_VERSION.to_string(),
-            });
-        }
+        validate_request(request)?;
         let item_id = item_id.into();
         let proposal_id = proposal_id.into();
         require_uuid(&item_id, "item_id")?;
         require_uuid(&proposal_id, "proposal_id")?;
-        i32::try_from(request.source_revision())
-            .map_err(|_| InstructionError::SourceRevisionOutOfRange(request.source_revision()))?;
-        validate_time_context(request)?;
         Ok(InterpretationMapping {
             request: request.clone(),
             item_id,
@@ -132,6 +124,20 @@ impl InterpretationMapping {
             &self.item_id,
         )?)
     }
+}
+
+/// Check the parts of a request the instructions depend on: the published instruction version,
+/// a proposal-range source revision and a coherent time context.
+pub(super) fn validate_request(request: &InterpretationRequest) -> Result<(), InstructionError> {
+    if request.instruction_version() != M1_INSTRUCTION_VERSION {
+        return Err(InstructionError::UnknownInstructionVersion {
+            requested: request.instruction_version().to_string(),
+            expected: M1_INSTRUCTION_VERSION.to_string(),
+        });
+    }
+    i32::try_from(request.source_revision())
+        .map_err(|_| InstructionError::SourceRevisionOutOfRange(request.source_revision()))?;
+    validate_time_context(request)
 }
 
 fn require_uuid(value: &str, field: &'static str) -> Result<(), InstructionError> {

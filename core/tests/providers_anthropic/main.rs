@@ -2,6 +2,9 @@
 //! shared `dispatch` harness with a scripted HTTP transport.
 
 use chrono::{TimeZone, Utc};
+use ohand_core::interpretation::instructions::{
+    output_schema, M1_INSTRUCTION_TEXT, M1_INSTRUCTION_VERSION,
+};
 use ohand_core::providers::anthropic::fake::{FakeAnthropicStep, FakeAnthropicTransport};
 use ohand_core::providers::anthropic::{
     AnthropicAdapter, AnthropicSettings, HttpMethod, HttpRequest, SettingsError,
@@ -50,7 +53,7 @@ fn request_for(profile: &ProviderProfile) -> InterpretationRequest {
         TextBasis::Original { item_revision: 0 },
         NOTE_TEXT,
         Uuid::new_v4().to_string(),
-        "instructions-v7",
+        M1_INSTRUCTION_VERSION,
         profile,
         "route-private-name",
         TimeContext {
@@ -136,9 +139,9 @@ fn tool_use(name: &str, input: Value) -> Value {
 
 fn valid_proposal() -> Value {
     json!({
-        "schema_version": 1,
-        "annotation": { "kind": "action" },
-        "reminder_time": { "resolution": "inferred" },
+        "operation": { "kind": "annotate" },
+        "item_type": "action",
+        "source_spans": [{ "start": 0, "end": 4 }],
     })
 }
 
@@ -195,17 +198,29 @@ fn request_is_built_from_profile_and_protocol_settings() {
 
     let body = body_of(call);
     let system = body["system"].as_str().expect("system prompt").to_string();
-    for expected in [
-        "instructions-v7",
-        "America/Chicago",
-        "en-US",
-        "gregorian",
-        "2026-01-05T15:00:00+00:00",
-        "-21600",
-    ] {
-        assert!(system.contains(expected), "system prompt lacks {expected}");
-    }
+    assert!(
+        system.starts_with(M1_INSTRUCTION_TEXT),
+        "the pinned instructions are sent byte for byte"
+    );
+    let delivery = &system[M1_INSTRUCTION_TEXT.len()..];
+    assert!(delivery.contains(INTERPRETATION_TOOL_NAME));
+    let user = body["messages"][0]["content"]
+        .as_str()
+        .expect("user message");
+    let document: Value = serde_json::from_str(user).expect("user message is the context document");
+    assert_eq!(document["instruction_version"], M1_INSTRUCTION_VERSION);
+    assert_eq!(document["source"]["text"], NOTE_TEXT);
+    assert_eq!(document["source"]["trust"], "untrusted_data");
+    assert_eq!(document["time_context"]["timezone"], "America/Chicago");
+    assert_eq!(document["time_context"]["locale"], "en-US");
+    assert_eq!(document["time_context"]["calendar"], "gregorian");
+    assert_eq!(document["time_context"]["utc_offset_at_capture"], -21_600);
+    assert_eq!(
+        document["time_context"]["reference_time"],
+        "2026-01-05T15:00:00Z"
+    );
     let settings = AnthropicSettings::default();
+    assert_eq!(settings.proposal_schema, output_schema());
     let expected_schema = settings.proposal_schema.clone();
     assert_eq!(
         body,
@@ -213,7 +228,7 @@ fn request_is_built_from_profile_and_protocol_settings() {
             "model": MODEL,
             "max_tokens": settings.max_output_tokens,
             "system": system,
-            "messages": [{ "role": "user", "content": NOTE_TEXT }],
+            "messages": [{ "role": "user", "content": user }],
             "tools": [{
                 "name": INTERPRETATION_TOOL_NAME,
                 "description": "Report the interpretation of the captured note.",
@@ -222,6 +237,34 @@ fn request_is_built_from_profile_and_protocol_settings() {
             "tool_choice": { "type": "auto" },
         })
     );
+}
+
+#[test]
+fn unpublished_instruction_version_is_rejected_before_any_transport_call() {
+    let harness = Harness::new(vec![ok_reply(valid_proposal())]);
+    let request = InterpretationRequest::new(
+        Uuid::new_v4().to_string(),
+        0,
+        TextBasis::Original { item_revision: 0 },
+        NOTE_TEXT,
+        Uuid::new_v4().to_string(),
+        "instructions-v7",
+        &harness.profile,
+        "route-private-name",
+        request_for(&harness.profile).time_context().clone(),
+    )
+    .expect("valid request");
+    let failure = dispatch(
+        &harness.adapter,
+        &harness.profile,
+        &request,
+        harness.clock.as_ref(),
+        &harness.cancel,
+        &DispatchLimits::default(),
+    )
+    .expect_err("only the published instructions are sent");
+    assert_eq!(failure.kind, FailureKind::Rejected);
+    assert!(harness.transport.calls().is_empty());
 }
 
 #[test]
@@ -352,7 +395,11 @@ fn text_and_thinking_blocks_around_the_interpret_call_are_ignored() {
 fn proposal_with_unrelated_extra_fields_is_kept_for_semantic_validation() {
     let mut proposal = valid_proposal();
     proposal["session_topic"] = json!({ "name": "errands" });
-    let harness = Harness::new(vec![ok_reply(proposal.clone())]);
+    let harness = Harness::with(
+        profile(StructuredOutputMode::JsonObject),
+        AnthropicSettings::default(),
+        vec![ok_reply(proposal.clone())],
+    );
     assert_eq!(Value::Object(harness.run().unwrap().proposal), proposal);
 }
 
@@ -508,22 +555,22 @@ fn malformed_and_unexpected_replies_are_invalid_output() {
             ),
         ),
         (
-            "missing required schema_version",
+            "missing required operation",
             FakeAnthropicStep::respond_json(
                 200,
                 &message(
                     "tool_use",
-                    json!([interpret(json!({ "annotation": { "kind": "note" } }))]),
+                    json!([interpret(json!({ "item_type": "note" }))]),
                 ),
             ),
         ),
         (
-            "schema_version has the wrong type",
+            "operation has the wrong type",
             FakeAnthropicStep::respond_json(
                 200,
                 &message(
                     "tool_use",
-                    json!([interpret(json!({ "schema_version": "1" }))]),
+                    json!([interpret(json!({ "operation": "annotate" }))]),
                 ),
             ),
         ),

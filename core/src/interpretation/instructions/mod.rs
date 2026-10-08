@@ -9,7 +9,8 @@
 //!   annotates and the proposal identifier. [`InterpretationMapping::render`] produces the
 //!   provider-neutral prompt: the instructions plus a JSON document in which the captured text
 //!   is a single escaped string next to explicit capture, profile and time context.
-//!   Adapters send it; they never add instructions of their own.
+//!   Adapters obtain it through [`render_prompt`] and send `system` and `user` as they are; the
+//!   only text an adapter may add is transport framing that says how to deliver the reply.
 //! - [`InterpretationMapping::map_output`] accepts only the facet keys the contract allows,
 //!   rejects provider-supplied provenance and any other key (scope, disclosure, route, ...),
 //!   adds trusted provenance from the request and runs the result through the checked I01
@@ -22,12 +23,22 @@ mod mapping;
 mod prompt;
 mod text;
 
+use crate::providers::contracts::InterpretationRequest;
 pub use mapping::InterpretationMapping;
 pub use prompt::RenderedPrompt;
 pub use text::{content_version, output_schema, M1_INSTRUCTION_TEXT, M1_INSTRUCTION_VERSION};
 
 use crate::interpretation::contracts::ProposalError;
 use thiserror::Error;
+
+/// The provider-neutral prompt for `request`, after checking that it names the published
+/// instructions and carries a coherent time context. Production adapters call this for every
+/// outbound request, so a request for any other instruction version fails closed instead of
+/// being sent with framing the adapter invented.
+pub fn render_prompt(request: &InterpretationRequest) -> Result<RenderedPrompt, InstructionError> {
+    mapping::validate_request(request)?;
+    Ok(prompt::render(request))
+}
 
 /// Version of the provider output contract, equal to the proposal schema version the mapping
 /// produces.

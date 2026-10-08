@@ -29,7 +29,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-const PINNED_VERSION: &str = "f3a650ca20fb00dc1063352a20d9339cca58fc0b5517b0ff2cba5cea01075d68";
+const PINNED_VERSION: &str = "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17";
 const PROPOSAL_ID: &str = "550e8400-e29b-41d4-a716-446655440001";
 const ITEM_ID: &str = "550e8400-e29b-41d4-a716-446655440002";
 const CAPTURE_ID: &str = "550e8400-e29b-41d4-a716-446655440003";
@@ -462,6 +462,24 @@ fn instructions_state_the_trust_boundary_and_limits() {
         assert!(
             M1_INSTRUCTION_TEXT.contains(required),
             "instructions must mention {required:?}"
+        );
+    }
+}
+
+#[test]
+fn trust_boundary_does_not_tell_the_model_to_ignore_the_reminder_request_it_must_classify() {
+    assert!(
+        !M1_INSTRUCTION_TEXT.contains("schedule things"),
+        "a request to be reminded lives in source.text and must still be interpreted"
+    );
+    for required in [
+        "a request to be reminded becomes a `reminder_proposal`",
+        "the app decides whether anything happens",
+        "only when the user explicitly asks to be reminded",
+    ] {
+        assert!(
+            M1_INSTRUCTION_TEXT.contains(required),
+            "instructions must say {required:?}"
         );
     }
 }
@@ -1268,10 +1286,7 @@ mod anthropic_schema {
             clock.clone(),
             [FakeAnthropicStep::respond_json(200, &message)],
         ));
-        let settings = AnthropicSettings::default()
-            .with_proposal_schema(output_schema())
-            .expect("schema is an object schema");
-        let adapter = AnthropicAdapter::new(transport, settings);
+        let adapter = AnthropicAdapter::new(transport, AnthropicSettings::default());
         dispatch(
             &adapter,
             &profile,
