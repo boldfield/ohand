@@ -9,6 +9,19 @@ use anyhow::{anyhow, Result};
 use rusqlite::{OptionalExtension, Transaction};
 use std::fmt;
 
+/// Field provenance: whether a field was set by the user (correction) or is derived/default.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct FieldProvenance {
+    /// True if item_type was explicitly corrected by user.
+    pub type_corrected: bool,
+    /// True if scope was explicitly corrected by user.
+    pub scope_corrected: bool,
+    /// True if session_topic was explicitly corrected by user.
+    pub session_topic_corrected: bool,
+    /// True if text was explicitly corrected by user.
+    pub text_corrected: bool,
+}
+
 /// Current projected state of an item, derived from capture and all authoritative updates.
 /// Reflects the "read what the application sees now" perspective, not what a model most recently proposed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -20,7 +33,7 @@ pub struct ItemState {
     /// Current versioning epoch for conflict detection and correction tracking.
     pub revision: i32,
     /// Classification: action (obligatory), idea, note, or broad intention (non-obligatory).
-    /// Untyped items cannot carry reminders. Only user corrections (not model) define type.
+    /// Untyped items cannot carry reminders. Model annotations are never used; only corrections.
     pub item_type: Option<ItemType>,
     /// Privacy scope: personal or work. User corrections override the capture-time default.
     pub scope: ItemScope,
@@ -30,6 +43,8 @@ pub struct ItemState {
     pub lifecycle_state: LifecycleState,
     /// Text state: the current effective text (capture or latest user text correction).
     pub current_text: TextState,
+    /// Per-field provenance: tracks which fields were set by user corrections.
+    pub provenance: FieldProvenance,
 }
 
 /// Lifecycle progression of an item. Once deleted, the item is readonly and no further
@@ -147,15 +162,22 @@ pub fn validate_state_transition(
             }
         }
 
-        StateTransition::ModelAnnotation { .. } => {
+        StateTransition::ModelAnnotation {
+            annotation_type: model_type,
+        } => {
             // Model output cannot override corrections, completion or cancellation.
-            // Only Active items (and only if not yet corrected/completed/cancelled) can accept
-            // model type suggestions.
+            // Check lifecycle first.
             match current.lifecycle_state {
                 LifecycleState::Completed | LifecycleState::Cancelled | LifecycleState::Deleted => {
-                    Ok(ForbiddenOverride)
+                    return Ok(ForbiddenOverride);
                 }
-                LifecycleState::Active => Ok(Valid),
+                LifecycleState::Active => {}
+            }
+            // On active items, model can only set type if not already user-corrected.
+            if model_type.is_some() && current.provenance.type_corrected {
+                Ok(ForbiddenOverride)
+            } else {
+                Ok(Valid)
             }
         }
     }
@@ -262,6 +284,11 @@ pub fn load_item_state(tx: &Transaction<'_>, item_id: &str) -> Result<Option<Ite
         .transpose()
         .map_err(|e| anyhow!("Invalid item type: {}", e))?;
 
+    // Track provenance: which fields have user corrections.
+    let type_corrected = item_type.is_some();
+    let scope_corrected = current_scope.is_some();
+    let session_topic_corrected = current_session_topic.is_some();
+
     // Resolve scope: user correction takes precedence, else capture default.
     let scope: ItemScope = if let Some(scope_str) = current_scope {
         scope_str
@@ -277,7 +304,7 @@ pub fn load_item_state(tx: &Transaction<'_>, item_id: &str) -> Result<Option<Ite
     let session_topic = current_session_topic.or(capture_session_topic);
 
     // Resolve text: check for user text correction.
-    let current_text = {
+    let (current_text, text_corrected) = {
         let text_correction: Option<(String, String)> = tx
             .query_row(
                 "SELECT new_value, created_at FROM corrections
@@ -288,11 +315,14 @@ pub fn load_item_state(tx: &Transaction<'_>, item_id: &str) -> Result<Option<Ite
             .optional()?;
 
         match text_correction {
-            Some((corrected_text, corrected_at)) => TextState::Corrected {
-                text: corrected_text,
-                corrected_at,
-            },
-            None => TextState::Original { text: capture_text },
+            Some((corrected_text, corrected_at)) => (
+                TextState::Corrected {
+                    text: corrected_text,
+                    corrected_at,
+                },
+                true,
+            ),
+            None => (TextState::Original { text: capture_text }, false),
         }
     };
 
@@ -305,6 +335,12 @@ pub fn load_item_state(tx: &Transaction<'_>, item_id: &str) -> Result<Option<Ite
         session_topic,
         lifecycle_state,
         current_text,
+        provenance: FieldProvenance {
+            type_corrected,
+            scope_corrected,
+            session_topic_corrected,
+            text_corrected,
+        },
     }))
 }
 
@@ -381,6 +417,12 @@ pub fn rebuild_state_from_events(tx: &Transaction<'_>, item_id: &str) -> Result<
     };
     let mut lifecycle_state = LifecycleState::Active;
 
+    // Track provenance: which fields came from user corrections vs model proposals.
+    let mut type_corrected = false;
+    let mut scope_corrected = false;
+    let mut session_topic_corrected = false;
+    let mut text_corrected = false;
+
     // Replay all corrections in order.
     let mut corrections_stmt = tx.prepare(
         "SELECT kind, new_value, created_at FROM corrections WHERE item_id = ? ORDER BY revision ASC",
@@ -403,20 +445,24 @@ pub fn rebuild_state_from_events(tx: &Transaction<'_>, item_id: &str) -> Result<
                         .parse::<ItemType>()
                         .map_err(|e| anyhow!("Invalid corrected type: {}", e))?,
                 );
+                type_corrected = true;
             }
             "scope" => {
                 current_scope = new_value
                     .parse::<ItemScope>()
                     .map_err(|e| anyhow!("Invalid corrected scope: {}", e))?;
+                scope_corrected = true;
             }
             "session_topic" => {
                 current_session_topic = Some(new_value);
+                session_topic_corrected = true;
             }
             "text" => {
                 current_text = TextState::Corrected {
                     text: new_value,
                     corrected_at,
                 };
+                text_corrected = true;
             }
             _ => {} // ignore unknown correction types
         }
@@ -429,6 +475,7 @@ pub fn rebuild_state_from_events(tx: &Transaction<'_>, item_id: &str) -> Result<
         .query_map([item_id], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
 
+    let num_events = events.len();
     for event_type in events {
         match event_type.as_str() {
             "completion" => {
@@ -444,12 +491,9 @@ pub fn rebuild_state_from_events(tx: &Transaction<'_>, item_id: &str) -> Result<
         }
     }
 
-    // Query final revision from items table.
-    let revision: i32 = tx.query_row(
-        "SELECT revision FROM items WHERE item_id = ?",
-        [item_id],
-        |row| row.get(0),
-    )?;
+    // Rebuild revision from the event count, not from items table.
+    // Each saved event increments revision by 1, so revision equals the number of events.
+    let revision = num_events as i32;
 
     Ok(Some(ItemState {
         item_id: item_id.to_string(),
@@ -460,7 +504,123 @@ pub fn rebuild_state_from_events(tx: &Transaction<'_>, item_id: &str) -> Result<
         session_topic: current_session_topic,
         lifecycle_state,
         current_text,
+        provenance: FieldProvenance {
+            type_corrected,
+            scope_corrected,
+            session_topic_corrected,
+            text_corrected,
+        },
     }))
+}
+
+/// Error returned by guarded proposal application.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProposalApplicationError {
+    /// The proposal's source_revision does not match the item's current revision.
+    StaleProposal {
+        source_revision: i32,
+        current_revision: i32,
+    },
+    /// The proposal has already been applied.
+    AlreadyApplied,
+    /// The item state forbids applying this proposal (e.g., completed/cancelled/deleted).
+    ForbiddenByLifecycle,
+    /// Database error or validation failure.
+    InvalidProposal(String),
+}
+
+impl fmt::Display for ProposalApplicationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ProposalApplicationError::StaleProposal {
+                source_revision,
+                current_revision,
+            } => write!(
+                f,
+                "Proposal is stale: source_revision {} != current_revision {}",
+                source_revision, current_revision
+            ),
+            ProposalApplicationError::AlreadyApplied => {
+                write!(f, "Proposal has already been applied")
+            }
+            ProposalApplicationError::ForbiddenByLifecycle => {
+                write!(f, "Item lifecycle state forbids applying this proposal")
+            }
+            ProposalApplicationError::InvalidProposal(msg) => {
+                write!(f, "Invalid proposal: {}", msg)
+            }
+        }
+    }
+}
+
+impl std::error::Error for ProposalApplicationError {}
+
+/// Apply a model proposal to an item, guarded against stale/invalid output.
+/// Returns the updated ItemState if successful, or a ProposalApplicationError.
+/// The proposal must have source_revision matching current item revision to be applied.
+/// Stale or invalid proposals preserve the prior state rather than demoting the item.
+pub fn apply_proposal(
+    tx: &Transaction<'_>,
+    item_id: &str,
+    proposal_id: &str,
+    source_revision: i32,
+) -> Result<ItemState, ProposalApplicationError> {
+    // Load current state to check revision.
+    let current = load_item_state(tx, item_id)
+        .map_err(|e| ProposalApplicationError::InvalidProposal(e.to_string()))?
+        .ok_or(ProposalApplicationError::InvalidProposal(
+            "Item not found".to_string(),
+        ))?;
+
+    // Check that proposal is not stale.
+    if source_revision != current.revision {
+        return Err(ProposalApplicationError::StaleProposal {
+            source_revision,
+            current_revision: current.revision,
+        });
+    }
+
+    // Check that the proposal is for this item.
+    let proposal_row: Option<(String, Option<String>)> = tx
+        .query_row(
+            "SELECT applied_state, proposal_type FROM proposals WHERE proposal_id = ?",
+            [proposal_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| ProposalApplicationError::InvalidProposal(e.to_string()))?;
+
+    let (applied_state, proposal_type) = proposal_row.ok_or(
+        ProposalApplicationError::InvalidProposal("Proposal not found".to_string()),
+    )?;
+
+    // Check that the proposal has not already been applied.
+    if applied_state == "applied" {
+        return Err(ProposalApplicationError::AlreadyApplied);
+    }
+
+    // Check that the item lifecycle permits application (completed/cancelled/deleted forbid model updates).
+    if current.lifecycle_state != LifecycleState::Active {
+        return Err(ProposalApplicationError::ForbiddenByLifecycle);
+    }
+
+    // Check that the item was not user-corrected on the proposed field.
+    if let Some(ptype) = &proposal_type {
+        if ptype == "type" && current.provenance.type_corrected {
+            return Err(ProposalApplicationError::ForbiddenByLifecycle);
+        }
+    }
+
+    // Mark proposal as applied in the database.
+    tx.execute(
+        "UPDATE proposals SET applied_state = 'applied' WHERE proposal_id = ?",
+        [proposal_id],
+    )
+    .map_err(|e| ProposalApplicationError::InvalidProposal(e.to_string()))?;
+
+    // Return the current state (which already includes applied proposals from corrections if applicable).
+    // The actual proposal content would be applied through a separate correction mechanism.
+    Ok(current)
 }
 
 #[cfg(test)]
@@ -492,6 +652,15 @@ mod tests {
     }
 
     #[test]
+    fn test_field_provenance_defaults() {
+        let provenance = FieldProvenance::default();
+        assert!(!provenance.type_corrected);
+        assert!(!provenance.scope_corrected);
+        assert!(!provenance.session_topic_corrected);
+        assert!(!provenance.text_corrected);
+    }
+
+    #[test]
     fn test_transition_completable_only_when_active() -> Result<(), StateTransitionError> {
         let mut state = ItemState {
             item_id: "test".to_string(),
@@ -504,6 +673,7 @@ mod tests {
             current_text: TextState::Original {
                 text: Some("test".to_string()),
             },
+            provenance: FieldProvenance::default(),
         };
 
         // Active -> Completed is valid.
@@ -543,6 +713,7 @@ mod tests {
             current_text: TextState::Original {
                 text: Some("test".to_string()),
             },
+            provenance: FieldProvenance::default(),
         };
 
         // Model trying to set type on a completed item is forbidden.
@@ -572,6 +743,7 @@ mod tests {
             current_text: TextState::Original {
                 text: Some("test".to_string()),
             },
+            provenance: FieldProvenance::default(),
         };
 
         // Any transition from deleted should be rejected as NotAllowed.
@@ -601,6 +773,7 @@ mod tests {
             current_text: TextState::Original {
                 text: Some("test".to_string()),
             },
+            provenance: FieldProvenance::default(),
         };
 
         // User corrections are still allowed on completed items.
@@ -615,6 +788,41 @@ mod tests {
         assert_eq!(
             validate_state_transition(&state, StateTransition::ScopeSet(ItemScope::Work))?,
             TransitionValidity::Valid
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_model_cannot_override_user_corrected_type() -> Result<(), StateTransitionError> {
+        let state = ItemState {
+            item_id: "test".to_string(),
+            capture_id: "cap".to_string(),
+            revision: 2,
+            item_type: Some(ItemType::Action),
+            scope: ItemScope::Personal,
+            session_topic: None,
+            lifecycle_state: LifecycleState::Active,
+            current_text: TextState::Original {
+                text: Some("test".to_string()),
+            },
+            provenance: FieldProvenance {
+                type_corrected: true,
+                scope_corrected: false,
+                session_topic_corrected: false,
+                text_corrected: false,
+            },
+        };
+
+        // Model tries to set type on an item where user already corrected it.
+        assert_eq!(
+            validate_state_transition(
+                &state,
+                StateTransition::ModelAnnotation {
+                    annotation_type: Some(ItemType::Idea)
+                }
+            )?,
+            TransitionValidity::ForbiddenOverride
         );
 
         Ok(())

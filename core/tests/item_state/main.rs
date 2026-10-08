@@ -3,8 +3,9 @@ use chrono::{DateTime, Utc};
 use std::sync::Arc;
 
 use ohand_core::domain::items::{
-    load_item_state, rebuild_state_from_events, validate_state_transition, ItemScope, ItemState,
-    ItemType, LifecycleState, StateTransition, TextState, TransitionValidity,
+    apply_proposal, load_item_state, rebuild_state_from_events, validate_state_transition,
+    FieldProvenance, ItemScope, ItemState, ItemType, LifecycleState, ProposalApplicationError,
+    StateTransition, TextState, TransitionValidity,
 };
 use ohand_core::store::events::{
     save_event, Correction, CorrectionKind, Event, EventPayload, EventType,
@@ -509,6 +510,7 @@ fn test_deleted_item_rejects_all_transitions() -> Result<()> {
         current_text: TextState::Original {
             text: Some("deleted".to_string()),
         },
+        provenance: FieldProvenance::default(),
     };
 
     // All transitions should be rejected as NotAllowed.
@@ -631,4 +633,260 @@ fn test_session_topic_from_capture_default() -> Result<()> {
 
     assert_eq!(state.session_topic, Some("therapy".to_string()));
     Ok(())
+}
+
+#[test]
+fn test_model_cannot_override_user_corrected_type() -> Result<()> {
+    let path = temp_db_path("model_override_type");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let tx = db.transaction()?;
+    insert_test_item(&tx, "item-1", "call the roofer")?;
+    tx.commit()?;
+
+    // User corrects the type to Action.
+    let type_correction = Event::new(
+        "evt-1".to_string(),
+        "item-1".to_string(),
+        0,
+        EventType::Correction,
+        EventPayload::Correction(Correction {
+            kind: CorrectionKind::Type,
+            old_value: None,
+            new_value: "action".to_string(),
+        }),
+        "2026-01-15T10:30:00Z".to_string(),
+    )?;
+    save_event(&mut db, &type_correction, 0)?;
+
+    let tx = db.transaction()?;
+    let state = load_item_state(&tx, "item-1")?.expect("item should exist");
+    assert_eq!(state.item_type, Some(ItemType::Action));
+    assert!(state.provenance.type_corrected);
+    tx.commit()?;
+
+    // Later, model tries to set type to Idea on this active item.
+    // Should be forbidden because user already corrected the type.
+    let tx = db.transaction()?;
+    let state = load_item_state(&tx, "item-1")?.expect("item should exist");
+    tx.commit()?;
+
+    let result = validate_state_transition(
+        &state,
+        StateTransition::ModelAnnotation {
+            annotation_type: Some(ItemType::Idea),
+        },
+    )?;
+
+    assert_eq!(result, TransitionValidity::ForbiddenOverride);
+    Ok(())
+}
+
+#[test]
+fn test_rebuild_equals_stored_with_provenance() -> Result<()> {
+    let path = temp_db_path("rebuild_provenance");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let tx = db.transaction()?;
+    insert_test_item(&tx, "item-1", "original")?;
+    tx.commit()?;
+
+    // Apply type, scope, and text corrections.
+    let type_event = Event::new(
+        "evt-1".to_string(),
+        "item-1".to_string(),
+        0,
+        EventType::Correction,
+        EventPayload::Correction(Correction {
+            kind: CorrectionKind::Type,
+            old_value: None,
+            new_value: "action".to_string(),
+        }),
+        "2026-01-15T10:30:00Z".to_string(),
+    )?;
+    save_event(&mut db, &type_event, 0)?;
+
+    let scope_event = Event::new(
+        "evt-2".to_string(),
+        "item-1".to_string(),
+        1,
+        EventType::Correction,
+        EventPayload::Correction(Correction {
+            kind: CorrectionKind::Scope,
+            old_value: Some("personal".to_string()),
+            new_value: "work".to_string(),
+        }),
+        "2026-01-15T10:30:01Z".to_string(),
+    )?;
+    save_event(&mut db, &scope_event, 1)?;
+
+    let text_event = Event::new(
+        "evt-3".to_string(),
+        "item-1".to_string(),
+        2,
+        EventType::Correction,
+        EventPayload::Correction(Correction {
+            kind: CorrectionKind::Text,
+            old_value: Some("original".to_string()),
+            new_value: "corrected".to_string(),
+        }),
+        "2026-01-15T10:30:02Z".to_string(),
+    )?;
+    save_event(&mut db, &text_event, 2)?;
+
+    // Verify rebuild.
+    let tx = db.transaction()?;
+    let stored = load_item_state(&tx, "item-1")?.expect("item should exist");
+    let rebuilt = rebuild_state_from_events(&tx, "item-1")?.expect("rebuilt should exist");
+    tx.commit()?;
+
+    // Both should track the same provenance.
+    assert_eq!(stored.provenance, rebuilt.provenance);
+    assert!(stored.provenance.type_corrected);
+    assert!(stored.provenance.scope_corrected);
+    assert!(stored.provenance.text_corrected);
+    assert!(!stored.provenance.session_topic_corrected);
+
+    // They should be equal.
+    assert_eq!(stored, rebuilt);
+    Ok(())
+}
+
+#[test]
+fn test_apply_proposal_rejects_stale_proposal() -> Result<()> {
+    let path = temp_db_path("apply_stale_proposal");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let tx = db.transaction()?;
+    insert_test_item(&tx, "item-1", "call the roofer")?;
+    tx.commit()?;
+
+    // Add a proposal with source_revision = 0.
+    let tx = db.transaction()?;
+    tx.execute(
+        "INSERT INTO proposals (proposal_id, item_id, capture_id, source_revision, schema_version, text_basis_kind, text_basis_id, applied_state, proposal_type, reminder_proposal, session_topic_proposal, source_spans, abstained, request_version, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rusqlite::params![
+            "prop-1",
+            "item-1",
+            "cap-item-1",
+            0,
+            1,
+            "capture",
+            None::<String>,
+            "unapplied",
+            "type",
+            None::<String>,
+            None::<String>,
+            None::<String>,
+            0,
+            None::<String>,
+            "2026-01-15T10:30:00Z",
+        ],
+    )?;
+    tx.commit()?;
+
+    // Apply a correction to increment revision.
+    let correction_event = Event::new(
+        "evt-1".to_string(),
+        "item-1".to_string(),
+        0,
+        EventType::Correction,
+        EventPayload::Correction(Correction {
+            kind: CorrectionKind::Type,
+            old_value: None,
+            new_value: "action".to_string(),
+        }),
+        "2026-01-15T10:30:00Z".to_string(),
+    )?;
+    save_event(&mut db, &correction_event, 0)?;
+
+    // Now item revision is 1, but proposal's source_revision is 0 (stale).
+    let tx = db.transaction()?;
+    let result = apply_proposal(&tx, "item-1", "prop-1", 0);
+    tx.commit()?;
+
+    // Should fail with StaleProposal error.
+    match result {
+        Err(ProposalApplicationError::StaleProposal {
+            source_revision: 0,
+            current_revision: 1,
+        }) => Ok(()),
+        _ => Err(anyhow::anyhow!(
+            "Expected StaleProposal error, got {:?}",
+            result
+        )),
+    }
+}
+
+#[test]
+fn test_apply_proposal_rejects_user_corrected_field() -> Result<()> {
+    let path = temp_db_path("apply_user_corrected");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let tx = db.transaction()?;
+    insert_test_item(&tx, "item-1", "call the roofer")?;
+    tx.commit()?;
+
+    // User corrects the type.
+    let type_event = Event::new(
+        "evt-1".to_string(),
+        "item-1".to_string(),
+        0,
+        EventType::Correction,
+        EventPayload::Correction(Correction {
+            kind: CorrectionKind::Type,
+            old_value: None,
+            new_value: "action".to_string(),
+        }),
+        "2026-01-15T10:30:00Z".to_string(),
+    )?;
+    save_event(&mut db, &type_event, 0)?;
+
+    // Add a proposal for type at the current revision (after the correction).
+    let tx = db.transaction()?;
+    let current_state = load_item_state(&tx, "item-1")?.expect("item should exist");
+    let current_revision = current_state.revision;
+    tx.commit()?;
+
+    let tx = db.transaction()?;
+    tx.execute(
+        "INSERT INTO proposals (proposal_id, item_id, capture_id, source_revision, schema_version, text_basis_kind, text_basis_id, applied_state, proposal_type, reminder_proposal, session_topic_proposal, source_spans, abstained, request_version, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rusqlite::params![
+            "prop-2",
+            "item-1",
+            "cap-item-1",
+            current_revision,
+            1,
+            "capture",
+            None::<String>,
+            "unapplied",
+            "type",
+            None::<String>,
+            None::<String>,
+            None::<String>,
+            0,
+            None::<String>,
+            "2026-01-15T10:30:00Z",
+        ],
+    )?;
+    tx.commit()?;
+
+    // Try to apply the proposal. Should fail because user already corrected the type.
+    let tx = db.transaction()?;
+    let result = apply_proposal(&tx, "item-1", "prop-2", current_revision);
+    tx.commit()?;
+
+    match result {
+        Err(ProposalApplicationError::ForbiddenByLifecycle) => Ok(()),
+        _ => Err(anyhow::anyhow!(
+            "Expected ForbiddenByLifecycle error, got {:?}",
+            result
+        )),
+    }
 }
