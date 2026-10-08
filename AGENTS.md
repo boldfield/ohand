@@ -2,6 +2,8 @@
 
 Read [DESIGN.md](DESIGN.md) before planning or implementing work.
 
+For M1 implementation, also read [the task refinement overlay](docs/features/m1-task-refinement.md) and its [effective dependency graph](docs/features/m1-task-refinement.json). It delegates original ownership groups into smaller tasks, preserves their acceptance criteria, and corrects transcription/reset ownership. The original task manifest remains the historical baseline; this overlay defines current execution.
+
 ## Interactive coordination
 
 Interactive agents investigate, discuss, and maintain design/specification documents. Application code changes go through Odonian tasks. Direct documentation edits and repository bootstrap mechanics are allowed. Do not implement features or fixes directly unless the maintainer explicitly requests a direct edit.
@@ -22,6 +24,8 @@ This project explicitly authorizes agent-driven delivery with **no routine human
 - Avoid opting into an Odonian feature whose contract requires human merge, such as the currently documented research continuation-manifest path. Use supported ordinary task coordination instead; do not bypass checks or rewrite Odonian as part of this app.
 
 Credentials, account enrollment/legal actions, and genuine device experiences are external inputs. Continue independent work when one is missing. Never fabricate a device test, successful deployment, or supported provider capability.
+
+For P08/V08 external execution inputs, read [the prerequisite status and provider configuration reference](docs/features/m1-external-prerequisites.md). Neither task is complete until its original real-evidence criteria pass.
 
 ## Implementation and review
 
