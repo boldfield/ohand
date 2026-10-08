@@ -8,6 +8,12 @@ final class NotificationProbeTests: XCTestCase {
     override func setUp() {
         super.setUp()
         notificationCenter.removeAllPendingNotificationRequests()
+
+        let authExpectation = XCTestExpectation(description: "Request authorization")
+        notificationCenter.requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in
+            authExpectation.fulfill()
+        }
+        wait(for: [authExpectation], timeout: testTimeout)
     }
 
     override func tearDown() {
