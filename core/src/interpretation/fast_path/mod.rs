@@ -12,7 +12,11 @@
 //! filler   := "please" | "hey" | "ok" | ... (closed list)
 //! ```
 //!
-//! The command must start its clause. Anything else that merely contains "remind me" (for
+//! In the topic-first form the content must not end in a preposition, particle or determiner
+//! ("ahead of", "prior to", "due"): the time would be a relation target, not the reminder time.
+//!
+//! The command must start its clause. A speaker label before a colon, bracket or dash ("Sam:")
+//! is attribution and abstains unless it is a self-addressed label ("Note to self:"). Anything else that merely contains "remind me" (for
 //! example "can the calendar remind me ..." or "my friend asked me to remind me ...") is not
 //! this grammar and is left alone.
 //!
@@ -24,8 +28,9 @@
 //!   instant (never guessed) and keep their evidence span for the correction path.
 //! - `Some(proposal)` with an abstention: the grammar matched but a safety guard applies
 //!   (negation, quotation, hypothetical or reported speech, completed work, a retraction,
-//!   negation, quote, clause break or condition inside the content, two competing times, or a
-//!   recurrence request). Nothing is scheduled; the
+//!   negation, quote, clause break, condition, attribution or second predicate inside the content,
+//!   a speaker label, two competing times, a relation word before the time, or a recurrence
+//!   request anywhere in the command). Nothing is scheduled; the
 //!   abstention only records why and never suppresses later interpretation of the same text.
 
 use crate::domain::items::SUPPORTED_PROPOSAL_SCHEMA_VERSION;
@@ -186,9 +191,95 @@ const NUMBER_INTRODUCERS: &[&str] = &[
     "at", "in", "by", "around", "within", "until", "till", "after", "before", "about",
 ];
 
+// In the topic-first form the time must follow the content directly (or after "on"). When the
+// content ends in a preposition, particle, determiner or relation word ("before", "ahead of",
+// "prior to", "the eve of", "due", "every"), the time is a relation target or deadline, not the
+// reminder time. Prepositions and determiners are closed classes, so this list is bounded.
 const TEMPORAL_RELATION_WORDS: &[&str] = &[
-    "before", "after", "by", "until", "till", "except", "from", "since", "around", "about", "at",
-    "in", "within", "during", "past", "through", "thru", "for", "than", "beyond", "ahead",
+    "about",
+    "above",
+    "across",
+    "after",
+    "against",
+    "ahead",
+    "along",
+    "amid",
+    "among",
+    "approximately",
+    "around",
+    "as",
+    "at",
+    "before",
+    "behind",
+    "below",
+    "beneath",
+    "beside",
+    "besides",
+    "between",
+    "beyond",
+    "by",
+    "circa",
+    "despite",
+    "down",
+    "due",
+    "during",
+    "earliest",
+    "effective",
+    "eve",
+    "except",
+    "for",
+    "from",
+    "in",
+    "inside",
+    "into",
+    "latest",
+    "like",
+    "near",
+    "of",
+    "off",
+    "onto",
+    "out",
+    "outside",
+    "over",
+    "past",
+    "per",
+    "prior",
+    "roughly",
+    "since",
+    "starting",
+    "than",
+    "through",
+    "throughout",
+    "thru",
+    "till",
+    "to",
+    "toward",
+    "towards",
+    "under",
+    "until",
+    "unto",
+    "up",
+    "upon",
+    "via",
+    "with",
+    "within",
+    "without",
+    "the",
+    "a",
+    "an",
+    "this",
+    "that",
+    "these",
+    "those",
+    "my",
+    "your",
+    "our",
+    "their",
+    "his",
+    "her",
+    "its",
+    "every",
+    "each",
 ];
 
 const CONTENT_CLAUSE_WORDS: &[&str] = &[
@@ -225,6 +316,32 @@ const CONTENT_CONDITION_WORDS: &[&str] = &[
     "possibly",
     "whether",
     "nevermind",
+    "hypothetically",
+    "theoretically",
+    "supposedly",
+    "allegedly",
+    "reportedly",
+    "apparently",
+    "presumably",
+    "probably",
+    "hopefully",
+    "ideally",
+    "suppose",
+    "imagine",
+];
+
+const CONTENT_CONDITION_SEQUENCES: &[&[&str]] = &[&["in", "theory"], &["in", "principle"]];
+
+// Attribution markers: "according to Sam", "per Sam", "via Sam".
+const CONTENT_ATTRIBUTION_WORDS: &[&str] = &["according", "per", "via"];
+
+// A modal, finite copula/auxiliary or linking verb in the content starts a second predicate
+// ("to call mom would be nice", "to call mom was the plan"), so the content is not the single
+// clause the grammar accepts. Base forms ("be", "have", "do") stay ordinary reminder verbs.
+const CONTENT_PREDICATE_WORDS: &[&str] = &[
+    "would", "might", "could", "should", "may", "must", "will", "shall", "can", "is", "was",
+    "were", "are", "has", "had", "does", "sounds", "sounded", "seems", "seemed", "feels", "looks",
+    "looked", "appears", "appeared",
 ];
 
 const CONTENT_RETRACTION_WORDS: &[&str] = &[
@@ -312,6 +429,27 @@ const RECURRENCE_UNITS: &[&str] = &[
     "weekday",
     "weekend",
     "other",
+];
+
+const DETERMINERS: &[&str] = &[
+    "the", "a", "an", "this", "that", "these", "those", "my", "your", "our", "their", "his", "her",
+    "its",
+];
+
+// A label before a colon, bracket or dash in the command's sentence is attribution ("Sam:",
+// "From Sam:", "Mom (via text):"), not the user's own command, unless it is one of these
+// self-addressed labels or assistant names.
+const SELF_LABELS: &[&[&str]] = &[
+    &[],
+    &["note", "to", "self"],
+    &["note"],
+    &["memo"],
+    &["reminder"],
+    &["todo"],
+    &["to-do"],
+    &["to", "do"],
+    &["siri"],
+    &["assistant"],
 ];
 
 const WEEKDAYS: &[&str] = &[
@@ -502,6 +640,11 @@ fn recurrence_phrase_length(tokens: &[Token], index: usize) -> usize {
     let Some(second) = tokens.get(index + 1) else {
         return 0;
     };
+    if second.is_word()
+        && (is_iso_date(&second.lower) || second.lower == "tomorrow" || second.lower == "next")
+    {
+        return 2;
+    }
     if is_unit_token(second) && !second.is_word_equal_to("other") {
         return 2;
     }
@@ -650,29 +793,20 @@ fn is_every_unit_lead(rest: &[Token]) -> bool {
     })
 }
 
-fn leading_time_length(rest: &[Token], first_index: usize) -> usize {
-    [2, 1]
-        .into_iter()
-        .find(|count| {
-            rest.get(first_index..first_index + count)
-                .is_some_and(looks_like_time_phrase)
-        })
-        .unwrap_or(0)
-}
-
-/// Recurrence is a request, not vocabulary: a recurrence phrase ("every <unit>", "every two
-/// days", a recurrence adverb, a plural weekday) in the time position (right after the command or
-/// right after a leading time) or ending the command. "the weekly report" or "the Mondays
-/// report" inside the content is just a noun phrase.
+/// Recurrence is a request, not vocabulary. A recurrence phrase ("every <unit>", "every two
+/// days", "each morning", a recurrence adverb, a plural weekday) anywhere in the command is a
+/// recurrence request, except where an adverb or plural weekday modifies a noun after a
+/// determiner ("the weekly report", "the Mondays report").
 fn is_recurrence_request(rest: &[Token]) -> bool {
     let body = command_body(rest);
-    let time_start = usize::from(body.first().is_some_and(|t| t.is_word_equal_to("on")));
-    let after_time = time_start + leading_time_length(body, time_start);
-    let command_end = body.iter().rposition(Token::is_word).map(|last| last + 1);
     (0..body.len()).any(|index| {
         let length = recurrence_phrase_length(body, index);
-        length > 0
-            && (index == time_start || index == after_time || command_end == Some(index + length))
+        let is_noun_modifier = index > 0
+            && !body[index].is_word_equal_to("every")
+            && !body[index].is_word_equal_to("each")
+            && DETERMINERS.contains(&body[index - 1].lower.as_str())
+            && body[index - 1].is_word();
+        length > 0 && !is_noun_modifier
     })
 }
 
@@ -768,10 +902,29 @@ fn current_clause(prefix: &[Token]) -> &[Token] {
     &prefix[start..]
 }
 
+fn is_label_break(token: &Token) -> bool {
+    token.kind == TokenKind::ClauseBreak && token.ch != ',' && token.ch != ';'
+}
+
+fn has_speaker_label(sentence: &[Token]) -> bool {
+    if !sentence.iter().any(is_label_break) {
+        return false;
+    }
+    let label: Vec<&str> = sentence
+        .iter()
+        .filter(|token| token.is_word() && !FILLERS.contains(&token.lower.as_str()))
+        .map(|token| token.lower.as_str())
+        .collect();
+    !SELF_LABELS.contains(&label.as_slice())
+}
+
 fn prefix_abstention(prefix: &[Token]) -> Option<AbstentionReason> {
     let sentence = current_sentence(prefix);
     if sentence.iter().any(is_negation_word) {
         return Some(AbstentionReason::Negated);
+    }
+    if has_speaker_label(sentence) {
+        return Some(AbstentionReason::UncertainTarget);
     }
     let open_quote_count = prefix
         .iter()
@@ -854,14 +1007,15 @@ fn is_single_plain_clause(content: &[Token]) -> bool {
         && words.iter().enumerate().all(|(position, token)| {
             has_plain_word_shape(&token.lower)
                 && !CONTENT_CLAUSE_WORDS.contains(&token.lower.as_str())
+                && !CONTENT_PREDICATE_WORDS.contains(&token.lower.as_str())
                 && !is_subject_contraction(token)
                 && (position == 0 || !CONTENT_CONTROL_VERBS.contains(&token.lower.as_str()))
         })
 }
 
 /// The reminder content is bounded: it must be a single short plain clause. Negation,
-/// retraction, reported speech, completed work, conditions, quotes, brackets, clause breaks, any
-/// further time and any second clause all mean the user may not be asking for this schedule, so
+/// retraction, reported speech or attribution, completed work, conditions or hypotheticals,
+/// quotes, brackets, clause breaks, any further time and any second clause or predicate all mean the user may not be asking for this schedule, so
 /// nothing is scheduled.
 fn content_abstention(content: &[Token]) -> Option<AbstentionReason> {
     if content.iter().any(is_content_negation_word)
@@ -876,6 +1030,10 @@ fn content_abstention(content: &[Token]) -> Option<AbstentionReason> {
         .iter()
         .any(|token| matches!(token.kind, TokenKind::ClauseBreak | TokenKind::Quote))
         || has_word(content, CONTENT_CONDITION_WORDS)
+        || CONTENT_CONDITION_SEQUENCES
+            .iter()
+            .any(|sequence| has_sequence(content, sequence))
+        || has_word(content, CONTENT_ATTRIBUTION_WORDS)
         || has_word(content, CONTENT_REPORTING_WORDS)
         || has_completion(content)
     {

@@ -208,7 +208,7 @@ fn spans_are_unicode_scalar_offsets_in_the_original_text() {
         FUTURE_INSTANT,
         FUTURE_PHRASE,
     );
-    expect_ambiguous("Caf\u{e9} r\u{e9}sum\u{e9}: remind me tomorrow", "tomorrow");
+    expect_ambiguous("Caf\u{e9} r\u{e9}sum\u{e9}. Remind me tomorrow", "tomorrow");
     expect_explicit(
         "remind me 2025-10-20 14:30:00 to buy \u{e9}clairs",
         FUTURE_INSTANT,
@@ -696,4 +696,146 @@ fn recurrence_is_syntax_aware() {
 fn stop_in_the_content_is_an_ordinary_verb() {
     expect_ambiguous("remind me to stop by mom's tomorrow", "tomorrow");
     expect_ambiguous("remind me tomorrow to stop smoking", "tomorrow");
+}
+
+#[test]
+fn multi_word_relations_before_a_topic_first_time_never_schedule() {
+    expect_explicit(
+        "remind me to call mom on 2025-10-20 14:30:00",
+        FUTURE_INSTANT,
+        FUTURE_PHRASE,
+    );
+    expect_explicit(
+        "remind me to pay rent 2025-10-20 14:30:00",
+        FUTURE_INSTANT,
+        FUTURE_PHRASE,
+    );
+    expect_ambiguous("remind me to call mom next friday", "next friday");
+    for time in ["2025-10-20 14:30:00", "tomorrow", "next friday"] {
+        for content in [
+            "call mom ahead of",
+            "call mom prior to",
+            "call mom in advance of",
+            "call mom leading up to",
+            "call mom the eve of",
+            "pay rent due",
+            "call mom no later than",
+            "call mom at the latest by",
+            "call mom roughly",
+            "call mom the",
+        ] {
+            let text = format!("remind me to {content} {time}");
+            expect_no_reminder(&text);
+        }
+    }
+}
+
+#[test]
+fn every_before_a_time_is_unsupported_recurrence() {
+    expect_explicit(
+        "remind me to call mom 2025-10-20 14:30:00",
+        FUTURE_INSTANT,
+        FUTURE_PHRASE,
+    );
+    expect_abstention(
+        "remind me to call mom every 2025-10-20 14:30:00",
+        AbstentionReason::UnsupportedOperation,
+    );
+    expect_abstention(
+        "remind me to call mom each tomorrow",
+        AbstentionReason::UnsupportedOperation,
+    );
+}
+
+#[test]
+fn hypothetical_attribution_and_second_predicate_tails_never_schedule() {
+    let positive = "remind me 2025-10-20 14:30:00 to call mom";
+    expect_explicit(positive, FUTURE_INSTANT, FUTURE_PHRASE);
+    expect_explicit(
+        "remind me 2025-10-20 14:30:00 to be nice to mom",
+        FUTURE_INSTANT,
+        FUTURE_PHRASE,
+    );
+    expect_explicit(
+        "remind me 2025-10-20 14:30:00 to have lunch with Sam",
+        FUTURE_INSTANT,
+        FUTURE_PHRASE,
+    );
+    for suffix in [
+        "hypothetically",
+        "hypothetically speaking",
+        "in theory",
+        "theoretically",
+        "supposedly",
+        "according to Sam",
+        "per Sam",
+        "via Sam",
+        "was the joke",
+        "was the plan",
+        "would be nice",
+        "might be good",
+        "could wait",
+        "is a good idea",
+        "sounds good",
+        "seems wise",
+        "has been postponed",
+    ] {
+        let text = format!("{positive} {suffix}");
+        expect_no_reminder(&text);
+    }
+}
+
+#[test]
+fn speaker_label_before_the_command_never_schedules() {
+    let command = "remind me 2025-10-20 14:30:00 to call mom";
+    expect_explicit(command, FUTURE_INSTANT, FUTURE_PHRASE);
+    for label in [
+        "Note to self: ",
+        "Hey Siri: ",
+        "Reminder: ",
+        "Hey, ",
+        "Ok \u{2014} ",
+    ] {
+        let text = format!("{label}{command}");
+        expect_explicit(&text, FUTURE_INSTANT, FUTURE_PHRASE);
+    }
+    for label in [
+        "Sam: ",
+        "From Sam: ",
+        "Mom (via text): ",
+        "Sam (",
+        "[Sam] ",
+        "Sam \u{2014} ",
+        "Caf\u{e9} r\u{e9}sum\u{e9}: ",
+    ] {
+        let text = format!("{label}{command}");
+        expect_abstention(&text, AbstentionReason::UncertainTarget);
+    }
+    expect_abstention(
+        "Mom (via text): remind me 2025-10-20 14:30:00 to call her",
+        AbstentionReason::UncertainTarget,
+    );
+}
+
+#[test]
+fn recurrence_anywhere_in_the_command_never_schedules_a_one_shot() {
+    expect_explicit(
+        "remind me 2025-10-20 14:30:00 to call mom at work",
+        FUTURE_INSTANT,
+        FUTURE_PHRASE,
+    );
+    expect_explicit(
+        "remind me 2025-10-20 14:30:00 to file the weekly report at work",
+        FUTURE_INSTANT,
+        FUTURE_PHRASE,
+    );
+    for text in [
+        "remind me 2025-10-20 14:30:00 to call mom weekly at work",
+        "remind me 2025-10-20 14:30:00 to call mom daily with Sam",
+        "remind me 2025-10-20 14:30:00 to call mom on Sundays at home",
+        "remind me 2025-10-20 14:30:00 to call mom every week at work",
+        "remind me to call mom weekly at work 2025-10-20 14:30:00",
+    ] {
+        expect_abstention(text, AbstentionReason::UnsupportedOperation);
+    }
 }
