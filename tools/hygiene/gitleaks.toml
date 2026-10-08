@@ -1,0 +1,17 @@
+title = "Oh And repository secret policy"
+
+# Default maintained ruleset plus provider keys this project is likely to handle.
+[extend]
+useDefault = true
+
+[[rules]]
+id = "anthropic-api-key"
+description = "Anthropic API key"
+regex = '''sk-ant-[A-Za-z0-9_\-]{20,}'''
+keywords = ["sk-ant-"]
+
+[[rules]]
+id = "openai-api-key"
+description = "OpenAI API key"
+regex = '''sk-(?:proj-|svcacct-)?[A-Za-z0-9_\-]{32,}'''
+keywords = ["sk-"]
