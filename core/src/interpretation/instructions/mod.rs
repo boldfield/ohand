@@ -8,6 +8,7 @@
 //! Adapters never use multiple versions of instructions in a single dispatch; all interpretation
 //! flows through a versioned request with an explicit `instruction_version` in the contract.
 
+use crate::domain::items::SUPPORTED_PROPOSAL_SCHEMA_VERSION;
 use crate::interpretation::contracts::{Proposal, ProposalError};
 use crate::providers::contracts::{InterpretationOutput, InterpretationRequest};
 use chrono::DateTime;
@@ -326,10 +327,61 @@ impl InterpretationMapping {
             ));
         }
 
-        // The provider output must match the output contract: only facets, no provenance.
-        // We enrich it with trusted provenance before validation.
-        // Use Proposal::from_output which performs full validation.
-        Proposal::from_output(request, output, expected_item_id)
+        // Verify that the mapping's source_text matches the request's text
+        if self.source_text != request.text() {
+            return Err(ProposalError::Malformed(
+                "source text mismatch between mapping and request".to_string(),
+            ));
+        }
+
+        // Enrich the provider output with trusted provenance fields.
+        // The provider returns only facets (operation, item_type, reminder_proposal,
+        // session_topic_proposal, abstention, source_spans); we add the provenance.
+        let mut enriched = output.proposal.clone();
+
+        // Generate a proposal ID
+        let proposal_id = Uuid::new_v4().to_string();
+
+        enriched.insert(
+            "proposal_id".to_string(),
+            serde_json::Value::String(proposal_id),
+        );
+        enriched.insert(
+            "item_id".to_string(),
+            serde_json::Value::String(expected_item_id.to_string()),
+        );
+        enriched.insert(
+            "capture_id".to_string(),
+            serde_json::Value::String(request.capture_id().to_string()),
+        );
+        enriched.insert(
+            "source_revision".to_string(),
+            serde_json::Value::Number(request.source_revision().try_into().unwrap_or(0).into()),
+        );
+        enriched.insert(
+            "schema_version".to_string(),
+            serde_json::Value::Number(SUPPORTED_PROPOSAL_SCHEMA_VERSION.into()),
+        );
+
+        // Serialize text_basis as JSON
+        let text_basis_json = serde_json::to_value(request.text_basis())
+            .map_err(|e| ProposalError::Malformed(format!("text_basis serialization: {}", e)))?;
+        enriched.insert("text_basis".to_string(), text_basis_json);
+
+        enriched.insert(
+            "request_version".to_string(),
+            serde_json::Value::String(request.request_version().to_string()),
+        );
+
+        // Create an enriched output with all provenance fields
+        let enriched_output = InterpretationOutput {
+            request_version: output.request_version.clone(),
+            proposal: enriched,
+            elapsed_ms: output.elapsed_ms,
+        };
+
+        // Now deserialize and validate as a full Proposal
+        Proposal::from_output(request, &enriched_output, expected_item_id)
     }
 }
 
