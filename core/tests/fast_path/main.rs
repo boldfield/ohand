@@ -1068,7 +1068,7 @@ fn only_neutral_reminder_pictographs_may_precede_the_command() {
     );
 }
 
-fn recognize_topic_in(text: &str, _time_context: &TimeContext) -> Option<Proposal> {
+fn recognize_topic_in(text: &str) -> Option<Proposal> {
     let proposal = recognize_session_topic(
         text,
         ITEM_ID,
@@ -1086,7 +1086,7 @@ fn recognize_topic_in(text: &str, _time_context: &TimeContext) -> Option<Proposa
 }
 
 fn recognize_topic(text: &str) -> Option<Proposal> {
-    recognize_topic_in(text, &context())
+    recognize_topic_in(text)
 }
 
 fn assert_session_topic(proposal: &Proposal, expected_topic: &str, text: &str) {
@@ -1133,17 +1133,17 @@ fn session_topic_basic_bring_this_up() {
 
 #[test]
 fn session_topic_basic_discuss() {
-    expect_session_topic("Discuss this at work", "work");
+    expect_session_topic("Discuss this at supervision", "supervision");
 }
 
 #[test]
 fn session_topic_basic_mention() {
-    expect_session_topic("Mention this in mentoring", "mentoring");
+    expect_session_topic("Mention this in counseling", "counseling");
 }
 
 #[test]
 fn session_topic_basic_talk_about() {
-    expect_session_topic("Talk about this in doctor", "doctor");
+    expect_session_topic("Talk about this in coaching", "coaching");
 }
 
 #[test]
@@ -1153,30 +1153,69 @@ fn session_topic_with_trailing_please() {
 
 #[test]
 fn session_topic_with_trailing_thanks() {
-    expect_session_topic("Discuss this at work thanks", "work");
+    expect_session_topic("Discuss this at supervision thanks", "supervision");
 }
 
 #[test]
 fn session_topic_with_trailing_punctuation() {
     expect_session_topic("Bring this up in therapy.", "therapy");
-    expect_session_topic("Discuss this at work!", "work");
-    expect_session_topic("Mention this in mentoring?", "mentoring");
+    expect_session_topic("Discuss this at supervision!", "supervision");
+    expect_session_topic("Mention this in coaching?", "coaching");
 }
 
 #[test]
 fn session_topic_with_prefix_filler() {
     expect_session_topic("Hey, bring this up in therapy", "therapy");
-    expect_session_topic("Ok, discuss this at work", "work");
+    expect_session_topic("Ok, discuss this at supervision", "supervision");
 }
 
 #[test]
-fn session_topic_mixed_reminder_and_topic() {
+fn session_topic_false_positives_unbounded() {
+    // Unbounded topics should not be accepted; these should be left for the interpreter
+    expect_topic_unrecognized("Bring this in please");
+    expect_topic_unrecognized("Bring this in tomorrow");
+    expect_topic_unrecognized("Discuss this at 5pm");
+    expect_topic_unrecognized("Talk about this in detail");
+    expect_topic_unrecognized("Mention this in passing");
+    expect_topic_unrecognized("Discuss this at home");
+    expect_topic_unrecognized("Discuss this at work");
+    expect_topic_unrecognized("Talk about this in doctor");
+    expect_topic_unrecognized("Discuss this at dentist");
+}
+
+#[test]
+fn session_topic_and_reminder_are_independent() {
+    // Reminder-only input should still work for reminders
     let text = "Remind me tomorrow to call mom";
     let reminder_prop = recognize(text);
     assert!(reminder_prop.is_some());
+    assert_eq!(
+        reminder_prop.as_ref().unwrap().session_topic_proposal,
+        None,
+        "reminder-only input should not produce a topic"
+    );
 
     let topic_prop = recognize_topic(text);
-    assert!(topic_prop.is_none());
+    assert!(
+        topic_prop.is_none(),
+        "reminder-only input should not match topic grammar"
+    );
+
+    // Session-topic-only input should work for topics
+    let text = "Bring this up in therapy";
+    let topic_prop = recognize_topic(text);
+    assert!(topic_prop.is_some());
+    assert_eq!(
+        topic_prop.as_ref().unwrap().reminder_proposal,
+        None,
+        "topic-only input should not produce a reminder"
+    );
+
+    let reminder_prop = recognize(text);
+    assert!(
+        reminder_prop.is_none(),
+        "topic-only input should not match reminder grammar"
+    );
 }
 
 #[test]
@@ -1217,12 +1256,12 @@ fn session_topic_with_closing_delimiter_abstains() {
 }
 
 #[test]
-fn session_topic_various_topics() {
+fn session_topic_various_bounded_topics() {
     expect_session_topic("Bring this up in therapy", "therapy");
+    expect_session_topic("Bring this up in counseling", "counseling");
     expect_session_topic("Bring this up in coaching", "coaching");
-    expect_session_topic("Bring this up in supervision", "supervision");
-    expect_session_topic("Discuss this at doctor", "doctor");
-    expect_session_topic("Discuss this at dentist", "dentist");
+    expect_session_topic("Discuss this at supervision", "supervision");
+    expect_session_topic("Discuss this at 1:1", "1:1");
 }
 
 #[test]
@@ -1239,4 +1278,87 @@ fn session_topic_no_reminder_when_topic_recognized() {
         recognize_topic("Bring this up in therapy").expect("should recognize session-topic phrase");
     assert!(proposal.reminder_proposal.is_none());
     assert!(proposal.session_topic_proposal.is_some());
+}
+
+#[test]
+fn session_topic_standalone_phrase_recognized() {
+    // A session-topic phrase alone (not part of a reminder) should be recognized
+    let text = "Bring this up in therapy";
+    let proposal = recognize_topic(text).expect("should recognize session-topic phrase");
+    assert_eq!(proposal.abstention, None);
+    assert_eq!(
+        proposal.reminder_proposal, None,
+        "should not have reminder facet"
+    );
+    assert_eq!(proposal.item_type, None, "should not specify item type");
+    assert_eq!(proposal.source_spans, None, "should not have action spans");
+    let topic_proposal = proposal
+        .session_topic_proposal
+        .expect("should have session-topic facet");
+    assert_eq!(topic_proposal.topic, "therapy");
+}
+
+#[test]
+fn session_topic_source_span_accuracy() {
+    // The source span must select exactly the topic word
+    let text = "Bring this up in therapy";
+    let proposal = recognize_topic(text).expect("should recognize");
+    let topic_proposal = proposal.session_topic_proposal.expect("should have topic");
+    let span = topic_proposal.source_span.expect("should have span");
+    let selected_text: String = text
+        .chars()
+        .skip(span.start)
+        .take(span.end - span.start)
+        .collect();
+    assert_eq!(
+        selected_text, "therapy",
+        "span should select exactly the topic word"
+    );
+}
+
+#[test]
+fn session_topic_permissions_unaffected() {
+    // Verify that a topic named "1:1" (which resembles an item scope name) is recognized
+    // as a topic, not as a scope constraint, and does not affect the proposal structure.
+    let text = "Bring this up in 1:1";
+    let proposal = recognize_topic(text).expect("should recognize 1:1 as bounded topic");
+    let topic_proposal = proposal.session_topic_proposal.expect("should have topic");
+    assert_eq!(
+        topic_proposal.topic, "1:1",
+        "topic should be recognized as a session topic"
+    );
+    // For a standalone session-topic phrase, there should be no item type, action span, or reminder.
+    // Scope and permission details are applied at the store level, not by the recognizer.
+    assert_eq!(proposal.item_type, None, "should not specify item type");
+    assert_eq!(
+        proposal.reminder_proposal, None,
+        "should not have reminder facet"
+    );
+    assert_eq!(proposal.source_spans, None, "should not have action spans");
+}
+
+#[test]
+fn reminder_behavior_unchanged_without_topic() {
+    // Verify that reminder recognition behavior is unchanged when no session-topic is present
+    let text = "Remind me tomorrow to call mom";
+    let proposal = recognize(text).expect("should recognize reminder");
+    assert_eq!(proposal.abstention, None);
+    assert!(
+        proposal.reminder_proposal.is_some(),
+        "should have reminder facet"
+    );
+    assert_eq!(
+        proposal.item_type,
+        Some(ItemType::Action),
+        "should be an Action"
+    );
+    assert!(proposal.source_spans.is_some(), "should have action span");
+    assert_eq!(
+        proposal.session_topic_proposal, None,
+        "should not have session-topic facet"
+    );
+
+    // Verify the reminder details are correct
+    let reminder = proposal.reminder_proposal.as_ref().unwrap();
+    assert_eq!(reminder.quality, TimeResolutionQuality::Ambiguous);
 }

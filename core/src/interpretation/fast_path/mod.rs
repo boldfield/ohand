@@ -60,10 +60,42 @@
 //!   a speaker label, two competing times, a relation word before the time, or a recurrence
 //!   request anywhere in the command). Nothing is scheduled; the
 //!   abstention only records why and never suppresses later interpretation of the same text.
+//!
+//! ## Session-topic recognition
+//!
+//! Session-topic phrases are explicit offline commands that annotate an action or context with a bounded
+//! session topic. The recognizer accepts a small, closed grammar: action phrases paired with explicit
+//! session types. A topic must be one of the documented session types (therapy, counseling, coaching,
+//! supervision, 1:1, or "my next session"). Every offset is a Unicode scalar offset into the original
+//! text, so spans always select exactly the evidence they describe.
+//!
+//! ```text
+//! session-phrase := prefix phrase [ suffix ]
+//! phrase         := verb-pattern session-topic
+//! verb-pattern   := "bring" "this" ("up" | <none>) "in" | "bring" "this" "in"
+//!                | "discuss" "this" ("in" | "at")
+//!                | "mention" "this" ("in" | "at")
+//!                | "talk" "about" "this" ("in" | "at")
+//! session-topic  := "therapy" | "counseling" | "coaching" | "supervision" | "1:1"
+//!                | "my" "next" "session"
+//! prefix        := (filler | pictograph)* [ self-label ( "," | ":" | dash ) filler* ]
+//! suffix        := ( "please" | "thanks" | "," | "." | "!" )*
+//! ```
+//!
+//! Outcomes of [`recognize_session_topic`]:
+//! - `None`: the text is not the supported grammar. Nothing is derived and the full text remains
+//!   available to the approved interpreter.
+//! - `Some(proposal)` with a session-topic facet: a supported phrase. The topic is one of the
+//!   documented session types and the source span selects it exactly.
+//! - `Some(proposal)` with an abstention: the grammar matched but a safety guard applies
+//!   (negation, quotation, hypothetical or reported speech, a speaker label, quotes or brackets
+//!   after the phrase). Nothing is scheduled; the abstention only records why and never suppresses
+//!   later interpretation of the same text.
 
 use crate::domain::items::SUPPORTED_PROPOSAL_SCHEMA_VERSION;
 use crate::interpretation::contracts::{
-    AbstentionReason, Proposal, ReminderProposal, SourceSpan, TextBasis, TimeResolutionQuality,
+    AbstentionReason, Proposal, ReminderProposal, SessionTopicProposal, SourceSpan, TextBasis,
+    TimeResolutionQuality,
 };
 use crate::store::events::ItemType;
 use crate::time::{ResolutionResult, TimeContext, TimeResolver};
@@ -1387,10 +1419,10 @@ pub fn recognize_reminder(
 }
 
 // Session-topic phrase recognition:
-// Recognize bounded explicit session-topic phrases like "Bring this up in therapy"
+// Recognize bounded explicit session-topic phrases like "Bring this up in therapy".
 // See module top-level docs for the complete grammar.
 
-use crate::interpretation::contracts::SessionTopicProposal;
+const SESSION_TOPICS: &[&str] = &["therapy", "counseling", "coaching", "supervision", "1:1"];
 
 const SESSION_TOPIC_VERBS: &[&[&str]] = &[
     &["bring", "this", "up", "in"],
@@ -1404,8 +1436,9 @@ const SESSION_TOPIC_VERBS: &[&[&str]] = &[
 ];
 
 fn find_session_topic_phrase(tokens: &[Token]) -> Option<(usize, usize)> {
-    for verb_pattern in SESSION_TOPIC_VERBS {
-        for start in 0..tokens.len() {
+    // Scan by position first: find the earliest verb pattern match in the text
+    for start in 0..tokens.len() {
+        for verb_pattern in SESSION_TOPIC_VERBS {
             let pattern_len = verb_pattern.len();
             if let Some(window) = tokens.get(start..start + pattern_len) {
                 if window
@@ -1457,7 +1490,8 @@ fn session_topic_suffix_is_allowed(rest: &[Token]) -> bool {
 
 /// Recognize an explicit offline session-topic phrase in `text`, the exact text identified by
 /// `text_basis`. The phrase must match one of the bounded patterns (e.g., "Bring this up in therapy")
-/// and produces a session-topic facet proposal only, never a reminder or item type.
+/// with a documented session topic, and produces a session-topic facet proposal only, never a
+/// reminder or item type.
 pub fn recognize_session_topic(
     text: &str,
     item_id: &str,
@@ -1474,6 +1508,11 @@ pub fn recognize_session_topic(
 
     let topic_token = rest.iter().find(|token| token.is_word())?;
     let topic = topic_token.lower.clone();
+
+    // Topic must be in the bounded set of documented session types
+    if !SESSION_TOPICS.contains(&topic.as_str()) {
+        return None;
+    }
 
     let rest_after_topic_idx = rest
         .iter()
@@ -1513,4 +1552,50 @@ pub fn recognize_session_topic(
                 source_span: Some(SourceSpan::new(topic_token.start, topic_token.end)),
             })),
     )
+}
+
+/// Recognize both reminder and session-topic facets in `text`, composing their results
+/// into a single proposal that may carry both. This function is called after the individual
+/// recognizers to produce a unified proposal when both patterns are present.
+pub fn recognize_with_composed_topics(
+    text: &str,
+    item_id: &str,
+    capture_id: &str,
+    source_revision: i32,
+    text_basis: TextBasis,
+    request_version: &str,
+    time_context: &TimeContext,
+) -> Option<Proposal> {
+    let reminder = recognize_reminder(
+        text,
+        item_id,
+        capture_id,
+        source_revision,
+        text_basis.clone(),
+        request_version,
+        time_context,
+    );
+    let topic = recognize_session_topic(
+        text,
+        item_id,
+        capture_id,
+        source_revision,
+        text_basis,
+        request_version,
+    );
+
+    match (&reminder, &topic) {
+        // Both reminder and topic: compose them
+        (Some(r), Some(t)) if r.abstention.is_none() && t.abstention.is_none() => {
+            let mut result = r.clone();
+            result.session_topic_proposal = t.session_topic_proposal.clone();
+            Some(result)
+        }
+        // Just reminder, use it
+        (Some(_), None) => reminder,
+        // Just topic, use it
+        (None, Some(_)) => topic,
+        // Neither or abstentions: use whichever is present (prefer reminder)
+        _ => reminder.or(topic),
+    }
 }
