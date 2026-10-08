@@ -890,10 +890,7 @@ mod proposal_tests {
 
         let result = proposal.validate(text);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("non-negative"));
+        assert!(result.unwrap_err().to_string().contains("non-negative"));
     }
 
     // === Empty Correction ID Validation ===
@@ -939,10 +936,7 @@ mod proposal_tests {
 
         let result = proposal.validate(text);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("source span"));
+        assert!(result.unwrap_err().to_string().contains("source span"));
     }
 
     #[test]
@@ -962,10 +956,7 @@ mod proposal_tests {
 
         let result = proposal.validate(text);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("source span"));
+        assert!(result.unwrap_err().to_string().contains("source span"));
     }
 
     // === Reminder Must Have Source Span ===
