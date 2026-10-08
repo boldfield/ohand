@@ -1,0 +1,17 @@
+[package]
+name = "ohand-bindings"
+version = "0.1.0"
+edition = "2021"
+description = "P01 Rust-to-Swift boundary probe: a minimal C ABI over the real ohand-core capture store"
+publish = false
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+ohand-core = { path = ".." }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+cbindgen = { version = "0.29", default-features = false }
