@@ -225,6 +225,50 @@ class InputValidationTests(SigningToolTestCase):
                 self.assertEqual(self.calls_of("xcodebuild", "archive"), [])
                 self.assertEqual(self.evidence_files(), [])
 
+    def test_malformed_profile_uuids_are_refused_without_touching_the_filesystem(self):
+        profiles_parent = self.home / USER_DATA_PROFILE_DIRECTORY / ".."
+        outside_target = Path(self.temporary.name) / "outside"
+        traversal_victim = (profiles_parent / "escaped.mobileprovision").resolve()
+        traversal_victim.parent.mkdir(parents=True)
+        absolute_victim = Path(f"{outside_target}.mobileprovision")
+        for victim in (traversal_victim, absolute_victim):
+            victim.write_bytes(b"maintainer-owned")
+        cases = {
+            "traversal": "../escaped",
+            "absolute path": str(outside_target),
+            "embedded separator": f"{SYNTHETIC_PROFILE_UUID}/../../escaped",
+            "not a UUID": "not-a-uuid",
+            "UUID with a suffix": SYNTHETIC_PROFILE_UUID + "x",
+            "UUID without hyphens": SYNTHETIC_PROFILE_UUID.replace("-", ""),
+            "non-string": 12345,
+            "list": [SYNTHETIC_PROFILE_UUID],
+        }
+        for case, malformed_uuid in cases.items():
+            with self.subTest(case):
+                self.state_reset()
+                self.write_profile(UUID=malformed_uuid)
+                result = self.sign("--install")
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("provisioning profile UUID is not a canonical UUID", result.stderr)
+                self.assertEqual(self.calls_of("security", "create-keychain"), [])
+                self.assertEqual(self.calls_of("xcodebuild", "archive"), [])
+                self.assertEqual(self.evidence_files(), [])
+                self.assertFalse((self.home / USER_DATA_PROFILE_DIRECTORY).exists())
+                for victim in (traversal_victim, absolute_victim):
+                    self.assertEqual(victim.read_bytes(), b"maintainer-owned")
+                self.assertEqual(sorted(path.name for path in traversal_victim.parent.iterdir()), [traversal_victim.name])
+
+    def test_lowercase_canonical_uuid_is_accepted(self):
+        self.write_profile(UUID=SYNTHETIC_PROFILE_UUID.replace("1", "a"))
+        self.assertEqual(self.sign().returncode, 0)
+
+    def test_non_string_profile_name_is_refused(self):
+        self.write_profile(Name=["not", "a", "string"])
+        result = self.sign()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("provisioning profile Name is not a string", result.stderr)
+        self.assertEqual(self.calls_of("security", "create-keychain"), [])
+
     def test_wildcard_profile_covering_the_prefix_is_accepted(self):
         self.write_profile(Entitlements={"application-identifier": f"{SYNTHETIC_TEAM}.com.boldfield.ohand.*", "get-task-allow": True})
         self.assertEqual(self.sign().returncode, 0)

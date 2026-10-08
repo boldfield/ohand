@@ -73,6 +73,8 @@ XCODE_VERSION_PATTERN = re.compile(r"^Xcode \d+(\.\d+){0,2}$")
 XCODE_BUILD_PATTERN = re.compile(r"^Build version [0-9A-Za-z]+$")
 CODESIGNING_IDENTITY_PATTERN = re.compile(r'^\s*\d+\)\s+[0-9A-Fa-f]{40}\s+"([^"]*)"')
 KEYCHAIN_PATH_PATTERN = re.compile(r'^\s*"(.*)"\s*$')
+# The profile UUID names the installed file, so only the canonical 8-4-4-4-12 hex form is accepted.
+PROFILE_UUID_PATTERN = re.compile(r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}")
 KEYCHAIN_TIMEOUT_SECONDS = 21600
 
 
@@ -141,6 +143,10 @@ def parse_profile(profile: dict, bundle_identifier: str, now: datetime.datetime)
     missing = [field for field in required_fields if not profile.get(field)]
     if missing:
         raise input_error("provisioning profile is missing required field(s): " + ", ".join(missing))
+    if not isinstance(profile["UUID"], str) or not PROFILE_UUID_PATTERN.fullmatch(profile["UUID"]):
+        raise input_error("provisioning profile UUID is not a canonical UUID")
+    if not isinstance(profile["Name"], str):
+        raise input_error("provisioning profile Name is not a string")
     team_identifiers = profile["TeamIdentifier"]
     if not isinstance(team_identifiers, list) or not team_identifiers or not isinstance(team_identifiers[0], str):
         raise input_error("provisioning profile has no usable TeamIdentifier")
@@ -307,6 +313,8 @@ class SigningRun:
         directory = self.profiles_directory()
         directory.mkdir(parents=True, exist_ok=True)
         destination = directory / f"{self.profile_info.uuid}.mobileprovision"
+        if destination.parent != directory:
+            raise input_error("provisioning profile UUID does not name a file in Xcode's profile directory")
         if destination.exists():
             if destination.read_bytes() != self.profile_path.read_bytes():
                 raise input_error("a different provisioning profile with the same UUID is already installed in Xcode's "
