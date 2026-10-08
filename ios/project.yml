@@ -232,12 +232,26 @@ targets:
         excludes:
           - Info.plist
           - "Control/**"
+          - "Tests/**"
     settings:
       PRODUCT_NAME: CaptureProbe
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.capture
       INFOPLIST_FILE: CaptureProbe/Info.plist
     dependencies:
       - target: CaptureProbeControl
+
+  CaptureProbeTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: CaptureProbe/Tests
+        createIntermediateGroups: true
+      - path: CaptureProbe/Shared
+        createIntermediateGroups: true
+    settings:
+      PRODUCT_NAME: CaptureProbeTests
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.capture.tests
+      GENERATE_INFOPLIST_FILE: YES
 
   CaptureProbeControl:
     type: app-extension
@@ -267,10 +281,19 @@ schemes:
       targets:
         OhAndTests: all
         BridgeProbeTests: all
+        CaptureProbeTests: all
     test:
       targets:
         - OhAndTests
         - BridgeProbeTests
+        - CaptureProbeTests
+  CaptureProbeTests:
+    build:
+      targets:
+        CaptureProbeTests: all
+    test:
+      targets:
+        - CaptureProbeTests
   BridgeProbeTests:
     build:
       targets:

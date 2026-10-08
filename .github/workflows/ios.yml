@@ -143,6 +143,29 @@ jobs:
             .evidence \
             "credentialprobe-launch.png" 2>&1 | tee .evidence/credential-smoke.log
 
+      - name: Build CaptureProbe
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd ios
+          ./scripts/build-simulator.sh CaptureProbe 2>&1 | tee .evidence/CaptureProbe-build.log
+
+      - name: CaptureProbe ingress smoke test
+        shell: bash
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+          SIMULATOR_NAME: ${{ steps.simulator.outputs.name }}
+          SIMULATOR_RUNTIME: ${{ steps.simulator.outputs.runtime }}
+        run: |
+          set -euo pipefail
+          echo "Capture smoke device: ${SIMULATOR_NAME} (iOS ${SIMULATOR_RUNTIME}, UDID ${SIMULATOR_UDID})"
+          cd ios
+          ./scripts/smoke-capture-simulator.sh \
+            "${SIMULATOR_UDID}" \
+            .derived/Build/Products/Debug-iphonesimulator/CaptureProbe.app \
+            com.boldfield.ohand.probes.capture \
+            .evidence 2>&1 | tee .evidence/capture-smoke.log
+
       - name: Upload evidence
         if: always()
         uses: actions/upload-artifact@v4
