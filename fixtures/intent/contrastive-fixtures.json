@@ -11,15 +11,16 @@
       "expected": {
         "item_type": "idea",
         "abstention": null,
-        "reminder": null,
-        "session_topic": null
+        "reminder_proposal": null,
+        "session_topic_proposal": null
       },
       "forbidden": {
         "item_type": "action",
-        "reminder_instant": "any",
-        "reminder_scheduled": true,
-        "obligations_created": true
+        "reminder_proposal": {
+          "quality": "any"
+        }
       },
+      "recoverable": true,
       "notes": "Broad intention must not create an obligation. 'Maybe' and conditional phrasing indicate exploration, not commitment."
     },
     {
@@ -32,14 +33,15 @@
       },
       "expected": {
         "item_type": "action",
-        "reminder": null,
+        "reminder_proposal": null,
         "abstention": null
       },
       "forbidden": {
-        "reminder_instant": "any",
-        "reminder_scheduled": true,
-        "inferred_deadline": "any"
+        "reminder_proposal": {
+          "quality": "any"
+        }
       },
+      "recoverable": true,
       "notes": "Action recorded without invitation to schedule. No reminder should be inferred when explicit time is absent."
     },
     {
@@ -52,14 +54,15 @@
       },
       "expected": {
         "item_type": "note",
-        "reminder": null,
+        "reminder_proposal": null,
         "abstention": null
       },
       "forbidden": {
-        "reminder_instant": "any",
-        "reminder_scheduled": true,
-        "inferred_deadline": "Friday"
+        "reminder_proposal": {
+          "quality": "any"
+        }
       },
+      "recoverable": true,
       "notes": "Date preserved as information. Absence of 'remind me' indicates no reminder request. Date/time information must not be silently converted to a deadline."
     },
     {
@@ -68,24 +71,30 @@
       "provenance": "synthetic, from DESIGN.md intent examples",
       "capture_context": {
         "capture_type": "text",
+        "capture_instant": "2026-10-08T14:00:00Z",
+        "device_timezone": "America/New_York",
         "notes": "explicit reminder with date and time"
       },
       "expected": {
         "item_type": "action",
-        "reminder": {
-          "source_span": "Remind me Friday at 3 p.m.",
+        "reminder_proposal": {
+          "source_span": {
+            "start": 0,
+            "end": 27
+          },
           "quality": "explicit",
-          "resolved": true
+          "instant": "2026-10-09T15:00:00-04:00",
+          "timezone_id": "America/New_York"
         },
         "abstention": null
       },
       "forbidden": {
-        "reminder": {
+        "reminder_proposal": {
           "quality": "inferred"
-        },
-        "reminder_instant": null
+        }
       },
-      "notes": "Explicit reminder command with clear date/time. 'Friday at 3 p.m.' should resolve to an explicit-quality reminder with instant and timezone."
+      "recoverable": true,
+      "notes": "Explicit reminder command with clear date/time. 'Friday at 3 p.m.' with reference date 2026-10-08 (Thursday) resolves to 2026-10-09 at 15:00. Quality is 'explicit' and instant is RFC 3339 with timezone."
     },
     {
       "id": "design-session-topic",
@@ -97,14 +106,18 @@
       },
       "expected": {
         "item_type": null,
-        "session_topic": "therapy",
+        "session_topic_proposal": {
+          "topic": "therapy"
+        },
         "abstention": null
       },
       "forbidden": {
         "item_type": "action",
-        "reminder_instant": "any",
-        "privacy_scope_changed": true
+        "reminder_proposal": {
+          "quality": "any"
+        }
       },
+      "recoverable": true,
       "notes": "Session topic must not create an item type or change privacy scope. Facet is independent of item capture context."
     },
     {
@@ -116,15 +129,16 @@
         "notes": "spoken update of existing item"
       },
       "expected": {
-        "source_preserved": true,
         "abstention": "unsupported-operation"
       },
       "forbidden": {
-        "existing_item_mutated": true,
-        "target_item_completed": true,
-        "target_item_changed": true,
-        "new_item_created_for_mutation": true
+        "item_type": "any",
+        "reminder_proposal": {
+          "quality": "any"
+        }
       },
+      "recoverable": false,
+      "recovery_notes": "Spoken update of existing item is not supported in M1. Target item is unclear without UI selection.",
       "notes": "M1 does not support spoken updates of existing items. The source must be preserved as-is, and the proposal must abstain with unsupported-operation reason. No implicit target update."
     },
     {
@@ -138,13 +152,15 @@
       "expected": {
         "item_type": "idea",
         "abstention": null,
-        "reminder": null
+        "reminder_proposal": null
       },
       "forbidden": {
         "item_type": "action",
-        "action_initiated": true,
-        "obligations_created": true
+        "reminder_proposal": {
+          "quality": "any"
+        }
       },
+      "recoverable": true,
       "notes": "Exploratory/hypothetical phrasing ('Maybe I should') must be preserved as an idea, not converted to a commitment or action."
     },
     {
@@ -159,9 +175,11 @@
         "abstention": "negated"
       },
       "forbidden": {
-        "reminder_instant": "any",
-        "reminder_scheduled": true
+        "reminder_proposal": {
+          "quality": "any"
+        }
       },
+      "recoverable": true,
       "notes": "Negation ('don't', 'no', 'not') must be recognized. A reminder request preceded by negation must not schedule."
     },
     {
@@ -177,8 +195,11 @@
       },
       "forbidden": {
         "item_type": "action",
-        "reminder_instant": "any"
+        "reminder_proposal": {
+          "quality": "any"
+        }
       },
+      "recoverable": true,
       "notes": "Negation with action/reminder prevents both scheduling and action creation."
     },
     {
@@ -190,14 +211,15 @@
         "notes": "reminder instruction in quoted speech"
       },
       "expected": {
-        "abstention": "other",
-        "source_preserved": true
+        "abstention": "other"
       },
       "forbidden": {
-        "reminder_instant": "any",
-        "reminder_scheduled": true,
-        "report_understood_instruction": true
+        "reminder_proposal": {
+          "quality": "any"
+        }
       },
+      "recoverable": false,
+      "recovery_notes": "Quoted speech contains nested instruction; the speaker is reporting someone else's words, not issuing a direct instruction.",
       "notes": "Quoted/reported speech (especially nested 'remind me') must not be interpreted as a direct instruction. Must abstain or preserve as idea, not schedule."
     },
     {
@@ -211,12 +233,14 @@
       "expected": {
         "item_type": "idea",
         "abstention": null,
-        "reminder": null
+        "reminder_proposal": null
       },
       "forbidden": {
-        "reminder_instant": "any",
-        "reminder_scheduled": true
+        "reminder_proposal": {
+          "quality": "any"
+        }
       },
+      "recoverable": true,
       "notes": "Hypothetical phrasing ('What if', question form) must not be interpreted as a directive. Must preserve as an idea, not schedule."
     },
     {
@@ -229,15 +253,14 @@
       },
       "expected": {
         "item_type": "note",
-        "abstention": null,
-        "source_preserved": "exactly as written"
+        "abstention": null
       },
       "forbidden": {
-        "reminder_instant": "any",
-        "reminder_scheduled": true,
-        "instructions_executed": true,
-        "model_instructions_modified": true
+        "reminder_proposal": {
+          "quality": "any"
+        }
       },
+      "recoverable": true,
       "notes": "Source text is untrusted data. Prompt-injection attempts must be stored as-is and never execute embedded instructions. No special parsing of 'instructions', 'ignore', or imperative embedded sentences."
     },
     {
@@ -250,15 +273,14 @@
       },
       "expected": {
         "item_type": "action",
-        "source_preserved": "exactly as written",
         "abstention": null
       },
       "forbidden": {
-        "markup_interpreted": true,
-        "hidden_instruction_executed": true,
-        "system_access_granted": true,
-        "reminders_scheduled_by_injection": true
+        "reminder_proposal": {
+          "quality": "any"
+        }
       },
+      "recoverable": true,
       "notes": "Markup-like or embedded system-instruction text must be treated as literal source, not parsed as directives."
     },
     {
@@ -267,22 +289,28 @@
       "provenance": "synthetic, explicit date reference",
       "capture_context": {
         "capture_type": "text",
+        "capture_instant": "2026-10-08T14:00:00Z",
+        "device_timezone": "America/New_York",
         "notes": "explicit same-day reminder"
       },
       "expected": {
-        "reminder": {
+        "reminder_proposal": {
           "quality": "explicit",
-          "resolved": true,
-          "same_day": true
+          "instant": "2026-10-08T17:00:00-04:00",
+          "timezone_id": "America/New_York",
+          "source_span": {
+            "start": 0,
+            "end": 25
+          }
         }
       },
       "forbidden": {
-        "reminder": {
-          "quality": "inferred",
-          "quality": "ambiguous"
+        "reminder_proposal": {
+          "quality": "inferred"
         }
       },
-      "notes": "'Today' is explicit when the current date is known. Reminder quality should be 'explicit'."
+      "recoverable": true,
+      "notes": "'Today' is explicit when the current date is known (capture_instant). Reminder quality is 'explicit'. Instant is RFC 3339: 2026-10-08 at 17:00 (5 p.m.)."
     },
     {
       "id": "date-relative-next-monday",
@@ -290,46 +318,57 @@
       "provenance": "synthetic, relative date",
       "capture_context": {
         "capture_type": "text",
-        "reference_date": "2026-10-08",
-        "notes": "relative weekday reference"
+        "capture_instant": "2026-10-08T14:00:00Z",
+        "device_timezone": "America/New_York",
+        "notes": "relative weekday reference; reference_date 2026-10-08 is Thursday"
       },
       "expected": {
-        "reminder": {
+        "reminder_proposal": {
           "quality": "inferred",
-          "resolved": true,
-          "expected_date": "2026-10-13"
+          "instant": "2026-10-12T00:00:00Z",
+          "timezone_id": "America/New_York",
+          "source_span": {
+            "start": 10,
+            "end": 21
+          }
         }
       },
       "forbidden": {
-        "reminder": {
+        "reminder_proposal": {
           "quality": "ambiguous"
         }
       },
-      "notes": "Relative dates ('next Monday') are inferred but resolvable with reference date. Quality should be 'inferred', not 'ambiguous'."
+      "recoverable": true,
+      "notes": "Reference date 2026-10-08 is Thursday; next Monday is 2026-10-12. Relative dates are inferred but resolvable. Quality is 'inferred', not 'ambiguous'."
     },
     {
       "id": "date-ambiguous-friday",
       "input": "Remind me Friday",
-      "provenance": "synthetic, ambiguous date without time",
+      "provenance": "synthetic, date without explicit time",
       "capture_context": {
         "capture_type": "text",
-        "reference_date": "2026-10-08",
-        "notes": "weekday without time"
+        "capture_instant": "2026-10-08T14:00:00Z",
+        "device_timezone": "America/New_York",
+        "notes": "weekday without time; context: 2026-10-08 is Thursday"
       },
       "expected": {
-        "reminder": {
+        "reminder_proposal": {
           "quality": "inferred",
-          "resolved": true,
-          "source_span": "Friday"
+          "instant": "2026-10-09T00:00:00Z",
+          "timezone_id": "America/New_York",
+          "source_span": {
+            "start": 10,
+            "end": 16
+          }
         }
       },
       "forbidden": {
-        "reminder": {
-          "instant": null,
-          "time_inferred": true
+        "reminder_proposal": {
+          "quality": "ambiguous"
         }
       },
-      "notes": "Weekday without time is inferred but lack of time should not cause ambiguity marker. Source span must mark 'Friday'."
+      "recoverable": true,
+      "notes": "A date without explicit time is resolvable by inferring a default time (00:00). The date 'Friday' is clear from context, so quality is 'inferred'. Time is inferred but represents a natural default, not an arbitrary guess. No ambiguity marker because the date itself is clear."
     },
     {
       "id": "date-ambiguous-maybe-friday",
@@ -337,20 +376,22 @@
       "provenance": "synthetic, conditional reminder",
       "capture_context": {
         "capture_type": "text",
+        "capture_instant": "2026-10-08T14:00:00Z",
+        "device_timezone": "America/New_York",
         "notes": "uncertain reminder with 'maybe'"
       },
       "expected": {
-        "reminder": {
+        "reminder_proposal": {
           "quality": "ambiguous"
         }
       },
       "forbidden": {
-        "reminder": {
-          "quality": "explicit",
-          "quality": "inferred"
+        "reminder_proposal": {
+          "instant": "any"
         }
       },
-      "notes": "'Maybe' or other conditional markers make time quality ambiguous even if date is otherwise clear."
+      "recoverable": true,
+      "notes": "'Maybe' or other conditional markers make reminder quality ambiguous even if date is otherwise clear. Ambiguous reminders carry no instant."
     },
     {
       "id": "timezone-explicit",
@@ -358,21 +399,27 @@
       "provenance": "synthetic, explicit timezone",
       "capture_context": {
         "capture_type": "text",
-        "notes": "timezone specified in text"
+        "capture_instant": "2026-10-08T14:00:00Z",
+        "notes": "timezone specified in text; EST is ambiguous abbreviation (winter offset)"
       },
       "expected": {
-        "reminder": {
-          "timezone_id": "US/Eastern",
+        "reminder_proposal": {
+          "timezone_id": "America/New_York",
           "quality": "explicit",
-          "resolved": true
+          "instant": "2026-10-09T13:00:00Z",
+          "source_span": {
+            "start": 0,
+            "end": 32
+          }
         }
       },
       "forbidden": {
-        "reminder": {
+        "reminder_proposal": {
           "timezone_id": null
         }
       },
-      "notes": "Timezone abbreviations (EST, PST) must be resolved to IANA identifiers. Source span should cover the timezone portion."
+      "recoverable": true,
+      "notes": "Timezone abbreviations (EST, PST) resolve to IANA identifiers (America/New_York). EST is a historic winter abbreviation; in October daylight-savings applies (EDT, -04:00). The proposal resolves the intent to the correct timezone and instant."
     },
     {
       "id": "timezone-implicit-local",
@@ -380,22 +427,28 @@
       "provenance": "synthetic, no explicit timezone",
       "capture_context": {
         "capture_type": "text",
+        "capture_instant": "2026-10-08T14:00:00Z",
         "device_timezone": "America/New_York",
         "notes": "timezone not stated, should use device default"
       },
       "expected": {
-        "reminder": {
+        "reminder_proposal": {
           "timezone_id": "America/New_York",
           "quality": "inferred",
-          "resolved": true
+          "instant": "2026-10-09T13:00:00-04:00",
+          "source_span": {
+            "start": 0,
+            "end": 28
+          }
         }
       },
       "forbidden": {
-        "reminder": {
+        "reminder_proposal": {
           "timezone_id": null
         }
       },
-      "notes": "When timezone is absent, device/context timezone should be used. Quality remains 'inferred' if time was clear but timezone had to be filled."
+      "recoverable": true,
+      "notes": "When timezone is absent, device/context timezone is used. Quality is 'inferred' because time was clear but timezone was inferred from context."
     },
     {
       "id": "timezone-conflicting",
@@ -403,22 +456,28 @@
       "provenance": "synthetic, explicit non-local timezone",
       "capture_context": {
         "capture_type": "text",
+        "capture_instant": "2026-10-08T14:00:00Z",
         "device_timezone": "America/New_York",
         "notes": "explicit timezone differs from device"
       },
       "expected": {
-        "reminder": {
+        "reminder_proposal": {
           "timezone_id": "Asia/Tokyo",
           "quality": "explicit",
-          "resolved": true
+          "instant": "2026-10-09T09:00:00+09:00",
+          "source_span": {
+            "start": 0,
+            "end": 39
+          }
         }
       },
       "forbidden": {
-        "reminder": {
+        "reminder_proposal": {
           "timezone_id": "America/New_York"
         }
       },
-      "notes": "Explicit timezone in source overrides device context. Must use stated timezone."
+      "recoverable": true,
+      "notes": "Explicit timezone in source overrides device context. Source says 'Tokyo time', so instant is resolved in Asia/Tokyo (UTC+09:00), not device timezone."
     },
     {
       "id": "asr-dropped-word-remind-me",
@@ -432,10 +491,12 @@
         "abstention": "uncertain-target"
       },
       "forbidden": {
-        "reminder_instant": "any",
-        "reminder_scheduled": true,
-        "assumed_prefix": "Remind me"
+        "reminder_proposal": {
+          "quality": "any"
+        }
       },
+      "recoverable": false,
+      "recovery_notes": "Initial 'Remind' is missing; target intent is uncertain without it.",
       "notes": "ASR errors that drop significant words make intent uncertain. Must abstain, not guess the missing prefix. Transcript is authoritative; cannot invent missing audio."
     },
     {
@@ -450,10 +511,9 @@
         "item_type": "action",
         "abstention": null
       },
-      "forbidden": {
-        "inferred_subject": "required"
-      },
-      "notes": "Even with grammatical incompleteness, clear action verbs (call, email, etc.) can be recognized as actions. Label if transcript lacks enough info to recover full intent but action is clear."
+      "forbidden": {},
+      "recoverable": true,
+      "notes": "Even with grammatical incompleteness, clear action verbs (call, email, etc.) can be recognized as actions. The action is recoverable even though the subject is missing; 'call the dentist' is a clear action."
     },
     {
       "id": "asr-garbled-time",
@@ -464,16 +524,18 @@
         "notes": "ASR produced unclear time/day combination"
       },
       "expected": {
-        "reminder": {
+        "reminder_proposal": {
           "quality": "ambiguous"
         }
       },
       "forbidden": {
-        "reminder": {
-          "instant": "invented"
+        "reminder_proposal": {
+          "instant": "any"
         }
       },
-      "notes": "Garbled time/date phrases create ambiguity. Must not invent a time interpretation; preserve source and mark as ambiguous."
+      "recoverable": false,
+      "recovery_notes": "Garbled 'Tuesmorning' (Tuesday + morning?) and 'fiveish' are ambiguous and cannot be reliably interpreted.",
+      "notes": "Garbled time/date phrases create ambiguity. Must not invent a time interpretation; preserve source and mark as ambiguous. No instant should be provided for ambiguous quality."
     },
     {
       "id": "mixed-note-action-capture",
@@ -485,14 +547,21 @@
       },
       "expected": {
         "item_type": "action",
-        "source_spans": ["Remember to order new tile"]
+        "source_spans": [
+          {
+            "start": 29,
+            "end": 55
+          }
+        ]
       },
       "forbidden": {
-        "two_items_created": true,
-        "note_created": true,
-        "action_skipped": true
+        "item_type": "note",
+        "reminder_proposal": {
+          "quality": "any"
+        }
       },
-      "notes": "When input contains both note and action, action takes priority in M1 interpretation. Source span should identify the action portion."
+      "recoverable": true,
+      "notes": "When input contains both note and action, action takes priority in M1 interpretation. Source span should identify the action portion. No reminder is created because 'Remember to order' is not a time-based reminder request."
     },
     {
       "id": "mixed-idea-action-capture",
@@ -500,20 +569,27 @@
       "provenance": "synthetic, mixed idea and action",
       "capture_context": {
         "capture_type": "text",
-        "notes": "exploratory idea + concrete action"
+        "notes": "exploratory idea + concrete action with date but no explicit reminder request"
       },
       "expected": {
         "item_type": "action",
-        "source_spans": ["call the contractor on Friday"],
-        "reminder": {
-          "source_span": "Friday"
-        }
+        "source_spans": [
+          {
+            "start": 39,
+            "end": 68
+          }
+        ],
+        "reminder_proposal": null
       },
       "forbidden": {
         "two_items_created": true,
-        "idea_preserved_as_separate_item": true
+        "idea_preserved_as_separate_item": true,
+        "reminder_proposal": {
+          "quality": "any"
+        }
       },
-      "notes": "Multiple intents in one capture: M1 chooses the most concrete/actionable. Source spans identify extracted intent."
+      "recoverable": true,
+      "notes": "Multiple intents in one capture: M1 chooses the most concrete/actionable (the action). Date 'Friday' is preserved as part of the action text, but without explicit 'remind me' phrasing, no reminder proposal is created. Source spans identify the extracted intent portion."
     },
     {
       "id": "correction-user-edit",
@@ -521,24 +597,26 @@
       "provenance": "synthetic, user corrected transcription",
       "capture_context": {
         "capture_type": "voice",
+        "capture_instant": "2026-10-08T14:00:00Z",
+        "device_timezone": "America/New_York",
         "user_correction": "Remind me Friday at 10 a.m.",
         "correction_spans": [{"original": "Frisday", "corrected": "Friday"}],
         "notes": "User corrected ASR error (typo/slur)"
       },
       "expected": {
-        "reminder": {
+        "reminder_proposal": {
           "quality": "explicit",
-          "resolved": true,
-          "uses_corrected_text": true,
-          "source_span": "Friday at 10 a.m."
+          "instant": "2026-10-09T10:00:00-04:00",
+          "timezone_id": "America/New_York",
+          "source_span": {
+            "start": 10,
+            "end": 27
+          }
         }
       },
-      "forbidden": {
-        "reminder": {
-          "uses_original_garbled": true
-        }
-      },
-      "notes": "User corrections are authoritative and take precedence over original transcription. Proposal must use corrected text for interpretation."
+      "forbidden": {},
+      "recoverable": true,
+      "notes": "User corrections are authoritative and take precedence over original transcription. The proposal uses corrected text ('Friday' not 'Frisday') for interpretation. Quality is 'explicit' because the corrected time is clear."
     },
     {
       "id": "abstract-broad-thought",
@@ -551,12 +629,15 @@
       "expected": {
         "item_type": "idea",
         "abstention": null,
-        "reminder": null
+        "reminder_proposal": null
       },
       "forbidden": {
         "item_type": "action",
-        "reminder_instant": "any"
+        "reminder_proposal": {
+          "quality": "any"
+        }
       },
+      "recoverable": true,
       "notes": "Abstract statements without action verbs or time references remain as ideas. Must not be converted to actions or reminders."
     },
     {
@@ -573,9 +654,11 @@
       },
       "forbidden": {
         "item_type": "action",
-        "reminder_instant": "any",
-        "created_obligation": true
+        "reminder_proposal": {
+          "quality": "any"
+        }
       },
+      "recoverable": true,
       "notes": "Reflective questions and self-reflection must not become actions or reminders without explicit phrasing."
     },
     {
@@ -592,9 +675,11 @@
       },
       "forbidden": {
         "item_type": "action",
-        "decision_made": true,
-        "preference_inferred": true
+        "reminder_proposal": {
+          "quality": "any"
+        }
       },
+      "recoverable": true,
       "notes": "Open questions must not be interpreted as decisions or preferences."
     },
     {
@@ -611,9 +696,11 @@
       },
       "forbidden": {
         "item_type": "action",
-        "reminder_instant": "any",
-        "obligation_created": true
+        "reminder_proposal": {
+          "quality": "any"
+        }
       },
+      "recoverable": true,
       "notes": "Past-tense verbs indicate completed actions, not future obligations. Must be treated as notes/records, not action items."
     },
     {
@@ -628,9 +715,13 @@
         "abstention": "uncertain-target"
       },
       "forbidden": {
-        "item_type": "any",
-        "reminder_instant": "any"
+        "item_type": "action",
+        "reminder_proposal": {
+          "quality": "any"
+        }
       },
+      "recoverable": false,
+      "recovery_notes": "No semantic content; cannot determine intent from filler words alone.",
       "notes": "Pure filler/noise with no semantic content must abstain. No item should be created."
     },
     {
@@ -639,20 +730,33 @@
       "provenance": "synthetic, long transcript with multiple topics",
       "capture_context": {
         "capture_type": "voice",
-        "notes": "rambling capture with mixed notes and actions"
+        "capture_instant": "2026-10-08T16:30:00Z",
+        "device_timezone": "America/New_York",
+        "notes": "rambling capture with mixed notes and actions; no explicit reminder request"
       },
       "expected": {
         "item_type": "action",
-        "source_spans": ["Call product management on Thursday", "workshop to review the legal requirements"],
-        "reminder": {
-          "source_span": "next Friday"
-        }
+        "source_spans": [
+          {
+            "start": 326,
+            "end": 361
+          },
+          {
+            "start": 382,
+            "end": 423
+          }
+        ],
+        "reminder_proposal": null
       },
       "forbidden": {
         "item_type": "note",
-        "multiple_items_created": true
+        "multiple_items_created": true,
+        "reminder_proposal": {
+          "quality": "any"
+        }
       },
-      "notes": "Long transcripts with mixed content: M1 extracts the most concrete action/deadline. Non-actionable context is preserved in source but does not create separate items."
+      "recoverable": true,
+      "notes": "Long transcripts with mixed content: M1 extracts the most concrete action(s). Dates and deadlines mentioned ('Thursday', 'next Friday') are information, not reminder requests because there is no 'Remind me' phrase. Non-actionable context is preserved in source but does not create separate items or reminder proposals."
     }
   ]
 }
