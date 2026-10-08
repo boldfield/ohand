@@ -1385,3 +1385,132 @@ pub fn recognize_reminder(
             .with_source_spans(Some(vec![SourceSpan::new(first.start, last.end)])),
     )
 }
+
+// Session-topic phrase recognition:
+// Recognize bounded explicit session-topic phrases like "Bring this up in therapy"
+// See module top-level docs for the complete grammar.
+
+use crate::interpretation::contracts::SessionTopicProposal;
+
+const SESSION_TOPIC_VERBS: &[&[&str]] = &[
+    &["bring", "this", "up", "in"],
+    &["bring", "this", "in"],
+    &["discuss", "this", "in"],
+    &["discuss", "this", "at"],
+    &["mention", "this", "in"],
+    &["mention", "this", "at"],
+    &["talk", "about", "this", "in"],
+    &["talk", "about", "this", "at"],
+];
+
+fn find_session_topic_phrase(tokens: &[Token]) -> Option<(usize, usize)> {
+    for verb_pattern in SESSION_TOPIC_VERBS {
+        for start in 0..tokens.len() {
+            let pattern_len = verb_pattern.len();
+            if let Some(window) = tokens.get(start..start + pattern_len) {
+                if window
+                    .iter()
+                    .zip(verb_pattern.iter())
+                    .all(|(token, &word)| token.is_word_equal_to(word))
+                {
+                    return Some((start, pattern_len));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn session_topic_prefix_abstention(prefix: &[Token]) -> Option<AbstentionReason> {
+    let sentence = current_sentence(prefix);
+    if sentence.iter().any(is_negation_word) {
+        return Some(AbstentionReason::Negated);
+    }
+    if has_speaker_label(sentence) {
+        return Some(AbstentionReason::UncertainTarget);
+    }
+    let open_quote_count = prefix
+        .iter()
+        .filter(|token| token.kind == TokenKind::Quote)
+        .count();
+    if open_quote_count % 2 == 1
+        || has_word(sentence, HYPOTHETICAL_WORDS)
+        || has_word(sentence, REPORTING_WORDS)
+    {
+        return Some(AbstentionReason::UncertainTarget);
+    }
+    None
+}
+
+fn session_topic_suffix_is_allowed(rest: &[Token]) -> bool {
+    rest.iter().all(|token| match token.kind {
+        TokenKind::Word => {
+            token.is_word_equal_to("please")
+                || token.is_word_equal_to("thanks")
+                || is_closing_delimiter(token)
+        }
+        TokenKind::ClauseBreak => matches!(token.ch, ',' | ';'),
+        TokenKind::SentenceBreak => matches!(token.ch, '.' | '!' | '?' | '\n'),
+        TokenKind::Quote => false,
+    })
+}
+
+/// Recognize an explicit offline session-topic phrase in `text`, the exact text identified by
+/// `text_basis`. The phrase must match one of the bounded patterns (e.g., "Bring this up in therapy")
+/// and produces a session-topic facet proposal only, never a reminder or item type.
+pub fn recognize_session_topic(
+    text: &str,
+    item_id: &str,
+    capture_id: &str,
+    source_revision: i32,
+    text_basis: TextBasis,
+    request_version: &str,
+) -> Option<Proposal> {
+    let tokens = tokenize(text);
+    let (phrase_start, pattern_len) = find_session_topic_phrase(&tokens)?;
+    let prefix = &tokens[..phrase_start];
+    let phrase_end = phrase_start + pattern_len;
+    let rest = tokens.get(phrase_end..)?;
+
+    let topic_token = rest.iter().find(|token| token.is_word())?;
+    let topic = topic_token.lower.clone();
+
+    let rest_after_topic_idx = rest
+        .iter()
+        .position(|token| token.is_word())
+        .map(|i| i + 1)?;
+    let rest_after_topic = rest.get(rest_after_topic_idx..)?;
+
+    let provenance = Provenance {
+        item_id,
+        capture_id,
+        source_revision,
+        text_basis,
+        request_version,
+    };
+
+    if let Some(reason) = session_topic_prefix_abstention(prefix) {
+        return Some(provenance.abstention(reason));
+    }
+
+    if !prefix_is_allowed(prefix) {
+        return None;
+    }
+
+    if !session_topic_suffix_is_allowed(rest_after_topic) {
+        return Some(provenance.abstention(AbstentionReason::UncertainTarget));
+    }
+
+    if has_delimiter_after_command(rest) {
+        return Some(provenance.abstention(AbstentionReason::UncertainTarget));
+    }
+
+    Some(
+        provenance
+            .proposal()
+            .with_session_topic_proposal(Some(SessionTopicProposal {
+                topic,
+                source_span: Some(SourceSpan::new(topic_token.start, topic_token.end)),
+            })),
+    )
+}

@@ -3,7 +3,7 @@ use chrono_tz::Tz;
 use ohand_core::interpretation::contracts::{
     AbstentionReason, Proposal, ReminderProposal, SourceSpan, TextBasis, TimeResolutionQuality,
 };
-use ohand_core::interpretation::fast_path::recognize_reminder;
+use ohand_core::interpretation::fast_path::{recognize_reminder, recognize_session_topic};
 use ohand_core::store::events::ItemType;
 use ohand_core::time::TimeContext;
 
@@ -1066,4 +1066,177 @@ fn only_neutral_reminder_pictographs_may_precede_the_command() {
         FUTURE_INSTANT,
         FUTURE_PHRASE,
     );
+}
+
+fn recognize_topic_in(text: &str, _time_context: &TimeContext) -> Option<Proposal> {
+    let proposal = recognize_session_topic(
+        text,
+        ITEM_ID,
+        CAPTURE_ID,
+        0,
+        TextBasis::Original { item_revision: 0 },
+        REQUEST_VERSION,
+    );
+    if let Some(proposal) = &proposal {
+        proposal
+            .validate(text)
+            .unwrap_or_else(|error| panic!("{text:?} produced an invalid proposal: {error}"));
+    }
+    proposal
+}
+
+fn recognize_topic(text: &str) -> Option<Proposal> {
+    recognize_topic_in(text, &context())
+}
+
+fn assert_session_topic(proposal: &Proposal, expected_topic: &str, text: &str) {
+    let topic_proposal = proposal
+        .session_topic_proposal
+        .as_ref()
+        .unwrap_or_else(|| panic!("{text:?} must have a session-topic proposal"));
+    assert_eq!(
+        topic_proposal.topic, expected_topic,
+        "{text:?}: expected topic {expected_topic:?}"
+    );
+    let span = topic_proposal
+        .source_span
+        .expect("session-topic evidence span required");
+    assert_eq!(selected(text, span), expected_topic, "{text:?}");
+}
+
+fn expect_session_topic(text: &str, expected_topic: &str) {
+    let proposal = recognize_topic(text).unwrap_or_else(|| panic!("{text:?} should be recognized"));
+    assert_eq!(proposal.abstention, None, "{text:?}");
+    assert_eq!(proposal.reminder_proposal, None, "{text:?}");
+    assert_eq!(proposal.item_type, None, "{text:?}");
+    assert_eq!(proposal.source_spans, None, "{text:?}");
+    assert_session_topic(&proposal, expected_topic, text);
+}
+
+fn expect_topic_abstention(text: &str, reason: AbstentionReason) {
+    let proposal = recognize_topic(text).unwrap_or_else(|| panic!("{text:?} should abstain"));
+    assert_eq!(proposal.abstention, Some(reason), "{text:?}");
+    assert!(proposal.session_topic_proposal.is_none(), "{text:?}");
+}
+
+fn expect_topic_unrecognized(text: &str) {
+    assert!(
+        recognize_topic(text).is_none(),
+        "{text:?} must be left for the approved interpreter"
+    );
+}
+
+#[test]
+fn session_topic_basic_bring_this_up() {
+    expect_session_topic("Bring this up in therapy", "therapy");
+}
+
+#[test]
+fn session_topic_basic_discuss() {
+    expect_session_topic("Discuss this at work", "work");
+}
+
+#[test]
+fn session_topic_basic_mention() {
+    expect_session_topic("Mention this in mentoring", "mentoring");
+}
+
+#[test]
+fn session_topic_basic_talk_about() {
+    expect_session_topic("Talk about this in doctor", "doctor");
+}
+
+#[test]
+fn session_topic_with_trailing_please() {
+    expect_session_topic("Bring this up in therapy, please", "therapy");
+}
+
+#[test]
+fn session_topic_with_trailing_thanks() {
+    expect_session_topic("Discuss this at work thanks", "work");
+}
+
+#[test]
+fn session_topic_with_trailing_punctuation() {
+    expect_session_topic("Bring this up in therapy.", "therapy");
+    expect_session_topic("Discuss this at work!", "work");
+    expect_session_topic("Mention this in mentoring?", "mentoring");
+}
+
+#[test]
+fn session_topic_with_prefix_filler() {
+    expect_session_topic("Hey, bring this up in therapy", "therapy");
+    expect_session_topic("Ok, discuss this at work", "work");
+}
+
+#[test]
+fn session_topic_mixed_reminder_and_topic() {
+    let text = "Remind me tomorrow to call mom";
+    let reminder_prop = recognize(text);
+    assert!(reminder_prop.is_some());
+
+    let topic_prop = recognize_topic(text);
+    assert!(topic_prop.is_none());
+}
+
+#[test]
+fn session_topic_negation_abstains() {
+    expect_topic_abstention("Don't bring this up in therapy", AbstentionReason::Negated);
+}
+
+#[test]
+fn session_topic_quoted_abstains() {
+    expect_topic_abstention(
+        "He said \"bring this up in therapy\"",
+        AbstentionReason::UncertainTarget,
+    );
+}
+
+#[test]
+fn session_topic_hypothetical_abstains() {
+    expect_topic_abstention(
+        "If I can, bring this up in therapy",
+        AbstentionReason::UncertainTarget,
+    );
+}
+
+#[test]
+fn session_topic_reported_speech_abstains() {
+    expect_topic_abstention(
+        "She asked me to bring this up in therapy",
+        AbstentionReason::UncertainTarget,
+    );
+}
+
+#[test]
+fn session_topic_with_closing_delimiter_abstains() {
+    expect_topic_abstention(
+        "Bring this up in therapy (please)",
+        AbstentionReason::UncertainTarget,
+    );
+}
+
+#[test]
+fn session_topic_various_topics() {
+    expect_session_topic("Bring this up in therapy", "therapy");
+    expect_session_topic("Bring this up in coaching", "coaching");
+    expect_session_topic("Bring this up in supervision", "supervision");
+    expect_session_topic("Discuss this at doctor", "doctor");
+    expect_session_topic("Discuss this at dentist", "dentist");
+}
+
+#[test]
+fn session_topic_unrecognized_shapes() {
+    expect_topic_unrecognized("bring up therapy");
+    expect_topic_unrecognized("up in therapy");
+    expect_topic_unrecognized("Remember therapy");
+    expect_topic_unrecognized("therapy");
+}
+
+#[test]
+fn session_topic_no_reminder_when_topic_recognized() {
+    let proposal =
+        recognize_topic("Bring this up in therapy").expect("should recognize session-topic phrase");
+    assert!(proposal.reminder_proposal.is_none());
+    assert!(proposal.session_topic_proposal.is_some());
 }
