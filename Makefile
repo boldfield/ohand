@@ -1,15 +1,20 @@
 PYTHON ?= python3
 export PYTHONDONTWRITEBYTECODE := 1
 
-.PHONY: check test contract-check contract-test ios-check
+.PHONY: check test contract-check contract-test ios-check bindings-generate
+
+# bindings-generate: Regenerate reproducible C bindings from Rust FFI source.
+# B01a establishes deterministic binding generation; output goes to build artifacts.
+bindings-generate:
+	tools/bindings/generate.sh build/
 
 # check: Validate contract correctness, compile, format, and lint.
 # F01 establishes contract-check and contract-test. F02 adds cargo targets and lint.
-# F05 adds native targets and documentation.
-check: contract-check cargo-check cargo-fmt-check cargo-clippy ios-check
+# F05 adds native targets and documentation. B01a adds binding generation.
+check: bindings-generate contract-check cargo-check cargo-fmt-check cargo-clippy ios-check
 
 # test: Run contract validation tests and cargo test suite.
-test: contract-test cargo-test
+test: bindings-generate contract-test cargo-test
 
 .PHONY: cargo-check cargo-test cargo-build cargo-fmt-check cargo-clippy
 

@@ -14,3 +14,6 @@ private/
 recordings/
 /captures/
 /target/
+/build/
+# Generated bindings are never committed; they are build artifacts
+core/bindings/include/ohand_bindings.h
