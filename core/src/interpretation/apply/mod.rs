@@ -810,11 +810,21 @@ const EXCLUDING_WORDS: &[&str] = &[
     "which",
     "that",
 ];
-/// Words that, directly after a reminder cue, ask to recall or explain something ("remind me why
-/// the quote expires on ...", "you remind me of ...") rather than to be notified at a time. A
-/// date in such a request belongs to the referenced fact, not to a notification.
+/// Words that, after a reminder cue, ask to recall or explain something ("remind me why the quote
+/// expires on ...", "remind me again of the meeting on ...") rather than to be notified at a time.
+/// A date in such a request belongs to the referenced fact, not to a notification. They
+/// disqualify the request whether they stand directly after the cue or anywhere between the cue
+/// and the quoted time, so an intervening modifier ("again", "exactly", "once more") cannot hide
+/// them.
 const RECALL_WORDS: &[&str] = &[
     "why", "what", "whether", "how", "where", "who", "which", "of", "about", "that", "if",
+];
+/// Past-tense verbs that, between a reminder cue and the quoted time, show the date describes an
+/// event that already took place ("remind me when the quote expired on ...") and therefore cannot
+/// be a future notification time.
+const PAST_EVENT_WORDS: &[&str] = &[
+    "expired", "happened", "occurred", "ended", "started", "began", "finished", "closed", "passed",
+    "arrived", "left", "went", "came", "ago",
 ];
 const COMPLETED_WORDS: &[&str] = &[
     "already",
@@ -911,11 +921,14 @@ fn tokenize_intent_text(text: &str) -> Vec<IntentToken> {
 /// word ("remind me why/what/of/about ...") asks for information, not a notification.
 ///
 /// With a `time_span` (character offsets of the phrase the model quoted), the request must also
-/// govern that phrase: the span starts after the cue with no clause break in between, and no
-/// negating or excluding word ("not", "except", "who") stands between the cue and the span. The
-/// model's
-/// candidate is never evidence of intent, and its choice of span cannot attach an unrelated date
-/// ("the quote expires 2026-01-16 09:00:00") to a request made elsewhere in the text.
+/// govern that phrase: the span starts after the cue with no clause break in between, and every
+/// word between the cue and the span is checked. A negating or excluding word ("not", "except",
+/// "who") detaches the time from the request; a recall word ("why", "what", "of", "about")
+/// anywhere in that segment, even after a modifier such as "again" or "once more", makes the date
+/// part of the fact being recalled; a completed-work or past-tense word ("already", "expired",
+/// "happened") shows the date lies in the past. The model's candidate is never evidence of
+/// intent, and its choice of span cannot attach an unrelated date ("the quote expires 2026-01-16
+/// 09:00:00") to a request made elsewhere in the text.
 fn states_reminder_intent(text: &str, time_span: Option<SourceSpan>) -> bool {
     let tokens = tokenize_intent_text(text);
     (0..tokens.len()).any(|start| {
@@ -929,25 +942,36 @@ fn states_reminder_intent(text: &str, time_span: Option<SourceSpan>) -> bool {
             if !matches_cue || !is_present_first_person_request(&tokens, start, cue[0]) {
                 return false;
             }
-            let cue_end = window[cue.len() - 1].end;
             let recalls = tokens.get(start + cue.len()).is_some_and(|next| {
                 !next.clause_break && RECALL_WORDS.contains(&next.text.as_str())
             });
             if recalls {
                 return false;
             }
-            time_span.is_none_or(|span| {
-                span.start >= cue_end
-                    && !tokens.iter().any(|token| {
-                        token.start >= cue_end
-                            && token.start < span.start
-                            && (token.clause_break
-                                || NEGATING_WORDS.contains(&token.text.as_str())
-                                || EXCLUDING_WORDS.contains(&token.text.as_str()))
-                    })
-            })
+            let cue_end = window[cue.len() - 1].end;
+            time_span.is_none_or(|span| request_governs_span(&tokens, cue_end, span))
         })
     })
+}
+
+/// Whether a reminder request whose cue ends at `cue_end` governs the quoted time `span`: the
+/// span follows the cue and no token between them breaks the clause or disqualifies the time
+/// (negation, exclusion, recall sense, completed work or a past-tense event).
+fn request_governs_span(tokens: &[IntentToken], cue_end: usize, span: SourceSpan) -> bool {
+    span.start >= cue_end
+        && !tokens
+            .iter()
+            .any(|token| token.start >= cue_end && token.start < span.start && detaches_time(token))
+}
+
+fn detaches_time(token: &IntentToken) -> bool {
+    let word = token.text.as_str();
+    token.clause_break
+        || NEGATING_WORDS.contains(&word)
+        || EXCLUDING_WORDS.contains(&word)
+        || RECALL_WORDS.contains(&word)
+        || COMPLETED_WORDS.contains(&word)
+        || PAST_EVENT_WORDS.contains(&word)
 }
 
 fn is_present_first_person_request(tokens: &[IntentToken], cue_start: usize, verb: &str) -> bool {

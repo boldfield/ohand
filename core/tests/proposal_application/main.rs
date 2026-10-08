@@ -1403,6 +1403,13 @@ fn a_dated_fact_that_does_not_ask_for_a_reminder_stays_unscheduled() {
         "remind me of the meeting on 2026-01-16 09:00:00",
         "you remind me of the meeting on 2026-01-16 09:00:00",
         "remind me about the call that ended 2026-01-16 09:00:00",
+        "remind me again why the roof quote expires on 2026-01-16 09:00:00",
+        "please remind me once more why the quote expires on 2026-01-16 09:00:00",
+        "remind me exactly what happened on 2026-01-16 09:00:00",
+        "remind me later of the meeting on 2026-01-16 09:00:00",
+        "remind me when the quote expired on 2026-01-16 09:00:00",
+        "remind me later about the meeting on 2026-01-16 09:00:00",
+        "remind me what I already did on 2026-01-16 09:00:00",
         "Bob told me I need to set a reminder for 2026-01-16 09:00:00",
         "Bob hopes I want to set a reminder for 2026-01-16 09:00:00",
     ] {
