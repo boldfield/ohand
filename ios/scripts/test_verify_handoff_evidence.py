@@ -11,7 +11,7 @@ LARGE_TEXT_ID = "123E4567-E89B-42D3-A456-426614174000"
 LOG = f"""noise
 HANDOFF-PHASE cold {COLD_ID} notRunning
 HANDOFF-PHASE warm {WARM_ID} background
-HANDOFF-PHASE rejected - 2
+HANDOFF-PHASE rejected - 3
 HANDOFF-PHASE large-text-capture {LARGE_TEXT_ID} scrolls=0
 HANDOFF-PHASE large-text-management {LARGE_TEXT_ID} ok
 """
@@ -30,7 +30,7 @@ class VerifyHandoffEvidenceTests(unittest.TestCase):
             self.write_inbox_record(capture_id, ready, received)
         for capture_id in (COLD_ID, WARM_ID, LARGE_TEXT_ID):
             self.write_native_record(capture_id)
-        self.write_rejections(2, "invalid_capture_id")
+        self.write_rejections(3, "invalid_capture_id")
 
     def write_inbox_record(self, capture_id, ready, received, **overrides):
         record = {"captureId": capture_id, "receivedAtUnixMs": received, "webviewReady": ready}
@@ -73,12 +73,16 @@ class VerifyHandoffEvidenceTests(unittest.TestCase):
         self.assertTrue(any("only identifier and delivery facts" in error for error in self.errors()))
 
     def test_requires_the_cold_url_to_arrive_through_the_scene_hook(self):
-        good_trace = "1 scene-hook installed=true\n2 ready\n3 scene-connect urls=1\n4 opened urls=1\n"
+        good_trace = "1 scene-hook installed=true\n2 ready\n3 scene-connect urls=1\n4 scene-open urls=1\n5 opened urls=1\n"
         self.assertEqual(self.errors(shell_trace=good_trace), [])
-        no_connect = self.errors(shell_trace="1 scene-hook installed=true\n2 ready\n4 opened urls=1\n")
+        no_connect = self.errors(shell_trace="1 scene-hook installed=true\n2 ready\n4 scene-open urls=1\n")
         self.assertTrue(any("cold launch URL" in error for error in no_connect))
-        not_installed = self.errors(shell_trace="1 scene-hook installed=false\n3 scene-connect urls=1\n")
+        not_installed = self.errors(shell_trace="1 scene-hook installed=false\n3 scene-connect urls=1\n4 scene-open urls=1\n")
         self.assertTrue(any("not installed" in error for error in not_installed))
+
+    def test_requires_the_warm_url_to_arrive_through_the_raw_scene_open_hook(self):
+        only_run_event = self.errors(shell_trace="1 scene-hook installed=true\n3 scene-connect urls=1\n4 opened urls=1\n")
+        self.assertTrue(any("warm path" in error for error in only_run_event))
 
     def test_rejects_a_large_text_phase_that_hands_off_a_different_entry(self):
         log = LOG.replace(f"large-text-management {LARGE_TEXT_ID}", f"large-text-management {WARM_ID}")
@@ -98,7 +102,7 @@ class VerifyHandoffEvidenceTests(unittest.TestCase):
         self.assertTrue(any("rejection count" in error for error in self.errors()))
 
     def test_rejects_an_unknown_rejection_reason(self):
-        self.write_rejections(2, "because")
+        self.write_rejections(3, "because")
         self.assertTrue(any("not a known code" in error for error in self.errors()))
 
     def test_rejects_a_non_canonical_identifier_in_the_log(self):

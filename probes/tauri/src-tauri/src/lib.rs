@@ -6,7 +6,7 @@ use ohand_tauri_handoff::{HandoffInbox, HandoffSnapshot};
 use tauri::Manager;
 
 #[cfg(target_os = "ios")]
-mod scene_cold_url;
+mod scene_urls;
 
 const ROUNDTRIP_RECORD_FILE: &str = "roundtrip.json";
 const HANDOFF_DIRECTORY: &str = "handoffs";
@@ -67,8 +67,9 @@ fn now_unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Native URL receiver. It runs from the application's open-URL event, not from a webview command, so a handoff is
-/// stored whether or not the web UI has loaded.
+/// Native URL receiver. It runs from a native open-URL callback, not from a webview command, so a handoff is stored
+/// whether or not the web UI has loaded. On iOS the callbacks are the raw scene hooks in `scene_urls`, because
+/// `RunEvent::Opened` carries URLs that tao has already normalised.
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
 fn record_opened_urls<'a>(app: &tauri::AppHandle, urls: impl Iterator<Item = &'a str>) {
     use ohand_tauri_handoff::{receive_urls, ReceiveOutcome};
@@ -112,8 +113,12 @@ pub fn run() {
     #[cfg(target_os = "ios")]
     {
         let handle = app.handle().clone();
-        let installed = scene_cold_url::install(move |urls| {
-            trace_label(&handle, &format!("scene-connect urls={}", urls.len()));
+        let installed = scene_urls::install(move |source, urls| {
+            let label = match source {
+                scene_urls::SceneUrlSource::Connect => "scene-connect",
+                scene_urls::SceneUrlSource::Open => "scene-open",
+            };
+            trace_label(&handle, &format!("{label} urls={}", urls.len()));
             record_opened_urls(&handle, urls.iter().map(String::as_str));
         });
         trace_label(app.handle(), &format!("scene-hook installed={installed}"));
@@ -122,7 +127,8 @@ pub fn run() {
     app.run(|app_handle, event| {
         trace_run_event(app_handle, &event);
         match event {
-            #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
+            // Not on iOS: there the scene hooks record the raw string, and these URLs are already normalised.
+            #[cfg(any(target_os = "macos", target_os = "android"))]
             tauri::RunEvent::Opened { urls } => {
                 record_opened_urls(app_handle, urls.iter().map(|url| url.as_str()))
             }

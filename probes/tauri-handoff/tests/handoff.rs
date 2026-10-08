@@ -56,6 +56,53 @@ fn shared_vectors_are_accepted_or_rejected_with_the_expected_code() {
     }
 }
 
+/// Both iOS scene hooks (cold connect and warm open) pass the raw URL string straight to `receive_urls`, so running
+/// every shared vector through it, in one delivery, is the receiver behaviour on both paths. A normalised parser
+/// (scheme lower-cased, tab and newline stripped) would accept the upper-case-scheme and trailing-newline vectors.
+#[test]
+fn every_shared_vector_gets_the_same_verdict_through_the_receiver() {
+    let vectors: Vectors =
+        serde_json::from_str(include_str!("../fixtures/handoff-urls.json")).expect("vectors parse");
+    let normalisation_sensitive = [
+        "OHAND-TAURI://capture?captureId=0F8FAD5B-D9CB-469F-A165-70867728950E",
+        "ohand-tauri://capture?captureId=0F8FAD5B-D9CB-469F-A165-70867728950E\n",
+    ];
+    for url in normalisation_sensitive {
+        assert!(
+            vectors
+                .cases
+                .iter()
+                .any(|case| case.url == url && case.expect != "ok"),
+            "fixture must hold the rejection vector {url:?}"
+        );
+    }
+    for case in vectors.cases {
+        let (_directory, inbox) = new_inbox();
+        let outcome = receive_urls(&inbox, [case.url.as_str()], false, 1_000).remove(0);
+        match (case.expect.as_str(), outcome) {
+            ("ok", ReceiveOutcome::Recorded(capture_id)) => {
+                assert_eq!(
+                    Some(capture_id.as_str().to_owned()),
+                    case.capture_id,
+                    "{}",
+                    case.description
+                );
+            }
+            (expected, ReceiveOutcome::Rejected(reason)) => {
+                assert_eq!(reason.code(), expected, "{}", case.description);
+                assert!(
+                    inbox.snapshot().unwrap().capture_ids.is_empty(),
+                    "{}",
+                    case.description
+                );
+            }
+            (expected, outcome) => {
+                panic!("{}: expected {expected}, got {outcome:?}", case.description)
+            }
+        }
+    }
+}
+
 #[test]
 fn built_urls_round_trip_to_the_same_identifier() {
     let capture_id: CaptureId = FIRST_ID.parse().expect("canonical id");

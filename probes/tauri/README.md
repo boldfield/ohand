@@ -16,4 +16,4 @@ limitations are in [`docs/validation/tauri-build.md`](../../docs/validation/taur
 ## Native handoff (P07)
 
 The shell registers the `ohand-tauri` URL scheme and records capture identifiers sent by CaptureProbe in
-`src-tauri/src/lib.rs` (`RunEvent::Opened`). See `docs/validation/tauri-handoff.md`.
+`src-tauri/src/lib.rs` from the raw scene hooks in `src-tauri/src/scene_urls.rs`. See `docs/validation/tauri-handoff.md`.

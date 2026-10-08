@@ -48,10 +48,13 @@ final class ManagementHandoffUITests: XCTestCase {
         expectManagementShell(shows: [coldId, warmId], phase: "warm")
         print("HANDOFF-PHASE warm \(warmId) background")
 
-        // Hostile URLs sent straight to the shell: each is counted and none adds a list entry.
+        // Hostile URLs sent straight to the shell: each is counted and none adds a list entry. The upper-case scheme is
+        // the third: the url crate would normalise it to a canonical URL, so it is only counted if the shell checks
+        // the raw string delivered by the scene hook.
         let hostileURLs = [
             "ohand-tauri://capture?captureId=not-a-uuid",
             "ohand-tauri://capture/../../admin?captureId=\(warmId)",
+            "OHAND-TAURI://capture?captureId=\(warmId)",
         ]
         for (index, hostile) in hostileURLs.enumerated() {
             openThroughSystem(try XCTUnwrap(URL(string: hostile)))

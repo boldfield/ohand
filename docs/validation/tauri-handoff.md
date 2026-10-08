@@ -24,25 +24,33 @@ rejected with a stable code:
 | Code | Meaning |
 | --- | --- |
 | `bad_scheme` | not `ohand-tauri://` |
-| `unknown_route` | route other than `capture` |
+| `unknown_route` | anything between `ohand-tauri://` and `?` other than exactly `capture`: other route, extra path, trailing slash, user info, port, a fragment before the query, other casing |
 | `missing_capture_id` | no `captureId=` query |
-| `unexpected_component` | extra path, userinfo, port, fragment, extra or duplicate parameters |
-| `invalid_capture_id` | not a canonical identifier (lower-case, wrong length, non-hex, encoded) |
+| `unexpected_component` | a query that does not start with `captureId=` (another parameter first) |
+| `invalid_capture_id` | the value after `captureId=` is not exactly a canonical identifier: lower-case, wrong length, non-hex, encoded, or followed by anything (second or repeated parameter, fragment, whitespace, newline) |
 
 Both implementations are tested against the same vectors, `probes/tauri-handoff/fixtures/handoff-urls.json`:
 
-- Rust: `probes/tauri-handoff/src/url_grammar.rs`, `tests/handoff.rs` (run by `make test` as part of the workspace).
+- Rust: `probes/tauri-handoff/src/url_grammar.rs`, `tests/handoff.rs` (run by `make test` as part of the workspace). The test
+  `every_shared_vector_gets_the_same_verdict_through_the_receiver` runs each vector through `receive_urls`, the function both
+  iOS scene hooks call, including the upper-case-scheme and trailing-newline vectors a normalising parser would accept.
+  The iOS hook wiring itself (that the raw string reaches `receive_urls`) is only proven by the simulator `rejected` phase.
 - Swift: `ios/CaptureProbe/Shared/ManagementHandoff.swift`, `ios/CaptureProbe/Tests/ManagementHandoffTests.swift`.
 
 ## Receiving: native, not webview
 
 - `probes/tauri/src-tauri/Info.ios.plist` registers the `ohand-tauri` scheme (merged into the app plist by tauri-cli).
-- `probes/tauri/src-tauri/src/lib.rs` handles `tauri::RunEvent::Opened` on the Rust side. Each URL is parsed with the
+- `probes/tauri/src-tauri/src/lib.rs` hands every delivered URL to `receive_urls`. Each URL is parsed with the
   grammar and, if valid, written atomically to `<app data>/handoffs/<ID>.json` (`ohand-tauri-handoff::HandoffInbox`).
   First write wins, so a replayed URL does not rewrite the record. Rejected URLs only increment a counter in
   `handoffs/rejections.json` (count, last reason code, time); the hostile URL text is never stored or shown.
-- On a cold launch the URL arrives in the scene connection options instead; `scene_cold_url.rs` forwards it to the
-  same receiver (see known risk 2). Duplicates from both paths are harmless because the first write wins.
+- On iOS both delivery paths come from `scene_urls.rs`, which wraps tao's scene delegate and passes the receiver the
+  unmodified `absoluteString`: `scene:willConnectToSession:options:` for the URL that launched the app (cold) and
+  `scene:openURLContexts:` for a URL opened while it runs (warm). The shell deliberately does not record from
+  `RunEvent::Opened` on iOS, because tao has already parsed that URL with the `url` crate, which lower-cases the scheme
+  and strips tab and newline, so `OHAND-TAURI://capture?captureId=<id>` would arrive looking canonical. Cold and warm
+  therefore apply the same literal grammar to the same bytes (see known risks 1 and 2). On macOS and Android
+  `RunEvent::Opened` is still the receiver's input; those targets are not exercised by this probe.
 - A record holds `captureId`, `receivedAtUnixMs` and `webviewReady`. `webviewReady` is false when the URL arrived before
   the web UI reported it had loaded, which is what a cold launch looks like. No webview is needed to record it.
 - The web UI lists identifiers with `textContent` only and polls the `list_handoffs` command, so a handoff recorded
@@ -58,7 +66,7 @@ both apps on one simulator. The test taps the real "Review in management app" bu
 | --- | --- | --- |
 | cold | Native entry launched once (the runner installs it on first launch), then both terminated; the entry saves via its URL, button tapped. | Shell state was `notRunning` when the entry saved; shell comes to the foreground and lists the same identifier. |
 | warm | Shell left in the background; a second entry is saved and handed off. | Shell was backgrounded; lists both identifiers. |
-| rejected | Two hostile `ohand-tauri://` URLs are opened directly (bad identifier; path traversal). | The shell shows "Handoffs rejected: 1." then "2."; the list still has exactly two identifiers. |
+| rejected | Three hostile `ohand-tauri://` URLs are opened directly while the shell is running: a bad identifier, path traversal, and an upper-case scheme around a valid, already-stored identifier (the URL the `url` crate would normalise into an accepted one). | The shell shows "Handoffs rejected: 1.", "2.", then "3."; the list still has exactly two identifiers. |
 | large-text | Both apps launched at `AccessibilityXXXL`. | The handoff button exists, is enabled and becomes hittable by scrolling; tapping it opens the shell (also at largest text), which lists that entry's identifier. |
 
 Afterwards `ios/scripts/verify_handoff_evidence.py` (unit-tested in `ios/scripts/test_verify_handoff_evidence.py`,
@@ -68,8 +76,9 @@ run by `make check`) reads the real files from both simulator data containers an
 - each shell record has only `captureId`, `receivedAtUnixMs`, `webviewReady`, and the same identifier exists as a saved
   CaptureProbe record, so identity is preserved end to end;
 - the cold record has `webviewReady == false` and the warm record `true`;
-- the rejection summary counts exactly two and uses a known reason code;
-- the shell's `run-events.log` shows the scene hook installed and a `scene-connect urls=1` delivery (the cold URL).
+- the rejection summary counts exactly three and uses a known reason code;
+- the shell's `run-events.log` shows the scene hook installed, a `scene-connect urls=1` delivery (the cold URL) and a
+  `scene-open urls=` delivery (warm URLs through the raw hook).
 
 Evidence uploaded as `tauri-probe-evidence` (7 days): `handoff-uitests.log`, `handoff-phases.txt`,
 `handoff-verification.txt`, `shell-handoffs/`, `capture-root/`, the xcresult bundle with screenshots.
@@ -107,15 +116,21 @@ pass/fail with a screenshot or screen recording. Use synthetic text only.
 
 1. tao 0.37.1 (via Tauri 2.12.1) has a path that can crash on a malformed URL: its app-delegate `application:openURL:`
    handler and the universal-link handler call `Url::parse(...).unwrap()`. The scene path this shell receives URLs on
-   drops a URL that does not parse (and logs it) without reaching our counter, and our own cold-launch hook validates
-   the raw string with the grammar. Only the scene path was exercised; the unwrap paths were read in source, not tested.
-2. A cold launch by URL is lost by tao 0.37.1. The system hands the launching URL over in
-   `UISceneConnectionOptions.URLContexts`, which tao's `TaoSceneDelegate` ignores; CI showed the shell listing nothing
-   after a cold handoff while a warm one worked. `probes/tauri/src-tauri/src/scene_cold_url.rs` wraps tao's
-   `scene:willConnectToSession:options:` through the Objective-C runtime (after tao runs unchanged) and feeds the URLs
-   to the same native receiver. This depends on tao's private class name (`TaoSceneDelegate`) and selector, so a tao
-   upgrade can silently disable it: the shell writes `run-events.log` (event kinds and timestamps only, never URLs,
-   capped at 16 KiB) and the CI verifier requires a `scene-connect` line, so such a regression fails the cold phase.
-   The production shell should get this fixed upstream or in its own native scene hook.
+   drops a URL that does not parse (and logs it) without reaching `RunEvent::Opened`; the `scene_urls.rs` hooks see the
+   raw string before that, so such a URL is counted as a rejection instead of vanishing. Only the scene path was
+   exercised; the unwrap paths were read in source, not tested.
+2. tao 0.37.1 mishandles scene URLs twice, and `probes/tauri/src-tauri/src/scene_urls.rs` works around both through the
+   Objective-C runtime (tao's method runs unchanged first, then the hook reads the same arguments).
+   - Cold: the launching URL is only in `UISceneConnectionOptions.URLContexts`, which tao's `TaoSceneDelegate` ignores;
+     CI showed the shell listing nothing after a cold handoff while a warm one worked.
+   - Warm: `scene:openURLContexts:` parses the URL into a `url::Url` before `RunEvent::Opened`. The `url` crate
+     normalises (lower-case scheme, tab and newline stripped), so validating `Url::as_str()` accepts input the grammar
+     must reject. The shell therefore does not record from `RunEvent::Opened` on iOS.
+   The hooks depend on tao's private class name (`TaoSceneDelegate`) and selectors, so a tao upgrade can silently disable
+   them. `install` changes nothing unless both selectors exist; the shell writes `run-events.log` (event kinds and
+   timestamps only, never URLs, capped at 16 KiB) and the CI verifier requires `scene-hook installed=true`, a
+   `scene-connect` line and a `scene-open` line, so such a regression fails CI. If the hooks are not installed the iOS
+   shell records nothing, which fails closed rather than falling back to normalised URLs. The production shell should
+   get this fixed upstream or in its own native scene hook.
 3. The cold `webviewReady == false` assertion depends on timing; a slow runner could flip it, which would be a false
    failure, not a false pass.

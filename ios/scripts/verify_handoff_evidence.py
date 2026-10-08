@@ -20,6 +20,7 @@ CAPTURE_ID_PATTERN = re.compile(r"^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{
 INBOX_RECORD_KEYS = {"captureId", "receivedAtUnixMs", "webviewReady"}
 REJECTION_KEYS = {"count", "lastReason", "lastReceivedAtUnixMs"}
 REJECTION_REASONS = {"bad_scheme", "unknown_route", "missing_capture_id", "unexpected_component", "invalid_capture_id"}
+HOSTILE_URL_COUNT = 3
 EXPECTED_PHASES = ["cold", "warm", "rejected", "large-text-capture", "large-text-management"]
 
 
@@ -55,8 +56,8 @@ def check(handoff_dir, capture_root, log_text, require_cold_without_webview=True
         errors.append("the handoffs did not carry three distinct identifiers")
     if phases["large-text-management"] != (phases["large-text-capture"][0], "ok"):
         errors.append(f"large-text management phase {phases['large-text-management']} does not repeat the large-text capture")
-    if phases["rejected"][1] != "2":
-        errors.append(f"expected 2 hostile URLs, phase reports {phases['rejected'][1]!r}")
+    if phases["rejected"][1] != str(HOSTILE_URL_COUNT):
+        errors.append(f"expected {HOSTILE_URL_COUNT} hostile URLs, phase reports {phases['rejected'][1]!r}")
     if errors:
         return errors
 
@@ -103,13 +104,15 @@ def check(handoff_dir, capture_root, log_text, require_cold_without_webview=True
             errors.append("the scene connection hook was not installed in the shell")
         if not any("scene-connect urls=1" in line for line in trace_lines):
             errors.append("no handoff arrived through the scene connection options, so the cold launch URL was not delivered")
+        if not any("scene-open urls=" in line for line in trace_lines):
+            errors.append("no URL arrived through the raw scene open hook, so the warm path was not exercised")
 
     summary = json.loads((handoff_dir / "rejections.json").read_text())
     if set(summary) != REJECTION_KEYS:
         errors.append(f"rejection summary has keys {sorted(summary)}")
     else:
-        if summary["count"] != 2:
-            errors.append(f"rejection count {summary['count']} != 2")
+        if summary["count"] != HOSTILE_URL_COUNT:
+            errors.append(f"rejection count {summary['count']} != {HOSTILE_URL_COUNT}")
         if summary["lastReason"] not in REJECTION_REASONS:
             errors.append(f"rejection reason {summary['lastReason']!r} is not a known code")
     return errors
@@ -135,7 +138,7 @@ def main():
         for error in errors:
             print(f"ERROR: {error}", file=sys.stderr)
         return 1
-    print("Handoff evidence verified: the shell stored exactly the cold, warm and large-text identifiers CaptureProbe saved, and rejected 2 hostile URLs")
+    print(f"Handoff evidence verified: the shell stored exactly the cold, warm and large-text identifiers CaptureProbe saved, and rejected {HOSTILE_URL_COUNT} hostile URLs")
     return 0
 
 
