@@ -1,0 +1,118 @@
+{
+  "classifications": {
+    "authentication_chat": "authentication-not-required",
+    "authentication_models": "authentication-not-required",
+    "chat": "openai-compatible",
+    "models": "openai-compatible",
+    "transport": "https-verified"
+  },
+  "collected_at": "2026-10-08T09:39:09Z",
+  "collection_context": "odonian-worker",
+  "configured_scheme": "https",
+  "evidence_id": "spark-probe-20261008T093909Z-22c47772",
+  "failures": [
+    "authentication-not-required-models",
+    "authentication-not-required-chat"
+  ],
+  "models": [
+    {
+      "id": "deepseek-flash-iq3:latest",
+      "object": "model"
+    },
+    {
+      "id": "qwen3.8:27b",
+      "object": "model"
+    },
+    {
+      "id": "qwen3.5:122b",
+      "object": "model"
+    },
+    {
+      "id": "gpt-oss:120b",
+      "object": "model"
+    },
+    {
+      "id": "gpt-oss:20b",
+      "object": "model"
+    },
+    {
+      "id": "glm-5.3-flash",
+      "object": "model"
+    }
+  ],
+  "probe_revision": {
+    "commit": "22c47772849c77b3d3a5e2b03be87098690e738e",
+    "dirty": false
+  },
+  "requests": [
+    {
+      "credential_sent": false,
+      "error": null,
+      "method": "GET",
+      "name": "models-unauthenticated",
+      "path": "/models",
+      "response_headers": {
+        "content-type": "application/json",
+        "date": "Thu, 08 Oct 2026 09:39:09 GMT"
+      },
+      "status": 200,
+      "tls_verified": true
+    },
+    {
+      "credential_sent": true,
+      "error": null,
+      "method": "GET",
+      "name": "models-authenticated",
+      "path": "/models",
+      "response_headers": {
+        "content-type": "application/json",
+        "date": "Thu, 08 Oct 2026 09:39:09 GMT"
+      },
+      "status": 200,
+      "tls_verified": true
+    },
+    {
+      "credential_sent": true,
+      "error": null,
+      "method": "POST",
+      "name": "chat-structured",
+      "path": "/chat/completions",
+      "response_headers": {
+        "content-type": "application/json",
+        "date": "Thu, 08 Oct 2026 09:39:11 GMT",
+        "server": "nginx/1.27.5"
+      },
+      "status": 200,
+      "tls_verified": true
+    },
+    {
+      "credential_sent": false,
+      "error": null,
+      "method": "POST",
+      "name": "chat-unauthenticated",
+      "path": "/chat/completions",
+      "response_headers": {
+        "content-type": "application/json",
+        "date": "Thu, 08 Oct 2026 09:39:12 GMT",
+        "server": "nginx/1.27.5"
+      },
+      "status": 200,
+      "tls_verified": true
+    }
+  ],
+  "result": "fail",
+  "schema_version": 1,
+  "structured_response": {
+    "attempted": true,
+    "model": "deepseek-flash-iq3:latest",
+    "observed_keys": [
+      "count",
+      "status"
+    ],
+    "passed": true,
+    "reason": "content-matches-requested-shape"
+  },
+  "unverified": [
+    "phone-context reachability (owned by V08b)"
+  ]
+}
