@@ -1,5 +1,13 @@
 # M1 external execution prerequisites
 
+## Verified provider-access update
+
+At 2026-10-08T04:11:22Z, the coordinator verified ArgoCD Synced/Healthy at manifests revision `17104178df5a24fb372747cffd534e943cd8344e`, deployment generation 18 observed, and all four configured workers ready. In every actual execution container, UID 1000 could read and parse `/etc/ohand-provider/models.json`; the mount and kernel filesystem were read-only, with observed root:1000 mode 0440. No credentials/configuration contents were printed and no pods were restarted.
+
+[Immutable sanitized operator evidence](https://github.com/boldfield/manifests/blob/07515bf53f7b2d96bf9b596f0f88de78f99f2fac/docs/validation/ohand-provider-access.md) records the individual container observations and private raw-evidence reference. This clears the missing worker-configuration-access prerequisite. Infrastructure task B still needs its PR cleanup and independent review; V08 can now run its authorized synthetic endpoint probes using that file. Endpoint behavior, successful authentication and phone-context reachability are not established by this access check. Do not ask the execution worker to install kubectl or obtain cluster-admin access to repeat the operator observation.
+
+The original blocker description below is historical and superseded for worker Secret mounting by this verified update. Apple enrollment/signing is unchanged by this observation.
+
 ## Current blockers
 
 P08 (`7d4836ee-0236-4f17-9f21-bc3ec1d3d7e0`) requires real Apple signing and device-install evidence. Developer enrollment is still pending, as corrected by the maintainer on 2026-10-07. This Mac currently selects Command Line Tools, has no valid code-signing identity and has no installed provisioning profiles. Do not unblock P08 based on enrollment alone. The existing PR #27 also has unresolved review findings; preserve that work and fix those findings before resubmission. Do not claim a signed installation from simulator results or fixture tests.
