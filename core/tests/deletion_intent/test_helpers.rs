@@ -1,13 +1,11 @@
 // Helper functions for deletion_intent tests.
 
-use oh_and_core::store::schema::{Database, SystemClock};
-use oh_and_core::store::captures::save_capture;
-use oh_and_core::store::events::{save_event, Event, EventType, EventPayload};
-use oh_and_core::jobs::queue::{enqueue_job, JobStatus};
 use chrono::Utc;
-use std::sync::Arc;
-use std::path::PathBuf;
+use ohand_core::jobs::queue::{enqueue_job, JobStatus};
+use ohand_core::store::captures::{save_capture, Capture};
+use ohand_core::store::schema::{Database, SystemClock};
 use std::fs;
+use std::sync::Arc;
 
 pub fn create_test_db() -> Database {
     // Create a temporary database file for testing
@@ -33,12 +31,10 @@ pub fn create_test_capture(
     audio_reference: Option<&str>,
 ) {
     let now = Utc::now();
-    save_capture(
-        db,
+    let capture = Capture::new(
         capture_id.to_string(),
-        text.to_string(),
+        Some(text.to_string()),
         audio_reference.map(|s| s.to_string()),
-        now.to_rfc3339(),
         "2026-01-15T10:30:00+00:00".to_string(),
         "UTC".to_string(),
         0,
@@ -46,10 +42,12 @@ pub fn create_test_capture(
         "gregorian".to_string(),
         "personal".to_string(),
         "route-default".to_string(),
-        None,
         false,
+        now.to_rfc3339(),
+        None,
     )
-    .expect("Capture should save");
+    .expect("Capture::new should not fail");
+    save_capture(db, &capture).expect("Capture should save");
 }
 
 pub fn create_test_item(db: &mut Database, item_id: &str, capture_id: &str) {
@@ -74,7 +72,12 @@ pub fn create_test_job(
     status: JobStatus,
     created_at: chrono::DateTime<chrono::Utc>,
 ) -> String {
-    let job_id = format!("job-{}-{}-{}", item_id, job_type, created_at.timestamp_millis());
+    let job_id = format!(
+        "job-{}-{}-{}",
+        item_id,
+        job_type,
+        created_at.timestamp_millis()
+    );
 
     enqueue_job(
         db,

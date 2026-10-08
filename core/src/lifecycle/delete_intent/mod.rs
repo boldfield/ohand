@@ -158,28 +158,43 @@ fn deletion_work_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeletionW
 
 /// Mark an item for deletion in a single idempotent transaction.
 /// This atomically:
-/// 1. Sets the item's lifecycle_state to "deleted" via an event (idempotent)
-/// 2. Removes the item from the search index
-/// 3. Cancels all pending jobs for this item
-/// 4. Enqueues cleanup work for audio, ingress, and notifications
+/// 1. Sets the item's lifecycle_state to "deleted" via an event (compare-and-set on revision)
+/// 2. Removes readable/indexed content: clears capture text and correction content
+/// 3. Removes the item from the search index
+/// 4. Cancels all pending jobs for this item
+/// 5. Cancels all reminders (moves to cancelled state and enqueues reminder cancellation)
+/// 6. Enqueues cleanup work for audio, ingress, and notifications
 ///
 /// Returns a deletion work record if successful.
 /// If the item is already deleted, returns success (idempotent).
+///
+/// `expected_revision` enforces compare-and-set semantics: a stale delete command cannot
+/// delete a newer corrected item.
 pub fn mark_deletion_intent(
     db: &mut Database,
     item_id: &str,
+    expected_revision: i32,
     now: DateTime<Utc>,
 ) -> Result<DeletionWork> {
     let tx = db.immediate_transaction()?;
 
-    // Load current item state to check if already deleted and to get the revision
+    // Load current item state to check if already deleted and validate revision
     let current_state = load_item_state(&tx, item_id)
         .map_err(|e| anyhow!("Failed to load item state: {}", e))?
         .ok_or_else(|| anyhow!("Item {} not found", item_id))?;
 
+    // Enforce compare-and-set: reject stale delete commands first, before checking state
+    if current_state.revision != expected_revision {
+        return Err(anyhow!(
+            "Stale delete: expected revision {} but current is {}",
+            expected_revision,
+            current_state.revision
+        ));
+    }
+
     // Check if already deleted (idempotent case)
     if current_state.lifecycle_state == LifecycleState::Deleted {
-        // Item is already deleted; just return the first cleanup work
+        // Item is already deleted; return success with existing work
         tx.commit()?;
         let conn = db.conn();
         let existing_work: Option<String> = conn
@@ -195,18 +210,12 @@ pub fn mark_deletion_intent(
                 .ok_or_else(|| anyhow!("Deletion work not found"));
         }
 
-        // No existing work, create placeholder
-        let work_id = format!("del-{}-{}", item_id, "already_deleted");
-        return Ok(DeletionWork::new(
-            work_id,
-            item_id.to_string(),
-            DeletionWorkType::RemoveAudio,
-            now,
-        ));
+        // No existing work, return empty (shouldn't happen normally)
+        return Err(anyhow!("Item already deleted with no pending work"));
     }
 
-    // Create deletion event
-    let event_id = format!("del-event-{}-{}", item_id, now.timestamp_millis());
+    // Create deletion event with command identity (not timestamp)
+    let event_id = format!("deletion:{}", item_id);
     let deletion_event = Event::new(
         event_id,
         item_id.to_string(),
@@ -218,37 +227,35 @@ pub fn mark_deletion_intent(
     .map_err(|e| anyhow!("Failed to create deletion event: {}", e))?;
 
     // Attempt to save the deletion event (compare-and-set on revision)
-    // This is public API from the events module
-    crate::store::events::save_event_in_tx(&tx, &deletion_event, current_state.revision)
+    // save_event_in_tx will enforce compare-and-set; pass the expected revision
+    crate::store::events::save_event_in_tx(&tx, &deletion_event, expected_revision)
         .map_err(|e| anyhow!("Failed to save deletion event: {}", e))?;
+
+    // Remove readable content: clear source text and all content-bearing rows
+    remove_readable_content_in_tx(&tx, item_id)
+        .map_err(|e| anyhow!("Failed to remove readable content: {}", e))?;
 
     // Remove from search index (item is now deleted via the event update)
     index::remove_item_from_index(&tx, item_id)
         .map_err(|e| anyhow!("Failed to remove item from search index: {}", e))?;
 
     // Cancel all pending jobs for this item
-    cancel_item_jobs_in_tx(&tx, item_id)
-        .map_err(|e| anyhow!("Failed to cancel jobs: {}", e))?;
+    cancel_item_jobs_in_tx(&tx, item_id).map_err(|e| anyhow!("Failed to cancel jobs: {}", e))?;
+
+    // Cancel all reminders and enqueue reminder cancellation
+    cancel_item_reminders_in_tx(&tx, item_id, &now)
+        .map_err(|e| anyhow!("Failed to cancel reminders: {}", e))?;
 
     // Enqueue cleanup work (audio, ingress, notifications)
-    let work_id_audio = enqueue_deletion_work_in_tx(
-        &tx,
-        item_id,
-        DeletionWorkType::RemoveAudio,
-        now,
-    )
-    .map_err(|e| anyhow!("Failed to enqueue audio cleanup: {}", e))?;
+    let work_id_audio =
+        enqueue_deletion_work_in_tx(&tx, item_id, DeletionWorkType::RemoveAudio, now)
+            .map_err(|e| anyhow!("Failed to enqueue audio cleanup: {}", e))?;
 
     enqueue_deletion_work_in_tx(&tx, item_id, DeletionWorkType::ClearIngress, now)
         .map_err(|e| anyhow!("Failed to enqueue ingress cleanup: {}", e))?;
 
-    enqueue_deletion_work_in_tx(
-        &tx,
-        item_id,
-        DeletionWorkType::CancelNotifications,
-        now,
-    )
-    .map_err(|e| anyhow!("Failed to enqueue notification cleanup: {}", e))?;
+    enqueue_deletion_work_in_tx(&tx, item_id, DeletionWorkType::CancelNotifications, now)
+        .map_err(|e| anyhow!("Failed to enqueue notification cleanup: {}", e))?;
 
     tx.commit()?;
 
@@ -261,9 +268,11 @@ pub fn mark_deletion_intent(
 }
 
 /// Mark a deletion work task as completed.
+/// Only updates if the current status is Pending; rejects other states.
 pub fn mark_deletion_work_completed(
     db: &mut Database,
     deletion_work_id: &str,
+    now: DateTime<Utc>,
 ) -> Result<DeletionWork> {
     let tx = db.transaction()?;
 
@@ -271,15 +280,23 @@ pub fn mark_deletion_work_completed(
         .map_err(|e| anyhow!("Failed to load deletion work: {}", e))?
         .ok_or_else(|| anyhow!("Deletion work {} not found", deletion_work_id))?;
 
-    let now = Utc::now();
+    // Only allow transition from Pending to Completed
+    if work.status != DeletionWorkStatus::Pending {
+        return Err(anyhow!(
+            "Cannot complete deletion work with status {:?}",
+            work.status
+        ));
+    }
+
     let completed_at_str = now.to_rfc3339();
 
     tx.execute(
-        "UPDATE deletion_work SET status = ?, attempted_at = ? WHERE deletion_work_id = ?",
+        "UPDATE deletion_work SET status = ?, attempted_at = ? WHERE deletion_work_id = ? AND status = ?",
         rusqlite::params![
             DeletionWorkStatus::Completed.as_str(),
             completed_at_str,
-            deletion_work_id
+            deletion_work_id,
+            DeletionWorkStatus::Pending.as_str()
         ],
     )
     .map_err(|e| anyhow!("Failed to update deletion work status: {}", e))?;
@@ -294,10 +311,7 @@ pub fn mark_deletion_work_completed(
 }
 
 /// List all pending deletion work for an item.
-pub fn list_pending_deletion_work(
-    db: &Database,
-    item_id: &str,
-) -> Result<Vec<DeletionWork>> {
+pub fn list_pending_deletion_work(db: &Database, item_id: &str) -> Result<Vec<DeletionWork>> {
     let conn = db.conn();
     let mut stmt = conn.prepare(
         "SELECT deletion_work_id, item_id, work_type, status, attempted_at, created_at
@@ -305,9 +319,10 @@ pub fn list_pending_deletion_work(
     )?;
 
     let work_items = stmt
-        .query_map(rusqlite::params![item_id, DeletionWorkStatus::Pending.as_str()], |row| {
-            deletion_work_from_row(row)
-        })?
+        .query_map(
+            rusqlite::params![item_id, DeletionWorkStatus::Pending.as_str()],
+            deletion_work_from_row,
+        )?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| anyhow!("Failed to query deletion work: {}", e))?;
 
@@ -323,6 +338,50 @@ pub fn get_deletion_work(db: &Database, deletion_work_id: &str) -> Result<Option
 // ============================================================================
 // Internal helpers
 // ============================================================================
+
+/// Remove all readable content from an item: clear capture text and correction content.
+/// This ensures deleted items cannot restore readable text after marking as deleted.
+/// Uses empty strings to satisfy schema constraints while removing readable content.
+fn remove_readable_content_in_tx(tx: &Transaction<'_>, item_id: &str) -> Result<()> {
+    // Clear capture text (set to empty string to satisfy NOT NULL constraints)
+    tx.execute(
+        "UPDATE captures SET text = '' WHERE capture_id IN
+         (SELECT capture_id FROM items WHERE item_id = ?)",
+        rusqlite::params![item_id],
+    )?;
+
+    // Clear correction values and proposal content
+    tx.execute(
+        "UPDATE events SET correction_new_value = NULL, correction_old_value = NULL
+         WHERE item_id = ?",
+        rusqlite::params![item_id],
+    )?;
+
+    // Delete proposal rows (suggestions, interpretation results)
+    tx.execute(
+        "DELETE FROM proposals WHERE item_id = ?",
+        rusqlite::params![item_id],
+    )?;
+
+    Ok(())
+}
+
+/// Cancel all reminders for an item by marking for user cancellation.
+/// Updates reminder request_state to 'user_cancelled' so reconciliation can complete it.
+fn cancel_item_reminders_in_tx(
+    tx: &Transaction<'_>,
+    item_id: &str,
+    now: &DateTime<Utc>,
+) -> Result<()> {
+    // Mark all reminders for this item as user_cancelled in the request_state column.
+    // Reconciliation will handle the actual notification cancellation.
+    tx.execute(
+        "UPDATE reminders SET request_state = 'user_cancelled', updated_at = ? WHERE item_id = ?",
+        rusqlite::params![now.to_rfc3339(), item_id],
+    )?;
+
+    Ok(())
+}
 
 /// Cancel all pending and running jobs for an item.
 fn cancel_item_jobs_in_tx(tx: &Transaction<'_>, item_id: &str) -> Result<usize> {
@@ -344,7 +403,12 @@ fn enqueue_deletion_work_in_tx(
     work_type: DeletionWorkType,
     created_at: DateTime<Utc>,
 ) -> Result<String> {
-    let work_id = format!("del-{}-{}-{}", item_id, work_type.as_str(), created_at.timestamp_millis());
+    let work_id = format!(
+        "del-{}-{}-{}",
+        item_id,
+        work_type.as_str(),
+        created_at.timestamp_millis()
+    );
     let created_at_str = created_at.to_rfc3339();
 
     // Check if work already exists (idempotent)
@@ -386,7 +450,7 @@ fn get_deletion_work_in_tx(
             "SELECT deletion_work_id, item_id, work_type, status, attempted_at, created_at
              FROM deletion_work WHERE deletion_work_id = ?",
             [deletion_work_id],
-            |row| deletion_work_from_row(row),
+            deletion_work_from_row,
         )
         .optional()?;
 
@@ -401,7 +465,10 @@ mod tests {
     fn test_deletion_work_type_str() {
         assert_eq!(DeletionWorkType::RemoveAudio.as_str(), "remove_audio");
         assert_eq!(DeletionWorkType::ClearIngress.as_str(), "clear_ingress");
-        assert_eq!(DeletionWorkType::CancelNotifications.as_str(), "cancel_notifications");
+        assert_eq!(
+            DeletionWorkType::CancelNotifications.as_str(),
+            "cancel_notifications"
+        );
     }
 
     #[test]
@@ -425,7 +492,10 @@ mod tests {
     fn test_deletion_work_status_str() {
         assert_eq!(DeletionWorkStatus::Pending.as_str(), "pending");
         assert_eq!(DeletionWorkStatus::Completed.as_str(), "completed");
-        assert_eq!(DeletionWorkStatus::FailedNoRetry.as_str(), "failed_no_retry");
+        assert_eq!(
+            DeletionWorkStatus::FailedNoRetry.as_str(),
+            "failed_no_retry"
+        );
     }
 
     #[test]

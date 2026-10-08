@@ -138,6 +138,8 @@ pub enum EventType {
     Completion,
     Cancellation,
     SuggestionControl,
+    // Deletion is internal-only and set via mark_deletion_intent, not public save_event
+    #[doc(hidden)]
     Deletion,
 }
 
@@ -570,7 +572,10 @@ pub fn save_event_in_tx(
     let allowed = match current.lifecycle_state.as_str() {
         "deleted" => false,
         "completed" | "cancelled" => {
-            matches!(event.event_type, EventType::Correction | EventType::Deletion)
+            matches!(
+                event.event_type,
+                EventType::Correction | EventType::Deletion
+            )
         }
         _ => true,
     };
