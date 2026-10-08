@@ -574,8 +574,6 @@ mod tests {
 
     #[test]
     fn test_experiment_rejects_credentials_in_profile_fields() {
-        let base_args = ("v1", "ctx", "instr", "1", "pb", "1", "build");
-
         let result = Experiment::new(
             "v1",
             "ctx",
