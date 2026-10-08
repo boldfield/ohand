@@ -433,6 +433,46 @@ impl FromStr for ReminderAcknowledgmentState {
     }
 }
 
+/// Processing job retry status: distinguishes provider outage from never attempted.
+/// Only present when ProcessingState is unprocessed/processing and a job exists in retry wait.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcessingJobStatus {
+    /// Job is waiting to retry after a transient failure (e.g., outage).
+    RetryingAfterTransient,
+    /// Job is waiting for configuration or destination setup.
+    AwaitingConfiguration,
+}
+
+impl ProcessingJobStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ProcessingJobStatus::RetryingAfterTransient => "retrying_after_transient",
+            ProcessingJobStatus::AwaitingConfiguration => "awaiting_configuration",
+        }
+    }
+}
+
+impl fmt::Display for ProcessingJobStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ProcessingJobStatus {
+    type Err = ParseStateError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "retrying_after_transient" => Ok(ProcessingJobStatus::RetryingAfterTransient),
+            "awaiting_configuration" => Ok(ProcessingJobStatus::AwaitingConfiguration),
+            _ => Err(ParseStateError(format!(
+                "Unknown ProcessingJobStatus: {}",
+                s
+            ))),
+        }
+    }
+}
+
 /// Complete status snapshot for an item.
 /// Distinguishes the separate independent facts: save, sync, processing, transcription,
 /// reminder request, schedule, delivery, and acknowledgment.
@@ -443,6 +483,7 @@ pub struct ItemStatus {
     pub sync_state: SyncState,
     pub processing_state: ProcessingState,
     pub transcription_state: TranscriptionState,
+    pub processing_job_status: Option<ProcessingJobStatus>,
     pub reminder_request_state: Option<ReminderRequestState>,
     pub reminder_schedule_state: Option<ReminderScheduleState>,
     pub reminder_delivery_state: Option<ReminderDeliveryState>,
@@ -452,7 +493,8 @@ pub struct ItemStatus {
 
 impl ItemStatus {
     /// Load item status from the database.
-    /// Reads item states from items table and reminder states from reminders table if present.
+    /// Reads item states from items table, reminder states from reminders table if present,
+    /// and job/retry status from jobs table if processing is unprocessed/processing.
     pub fn load(
         tx: &rusqlite::Transaction<'_>,
         item_id: &str,
@@ -487,6 +529,38 @@ impl ItemStatus {
             .map(|s| s.parse::<TranscriptionState>())
             .transpose()?
             .unwrap_or(TranscriptionState::NotApplicable);
+
+        // Load processing job status if item is unprocessed/processing
+        let processing_job_status = if matches!(
+            processing_state,
+            ProcessingState::Unprocessed | ProcessingState::Processing
+        ) {
+            let job_row: Option<(Option<String>, Option<String>)> = tx
+                .query_row(
+                    "SELECT status, failure_reason FROM jobs WHERE item_id = ? ORDER BY created_at DESC LIMIT 1",
+                    [item_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+
+            match job_row {
+                Some((Some(status_str), failure_reason)) if status_str == "pending" => {
+                    // Determine job status based on failure reason
+                    match failure_reason.as_deref() {
+                        Some("transient_error") | Some("network_error") | Some("timeout_error") => {
+                            Some(ProcessingJobStatus::RetryingAfterTransient)
+                        }
+                        Some("configuration_error") | Some("config_wait") => {
+                            Some(ProcessingJobStatus::AwaitingConfiguration)
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
 
         // Load reminder states if a reminder row exists for this item
         let reminder_row: Option<(String, String, String, String, Option<String>)> = tx
@@ -532,6 +606,7 @@ impl ItemStatus {
             sync_state,
             processing_state,
             transcription_state,
+            processing_job_status,
             reminder_request_state,
             reminder_schedule_state,
             reminder_delivery_state,
@@ -540,13 +615,22 @@ impl ItemStatus {
         }))
     }
 
-    /// Check if this status ever claims user attention.
-    /// Unschedulable, pending, and outage states never claim attention by themselves.
-    pub fn never_claims_attention(&self) -> bool {
+    /// Check if this status claims explicit user attention.
+    /// Only true if the user has explicitly acknowledged the reminder.
+    /// Permission denial, expiration, ambiguity, outage, schedule failure, delivery, and opened
+    /// without acknowledgment never claim attention.
+    pub fn claims_user_attention(&self) -> bool {
         matches!(
-            self.reminder_request_state,
-            Some(ReminderRequestState::Unschedulable | ReminderRequestState::NotScheduledYet)
+            self.reminder_acknowledgment_state,
+            Some(ReminderAcknowledgmentState::Acknowledged)
         )
+    }
+
+    /// Check if this status never claims user attention (for backward compatibility).
+    /// Deprecated: use !claims_user_attention() instead.
+    #[deprecated(since = "0.1.0", note = "use !claims_user_attention() instead")]
+    pub fn never_claims_attention(&self) -> bool {
+        !self.claims_user_attention()
     }
 }
 

@@ -1,12 +1,12 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
+use tempfile::TempDir;
 use uuid::Uuid;
 
 use ohand_core::domain::status::{
-    ItemStatus, ProcessingState, ReminderAcknowledgmentState, ReminderDeliveryState,
-    ReminderRequestState, ReminderScheduleState, SaveState, SyncState, TranscriptionState,
-    UnschedulableReason,
+    ItemStatus, ProcessingJobStatus, ProcessingState, ReminderDeliveryState, ReminderRequestState,
+    ReminderScheduleState, SaveState, SyncState, TranscriptionState, UnschedulableReason,
 };
 use ohand_core::store::schema::{Clock, Database};
 
@@ -102,18 +102,44 @@ fn insert_test_reminder(
     Ok(())
 }
 
-fn temp_db_path(name: &str) -> String {
-    format!(
-        "{}/ohand_test_{}_{}.db",
-        std::env::temp_dir().display(),
-        name,
-        Uuid::new_v4()
-    )
+fn insert_test_job(
+    tx: &rusqlite::Transaction<'_>,
+    item_id: &str,
+    status: &str,
+    failure_reason: Option<&str>,
+) -> Result<()> {
+    let job_id = Uuid::new_v4().to_string();
+
+    tx.execute(
+        "INSERT INTO jobs (job_id, job_schema_version, item_id, job_type, source_revision, status, failure_reason, attempt_count, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rusqlite::params![
+            &job_id,
+            1,
+            item_id,
+            "interpretation",
+            0,
+            status,
+            failure_reason,
+            1,
+            "2026-01-15T10:30:00Z",
+        ],
+    )?;
+    Ok(())
+}
+
+fn temp_db_path(tmpdir: &TempDir, name: &str) -> String {
+    tmpdir
+        .path()
+        .join(format!("ohand_test_{}.db", name))
+        .to_string_lossy()
+        .to_string()
 }
 
 #[test]
 fn test_load_item_status() -> Result<()> {
-    let path = temp_db_path("load");
+    let tmpdir = TempDir::new()?;
+    let path = temp_db_path(&tmpdir, "load");
     let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
     let mut db = make_test_db(&path, instant)?;
 
@@ -145,7 +171,8 @@ fn test_load_item_status() -> Result<()> {
 
 #[test]
 fn test_m1_sync_not_configured() -> Result<()> {
-    let path = temp_db_path("m1sync");
+    let tmpdir = TempDir::new()?;
+    let path = temp_db_path(&tmpdir, "m1sync");
     let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
     let mut db = make_test_db(&path, instant)?;
 
@@ -178,7 +205,8 @@ fn test_m1_sync_not_configured() -> Result<()> {
 
 #[test]
 fn test_processing_state_values() -> Result<()> {
-    let path = temp_db_path("processing");
+    let tmpdir = TempDir::new()?;
+    let path = temp_db_path(&tmpdir, "processing");
     let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
     let mut db = make_test_db(&path, instant)?;
 
@@ -233,7 +261,8 @@ fn test_processing_state_values() -> Result<()> {
 
 #[test]
 fn test_item_not_found() -> Result<()> {
-    let path = temp_db_path("notfound");
+    let tmpdir = TempDir::new()?;
+    let path = temp_db_path(&tmpdir, "notfound");
     let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
     let mut db = make_test_db(&path, instant)?;
 
@@ -248,7 +277,8 @@ fn test_item_not_found() -> Result<()> {
 
 #[test]
 fn test_save_state_values() -> Result<()> {
-    let path = temp_db_path("savestates");
+    let tmpdir = TempDir::new()?;
+    let path = temp_db_path(&tmpdir, "savestates");
     let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
     let mut db = make_test_db(&path, instant)?;
 
@@ -286,7 +316,8 @@ fn test_save_state_values() -> Result<()> {
 
 #[test]
 fn test_transcription_state_values() -> Result<()> {
-    let path = temp_db_path("transcription");
+    let tmpdir = TempDir::new()?;
+    let path = temp_db_path(&tmpdir, "transcription");
     let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
     let mut db = make_test_db(&path, instant)?;
 
@@ -345,7 +376,8 @@ fn test_transcription_state_values() -> Result<()> {
 
 #[test]
 fn test_text_capture_without_transcription() -> Result<()> {
-    let path = temp_db_path("textonly");
+    let tmpdir = TempDir::new()?;
+    let path = temp_db_path(&tmpdir, "textonly");
     let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
     let mut db = make_test_db(&path, instant)?;
 
@@ -375,7 +407,8 @@ fn test_text_capture_without_transcription() -> Result<()> {
 
 #[test]
 fn test_save_and_processing_independent_from_reminder() -> Result<()> {
-    let path = temp_db_path("saveindep");
+    let tmpdir = TempDir::new()?;
+    let path = temp_db_path(&tmpdir, "saveindep");
     let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
     let mut db = make_test_db(&path, instant)?;
 
@@ -442,7 +475,8 @@ fn test_save_and_processing_independent_from_reminder() -> Result<()> {
 
 #[test]
 fn test_distinguishable_reminder_error_states() -> Result<()> {
-    let path = temp_db_path("reminderr");
+    let tmpdir = TempDir::new()?;
+    let path = temp_db_path(&tmpdir, "reminderr");
     let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
     let mut db = make_test_db(&path, instant)?;
 
@@ -566,34 +600,106 @@ fn test_distinguishable_reminder_error_states() -> Result<()> {
 }
 
 #[test]
-fn test_reminder_delivery_never_claims_attention() -> Result<()> {
-    let path = temp_db_path("delivery");
+fn test_outage_retry_distinguishable_from_never_attempted() -> Result<()> {
+    let tmpdir = TempDir::new()?;
+    let path = temp_db_path(&tmpdir, "outage");
     let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
     let mut db = make_test_db(&path, instant)?;
 
     let tx = db.transaction()?;
+    // Item with outage retry
     insert_test_item_with_status(
         &tx,
-        "delivered",
+        "outage-retry",
         "text",
         "saved_local",
         "not_configured",
-        "processed",
+        "unprocessed",
         Some("transcribed"),
     )?;
-    insert_test_reminder(
+    insert_test_job(&tx, "outage-retry", "pending", Some("transient_error"))?;
+
+    // Item never attempted (no job)
+    insert_test_item_with_status(
         &tx,
-        "delivered",
-        "resolved",
-        "scheduled",
-        "delivered",
-        "not_acknowledged",
-        None,
+        "never-attempted",
+        "text",
+        "saved_local",
+        "not_configured",
+        "unprocessed",
+        Some("transcribed"),
     )?;
 
+    // Item waiting for config
     insert_test_item_with_status(
         &tx,
-        "opened",
+        "config-wait",
+        "text",
+        "saved_local",
+        "not_configured",
+        "unprocessed",
+        Some("transcribed"),
+    )?;
+    insert_test_job(&tx, "config-wait", "pending", Some("config_wait"))?;
+
+    tx.commit()?;
+
+    let tx = db.transaction()?;
+    let outage = ItemStatus::load(&tx, "outage-retry")?.expect("item should exist");
+    let never_attempted = ItemStatus::load(&tx, "never-attempted")?.expect("item should exist");
+    let config_wait = ItemStatus::load(&tx, "config-wait")?.expect("item should exist");
+    tx.commit()?;
+
+    // All are unprocessed processing state
+    assert_eq!(outage.processing_state, ProcessingState::Unprocessed);
+    assert_eq!(
+        never_attempted.processing_state,
+        ProcessingState::Unprocessed
+    );
+    assert_eq!(config_wait.processing_state, ProcessingState::Unprocessed);
+
+    // But job statuses differ
+    assert_eq!(
+        outage.processing_job_status,
+        Some(ProcessingJobStatus::RetryingAfterTransient),
+        "outage retry must be distinguishable"
+    );
+    assert_eq!(
+        never_attempted.processing_job_status, None,
+        "never-attempted has no job"
+    );
+    assert_eq!(
+        config_wait.processing_job_status,
+        Some(ProcessingJobStatus::AwaitingConfiguration),
+        "config-wait must be distinguishable from outage"
+    );
+
+    // All assertions show they are distinct
+    assert_ne!(
+        outage.processing_job_status, never_attempted.processing_job_status,
+        "outage and never-attempted must differ"
+    );
+    assert_ne!(
+        outage.processing_job_status, config_wait.processing_job_status,
+        "outage and config-wait must differ"
+    );
+
+    Ok(())
+}
+
+#[test]
+#[allow(deprecated)]
+fn test_attention_predicate_only_acknowledged_claims_attention() -> Result<()> {
+    let tmpdir = TempDir::new()?;
+    let path = temp_db_path(&tmpdir, "attention");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let tx = db.transaction()?;
+    // Acknowledged: claims attention
+    insert_test_item_with_status(
+        &tx,
+        "acknowledged",
         "text",
         "saved_local",
         "not_configured",
@@ -602,7 +708,7 @@ fn test_reminder_delivery_never_claims_attention() -> Result<()> {
     )?;
     insert_test_reminder(
         &tx,
-        "opened",
+        "acknowledged",
         "resolved",
         "scheduled",
         "opened",
@@ -610,6 +716,47 @@ fn test_reminder_delivery_never_claims_attention() -> Result<()> {
         None,
     )?;
 
+    // Delivered but not acknowledged: does NOT claim attention
+    insert_test_item_with_status(
+        &tx,
+        "delivered-not-ack",
+        "text",
+        "saved_local",
+        "not_configured",
+        "processed",
+        Some("transcribed"),
+    )?;
+    insert_test_reminder(
+        &tx,
+        "delivered-not-ack",
+        "resolved",
+        "scheduled",
+        "delivered",
+        "not_acknowledged",
+        None,
+    )?;
+
+    // Opened but not acknowledged: does NOT claim attention
+    insert_test_item_with_status(
+        &tx,
+        "opened-not-ack",
+        "text",
+        "saved_local",
+        "not_configured",
+        "processed",
+        Some("transcribed"),
+    )?;
+    insert_test_reminder(
+        &tx,
+        "opened-not-ack",
+        "resolved",
+        "scheduled",
+        "opened",
+        "not_acknowledged",
+        None,
+    )?;
+
+    // Unschedulable (expired): does NOT claim attention
     insert_test_item_with_status(
         &tx,
         "unschedulable",
@@ -626,9 +773,10 @@ fn test_reminder_delivery_never_claims_attention() -> Result<()> {
         "not_scheduled",
         "unknown",
         "not_acknowledged",
-        Some("permission_denied"),
+        Some("time_in_past"),
     )?;
 
+    // Ambiguous: does NOT claim attention
     insert_test_item_with_status(
         &tx,
         "ambiguous",
@@ -648,41 +796,75 @@ fn test_reminder_delivery_never_claims_attention() -> Result<()> {
         None,
     )?;
 
+    // Pending schedule: does NOT claim attention
+    insert_test_item_with_status(
+        &tx,
+        "pending-schedule",
+        "text",
+        "saved_local",
+        "not_configured",
+        "processed",
+        Some("transcribed"),
+    )?;
+    insert_test_reminder(
+        &tx,
+        "pending-schedule",
+        "resolved",
+        "pending_schedule",
+        "unknown",
+        "not_acknowledged",
+        None,
+    )?;
+
+    // Schedule failed: does NOT claim attention
+    insert_test_item_with_status(
+        &tx,
+        "schedule-failed",
+        "text",
+        "saved_local",
+        "not_configured",
+        "processed",
+        Some("transcribed"),
+    )?;
+    insert_test_reminder(
+        &tx,
+        "schedule-failed",
+        "resolved",
+        "schedule_failed",
+        "unknown",
+        "not_acknowledged",
+        None,
+    )?;
+
     tx.commit()?;
 
     let tx = db.transaction()?;
-    let delivered = ItemStatus::load(&tx, "delivered")?.expect("item should exist");
-    let opened = ItemStatus::load(&tx, "opened")?.expect("item should exist");
+    let acknowledged = ItemStatus::load(&tx, "acknowledged")?.expect("item should exist");
+    let delivered_not_ack = ItemStatus::load(&tx, "delivered-not-ack")?.expect("item should exist");
+    let opened_not_ack = ItemStatus::load(&tx, "opened-not-ack")?.expect("item should exist");
     let unschedulable = ItemStatus::load(&tx, "unschedulable")?.expect("item should exist");
     let ambiguous = ItemStatus::load(&tx, "ambiguous")?.expect("item should exist");
+    let pending_schedule = ItemStatus::load(&tx, "pending-schedule")?.expect("item should exist");
+    let schedule_failed = ItemStatus::load(&tx, "schedule-failed")?.expect("item should exist");
     tx.commit()?;
 
-    assert_eq!(
-        delivered.reminder_delivery_state,
-        Some(ReminderDeliveryState::Delivered)
-    );
-    assert_eq!(
-        opened.reminder_delivery_state,
-        Some(ReminderDeliveryState::Opened)
-    );
+    // Only acknowledged claims attention
+    assert!(acknowledged.claims_user_attention());
+    assert!(!delivered_not_ack.claims_user_attention());
+    assert!(!opened_not_ack.claims_user_attention());
+    assert!(!unschedulable.claims_user_attention());
+    assert!(!ambiguous.claims_user_attention());
+    assert!(!pending_schedule.claims_user_attention());
+    assert!(!schedule_failed.claims_user_attention());
 
-    assert_eq!(
-        delivered.reminder_acknowledgment_state,
-        Some(ReminderAcknowledgmentState::NotAcknowledged)
-    );
-    assert_eq!(
-        opened.reminder_acknowledgment_state,
-        Some(ReminderAcknowledgmentState::Acknowledged)
-    );
-
-    assert!(
-        unschedulable.never_claims_attention(),
-        "unschedulable state should not claim attention"
-    );
-    assert!(
-        ambiguous.never_claims_attention(),
-        "ambiguous state should not claim attention"
-    );
+    // Backward compat: never_claims_attention is opposite of claims_user_attention
+    assert!(!acknowledged.never_claims_attention());
+    assert!(delivered_not_ack.never_claims_attention());
+    assert!(opened_not_ack.never_claims_attention());
+    assert!(unschedulable.never_claims_attention());
+    assert!(ambiguous.never_claims_attention());
+    assert!(pending_schedule.never_claims_attention());
+    assert!(schedule_failed.never_claims_attention());
 
     Ok(())
 }
