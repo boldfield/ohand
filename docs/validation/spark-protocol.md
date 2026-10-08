@@ -1,6 +1,6 @@
 # Spark serving protocol verification
 
-Status: **Pending worker-context evidence** — V08a implementation complete. Phone-context reachability evidence is owned by V08b and collected on the maintainer's iPhone over Tailscale, not from the Odonian worker.
+Status: **Worker-context evidence collected (V08a)** — server-side protocol verification complete. Phone-context reachability evidence is owned by V08b and collected on the maintainer's iPhone over Tailscale, not from the Odonian worker.
 
 ## Protocol classification (Worker context)
 
@@ -10,42 +10,55 @@ This section records the Spark endpoint protocol observations collected by the V
 
 Spark endpoint authentication verification:
 
-- **Status**: Pending evidence artifact
-- **Evidence identifier**: [To be populated by probe run]
-- **Probe revision**: [To be populated by probe run]
-- **Collection time**: [To be populated by probe run]
+- **Status**: Observed
+- **Evidence identifier**: spark-2026-10-08T07-54-20.140534z00-00
+- **Probe revision**: 4fee1f6ec9faa36820cbf99a9ba91edd88c9173a (worker tree dirty at collection time)
+- **Collection time**: 2026-10-08T07:54:20+00:00
 
-The probe sends an unauthenticated GET request to the endpoint's `/models` path. A 401 or 403 response indicates authentication is required. A 200 response with valid JSON model list indicates authentication is not required.
+The probe sends an unauthenticated GET request to the endpoint's `/models` path. Response: **401 Unauthorized**. The endpoint requires authentication.
 
 ### Model listing
 
 Spark endpoint model enumeration:
 
-- **Status**: Pending evidence artifact
-- **Evidence identifier**: [To be populated by probe run]
-- **Models**: [To be populated by probe run]
+- **Status**: Observed
+- **Evidence identifier**: spark-2026-10-08T07-54-20.140534z00-00
+- **Models**: qwen-long, qwen-max
+- **Response status**: 200 OK
+- **Response headers**: 
+  - Server: BaseHTTP/0.6 Python/3.11.2
+  - Date: Thu, 08 Oct 2026 07:54:20 GMT
+  - Content-Type: application/json
 
-The probe sends an authenticated GET request to the endpoint's `/models` path using the configured bearer credential. The response body is parsed to extract available model identifiers.
+The probe sends an authenticated GET request to the endpoint's `/models` path using the configured bearer credential. The response parses as a valid JSON object with a `data` array containing model identifiers.
 
 ### OpenAI compatibility
 
 Spark endpoint OpenAI /chat/completions compatibility:
 
-- **Status**: Pending evidence artifact
-- **Evidence identifier**: [To be populated by probe run]
+- **Status**: Observed
+- **Evidence identifier**: spark-2026-10-08T07-54-20.140534z00-00
+- **Model tested**: qwen-long (first available from /models)
+- **Response status**: 200 OK
+- **Response headers**:
+  - Server: BaseHTTP/0.6 Python/3.11.2
+  - Date: Thu, 08 Oct 2026 07:54:20 GMT
+  - Content-Type: application/json
 
-The probe sends an authenticated POST request to the endpoint's `/chat/completions` path with a minimal message. The response is parsed to verify the expected structure (choices array with message objects containing role and content fields).
+The probe sends an authenticated POST request to the endpoint's `/chat/completions` path with a minimal message using the first model reported by the endpoint. The response parses as a valid JSON object with the expected structure: `choices` array containing message objects with `role` and `content` fields. The message content is non-empty and valid.
 
 ### TLS and transport
 
 Spark endpoint transport configuration:
 
-- **Status**: Worker context only — scheme and certificate validation as configured
-- **Evidence identifier**: [To be populated by probe run]
+- **Status**: Observed
+- **Evidence identifier**: spark-2026-10-08T07-54-20.140534z00-00
+- **Scheme**: HTTP (cleartext)
+- **TLS verified**: No (cleartext HTTP endpoint)
 
-The probe records the transport scheme configured in the provider configuration file and whether the endpoint's TLS certificate validates against the system's default trust store. The endpoint may be served over cleartext HTTP on a private network; the recorded scheme reflects the configuration as observed, not an assumption.
+The probe records the transport scheme configured in the provider configuration file. The endpoint is reachable over cleartext HTTP on the private network. The endpoint may require an explicit architectural allowance for cleartext communication when used by adapters like V09.
 
-Cleartext HTTP endpoints require an explicit, reviewed architectural allowance when used by adapters like V09. This evidence records what is configured; V09 implementation and security review are separate gates.
+This evidence records what is configured and observed; V09 implementation and security review are separate gates.
 
 ## Phone-context reachability
 

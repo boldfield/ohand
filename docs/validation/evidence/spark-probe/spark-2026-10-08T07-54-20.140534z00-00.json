@@ -1,0 +1,60 @@
+{
+  "evidence_id": "spark-2026-10-08T07-54-20.140534z00-00",
+  "probe_revision": "4fee1f6ec9faa36820cbf99a9ba91edd88c9173a+dirty",
+  "collection_time": "2026-10-08T07:54:20.140534+00:00",
+  "scheme": "http",
+  "probes": {
+    "unauthenticated_models": {
+      "method": "GET",
+      "path": "/models",
+      "credential_sent": false,
+      "authentication_requirement": "authentication_required"
+    },
+    "authenticated_models": {
+      "method": "GET",
+      "path": "/models",
+      "credential_sent": true,
+      "status": 200,
+      "headers": {
+        "server": "BaseHTTP/0.6 Python/3.11.2",
+        "date": "Thu, 08 Oct 2026 07:54:20 GMT",
+        "content-type": "application/json"
+      },
+      "models": [
+        "qwen-long",
+        "qwen-max"
+      ]
+    },
+    "structured_response": {
+      "method": "POST",
+      "path": "/chat/completions",
+      "credential_sent": true,
+      "status": 200,
+      "headers": {
+        "server": "BaseHTTP/0.6 Python/3.11.2",
+        "date": "Thu, 08 Oct 2026 07:54:20 GMT",
+        "content-type": "application/json"
+      },
+      "model_requested": "qwen-long",
+      "content_valid": true
+    }
+  },
+  "authentication_status": 200,
+  "authentication_response_headers": {
+    "server": "BaseHTTP/0.6 Python/3.11.2",
+    "date": "Thu, 08 Oct 2026 07:54:20 GMT",
+    "content-type": "application/json"
+  },
+  "tls_verified": false,
+  "models": [
+    "qwen-long",
+    "qwen-max"
+  ],
+  "structured_response_status": 200,
+  "structured_response_headers": {
+    "server": "BaseHTTP/0.6 Python/3.11.2",
+    "date": "Thu, 08 Oct 2026 07:54:20 GMT",
+    "content-type": "application/json"
+  },
+  "structured_response_content": "This is a test response from Spark."
+}
