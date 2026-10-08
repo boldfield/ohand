@@ -883,9 +883,15 @@ fn test_apply_proposal_rejects_user_corrected_field() -> Result<()> {
     tx.commit()?;
 
     match result {
-        Err(ProposalApplicationError::ForbiddenByLifecycle) => Ok(()),
+        Err(ProposalApplicationError::ForbiddenByUserCorrection(field)) => {
+            if field == "type" {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("Expected field 'type', got '{}'", field))
+            }
+        }
         _ => Err(anyhow::anyhow!(
-            "Expected ForbiddenByLifecycle error, got {:?}",
+            "Expected ForbiddenByUserCorrection error, got {:?}",
             result
         )),
     }
@@ -1102,9 +1108,15 @@ fn test_apply_proposal_with_user_correction_precedence() -> Result<()> {
 
     // Should fail because user already corrected the type.
     match result {
-        Err(ProposalApplicationError::ForbiddenByLifecycle) => Ok(()),
+        Err(ProposalApplicationError::ForbiddenByUserCorrection(field)) => {
+            if field == "type" {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("Expected field 'type', got '{}'", field))
+            }
+        }
         _ => Err(anyhow::anyhow!(
-            "Expected ForbiddenByLifecycle error, got {:?}",
+            "Expected ForbiddenByUserCorrection error, got {:?}",
             result
         )),
     }
