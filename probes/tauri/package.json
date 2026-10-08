@@ -4,15 +4,11 @@
   "description": "Tauri 2 iOS management-shell feasibility probe for Oh And",
   "type": "module",
   "scripts": {
-    "dev": "tauri dev",
-    "build": "tauri build",
-    "ios:dev": "tauri ios dev",
+    "tauri": "tauri",
+    "ios:init": "tauri ios init",
     "ios:build": "tauri ios build"
   },
-  "dependencies": {
-    "@tauri-apps/api": "=2.4.1"
-  },
   "devDependencies": {
-    "@tauri-apps/cli": "=2.4.1"
+    "@tauri-apps/cli": "=2.12.1"
   }
 }
