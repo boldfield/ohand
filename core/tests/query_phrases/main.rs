@@ -562,7 +562,19 @@ fn original_phrase_is_preserved_and_case_is_ignored_for_keywords() -> Result<()>
 #[test]
 fn malformed_ordinal_suffix_is_unrecognized_not_a_committed_date() -> Result<()> {
     let context = utc_context();
-    for phrase in ["notes since jan 10garbage", "notes since jan 10xyz 2025"] {
+    for phrase in [
+        "notes since jan 10garbage",
+        "notes since jan 10xyz 2025",
+        "notes since jan 11st",
+        "notes since jan 12nd",
+        "notes since jan 13rd",
+        "notes since jan 1th",
+        "notes since jan 2st",
+        "notes since jan 3nd",
+        "notes since jan 22rd",
+        "notes since jan 31th",
+        "notes since jan +5",
+    ] {
         let resolution = parse_phrase(phrase, &context)?;
         assert!(resolution.filter.is_none(), "{phrase}");
         assert!(
@@ -580,6 +592,13 @@ fn malformed_ordinal_suffix_is_unrecognized_not_a_committed_date() -> Result<()>
         ("notes since jan 2nd", "2026-01-02T00:00:00+00:00"),
         ("notes since jan 3rd", "2026-01-03T00:00:00+00:00"),
         ("notes since jan 10th", "2026-01-10T00:00:00+00:00"),
+        ("notes since jan 11th", "2026-01-11T00:00:00+00:00"),
+        ("notes since jan 12th", "2026-01-12T00:00:00+00:00"),
+        ("notes since jan 13th", "2026-01-13T00:00:00+00:00"),
+        ("notes since jan 21st", "2025-01-21T00:00:00+00:00"),
+        ("notes since jan 22nd", "2025-01-22T00:00:00+00:00"),
+        ("notes since jan 23rd", "2025-01-23T00:00:00+00:00"),
+        ("notes since jan 31st", "2025-01-31T00:00:00+00:00"),
     ] {
         let resolution = parse_phrase(phrase, &context)?;
         let filter = resolution.filter.expect(phrase);

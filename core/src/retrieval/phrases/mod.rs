@@ -400,10 +400,13 @@ fn parse_month_day(text: &str, today: NaiveDate) -> Option<NaiveDate> {
     let month = parse_month(words[0])?;
     let day_digits = words[1].trim_end_matches(|c: char| c.is_alphabetic());
     let suffix = &words[1][day_digits.len()..];
-    if !matches!(suffix, "" | "st" | "nd" | "rd" | "th") {
+    if day_digits.is_empty() || !day_digits.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
     let day: u32 = day_digits.parse().ok()?;
+    if !suffix.is_empty() && suffix != ordinal_suffix(day) {
+        return None;
+    }
     match words.get(2) {
         Some(year_text) => {
             if year_text.len() != 4 {
@@ -419,6 +422,19 @@ fn parse_month_day(text: &str, today: NaiveDate) -> Option<NaiveDate> {
                 NaiveDate::from_ymd_opt(today.year() - 1, month, day)
             }
         }
+    }
+}
+
+/// English ordinal suffix for a day number: 1st, 2nd, 3rd, 4th, 11th, 12th, 13th, 21st, ...
+fn ordinal_suffix(day: u32) -> &'static str {
+    if (11..=13).contains(&(day % 100)) {
+        return "th";
+    }
+    match day % 10 {
+        1 => "st",
+        2 => "nd",
+        3 => "rd",
+        _ => "th",
     }
 }
 
