@@ -54,18 +54,18 @@ mod proposal_tests {
     #[test]
     fn test_proposal_creation_minimal() {
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         );
 
-        assert_eq!(proposal.proposal_id, "prop-1");
-        assert_eq!(proposal.item_id, "item-1");
-        assert_eq!(proposal.capture_id, "cap-1");
+        assert_eq!(proposal.proposal_id, "550e8400-e29b-41d4-a716-446655440001");
+        assert_eq!(proposal.item_id, "550e8400-e29b-41d4-a716-446655440002");
+        assert_eq!(proposal.capture_id, "550e8400-e29b-41d4-a716-446655440003");
         assert_eq!(proposal.source_revision, 0);
         assert_eq!(proposal.schema_version, SUPPORTED_PROPOSAL_SCHEMA_VERSION);
         assert_eq!(proposal.item_type, None);
@@ -77,13 +77,13 @@ mod proposal_tests {
     #[test]
     fn test_proposal_validate_schema_version_supported() {
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         )
         .with_item_type(Some(ItemType::Action));
 
@@ -94,13 +94,13 @@ mod proposal_tests {
     #[test]
     fn test_proposal_validate_schema_version_unsupported() {
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             999,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         );
 
         let result = proposal.validate_schema_version();
@@ -117,13 +117,13 @@ mod proposal_tests {
         ];
 
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         )
         .with_source_spans(Some(spans.clone()))
         .with_item_type(Some(ItemType::Action));
@@ -136,20 +136,20 @@ mod proposal_tests {
     fn test_proposal_validate_reminder_proposal_valid() {
         let text = "Call the roofer on Friday";
         let reminder = ReminderProposal {
-            instant: "2026-10-10T15:00:00Z".to_string(),
-            timezone_id: "America/New_York".to_string(),
+            instant: Some("2026-10-10T15:00:00Z".to_string()),
+            timezone_id: Some("America/New_York".to_string()),
             quality: TimeResolutionQuality::Explicit,
             source_span: Some(SourceSpan::new(19, 25)), // "Friday"
         };
 
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         )
         .with_reminder_proposal(Some(reminder));
 
@@ -161,21 +161,21 @@ mod proposal_tests {
     fn test_proposal_validate_full_valid_with_all_fields() {
         let text = "Call the roofer on Friday";
         let reminder = ReminderProposal {
-            instant: "2026-10-10T15:00:00Z".to_string(),
-            timezone_id: "America/New_York".to_string(),
+            instant: Some("2026-10-10T15:00:00Z".to_string()),
+            timezone_id: Some("America/New_York".to_string()),
             quality: TimeResolutionQuality::Explicit,
             source_span: Some(SourceSpan::new(19, 25)), // "Friday"
         };
         let spans = vec![SourceSpan::new(0, 4), SourceSpan::new(19, 25)]; // "Call" and "Friday"
 
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         )
         .with_item_type(Some(ItemType::Action))
         .with_reminder_proposal(Some(reminder))
@@ -195,13 +195,13 @@ mod proposal_tests {
         let spans = vec![SourceSpan::new(0, 5)]; // "Maybe"
 
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         )
         .with_item_type(Some(ItemType::Idea))
         .with_source_spans(Some(spans));
@@ -215,13 +215,13 @@ mod proposal_tests {
         let text = "Something unclear";
 
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         )
         .with_abstention(Some(AbstentionReason::Ambiguous));
 
@@ -234,13 +234,13 @@ mod proposal_tests {
         let text = "Some text";
 
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         );
 
         let result = proposal.validate(text);
@@ -291,8 +291,8 @@ mod proposal_tests {
 
         let proposal = Proposal::new(
             "prop-2".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             1,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             basis,
@@ -308,20 +308,20 @@ mod proposal_tests {
     fn test_proposal_uncertain_reminder_time() {
         let text = "Maybe remind me on Friday?";
         let reminder = ReminderProposal {
-            instant: "2026-10-10T15:00:00Z".to_string(),
-            timezone_id: "America/New_York".to_string(),
+            instant: Some("2026-10-10T15:00:00Z".to_string()),
+            timezone_id: Some("America/New_York".to_string()),
             quality: TimeResolutionQuality::Ambiguous,
             source_span: Some(SourceSpan::new(19, 25)), // "Friday"
         };
 
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         )
         .with_reminder_proposal(Some(reminder));
 
@@ -334,13 +334,13 @@ mod proposal_tests {
         let text = "Don't remind me about the roof";
 
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         )
         .with_abstention(Some(AbstentionReason::Negated));
 
@@ -394,20 +394,20 @@ mod proposal_tests {
     fn test_reminder_invalid_rfc3339_instant() {
         let text = "remind me";
         let reminder = ReminderProposal {
-            instant: "not a time".to_string(),
-            timezone_id: "America/New_York".to_string(),
+            instant: Some("not a time".to_string()),
+            timezone_id: Some("America/New_York".to_string()),
             quality: TimeResolutionQuality::Explicit,
             source_span: None,
         };
 
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         )
         .with_reminder_proposal(Some(reminder));
 
@@ -420,20 +420,20 @@ mod proposal_tests {
     fn test_reminder_invalid_iana_timezone() {
         let text = "remind me";
         let reminder = ReminderProposal {
-            instant: "2026-10-10T15:00:00Z".to_string(),
-            timezone_id: "Nowhere/Fake".to_string(),
+            instant: Some("2026-10-10T15:00:00Z".to_string()),
+            timezone_id: Some("Nowhere/Fake".to_string()),
             quality: TimeResolutionQuality::Explicit,
             source_span: None,
         };
 
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         )
         .with_reminder_proposal(Some(reminder));
 
@@ -446,20 +446,20 @@ mod proposal_tests {
     fn test_reminder_source_span_out_of_bounds() {
         let text = "abc";
         let reminder = ReminderProposal {
-            instant: "2026-10-10T15:00:00Z".to_string(),
-            timezone_id: "America/New_York".to_string(),
+            instant: Some("2026-10-10T15:00:00Z".to_string()),
+            timezone_id: Some("America/New_York".to_string()),
             quality: TimeResolutionQuality::Explicit,
             source_span: Some(SourceSpan::new(0, 9999)),
         };
 
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         )
         .with_reminder_proposal(Some(reminder));
 
@@ -474,13 +474,13 @@ mod proposal_tests {
     fn test_abstention_rejects_item_type() {
         let text = "Some text";
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         )
         .with_abstention(Some(AbstentionReason::Ambiguous))
         .with_item_type(Some(ItemType::Action));
@@ -494,20 +494,20 @@ mod proposal_tests {
     fn test_abstention_rejects_reminder() {
         let text = "Some text";
         let reminder = ReminderProposal {
-            instant: "2026-10-10T15:00:00Z".to_string(),
-            timezone_id: "America/New_York".to_string(),
+            instant: Some("2026-10-10T15:00:00Z".to_string()),
+            timezone_id: Some("America/New_York".to_string()),
             quality: TimeResolutionQuality::Explicit,
             source_span: Some(SourceSpan::new(0, 4)), // "Some"
         };
 
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         )
         .with_abstention(Some(AbstentionReason::Ambiguous))
         .with_reminder_proposal(Some(reminder));
@@ -521,13 +521,13 @@ mod proposal_tests {
     fn test_abstention_rejects_session_topic() {
         let text = "Some text";
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         )
         .with_abstention(Some(AbstentionReason::Ambiguous))
         .with_session_topic_proposal(Some(SessionTopicProposal {
@@ -547,12 +547,12 @@ mod proposal_tests {
         let text = "Some text";
         let proposal = Proposal::new(
             "".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         )
         .with_item_type(Some(ItemType::Action));
 
@@ -565,13 +565,13 @@ mod proposal_tests {
     fn test_empty_item_id_rejected() {
         let text = "Some text";
         let proposal = Proposal::new(
-            "prop-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
             "".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         )
         .with_item_type(Some(ItemType::Action));
 
@@ -584,13 +584,13 @@ mod proposal_tests {
     fn test_empty_capture_id_rejected() {
         let text = "Some text";
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
             "".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         )
         .with_item_type(Some(ItemType::Action));
 
@@ -603,9 +603,9 @@ mod proposal_tests {
     fn test_empty_request_version_rejected() {
         let text = "Some text";
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
@@ -624,13 +624,13 @@ mod proposal_tests {
     fn test_session_topic_requires_source_span() {
         let text = "meeting notes";
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         )
         .with_session_topic_proposal(Some(SessionTopicProposal {
             topic: "work".to_string(),
@@ -646,13 +646,13 @@ mod proposal_tests {
     fn test_session_topic_with_source_span_valid() {
         let text = "meeting notes";
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         )
         .with_session_topic_proposal(Some(SessionTopicProposal {
             topic: "work".to_string(),
@@ -668,13 +668,13 @@ mod proposal_tests {
     #[test]
     fn test_json_unknown_fields_rejected() {
         let json = r#"{
-            "proposal_id": "prop-1",
-            "item_id": "item-1",
-            "capture_id": "cap-1",
+            "proposal_id": "550e8400-e29b-41d4-a716-446655440001",
+            "item_id": "550e8400-e29b-41d4-a716-446655440002",
+            "capture_id": "550e8400-e29b-41d4-a716-446655440003",
             "source_revision": 0,
             "schema_version": 1,
             "text_basis": "Original",
-            "request_version": "req-1",
+            "request_version": "550e8400-e29b-41d4-a716-446655440004",
             "item_type": "Action",
             "unknown_field": "should fail"
         }"#;
@@ -686,13 +686,13 @@ mod proposal_tests {
     #[test]
     fn test_json_valid_proposal_deserializes() {
         let json = r#"{
-            "proposal_id": "prop-1",
-            "item_id": "item-1",
-            "capture_id": "cap-1",
+            "proposal_id": "550e8400-e29b-41d4-a716-446655440001",
+            "item_id": "550e8400-e29b-41d4-a716-446655440002",
+            "capture_id": "550e8400-e29b-41d4-a716-446655440003",
             "source_revision": 0,
             "schema_version": 1,
             "text_basis": "Original",
-            "request_version": "req-1",
+            "request_version": "550e8400-e29b-41d4-a716-446655440004",
             "item_type": "action",
             "reminder_proposal": null,
             "session_topic_proposal": null,
@@ -703,7 +703,7 @@ mod proposal_tests {
         let result: serde_json::Result<Proposal> = serde_json::from_str(json);
         assert!(result.is_ok());
         let proposal = result.unwrap();
-        assert_eq!(proposal.proposal_id, "prop-1");
+        assert_eq!(proposal.proposal_id, "550e8400-e29b-41d4-a716-446655440001");
     }
 
     // === Abstention Reason Variants ===
@@ -712,13 +712,13 @@ mod proposal_tests {
     fn test_abstention_reason_uncertain_target() {
         let text = "unclear what this is";
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         )
         .with_abstention(Some(AbstentionReason::UncertainTarget));
 
@@ -730,13 +730,13 @@ mod proposal_tests {
     fn test_abstention_reason_negated() {
         let text = "don't do this";
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         )
         .with_abstention(Some(AbstentionReason::Negated));
 
@@ -748,13 +748,13 @@ mod proposal_tests {
     fn test_abstention_reason_ambiguous() {
         let text = "maybe later";
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         )
         .with_abstention(Some(AbstentionReason::Ambiguous));
 
@@ -766,13 +766,13 @@ mod proposal_tests {
     fn test_abstention_reason_unsupported_operation() {
         let text = "recurring reminder";
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         )
         .with_abstention(Some(AbstentionReason::UnsupportedOperation));
 
@@ -784,13 +784,13 @@ mod proposal_tests {
     fn test_abstention_reason_other() {
         let text = "something custom";
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         )
         .with_abstention(Some(AbstentionReason::Other("custom reason".to_string())));
 
@@ -803,13 +803,13 @@ mod proposal_tests {
     #[test]
     fn test_json_nested_unknown_fields_in_reminder_proposal() {
         let json = r#"{
-            "proposal_id": "prop-1",
-            "item_id": "item-1",
-            "capture_id": "cap-1",
+            "proposal_id": "550e8400-e29b-41d4-a716-446655440001",
+            "item_id": "550e8400-e29b-41d4-a716-446655440002",
+            "capture_id": "550e8400-e29b-41d4-a716-446655440003",
             "source_revision": 0,
             "schema_version": 1,
             "text_basis": "Original",
-            "request_version": "req-1",
+            "request_version": "550e8400-e29b-41d4-a716-446655440004",
             "reminder_proposal": {
                 "instant": "2026-10-10T15:00:00Z",
                 "timezone_id": "America/New_York",
@@ -829,13 +829,13 @@ mod proposal_tests {
     #[test]
     fn test_json_nested_unknown_fields_in_source_span() {
         let json = r#"{
-            "proposal_id": "prop-1",
-            "item_id": "item-1",
-            "capture_id": "cap-1",
+            "proposal_id": "550e8400-e29b-41d4-a716-446655440001",
+            "item_id": "550e8400-e29b-41d4-a716-446655440002",
+            "capture_id": "550e8400-e29b-41d4-a716-446655440003",
             "source_revision": 0,
             "schema_version": 1,
             "text_basis": "Original",
-            "request_version": "req-1",
+            "request_version": "550e8400-e29b-41d4-a716-446655440004",
             "reminder_proposal": {
                 "instant": "2026-10-10T15:00:00Z",
                 "timezone_id": "America/New_York",
@@ -854,13 +854,13 @@ mod proposal_tests {
     #[test]
     fn test_json_nested_unknown_fields_in_text_basis_correction() {
         let json = r#"{
-            "proposal_id": "prop-1",
-            "item_id": "item-1",
-            "capture_id": "cap-1",
+            "proposal_id": "550e8400-e29b-41d4-a716-446655440001",
+            "item_id": "550e8400-e29b-41d4-a716-446655440002",
+            "capture_id": "550e8400-e29b-41d4-a716-446655440003",
             "source_revision": 0,
             "schema_version": 1,
             "text_basis": {"correction": {"correction_id": "corr-1", "extra_field": "bad"}},
-            "request_version": "req-1",
+            "request_version": "550e8400-e29b-41d4-a716-446655440004",
             "item_type": "Action",
             "reminder_proposal": null,
             "session_topic_proposal": null,
@@ -878,13 +878,13 @@ mod proposal_tests {
     fn test_proposal_negative_source_revision_rejected() {
         let text = "Some text";
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             -5,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         )
         .with_item_type(Some(ItemType::Action));
 
@@ -903,13 +903,13 @@ mod proposal_tests {
         };
 
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             basis,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         )
         .with_item_type(Some(ItemType::Action));
 
@@ -924,13 +924,13 @@ mod proposal_tests {
     fn test_type_only_proposal_without_source_spans_rejected() {
         let text = "Some text";
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         )
         .with_item_type(Some(ItemType::Action));
 
@@ -943,13 +943,13 @@ mod proposal_tests {
     fn test_type_only_proposal_with_empty_source_spans_rejected() {
         let text = "Some text";
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         )
         .with_item_type(Some(ItemType::Action))
         .with_source_spans(Some(vec![]));
@@ -965,20 +965,20 @@ mod proposal_tests {
     fn test_reminder_without_source_span_rejected() {
         let text = "Some text";
         let reminder = ReminderProposal {
-            instant: "2026-10-10T15:00:00Z".to_string(),
-            timezone_id: "America/New_York".to_string(),
+            instant: Some("2026-10-10T15:00:00Z".to_string()),
+            timezone_id: Some("America/New_York".to_string()),
             quality: TimeResolutionQuality::Explicit,
             source_span: None,
         };
 
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         )
         .with_reminder_proposal(Some(reminder));
 
@@ -993,13 +993,13 @@ mod proposal_tests {
     fn test_session_topic_with_null_source_span_rejected() {
         let text = "meeting notes";
         let proposal = Proposal::new(
-            "prop-1".to_string(),
-            "item-1".to_string(),
-            "cap-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440001".to_string(),
+            "550e8400-e29b-41d4-a716-446655440002".to_string(),
+            "550e8400-e29b-41d4-a716-446655440003".to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
             TextBasis::Original,
-            "req-1".to_string(),
+            "550e8400-e29b-41d4-a716-446655440004".to_string(),
         )
         .with_session_topic_proposal(Some(SessionTopicProposal {
             topic: "work".to_string(),
