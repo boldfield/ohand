@@ -12,3 +12,8 @@ Layout:
 
 Build, simulator launch, CI assertions, pinned versions, evidence and known
 limitations are in [`docs/validation/tauri-build.md`](../../docs/validation/tauri-build.md).
+
+## Native handoff (P07)
+
+The shell registers the `ohand-tauri` URL scheme and records capture identifiers sent by CaptureProbe in
+`src-tauri/src/lib.rs` (`RunEvent::Opened`). See `docs/validation/tauri-handoff.md`.

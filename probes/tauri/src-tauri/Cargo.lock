@@ -2079,9 +2079,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ohand-tauri-handoff"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ohand-tauri-probe"
 version = "0.1.0"
 dependencies = [
+ "ohand-tauri-handoff",
  "serde",
  "serde_json",
  "tauri",

@@ -310,6 +310,57 @@ jobs:
           test -s .evidence/screenshot.png
           echo "Tauri probe passed" | tee -a .evidence/roundtrip.log
 
+      - name: Install XcodeGen launcher
+        run: brew install mint
+
+      # Real handoff between two installed apps: CaptureProbe (native entry) opens this Tauri shell by URL.
+      - name: Native-to-Tauri handoff UI tests (cold, warm, hostile routes, largest text)
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+        run: |
+          set -euo pipefail
+          evidence_dir="$PWD/.evidence"
+          tauri_bundle_id="com.boldfield.ohand.tauri-probe"
+          capture_bundle_id="com.boldfield.ohand.probes.capture"
+          log_file="${evidence_dir}/handoff-uitests.log"
+
+          xcrun simctl bootstatus "${SIMULATOR_UDID}" -b
+          xcrun simctl terminate "${SIMULATOR_UDID}" "${tauri_bundle_id}" 2>/dev/null || true
+          xcrun simctl uninstall "${SIMULATOR_UDID}" "${capture_bundle_id}" 2>/dev/null || true
+          tauri_data_dir="$(xcrun simctl get_app_container "${SIMULATOR_UDID}" "${tauri_bundle_id}" data)"
+          find "${tauri_data_dir}" -type d -name handoffs -prune -exec rm -rf {} +
+
+          (
+            cd ../../ios
+            ./scripts/generate.sh
+            rm -rf "${evidence_dir}/ManagementHandoffUITests.xcresult"
+            xcodebuild test \
+              -project OhAnd.xcodeproj \
+              -scheme ManagementHandoffUITests \
+              -configuration Debug \
+              -sdk iphonesimulator \
+              -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
+              -derivedDataPath .derived \
+              -resultBundlePath "${evidence_dir}/ManagementHandoffUITests.xcresult" \
+              CODE_SIGNING_ALLOWED=NO
+          ) 2>&1 | tee "${log_file}"
+
+          grep -F '** TEST SUCCEEDED **' "${log_file}"
+          grep -o 'HANDOFF-PHASE .*' "${log_file}" | awk '!seen[$2]++' | tee "${evidence_dir}/handoff-phases.txt"
+
+          tauri_data_dir="$(xcrun simctl get_app_container "${SIMULATOR_UDID}" "${tauri_bundle_id}" data)"
+          handoff_dir="$(find "${tauri_data_dir}" -type d -name handoffs | head -1)"
+          capture_data_dir="$(xcrun simctl get_app_container "${SIMULATOR_UDID}" "${capture_bundle_id}" data)"
+          capture_root="${capture_data_dir}/Library/Application Support/CaptureProbe"
+          test -n "${handoff_dir}" || { echo "FAILURE: the shell persisted no handoffs directory"; exit 1; }
+          cp -R "${handoff_dir}" "${evidence_dir}/shell-handoffs"
+          cp -R "${capture_root}" "${evidence_dir}/capture-root"
+
+          python3 ../../ios/scripts/verify_handoff_evidence.py \
+            --handoff-dir "${handoff_dir}" \
+            --capture-root "${capture_root}" \
+            --log "${log_file}" 2>&1 | tee "${evidence_dir}/handoff-verification.txt"
+
       - name: Upload evidence
         if: always()
         uses: actions/upload-artifact@v4

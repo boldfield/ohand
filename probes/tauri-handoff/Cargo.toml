@@ -1,0 +1,13 @@
+[package]
+name = "ohand-tauri-handoff"
+version = "0.1.0"
+edition = "2021"
+description = "P07 probe: strict native-to-management-shell handoff URL grammar and durable, webview-independent handoff inbox"
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
