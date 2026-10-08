@@ -334,6 +334,33 @@ pub fn claim_job_with_lease_in_tx(
             continue;
         }
 
+        // Check if job's profile has been revoked. Skip this job without claiming it.
+        if let Some(ref profile_version) = job.profile_version {
+            let revoked_at: Option<Option<String>> = tx
+                .query_row(
+                    "SELECT revoked_at FROM provider_profiles WHERE profile_version = ?",
+                    [profile_version],
+                    |row| row.get(0),
+                )
+                .optional()?;
+
+            if matches!(revoked_at, Some(Some(_))) {
+                // Profile is revoked: mark this queued job as cancelled and skip it
+                if job.status == JobStatus::Queued {
+                    tx.execute(
+                        "UPDATE jobs SET status = ?, failure_reason = ?, lease_expires_at = NULL WHERE job_id = ?",
+                        rusqlite::params![
+                            JobStatus::Cancelled.as_str(),
+                            "profile_revoked",
+                            &job.job_id
+                        ],
+                    )?;
+                }
+                // Skip to next job (whether queued or running)
+                continue;
+            }
+        }
+
         // Check item exists and is not deleted, and check revision staleness
         let item_result: Option<(bool, i32)> = tx
             .query_row(
@@ -446,6 +473,33 @@ pub fn complete_job(db: &mut Database, job_id: &str, lease_attempt: i32) -> Resu
 }
 
 pub fn complete_job_in_tx(tx: &Transaction<'_>, job_id: &str, lease_attempt: i32) -> Result<()> {
+    // Check if job's profile has been revoked; if so, reject the result
+    let profile_version: Option<Option<String>> = tx
+        .query_row(
+            "SELECT profile_version FROM jobs WHERE job_id = ?",
+            [job_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+
+    if let Some(profile_ver) = profile_version {
+        let revoked_at: Option<Option<String>> = tx
+            .query_row(
+                "SELECT revoked_at FROM provider_profiles WHERE profile_version = ?",
+                [&profile_ver],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        if matches!(revoked_at, Some(Some(_))) {
+            return Err(anyhow!(
+                "Job {} result rejected: profile was revoked",
+                job_id
+            ));
+        }
+    }
+
     let affected = tx.execute(
         "UPDATE jobs SET status = ?, lease_expires_at = NULL \
          WHERE job_id = ? AND status = ? AND attempt_count = ?",

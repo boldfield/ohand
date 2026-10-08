@@ -51,6 +51,10 @@ pub const MIGRATIONS: &[MigrationStep] = &[
         target_version: 2,
         apply: add_event_payload_columns_v2,
     },
+    MigrationStep {
+        target_version: 3,
+        apply: add_profile_revocation_v3,
+    },
 ];
 
 /// Database handle with schema validation.
@@ -659,6 +663,14 @@ fn add_event_payload_columns_v2(tx: &Transaction<'_>) -> Result<()> {
     )?;
     tx.execute(
         "ALTER TABLE events ADD COLUMN suggestion_control_kind TEXT",
+        [],
+    )?;
+    Ok(())
+}
+
+fn add_profile_revocation_v3(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute(
+        "ALTER TABLE provider_profiles ADD COLUMN revoked_at TEXT",
         [],
     )?;
     Ok(())
