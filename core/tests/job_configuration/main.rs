@@ -1197,3 +1197,91 @@ fn test_late_completion_rejected_after_pinned_profile_disappears() -> Result<()>
     assert!(claim_job_with_lease(&mut db, Duration::minutes(5), later)?.is_none());
     Ok(())
 }
+
+/// A job whose pinned profile disappears before its first claim is retired at claim time with
+/// an explicit configuration failure, and the claim moves on to live work instead of leasing it.
+#[test]
+fn test_claim_retires_job_whose_pinned_profile_disappeared() -> Result<()> {
+    let clock = Arc::new(MockClock::new(Utc::now()));
+    let (mut db, item_id) = setup_test_db(&clock)?;
+    let now = clock.now();
+
+    let vanished_profile = "profile-vanished-before-claim-ffff";
+    let live_profile = "profile-live-after-vanish-gggg";
+    create_profile(&mut db, "p-vanished", vanished_profile)?;
+    create_profile(&mut db, "p-live", live_profile)?;
+    enqueue_interpret(&mut db, "job-orphaned", &item_id, vanished_profile, now)?;
+    enqueue_interpret(
+        &mut db,
+        "job-live",
+        &item_id,
+        live_profile,
+        now + Duration::seconds(1),
+    )?;
+
+    db.conn().execute(
+        "DELETE FROM provider_profiles WHERE profile_version = ?",
+        [vanished_profile],
+    )?;
+
+    let later = now + Duration::seconds(2);
+    let claimed =
+        claim_job_with_lease(&mut db, Duration::minutes(5), later)?.expect("live job claimable");
+    assert_eq!(claimed.job_id, "job-live");
+    assert_eq!(
+        job_state(&db, "job-orphaned")?,
+        ("cancelled".to_string(), Some("profile_missing".to_string()))
+    );
+    let orphan_lease: Option<String> = db.conn().query_row(
+        "SELECT lease_expires_at FROM jobs WHERE job_id = ?",
+        ["job-orphaned"],
+        |row| row.get(0),
+    )?;
+    assert!(orphan_lease.is_none());
+
+    // The retired job never comes back, so no retry loop can lease it again.
+    complete_job(&mut db, "job-live", claimed.attempt_count)?;
+    assert!(claim_job_with_lease(&mut db, Duration::minutes(5), later)?.is_none());
+    assert_eq!(
+        job_state(&db, "job-orphaned")?,
+        ("cancelled".to_string(), Some("profile_missing".to_string()))
+    );
+    Ok(())
+}
+
+/// A running job whose pinned profile disappears and whose lease then expires is retired by the
+/// next claim rather than re-leased or selected forever.
+#[test]
+fn test_reclaim_after_lease_expiry_retires_job_with_missing_profile() -> Result<()> {
+    let clock = Arc::new(MockClock::new(Utc::now()));
+    let (mut db, item_id) = setup_test_db(&clock)?;
+    let now = clock.now();
+
+    let profile = "profile-vanished-while-leased-hhhh";
+    create_profile(&mut db, "p-vanished-leased", profile)?;
+    enqueue_interpret(&mut db, "job-leased-orphan", &item_id, profile, now)?;
+    let claimed =
+        claim_job_with_lease(&mut db, Duration::minutes(5), now)?.expect("job should be claimable");
+    assert_eq!(claimed.status, JobStatus::Running);
+
+    db.conn().execute(
+        "DELETE FROM provider_profiles WHERE profile_version = ?",
+        [profile],
+    )?;
+
+    let after_expiry = now + Duration::minutes(10);
+    *clock.current_time.write().unwrap() = after_expiry;
+    assert!(claim_job_with_lease(&mut db, Duration::minutes(5), after_expiry)?.is_none());
+    assert_eq!(
+        job_state(&db, "job-leased-orphan")?,
+        ("cancelled".to_string(), Some("profile_missing".to_string()))
+    );
+
+    // The stale holder's late result is still ineligible.
+    assert!(complete_job(&mut db, "job-leased-orphan", claimed.attempt_count).is_err());
+    assert_eq!(
+        job_state(&db, "job-leased-orphan")?,
+        ("cancelled".to_string(), Some("profile_missing".to_string()))
+    );
+    Ok(())
+}
