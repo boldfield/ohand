@@ -32,7 +32,7 @@ The file is `{"fixtures": [...]}`. Every object below rejects unknown keys and d
 
 - `item_type`: `broad_intention`, `note`, `idea` or `action`; needs `source_spans`.
 - `source_spans`: evidence for the item type, `[{start, end, text}]`.
-- `reminder_proposal`: `{quality, instant, timezone_id, source_span}`; `source_span` is the time phrase only, not "Remind me".
+- `reminder_proposal`: `{quality, instant, timezone_id, source_span}`; `source_span` is the time phrase only, not "Remind me". A reminder requires `item_type: action` (reminders attach only to an active action), and the action's `source_spans` must cover more than the time phrase (the reminder target).
 - `session_topic_proposal`: `{topic, source_span}`.
 - `abstention`: `"UncertainTarget"`, `"Negated"`, `"Ambiguous"`, `"UnsupportedOperation"` or `{"Other": "reason"}` (I01's serde form). Only the variant is compared; the `Other` text is free. An abstention means the capture's item still exists with the source preserved, but no derived facet is applied.
 
@@ -69,11 +69,12 @@ A fixture that expects "no target mutation" (an unsupported spoken update such a
 1. Strict typed parse (unknown or duplicate keys, bad enum values and missing required fields fail).
 2. Unique kebab-case ids; `synthetic` provenance; labels (`recoverable`/`recovery_notes`), `preserve` and `text_basis` consistency; correction replay.
 3. Span text equals the basis slice and is in bounds.
-4. The expected facets rebuilt as an I01 `Proposal` pass `Proposal::validate` (abstention exclusivity, evidence, RFC 3339, IANA zone, ambiguous reminder without instant).
-5. Reminder instants recomputed against the time context.
-6. Expected does not violate its own `forbidden`; each forbidden rule is exercised against synthetic violating proposals.
-7. Corpus coverage: all categories, the DESIGN examples, the unsupported-update, negation, injection, correction and dropped-ASR requirements.
-8. Mutation tests: bad vocabulary, extra keys, broken evidence, wrong instants and dropped labels are each rejected with the expected error.
+4. A `reminder_proposal` is accompanied by `item_type: action` whose evidence extends beyond the time phrase.
+5. The expected facets rebuilt as an I01 `Proposal` pass `Proposal::validate` (abstention exclusivity, evidence, RFC 3339, IANA zone, ambiguous reminder without instant).
+6. Reminder instants recomputed against the time context.
+7. Expected does not violate its own `forbidden`; each forbidden rule is exercised against synthetic violating proposals.
+8. Corpus coverage: all categories, the DESIGN examples, the unsupported-update, negation, injection, correction and dropped-ASR requirements.
+9. Mutation tests: bad vocabulary, extra keys, broken evidence, wrong instants and dropped labels are each rejected with the expected error.
 
 ## Maintenance
 

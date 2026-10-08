@@ -416,7 +416,7 @@
     {
       "id": "date-explicit-today",
       "category": "dates",
-      "input": "Remind me today at 5 p.m.",
+      "input": "Remind me today at 5 p.m. to call the dentist",
       "provenance": "synthetic, explicit date reference",
       "text_basis": "original",
       "preserve": {
@@ -430,6 +430,14 @@
         "notes": "explicit same-day reminder"
       },
       "expected": {
+        "item_type": "action",
+        "source_spans": [
+          {
+            "start": 0,
+            "end": 45,
+            "text": "Remind me today at 5 p.m. to call the dentist"
+          }
+        ],
         "reminder_proposal": {
           "quality": "explicit",
           "instant": "2026-10-08T17:00:00-04:00",
@@ -451,12 +459,12 @@
         ]
       },
       "recoverable": true,
-      "notes": "'Today' is explicit when the current date is known (capture_instant). Reminder quality is 'explicit'. Instant is RFC 3339: 2026-10-08 at 17:00 (5 p.m.)."
+      "notes": "'Today' is explicit when the current date is known (capture_instant). Reminder quality is 'explicit'. Instant is RFC 3339: 2026-10-08 at 17:00 (5 p.m.). The request names a target, so the capture is an action and the reminder attaches to it (a reminder needs an active action; a bare time phrase has nothing to remind about)."
     },
     {
       "id": "date-relative-next-monday",
       "category": "dates",
-      "input": "Remind me next Monday",
+      "input": "Remind me next Monday to email the landlord",
       "provenance": "synthetic, relative date",
       "text_basis": "original",
       "preserve": {
@@ -470,6 +478,14 @@
         "notes": "relative weekday reference; reference_date 2026-10-08 is Thursday"
       },
       "expected": {
+        "item_type": "action",
+        "source_spans": [
+          {
+            "start": 0,
+            "end": 43,
+            "text": "Remind me next Monday to email the landlord"
+          }
+        ],
         "reminder_proposal": {
           "quality": "ambiguous",
           "source_span": {
@@ -484,12 +500,12 @@
       },
       "recoverable": false,
       "recovery_notes": "The transcript names a date (next Monday) but no hour, so the time of day the user intends cannot be recovered.",
-      "notes": "Date without explicit time is ambiguous per I02 MissingHour. 'Next Monday' is identified but no time is provided. Encoded outcome: an ambiguous reminder_proposal on the time phrase with no instant; no abstention."
+      "notes": "Date without explicit time is ambiguous per I02 MissingHour. 'Next Monday' is identified but no time is provided. Encoded outcome: an ambiguous reminder_proposal on the time phrase with no instant; no abstention. The request names a target, so the capture is an action and the reminder attaches to it (a reminder needs an active action; a bare time phrase has nothing to remind about)."
     },
     {
       "id": "date-ambiguous-friday",
       "category": "ambiguity",
-      "input": "Remind me Friday",
+      "input": "Remind me Friday to water the plants",
       "provenance": "synthetic, date without explicit time",
       "text_basis": "original",
       "preserve": {
@@ -503,6 +519,14 @@
         "notes": "weekday without time; context: 2026-10-08 is Thursday"
       },
       "expected": {
+        "item_type": "action",
+        "source_spans": [
+          {
+            "start": 0,
+            "end": 36,
+            "text": "Remind me Friday to water the plants"
+          }
+        ],
         "reminder_proposal": {
           "quality": "ambiguous",
           "source_span": {
@@ -517,12 +541,12 @@
       },
       "recoverable": false,
       "recovery_notes": "The transcript names a date (Friday) but no hour, so the time of day the user intends cannot be recovered.",
-      "notes": "Date without explicit time is ambiguous per I02 MissingHour. 'Friday' identifies a date but no time is provided. Encoded outcome: an ambiguous reminder_proposal on the time phrase with no instant; no abstention."
+      "notes": "Date without explicit time is ambiguous per I02 MissingHour. 'Friday' identifies a date but no time is provided. Encoded outcome: an ambiguous reminder_proposal on the time phrase with no instant; no abstention. The request names a target, so the capture is an action and the reminder attaches to it (a reminder needs an active action; a bare time phrase has nothing to remind about)."
     },
     {
       "id": "date-ambiguous-maybe-friday",
       "category": "ambiguity",
-      "input": "Maybe remind me Friday?",
+      "input": "Maybe remind me Friday to water the plants?",
       "provenance": "synthetic, conditional reminder",
       "text_basis": "original",
       "preserve": {
@@ -536,6 +560,14 @@
         "notes": "uncertain reminder with 'maybe'"
       },
       "expected": {
+        "item_type": "action",
+        "source_spans": [
+          {
+            "start": 0,
+            "end": 43,
+            "text": "Maybe remind me Friday to water the plants?"
+          }
+        ],
         "reminder_proposal": {
           "quality": "ambiguous",
           "source_span": {
@@ -550,12 +582,12 @@
       },
       "recoverable": false,
       "recovery_notes": "The user is unsure whether they want a reminder and names no hour, so neither the intent nor the time can be recovered.",
-      "notes": "'Maybe' or other conditional markers make reminder quality ambiguous even if date is otherwise clear. Ambiguous reminders carry no instant."
+      "notes": "'Maybe' or other conditional markers make reminder quality ambiguous even if date is otherwise clear. Ambiguous reminders carry no instant. The request names a target, so the capture is an action and the reminder attaches to it (a reminder needs an active action; a bare time phrase has nothing to remind about)."
     },
     {
       "id": "timezone-explicit",
       "category": "dates",
-      "input": "Remind me tomorrow at 9 a.m. EST",
+      "input": "Remind me tomorrow at 9 a.m. EST to submit the form",
       "provenance": "synthetic, explicit timezone",
       "text_basis": "original",
       "preserve": {
@@ -569,6 +601,14 @@
         "notes": "EST is stated in October, when New York observes EDT; the abbreviation conflicts with the device zone"
       },
       "expected": {
+        "item_type": "action",
+        "source_spans": [
+          {
+            "start": 0,
+            "end": 51,
+            "text": "Remind me tomorrow at 9 a.m. EST to submit the form"
+          }
+        ],
         "reminder_proposal": {
           "quality": "ambiguous",
           "source_span": {
@@ -583,12 +623,12 @@
       },
       "recoverable": false,
       "recovery_notes": "The transcript says EST (UTC-05:00) while the device zone observes EDT (UTC-04:00) on that date. Both readings are plausible (a literal EST offset, or a loose reference to Eastern time), so the transcript alone cannot decide the instant.",
-      "notes": "Expected outcome: quality ambiguous and no instant, with the time phrase as evidence. Silently choosing EDT (13:00Z) or literal EST (14:00Z) is forbidden."
+      "notes": "Expected outcome: quality ambiguous and no instant, with the time phrase as evidence. Silently choosing EDT (13:00Z) or literal EST (14:00Z) is forbidden. The request names a target, so the capture is an action and the reminder attaches to it (a reminder needs an active action; a bare time phrase has nothing to remind about)."
     },
     {
       "id": "timezone-implicit-local",
       "category": "dates",
-      "input": "Remind me tomorrow at 9 a.m.",
+      "input": "Remind me tomorrow at 9 a.m. to submit the form",
       "provenance": "synthetic, no explicit timezone",
       "text_basis": "original",
       "preserve": {
@@ -602,6 +642,14 @@
         "notes": "timezone not stated, should use device default"
       },
       "expected": {
+        "item_type": "action",
+        "source_spans": [
+          {
+            "start": 0,
+            "end": 47,
+            "text": "Remind me tomorrow at 9 a.m. to submit the form"
+          }
+        ],
         "reminder_proposal": {
           "timezone_id": "America/New_York",
           "quality": "explicit",
@@ -622,12 +670,12 @@
         ]
       },
       "recoverable": true,
-      "notes": "No timezone is stated, so the device timezone applies; a device-default timezone does not downgrade quality because the date and hour are both stated. 2026-10-09 09:00 America/New_York is UTC-04:00 (13:00Z)."
+      "notes": "No timezone is stated, so the device timezone applies; a device-default timezone does not downgrade quality because the date and hour are both stated. 2026-10-09 09:00 America/New_York is UTC-04:00 (13:00Z). The request names a target, so the capture is an action and the reminder attaches to it (a reminder needs an active action; a bare time phrase has nothing to remind about)."
     },
     {
       "id": "timezone-conflicting",
       "category": "dates",
-      "input": "Remind me tomorrow at 9 a.m. Tokyo time",
+      "input": "Remind me tomorrow at 9 a.m. Tokyo time to join the call",
       "provenance": "synthetic, explicit non-local timezone",
       "text_basis": "original",
       "preserve": {
@@ -641,6 +689,14 @@
         "notes": "explicit timezone differs from device"
       },
       "expected": {
+        "item_type": "action",
+        "source_spans": [
+          {
+            "start": 0,
+            "end": 56,
+            "text": "Remind me tomorrow at 9 a.m. Tokyo time to join the call"
+          }
+        ],
         "reminder_proposal": {
           "timezone_id": "Asia/Tokyo",
           "quality": "explicit",
@@ -658,7 +714,7 @@
         ]
       },
       "recoverable": true,
-      "notes": "Explicit timezone in source overrides device context. Source says 'Tokyo time', so instant is resolved in Asia/Tokyo (UTC+09:00), not device timezone."
+      "notes": "Explicit timezone in source overrides device context. Source says 'Tokyo time', so instant is resolved in Asia/Tokyo (UTC+09:00), not device timezone. The request names a target, so the capture is an action and the reminder attaches to it (a reminder needs an active action; a bare time phrase has nothing to remind about)."
     },
     {
       "id": "asr-dropped-word-remind-me",
@@ -719,7 +775,7 @@
     {
       "id": "asr-garbled-time",
       "category": "ambiguity",
-      "input": "Remind me at fiveish on Tuesmorning",
+      "input": "Remind me at fiveish on Tuesmorning to email Sam",
       "provenance": "synthetic, ASR error - garbled time phrase",
       "text_basis": "original",
       "preserve": {
@@ -733,6 +789,14 @@
         "notes": "ASR produced unclear time/day combination"
       },
       "expected": {
+        "item_type": "action",
+        "source_spans": [
+          {
+            "start": 0,
+            "end": 48,
+            "text": "Remind me at fiveish on Tuesmorning to email Sam"
+          }
+        ],
         "reminder_proposal": {
           "quality": "ambiguous",
           "source_span": {
@@ -747,7 +811,7 @@
       },
       "recoverable": false,
       "recovery_notes": "Garbled 'Tuesmorning' (Tuesday + morning?) and 'fiveish' are ambiguous and cannot be reliably interpreted.",
-      "notes": "Garbled time/date phrases are marked quality ambiguous with no instant; the interpreter must not invent a reading. Expected outcome is the ambiguous reminder_proposal carrying the garbled phrase as evidence."
+      "notes": "Garbled time/date phrases are marked quality ambiguous with no instant; the interpreter must not invent a reading. Expected outcome is the ambiguous reminder_proposal carrying the garbled phrase as evidence. The request names a target, so the capture is an action and the reminder attaches to it (a reminder needs an active action; a bare time phrase has nothing to remind about)."
     },
     {
       "id": "mixed-note-action-capture",

@@ -516,6 +516,12 @@ fn check_fixture(fixture: &Fixture) -> Result<(), String> {
         .validate(basis)
         .map_err(|error| format!("expected outcome is not a valid I01 proposal: {error}"))?;
     if let Some(reminder) = &expected.reminder_proposal {
+        if expected.item_type != Some(ItemType::Action) {
+            return Err(
+                "a reminder_proposal needs an expected action item_type: reminders attach only to an active action"
+                    .into(),
+            );
+        }
         check_reminder_time(fixture, reminder)?;
     }
     let contradictions = violations(&proposal, &fixture.forbidden);
@@ -914,6 +920,40 @@ fn validator_recomputes_reminder_times() {
             .unwrap()
             .remove("device_timezone");
     });
+}
+
+#[test]
+fn validator_requires_reminders_to_attach_to_an_action() {
+    assert_rejected("design-explicit-reminder", "active action", |f| {
+        f["expected"]["item_type"] = json!("note");
+    });
+    assert_rejected("date-ambiguous-friday", "active action", |f| {
+        let expected = f["expected"].as_object_mut().unwrap();
+        expected.remove("item_type");
+        expected.remove("source_spans");
+    });
+    let corpus = load_corpus();
+    let reminder_fixtures: Vec<&Fixture> = corpus
+        .fixtures
+        .iter()
+        .filter(|fixture| fixture.expected.reminder_proposal.is_some())
+        .collect();
+    assert!(reminder_fixtures.len() >= 8);
+    for fixture in reminder_fixtures {
+        let reminder = fixture.expected.reminder_proposal.as_ref().unwrap();
+        let evidence = fixture
+            .expected
+            .source_spans
+            .as_ref()
+            .expect("action evidence");
+        assert!(
+            evidence
+                .iter()
+                .any(|span| span.text.len() > reminder.source_span.text.len()),
+            "{}: the action evidence must include a reminder target beyond the time phrase",
+            fixture.id
+        );
+    }
 }
 
 #[test]
