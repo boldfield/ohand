@@ -144,7 +144,8 @@ Run on a physical device with a passcode set. Record device model, iOS version a
 ```bash
 # Simulator build with ad-hoc signing and the target's Keychain entitlements (macOS with Xcode)
 OHAND_SIMULATOR_ADHOC_SIGN=1 ios/scripts/build-simulator.sh CredentialProbe
-make ios-credential-probe   # unsigned build only; Keychain calls fail with -34018
+make ios-credential-probe   # same signed build
+# An unsigned build (no OHAND_SIMULATOR_ADHOC_SIGN) compiles but every Keychain call fails with -34018
 
 # Self-test on a booted-or-bootable simulator
 ios/scripts/keychain-selftest-simulator.sh <simulator-udid> ios/.derived/Build/Products/Debug-iphonesimulator/CredentialProbe.app <evidence-dir>
