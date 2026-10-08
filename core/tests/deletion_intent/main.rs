@@ -616,6 +616,48 @@ fn deletion_cancels_the_reminder_and_gates_notification_cleanup() {
     assert_eq!(completed.status, DeletionWorkStatus::Completed);
 }
 
+#[test]
+fn failed_native_cancel_never_completes_notification_cleanup() {
+    let mut db = create_test_db();
+    let item_id = create_item_with_reminder(&mut db, "remind-failed");
+
+    let intent = mark_deletion_intent(&mut db, &item_id, 1, fixed_instant(5)).expect("deletion");
+    let notifications = work_of_type(&intent, DeletionWorkType::CancelNotifications);
+
+    db.conn()
+        .execute(
+            "UPDATE reminder_operations SET operation_state = 'failed'
+             WHERE operation_type = 'cancel' AND operation_state = 'pending'",
+            [],
+        )
+        .unwrap();
+
+    let blocked =
+        mark_deletion_work_completed(&mut db, &notifications.deletion_work_id, fixed_instant(6));
+    assert!(blocked.is_err(), "a failed native cancel blocks completion");
+    assert_eq!(
+        get_deletion_work(&db, &notifications.deletion_work_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        DeletionWorkStatus::Pending
+    );
+
+    for work in &intent.work {
+        if work.work_type != DeletionWorkType::CancelNotifications {
+            mark_deletion_work_completed(&mut db, &work.deletion_work_id, fixed_instant(7))
+                .expect("other cleanup completes");
+        }
+    }
+    assert!(
+        !matches!(
+            deletion_progress(&mut db, &item_id).unwrap(),
+            DeletionProgress::Complete
+        ),
+        "deletion is never complete while the native cancel has failed"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Racing and replayed writes cannot restore readable text
 // ---------------------------------------------------------------------------

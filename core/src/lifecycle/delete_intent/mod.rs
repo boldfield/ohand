@@ -353,7 +353,8 @@ pub fn deletion_progress(db: &mut Database, item_id: &str) -> Result<DeletionPro
 
 /// Mark a deletion work task as completed. Idempotent for an already-completed task; rejected
 /// for a terminally failed task. Completing `CancelNotifications` is refused while any reminder
-/// operation for the item is still unacknowledged, and completing `RemoveAudio` releases the
+/// operation for the item is still pending or has failed (a failed native cancel means the
+/// notification may still be installed), and completing `RemoveAudio` releases the
 /// audio reference held on the tombstoned capture.
 pub fn mark_deletion_work_completed(
     db: &mut Database,
@@ -381,13 +382,13 @@ pub fn mark_deletion_work_completed(
             let unfinished_operations: i64 = tx.query_row(
                 "SELECT COUNT(*) FROM reminder_operations
                  JOIN reminders ON reminders.reminder_id = reminder_operations.reminder_id
-                 WHERE reminders.item_id = ? AND reminder_operations.operation_state = 'pending'",
+                 WHERE reminders.item_id = ? AND reminder_operations.operation_state IN ('pending', 'failed')",
                 [&work.item_id],
                 |row| row.get(0),
             )?;
             if unfinished_operations > 0 {
                 return Err(anyhow!(
-                    "Cannot complete notification cleanup: {} reminder operation(s) unacknowledged",
+                    "Cannot complete notification cleanup: {} reminder operation(s) pending or failed",
                     unfinished_operations
                 ));
             }
