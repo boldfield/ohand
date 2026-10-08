@@ -77,55 +77,10 @@ pub fn scoped_query(
     filter: &QueryFilter,
     pagination: &QueryPagination,
 ) -> Result<QueryResult> {
-    // Validate date filters early (before searching).
-    validate_date_filters(filter)?;
-
-    // Use read_scopes from filter, or default to personal only if empty.
-    let allowed_scopes = if filter.read_scopes.is_empty() {
-        vec![ItemScope::Personal]
-    } else {
-        filter.read_scopes.clone()
-    };
-
-    // First pass: search with scope filter (the index handles scope enforcement).
-    let mut all_hits = search_index(conn, search_text, &allowed_scopes)?;
-
-    // Apply additional filters to the hits.
-    all_hits.retain(|hit| {
-        // Always exclude deleted items.
-        if hit.lifecycle_state == "deleted" {
-            return false;
-        }
-        // Filter by lifecycle state if specified.
-        if !filter.lifecycle_states.is_empty()
-            && !filter.lifecycle_states.contains(&hit.lifecycle_state)
-        {
-            return false;
-        }
-        // Filter by route_id if specified.
-        if !filter.route_ids.is_empty() && !filter.route_ids.contains(&hit.route_id) {
-            return false;
-        }
-        true
-    });
-
-    // Join with items and captures tables to apply remaining filters (item_type, date, session_topic).
-    let total_accessible = filter_hits_in_db(conn, &mut all_hits, filter)?;
-
-    // Apply pagination.
-    let offset = pagination.offset;
-    let limit = if pagination.limit == 0 {
-        all_hits.len()
-    } else {
-        pagination.limit
-    };
-
-    let paginated_hits = all_hits.into_iter().skip(offset).take(limit).collect();
-
-    Ok(QueryResult {
-        hits: paginated_hits,
-        total_accessible,
-    })
+    let date_bounds = parse_date_bounds(filter)?;
+    let allowed_scopes = allowed_read_scopes(filter);
+    let candidate_hits = search_index(conn, search_text, &allowed_scopes)?;
+    finish_query(conn, candidate_hits, filter, &date_bounds, pagination)
 }
 
 /// Alternative query using direct source table (fallback when index is out of sync).
@@ -135,23 +90,34 @@ pub fn scoped_query_direct(
     filter: &QueryFilter,
     pagination: &QueryPagination,
 ) -> Result<QueryResult> {
-    // Validate date filters early (before searching).
-    validate_date_filters(filter)?;
+    let date_bounds = parse_date_bounds(filter)?;
+    let allowed_scopes = allowed_read_scopes(filter);
+    let candidate_hits = search_source_direct(conn, search_text, &allowed_scopes)?;
+    finish_query(conn, candidate_hits, filter, &date_bounds, pagination)
+}
 
-    let allowed_scopes = if filter.read_scopes.is_empty() {
+/// Read scopes from the filter, defaulting to personal only when none are given.
+fn allowed_read_scopes(filter: &QueryFilter) -> Vec<ItemScope> {
+    if filter.read_scopes.is_empty() {
         vec![ItemScope::Personal]
     } else {
         filter.read_scopes.clone()
-    };
+    }
+}
 
-    let mut all_hits = search_source_direct(conn, search_text, &allowed_scopes)?;
-
-    all_hits.retain(|hit| {
-        // Always exclude deleted items.
+/// Shared post-search filtering and pagination so the indexed and direct paths cannot drift.
+fn finish_query(
+    conn: &Connection,
+    mut hits: Vec<SearchHit>,
+    filter: &QueryFilter,
+    date_bounds: &DateBounds,
+    pagination: &QueryPagination,
+) -> Result<QueryResult> {
+    hits.retain(|hit| {
+        // Deleted items are never returned, regardless of the lifecycle filter.
         if hit.lifecycle_state == "deleted" {
             return false;
         }
-        // Filter by lifecycle state if specified.
         if !filter.lifecycle_states.is_empty()
             && !filter.lifecycle_states.contains(&hit.lifecycle_state)
         {
@@ -163,16 +129,18 @@ pub fn scoped_query_direct(
         true
     });
 
-    let total_accessible = filter_hits_in_db(conn, &mut all_hits, filter)?;
+    let total_accessible = filter_hits_in_db(conn, &mut hits, filter, date_bounds)?;
 
-    let offset = pagination.offset;
     let limit = if pagination.limit == 0 {
-        all_hits.len()
+        hits.len()
     } else {
         pagination.limit
     };
-
-    let paginated_hits = all_hits.into_iter().skip(offset).take(limit).collect();
+    let paginated_hits = hits
+        .into_iter()
+        .skip(pagination.offset)
+        .take(limit)
+        .collect();
 
     Ok(QueryResult {
         hits: paginated_hits,
@@ -180,58 +148,59 @@ pub fn scoped_query_direct(
     })
 }
 
-/// Validate date filters early to catch invalid RFC3339 before searching.
-fn validate_date_filters(filter: &QueryFilter) -> Result<()> {
-    if let Some(after_str) = &filter.captured_after {
-        parse_and_normalize_rfc3339(after_str)?;
+/// Parsed UTC instants for the optional capture-date bounds (both inclusive).
+struct DateBounds {
+    captured_after: Option<DateTime<Utc>>,
+    captured_before: Option<DateTime<Utc>>,
+}
+
+impl DateBounds {
+    fn is_set(&self) -> bool {
+        self.captured_after.is_some() || self.captured_before.is_some()
     }
-    if let Some(before_str) = &filter.captured_before {
-        parse_and_normalize_rfc3339(before_str)?;
-    }
-    Ok(())
+}
+
+/// Parse and validate date bounds before searching; invalid RFC3339 is an error.
+fn parse_date_bounds(filter: &QueryFilter) -> Result<DateBounds> {
+    Ok(DateBounds {
+        captured_after: filter
+            .captured_after
+            .as_deref()
+            .map(parse_rfc3339_utc)
+            .transpose()?,
+        captured_before: filter
+            .captured_before
+            .as_deref()
+            .map(parse_rfc3339_utc)
+            .transpose()?,
+    })
 }
 
 /// Apply database-level filters to reduce hit set by item_type, dates, and session_topic.
 /// Modifies the hits vector in place and returns the total accessible count (after all filters, before pagination).
+///
+/// Date bounds are compared as parsed UTC instants in Rust to keep full sub-second precision.
+/// When a bound is set, items whose stored capture instant is not valid RFC3339 are excluded
+/// (they cannot be placed in the range); without a bound they are returned normally.
 fn filter_hits_in_db(
     conn: &Connection,
     hits: &mut Vec<SearchHit>,
     filter: &QueryFilter,
+    date_bounds: &DateBounds,
 ) -> Result<usize> {
     if hits.is_empty() {
         return Ok(0);
     }
 
-    // Parse and validate date bounds, converting to UTC.
-    let captured_after_utc = if let Some(after_str) = &filter.captured_after {
-        Some(parse_and_normalize_rfc3339(after_str)?)
-    } else {
-        None
-    };
-
-    let captured_before_utc = if let Some(before_str) = &filter.captured_before {
-        Some(parse_and_normalize_rfc3339(before_str)?)
-    } else {
-        None
-    };
-
-    // Build a list of item_ids to join against.
     let item_ids: Vec<&str> = hits.iter().map(|h| h.item_id.as_str()).collect();
     let placeholders = vec!["?"; item_ids.len()].join(", ");
-
-    // Build the WHERE clause for additional filters.
     let mut where_clauses = vec![format!("i.item_id IN ({})", placeholders)];
 
-    // Add item_type filter if specified.
     if !filter.item_types.is_empty() {
         let type_placeholders = vec!["?"; filter.item_types.len()].join(", ");
         where_clauses.push(format!("i.item_type IN ({})", type_placeholders));
     }
 
-    // Note: Date range filtering is applied in Rust (below) to preserve sub-second precision.
-    // The SQL query does not apply date filters; we fetch capture_instant and filter in Rust.
-
-    // Add session_topic filter if specified.
     if !filter.session_topics.is_empty() {
         let topic_placeholders = vec!["?"; filter.session_topics.len()].join(", ");
         if filter.include_no_session_topic {
@@ -246,23 +215,19 @@ fn filter_hits_in_db(
             ));
         }
     } else if filter.include_no_session_topic {
-        // If only include_no_session_topic is set (no specific topics), include only items with no topic.
         where_clauses
             .push("(i.current_session_topic IS NULL AND c.session_topic IS NULL)".to_string());
     }
 
-    let where_clause = where_clauses.join(" AND ");
     let sql = format!(
-        "SELECT i.item_id, i.item_type, c.capture_instant, COALESCE(i.current_session_topic, c.session_topic)
+        "SELECT i.item_id, c.capture_instant
          FROM items i
          JOIN captures c ON c.capture_id = i.capture_id
          WHERE {}",
-        where_clause
+        where_clauses.join(" AND ")
     );
-
     let mut stmt = conn.prepare(&sql)?;
 
-    // Build parameter list in order (excluding date bounds - those are applied in Rust below).
     let mut params: Vec<&dyn rusqlite::ToSql> = Vec::new();
     for id in &item_ids {
         params.push(id);
@@ -274,72 +239,40 @@ fn filter_hits_in_db(
         params.push(topic);
     }
 
-    // Fetch items with their capture instants.
-    let sql_items: Vec<(String, String)> = stmt
+    let matching_rows: Vec<(String, String)> = stmt
         .query_map(rusqlite::params_from_iter(params), |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(2)?))
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
-    // Filter by date bounds in Rust to preserve sub-second precision.
     let mut allowed_item_ids = std::collections::HashSet::new();
-    for (item_id, capture_instant) in sql_items {
-        // Parse the stored capture instant.
-        match DateTime::parse_from_rfc3339(&capture_instant) {
-            Ok(stored_dt) => {
-                let stored_utc = stored_dt.with_timezone(&Utc);
-                let mut include = true;
-
-                // Check captured_after bound.
-                if let Some(after_dt_str) = &captured_after_utc {
-                    if let Ok(after_dt_str_parsed) = DateTime::parse_from_rfc3339(after_dt_str) {
-                        let after_utc = after_dt_str_parsed.with_timezone(&Utc);
-                        if stored_utc < after_utc {
-                            include = false;
-                        }
-                    }
-                }
-
-                // Check captured_before bound.
-                if include {
-                    if let Some(before_dt_str) = &captured_before_utc {
-                        if let Ok(before_dt_str_parsed) =
-                            DateTime::parse_from_rfc3339(before_dt_str)
-                        {
-                            let before_utc = before_dt_str_parsed.with_timezone(&Utc);
-                            if stored_utc > before_utc {
-                                include = false;
-                            }
-                        }
-                    }
-                }
-
-                if include {
-                    allowed_item_ids.insert(item_id);
-                }
-            }
-            Err(_) => {
-                // If we can't parse the capture instant, exclude it.
-                // This matches the SQL datetime() behavior where invalid dates are dropped.
+    for (item_id, capture_instant) in matching_rows {
+        if date_bounds.is_set() {
+            let Ok(stored_instant) = parse_rfc3339_utc(&capture_instant) else {
+                continue;
+            };
+            if date_bounds
+                .captured_after
+                .is_some_and(|after| stored_instant < after)
+                || date_bounds
+                    .captured_before
+                    .is_some_and(|before| stored_instant > before)
+            {
+                continue;
             }
         }
+        allowed_item_ids.insert(item_id);
     }
 
-    // Retain only hits that passed all filters.
     hits.retain(|hit| allowed_item_ids.contains(&hit.item_id));
-
-    // Return the count AFTER all filters have been applied (before pagination).
     Ok(hits.len())
 }
 
-/// Parse and normalize an RFC3339 datetime string to UTC.
-/// Returns an error if the string is not valid RFC3339.
-/// Preserves sub-second precision for accurate date filtering.
-fn parse_and_normalize_rfc3339(rfc3339_str: &str) -> Result<String> {
-    let dt = DateTime::parse_from_rfc3339(rfc3339_str)
+/// Parse an RFC3339 datetime into a UTC instant, preserving full sub-second precision.
+fn parse_rfc3339_utc(rfc3339_str: &str) -> Result<DateTime<Utc>> {
+    Ok(DateTime::parse_from_rfc3339(rfc3339_str)
         .map_err(|e| anyhow!("Invalid RFC3339 datetime '{}': {}", rfc3339_str, e))?
-        .with_timezone(&Utc);
-    Ok(dt.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true))
+        .with_timezone(&Utc))
 }
 
 #[cfg(test)]
@@ -1219,6 +1152,57 @@ mod tests {
             "scoped_query_direct: capture at .500100Z should be excluded by after=.500400Z"
         );
         assert_eq!(result_direct.total_accessible, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn non_rfc3339_capture_instant_still_retrievable_without_date_bounds() -> Result<()> {
+        let mut db = new_db("non_rfc3339_instant")?;
+        let instant = "2026-01-15 10:30:00";
+        let capture_id = "cap-odd-instant";
+        let tx = db.immediate_transaction()?;
+        let capture = Capture::new(
+            capture_id.to_string(),
+            Some("test".to_string()),
+            None,
+            instant.to_string(),
+            "UTC".to_string(),
+            0,
+            "en".to_string(),
+            "gregorian".to_string(),
+            "personal".to_string(),
+            "route-1".to_string(),
+            false,
+            instant.to_string(),
+            None,
+        )?;
+        crate::store::captures::save_capture_in_tx(&tx, &capture)?;
+        tx.execute(
+            "INSERT INTO items (item_id, capture_id, revision, item_type, lifecycle_state,
+                               save_state, sync_state, processing_state, transcription_state, created_at, updated_at)
+             VALUES (?, ?, 0, 'note', 'active', 'saved', 'not_synced', 'unprocessed', 'unprocessed', ?, ?)",
+            rusqlite::params!["item-odd", capture_id, instant, instant],
+        )?;
+        sync_item_in_tx(&tx, "item-odd")?;
+        tx.commit()?;
+
+        let pagination = QueryPagination::default();
+
+        // No date bounds: the item is still returned on both paths.
+        let filter = QueryFilter::personal_only();
+        let indexed = scoped_query(db.conn(), "test", &filter, &pagination)?;
+        let direct = scoped_query_direct(db.conn(), "test", &filter, &pagination)?;
+        assert_eq!((indexed.hits.len(), indexed.total_accessible), (1, 1));
+        assert_eq!((direct.hits.len(), direct.total_accessible), (1, 1));
+
+        // With a date bound the unparseable instant cannot be placed in range and is excluded.
+        let mut bounded = QueryFilter::personal_only();
+        bounded.captured_after = Some("2000-01-01T00:00:00Z".to_string());
+        let indexed = scoped_query(db.conn(), "test", &bounded, &pagination)?;
+        let direct = scoped_query_direct(db.conn(), "test", &bounded, &pagination)?;
+        assert_eq!((indexed.hits.len(), indexed.total_accessible), (0, 0));
+        assert_eq!((direct.hits.len(), direct.total_accessible), (0, 0));
 
         Ok(())
     }
