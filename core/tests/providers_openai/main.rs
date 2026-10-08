@@ -751,6 +751,36 @@ fn truncated_output_is_invalid_output() {
     assert_eq!(failure_of(harness.run()).kind, FailureKind::InvalidOutput);
 }
 
+#[test]
+fn non_stop_finish_reasons_are_invalid_output_even_with_valid_content() {
+    let finish_reasons = [
+        Some(json!("tool_calls")),
+        Some(json!("function_call")),
+        Some(json!("something_new")),
+        Some(json!(null)),
+        Some(json!("")),
+        None,
+    ];
+    for finish_reason in finish_reasons {
+        let mut choice = json!({
+            "message": {"role": "assistant", "content": "{\"kind\":\"note\"}", "refusal": null}
+        });
+        if let Some(value) = &finish_reason {
+            choice["finish_reason"] = value.clone();
+        }
+        let body = serde_json::to_vec(&json!({"choices": [choice]})).unwrap();
+        let harness = Harness::new(vec![Step::http(200, body)]);
+        let failure = failure_of(harness.run());
+        assert_eq!(
+            failure.kind,
+            FailureKind::InvalidOutput,
+            "finish_reason {finish_reason:?}"
+        );
+        assert_eq!(failure.class, ErrorClass::Permanent);
+        assert!(!failure.retriable);
+    }
+}
+
 // ---- Response size bound ----
 
 fn envelope_of_exact_length(total_bytes: usize) -> Vec<u8> {

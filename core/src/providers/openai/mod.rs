@@ -196,7 +196,9 @@ fn decode_response(
     {
         return Err(TransportError::Rejected);
     }
-    if choice.finish_reason.as_deref() == Some("length") {
+    if choice.finish_reason.as_deref() != Some("stop") {
+        // Only a completed answer may become a proposal: "length" is truncated output and
+        // a missing, "tool_calls", "function_call" or unknown reason is not a final message.
         return Err(TransportError::InvalidOutput);
     }
     choice
