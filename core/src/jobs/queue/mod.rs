@@ -7,7 +7,6 @@ use chrono::{DateTime, Duration, Utc};
 use rusqlite::{OptionalExtension, Transaction};
 use std::fmt;
 use std::str::FromStr;
-use uuid::Uuid;
 
 const SUPPORTED_JOB_SCHEMA_VERSION: i32 = 1;
 
@@ -63,7 +62,6 @@ pub struct Job {
     pub attempt_count: i32,
     pub next_attempt_at: Option<DateTime<Utc>>,
     pub lease_expires_at: Option<DateTime<Utc>>,
-    pub lease_id: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -71,6 +69,27 @@ impl fmt::Display for Job {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Job({})", self.job_id)
     }
+}
+
+fn timestamp_error(column: usize, detail: String) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(column, rusqlite::types::Type::Text, detail.into())
+}
+
+/// Parse an optional RFC 3339 column. A malformed durable timestamp is a read error: silently
+/// treating it as absent would make a backed-off job immediately claimable.
+fn parse_timestamp_column(
+    row: &rusqlite::Row<'_>,
+    column: usize,
+) -> rusqlite::Result<Option<DateTime<Utc>>> {
+    let raw: Option<String> = row.get(column)?;
+    raw.map(|text| {
+        DateTime::parse_from_rfc3339(&text)
+            .map(|parsed| parsed.with_timezone(&Utc))
+            .map_err(|error| {
+                timestamp_error(column, format!("malformed timestamp {text:?}: {error}"))
+            })
+    })
+    .transpose()
 }
 
 fn job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Job> {
@@ -85,15 +104,8 @@ fn job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Job> {
         }
     };
 
-    let created_at_str: String = row.get(13)?;
-    let created_at = match created_at_str.parse::<DateTime<Utc>>() {
-        Ok(dt) => dt,
-        Err(_) => {
-            return Err(rusqlite::Error::InvalidParameterName(
-                "invalid datetime format".to_string(),
-            ))
-        }
-    };
+    let created_at = parse_timestamp_column(row, 12)?
+        .ok_or_else(|| timestamp_error(12, "created_at is NULL".to_string()))?;
 
     Ok(Job {
         job_id: row.get(0)?,
@@ -105,23 +117,16 @@ fn job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Job> {
         status,
         failure_reason: row.get(7)?,
         attempt_count: row.get(8)?,
-        next_attempt_at: row
-            .get::<_, Option<String>>(9)?
-            .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-            .map(|dt| dt.with_timezone(&Utc)),
-        lease_expires_at: row
-            .get::<_, Option<String>>(10)?
-            .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-            .map(|dt| dt.with_timezone(&Utc)),
+        next_attempt_at: parse_timestamp_column(row, 9)?,
+        lease_expires_at: parse_timestamp_column(row, 10)?,
         request_version: row.get(11)?,
-        lease_id: row.get(12)?,
         created_at,
     })
 }
 
 const JOB_COLUMNS: &str = "job_id, job_schema_version, item_id, job_type, source_revision, \
     profile_version, status, failure_reason, attempt_count, next_attempt_at, lease_expires_at, \
-    request_version, lease_id, created_at";
+    request_version, created_at";
 
 /// Enqueue a new job. The job must have a unique job_id per item/job_type/source_revision/profile_version
 /// combination to prevent duplicates. Returns the enqueued job.
@@ -240,7 +245,6 @@ pub fn enqueue_job_in_tx(
         attempt_count: 0,
         next_attempt_at: None,
         lease_expires_at: None,
-        lease_id: None,
         created_at: now,
     })
 }
@@ -267,11 +271,13 @@ fn get_job_internal(tx: &Transaction<'_>, job_id: &str) -> Result<Option<Job>> {
     .map_err(|e| anyhow!(e))
 }
 
-/// Claim a job for execution with a lease. The job must be queued, and its item must not be deleted.
-/// Returns the leased job with lease_expires_at set to now + lease_duration, and status set to Running.
-/// If no queued job exists, returns None.
-/// Skips jobs with unsupported schema versions (marks them failed), deleted items (cancels them),
-/// and stale revision jobs (cancels them).
+/// Claim the oldest eligible job: a queued job whose `next_attempt_at` has passed, or a running
+/// job whose lease expired (interrupted-lease recovery). The returned job is `Running` and its
+/// `attempt_count` is the lease token that `complete_job` / `fail_job_with_backoff` must present.
+/// Candidates that can never run are resolved durably inside the claim transaction and skipped:
+/// unsupported schema versions become `failed` (`unsupported_job_version`); jobs whose item is
+/// missing, deleted or revised past `source_revision` become `cancelled` with the reason recorded.
+/// Returns None if nothing is eligible.
 pub fn claim_job_with_lease(
     db: &mut Database,
     lease_duration: Duration,
@@ -316,11 +322,13 @@ pub fn claim_job_with_lease_in_tx(
         if job.job_schema_version != SUPPORTED_JOB_SCHEMA_VERSION {
             // Mark as failed with unsupported_job_version reason
             tx.execute(
-                "UPDATE jobs SET status = ?, failure_reason = ?, lease_expires_at = NULL, lease_id = NULL WHERE job_id = ?",
+                "UPDATE jobs SET status = ?, failure_reason = ?, lease_expires_at = NULL WHERE job_id = ? AND status IN (?, ?)",
                 rusqlite::params![
                     JobStatus::Failed.as_str(),
                     "unsupported_job_version",
-                    &job.job_id
+                    &job.job_id,
+                    JobStatus::Queued.as_str(),
+                    JobStatus::Running.as_str()
                 ],
             )?;
             continue;
@@ -335,51 +343,32 @@ pub fn claim_job_with_lease_in_tx(
             )
             .optional()?;
 
-        match item_result {
-            None => {
-                // Item doesn't exist: cancel this job and move to next
-                tx.execute(
-                    "UPDATE jobs SET status = ?, failure_reason = ?, lease_expires_at = NULL, lease_id = NULL WHERE job_id = ? AND status != ?",
-                    rusqlite::params![
-                        JobStatus::Cancelled.as_str(),
-                        "item_not_found",
-                        &job.job_id,
-                        JobStatus::Completed.as_str()
-                    ],
-                )?;
-                continue;
-            }
-            Some((false, _)) => {
-                // Item is deleted: cancel this job and move to next
-                tx.execute(
-                    "UPDATE jobs SET status = ?, failure_reason = ?, lease_expires_at = NULL, lease_id = NULL WHERE job_id = ? AND status != ?",
-                    rusqlite::params![
-                        JobStatus::Cancelled.as_str(),
-                        "item_deleted",
-                        &job.job_id,
-                        JobStatus::Completed.as_str()
-                    ],
-                )?;
-                continue;
-            }
-            Some((true, item_revision)) if item_revision != job.source_revision => {
-                // Item has been revised since job was created: cancel as stale
-                tx.execute(
-                    "UPDATE jobs SET status = ?, failure_reason = ?, lease_expires_at = NULL, lease_id = NULL WHERE job_id = ? AND status IN (?, ?)",
-                    rusqlite::params![
-                        JobStatus::Cancelled.as_str(),
-                        "stale_revision",
-                        &job.job_id,
-                        JobStatus::Queued.as_str(),
-                        JobStatus::Running.as_str()
-                    ],
-                )?;
-                continue;
-            }
-            Some((true, _)) => {
-                // Item is valid, proceed with claim
-                break 'search Some(job);
-            }
+        let cancel_reason = match item_result {
+            None => "item_not_found",
+            Some((false, _)) => "item_deleted",
+            Some((true, item_revision)) if item_revision != job.source_revision => "stale_revision",
+            Some((true, _)) => break 'search Some(job),
+        };
+
+        // The target can no longer be mutated: cancel durably (with a reason visible offline)
+        // so this job cannot block later work, then look at the next candidate.
+        let cancelled = tx.execute(
+            "UPDATE jobs SET status = ?, failure_reason = ?, lease_expires_at = NULL \
+             WHERE job_id = ? AND status IN (?, ?)",
+            rusqlite::params![
+                JobStatus::Cancelled.as_str(),
+                cancel_reason,
+                &job.job_id,
+                JobStatus::Queued.as_str(),
+                JobStatus::Running.as_str()
+            ],
+        )?;
+        if cancelled != 1 {
+            return Err(anyhow!(
+                "Job {} could not be cancelled as {}",
+                job.job_id,
+                cancel_reason
+            ));
         }
     };
 
@@ -387,73 +376,89 @@ pub fn claim_job_with_lease_in_tx(
         return Ok(None);
     };
 
-    let lease_id = Uuid::new_v4().to_string();
+    // The lease token is the attempt number this claim produces: every claim increments
+    // attempt_count, so a stale holder's token can never match a later lease.
+    let lease_attempt = job.attempt_count + 1;
     let lease_expires_at = now + lease_duration;
     let lease_expires_at_str = lease_expires_at.to_rfc3339();
 
-    tx.execute(
-        "UPDATE jobs SET status = ?, lease_expires_at = ?, lease_id = ?, attempt_count = attempt_count + 1 \
-         WHERE job_id = ?",
+    let affected = tx.execute(
+        "UPDATE jobs SET status = ?, lease_expires_at = ?, attempt_count = ? \
+         WHERE job_id = ? AND status = ? AND attempt_count = ?",
         rusqlite::params![
             JobStatus::Running.as_str(),
             &lease_expires_at_str,
-            &lease_id,
-            &job.job_id
+            lease_attempt,
+            &job.job_id,
+            job.status.as_str(),
+            job.attempt_count
         ],
     )?;
+    if affected != 1 {
+        return Err(anyhow!(
+            "Job {} changed while being claimed; claim aborted",
+            job.job_id
+        ));
+    }
 
     Ok(Some(Job {
-        job_id: job.job_id,
-        job_schema_version: job.job_schema_version,
-        item_id: job.item_id,
-        job_type: job.job_type,
-        source_revision: job.source_revision,
-        profile_version: job.profile_version,
-        request_version: job.request_version,
         status: JobStatus::Running,
-        failure_reason: job.failure_reason,
-        attempt_count: job.attempt_count + 1,
-        next_attempt_at: job.next_attempt_at,
+        attempt_count: lease_attempt,
         lease_expires_at: Some(lease_expires_at),
-        lease_id: Some(lease_id),
-        created_at: job.created_at,
+        ..job
     }))
 }
 
-/// Mark a job as completed. Requires the correct lease_id to prevent stale holders from completing.
-pub fn complete_job(db: &mut Database, job_id: &str, lease_id: &str) -> Result<()> {
+/// Explain why a lease-guarded transition affected no rows.
+fn lease_rejection(
+    tx: &Transaction<'_>,
+    job_id: &str,
+    lease_attempt: i32,
+    action: &str,
+) -> anyhow::Error {
+    match get_job_internal(tx, job_id) {
+        Err(error) => error,
+        Ok(None) => anyhow!("Job {} not found", job_id),
+        Ok(Some(job)) => match job.status {
+            JobStatus::Completed => anyhow!("Job {} already completed; cannot {}", job_id, action),
+            JobStatus::Cancelled => {
+                anyhow!("Job {} is cancelled and cannot be {}", job_id, action)
+            }
+            JobStatus::Failed => anyhow!("Job {} has failed terminally; cannot {}", job_id, action),
+            JobStatus::Queued => anyhow!("Job {} is not running; cannot {}", job_id, action),
+            JobStatus::Running => anyhow!(
+                "Job {} lease mismatch: holder presented attempt {}, current lease is attempt {}",
+                job_id,
+                lease_attempt,
+                job.attempt_count
+            ),
+        },
+    }
+}
+
+/// Mark a job as completed. `lease_attempt` is the `attempt_count` of the job returned by the
+/// claim; a stale holder whose lease was reclaimed presents an older attempt and is rejected.
+pub fn complete_job(db: &mut Database, job_id: &str, lease_attempt: i32) -> Result<()> {
     let tx = db.immediate_transaction()?;
-    complete_job_in_tx(&tx, job_id, lease_id)?;
+    complete_job_in_tx(&tx, job_id, lease_attempt)?;
     tx.commit()?;
     Ok(())
 }
 
-pub fn complete_job_in_tx(tx: &Transaction<'_>, job_id: &str, lease_id: &str) -> Result<()> {
+pub fn complete_job_in_tx(tx: &Transaction<'_>, job_id: &str, lease_attempt: i32) -> Result<()> {
     let affected = tx.execute(
-        "UPDATE jobs SET status = ?, lease_expires_at = NULL, lease_id = NULL WHERE job_id = ? AND lease_id = ? AND status = ?",
-        rusqlite::params![JobStatus::Completed.as_str(), job_id, lease_id, JobStatus::Running.as_str()],
+        "UPDATE jobs SET status = ?, lease_expires_at = NULL \
+         WHERE job_id = ? AND status = ? AND attempt_count = ?",
+        rusqlite::params![
+            JobStatus::Completed.as_str(),
+            job_id,
+            JobStatus::Running.as_str(),
+            lease_attempt
+        ],
     )?;
 
     if affected == 0 {
-        let job = get_job_internal(tx, job_id)?;
-        if let Some(j) = job {
-            if j.status == JobStatus::Completed {
-                return Err(anyhow!("Job {} already completed", job_id));
-            } else if j.status == JobStatus::Cancelled {
-                return Err(anyhow!(
-                    "Job {} is cancelled and cannot be completed",
-                    job_id
-                ));
-            } else if j.lease_id.as_deref() != Some(lease_id) {
-                return Err(anyhow!(
-                    "Job {} lease mismatch: expected {}, got {:?}",
-                    job_id,
-                    lease_id,
-                    j.lease_id
-                ));
-            }
-        }
-        return Err(anyhow!("Job {} not found or not running", job_id));
+        return Err(lease_rejection(tx, job_id, lease_attempt, "be completed"));
     }
 
     Ok(())
@@ -461,7 +466,7 @@ pub fn complete_job_in_tx(tx: &Transaction<'_>, job_id: &str, lease_id: &str) ->
 
 /// Mark a job as failed with a reason and schedule the next retry using exponential backoff.
 /// Backoff formula: min(max_backoff_seconds, base_backoff_seconds * 2^attempt_count)
-/// Requires the correct lease_id to prevent stale holders from failing.
+/// `lease_attempt` fences stale holders exactly as in [`complete_job`].
 #[allow(clippy::too_many_arguments)]
 pub fn fail_job_with_backoff(
     db: &mut Database,
@@ -470,7 +475,7 @@ pub fn fail_job_with_backoff(
     base_backoff_seconds: i64,
     max_backoff_seconds: i64,
     now: DateTime<Utc>,
-    lease_id: &str,
+    lease_attempt: i32,
 ) -> Result<()> {
     let tx = db.immediate_transaction()?;
     fail_job_with_backoff_in_tx(
@@ -480,7 +485,7 @@ pub fn fail_job_with_backoff(
         base_backoff_seconds,
         max_backoff_seconds,
         now,
-        lease_id,
+        lease_attempt,
     )?;
     tx.commit()?;
     Ok(())
@@ -494,52 +499,34 @@ pub fn fail_job_with_backoff_in_tx(
     base_backoff_seconds: i64,
     max_backoff_seconds: i64,
     now: DateTime<Utc>,
-    lease_id: &str,
+    lease_attempt: i32,
 ) -> Result<()> {
-    // Get current job state
-    let job = get_job_internal(tx, job_id)?;
-    let Some(job) = job else {
-        return Err(anyhow!("Job {} not found", job_id));
-    };
-
-    if job.status == JobStatus::Completed {
-        return Err(anyhow!("Job {} is already completed", job_id));
-    }
-
-    if job.status == JobStatus::Cancelled {
-        return Err(anyhow!("Job {} is cancelled and cannot be failed", job_id));
-    }
-
-    if job.lease_id.as_deref() != Some(lease_id) {
-        return Err(anyhow!(
-            "Job {} lease mismatch: expected {}, got {:?}",
-            job_id,
-            lease_id,
-            job.lease_id
-        ));
-    }
-
-    // Calculate backoff: min(max, base * 2^attempts)
+    // Backoff: min(max, base * 2^attempts), saturating so large attempt counts cannot overflow.
+    let exponent = u32::try_from(lease_attempt).unwrap_or(0);
     let backoff_seconds = std::cmp::min(
         max_backoff_seconds,
-        base_backoff_seconds.saturating_mul(2i64.saturating_pow(job.attempt_count as u32)),
+        base_backoff_seconds.saturating_mul(2i64.saturating_pow(exponent)),
     );
 
     let next_attempt_at = now + Duration::seconds(backoff_seconds);
     let next_attempt_at_str = next_attempt_at.to_rfc3339();
 
-    tx.execute(
-        "UPDATE jobs SET status = ?, failure_reason = ?, next_attempt_at = ?, lease_expires_at = NULL, lease_id = NULL \
-         WHERE job_id = ? AND lease_id = ? AND status = ?",
+    let affected = tx.execute(
+        "UPDATE jobs SET status = ?, failure_reason = ?, next_attempt_at = ?, lease_expires_at = NULL \
+         WHERE job_id = ? AND status = ? AND attempt_count = ?",
         rusqlite::params![
             JobStatus::Queued.as_str(),
             failure_reason,
             next_attempt_at_str,
             job_id,
-            lease_id,
-            JobStatus::Running.as_str()
+            JobStatus::Running.as_str(),
+            lease_attempt
         ],
     )?;
+
+    if affected == 0 {
+        return Err(lease_rejection(tx, job_id, lease_attempt, "be failed"));
+    }
 
     Ok(())
 }
@@ -555,7 +542,7 @@ pub fn cancel_job(db: &mut Database, job_id: &str) -> Result<()> {
 pub fn cancel_job_in_tx(tx: &Transaction<'_>, job_id: &str) -> Result<()> {
     // Only cancel queued or running jobs; don't overwrite completed
     let affected = tx.execute(
-        "UPDATE jobs SET status = ?, lease_expires_at = NULL, lease_id = NULL WHERE job_id = ? AND status IN (?, ?)",
+        "UPDATE jobs SET status = ?, lease_expires_at = NULL WHERE job_id = ? AND status IN (?, ?)",
         rusqlite::params![
             JobStatus::Cancelled.as_str(),
             job_id,
