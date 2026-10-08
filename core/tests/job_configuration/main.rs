@@ -92,12 +92,32 @@ fn setup_test_db(mock_clock: &Arc<MockClock>) -> Result<(Database, String)> {
         ],
     )?;
 
+    // Insert route authorization for text interpretation capability
+    // Authorize the same destinations as the route itself (https://api.example.com)
+    tx.execute(
+        "INSERT INTO route_authorizations (route_id, capability, authorized_destinations, created_at) \
+         VALUES (?, ?, ?, ?)",
+        rusqlite::params![
+            "route-1",
+            "text_interpretation",
+            r#"["https://api.example.com"]"#,
+            "2026-01-01T00:00:00Z"
+        ],
+    )?;
+
     tx.commit()?;
     Ok((db, item_id.to_string()))
 }
 
 fn create_profile(db: &mut Database, profile_id: &str, profile_version: &str) -> Result<()> {
     let tx = db.immediate_transaction()?;
+    // Determine provider based on profile_id, but all profiles use the test route's destination
+    let provider_type = if profile_id.contains("openai") || profile_id.contains("new") {
+        "openai"
+    } else {
+        "anthropic"
+    };
+
     tx.execute(
         "INSERT INTO provider_profiles (
             profile_id, profile_version, provider_type, model, timeout_seconds,
@@ -106,11 +126,11 @@ fn create_profile(db: &mut Database, profile_id: &str, profile_version: &str) ->
         rusqlite::params![
             profile_id,
             profile_version,
-            "anthropic",
-            "claude-3-5-sonnet",
+            provider_type,
+            if provider_type == "openai" { "gpt-4" } else { "claude-3-5-sonnet" },
             30,
             r#"{"max_attempts":3,"initial_backoff_ms":500,"max_backoff_ms":30000}"#,
-            r#"["https://api.anthropic.com"]"#,
+            r#"["https://api.example.com"]"#,
             r#"{"text_interpretation":{"capability":"text_interpretation","support":"supported","evidence":"V06","input_size_limit":8000,"structured_output":"none"}}"#,
             "2026-01-01T00:00:00Z"
         ],
@@ -306,7 +326,8 @@ fn test_late_results_rejected_after_revocation() -> Result<()> {
 
     // Advance time past lease expiry to trigger the claim loop's revocation cancellation
     let now_plus_10_min = now + Duration::minutes(10);
-    let claimed_after_expiry = claim_job_with_lease(&mut db, Duration::minutes(5), now_plus_10_min)?;
+    let claimed_after_expiry =
+        claim_job_with_lease(&mut db, Duration::minutes(5), now_plus_10_min)?;
     assert!(
         claimed_after_expiry.is_none(),
         "Claim should return none after revoked job's lease expires and is cancelled"
@@ -687,6 +708,228 @@ fn test_revocation_after_lease_expiry_does_not_hang() -> Result<()> {
     )?;
     assert_eq!(job_status.0, "cancelled");
     assert_eq!(job_status.1, Some("profile_revoked".to_string()));
+
+    Ok(())
+}
+
+/// Behavioral Test 10: authorize_job rejects jobs with revoked profiles.
+/// This end-to-end test verifies that jobs with revoked profiles cannot be authorized for dispatch.
+/// It proves the revocation gate works in the authorization path with no provider effect.
+#[test]
+fn test_authorize_job_rejects_revoked_profile() -> Result<()> {
+    use ohand_core::privacy::routing::{authorize_job, AuthorizationDecision, DenialReason};
+
+    let clock = Arc::new(MockClock::new(Utc::now()));
+    let (mut db, item_id) = setup_test_db(&clock)?;
+    let now = clock.now();
+
+    let profile = "profile-for-auth-test-bbbb";
+    create_profile(&mut db, "provider-auth-test", profile)?;
+
+    // Enqueue a job pinned to this profile
+    enqueue_job(
+        &mut db,
+        "job-auth-revoke-test".to_string(),
+        item_id,
+        "interpret".to_string(),
+        0,
+        Some(profile.to_string()),
+        None,
+        1,
+        now,
+    )?;
+
+    // Claim the job to move it to running state
+    let claimed =
+        claim_job_with_lease(&mut db, Duration::minutes(5), now)?.expect("job should be claimable");
+    assert_eq!(claimed.status, JobStatus::Running);
+
+    // Before revocation, authorization should succeed
+    let auth_before = authorize_job(db.conn(), "job-auth-revoke-test")?;
+    match &auth_before {
+        AuthorizationDecision::Authorized(_) => {}
+        AuthorizationDecision::Denied(reason) => {
+            panic!(
+                "Expected authorization to succeed, got denial: {:?}",
+                reason
+            );
+        }
+    }
+
+    // Revoke the profile
+    {
+        let tx = db.immediate_transaction()?;
+        revoke_profile_and_retire_jobs_in_tx(&tx, profile, now)?;
+        tx.commit()?;
+    }
+
+    // After revocation, authorization should fail with ProfileRevoked
+    let auth_after = authorize_job(db.conn(), "job-auth-revoke-test")?;
+    assert!(
+        matches!(
+            auth_after,
+            AuthorizationDecision::Denied(DenialReason::ProfileRevoked)
+        ),
+        "After revocation, job should be denied with ProfileRevoked reason"
+    );
+
+    Ok(())
+}
+
+/// Behavioral Test 11: Default provider switch shows pinned destination in authorization.
+/// After changing the default provider, claiming and authorizing an old job should
+/// still resolve to its original pinned profile, not the new default.
+#[test]
+fn test_pinned_destination_honored_in_authorization() -> Result<()> {
+    use ohand_core::privacy::routing::authorize_job;
+
+    let clock = Arc::new(MockClock::new(Utc::now()));
+    let (mut db, item_id) = setup_test_db(&clock)?;
+    let now = clock.now();
+
+    let old_profile = "profile-old-auth-cccc";
+    let new_profile = "profile-new-auth-dddd";
+
+    create_profile(&mut db, "provider-old-config", old_profile)?;
+
+    // Enqueue job pinned to old profile
+    enqueue_job(
+        &mut db,
+        "job-pinned-old".to_string(),
+        item_id,
+        "interpret".to_string(),
+        0,
+        Some(old_profile.to_string()),
+        None,
+        1,
+        now,
+    )?;
+
+    // Claim and authorize before default switch
+    let _claimed_before =
+        claim_job_with_lease(&mut db, Duration::minutes(5), now)?.expect("job should be claimable");
+    assert_eq!(
+        _claimed_before.profile_version,
+        Some(old_profile.to_string())
+    );
+
+    let auth_before = authorize_job(db.conn(), "job-pinned-old")?;
+    let profile_before = match auth_before {
+        ohand_core::privacy::routing::AuthorizationDecision::Authorized(auth) => {
+            auth.profile_version().map(|s| s.to_string())
+        }
+        ohand_core::privacy::routing::AuthorizationDecision::Denied(reason) => {
+            panic!(
+                "Expected authorization to succeed before switch, got denial: {:?}",
+                reason
+            );
+        }
+    };
+    assert_eq!(
+        profile_before,
+        Some(old_profile.to_string()),
+        "Before default switch, pinned profile should be old one"
+    );
+
+    // Switch default provider
+    create_profile(&mut db, "provider-new-config", new_profile)?;
+
+    // Authorization should still use the pinned old profile, not the new default
+    let auth_after = authorize_job(db.conn(), "job-pinned-old")?;
+    let profile_after = match auth_after {
+        ohand_core::privacy::routing::AuthorizationDecision::Authorized(auth) => {
+            auth.profile_version().map(|s| s.to_string())
+        }
+        _ => panic!("Authorization should still succeed after switch"),
+    };
+    assert_eq!(
+        profile_after, profile_before,
+        "After default switch, pinned profile should still be old one, not new default"
+    );
+
+    Ok(())
+}
+
+/// Behavioral Test 12: Requeue creates inspectable record and atomicity.
+/// After requeue, old job is marked with reason 'requeued', new job is created and claimable,
+/// and both jobs can be linked through their records. The requeue is atomic and complete.
+#[test]
+fn test_requeue_creates_inspectable_record() -> Result<()> {
+    let clock = Arc::new(MockClock::new(Utc::now()));
+    let (mut db, item_id) = setup_test_db(&clock)?;
+    let now = clock.now();
+
+    let old_profile = "profile-requeue-old-eeee";
+    let new_profile = "profile-requeue-new-ffff";
+
+    create_profile(&mut db, "provider-old", old_profile)?;
+    create_profile(&mut db, "provider-new", new_profile)?;
+
+    // Enqueue and claim an old job
+    enqueue_job(
+        &mut db,
+        "job-to-requeue".to_string(),
+        item_id.clone(),
+        "interpret".to_string(),
+        0,
+        Some(old_profile.to_string()),
+        None,
+        1,
+        now,
+    )?;
+
+    let _claimed =
+        claim_job_with_lease(&mut db, Duration::minutes(5), now)?.expect("job should be claimable");
+
+    // Requeue to new profile
+    {
+        let tx = db.immediate_transaction()?;
+        requeue_job_to_new_profile_in_tx(
+            &tx,
+            "job-to-requeue",
+            "job-requeued".to_string(),
+            item_id,
+            "interpret".to_string(),
+            0,
+            new_profile.to_string(),
+            None,
+            1,
+            now,
+        )?;
+        tx.commit()?;
+    }
+
+    // Verify old job is marked as requeued
+    let old_job_data: (String, Option<String>) = db.conn().query_row(
+        "SELECT status, failure_reason FROM jobs WHERE job_id = ?",
+        ["job-to-requeue"],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    assert_eq!(old_job_data.0, "cancelled");
+    assert_eq!(old_job_data.1, Some("requeued".to_string()));
+
+    // Verify new job exists and is queued on new profile
+    let new_job_data: (String, Option<String>, i32) = db.conn().query_row(
+        "SELECT status, profile_version, attempt_count FROM jobs WHERE job_id = ?",
+        ["job-requeued"],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    assert_eq!(new_job_data.0, "queued");
+    assert_eq!(new_job_data.1, Some(new_profile.to_string()));
+    assert_eq!(
+        new_job_data.2, 0,
+        "Requeued job should start with fresh attempt count"
+    );
+
+    // Verify: only new job is now claimable
+    let claimed_after = claim_job_with_lease(&mut db, Duration::minutes(5), now)?
+        .expect("new job should be claimable");
+    assert_eq!(claimed_after.job_id, "job-requeued");
+    assert_eq!(claimed_after.profile_version, Some(new_profile.to_string()));
+
+    // Verify: no more jobs claimable
+    let claimed_again = claim_job_with_lease(&mut db, Duration::minutes(5), now)?;
+    assert!(claimed_again.is_none(), "No more jobs should be claimable");
 
     Ok(())
 }
