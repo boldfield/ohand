@@ -3,9 +3,9 @@
 // and deterministic clock-controlled rotation.
 
 use crate::domain::items::LifecycleState;
-use crate::store::events::{self, SuggestionControlKind};
+use crate::store::events::{self, ItemScope, SuggestionControlKind};
 use anyhow::{anyhow, Result};
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use rusqlite::{OptionalExtension, Transaction};
 
 /// Named not-now cooldown policy: 1 hour by default
@@ -69,8 +69,6 @@ struct EligibleItemCandidate {
     item_id: String,
     /// Last time this item was selected (None if never selected)
     last_selected_at: Option<DateTime<Utc>>,
-    /// Selection sequence for tie-breaking when timestamps are equal
-    selection_sequence: Option<i32>,
     /// Reason why this item is eligible
     reason: String,
 }
@@ -94,7 +92,7 @@ pub fn check_eligibility_with_scope(
     tx: &Transaction<'_>,
     item_id: &str,
     evaluation_instant: DateTime<Utc>,
-    scope_filter: Option<&str>,
+    scope_filter: Option<ItemScope>,
 ) -> Result<Eligibility> {
     // Load item state
     let item_state = crate::domain::items::load_item_state(tx, item_id)?
@@ -102,8 +100,7 @@ pub fn check_eligibility_with_scope(
 
     // Check scope filter if provided (privacy eligibility)
     if let Some(filter) = scope_filter {
-        let item_scope = item_state.scope.as_str();
-        if item_scope != filter {
+        if item_state.scope != filter {
             return Ok(Eligibility {
                 eligible: false,
                 reason: EligibilityReason::ScopeExcluded,
@@ -261,49 +258,62 @@ fn get_snooze_expiry(
 }
 
 /// Record that an item was selected for suggestion with a reason.
-/// Updates the suggestion_eligibility table with selection timestamp, reason, and sequence.
-/// The selection_sequence increments to ensure rotation advances even when clock doesn't.
+///
+/// `last_selected_at` is a strictly increasing selection stamp: it is `now`, unless `now` is not
+/// later than the most recent stamp already stored, in which case it is that stamp plus one
+/// microsecond. This keeps rotation advancing when the injected clock does not move (fixed test
+/// clocks, repeated selection in one instant) without needing any schema column beyond the
+/// existing `last_selected_at`.
 pub fn record_selection(
     tx: &Transaction<'_>,
     item_id: &str,
     reason: &str,
     now: DateTime<Utc>,
 ) -> Result<()> {
+    let latest_stamp = latest_selection_stamp(tx)?;
+    let stamp = match latest_stamp {
+        Some(latest) if latest >= now => latest + Duration::microseconds(1),
+        _ => now,
+    };
+    let stamp_str = stamp.to_rfc3339_opts(SecondsFormat::Micros, true);
     let now_str = now.to_rfc3339();
 
-    // Get the next sequence number (max sequence + 1, or 1 if no records yet)
-    let next_sequence: i32 = tx
-        .query_row(
-            "SELECT COALESCE(MAX(selection_sequence), 0) + 1 FROM suggestion_eligibility",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(1);
-
     tx.execute(
-        "INSERT INTO suggestion_eligibility (item_id, eligible, snoozed, pull_only, last_selected_at, selection_reason, selection_sequence, created_at, updated_at)
-         VALUES (?, 1, 0, 0, ?, ?, ?, ?, ?)
+        "INSERT INTO suggestion_eligibility (item_id, eligible, snoozed, pull_only, last_selected_at, selection_reason, created_at, updated_at)
+         VALUES (?, 1, 0, 0, ?, ?, ?, ?)
          ON CONFLICT(item_id) DO UPDATE SET
            last_selected_at = ?,
            selection_reason = ?,
-           selection_sequence = ?,
            eligible = 1,
            snoozed = 0,
            updated_at = ?",
         rusqlite::params![
-            item_id,
-            &now_str,
-            reason,
-            next_sequence,
-            &now_str,
-            &now_str,
-            &now_str,
-            reason,
-            next_sequence,
-            &now_str,
+            item_id, &stamp_str, reason, &now_str, &now_str, &stamp_str, reason, &now_str,
         ],
     )?;
     Ok(())
+}
+
+/// Most recent `last_selected_at` across all items; errors on a malformed stored value.
+fn latest_selection_stamp(tx: &Transaction<'_>) -> Result<Option<DateTime<Utc>>> {
+    let mut stmt = tx.prepare(
+        "SELECT last_selected_at FROM suggestion_eligibility WHERE last_selected_at IS NOT NULL",
+    )?;
+    let stamps = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut latest: Option<DateTime<Utc>> = None;
+    for stamp_str in stamps {
+        let stamp = parse_selection_stamp(&stamp_str)?;
+        latest = Some(latest.map_or(stamp, |current| current.max(stamp)));
+    }
+    Ok(latest)
+}
+
+fn parse_selection_stamp(value: &str) -> Result<DateTime<Utc>> {
+    value
+        .parse::<DateTime<Utc>>()
+        .map_err(|e| anyhow!("Invalid last_selected_at timestamp {}: {}", value, e))
 }
 
 /// Set a snooze (not-now) for an item with the specified cooldown duration (internal use).
@@ -398,7 +408,7 @@ pub fn set_pull_only(tx: &Transaction<'_>, item_id: &str, now: DateTime<Utc>) ->
 ///
 /// This is the main entry point for suggestion rotation. It:
 /// - Enforces eligibility policy over current authoritative state
-/// - Performs deterministic rotation (oldest last_selected_at first)
+/// - Performs deterministic rotation (oldest selection stamp first; see `record_selection`)
 /// - Records the selection reason durably (the actual reason the item was eligible)
 /// - Takes evaluation time as a parameter for deterministic testing
 /// - Accepts an optional scope filter for privacy boundaries
@@ -407,7 +417,7 @@ pub fn set_pull_only(tx: &Transaction<'_>, item_id: &str, now: DateTime<Utc>) ->
 pub fn select_eligible_item(
     tx: &Transaction<'_>,
     evaluation_instant: DateTime<Utc>,
-    scope_filter: Option<&str>,
+    scope_filter: Option<ItemScope>,
 ) -> Result<Option<String>> {
     // Find all active items that are not deleted
     let mut stmt = tx.prepare(
@@ -424,77 +434,37 @@ pub fn select_eligible_item(
     let mut eligible_items: Vec<EligibleItemCandidate> = Vec::new();
 
     for item_id in items {
-        match check_eligibility_with_scope(tx, &item_id, evaluation_instant, scope_filter) {
-            Ok(eligibility) if eligibility.eligible => {
-                // Get the last selection time and sequence for rotation ordering
-                let (last_selected_at_str, sequence): (Option<String>, Option<i32>) = tx
-                    .query_row(
-                        "SELECT last_selected_at, selection_sequence FROM suggestion_eligibility WHERE item_id = ?",
-                        [&item_id],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .optional()?
-                    .unwrap_or((None, None));
-
-                let last_selected_dt = match last_selected_at_str {
-                    Some(s) => Some(
-                        s.parse::<DateTime<Utc>>()
-                            .map_err(|e| anyhow!("Invalid last_selected_at: {}", e))?,
-                    ),
-                    None => None,
-                };
-
-                // Store the actual reason the item was eligible
-                let reason_str = eligibility.reason.as_str().to_string();
-                eligible_items.push(EligibleItemCandidate {
-                    item_id,
-                    last_selected_at: last_selected_dt,
-                    selection_sequence: sequence,
-                    reason: reason_str,
-                });
-            }
-            Ok(_) => {
-                // Item is not eligible, skip it
-            }
-            Err(e) => {
-                // Propagate store/parse errors; don't silently skip
-                return Err(e);
-            }
+        let eligibility =
+            check_eligibility_with_scope(tx, &item_id, evaluation_instant, scope_filter)?;
+        if !eligibility.eligible {
+            continue;
         }
+        let last_selected_at_str: Option<String> = tx
+            .query_row(
+                "SELECT last_selected_at FROM suggestion_eligibility WHERE item_id = ?",
+                [&item_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        let last_selected_at = match last_selected_at_str {
+            Some(stamp_str) => Some(parse_selection_stamp(&stamp_str)?),
+            None => None,
+        };
+        eligible_items.push(EligibleItemCandidate {
+            item_id,
+            last_selected_at,
+            reason: eligibility.reason.as_str().to_string(),
+        });
     }
 
-    if eligible_items.is_empty() {
-        return Ok(None);
-    }
-
-    // Sort by last_selected_at (None values first = oldest), then by selection_sequence, then by item_id
-    eligible_items.sort_by(|a, b| match (a.last_selected_at, b.last_selected_at) {
-        (None, None) => match (a.selection_sequence, b.selection_sequence) {
-            (None, None) => a.item_id.cmp(&b.item_id),
-            (None, Some(_)) => std::cmp::Ordering::Less,
-            (Some(_), None) => std::cmp::Ordering::Greater,
-            (Some(sa), Some(sb)) => match sa.cmp(&sb) {
-                std::cmp::Ordering::Equal => a.item_id.cmp(&b.item_id),
-                other => other,
-            },
-        },
-        (None, Some(_)) => std::cmp::Ordering::Less,
-        (Some(_), None) => std::cmp::Ordering::Greater,
-        (Some(ta), Some(tb)) => match ta.cmp(&tb) {
-            std::cmp::Ordering::Equal => match (a.selection_sequence, b.selection_sequence) {
-                (None, None) => a.item_id.cmp(&b.item_id),
-                (None, Some(_)) => std::cmp::Ordering::Less,
-                (Some(_), None) => std::cmp::Ordering::Greater,
-                (Some(sa), Some(sb)) => match sa.cmp(&sb) {
-                    std::cmp::Ordering::Equal => a.item_id.cmp(&b.item_id),
-                    other => other,
-                },
-            },
-            other => other,
-        },
+    // Never-selected items first, then oldest selection stamp; item_id breaks remaining ties.
+    eligible_items.sort_by(|a, b| {
+        a.last_selected_at
+            .cmp(&b.last_selected_at)
+            .then_with(|| a.item_id.cmp(&b.item_id))
     });
 
-    // Select the first item (oldest last_selected_at, then oldest selection_sequence)
     if let Some(candidate) = eligible_items.first() {
         record_selection(
             tx,

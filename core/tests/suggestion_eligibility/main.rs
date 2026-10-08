@@ -5,7 +5,7 @@ use ohand_core::domain::items;
 use ohand_core::store::captures;
 use ohand_core::store::captures::Capture;
 use ohand_core::store::events::{
-    self, Correction, CorrectionKind, Event, EventPayload, SuggestionControlKind,
+    self, Correction, CorrectionKind, Event, EventPayload, ItemScope, SuggestionControlKind,
 };
 use ohand_core::store::schema::{Database, SystemClock};
 use ohand_core::suggestions::eligibility::{self, EligibilityReason};
@@ -754,15 +754,20 @@ fn test_privacy_scope_filter_excludes_items() -> anyhow::Result<()> {
 
     // With work scope filter, it should be excluded
     let tx = db.transaction()?;
-    let elig = eligibility::check_eligibility_with_scope(&tx, item_id, eval_time, Some("work"))?;
+    let elig =
+        eligibility::check_eligibility_with_scope(&tx, item_id, eval_time, Some(ItemScope::Work))?;
     assert!(!elig.eligible);
     assert_eq!(elig.reason, EligibilityReason::ScopeExcluded);
     drop(tx);
 
     // With personal scope filter, it should be eligible
     let tx = db.transaction()?;
-    let elig =
-        eligibility::check_eligibility_with_scope(&tx, item_id, eval_time, Some("personal"))?;
+    let elig = eligibility::check_eligibility_with_scope(
+        &tx,
+        item_id,
+        eval_time,
+        Some(ItemScope::Personal),
+    )?;
     assert!(elig.eligible);
     assert_eq!(elig.reason, EligibilityReason::ActiveAction);
     Ok(())
@@ -1096,6 +1101,13 @@ fn test_nonresponse_preserves_lifecycle_and_importance() -> anyhow::Result<()> {
     events::save_event_in_tx(&tx, &event, 0)?;
     tx.commit()?;
 
+    let (revision_before, event_count_before, type_before) = {
+        let tx = db.transaction()?;
+        let counts = item_write_counts(&tx, item_id)?;
+        let state = items::load_item_state(&tx, item_id)?.expect("Item should exist");
+        (counts.0, counts.1, state.item_type)
+    };
+
     // Select the item three times - nonresponse should not change lifecycle
     for _ in 1..=3 {
         let tx = db.immediate_transaction()?;
@@ -1110,5 +1122,59 @@ fn test_nonresponse_preserves_lifecycle_and_importance() -> anyhow::Result<()> {
         tx.commit()?;
     }
 
+    // Selection bookkeeping writes no events or revisions and never alters type or lifecycle
+    let tx = db.transaction()?;
+    let (revision_after, event_count_after) = item_write_counts(&tx, item_id)?;
+    assert_eq!(revision_after, revision_before);
+    assert_eq!(event_count_after, event_count_before);
+    let state_after = items::load_item_state(&tx, item_id)?.expect("Item should exist");
+    assert_eq!(state_after.item_type, type_before);
+    assert_eq!(state_after.lifecycle_state, items::LifecycleState::Active);
+
+    Ok(())
+}
+
+fn item_write_counts(tx: &rusqlite::Transaction<'_>, item_id: &str) -> anyhow::Result<(i64, i64)> {
+    let revision: i64 = tx.query_row(
+        "SELECT revision FROM items WHERE item_id = ?",
+        [item_id],
+        |row| row.get(0),
+    )?;
+    let event_count: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM events WHERE item_id = ?",
+        [item_id],
+        |row| row.get(0),
+    )?;
+    Ok((revision, event_count))
+}
+
+#[test]
+fn test_malformed_last_selected_at_is_an_error() -> anyhow::Result<()> {
+    let mut db = test_db()?;
+    let eval_time = "2026-10-08T10:00:00Z".parse::<DateTime<Utc>>()?;
+    let capture = make_test_capture("capture-bad-stamp", "Malformed stamp")?;
+    captures::save_capture(&mut db, &capture)?;
+
+    let tx = db.immediate_transaction()?;
+    create_test_item(&tx, "item-bad-stamp", "capture-bad-stamp")?;
+    let event = Event::new(
+        "event-1".to_string(),
+        "item-bad-stamp".to_string(),
+        0,
+        events::EventType::Correction,
+        EventPayload::Correction(Correction {
+            kind: CorrectionKind::Type,
+            old_value: None,
+            new_value: "action".to_string(),
+        }),
+        "2026-10-08T10:00:00Z".to_string(),
+    )?;
+    events::save_event_in_tx(&tx, &event, 0)?;
+    tx.execute(
+        "INSERT INTO suggestion_eligibility (item_id, eligible, snoozed, pull_only, last_selected_at, created_at, updated_at)
+         VALUES ('item-bad-stamp', 1, 0, 0, 'not-a-timestamp', '2026-10-08T10:00:00Z', '2026-10-08T10:00:00Z')",
+        [],
+    )?;
+    assert!(eligibility::select_eligible_item(&tx, eval_time, None).is_err());
     Ok(())
 }
