@@ -496,7 +496,23 @@ pub fn apply_derived_request(
                     Err(ReminderStateError::CommittedTimeProtected)
                 };
             }
-            RequestState::NotRequested | RequestState::NotScheduledYet => {}
+            RequestState::NotScheduledYet => {
+                // A retry or reprocessing pass that reaches the same pending ambiguity must not
+                // bump the version, or it would make the user's pending correction stale.
+                if let TimeOutcome::NeedsCorrection {
+                    reason,
+                    timezone_id,
+                } = &outcome
+                {
+                    if record.ambiguity_reason.as_deref() == Some(reason.as_str())
+                        && record.timezone_id.as_deref() == Some(timezone_id.as_str())
+                        && record.source_phrase.as_deref() == Some(request.phrase.trim())
+                    {
+                        return Ok(record.clone());
+                    }
+                }
+            }
+            RequestState::NotRequested => {}
         }
     }
     commit_outcome(
@@ -1258,6 +1274,11 @@ fn retire_generation(
     Ok(true)
 }
 
+/// Mark the reminder cancelled and record a cancel operation for its live generation.
+///
+/// `schedule_state` is left as it was (for example `pending_schedule`): it describes the
+/// native side, and N03 moves it once the native cancel is acknowledged. The same holds for a
+/// reminder that becomes unschedulable because its new time is in the past.
 fn cancel_existing(
     tx: &Transaction<'_>,
     now: DateTime<Utc>,

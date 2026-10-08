@@ -522,6 +522,88 @@ fn unparseable_phrase_present_in_text_is_not_scheduled_yet() -> Result<()> {
     Ok(())
 }
 
+/// Replay a derived request that leaves the reminder pending, and show the replay changes
+/// nothing: the record (version and timestamps included) is identical, and a user correction
+/// issued against the first result still applies.
+fn assert_pending_derived_replay_is_idempotent(
+    label: &str,
+    text: &str,
+    phrase: &str,
+) -> Result<()> {
+    let mut db = open_db(&temp_db_path(label))?;
+    let revision = insert_item(&mut db, "item-1", text, true)?;
+    let first = run(&mut db, |tx| {
+        apply_derived_request(
+            tx,
+            &clock_at(capture_instant()),
+            &derived("item-1", revision, phrase),
+        )
+    })?;
+    assert_eq!(first.request_state, RequestState::NotScheduledYet);
+    assert_eq!(first.state_version, 1);
+    let pending_correction = user_time(db.conn(), "item-1", revision, "2026-01-20T08:00:00Z");
+
+    let later = clock_at(capture_instant() + Duration::minutes(5));
+    let replay = run(&mut db, |tx| {
+        apply_derived_request(tx, &later, &derived("item-1", revision, phrase))
+    })?;
+    assert_eq!(replay, first);
+    assert_eq!(reminder(&mut db, "item-1")?.unwrap(), first);
+    assert!(operations(&mut db, "item-1")?.is_empty());
+
+    let corrected = run(&mut db, |tx| {
+        apply_user_time_correction(tx, &later, &pending_correction)
+    })?;
+    assert_eq!(corrected.request_state, RequestState::Resolved);
+    assert_eq!(corrected.state_version, 2);
+    assert_eq!(
+        operations(&mut db, "item-1")?,
+        vec![(OperationType::Schedule, OperationState::Pending)]
+    );
+    Ok(())
+}
+
+#[test]
+fn replayed_ambiguous_derived_request_keeps_the_version_and_the_pending_correction() -> Result<()> {
+    assert_pending_derived_replay_is_idempotent(
+        "ambiguous_replay",
+        "pay the invoice 2026-01-20",
+        "2026-01-20",
+    )
+}
+
+#[test]
+fn replayed_unparseable_derived_request_keeps_the_version_and_the_pending_correction() -> Result<()>
+{
+    assert_pending_derived_replay_is_idempotent(
+        "unparseable_replay",
+        "call the roofer sometime soon",
+        "sometime soon",
+    )
+}
+
+#[test]
+fn a_different_pending_phrase_is_recorded_as_a_new_version() -> Result<()> {
+    let mut db = open_db(&temp_db_path("pending_phrase_change"))?;
+    let revision = insert_item(
+        &mut db,
+        "item-1",
+        "pay the invoice 2026-01-20 or sometime soon",
+        true,
+    )?;
+    let clock = clock_at(capture_instant());
+    let first = run(&mut db, |tx| {
+        apply_derived_request(tx, &clock, &derived("item-1", revision, "2026-01-20"))
+    })?;
+    let changed = run(&mut db, |tx| {
+        apply_derived_request(tx, &clock, &derived("item-1", revision, "sometime soon"))
+    })?;
+    assert_eq!(changed.request_state, RequestState::NotScheduledYet);
+    assert_eq!(changed.source_phrase.as_deref(), Some("sometime soon"));
+    assert_eq!(changed.state_version, first.state_version + 1);
+    Ok(())
+}
+
 #[test]
 fn past_time_is_unschedulable_and_the_expired_opportunity_stays_inspectable() -> Result<()> {
     let mut db = open_db(&temp_db_path("past"))?;
