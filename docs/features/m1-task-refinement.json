@@ -1672,6 +1672,29 @@
         "ios/scripts/select_simulator.py:71",
         "AGENTS.md:65"
       ]
+    },
+    {
+      "key": "I05b",
+      "parent": null,
+      "title": "Extend reminder-withdrawal grammar coverage",
+      "file_scope": [
+        "core/src/interpretation/apply/",
+        "core/tests/proposal_application/"
+      ],
+      "intent": "Add withdrawal phrasings and over-rejection fixes outside the bounded I05 grammar, driven by a synthetic fixture corpus.",
+      "acceptance": [
+        "Fixture corpus under core/tests/proposal_application/ drives the withdrawal/control behavior test; every I05 construction carried over unchanged.",
+        "Known over-rejections schedule again: 'about <verb>-ing' task objects, coordinated verbs inside the requested task, 'need to <verb>' complements.",
+        "Withdrawals produce no reminder rows/operations with source and non-reminder facets intact; controls produce exactly one scheduled reminder."
+      ],
+      "depends_on": [
+        "I05"
+      ],
+      "source_pointers": [
+        "core/src/interpretation/apply/mod.rs",
+        "core/tests/proposal_application/main.rs"
+      ],
+      "covers_parent_criteria": []
     }
   ],
   "effective_dependencies": {
@@ -2198,6 +2221,9 @@
     ],
     "F08": [
       "P07"
+    ],
+    "I05b": [
+      "I05"
     ]
   },
   "retained_dependency_overrides": {
@@ -2228,6 +2254,10 @@
     {
       "date": "2026-10-08",
       "change": "B01c: ownership allowance for ios/Tests/CoreBridge/CaptureStatusTests.swift and a recorded decision that ohand_core_start_save_capture is a pre-import capture write; C02a owns route validation and the ingestion acknowledgment."
+    },
+    {
+      "date": "2026-10-08",
+      "change": "Bounded the withdrawal grammar I05 criterion 2 requires (PR #96 breaker after four rounds); added I05b for phrasings and over-rejections outside that list, depending on I05."
     }
   ]
 }

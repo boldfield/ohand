@@ -1,6 +1,6 @@
 # M1 task refinement — 2026-10-07
 
-This execution overlay replaces 25 task groups with 52 smaller implementation tasks. The other 55 never-started tasks retain their scope. Eighteen already completed, attempted, active or externally blocked groups were excluded. The effective M1 graph contains 125 tasks. This changes implementation granularity, not product scope or milestone exit criteria.
+This execution overlay replaces 25 task groups with 53 smaller implementation tasks. The other 55 never-started tasks retain their scope. Eighteen already completed, attempted, active or externally blocked groups were excluded. The effective M1 graph contains 126 tasks. This changes implementation granularity, not product scope or milestone exit criteria.
 
 Addendum 2026-10-08: V08 was originally excluded as an externally blocked evidence task. After two rejected review rounds on its PR #60, it is now split into V08a (worker-executable server-side probe) and V08b (maintainer-supplied phone-context evidence). The original task `939fe62e` is retired; see the replacement map and the V08a/V08b slices below. Addendum 2026-10-08, later: P08 is split the same way into P08a (signing tooling, Linux-testable with stubbed Apple tools) and P08b (maintainer-produced signed build and device-install evidence on a Mac with Xcode). The original task `7d4836ee` is retired; P09, T05 and T10 now depend on P08b.
 
@@ -33,6 +33,8 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
 - B01b holds an ordered ownership allowance, granted by the coordinator on 2026-10-08 after PR #87 showed that criterion 2 cannot be met inside `core/src/ffi/` and `ios/OhAndCoreBridge/` alone: (1) in `ios/project.yml`, only the OhAndCoreBridge target's link, search-path, `SWIFT_INCLUDE_PATHS` and pre-build settings, and the OhAndTests target's `OHAND_RUST_OUTPUT_DIR`, `HEADER_SEARCH_PATHS` and `SWIFT_INCLUDE_PATHS`; (2) in `core/bindings/build-ios.sh`, a lock that serializes parallel Xcode invocations; (3) a handle/callback section in `docs/validation/core-binding.md`; (4) the new `ios/Tests/CoreBridge/` directory. Because P07 edits `ios/project.yml` concurrently, B01b now also waits for P07. The generator and `core/bindings/src/lib.rs` remain off-limits to B01b, and an allowance written inside an implementation PR is still not an allowance.
 
 - B01c holds an ordered ownership allowance, granted by the coordinator on 2026-10-08 after PR #110 showed that criterion 2 (restart, duplicate capture ID and normalized failure on simulator) needs a simulator test next to B01b's: it may add and later maintain the single file `ios/Tests/CoreBridge/CaptureStatusTests.swift`. B01b has landed (PR #108), so no ordering conflict remains in that directory. Nothing else under `ios/Tests/`, `ios/project.yml` or `core/bindings/` is granted, and an allowance written inside an implementation PR is still not an allowance.
+
+- I05's criterion 2 ("reminder candidates require explicit intent") was reviewed on PR #96 by probing one new withdrawal phrasing per round. After four rounds the breaker blocked the task with Opus approving and Codex producing a further phrasing each time. On 2026-10-08 the coordinator bounded the withdrawal grammar I05 must recognize, without weakening the criterion: a reminder request followed in the same capture by an unquoted, non-negated, non-infinitive withdrawal stays unscheduled, with the source record and non-reminder facets intact. Required constructions: (a) retraction verbs and idioms: forget, skip, cancel, delete, stop, never mind, scratch that, take back, change mind, remember on my own, don't bother, and bare "actually no" / "actually don't"; (b) negated want, need or desire that either governs the reminder itself ("I don't want that reminder", "I don't need the reminder") or carries a wish-ended marker (no longer, anymore, any more); (c) needless predicates: not needed, not necessary, not required. Positive controls that must still schedule: complement infinitives ("don't want to miss it"), negated verbs governing a task object ("don't cancel the ladder order"), and unrelated negations ("it's not urgent"). The PR carries every listed construction as a durable regression. Reviewers verify criterion 2 against this list. A phrasing outside it, and the known over-rejections ("about cancelling the gym", "call the roofer and cancel the order", "take the ladder back", "so I don't need to worry"), are findings for I05b, not blockers for I05.
 
 - P08 conflated signing automation, which the Linux fleet can build and test against stubbed `security`, `xcodebuild` and `devicectl`, with a signed build installed on a physical iPhone, which only the maintainer can produce on a Mac with Xcode, an Apple Development identity and a device profile. Apple Developer Program enrollment completed on 2026-10-08; this Mac still has no Xcode, identity or profile. P08a owns the tooling, its behaviour tests and the signing document's procedure sections; P08b owns the evidence record and the validity/renewal statement. P09, T05 and T10 depend on P08b, the last child.
 
@@ -342,6 +344,24 @@ Acceptance:
 3. `AGENTS.md` names the new runner, Xcode and SDK, and the evidence requirements are unchanged.
 
 Source pointers (baseline above): `.github/workflows/ios.yml:18`, `.github/workflows/ios.yml:26`, `ios/project.yml:6`, `ios/scripts/select_simulator.py:71`, `AGENTS.md:65`.
+
+### I05b
+
+Extend reminder-withdrawal grammar coverage
+
+Add the withdrawal phrasings and over-rejection fixes that fall outside the bounded grammar recorded for I05, driven by a fixture corpus so future phrasings are added as data.
+
+Owned paths: `core/src/interpretation/apply/`, `core/tests/proposal_application/`.
+
+Dependencies: I05.
+
+Acceptance:
+
+1. A synthetic fixture corpus under `core/tests/proposal_application/` lists withdrawal phrasings that must stay unscheduled and controls that must schedule; the behavior test is driven by that corpus, and every I05 construction is carried over unchanged.
+2. The known over-rejections are scheduled again without reopening withdrawals: a gerund or infinitive task object after "about" ("about cancelling the gym"), coordinated verbs inside the requested task ("call the roofer and cancel the order", "take the ladder back"), and "need to <verb>" complements ("so I don't need to worry").
+3. Each withdrawal still produces an uninterpreted-for-reminder result with source and non-reminder facets intact, and no reminder rows or operations; each control still produces exactly one scheduled reminder.
+
+Source pointers: `core/src/interpretation/apply/mod.rs` (`retracted_after`, `wish_has_ended`, `verb_is_negated_or_infinitive` on PR #96), `core/tests/proposal_application/main.rs`.
 
 ### I03a
 
