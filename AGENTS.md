@@ -2,6 +2,8 @@
 
 Read [DESIGN.md](DESIGN.md) before planning or implementing work.
 
+For M1 implementation, also read [the task refinement overlay](docs/features/m1-task-refinement.md) and its [effective dependency graph](docs/features/m1-task-refinement.json). It delegates original ownership groups into smaller tasks, preserves their acceptance criteria, and corrects transcription/reset ownership. The original task manifest remains the historical baseline; this overlay defines current execution.
+
 ## Interactive coordination
 
 Interactive agents investigate, discuss, and maintain design/specification documents. Application code changes go through Odonian tasks. Direct documentation edits and repository bootstrap mechanics are allowed. Do not implement features or fixes directly unless the maintainer explicitly requests a direct edit.
