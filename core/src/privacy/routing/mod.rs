@@ -114,9 +114,11 @@ impl Authorization {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DenialReason {
     JobNotFound,
+    JobRetired,
     UnknownJobType,
     LocalOnlyJobHasProfile,
     ProfileUnavailable,
+    ProfileRevoked,
     UnknownProviderType,
     MalformedProfile,
     RouteNotConfigured,
@@ -130,11 +132,13 @@ impl fmt::Display for DenialReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let text = match self {
             DenialReason::JobNotFound => "job, its item or its capture does not exist",
+            DenialReason::JobRetired => "the job is in a terminal state and must not be dispatched",
             DenialReason::UnknownJobType => "the job has an unrecognized job type",
             DenialReason::LocalOnlyJobHasProfile => {
                 "an on-device-only job must not be pinned to a provider profile"
             }
             DenialReason::ProfileUnavailable => "the job's pinned profile version is unavailable",
+            DenialReason::ProfileRevoked => "the job's pinned profile version has been revoked",
             DenialReason::UnknownProviderType => "the pinned profile has an unknown provider type",
             DenialReason::MalformedProfile => "the pinned profile has no valid destination",
             DenialReason::RouteNotConfigured => "the capture's route has no stored configuration",
@@ -183,6 +187,7 @@ pub fn authorize_job(conn: &Connection, job_id: &str) -> Result<AuthorizationDec
         job_type,
         route_id,
         profile_version,
+        status,
     }) = load_job_binding(conn, job_id)?
     else {
         return Ok(Denied(DenialReason::JobNotFound));
@@ -190,6 +195,11 @@ pub fn authorize_job(conn: &Connection, job_id: &str) -> Result<AuthorizationDec
     let Some(capability) = capability_for_job_type(&job_type) else {
         return Ok(Denied(DenialReason::UnknownJobType));
     };
+
+    // A cancelled (revoked or requeued), failed or completed job must never reach a provider, even
+    // if a worker claimed it before the retirement. Revocation is reported in preference to the
+    // generic retired denial for profile-pinned jobs.
+    let retired = matches!(status.as_str(), "cancelled" | "failed" | "completed");
 
     let make = |profile_version: Option<String>, disposition: Disposition| {
         AuthorizationDecision::Authorized(Authorization {
@@ -200,6 +210,10 @@ pub fn authorize_job(conn: &Connection, job_id: &str) -> Result<AuthorizationDec
             disposition,
         })
     };
+
+    if retired && (capability == ProcessingCapability::Transcription || profile_version.is_none()) {
+        return Ok(Denied(DenialReason::JobRetired));
+    }
 
     if capability == ProcessingCapability::Transcription {
         // Transcription runs on device only; a provider pin on such a job is a corrupt record.
@@ -212,6 +226,25 @@ pub fn authorize_job(conn: &Connection, job_id: &str) -> Result<AuthorizationDec
     let Some(profile_version) = profile_version else {
         return Ok(make(None, Disposition::Local));
     };
+
+    // Check if profile is revoked
+    let is_revoked: Option<Option<String>> = conn
+        .query_row(
+            "SELECT revoked_at FROM provider_profiles WHERE profile_version = ?",
+            [profile_version.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("checking profile revocation")?;
+
+    match is_revoked {
+        Some(Some(_)) => return Ok(Denied(DenialReason::ProfileRevoked)),
+        None => return Ok(Denied(DenialReason::ProfileUnavailable)),
+        Some(None) => {} // Profile exists and is not revoked, continue
+    }
+    if retired {
+        return Ok(Denied(DenialReason::JobRetired));
+    }
 
     let Some(profile) = load_profile(conn, &profile_version)? else {
         return Ok(Denied(DenialReason::ProfileUnavailable));
@@ -290,12 +323,13 @@ struct JobBinding {
     job_type: String,
     route_id: String,
     profile_version: Option<String>,
+    status: String,
 }
 
 /// The job's type and profile pin plus the capture's immutable route, joined through the item.
 fn load_job_binding(conn: &Connection, job_id: &str) -> Result<Option<JobBinding>> {
     conn.query_row(
-        "SELECT jobs.job_type, captures.route_id, jobs.profile_version \
+        "SELECT jobs.job_type, captures.route_id, jobs.profile_version, jobs.status \
          FROM jobs \
          JOIN items ON items.item_id = jobs.item_id \
          JOIN captures ON captures.capture_id = items.capture_id \
@@ -306,6 +340,7 @@ fn load_job_binding(conn: &Connection, job_id: &str) -> Result<Option<JobBinding
                 job_type: row.get(0)?,
                 route_id: row.get(1)?,
                 profile_version: row.get(2)?,
+                status: row.get(3)?,
             })
         },
     )
