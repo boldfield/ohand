@@ -233,6 +233,7 @@ targets:
           - Info.plist
           - "Control/**"
           - "Tests/**"
+          - "UITests/**"
     settings:
       PRODUCT_NAME: CaptureProbe
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.capture
@@ -252,6 +253,20 @@ targets:
       PRODUCT_NAME: CaptureProbeTests
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.capture.tests
       GENERATE_INFOPLIST_FILE: YES
+
+  CaptureProbeUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: CaptureProbe/UITests
+        createIntermediateGroups: true
+    settings:
+      PRODUCT_NAME: CaptureProbeUITests
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.capture.uitests
+      GENERATE_INFOPLIST_FILE: YES
+      TEST_TARGET_NAME: CaptureProbe
+    dependencies:
+      - target: CaptureProbe
 
   CaptureProbeControl:
     type: app-extension
@@ -294,6 +309,13 @@ schemes:
     test:
       targets:
         - CaptureProbeTests
+  CaptureProbeUITests:
+    build:
+      targets:
+        CaptureProbeUITests: all
+    test:
+      targets:
+        - CaptureProbeUITests
   BridgeProbeTests:
     build:
       targets:

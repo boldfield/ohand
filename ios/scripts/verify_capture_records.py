@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Checks the CaptureProbe records that the app persisted in its simulator data container.
 
-Used by smoke-capture-simulator.sh after each phase. It reads the real files the app wrote
+Used by smoke-capture-simulator.sh after the CaptureProbe UI test has driven the app. It reads the real files the app wrote
 (records/*.json, pending-entry.json and last-presented.json); it never trusts the process being alive.
 """
 import argparse
@@ -55,6 +55,18 @@ def check_records(root, expected_kinds, expected_source):
     return errors, records
 
 
+def check_expected_records(records, expected_records):
+    errors = []
+    for expectation in expected_records:
+        capture_id, _, launch_kind = expectation.partition("=")
+        record = records.get(capture_id)
+        if record is None:
+            errors.append(f"rendered capture {capture_id} has no persisted record")
+        elif record.get("launchKind") != launch_kind:
+            errors.append(f"record {capture_id} has launchKind {record.get('launchKind')!r}, rendered {launch_kind!r}")
+    return errors
+
+
 def check_presented(root, records, expected_presented, known_ids):
     presented_path = root / "last-presented.json"
     if not presented_path.exists():
@@ -95,9 +107,14 @@ def main(argv=None):
     parser.add_argument("--expect-source", choices=sorted(SOURCES), help="source every record must have")
     parser.add_argument("--expect-presented", choices=["saved", "idle"], default="saved")
     parser.add_argument("--known-ids", nargs="*", default=[], help="capture IDs persisted before this phase")
+    parser.add_argument(
+        "--expect-record", action="append", default=[], metavar="ID=KIND",
+        help="a capture ID the screen rendered and the launchKind it rendered; repeatable",
+    )
     parser.add_argument("--quiet", action="store_true", help="print nothing; only the exit status (for polling)")
     args = parser.parse_args(argv)
     errors, records = check_records(args.root, args.expect_kinds, args.expect_source)
+    errors += check_expected_records(records, args.expect_record)
     errors += check_presented(args.root, records, args.expect_presented, args.known_ids)
     if not args.quiet:
         for error in errors:

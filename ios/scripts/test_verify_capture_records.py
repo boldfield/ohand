@@ -106,6 +106,21 @@ class VerifyCaptureRecordsTests(unittest.TestCase):
         write_presented(self.root, capture_id)
         self.assertEqual(self.run_verifier("cold"), 1)
 
+    def test_accepts_records_matching_what_the_screen_rendered(self):
+        cold_id = write_record(self.root, "cold")
+        warm_id = write_record(self.root, "warm")
+        write_presented(self.root, warm_id)
+        argv = [str(self.root), "--quiet", "--expect-kinds", "cold", "warm", "--known-ids", cold_id,
+                "--expect-record", f"{cold_id}=cold", "--expect-record", f"{warm_id}=warm"]
+        self.assertEqual(verifier.main(argv), 0)
+
+    def test_rejects_a_rendered_id_without_a_record_or_with_another_kind(self):
+        cold_id = write_record(self.root, "cold")
+        write_presented(self.root, cold_id)
+        base = [str(self.root), "--quiet", "--expect-kinds", "cold"]
+        self.assertEqual(verifier.main(base + ["--expect-record", f"{cold_id}=warm"]), 1)
+        self.assertEqual(verifier.main(base + ["--expect-record", f"{uuid.uuid4()}=cold"]), 1)
+
     def test_rejects_missing_records(self):
         (self.root / "records").mkdir()
         write_idle(self.root)

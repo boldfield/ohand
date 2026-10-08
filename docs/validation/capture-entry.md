@@ -14,7 +14,8 @@ This document reports what the probe implements and what the automated checks as
 | `ios/CaptureProbe/Info.plist` | Registers the `ohand-captureprobe` URL scheme used by the shortcut entry. |
 | `ios/CaptureProbe/Control/` | iOS 18 `ControlWidget` whose button runs `ProbeOpenCaptureIntent`. |
 | `ios/CaptureProbe/Tests/IngressFlowTests.swift` | XCTest suite (`CaptureProbeTests`, also part of the `OhAndTests` scheme). |
-| `ios/scripts/smoke-capture-simulator.sh`, `verify_capture_records.py` | Simulator smoke test that drives shortcut handoffs and reads the persisted files. |
+| `ios/CaptureProbe/UITests/CaptureProbeHandoffUITests.swift` | UI test (`CaptureProbeUITests`) that drives plain launches and shortcut handoffs and reads the rendered screen. |
+| `ios/scripts/smoke-capture-simulator.sh`, `verify_capture_records.py` | Runs the UI test on a fresh install, then checks the persisted files against what was rendered. |
 
 ## Design
 
@@ -42,24 +43,32 @@ Unit tests (`CaptureProbeTests`, simulator, no host app):
 
 The tests do not instantiate `CaptureProbeSceneDelegate` or `CaptureProbeViewController` (the unit-test bundle has no host app); "rendered" means the outcome the session hands to the view, whose lines the tests inspect.
 
-Simulator smoke test (`smoke-capture-simulator.sh`, then `verify_capture_records.py` on the files in the app's data container after each phase; every phase also requires that no pending entry is left and that previously persisted records still exist):
+Simulator smoke test (`smoke-capture-simulator.sh`). It uninstalls the app, runs `CaptureProbeUITests`, and reads the rendered capture screen in each phase. The URL is opened with `XCUIDevice.shared.system.open`, and the test accepts the system's "Open" confirmation if one appears.
 
-1. plain cold launch: idle screen (`last-presented.json` has no capture ID and status `Ready`), no record;
-2. terminate, then `simctl openurl ohand-captureprobe://capture` (cold): exactly one new record, source `shortcutURL`, kind cold, and the presented ID is that record with status `Saved`;
-3. terminate and open the URL again (cold): exactly one more record, and the first record file is byte-identical to before the restart;
-4. launch Settings to background the app, then open the URL (warm): exactly one more record, kind warm;
-5. background the app, then launch it directly (warm): idle screen and no new record;
-6. open the URL while the app is foreground: exactly one more record.
+| Phase | Action | Expected screen |
+| --- | --- | --- |
+| 1 | Plain cold launch | Idle screen (`Ready`, no capture ID) |
+| 2 | Terminate, then open `ohand-captureprobe://capture` (cold) | `Saved`, `Entry: shortcutURL, cold launch` and a new UUID |
+| 3 | Terminate and open the URL again (cold) | `Saved`, an ID different from phase 2 |
+| 4 | Press Home, then open the URL (warm) | `Saved`, `warm`, a new ID |
+| 5 | Press Home, then activate the app directly (warm) | Idle screen |
+| 6 | Open the URL while the app is foreground | `Saved`, a new ID |
+
+No phase may show an earlier entry's ID. After the UI test, the script reads the files in the app's data container and requires:
+- exactly one record per rendered entry, with the rendered ID and launch kind and source `shortcutURL`;
+- no record for the plain launches;
+- no pending entry left;
+- `last-presented.json` naming the phase 6 entry.
 
 The verifier has Linux unit tests (`test_verify_capture_records.py`, run by `make check`). They test the verifier, not the app.
 
-Artifacts uploaded in `ios-evidence`: `capture-smoke.log`, `capture-records/` (the persisted files), `capture-1-plain-cold.png` through `capture-6-url-foreground.png`, `CaptureProbe-build.log`.
+Artifacts uploaded in `ios-evidence`: `capture-smoke.log`, `capture-uitests.log` (with one `CAPTURE-PHASE` line per phase), `CaptureProbeUITests.xcresult` (with a screenshot per phase), `capture-records/` (the persisted files) and `CaptureProbe-build.log`.
 
 ## Limits of the simulator evidence
 
 - The simulator does not enforce data protection classes. The tests show that the protected write path works and that failures are handled; they do not show that iOS blocks or allows a write in a protection state.
 - `simctl` cannot press a Control Center control, lock the device or simulate before-first-unlock. The control's intent is exercised by calling `perform()` in unit tests, not by the system running it from a control.
-- `simctl openurl` delivers the URL through the scene's URL callbacks; it does not run the Shortcuts app or an Action-button shortcut.
+- Opening the URL from the UI test delivers it through the scene's URL callbacks. It does not run the Shortcuts app or an Action-button shortcut.
 
 ## Needs a physical device (not measured)
 

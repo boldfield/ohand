@@ -66,6 +66,7 @@ Targets include whole directories, so owners add files under their F01 paths wit
 | `CaptureProbe/Control/` | `CaptureProbeControl` control extension embedded in `CaptureProbe` (P02); excluded from the probe app itself |
 | `CaptureProbe/Shared/` | compiled into both `CaptureProbe` and `CaptureProbeControl`; holds the app-opening `ProbeOpenCaptureIntent` |
 | `CaptureProbe/Tests/` | `CaptureProbeTests` (P02), which also compiles `CaptureProbe/Shared/`; excluded from the probe app |
+| `CaptureProbe/UITests/` | `CaptureProbeUITests` (P02) UI test of the handoff, run by `scripts/smoke-capture-simulator.sh`; excluded from the probe app |
 
 `Capture/` is app-side code and may import `OhAndServices`; `Services/` cannot import `Capture/`. B02's composition root in `Services/Assembly/` therefore wires service dependencies, and U01 in `AppAssembly/` composes `Capture/` views with it.
 

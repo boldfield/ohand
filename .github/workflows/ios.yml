@@ -150,7 +150,7 @@ jobs:
           cd ios
           ./scripts/build-simulator.sh CaptureProbe 2>&1 | tee .evidence/CaptureProbe-build.log
 
-      - name: CaptureProbe ingress smoke test
+      - name: CaptureProbe handoff UI test and ingress smoke test
         shell: bash
         env:
           SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
@@ -162,7 +162,6 @@ jobs:
           cd ios
           ./scripts/smoke-capture-simulator.sh \
             "${SIMULATOR_UDID}" \
-            .derived/Build/Products/Debug-iphonesimulator/CaptureProbe.app \
             com.boldfield.ohand.probes.capture \
             .evidence 2>&1 | tee .evidence/capture-smoke.log
 
