@@ -203,14 +203,12 @@ targets:
     sources:
       - path: AudioProbe/Tests
         createIntermediateGroups: true
+      - path: AudioProbe/Shared
+        createIntermediateGroups: true
     settings:
       PRODUCT_NAME: AudioProbeTests
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.audio.tests
       GENERATE_INFOPLIST_FILE: YES
-      TEST_HOST: $(BUILT_PRODUCTS_DIR)/AudioProbe.app/AudioProbe
-      BUNDLE_LOADER: $(TEST_HOST)
-    dependencies:
-      - target: AudioProbe
 
   TranscriptionProbe:
     type: application

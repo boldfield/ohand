@@ -1,296 +1,393 @@
 import XCTest
 import AVFoundation
-@testable import AudioProbe
 
-class AudioProbeRecordingTests: XCTestCase {
-    var recorder: AudioRecorder!
-    var testRecordingURL: URL!
+/// Writes a real 16 kHz mono PCM WAV prefix on start so the recorder's read-back verification runs against genuine files.
+final class SyntheticCaptureEngine: AudioCaptureEngine {
+    enum CloseBehavior {
+        case clean
+        case reportFailure
+        case corruptFile
+        case truncateToEmpty
+    }
+
+    var startError: AudioCaptureError?
+    var framesWrittenAtStart: AVAudioFrameCount = 8000
+    var closeBehavior: CloseBehavior = .clean
+    private(set) var startCount = 0
+    private(set) var closeCount = 0
+    private(set) var lastMaxDuration: TimeInterval?
+    private var destination: URL?
+    private var openFile: AVAudioFile?
+
+    func start(to destination: URL, maxDuration: TimeInterval) throws {
+        if let startError = startError {
+            throw startError
+        }
+        let settings: [String: Any] = [
+            AVFormatIDKey: Int(kAudioFormatLinearPCM),
+            AVSampleRateKey: 16000.0,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsFloatKey: false
+        ]
+        let audioFile = try AVAudioFile(
+            forWriting: destination,
+            settings: settings,
+            commonFormat: .pcmFormatInt16,
+            interleaved: true
+        )
+        if framesWrittenAtStart > 0 {
+            let buffer = AVAudioPCMBuffer(pcmFormat: audioFile.processingFormat, frameCapacity: framesWrittenAtStart)!
+            buffer.frameLength = framesWrittenAtStart
+            let samples = buffer.int16ChannelData![0]
+            for index in 0..<Int(framesWrittenAtStart) {
+                samples[index] = Int16(truncatingIfNeeded: index % 100)
+            }
+            try audioFile.write(from: buffer)
+        }
+        startCount += 1
+        lastMaxDuration = maxDuration
+        self.destination = destination
+        openFile = audioFile
+    }
+
+    func stopAndClose() -> Bool {
+        closeCount += 1
+        openFile = nil
+        switch closeBehavior {
+        case .clean:
+            return true
+        case .reportFailure:
+            return false
+        case .corruptFile:
+            if let destination = destination {
+                try? Data([0x00, 0x01, 0x02]).write(to: destination)
+            }
+            return true
+        case .truncateToEmpty:
+            if let destination = destination {
+                try? Data().write(to: destination)
+            }
+            return true
+        }
+    }
+}
+
+final class AudioProbeRecordingTests: XCTestCase {
+    private var engine: SyntheticCaptureEngine!
+    private var notificationCenter: NotificationCenter!
+    private var recorder: AudioRecorder!
+    private var recordingURL: URL!
+    private var endedEarlyResults: [AudioRecordingResult] = []
 
     override func setUp() {
         super.setUp()
-        recorder = AudioRecorder()
-        let tempDirectory = FileManager.default.temporaryDirectory
-        testRecordingURL = tempDirectory.appendingPathComponent("test-\(UUID().uuidString).wav")
+        engine = SyntheticCaptureEngine()
+        notificationCenter = NotificationCenter()
+        recorder = makeRecorder()
+        recordingURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("audio-probe-\(UUID().uuidString).wav")
+        endedEarlyResults = []
+        recorder.onSessionEndedEarly = { [unowned self] result in
+            self.endedEarlyResults.append(result)
+        }
     }
 
     override func tearDown() {
-        try? FileManager.default.removeItem(at: testRecordingURL)
+        try? FileManager.default.removeItem(at: recordingURL)
         super.tearDown()
     }
 
-    func testRecordingStartsSuccessfully() {
-        let started = recorder.startRecording(to: testRecordingURL)
-        XCTAssertTrue(started, "Recording should start successfully")
-        XCTAssertNotNil(recorder.recordingStartTime, "Recording start time should be set")
-        _ = recorder.stopRecording()
+    private func makeRecorder(
+        limits: AudioRecordingLimits = AudioRecordingLimits(),
+        freeBytes: Int64? = 1_000_000_000
+    ) -> AudioRecorder {
+        AudioRecorder(
+            engine: engine,
+            limits: limits,
+            freeSpaceProvider: { _ in freeBytes },
+            notificationCenter: notificationCenter
+        )
     }
 
-    func testRecordingStopsAndReturnsResult() {
-        let started = recorder.startRecording(to: testRecordingURL)
-        XCTAssertTrue(started)
-
-        let waitExpectation = XCTestExpectation(description: "Recording duration")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            waitExpectation.fulfill()
+    private func postInterruption(
+        _ type: AVAudioSession.InterruptionType,
+        options: AVAudioSession.InterruptionOptions? = nil
+    ) {
+        var userInfo: [AnyHashable: Any] = [AVAudioSession.interruptionTypeKey: type.rawValue]
+        if let options = options {
+            userInfo[AVAudioSession.interruptionOptionKey] = options.rawValue
         }
-        wait(for: [waitExpectation], timeout: 2)
+        notificationCenter.post(name: AVAudioSession.interruptionNotification, object: nil, userInfo: userInfo)
+    }
+
+    private func assertReadablePrefix(_ result: AudioRecordingResult, frames: Int64 = 8000, file: StaticString = #filePath, line: UInt = #line) throws {
+        let path = try XCTUnwrap(result.filePath, "A recoverable result must expose its path", file: file, line: line)
+        let audioFile = try AVAudioFile(forReading: URL(fileURLWithPath: path))
+        XCTAssertEqual(audioFile.length, frames, "Prefix should hold every frame written before close", file: file, line: line)
+        XCTAssertEqual(result.durationSeconds, Double(frames) / 16000.0, accuracy: 0.0001, file: file, line: line)
+        XCTAssertGreaterThan(result.fileSize, 0, file: file, line: line)
+    }
+
+    func testStopReportsSavedOnlyAfterFileIsClosedAndReadBack() throws {
+        XCTAssertTrue(recorder.startRecording(to: recordingURL))
+        XCTAssertTrue(recorder.isRecording)
+        XCTAssertNotNil(recorder.sessionStartTime)
 
         let result = recorder.stopRecording()
-        XCTAssertTrue(result.success, "Recording should complete successfully")
-        XCTAssertGreaterThan(result.durationSeconds, 0.4, "Recording duration should be at least 0.4 seconds")
-        XCTAssertNotNil(result.filePath, "Recording file path should be set")
-        XCTAssertGreaterThan(result.fileSize, 0, "Recording file should have non-zero size")
+
+        XCTAssertEqual(result.outcome, .saved)
+        XCTAssertTrue(result.success)
+        XCTAssertEqual(engine.closeCount, 1, "The file must be closed before the result is reported")
+        XCTAssertEqual(result.filePath, recordingURL.path)
+        try assertReadablePrefix(result)
+        XCTAssertFalse(recorder.isRecording)
     }
 
-    func testCancellingRecordingReturnsPartialResult() {
-        let started = recorder.startRecording(to: testRecordingURL)
-        XCTAssertTrue(started)
+    func testEngineFailureAtCloseIsNotReportedAsSuccess() throws {
+        engine.closeBehavior = .reportFailure
+        XCTAssertTrue(recorder.startRecording(to: recordingURL))
 
-        let waitExpectation = XCTestExpectation(description: "Recording duration")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            waitExpectation.fulfill()
-        }
-        wait(for: [waitExpectation], timeout: 2)
+        let result = recorder.stopRecording()
+
+        XCTAssertFalse(result.success)
+        XCTAssertEqual(result.outcome, .partial(reason: AudioRecordingReason.finalizationFailed))
+        try assertReadablePrefix(result)
+    }
+
+    func testCorruptFileAfterCloseIsHonestFailureWithoutPath() {
+        engine.closeBehavior = .corruptFile
+        XCTAssertTrue(recorder.startRecording(to: recordingURL))
+
+        let result = recorder.stopRecording()
+
+        XCTAssertFalse(result.success)
+        XCTAssertEqual(result.outcome, .failed(reason: AudioRecordingReason.noRecoverableAudio))
+        XCTAssertNil(result.filePath)
+        XCTAssertEqual(result.fileSize, 0)
+    }
+
+    func testEmptyFileAfterCloseIsHonestFailureWithoutPath() {
+        engine.closeBehavior = .truncateToEmpty
+        XCTAssertTrue(recorder.startRecording(to: recordingURL))
+
+        let result = recorder.stopRecording()
+
+        XCTAssertEqual(result.outcome, .failed(reason: AudioRecordingReason.noRecoverableAudio))
+        XCTAssertNil(result.filePath)
+    }
+
+    func testRecordingWithNoFramesIsHonestFailure() {
+        engine.framesWrittenAtStart = 0
+        XCTAssertTrue(recorder.startRecording(to: recordingURL))
+
+        let result = recorder.stopRecording()
+
+        XCTAssertFalse(result.success)
+        XCTAssertNil(result.filePath)
+    }
+
+    func testCancelKeepsRecoverablePrefixAsPartial() throws {
+        XCTAssertTrue(recorder.startRecording(to: recordingURL))
 
         let result = recorder.cancelRecording()
-        XCTAssertFalse(result.success, "Cancelled recording should not mark as successful")
-        XCTAssertNotNil(result.filePath, "Cancelled recording should preserve partial file path")
-        XCTAssertEqual(result.interruption, "Cancelled", "Interruption reason should be 'Cancelled'")
+
+        XCTAssertFalse(result.success)
+        XCTAssertEqual(result.outcome, .partial(reason: AudioRecordingReason.cancelled))
+        XCTAssertEqual(engine.closeCount, 1, "Cancel must close the file before inspecting it")
+        try assertReadablePrefix(result)
     }
 
-    func testRecordingWithoutStartReturnsFailure() {
-        let result = recorder.stopRecording()
-        XCTAssertFalse(result.success, "Stopping without starting should fail")
-        XCTAssertNil(result.filePath, "No file path should be available")
-        XCTAssertEqual(result.durationSeconds, 0, "Duration should be zero")
-    }
-
-    func testMultipleRecordingSequences() {
-        let result1 = recorder.stopRecording()
-        XCTAssertFalse(result1.success, "First stop without start should fail")
-
-        let started1 = recorder.startRecording(to: testRecordingURL)
-        XCTAssertTrue(started1)
-        let stopped1 = recorder.stopRecording()
-        XCTAssertTrue(stopped1.success)
-
-        let tempFile2 = FileManager.default.temporaryDirectory.appendingPathComponent("test-2-\(UUID().uuidString).wav")
-        let started2 = recorder.startRecording(to: tempFile2)
-        XCTAssertTrue(started2)
-        let stopped2 = recorder.stopRecording()
-        XCTAssertTrue(stopped2.success)
-
-        try? FileManager.default.removeItem(at: tempFile2)
-    }
-
-    func testAudioSessionSetup() {
-        let session = AVAudioSession.sharedInstance()
-        XCTAssertEqual(session.category, .record, "Audio session should be in record category")
-    }
-
-    func testRecordingFileCreation() {
-        let started = recorder.startRecording(to: testRecordingURL)
-        XCTAssertTrue(started)
-
-        let waitExpectation = XCTestExpectation(description: "Recording duration")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            waitExpectation.fulfill()
-        }
-        wait(for: [waitExpectation], timeout: 2)
-
-        recorder.stopRecording()
-
-        let fileExists = FileManager.default.fileExists(atPath: testRecordingURL.path)
-        XCTAssertTrue(fileExists, "Recording file should exist after stop")
-    }
-
-    func testRecordingResultDuration() {
-        let started = recorder.startRecording(to: testRecordingURL)
-        XCTAssertTrue(started)
-
-        let expectedDuration = 0.5
-        let waitExpectation = XCTestExpectation(description: "Recording duration")
-        DispatchQueue.main.asyncAfter(deadline: .now() + expectedDuration) {
-            waitExpectation.fulfill()
-        }
-        wait(for: [waitExpectation], timeout: 2)
-
-        let result = recorder.stopRecording()
-        XCTAssertGreaterThan(result.durationSeconds, expectedDuration - 0.1, "Duration should match recorded time")
-        XCTAssertLessThan(result.durationSeconds, expectedDuration + 0.3, "Duration should not exceed recorded time by much")
-    }
-
-    func testInterruptionHandling() {
-        let started = recorder.startRecording(to: testRecordingURL)
-        XCTAssertTrue(started)
-
-        let waitExpectation = XCTestExpectation(description: "Record for interruption")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            waitExpectation.fulfill()
-        }
-        wait(for: [waitExpectation], timeout: 2)
-
-        let interruptionNotification = Notification(
-            name: AVAudioSession.interruptionNotification,
-            object: AVAudioSession.sharedInstance(),
-            userInfo: [
-                AVAudioSession.interruptionTypeKey: AVAudioSession.InterruptionType.began.rawValue
-            ]
-        )
-        NotificationCenter.default.post(interruptionNotification)
-
-        let result = recorder.stopRecording()
-        XCTAssertFalse(result.success, "Recording interrupted should not be marked as successful")
-        let filePath = XCTUnwrap(result.filePath, "Interrupted recording should have a partial file")
-        XCTAssertEqual(result.interruption, "Audio interrupted", "Interruption reason should be recorded")
-
-        let audioFileURL = URL(fileURLWithPath: filePath)
-        let audioFile = try XCTUnwrap(try? AVAudioFile(forReading: audioFileURL), "Partial file should be readable")
-        XCTAssertGreaterThan(audioFile.length, 0, "Interrupted partial file should contain audio")
-    }
-
-    func testInterruptionWithResume() {
-        let started = recorder.startRecording(to: testRecordingURL)
-        XCTAssertTrue(started)
-
-        let waitExpectation1 = XCTestExpectation(description: "Record before interruption")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            waitExpectation1.fulfill()
-        }
-        wait(for: [waitExpectation1], timeout: 2)
-
-        let beganNotification = Notification(
-            name: AVAudioSession.interruptionNotification,
-            object: AVAudioSession.sharedInstance(),
-            userInfo: [
-                AVAudioSession.interruptionTypeKey: AVAudioSession.InterruptionType.began.rawValue
-            ]
-        )
-        NotificationCenter.default.post(beganNotification)
-
-        let waitExpectation2 = XCTestExpectation(description: "Interrupted")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            waitExpectation2.fulfill()
-        }
-        wait(for: [waitExpectation2], timeout: 2)
-
-        let endedNotification = Notification(
-            name: AVAudioSession.interruptionNotification,
-            object: AVAudioSession.sharedInstance(),
-            userInfo: [
-                AVAudioSession.interruptionTypeKey: AVAudioSession.InterruptionType.ended.rawValue,
-                AVAudioSession.interruptionOptionKey: AVAudioSession.InterruptionOptions.shouldResume.rawValue
-            ]
-        )
-        NotificationCenter.default.post(endedNotification)
-
-        let waitExpectation3 = XCTestExpectation(description: "Resume and record")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            waitExpectation3.fulfill()
-        }
-        wait(for: [waitExpectation3], timeout: 2)
-
-        let result = recorder.stopRecording()
-        XCTAssertFalse(result.success, "Recording with interruption and resume should not report clean success")
-        XCTAssertEqual(result.interruption, "Interrupted and resumed", "Should track that interruption occurred despite resume")
-
-        if let filePath = result.filePath {
-            let audioFileURL = URL(fileURLWithPath: filePath)
-            let audioFile = try XCTUnwrap(try? AVAudioFile(forReading: audioFileURL), "Interrupted+resumed file should be readable")
-            XCTAssertGreaterThan(audioFile.length, 0, "File should contain audio despite interruption")
-        }
-    }
-
-    func testCancelledRecovery() {
-        let started = recorder.startRecording(to: testRecordingURL)
-        XCTAssertTrue(started)
-
-        let waitExpectation = XCTestExpectation(description: "Recording duration")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            waitExpectation.fulfill()
-        }
-        wait(for: [waitExpectation], timeout: 2)
+    func testCancelWithUnrecoverableAudioIsHonestFailure() {
+        engine.closeBehavior = .corruptFile
+        XCTAssertTrue(recorder.startRecording(to: recordingURL))
 
         let result = recorder.cancelRecording()
-        XCTAssertFalse(result.success, "Cancelled recording should not be successful")
-        let filePath = XCTUnwrap(result.filePath, "Cancelled recording should preserve partial file path")
-        XCTAssertEqual(result.interruption, "Cancelled", "Interruption reason should be 'Cancelled'")
 
-        let fileExists = FileManager.default.fileExists(atPath: filePath)
-        XCTAssertTrue(fileExists, "Cancelled partial file should exist")
+        XCTAssertEqual(
+            result.outcome,
+            .failed(reason: "\(AudioRecordingReason.cancelled); \(AudioRecordingReason.noRecoverableAudio)")
+        )
+        XCTAssertNil(result.filePath)
+    }
 
-        let audioFileURL = URL(fileURLWithPath: filePath)
-        let audioFile = try XCTUnwrap(try? AVAudioFile(forReading: audioFileURL), "Partial file should be readable")
-        XCTAssertGreaterThan(audioFile.length, 0, "Partial file should contain audio data")
+    func testInterruptionFinalizesAndPreservesPrefixImmediately() throws {
+        XCTAssertTrue(recorder.startRecording(to: recordingURL))
+
+        postInterruption(.began)
+
+        let earlyResult = try XCTUnwrap(endedEarlyResults.first, "The interruption must be reported without waiting for Stop")
+        XCTAssertEqual(endedEarlyResults.count, 1)
+        XCTAssertEqual(earlyResult.outcome, .partial(reason: AudioRecordingReason.interrupted))
+        XCTAssertFalse(earlyResult.success)
+        XCTAssertEqual(engine.closeCount, 1)
+        XCTAssertFalse(recorder.isRecording)
+        try assertReadablePrefix(earlyResult)
+
+        let stopResult = recorder.stopRecording()
+        XCTAssertEqual(stopResult.outcome, earlyResult.outcome)
+        XCTAssertEqual(stopResult.filePath, earlyResult.filePath)
+        XCTAssertEqual(engine.closeCount, 1, "Stop must not close the engine a second time")
+    }
+
+    func testInterruptionWithUnreadablePrefixIsHonestFailure() {
+        engine.closeBehavior = .corruptFile
+        XCTAssertTrue(recorder.startRecording(to: recordingURL))
+
+        postInterruption(.began)
+
+        XCTAssertEqual(
+            endedEarlyResults.first?.outcome,
+            AudioRecordingOutcome.failed(reason: "\(AudioRecordingReason.interrupted); \(AudioRecordingReason.noRecoverableAudio)")
+        )
+        XCTAssertNil(endedEarlyResults.first?.filePath)
+
+        let stopResult = recorder.stopRecording()
+        XCTAssertFalse(stopResult.success)
+        XCTAssertNil(stopResult.filePath)
+    }
+
+    func testInterruptionEndedWithShouldResumeDoesNotRestartOrOverwritePrefix() throws {
+        XCTAssertTrue(recorder.startRecording(to: recordingURL))
+
+        postInterruption(.began)
+        postInterruption(.ended, options: .shouldResume)
+
+        XCTAssertEqual(engine.startCount, 1, "Resuming into the same URL would truncate the saved prefix")
+        XCTAssertEqual(endedEarlyResults.count, 1)
+
+        let result = recorder.stopRecording()
+        XCTAssertFalse(result.success, "A capture with an interruption must never be reported as clean success")
+        XCTAssertEqual(result.outcome, .partial(reason: AudioRecordingReason.interrupted))
+        try assertReadablePrefix(result)
+    }
+
+    func testInterruptionWhileIdleIsIgnored() {
+        postInterruption(.began)
+
+        XCTAssertTrue(endedEarlyResults.isEmpty)
+        XCTAssertEqual(engine.closeCount, 0)
+    }
+
+    func testStopWithoutStartFails() {
+        let result = recorder.stopRecording()
+
+        XCTAssertEqual(result.outcome, .failed(reason: AudioRecordingReason.noActiveRecording))
+        XCTAssertNil(result.filePath)
+        XCTAssertEqual(result.durationSeconds, 0)
     }
 
     func testDoubleStopDoesNotReportSuccessTwice() {
-        let started = recorder.startRecording(to: testRecordingURL)
-        XCTAssertTrue(started)
+        XCTAssertTrue(recorder.startRecording(to: recordingURL))
 
-        let waitExpectation = XCTestExpectation(description: "Recording duration")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            waitExpectation.fulfill()
-        }
-        wait(for: [waitExpectation], timeout: 2)
+        XCTAssertTrue(recorder.stopRecording().success)
+        let second = recorder.stopRecording()
 
-        let result1 = recorder.stopRecording()
-        XCTAssertTrue(result1.success, "First stop should succeed")
-
-        let result2 = recorder.stopRecording()
-        XCTAssertFalse(result2.success, "Second stop should fail because recording is no longer active")
-        XCTAssertEqual(result2.interruption, "No active recording", "Second stop should report no active recording")
+        XCTAssertFalse(second.success)
+        XCTAssertEqual(second.outcome, .failed(reason: AudioRecordingReason.noActiveRecording))
+        XCTAssertEqual(engine.closeCount, 1)
     }
 
-    func testFailedStartClearsState() {
-        let tempURL1 = FileManager.default.temporaryDirectory.appendingPathComponent("test-invalid-\(UUID().uuidString).wav")
-        let invalidParentURL = tempURL1.deletingLastPathComponent().appendingPathComponent("nonexistent").appendingPathComponent("test.wav")
+    func testMicrophonePermissionDenialLeavesNoActiveRecording() {
+        engine.startError = AudioCaptureError(reason: "Microphone permission denied")
 
-        let started = recorder.startRecording(to: invalidParentURL)
-        XCTAssertFalse(started, "Recording should fail with invalid destination")
+        XCTAssertFalse(recorder.startRecording(to: recordingURL))
+        XCTAssertEqual(recorder.lastStartFailure, "Microphone permission denied")
+        XCTAssertFalse(recorder.isRecording)
+        XCTAssertNil(recorder.sessionStartTime)
 
         let result = recorder.stopRecording()
-        XCTAssertFalse(result.success, "Stop after failed start should fail")
-        XCTAssertNil(result.filePath, "No file path should be available after failed start")
-
-        let result2 = recorder.stopRecording()
-        XCTAssertFalse(result2.success, "Second stop should also fail")
+        XCTAssertEqual(result.outcome, .failed(reason: AudioRecordingReason.noActiveRecording))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: recordingURL.path))
     }
 
-    func testUnreadableInterruptedFileFails() {
-        let started = recorder.startRecording(to: testRecordingURL)
-        XCTAssertTrue(started)
+    func testFailedStartClearsStateAndAllowsLaterRecording() {
+        engine.startError = AudioCaptureError(reason: "Recording start failed")
+        XCTAssertFalse(recorder.startRecording(to: recordingURL))
+        XCTAssertFalse(recorder.stopRecording().success)
 
-        let waitExpectation = XCTestExpectation(description: "Record very briefly")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            waitExpectation.fulfill()
-        }
-        wait(for: [waitExpectation], timeout: 2)
-
-        let interruptionNotification = Notification(
-            name: AVAudioSession.interruptionNotification,
-            object: AVAudioSession.sharedInstance(),
-            userInfo: [
-                AVAudioSession.interruptionTypeKey: AVAudioSession.InterruptionType.began.rawValue
-            ]
-        )
-        NotificationCenter.default.post(interruptionNotification)
-
-        let result = recorder.stopRecording()
-        XCTAssertFalse(result.success, "Interrupted recording should fail")
-        if result.filePath != nil {
-            XCTAssertNil(result.filePath, "Unrecoverable interrupted file should not return a path")
-        }
+        engine.startError = nil
+        XCTAssertTrue(recorder.startRecording(to: recordingURL))
+        XCTAssertNil(recorder.lastStartFailure)
+        XCTAssertTrue(recorder.stopRecording().success)
     }
 
-    func testMicrophonePermissionDenial() {
-        let session = AVAudioSession.sharedInstance()
-        if session.recordPermission == .denied {
-            let started = recorder.startRecording(to: testRecordingURL)
-            XCTAssertFalse(started, "Recording should fail when microphone is denied")
-            XCTAssertEqual(recorder.lastInterruptionReason, "Microphone permission denied")
+    func testStartWhileRecordingIsRefusedAndKeepsFirstSession() {
+        XCTAssertTrue(recorder.startRecording(to: recordingURL))
+        let secondURL = recordingURL.deletingLastPathComponent()
+            .appendingPathComponent("audio-probe-second-\(UUID().uuidString).wav")
+
+        XCTAssertFalse(recorder.startRecording(to: secondURL))
+
+        XCTAssertEqual(recorder.lastStartFailure, "Recording already active")
+        XCTAssertEqual(engine.startCount, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: secondURL.path))
+        XCTAssertEqual(recorder.stopRecording().filePath, recordingURL.path)
+    }
+
+    func testSequentialSessionsAreIndependent() {
+        XCTAssertTrue(recorder.startRecording(to: recordingURL))
+        postInterruption(.began)
+        _ = recorder.stopRecording()
+
+        let secondURL = recordingURL.deletingLastPathComponent()
+            .appendingPathComponent("audio-probe-next-\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: secondURL) }
+        XCTAssertTrue(recorder.startRecording(to: secondURL))
+
+        let second = recorder.stopRecording()
+        XCTAssertEqual(second.outcome, .saved)
+        XCTAssertEqual(second.filePath, secondURL.path)
+    }
+
+    func testInsufficientFreeSpaceRefusesToStart() {
+        recorder = makeRecorder(freeBytes: 10)
+
+        XCTAssertFalse(recorder.startRecording(to: recordingURL))
+        XCTAssertEqual(recorder.lastStartFailure, "Insufficient free space")
+        XCTAssertEqual(engine.startCount, 0)
+    }
+
+    func testUnknownFreeSpaceFailsClosed() {
+        recorder = makeRecorder(freeBytes: nil)
+
+        XCTAssertFalse(recorder.startRecording(to: recordingURL))
+        XCTAssertEqual(recorder.lastStartFailure, "Free space unknown")
+        XCTAssertEqual(engine.startCount, 0)
+    }
+
+    func testDurationLimitIsEnforcedByPassingItToTheEngine() {
+        recorder = makeRecorder(limits: AudioRecordingLimits(maxDurationSeconds: 42, minimumFreeBytes: 1))
+
+        XCTAssertTrue(recorder.startRecording(to: recordingURL))
+
+        XCTAssertEqual(engine.lastMaxDuration, 42)
+        _ = recorder.stopRecording()
+    }
+
+    func testDefaultLimitsMatchDocumentedProbeBounds() {
+        let limits = AudioRecordingLimits()
+
+        XCTAssertEqual(limits.maxDurationSeconds, 300)
+        XCTAssertEqual(limits.minimumFreeBytes, 50_000_000)
+    }
+
+    func testRealMicrophoneEngineEitherSavesReadableAudioOrReportsHonestly() throws {
+        let realRecorder = AudioRecorder(engine: AVAudioRecorderEngine(), notificationCenter: NotificationCenter())
+        guard realRecorder.startRecording(to: recordingURL) else {
+            throw XCTSkip("Real microphone capture unavailable here: \(realRecorder.lastStartFailure ?? "unknown")")
+        }
+        Thread.sleep(forTimeInterval: 0.3)
+
+        let result = realRecorder.stopRecording()
+
+        if result.success {
+            let path = try XCTUnwrap(result.filePath)
+            let audioFile = try AVAudioFile(forReading: URL(fileURLWithPath: path))
+            XCTAssertGreaterThan(audioFile.length, 0)
         } else {
-            XCTSkip("Microphone permission is not denied; skipping denial test")
+            XCTAssertNotNil(result.interruption, "A non-success result must say why")
         }
     }
 }

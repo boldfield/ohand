@@ -44,7 +44,7 @@ class AudioProbeSceneDelegate: UIResponder, UIWindowSceneDelegate {
 }
 
 class AudioProbeViewController: UIViewController {
-    private let recorder = AudioRecorder()
+    private let recorder = AudioRecorder(engine: AVAudioRecorderEngine())
     private var resultLabel: UILabel?
     private var recordingDurationLabel: UILabel?
     private var recordingTimer: Timer?
@@ -144,6 +144,14 @@ class AudioProbeViewController: UIViewController {
             container.widthAnchor.constraint(equalTo: scrollView.widthAnchor, constant: -40)
         ])
 
+        recorder.onSessionEndedEarly = { [weak self] result in
+            self?.recordingTimer?.invalidate()
+            self?.recordingTimer = nil
+            self?.recordingDurationLabel?.textColor = .tertiaryLabel
+            self?.resultLabel?.text = result.description
+            self?.resultLabel?.textColor = .systemOrange
+        }
+
         requestMicrophonePermission()
     }
 
@@ -170,22 +178,22 @@ class AudioProbeViewController: UIViewController {
     }
 
     @objc private func startRecording() {
-        let documentsPath = NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true)[0]
-        let recordingFilePath = documentsPath + "/recording-" + UUID().uuidString + ".wav"
-        let recordingURL = URL(fileURLWithPath: recordingFilePath)
+        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let recordingURL = documentsURL.appendingPathComponent("recording-\(UUID().uuidString).wav")
 
         if recorder.startRecording(to: recordingURL) {
             resultLabel?.text = "Recording..."
             resultLabel?.textColor = .systemBlue
             recordingDurationLabel?.textColor = .systemBlue
 
+            recordingTimer?.invalidate()
             recordingTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-                guard let self = self, let startTime = self.recorder.recordingStartTime else { return }
+                guard let self = self, let startTime = self.recorder.sessionStartTime else { return }
                 let duration = Date().timeIntervalSince(startTime)
                 self.recordingDurationLabel?.text = String(format: "Duration: %.1fs", duration)
             }
         } else {
-            resultLabel?.text = "Failed to start recording"
+            resultLabel?.text = "Failed to start recording: \(recorder.lastStartFailure ?? "unknown")"
             resultLabel?.textColor = .systemRed
         }
     }
