@@ -1,11 +1,19 @@
 mod proposal_tests {
-    use ohand_core::domain::items::SUPPORTED_PROPOSAL_SCHEMA_VERSION;
+    use chrono::{TimeZone, Utc};
+    use ohand_core::domain::items::{
+        FieldProvenance, ItemState, LifecycleState, TextState, SUPPORTED_PROPOSAL_SCHEMA_VERSION,
+    };
     use ohand_core::interpretation::contracts::{
         resolve_session_topic, AbstentionReason, Operation, Proposal, ProposalError,
-        ReminderProposal, ResolvedSessionTopic, SessionTopicProposal, SourceSpan, TextBasis,
+        ReminderProposal, ResolvedSessionTopic, SessionTopicProposal, SourceSpan,
         TimeResolutionQuality,
     };
-    use ohand_core::store::events::ItemType;
+    use ohand_core::providers::contracts::{
+        CapabilityMetadata, InterpretationOutput, InterpretationRequest, ProviderCapability,
+        ProviderProfile, ProviderProfileBuilder, ProviderProtocol, StructuredOutputMode, TextBasis,
+    };
+    use ohand_core::store::events::{ItemScope, ItemType};
+    use ohand_core::time::TimeContext;
     use serde_json::{json, Value};
 
     const PROPOSAL_ID: &str = "550e8400-e29b-41d4-a716-446655440001";
@@ -22,9 +30,87 @@ mod proposal_tests {
             CAPTURE_ID.to_string(),
             0,
             SUPPORTED_PROPOSAL_SCHEMA_VERSION,
-            TextBasis::Original {},
+            TextBasis::Original { item_revision: 0 },
             REQUEST_VERSION.to_string(),
         )
+    }
+
+    fn profile() -> ProviderProfile {
+        ProviderProfileBuilder::new(
+            "synthetic-self-hosted",
+            ProviderProtocol::SelfHosted,
+            "model-a",
+        )
+        .endpoint("https://llm.example.test:8443/v1/interpret")
+        .credential_ref("cred-ref-1")
+        .timeout_seconds(30)
+        .authorized_destination("https://llm.example.test:8443")
+        .capability(
+            CapabilityMetadata::supported(
+                ProviderCapability::TextInterpretation,
+                "adapter-test:fake",
+            )
+            .with_input_size_limit(200)
+            .with_structured_output(StructuredOutputMode::JsonObject),
+        )
+        .build()
+        .expect("valid profile")
+    }
+
+    fn request_with(text_basis: TextBasis, source_revision: u64) -> InterpretationRequest {
+        InterpretationRequest::new(
+            CAPTURE_ID,
+            source_revision,
+            text_basis,
+            TEXT,
+            REQUEST_VERSION,
+            "instructions-v1",
+            &profile(),
+            "route-secret-name",
+            TimeContext {
+                timezone: "UTC".to_string(),
+                locale: "en-US".to_string(),
+                reference_time: Utc.with_ymd_and_hms(2026, 10, 8, 9, 0, 0).unwrap(),
+                utc_offset_at_capture: 0,
+                calendar: "gregorian".to_string(),
+            },
+        )
+        .expect("valid request")
+    }
+
+    fn request() -> InterpretationRequest {
+        request_with(TextBasis::Original { item_revision: 0 }, 0)
+    }
+
+    fn output_for(value: &Value, request_version: &str) -> InterpretationOutput {
+        InterpretationOutput {
+            request_version: request_version.to_string(),
+            proposal: value.as_object().cloned().unwrap_or_default(),
+            elapsed_ms: 5,
+        }
+    }
+
+    fn item_state(session_topic: Option<&str>, topic_corrected: bool) -> ItemState {
+        ItemState {
+            item_id: ITEM_ID.to_string(),
+            capture_id: CAPTURE_ID.to_string(),
+            revision: 0,
+            item_type: None,
+            scope: ItemScope::Personal,
+            session_topic: session_topic.map(str::to_string),
+            lifecycle_state: LifecycleState::Active,
+            current_text: TextState::Original {
+                text: Some(TEXT.to_string()),
+            },
+            provenance: FieldProvenance {
+                session_topic_corrected: topic_corrected,
+                ..FieldProvenance::default()
+            },
+        }
+    }
+
+    fn proposal_with_topic() -> Proposal {
+        base().with_session_topic_proposal(Some(topic()))
     }
 
     fn typed() -> Proposal {
@@ -65,7 +151,7 @@ mod proposal_tests {
             "capture_id": CAPTURE_ID,
             "source_revision": 0,
             "schema_version": SUPPORTED_PROPOSAL_SCHEMA_VERSION,
-            "text_basis": {"kind": "original"},
+            "text_basis": {"kind": "original", "item_revision": 0},
             "request_version": REQUEST_VERSION,
             "operation": {"kind": "annotate"},
             "item_type": "action",
@@ -85,7 +171,7 @@ mod proposal_tests {
     }
 
     fn parse(value: &Value) -> Result<Proposal, ProposalError> {
-        Proposal::parse(&value.to_string(), TEXT)
+        Proposal::from_output(&request(), &output_for(value, REQUEST_VERSION), ITEM_ID)
     }
 
     // --- Happy paths and provenance ---
@@ -96,7 +182,8 @@ mod proposal_tests {
         assert_eq!(proposal.operation, Operation::Annotate {});
         assert_eq!(proposal.item_type, Some(ItemType::Action));
         let reserialized = serde_json::to_string(&proposal).unwrap();
-        assert_eq!(Proposal::parse(&reserialized, TEXT).unwrap(), proposal);
+        let reserialized: Value = serde_json::from_str(&reserialized).unwrap();
+        assert_eq!(parse(&reserialized).unwrap(), proposal);
     }
 
     #[test]
@@ -119,39 +206,51 @@ mod proposal_tests {
     }
 
     #[test]
-    fn correction_basis_round_trips_and_requires_uuid() {
+    fn correction_basis_keeps_revision_and_requires_uuid_and_matching_revision() {
         let basis = TextBasis::Correction {
-            correction_id: OTHER_ITEM_ID.to_string(),
+            correction_record_id: OTHER_ITEM_ID.to_string(),
+            item_revision: 2,
         };
-        let (kind, id) = basis.to_db();
-        assert_eq!(TextBasis::from_db(kind, id.as_deref()).unwrap(), basis);
+        let mut proposal = typed();
+        proposal.source_revision = 2;
+        proposal.text_basis = basis.clone();
+        assert_eq!(proposal.validate(TEXT), Ok(()));
+        let encoded = serde_json::to_value(&proposal.text_basis).unwrap();
         assert_eq!(
-            TextBasis::from_db("original", None).unwrap(),
-            TextBasis::Original {}
-        );
-        assert!(matches!(
-            TextBasis::from_db("unknown", None),
-            Err(ProposalError::UnknownTextBasisKind(_))
-        ));
-        assert_eq!(
-            TextBasis::from_db("correction", None),
-            Err(ProposalError::MissingCorrectionId)
+            encoded,
+            json!({"kind": "correction", "correction_record_id": OTHER_ITEM_ID, "item_revision": 2})
         );
 
-        let mut proposal = typed();
-        proposal.text_basis = basis;
-        assert_eq!(proposal.validate(TEXT), Ok(()));
         for bad in ["", "corr-123"] {
             proposal.text_basis = TextBasis::Correction {
-                correction_id: bad.to_string(),
+                correction_record_id: bad.to_string(),
+                item_revision: 2,
             };
             assert_eq!(
                 proposal.validate(TEXT),
                 Err(ProposalError::InvalidIdentifier {
-                    field: "correction_id"
+                    field: "correction_record_id"
                 })
             );
         }
+        proposal.text_basis = basis;
+        proposal.source_revision = 3;
+        assert_eq!(
+            proposal.validate(TEXT),
+            Err(ProposalError::BasisRevisionMismatch {
+                basis_revision: 2,
+                source_revision: 3
+            })
+        );
+        let mut original = typed();
+        original.source_revision = 1;
+        assert_eq!(
+            original.validate(TEXT),
+            Err(ProposalError::BasisRevisionMismatch {
+                basis_revision: 0,
+                source_revision: 1
+            })
+        );
     }
 
     // --- Identifiers and revisions ---
@@ -613,7 +712,12 @@ mod proposal_tests {
             );
         }
         let mut json = valid_json();
-        json["text_basis"] = json!({"kind": "correction", "correction_id": OTHER_ITEM_ID, "x": 1});
+        json["text_basis"] = json!({
+            "kind": "correction",
+            "correction_record_id": OTHER_ITEM_ID,
+            "item_revision": 0,
+            "x": 1
+        });
         assert!(matches!(parse(&json), Err(ProposalError::Malformed(_))));
     }
 
@@ -647,11 +751,8 @@ mod proposal_tests {
 
     #[test]
     fn invalid_json_shapes_are_rejected_not_panicked() {
-        for raw in ["", "null", "[]", "{}", "\"x\"", "{\"proposal_id\": 1}"] {
-            assert!(matches!(
-                Proposal::parse(raw, TEXT),
-                Err(ProposalError::Malformed(_))
-            ));
+        for shape in [json!({}), json!({"proposal_id": 1}), Value::Null] {
+            assert!(matches!(parse(&shape), Err(ProposalError::Malformed(_))));
         }
         let mut json = valid_json();
         json["source_spans"] = json!([{"start": -1, "end": 2}]);
@@ -667,10 +768,12 @@ mod proposal_tests {
         json["reminder_proposal"]["instant"] = json!("not a time");
         assert_eq!(parse(&json), Err(ProposalError::InvalidInstant));
         let mut json = valid_json();
-        json["item_id"] = json!("item-1");
+        json["proposal_id"] = json!("prop-1");
         assert_eq!(
             parse(&json),
-            Err(ProposalError::InvalidIdentifier { field: "item_id" })
+            Err(ProposalError::InvalidIdentifier {
+                field: "proposal_id"
+            })
         );
     }
 
@@ -689,41 +792,188 @@ mod proposal_tests {
     }
 
     #[test]
-    fn user_assigned_topic_wins_over_proposal() {
-        let proposal = topic();
+    fn user_correction_wins_over_capture_topic_and_proposal() {
+        let proposal = proposal_with_topic();
+        let corrected = item_state(Some("  grief group "), true);
         assert_eq!(
-            resolve_session_topic(Some("  grief group "), Some(&proposal)),
-            Some(ResolvedSessionTopic::UserAssigned {
+            resolve_session_topic(&corrected, Some("stated"), &proposal, TEXT),
+            Ok(Some(ResolvedSessionTopic::UserCorrected {
                 topic: "grief group".to_string()
-            })
+            }))
+        );
+        // A user who cleared the topic is not overridden by a model proposal.
+        assert_eq!(
+            resolve_session_topic(&item_state(None, true), None, &proposal, TEXT),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn topic_stated_at_capture_outranks_a_proposal() {
+        let state = item_state(Some("stated"), false);
+        assert_eq!(
+            resolve_session_topic(&state, Some(" stated "), &proposal_with_topic(), TEXT),
+            Ok(Some(ResolvedSessionTopic::StatedAtCapture {
+                topic: "stated".to_string()
+            }))
+        );
+    }
+
+    #[test]
+    fn proposal_topic_is_derived_only_without_user_input() {
+        let state = item_state(None, false);
+        assert_eq!(
+            resolve_session_topic(&state, None, &proposal_with_topic(), TEXT),
+            Ok(Some(ResolvedSessionTopic::Derived {
+                topic: "therapy".to_string(),
+                evidence: SourceSpan::new(39, 46)
+            }))
         );
         assert_eq!(
-            resolve_session_topic(Some("grief group"), None),
-            Some(ResolvedSessionTopic::UserAssigned {
-                topic: "grief group".to_string()
+            resolve_session_topic(&state, Some("   "), &proposal_with_topic(), TEXT),
+            resolve_session_topic(&state, None, &proposal_with_topic(), TEXT)
+        );
+        assert_eq!(
+            resolve_session_topic(&state, None, &typed(), TEXT),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn session_topic_resolution_rejects_invalid_or_foreign_proposals() {
+        let state = item_state(None, false);
+        let blank_out_of_bounds = base().with_session_topic_proposal(Some(SessionTopicProposal {
+            topic: "   ".to_string(),
+            source_span: Some(SourceSpan::new(99, 100)),
+        }));
+        assert!(resolve_session_topic(&state, None, &blank_out_of_bounds, TEXT).is_err());
+        let mut unsourced = topic();
+        unsourced.source_span = None;
+        assert_eq!(
+            resolve_session_topic(
+                &state,
+                None,
+                &base().with_session_topic_proposal(Some(unsourced)),
+                TEXT
+            ),
+            Err(ProposalError::MissingEvidence {
+                facet: "session topic"
+            })
+        );
+        // Validation applies even when a higher-precedence topic would win.
+        assert!(resolve_session_topic(
+            &item_state(Some("kept"), true),
+            None,
+            &blank_out_of_bounds,
+            TEXT
+        )
+        .is_err());
+
+        let mut other_item = proposal_with_topic();
+        other_item.item_id = OTHER_ITEM_ID.to_string();
+        assert_eq!(
+            resolve_session_topic(&state, None, &other_item, TEXT),
+            Err(ProposalError::ProvenanceMismatch { field: "item_id" })
+        );
+        let mut other_capture = proposal_with_topic();
+        other_capture.capture_id = OTHER_ITEM_ID.to_string();
+        assert_eq!(
+            resolve_session_topic(&state, None, &other_capture, TEXT),
+            Err(ProposalError::ProvenanceMismatch {
+                field: "capture_id"
+            })
+        );
+    }
+
+    // --- Trusted boundary: provenance must equal the dispatched request ---
+
+    #[test]
+    fn output_matching_the_trusted_request_is_accepted() {
+        let proposal = parse(&valid_json()).expect("matching provenance");
+        assert_eq!(proposal.capture_id, CAPTURE_ID);
+    }
+
+    #[test]
+    fn provenance_must_match_the_trusted_request() {
+        let other_uuid = "550e8400-e29b-41d4-a716-4466554400ff";
+        let cases: [(&str, Value); 4] = [
+            ("capture_id", json!(other_uuid)),
+            ("request_version", json!(other_uuid)),
+            ("item_id", json!(OTHER_ITEM_ID)),
+            ("source_revision", json!(1)),
+        ];
+        for (field, value) in cases {
+            let mut json = valid_json();
+            json[field] = value;
+            if field == "source_revision" {
+                json["text_basis"]["item_revision"] = json!(1);
+            }
+            assert_eq!(
+                parse(&json),
+                Err(ProposalError::ProvenanceMismatch { field }),
+                "{field}"
+            );
+        }
+        let mut json = valid_json();
+        json["text_basis"] = json!({
+            "kind": "correction",
+            "correction_record_id": OTHER_ITEM_ID,
+            "item_revision": 0
+        });
+        assert_eq!(
+            parse(&json),
+            Err(ProposalError::ProvenanceMismatch {
+                field: "text_basis"
             })
         );
     }
 
     #[test]
-    fn proposal_topic_is_used_only_with_evidence_and_without_user_assignment() {
-        let proposal = topic();
+    fn output_request_version_must_equal_the_request() {
+        let other_uuid = "550e8400-e29b-41d4-a716-4466554400ff";
         assert_eq!(
-            resolve_session_topic(None, Some(&proposal)),
-            Some(ResolvedSessionTopic::Derived {
-                topic: "therapy".to_string(),
-                evidence: SourceSpan::new(39, 46)
+            Proposal::from_output(&request(), &output_for(&valid_json(), other_uuid), ITEM_ID),
+            Err(ProposalError::ProvenanceMismatch {
+                field: "output request_version"
             })
         );
-        assert_eq!(
-            resolve_session_topic(Some("   "), Some(&proposal)),
-            resolve_session_topic(None, Some(&proposal))
-        );
-        let unsourced = SessionTopicProposal {
-            topic: "therapy".to_string(),
-            source_span: None,
+    }
+
+    #[test]
+    fn correction_basis_and_revision_must_match_the_request() {
+        let basis = TextBasis::Correction {
+            correction_record_id: OTHER_ITEM_ID.to_string(),
+            item_revision: 3,
         };
-        assert_eq!(resolve_session_topic(None, Some(&unsourced)), None);
-        assert_eq!(resolve_session_topic(None, None), None);
+        let request = request_with(basis, 3);
+        let mut json = valid_json();
+        json["source_revision"] = json!(3);
+        json["text_basis"] = json!({
+            "kind": "correction",
+            "correction_record_id": OTHER_ITEM_ID,
+            "item_revision": 3
+        });
+        let output = output_for(&json, REQUEST_VERSION);
+        assert!(Proposal::from_output(&request, &output, ITEM_ID).is_ok());
+
+        // The original basis at the same revision is not the corrected text the model saw.
+        json["text_basis"] = json!({"kind": "original", "item_revision": 3});
+        let output = output_for(&json, REQUEST_VERSION);
+        assert_eq!(
+            Proposal::from_output(&request, &output, ITEM_ID),
+            Err(ProposalError::ProvenanceMismatch {
+                field: "text_basis"
+            })
+        );
+    }
+
+    #[test]
+    fn spans_are_checked_against_the_request_text() {
+        let mut json = valid_json();
+        json["source_spans"] = json!([{"start": 0, "end": 9999}]);
+        assert!(matches!(
+            parse(&json),
+            Err(ProposalError::SpanOutOfBounds { .. })
+        ));
     }
 }

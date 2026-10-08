@@ -10,12 +10,13 @@
 //! [`Proposal::validate`] performs the semantic checks and, even when it passes, the result is
 //! only a candidate until the separate application logic accepts it.
 
-use crate::domain::items::SUPPORTED_PROPOSAL_SCHEMA_VERSION;
+use crate::domain::items::{ItemState, SUPPORTED_PROPOSAL_SCHEMA_VERSION};
+pub use crate::providers::contracts::TextBasis;
+use crate::providers::contracts::{InterpretationOutput, InterpretationRequest};
 use crate::store::events::ItemType;
 use chrono::DateTime;
 use chrono_tz::Tz;
-use serde::{Deserialize, Serialize};
-use std::fmt;
+use serde::{Deserialize, Deserializer, Serialize};
 use std::str::FromStr;
 use thiserror::Error;
 use uuid::Uuid;
@@ -31,10 +32,13 @@ pub enum ProposalError {
     InvalidIdentifier { field: &'static str },
     #[error("source_revision must be non-negative, got {0}")]
     NegativeRevision(i32),
-    #[error("unknown text basis kind: {0}")]
-    UnknownTextBasisKind(String),
-    #[error("correction text basis requires a correction ID")]
-    MissingCorrectionId,
+    #[error("text basis revision {basis_revision} must equal source_revision {source_revision}")]
+    BasisRevisionMismatch {
+        basis_revision: u64,
+        source_revision: i32,
+    },
+    #[error("proposal {field} does not match the trusted request context")]
+    ProvenanceMismatch { field: &'static str },
     #[error("{field} must not be empty")]
     EmptyField { field: &'static str },
     #[error("source span [{start}, {end}) must be non-empty")]
@@ -73,54 +77,42 @@ fn parse_uuid(value: &str, field: &'static str) -> Result<(), ProposalError> {
         .map_err(|_| ProposalError::InvalidIdentifier { field })
 }
 
-/// Identifies the text basis used for source spans and validation.
-/// Text basis is always immutable: the original source text, or a specific text-correction record
-/// at the item revision where it was current.
-/// Variants are struct-like (`{}`) so serde's `deny_unknown_fields` also applies to them.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Strict wire form of the provider text basis. The provider type does not reject unknown
+/// fields, but model output is untrusted at every nesting level, so proposals decode through
+/// this mirror and convert to the established [`TextBasis`], which keeps the item revision and
+/// the correction record identity.
+#[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum TextBasis {
-    /// Original source text from capture.
-    Original {},
-    /// A user text-correction record, identified by its correction record ID.
-    Correction { correction_id: String },
+enum TextBasisWire {
+    Original {
+        item_revision: u64,
+    },
+    Correction {
+        correction_record_id: String,
+        item_revision: u64,
+    },
 }
 
-impl fmt::Display for TextBasis {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            TextBasis::Original {} => write!(f, "original"),
-            TextBasis::Correction { correction_id } => write!(f, "correction:{correction_id}"),
-        }
-    }
+fn deserialize_text_basis<'de, D>(deserializer: D) -> Result<TextBasis, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(match TextBasisWire::deserialize(deserializer)? {
+        TextBasisWire::Original { item_revision } => TextBasis::Original { item_revision },
+        TextBasisWire::Correction {
+            correction_record_id,
+            item_revision,
+        } => TextBasis::Correction {
+            correction_record_id,
+            item_revision,
+        },
+    })
 }
 
-impl TextBasis {
-    /// Parse from database representation (kind + optional id).
-    pub fn from_db(kind: &str, id: Option<&str>) -> Result<Self, ProposalError> {
-        match kind {
-            "original" => Ok(TextBasis::Original {}),
-            "correction" => {
-                let correction_id = id.ok_or(ProposalError::MissingCorrectionId)?.to_string();
-                Ok(TextBasis::Correction { correction_id })
-            }
-            other => Err(ProposalError::UnknownTextBasisKind(other.to_string())),
-        }
-    }
-
-    /// Convert to database representation (kind, optional id).
-    pub fn to_db(&self) -> (&'static str, Option<String>) {
-        match self {
-            TextBasis::Original {} => ("original", None),
-            TextBasis::Correction { correction_id } => ("correction", Some(correction_id.clone())),
-        }
-    }
-
-    /// A correction basis must name its correction record by UUID.
-    pub fn validate(&self) -> Result<(), ProposalError> {
-        match self {
-            TextBasis::Original {} => Ok(()),
-            TextBasis::Correction { correction_id } => parse_uuid(correction_id, "correction_id"),
+fn basis_revision(text_basis: &TextBasis) -> u64 {
+    match text_basis {
+        TextBasis::Original { item_revision } | TextBasis::Correction { item_revision, .. } => {
+            *item_revision
         }
     }
 }
@@ -204,6 +196,7 @@ pub struct ReminderProposal {
 
 /// Reason for abstaining from a proposal.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum AbstentionReason {
     /// Unable to determine the target or value from the source.
     UncertainTarget,
@@ -228,36 +221,58 @@ pub struct SessionTopicProposal {
     pub source_span: Option<SourceSpan>,
 }
 
-/// The session-topic in effect after combining the user's assignment with a proposal.
+/// The session-topic in effect after applying the item state's precedence.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResolvedSessionTopic {
-    /// Assigned or corrected by the user; survives reprocessing.
-    UserAssigned { topic: String },
-    /// Derived from source evidence by an interpretation proposal.
+    /// Set or corrected by the user (a D04 `session_topic` correction); survives reprocessing.
+    UserCorrected { topic: String },
+    /// Stated by the user at capture; outranks any model proposal.
+    StatedAtCapture { topic: String },
+    /// Derived from source evidence by a validated interpretation proposal.
     Derived { topic: String, evidence: SourceSpan },
 }
 
-/// The user's assignment always wins and survives reprocessing; a proposal only supplies a
-/// topic when the user has not assigned one. A proposal without evidence is never used. Neither
-/// input can change item scope, session read scope or any permission.
+/// Resolve the session-topic using the D04 precedence: user correction, then a topic stated at
+/// capture, then a model proposal. `item_state` is the authoritative projection; the proposal is
+/// fully validated against `text` and must belong to the same item and capture before it is
+/// considered, even when a higher-precedence topic wins. Neither the proposal nor the result can
+/// change item scope, session read scope or any permission. `Ok(None)` means no topic.
 pub fn resolve_session_topic(
-    user_assigned: Option<&str>,
-    proposal: Option<&SessionTopicProposal>,
-) -> Option<ResolvedSessionTopic> {
-    if let Some(topic) = user_assigned
-        .map(str::trim)
-        .filter(|topic| !topic.is_empty())
-    {
-        return Some(ResolvedSessionTopic::UserAssigned {
-            topic: topic.to_string(),
+    item_state: &ItemState,
+    stated_at_capture: Option<&str>,
+    proposal: &Proposal,
+    text: &str,
+) -> Result<Option<ResolvedSessionTopic>, ProposalError> {
+    proposal.validate(text)?;
+    if proposal.item_id != item_state.item_id {
+        return Err(ProposalError::ProvenanceMismatch { field: "item_id" });
+    }
+    if proposal.capture_id != item_state.capture_id {
+        return Err(ProposalError::ProvenanceMismatch {
+            field: "capture_id",
         });
     }
-    let proposal = proposal?;
-    let evidence = proposal.source_span?;
-    Some(ResolvedSessionTopic::Derived {
-        topic: proposal.topic.trim().to_string(),
-        evidence,
-    })
+    let non_blank = |topic: &str| Some(topic.trim().to_string()).filter(|t| !t.is_empty());
+    if item_state.provenance.session_topic_corrected {
+        return Ok(item_state
+            .session_topic
+            .as_deref()
+            .and_then(non_blank)
+            .map(|topic| ResolvedSessionTopic::UserCorrected { topic }));
+    }
+    if let Some(topic) = stated_at_capture.and_then(non_blank) {
+        return Ok(Some(ResolvedSessionTopic::StatedAtCapture { topic }));
+    }
+    Ok(proposal
+        .session_topic_proposal
+        .as_ref()
+        .and_then(|proposed| {
+            let evidence = proposed.source_span?;
+            Some(ResolvedSessionTopic::Derived {
+                topic: proposed.topic.trim().to_string(),
+                evidence,
+            })
+        }))
 }
 
 /// Character offset span into a text basis.
@@ -309,7 +324,8 @@ pub struct Proposal {
     pub source_revision: i32,
     /// Schema version; unknown versions are rejected without mutation.
     pub schema_version: i32,
-    /// Text basis and immutable identification.
+    /// Immutable text basis with the item revision at which it was current.
+    #[serde(deserialize_with = "deserialize_text_basis")]
     pub text_basis: TextBasis,
     /// Versioned interpretation request that produced this proposal (UUID).
     pub request_version: String,
@@ -355,13 +371,50 @@ impl Proposal {
         }
     }
 
-    /// Decode untrusted JSON and run full semantic validation against the basis text.
-    /// Unknown fields at any level, including scope or permission fields, are rejected.
-    pub fn parse(json: &str, text: &str) -> Result<Self, ProposalError> {
-        let proposal: Proposal = serde_json::from_str(json)
-            .map_err(|error| ProposalError::Malformed(error.to_string()))?;
-        proposal.validate(text)?;
+    /// The checked boundary for provider output. Decodes the untrusted proposal object, rejects
+    /// unknown fields at every level, requires its provenance to equal the trusted request
+    /// (capture, revision, text basis, request version) and the expected item, then validates
+    /// semantics against the request's text. Rejection mutates nothing.
+    pub fn from_output(
+        request: &InterpretationRequest,
+        output: &InterpretationOutput,
+        expected_item_id: &str,
+    ) -> Result<Self, ProposalError> {
+        if output.request_version != request.request_version() {
+            return Err(ProposalError::ProvenanceMismatch {
+                field: "output request_version",
+            });
+        }
+        let proposal: Proposal =
+            serde_json::from_value(serde_json::Value::Object(output.proposal.clone()))
+                .map_err(|error| ProposalError::Malformed(error.to_string()))?;
+        proposal.check_provenance(request, expected_item_id)?;
+        proposal.validate(request.text())?;
         Ok(proposal)
+    }
+
+    fn check_provenance(
+        &self,
+        request: &InterpretationRequest,
+        expected_item_id: &str,
+    ) -> Result<(), ProposalError> {
+        let mismatches = [
+            ("item_id", self.item_id != expected_item_id),
+            ("capture_id", self.capture_id != request.capture_id()),
+            (
+                "request_version",
+                self.request_version != request.request_version(),
+            ),
+            (
+                "source_revision",
+                u64::try_from(self.source_revision).ok() != Some(request.source_revision()),
+            ),
+            ("text_basis", self.text_basis != *request.text_basis()),
+        ];
+        match mismatches.into_iter().find(|(_, differs)| *differs) {
+            Some((field, _)) => Err(ProposalError::ProvenanceMismatch { field }),
+            None => Ok(()),
+        }
     }
 
     pub fn with_operation(mut self, operation: Operation) -> Self {
@@ -405,17 +458,31 @@ impl Proposal {
         Ok(())
     }
 
-    /// Identifiers must be UUIDs and the revision non-negative. Existence of the capture and
-    /// item and freshness of the revision are checked by application against current state.
+    /// Identifiers must be UUIDs, the revision non-negative and the text basis current at that
+    /// revision. Agreement with the trusted request is checked by [`Proposal::from_output`];
+    /// freshness against stored state is checked when the proposal is applied.
     pub fn validate_identifiers(&self) -> Result<(), ProposalError> {
         parse_uuid(&self.proposal_id, "proposal_id")?;
         parse_uuid(&self.item_id, "item_id")?;
         parse_uuid(&self.capture_id, "capture_id")?;
         parse_uuid(&self.request_version, "request_version")?;
-        if self.source_revision < 0 {
-            return Err(ProposalError::NegativeRevision(self.source_revision));
+        let source_revision = u64::try_from(self.source_revision)
+            .map_err(|_| ProposalError::NegativeRevision(self.source_revision))?;
+        if let TextBasis::Correction {
+            correction_record_id,
+            ..
+        } = &self.text_basis
+        {
+            parse_uuid(correction_record_id, "correction_record_id")?;
         }
-        self.text_basis.validate()
+        let basis_revision = basis_revision(&self.text_basis);
+        if basis_revision != source_revision {
+            return Err(ProposalError::BasisRevisionMismatch {
+                basis_revision,
+                source_revision: self.source_revision,
+            });
+        }
+        Ok(())
     }
 
     /// Unsupported operations (create, update of existing items) must be explicit abstentions
