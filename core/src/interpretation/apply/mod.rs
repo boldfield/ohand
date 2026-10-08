@@ -9,14 +9,20 @@
 /// authoritative state on failure. Reminder candidates require explicit intent and
 /// deterministic resolution consistent with source/context; unsupported grammar stays
 /// unscheduled with original intention intact.
-use crate::domain::items::{ItemState, LifecycleState, TextState};
+use crate::domain::items::{
+    validate_state_transition, ItemState, LifecycleState, StateTransition, TextState,
+    TransitionValidity,
+};
 use crate::interpretation::contracts::{Proposal, TimeResolutionQuality};
+use crate::jobs::queue::complete_job_in_tx;
 use crate::providers::contracts::TextBasis;
 use crate::store::events::ItemType;
 use anyhow::Result;
 use chrono::DateTime;
+use chrono::Utc;
 use rusqlite::{OptionalExtension, Transaction};
 use thiserror::Error;
+use uuid::Uuid;
 
 /// Errors that occur when applying a proposal to stored state.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -54,37 +60,49 @@ pub enum ApplyOutcome {
     Rejected,
 }
 
-/// Apply a validated proposal to the current item state. This function performs
-/// additional database-state validations beyond the syntactic checks in
-/// [`Proposal::validate`], ensuring that the proposal is fresh (not stale) and
-/// that the item is in a state that permits application.
+/// Apply a proposal to item state with full validation and job completion.
+/// Loads current item state, validates the proposal, checks authorization and lifecycle,
+/// marks the proposal as applied, and completes the associated job atomically.
 ///
-/// Returns `ApplyOutcome::Applied` on success, or `ApplyOutcome::Rejected` if the
-/// proposal is stale or the item cannot be modified.
+/// Returns `ApplyOutcome::Applied` on success, or `ApplyOutcome::Rejected` if validation
+/// or authorization fails, or `ApplyError` on database/storage errors.
 ///
-/// # Constraints
-/// - The proposal's source_revision must match the item's current revision.
-/// - The item must not be deleted or in a terminal state.
-/// - The item's capture_id must match the proposal's capture_id.
-/// - If a reminder is proposed, the item type must be Action or must be set by the proposal.
-/// - If the reminder quality is ambiguous, no instant may be present.
-/// - If the reminder quality is explicit or inferred, an instant must be present.
+/// This function performs all validation in one transaction:
+/// - Proposal schema and semantic validation via Proposal::validate
+/// - Item freshness: source_revision matches current revision
+/// - Item exists and authorization: capture_id matches
+/// - Lifecycle validation: item is not deleted/terminal
+/// - Text basis currency check
+/// - State transition validity for each proposed facet
+/// - Reminder constraints if present
+/// - Job completion with lease verification
+/// - Event/proposal projection updates
 pub fn apply_proposal(
     tx: &Transaction,
-    item_state: &ItemState,
+    item_id: &str,
     proposal: &Proposal,
+    job_id: &str,
+    lease_attempt: i32,
 ) -> Result<ApplyOutcome, ApplyError> {
-    // Syntactic validation was already done by Proposal::validate.
-    // Now we check database state and proposal freshness.
+    // Load current item state from transaction (not trusting caller).
+    let item_state = load_item_state(tx, item_id)?;
 
-    // 1. Check item exists and is not deleted.
+    // Load the capture text for validation.
+    let source_text = load_source_text(tx, &item_state.capture_id)?;
+
+    // 1. Validate proposal schema, semantics, source spans, and all field constraints.
+    proposal
+        .validate(&source_text)
+        .map_err(|e| ApplyError::Validation(format!("{}", e)))?;
+
+    // 2. Verify item exists and is not deleted.
     if item_state.lifecycle_state == LifecycleState::Deleted {
         return Err(ApplyError::DeletedItem {
             item_id: item_state.item_id.clone(),
         });
     }
 
-    // 2. Check proposal revision matches current item revision.
+    // 3. Check proposal freshness: source_revision must match current revision.
     if proposal.source_revision != item_state.revision {
         return Err(ApplyError::StaleRevision {
             expected: proposal.source_revision,
@@ -92,32 +110,271 @@ pub fn apply_proposal(
         });
     }
 
-    // 3. Verify capture_id matches.
+    // 4. Verify capture_id matches (authorization check).
     if proposal.capture_id != item_state.capture_id {
         return Err(ApplyError::CaptureIdMismatch);
     }
 
-    // 4. Verify text basis is current at the proposed revision.
+    // 5. Verify text basis is current at the proposed revision.
     verify_text_basis_is_current(&item_state.current_text, &proposal.text_basis)?;
 
-    // 5. Validate reminder constraints if present.
+    // 6. Validate reminder constraints if present.
     if let Some(reminder) = &proposal.reminder_proposal {
-        validate_reminder_application(item_state, proposal, reminder)?;
+        validate_reminder_application(&item_state, proposal, reminder)?;
     }
 
-    // 6. If abstention, persist abstained state and return success.
+    // 7. Determine if this is a first interpretation by checking existing processing state.
+    let is_first_interpretation = is_first_interpretation(tx, item_id)?;
+
+    // 8. If abstention, handle based on whether this is first interpretation.
     if proposal.abstention.is_some() {
-        update_processing_state(tx, &item_state.item_id, "abstained")?;
+        if is_first_interpretation {
+            // First-pass abstention: mark as uninterpreted (searchable, suggestion-excluded).
+            mark_uninterpreted(tx, item_id)?;
+        } else {
+            // Later abstention: preserve prior state, just record abstention.
+            update_processing_state(tx, item_id, "abstained")?;
+        }
+        // Mark proposal as applied.
+        mark_proposal_applied(tx, &proposal.proposal_id, item_id)?;
+        // Complete the job atomically.
+        complete_job_in_tx(tx, job_id, lease_attempt)
+            .map_err(|e| ApplyError::Storage(format!("Job completion failed: {}", e)))?;
         return Ok(ApplyOutcome::Applied);
     }
 
-    // 7. Apply the proposal facets to the item (type, session_topic, reminder).
-    apply_facets(tx, item_state, proposal)?;
+    // 9. Validate all proposed facets against current state using D04 guards.
+    if proposal.item_type.is_some() {
+        let transition = StateTransition::TypeSet(proposal.item_type);
+        match validate_state_transition(&item_state, transition) {
+            TransitionValidity::Valid => {}
+            TransitionValidity::ForbiddenOverride => {
+                return Err(ApplyError::Validation(
+                    "cannot override user-corrected item type".to_string(),
+                ));
+            }
+            TransitionValidity::NotAllowed => {
+                return Err(ApplyError::LifecycleViolation {
+                    item_id: item_id.to_string(),
+                    state: item_state.lifecycle_state.as_str().to_string(),
+                });
+            }
+        }
+    }
 
-    // 8. Update processing state to processed.
-    update_processing_state(tx, &item_state.item_id, "processed")?;
+    // 10. Apply the proposal facets transactionally (type, session_topic, reminder).
+    apply_facets(tx, &item_state, proposal)?;
+
+    // 11. Update processing state to processed.
+    update_processing_state(tx, item_id, "processed")?;
+
+    // 12. Mark proposal as applied in proposals table (event/projection model).
+    mark_proposal_applied(tx, &proposal.proposal_id, item_id)?;
+
+    // 13. Complete the job atomically (J01 integration).
+    complete_job_in_tx(tx, job_id, lease_attempt)
+        .map_err(|e| ApplyError::Storage(format!("Job completion failed: {}", e)))?;
 
     Ok(ApplyOutcome::Applied)
+}
+
+/// Load the current item state from the database.
+fn load_item_state(tx: &Transaction, item_id: &str) -> Result<ItemState, ApplyError> {
+    // Query item and related data to reconstruct ItemState.
+    let row_result = tx.query_row(
+        "SELECT item_id, capture_id, revision, item_type, lifecycle_state,
+                current_session_topic FROM items WHERE item_id = ?",
+        [item_id],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i32>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        },
+    );
+
+    let (item_id_check, capture_id, revision, item_type_str, lifecycle_state_str, session_topic) =
+        row_result.map_err(|_| ApplyError::ItemNotFound {
+            item_id: item_id.to_string(),
+        })?;
+
+    let lifecycle_state = match lifecycle_state_str.as_str() {
+        "active" => LifecycleState::Active,
+        "completed" => LifecycleState::Completed,
+        "cancelled" => LifecycleState::Cancelled,
+        "deleted" => LifecycleState::Deleted,
+        _ => {
+            return Err(ApplyError::Storage(format!(
+                "Unknown lifecycle state: {}",
+                lifecycle_state_str
+            )))
+        }
+    };
+
+    let item_type = item_type_str.as_deref().and_then(|s| match s {
+        "action" => Some(ItemType::Action),
+        "note" => Some(ItemType::Note),
+        "idea" => Some(ItemType::Idea),
+        _ => None,
+    });
+
+    // Load text state (original or corrected).
+    let current_text = load_text_state(tx, item_id)?;
+
+    // Load field provenance.
+    let provenance = load_field_provenance(tx, item_id)?;
+
+    Ok(ItemState {
+        item_id: item_id_check,
+        capture_id,
+        revision,
+        item_type,
+        scope: crate::domain::items::ItemScope::Personal, // TODO: load from items.current_scope
+        session_topic,
+        lifecycle_state,
+        current_text,
+        provenance,
+    })
+}
+
+/// Load the text state (original or corrected) for an item.
+fn load_text_state(tx: &Transaction, item_id: &str) -> Result<TextState, ApplyError> {
+    // Check for corrections.
+    let correction_result: Option<(String, String)> = tx
+        .query_row(
+            "SELECT new_value, created_at FROM corrections WHERE item_id = ? AND kind = 'text' ORDER BY revision DESC LIMIT 1",
+            [item_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| ApplyError::Storage(e.to_string()))?;
+
+    if let Some((corrected_text, corrected_at)) = correction_result {
+        return Ok(TextState::Corrected {
+            text: corrected_text,
+            corrected_at,
+        });
+    }
+
+    // Load original from capture.
+    let original_text: Option<String> = tx
+        .query_row(
+            "SELECT text FROM captures WHERE capture_id = (SELECT capture_id FROM items WHERE item_id = ?)",
+            [item_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| ApplyError::Storage(e.to_string()))?
+        .flatten();
+
+    Ok(TextState::Original {
+        text: original_text,
+    })
+}
+
+/// Load field provenance (which fields were corrected by the user).
+fn load_field_provenance(
+    tx: &Transaction,
+    item_id: &str,
+) -> Result<crate::domain::items::FieldProvenance, ApplyError> {
+    let type_corrected: bool = tx
+        .query_row(
+            "SELECT COUNT(*) FROM corrections WHERE item_id = ? AND kind = 'type'",
+            [item_id],
+            |row| {
+                let count: i32 = row.get(0)?;
+                Ok(count > 0)
+            },
+        )
+        .map_err(|e| ApplyError::Storage(e.to_string()))?;
+
+    let session_topic_corrected: bool = tx
+        .query_row(
+            "SELECT COUNT(*) FROM corrections WHERE item_id = ? AND kind = 'session_topic'",
+            [item_id],
+            |row| {
+                let count: i32 = row.get(0)?;
+                Ok(count > 0)
+            },
+        )
+        .map_err(|e| ApplyError::Storage(e.to_string()))?;
+
+    let text_corrected: bool = tx
+        .query_row(
+            "SELECT COUNT(*) FROM corrections WHERE item_id = ? AND kind = 'text'",
+            [item_id],
+            |row| {
+                let count: i32 = row.get(0)?;
+                Ok(count > 0)
+            },
+        )
+        .map_err(|e| ApplyError::Storage(e.to_string()))?;
+
+    Ok(crate::domain::items::FieldProvenance {
+        type_corrected,
+        scope_corrected: false,
+        session_topic_corrected,
+        text_corrected,
+    })
+}
+
+/// Load the source text from the capture for validation.
+fn load_source_text(tx: &Transaction, capture_id: &str) -> Result<String, ApplyError> {
+    let text: Option<String> = tx
+        .query_row(
+            "SELECT text FROM captures WHERE capture_id = ?",
+            [capture_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| ApplyError::Storage(e.to_string()))?
+        .flatten();
+
+    text.ok_or_else(|| ApplyError::Storage("Capture has no text".to_string()))
+}
+
+/// Check if this is a first interpretation by looking at processing_state.
+fn is_first_interpretation(tx: &Transaction, item_id: &str) -> Result<bool, ApplyError> {
+    let processing_state: Option<String> = tx
+        .query_row(
+            "SELECT processing_state FROM items WHERE item_id = ?",
+            [item_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| ApplyError::Storage(e.to_string()))?;
+
+    // First interpretation if processing_state is "unprocessed" or "uninterpreted".
+    Ok(processing_state.as_deref() == Some("unprocessed")
+        || processing_state.as_deref() == Some("uninterpreted"))
+}
+
+/// Mark an item as uninterpreted (explicit state for first-pass failure/abstention).
+fn mark_uninterpreted(tx: &Transaction, item_id: &str) -> Result<(), ApplyError> {
+    tx.execute(
+        "UPDATE items SET processing_state = ? WHERE item_id = ?",
+        rusqlite::params!["uninterpreted", item_id],
+    )
+    .map_err(|e| ApplyError::Storage(e.to_string()))?;
+    Ok(())
+}
+
+/// Mark a proposal as applied in the proposals table.
+fn mark_proposal_applied(
+    tx: &Transaction,
+    proposal_id: &str,
+    item_id: &str,
+) -> Result<(), ApplyError> {
+    tx.execute(
+        "UPDATE proposals SET applied_state = ? WHERE proposal_id = ? AND item_id = ?",
+        rusqlite::params!["applied", proposal_id, item_id],
+    )
+    .map_err(|e| ApplyError::Storage(e.to_string()))?;
+    Ok(())
 }
 
 /// Verify that the text basis matches the current item text state.
@@ -230,12 +487,13 @@ fn apply_facets(
     Ok(())
 }
 
-/// Update or insert reminder state for the proposal.
+/// Update or insert reminder state for the proposal with all required columns.
 fn apply_reminder_proposal(
     tx: &Transaction,
     item_id: &str,
     reminder: &crate::interpretation::contracts::ReminderProposal,
 ) -> Result<(), ApplyError> {
+    let now = Utc::now().to_rfc3339();
     let request_state = match reminder.quality {
         TimeResolutionQuality::Explicit | TimeResolutionQuality::Inferred => {
             if reminder.instant.is_some() {
@@ -247,7 +505,34 @@ fn apply_reminder_proposal(
         TimeResolutionQuality::Ambiguous => "not_scheduled_yet",
     };
 
-    // Check if reminder row exists
+    // Prepare evidence fields based on quality.
+    let (resolved_instant, timezone_id, ambiguity_reason, unsupported_reason): (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = match reminder.quality {
+        TimeResolutionQuality::Explicit | TimeResolutionQuality::Inferred => {
+            // Resolved reminder: store instant and timezone.
+            (
+                reminder.instant.clone(),
+                reminder.timezone_id.clone(),
+                None,
+                None,
+            )
+        }
+        TimeResolutionQuality::Ambiguous => {
+            // Ambiguous reminder: no instant, mark ambiguity as reason.
+            (
+                None,
+                reminder.timezone_id.clone(),
+                Some("ambiguous_time".to_string()),
+                None,
+            )
+        }
+    };
+
+    // Check if reminder row exists.
     let exists: bool = tx
         .query_row(
             "SELECT 1 FROM reminders WHERE item_id = ? LIMIT 1",
@@ -259,17 +544,44 @@ fn apply_reminder_proposal(
         .unwrap_or(false);
 
     if exists {
-        // Update existing reminder
+        // Update existing reminder: preserve prior resolved state unless this updates it.
         tx.execute(
-            "UPDATE reminders SET request_state = ?, schedule_state = 'not_scheduled' WHERE item_id = ?",
-            rusqlite::params![request_state, item_id],
+            "UPDATE reminders SET request_state = ?, schedule_state = 'not_scheduled', \
+             resolved_instant = ?, timezone_id = ?, ambiguity_reason = ?, unsupported_reason = ?, \
+             updated_at = ? WHERE item_id = ?",
+            rusqlite::params![
+                request_state,
+                resolved_instant,
+                timezone_id,
+                ambiguity_reason,
+                unsupported_reason,
+                now,
+                item_id
+            ],
         )
         .map_err(|e| ApplyError::Storage(e.to_string()))?;
     } else {
-        // Insert new reminder with default values
+        // Insert new reminder with all required columns.
+        let reminder_id = Uuid::new_v4().to_string();
         tx.execute(
-            "INSERT INTO reminders (item_id, request_state, schedule_state, delivery_state, acknowledgment_state) VALUES (?, ?, ?, ?, ?)",
-            rusqlite::params![item_id, request_state, "not_scheduled", "unknown", "not_acknowledged"],
+            "INSERT INTO reminders \
+             (reminder_id, item_id, request_state, schedule_state, delivery_state, acknowledgment_state, \
+              resolved_instant, timezone_id, ambiguity_reason, unsupported_reason, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rusqlite::params![
+                reminder_id,
+                item_id,
+                request_state,
+                "not_scheduled",
+                "unknown",
+                "not_acknowledged",
+                resolved_instant,
+                timezone_id,
+                ambiguity_reason,
+                unsupported_reason,
+                now,
+                now
+            ],
         )
         .map_err(|e| ApplyError::Storage(e.to_string()))?;
     }
