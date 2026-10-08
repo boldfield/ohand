@@ -32,7 +32,7 @@ fn test_create_empty_database() -> Result<()> {
 
     let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
     let db = make_test_db(&path, instant)?;
-    assert_eq!(db.schema_version()?, 3);
+    assert_eq!(db.schema_version()?, 4);
 
     let _ = std::fs::remove_file(&path);
     Ok(())
@@ -56,7 +56,7 @@ fn test_reopen_database() -> Result<()> {
 
     {
         let db = make_test_db(&path, instant)?;
-        assert_eq!(db.schema_version()?, 3);
+        assert_eq!(db.schema_version()?, 4);
     }
 
     let _ = std::fs::remove_file(&path);
@@ -80,7 +80,7 @@ fn test_forward_incompatible_version_rejected() -> Result<()> {
         let db = make_test_db(&path, instant)?;
         db.conn().execute(
             "INSERT INTO _schema_metadata (version, created_at, upgraded_at) VALUES (?, ?, ?)",
-            rusqlite::params![4, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"],
+            rusqlite::params![5, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"],
         )?;
     }
 
@@ -113,12 +113,12 @@ fn test_forward_incompatible_database_not_modified() -> Result<()> {
         let _db = make_test_db(&path, instant)?;
     }
 
-    // Manually insert a v4 record (higher than supported).
+    // Manually insert a v5 record (higher than supported).
     {
         let conn = Connection::open(&path)?;
         conn.execute(
             "INSERT INTO _schema_metadata (version, created_at, upgraded_at) VALUES (?, ?, ?)",
-            rusqlite::params![4, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"],
+            rusqlite::params![5, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"],
         )?;
     }
     let bytes_before = std::fs::read(&path)?;
@@ -170,7 +170,7 @@ fn test_migration_from_version_zero() -> Result<()> {
     {
         let db = make_test_db(&path, instant)?;
         let version = db.schema_version()?;
-        assert_eq!(version, 3, "Schema version should be upgraded to 3");
+        assert_eq!(version, 4, "Schema version should be upgraded to 4");
 
         // Check that v1 tables now exist.
         let tables_exist: bool = db.conn().query_row(
@@ -262,11 +262,11 @@ fn test_synthetic_step_success_records_own_version() -> Result<()> {
     let steps = steps_with(create_synthetic_v2_table);
     {
         let db = open_with(&path, later, &steps)?;
-        assert_eq!(db.schema_version()?, 4);
+        assert_eq!(db.schema_version()?, 5);
         assert!(table_exists(db.conn(), "synthetic_v2")?);
         assert_eq!(capture_count(db.conn(), "capture-keep")?, 1);
         let (created, version_two): (String, String) = db.conn().query_row(
-            "SELECT (SELECT created_at FROM _schema_metadata WHERE version = 4),
+            "SELECT (SELECT created_at FROM _schema_metadata WHERE version = 5),
                     (SELECT created_at FROM _schema_metadata WHERE version = 2)",
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
@@ -297,7 +297,7 @@ fn test_fresh_database_walks_full_step_list() -> Result<()> {
 
     let steps = steps_with(create_synthetic_v2_table);
     let db = open_with(&path, instant, &steps)?;
-    assert_eq!(db.schema_version()?, 4);
+    assert_eq!(db.schema_version()?, 5);
     assert!(table_exists(db.conn(), "captures")?);
     assert!(table_exists(db.conn(), "synthetic_v2")?);
     let versions: i64 =
@@ -305,7 +305,7 @@ fn test_fresh_database_walks_full_step_list() -> Result<()> {
             .query_row("SELECT COUNT(*) FROM _schema_metadata", [], |row| {
                 row.get(0)
             })?;
-    assert_eq!(versions, 4);
+    assert_eq!(versions, 5);
 
     let _ = std::fs::remove_file(&path);
     Ok(())
@@ -325,7 +325,7 @@ fn test_failed_step_rolls_back_and_preserves_source_records() -> Result<()> {
     let result = open_with(&path, instant, &steps);
     let error = result.unwrap_err().to_string();
     assert!(
-        error.contains("Migration to version 4 failed"),
+        error.contains("Migration to version 5 failed"),
         "Got: {}",
         error
     );
@@ -336,7 +336,7 @@ fn test_failed_step_rolls_back_and_preserves_source_records() -> Result<()> {
             conn.query_row("SELECT MAX(version) FROM _schema_metadata", [], |row| {
                 row.get(0)
             })?;
-        assert_eq!(version, 3, "Version must stay at the last good version");
+        assert_eq!(version, 4, "Version must stay at the last good version");
         assert!(!table_exists(&conn, "synthetic_partial")?);
         let column_added: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('captures') WHERE name='synthetic_partial_col')",
@@ -349,7 +349,7 @@ fn test_failed_step_rolls_back_and_preserves_source_records() -> Result<()> {
 
     // The original database still opens normally.
     let db = make_test_db(&path, instant)?;
-    assert_eq!(db.schema_version()?, 3);
+    assert_eq!(db.schema_version()?, 4);
     assert_eq!(capture_count(db.conn(), "capture-keep")?, 1);
 
     let _ = std::fs::remove_file(&path);
@@ -916,7 +916,7 @@ fn test_ledger_whitespace_differences_do_not_brick_database() -> Result<()> {
     let instant = instant_for_tests()?;
     drop(make_test_db(&path, instant)?);
     let reopened = make_test_db(&path, instant)?;
-    assert_eq!(reopened.schema_version()?, 3);
+    assert_eq!(reopened.schema_version()?, 4);
     let _ = std::fs::remove_file(&path);
     Ok(())
 }
@@ -994,7 +994,7 @@ fn test_v1_to_v2_migration_preserves_data() -> Result<()> {
     // Reopen the database with full migration list: should upgrade from v1 to v2
     {
         let db = make_test_db(&path, instant)?;
-        assert_eq!(db.schema_version()?, 3);
+        assert_eq!(db.schema_version()?, 4);
 
         // Verify source data is intact
         let capture_count: i64 = db.conn().query_row(
@@ -1061,7 +1061,7 @@ fn test_v2_to_v3_migration_preserves_reminder_rows() -> Result<()> {
 
     {
         let db = make_test_db(&path, instant)?;
-        assert_eq!(db.schema_version()?, 3);
+        assert_eq!(db.schema_version()?, 4);
         let (request_state, schedule_state, unschedulable_reason): (String, String, Option<String>) =
             db.conn().query_row(
                 "SELECT request_state, schedule_state, unschedulable_reason FROM reminders WHERE reminder_id = 'rem-1'",

@@ -55,6 +55,10 @@ pub const MIGRATIONS: &[MigrationStep] = &[
         target_version: 3,
         apply: add_unschedulable_reason_v3,
     },
+    MigrationStep {
+        target_version: 4,
+        apply: add_reminder_source_phrase_v4,
+    },
 ];
 
 /// Database handle with schema validation.
@@ -674,5 +678,12 @@ fn add_unschedulable_reason_v3(tx: &Transaction<'_>) -> Result<()> {
         "ALTER TABLE reminders ADD COLUMN unschedulable_reason TEXT",
         [],
     )?;
+    Ok(())
+}
+
+/// Step 4: Add source_phrase column to reminders table for N01, so a requested phrase that is
+/// ambiguous or unscheduled stays inspectable after the item's text is corrected.
+fn add_reminder_source_phrase_v4(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute("ALTER TABLE reminders ADD COLUMN source_phrase TEXT", [])?;
     Ok(())
 }

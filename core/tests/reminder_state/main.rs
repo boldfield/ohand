@@ -3,12 +3,15 @@ use chrono::{DateTime, Duration, Utc};
 use rusqlite::Transaction;
 use std::sync::Arc;
 
+use ohand_core::domain::status::{
+    ItemStatus, ReminderRequestState, UnschedulableReason as StatusUnschedulableReason,
+};
 use ohand_core::reminders::state::{
     apply_derived_request, apply_user_time_correction, cancel_for_inactive_item, cancel_reminder,
-    desired_notifications, get_reminder, list_operations, notification_identifier,
-    AcknowledgmentState, DeliveryState, DerivedReminderRequest, OperationState, OperationType,
-    ReminderRecord, ReminderStateError, RequestState, ScheduleState, UnschedulableReason,
-    UserTimeCorrection,
+    desired_notifications, end_item_with_event, get_reminder, list_operations,
+    notification_identifier, reconcile_inactive_items, AcknowledgmentState, DeliveryState,
+    DerivedReminderRequest, OperationState, OperationType, ReminderRecord, ReminderStateError,
+    RequestState, ScheduleState, UnschedulableReason, UserTimeCorrection,
 };
 use ohand_core::store::events::{
     save_event, Correction, CorrectionKind, Event, EventPayload, EventType,
@@ -65,7 +68,7 @@ fn insert_item(db: &mut Database, item_id: &str, text: &str, as_action: bool) ->
     )?;
     tx.execute(
         "INSERT INTO items (item_id, capture_id, revision, lifecycle_state, save_state, sync_state, processing_state, transcription_state, created_at, updated_at)
-         VALUES (?, ?, 0, 'active', 'saved', 'not_synced', 'unprocessed', 'unprocessed', '2026-01-15T10:30:00Z', '2026-01-15T10:30:00Z')",
+         VALUES (?, ?, 0, 'active', 'saved_local', 'not_configured', 'unprocessed', 'not_applicable', '2026-01-15T10:30:00Z', '2026-01-15T10:30:00Z')",
         rusqlite::params![item_id, &capture_id],
     )?;
     tx.commit()?;
@@ -959,5 +962,401 @@ fn late_replay_does_not_flip_a_scheduled_reminder_to_past() -> Result<()> {
     })?;
     assert_eq!(replay, first);
     assert_eq!(operations(&mut db, "item-1")?.len(), 1);
+    Ok(())
+}
+
+fn correct_text(
+    db: &mut Database,
+    item_id: &str,
+    revision: i32,
+    old_text: &str,
+    new_text: &str,
+) -> Result<i32> {
+    let event = Event::new(
+        format!("evt-text-{item_id}-{revision}"),
+        item_id.to_string(),
+        revision,
+        EventType::Correction,
+        EventPayload::Correction(Correction {
+            kind: CorrectionKind::Text,
+            old_value: Some(old_text.to_string()),
+            new_value: new_text.to_string(),
+        }),
+        "2026-01-15T10:45:00Z".to_string(),
+    )?;
+    save_event(db, &event, revision)?;
+    Ok(revision + 1)
+}
+
+fn completion_event(item_id: &str, revision: i32) -> Event {
+    Event::new(
+        format!("evt-complete-{item_id}"),
+        item_id.to_string(),
+        revision,
+        EventType::Completion,
+        EventPayload::Completion,
+        "2026-01-15T11:00:00Z".to_string(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn derived_output_cannot_reduce_a_stored_recurrence_to_a_one_shot() -> Result<()> {
+    let mut db = open_db(&temp_db_path("recurrence_protected"))?;
+    let text = "take the pill every day starting 2026-01-16 09:00:00";
+    let revision = insert_item(&mut db, "item-1", text, true)?;
+    let clock = clock_at(capture_instant());
+
+    let recurring = run(&mut db, |tx| {
+        apply_derived_request(tx, &clock, &derived("item-1", revision, "every day"))
+    })?;
+    assert_eq!(recurring.request_state, RequestState::UnsupportedRecurrence);
+
+    // While the text carries the repeat marker, a one-shot phrase is kept as the recurrence.
+    let one_shot = derived("item-1", revision, "2026-01-16 09:00:00");
+    let kept = run(&mut db, |tx| apply_derived_request(tx, &clock, &one_shot))?;
+    assert_eq!(kept, recurring);
+    assert!(operations(&mut db, "item-1")?.is_empty());
+    assert!(run(&mut db, desired_notifications)?.is_empty());
+
+    // Even once the marker is gone from the text, derived output cannot leave the stored
+    // recurrence; only an explicit user time correction can.
+    let revision = correct_text(
+        &mut db,
+        "item-1",
+        revision,
+        text,
+        "take the pill starting 2026-01-16 09:00:00",
+    )?;
+    let one_shot = derived("item-1", revision, "2026-01-16 09:00:00");
+    let refused = run(&mut db, |tx| apply_derived_request(tx, &clock, &one_shot));
+    assert!(matches!(
+        refused,
+        Err(ReminderStateError::RecurrenceProtected)
+    ));
+    assert_eq!(reminder(&mut db, "item-1")?.unwrap(), recurring);
+    assert!(operations(&mut db, "item-1")?.is_empty());
+    assert!(run(&mut db, desired_notifications)?.is_empty());
+
+    let explicit = run(&mut db, |tx| {
+        apply_user_time_correction(
+            tx,
+            &clock,
+            &user_time("item-1", revision, "2026-01-16T09:00:00Z"),
+        )
+    })?;
+    assert_eq!(explicit.request_state, RequestState::Resolved);
+    assert_eq!(operations(&mut db, "item-1")?.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn a_one_shot_phrase_beside_a_repeat_marker_in_the_text_is_stored_as_recurrence() -> Result<()> {
+    let mut db = open_db(&temp_db_path("recurrence_in_text"))?;
+    let clock = clock_at(capture_instant());
+    let texts = [
+        "take the pill every day starting 2026-01-16 09:00:00",
+        "stretch: daily, first on 2026-01-16 09:00:00",
+        "review the budget weekly. first one 2026-01-16 09:00:00",
+    ];
+    for (index, text) in texts.iter().enumerate() {
+        let item_id = format!("item-{index}");
+        let revision = insert_item(&mut db, &item_id, text, true)?;
+        let record = run(&mut db, |tx| {
+            apply_derived_request(
+                tx,
+                &clock,
+                &derived(&item_id, revision, "2026-01-16 09:00:00"),
+            )
+        })?;
+        assert_eq!(
+            record.request_state,
+            RequestState::UnsupportedRecurrence,
+            "{text}"
+        );
+        assert_eq!(record.resolved_instant, None);
+        assert_eq!(record.schedule_generation, 0);
+        assert!(operations(&mut db, &item_id)?.is_empty());
+    }
+    assert!(run(&mut db, desired_notifications)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn a_text_without_repeat_markers_is_still_scheduled_as_a_one_shot() -> Result<()> {
+    let mut db = open_db(&temp_db_path("no_repeat_marker"))?;
+    let revision = insert_item(
+        &mut db,
+        "item-1",
+        "everyone should see 2026-01-16 09:00:00",
+        true,
+    )?;
+    let clock = clock_at(capture_instant());
+    let record = run(&mut db, |tx| {
+        apply_derived_request(
+            tx,
+            &clock,
+            &derived("item-1", revision, "2026-01-16 09:00:00"),
+        )
+    })?;
+    assert_eq!(record.request_state, RequestState::Resolved);
+    Ok(())
+}
+
+#[test]
+fn expired_opportunity_loads_through_the_item_status_api_with_its_own_reason_column() -> Result<()>
+{
+    let mut db = open_db(&temp_db_path("status_past"))?;
+    let revision = insert_item(
+        &mut db,
+        "item-1",
+        "call the roofer 2026-01-14 09:00:00",
+        true,
+    )?;
+    let clock = clock_at(capture_instant());
+    let record = run(&mut db, |tx| {
+        apply_derived_request(
+            tx,
+            &clock,
+            &derived("item-1", revision, "2026-01-14 09:00:00"),
+        )
+    })?;
+    assert_eq!(
+        record.request_state,
+        RequestState::Unschedulable(UnschedulableReason::TimeInPast)
+    );
+    assert_eq!(record.unsupported_reason, None);
+
+    let (unsupported, unschedulable): (Option<String>, Option<String>) = db.conn().query_row(
+        "SELECT unsupported_reason, unschedulable_reason FROM reminders WHERE item_id = 'item-1'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    assert_eq!(unsupported, None);
+    assert_eq!(unschedulable.as_deref(), Some("time_in_past"));
+
+    let status = run_status(&mut db, "item-1")?;
+    assert_eq!(
+        status.reminder_request_state,
+        Some(ReminderRequestState::Unschedulable)
+    );
+    assert_eq!(
+        status.unschedulable_reason,
+        Some(StatusUnschedulableReason::TimeInPast)
+    );
+
+    run(&mut db, |tx| {
+        cancel_reminder(tx, &clock, "item-1", revision)
+    })?;
+    let cancelled = run_status(&mut db, "item-1")?;
+    assert_eq!(
+        cancelled.reminder_request_state,
+        Some(ReminderRequestState::Cancelled)
+    );
+    assert_eq!(cancelled.unschedulable_reason, None);
+    Ok(())
+}
+
+fn run_status(db: &mut Database, item_id: &str) -> Result<ItemStatus> {
+    let tx = db.immediate_transaction()?;
+    let status = ItemStatus::load(&tx, item_id)?.expect("item exists");
+    tx.commit()?;
+    Ok(status)
+}
+
+#[test]
+fn every_reminder_state_loads_through_the_item_status_api() -> Result<()> {
+    let mut db = open_db(&temp_db_path("status_all"))?;
+    let clock = clock_at(capture_instant());
+    let revision = insert_item(&mut db, "item-ok", ROOFER_TEXT, true)?;
+    run(&mut db, |tx| {
+        apply_derived_request(
+            tx,
+            &clock,
+            &derived("item-ok", revision, "2026-01-16 09:00:00"),
+        )
+    })?;
+    let revision = insert_item(&mut db, "item-amb", "pay the invoice 2026-01-20", true)?;
+    run(&mut db, |tx| {
+        apply_derived_request(tx, &clock, &derived("item-amb", revision, "2026-01-20"))
+    })?;
+    let revision = insert_item(&mut db, "item-rec", "water the plants every day", true)?;
+    run(&mut db, |tx| {
+        apply_derived_request(tx, &clock, &derived("item-rec", revision, "every day"))
+    })?;
+
+    assert_eq!(
+        run_status(&mut db, "item-ok")?.reminder_request_state,
+        Some(ReminderRequestState::Resolved)
+    );
+    assert_eq!(
+        run_status(&mut db, "item-amb")?.reminder_request_state,
+        Some(ReminderRequestState::NotScheduledYet)
+    );
+    assert_eq!(
+        run_status(&mut db, "item-rec")?.reminder_request_state,
+        Some(ReminderRequestState::UnsupportedRecurrence)
+    );
+    Ok(())
+}
+
+#[test]
+fn the_requested_phrase_survives_a_text_correction_while_ambiguity_is_pending() -> Result<()> {
+    let mut db = open_db(&temp_db_path("source_phrase"))?;
+    let original = "pay the invoice 2026-01-20 and renew the lease 2026-02-01";
+    let revision = insert_item(&mut db, "item-1", original, true)?;
+    let clock = clock_at(capture_instant());
+
+    let record = run(&mut db, |tx| {
+        apply_derived_request(tx, &clock, &derived("item-1", revision, "  2026-01-20 "))
+    })?;
+    assert_eq!(record.request_state, RequestState::NotScheduledYet);
+    assert_eq!(record.source_phrase.as_deref(), Some("2026-01-20"));
+
+    let corrected_revision =
+        correct_text(&mut db, "item-1", revision, original, "pay the invoice")?;
+    let reloaded = reminder(&mut db, "item-1")?.unwrap();
+    assert_eq!(reloaded.source_phrase.as_deref(), Some("2026-01-20"));
+    assert!(reloaded.ambiguity_reason.is_some());
+
+    let resolved = run(&mut db, |tx| {
+        apply_user_time_correction(
+            tx,
+            &clock,
+            &user_time("item-1", corrected_revision, "2026-01-20T08:00:00Z"),
+        )
+    })?;
+    assert_eq!(resolved.request_state, RequestState::Resolved);
+    assert_eq!(resolved.source_phrase.as_deref(), Some("2026-01-20"));
+    Ok(())
+}
+
+#[test]
+fn completing_through_the_production_path_cancels_the_reminder_in_one_transaction() -> Result<()> {
+    let path = temp_db_path("end_item");
+    let mut db = open_db(&path)?;
+    let revision = insert_item(&mut db, "item-1", ROOFER_TEXT, true)?;
+    let clock = clock_at(capture_instant());
+    let scheduled = run(&mut db, |tx| {
+        apply_derived_request(
+            tx,
+            &clock,
+            &derived("item-1", revision, "2026-01-16 09:00:00"),
+        )
+    })?;
+
+    let wrong_revision = completion_event("item-1", revision + 1);
+    let stale = run(&mut db, |tx| {
+        end_item_with_event(tx, &clock, &wrong_revision, revision + 1)
+    });
+    assert!(matches!(stale, Err(ReminderStateError::Event(_))));
+    assert_eq!(reminder(&mut db, "item-1")?.unwrap(), scheduled);
+
+    let correction_event = Event::new(
+        "evt-other".to_string(),
+        "item-1".to_string(),
+        revision,
+        EventType::Correction,
+        EventPayload::Correction(Correction {
+            kind: CorrectionKind::Scope,
+            old_value: Some("personal".to_string()),
+            new_value: "work".to_string(),
+        }),
+        "2026-01-15T11:00:00Z".to_string(),
+    )?;
+    let not_lifecycle = run(&mut db, |tx| {
+        end_item_with_event(tx, &clock, &correction_event, revision)
+    });
+    assert!(matches!(
+        not_lifecycle,
+        Err(ReminderStateError::NotALifecycleEvent)
+    ));
+
+    let event = completion_event("item-1", revision);
+    let cancelled = run(&mut db, |tx| {
+        end_item_with_event(tx, &clock, &event, revision)
+    })?
+    .expect("reminder exists");
+    assert_eq!(cancelled.request_state, RequestState::Cancelled);
+    assert!(run(&mut db, desired_notifications)?.is_empty());
+
+    let replay = run(&mut db, |tx| {
+        end_item_with_event(tx, &clock, &event, revision)
+    })?;
+    assert_eq!(replay, Some(cancelled));
+    let operation_list = run(&mut db, |tx| list_operations(tx, &scheduled.reminder_id))?;
+    assert_eq!(operation_list.len(), 2);
+    assert_eq!(operation_list[1].operation_type, OperationType::Cancel);
+
+    drop(db);
+    let mut reopened = open_db(&path)?;
+    assert_eq!(
+        reminder(&mut reopened, "item-1")?.unwrap().request_state,
+        RequestState::Cancelled
+    );
+    Ok(())
+}
+
+#[test]
+fn a_crash_between_item_completion_and_reminder_cancellation_is_repaired_on_restart() -> Result<()>
+{
+    let path = temp_db_path("crash_boundary");
+    let clock = clock_at(capture_instant());
+    let scheduled = {
+        let mut db = open_db(&path)?;
+        let revision = insert_item(&mut db, "item-1", ROOFER_TEXT, true)?;
+        let scheduled = run(&mut db, |tx| {
+            apply_derived_request(
+                tx,
+                &clock,
+                &derived("item-1", revision, "2026-01-16 09:00:00"),
+            )
+        })?;
+        // The completion event commits; the process dies before any reminder cancellation.
+        complete_item(&mut db, "item-1", revision)?;
+        scheduled
+    };
+
+    let mut db = open_db(&path)?;
+    assert_eq!(
+        reminder(&mut db, "item-1")?.unwrap().request_state,
+        RequestState::Resolved
+    );
+    assert!(
+        run(&mut db, desired_notifications)?.is_empty(),
+        "an inactive item's reminder is never part of the desired native set"
+    );
+
+    let repaired = run(&mut db, |tx| reconcile_inactive_items(tx, &clock))?;
+    assert_eq!(repaired.len(), 1);
+    assert_eq!(repaired[0].request_state, RequestState::Cancelled);
+    let operation_list = run(&mut db, |tx| list_operations(tx, &scheduled.reminder_id))?;
+    assert_eq!(operation_list.len(), 2);
+    assert_eq!(operation_list[1].operation_type, OperationType::Cancel);
+    assert_eq!(
+        operation_list[1].notification_id,
+        scheduled.notification_id().unwrap()
+    );
+
+    assert!(run(&mut db, |tx| reconcile_inactive_items(tx, &clock))?.is_empty());
+    assert_eq!(operations(&mut db, "item-1")?.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn reconciliation_leaves_active_items_alone() -> Result<()> {
+    let mut db = open_db(&temp_db_path("reconcile_active"))?;
+    let revision = insert_item(&mut db, "item-1", ROOFER_TEXT, true)?;
+    let clock = clock_at(capture_instant());
+    let scheduled = run(&mut db, |tx| {
+        apply_derived_request(
+            tx,
+            &clock,
+            &derived("item-1", revision, "2026-01-16 09:00:00"),
+        )
+    })?;
+    assert!(run(&mut db, |tx| reconcile_inactive_items(tx, &clock))?.is_empty());
+    assert_eq!(reminder(&mut db, "item-1")?.unwrap(), scheduled);
+    assert_eq!(run(&mut db, desired_notifications)?.len(), 1);
     Ok(())
 }

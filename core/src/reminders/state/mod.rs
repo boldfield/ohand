@@ -16,7 +16,14 @@
 //   correction changes that.
 // - Every write carries the expected item revision (compare-and-set). Reminder changes do not
 //   bump the item revision.
-// - Recurring requests are stored as `unsupported_recurrence` and are never reduced to one shot.
+// - Recurring requests are stored as `unsupported_recurrence` and are never reduced to one shot:
+//   a derived phrase is refused (stored as recurrence) when the item's text carries a repeat
+//   marker anywhere, and derived output can never leave `unsupported_recurrence`; only an
+//   explicit user time correction does.
+// - Completing or cancelling an item cancels its reminder in the same transaction as the
+//   lifecycle event. `reconcile_inactive_items` repairs any reminder left behind by an item that
+//   became inactive through another path, and `desired_notifications` never includes the
+//   reminder of an inactive item.
 //
 // Native identity: `reminder_id#schedule_generation`, used verbatim as the OS request
 // identifier. The generation increases every time the reminder's time changes, so a retry
@@ -31,6 +38,7 @@ use std::str::FromStr;
 use thiserror::Error;
 
 use crate::domain::items::{load_item_state, ItemState, LifecycleState};
+use crate::store::events::{save_event_in_tx, Event, EventError, EventType};
 use crate::store::schema::Clock;
 use crate::time::{AmbiguityKind, ResolutionError, TimeContext, TimeResolver};
 
@@ -250,8 +258,12 @@ pub struct ReminderRecord {
     pub timezone_id: Option<String>,
     /// Why the time is incomplete or ambiguous (`NotScheduledYet`).
     pub ambiguity_reason: Option<String>,
-    /// Why recurrence is unsupported (`UnsupportedRecurrence`).
+    /// Why recurrence is unsupported (`UnsupportedRecurrence`). Never holds an unschedulable
+    /// reason; that lives in `RequestState::Unschedulable`.
     pub unsupported_reason: Option<String>,
+    /// The phrase the reminder was requested with, preserved so an ambiguous or unscheduled
+    /// request stays inspectable after the item's text is corrected.
+    pub source_phrase: Option<String>,
     pub schedule_generation: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -307,6 +319,10 @@ pub enum ReminderStateError {
     ItemCannotCarryReminder(String),
     #[error("item {item_id} is still active; its reminder is not cancelled by lifecycle")]
     ItemStillActive { item_id: String },
+    #[error("only completion and cancellation events end an item's reminder")]
+    NotALifecycleEvent,
+    #[error(transparent)]
+    Event(#[from] EventError),
     #[error("stale revision on item {item_id}: expected {expected}, current {current}")]
     StaleRevision {
         item_id: String,
@@ -317,6 +333,8 @@ pub enum ReminderStateError {
     FabricatedDeadline(String),
     #[error("a committed reminder time can only be changed by an explicit user correction")]
     CommittedTimeProtected,
+    #[error("the request is a recurring reminder; only an explicit user time correction can replace it with a one-shot")]
+    RecurrenceProtected,
     #[error("the reminder was cancelled; only an explicit user time correction can restore it")]
     ReminderCancelled,
     #[error("unknown timezone {0}")]
@@ -420,10 +438,54 @@ pub fn apply_derived_request(
     let context = load_capture_time_context(tx, &item.capture_id)?;
     require_phrase_in_text(&item, &request.phrase)?;
 
-    let outcome = match TimeResolver::resolve(&request.phrase, &context) {
+    let outcome = match text_repeat_reason(&item, &context) {
+        Some(reason) => TimeOutcome::UnsupportedRecurrence {
+            reason,
+            timezone_id: context.timezone.clone(),
+        },
+        None => resolve_phrase(&request.phrase, &context, clock.now())?,
+    };
+
+    let existing = load_reminder_by_item(tx, &request.item_id)?;
+    if let Some(record) = &existing {
+        match record.request_state {
+            RequestState::Cancelled => return Err(ReminderStateError::ReminderCancelled),
+            RequestState::UnsupportedRecurrence => {
+                return if matches!(outcome, TimeOutcome::UnsupportedRecurrence { .. }) {
+                    Ok(record.clone())
+                } else {
+                    Err(ReminderStateError::RecurrenceProtected)
+                };
+            }
+            RequestState::Resolved | RequestState::Unschedulable(_) => {
+                return if outcome.committed_instant() == record.resolved_instant {
+                    Ok(record.clone())
+                } else {
+                    Err(ReminderStateError::CommittedTimeProtected)
+                };
+            }
+            RequestState::NotRequested | RequestState::NotScheduledYet => {}
+        }
+    }
+    commit_outcome(
+        tx,
+        clock.now(),
+        &request.item_id,
+        existing,
+        outcome,
+        Some(request.phrase.trim()),
+    )
+}
+
+fn resolve_phrase(
+    phrase: &str,
+    context: &TimeContext,
+    now: DateTime<Utc>,
+) -> Result<TimeOutcome, ReminderStateError> {
+    Ok(match TimeResolver::resolve(phrase, context) {
         Ok(resolution) => match resolution.resolved_time {
             Some(instant) if resolution.ambiguity_kind != Some(AmbiguityKind::Past) => {
-                TimeOutcome::for_instant(instant, context.timezone.clone(), clock.now())
+                TimeOutcome::for_instant(instant, context.timezone.clone(), now)
             }
             Some(instant) => TimeOutcome::InPast {
                 instant,
@@ -445,25 +507,27 @@ pub fn apply_derived_request(
             timezone_id: context.timezone.clone(),
         },
         Err(other) => return Err(ReminderStateError::Resolution(other)),
-    };
+    })
+}
 
-    let existing = load_reminder_by_item(tx, &request.item_id)?;
-    if let Some(record) = &existing {
-        match record.request_state {
-            RequestState::Cancelled => return Err(ReminderStateError::ReminderCancelled),
-            RequestState::Resolved | RequestState::Unschedulable(_) => {
-                return if outcome.committed_instant() == record.resolved_instant {
-                    Ok(record.clone())
-                } else {
-                    Err(ReminderStateError::CommittedTimeProtected)
-                };
+/// The resolver's own repeat detection applied to the whole item text (punctuation treated as
+/// whitespace), so a one-shot phrase beside "every day" is not mistaken for a one-shot request.
+fn text_repeat_reason(item: &ItemState, context: &TimeContext) -> Option<String> {
+    let text = item.current_text.text()?;
+    let spaced: String = text
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() {
+                character
+            } else {
+                ' '
             }
-            RequestState::NotRequested
-            | RequestState::NotScheduledYet
-            | RequestState::UnsupportedRecurrence => {}
-        }
+        })
+        .collect();
+    match TimeResolver::resolve(&spaced, context) {
+        Err(ResolutionError::UnsupportedRepeat(reason)) => Some(reason),
+        _ => None,
     }
-    commit_outcome(tx, clock.now(), &request.item_id, existing, outcome)
 }
 
 /// Set or change the reminder time from an explicit user choice. Idempotent for the same
@@ -495,7 +559,14 @@ pub fn apply_user_time_correction(
         correction.timezone_id.clone(),
         clock.now(),
     );
-    commit_outcome(tx, clock.now(), &correction.item_id, existing, outcome)
+    commit_outcome(
+        tx,
+        clock.now(),
+        &correction.item_id,
+        existing,
+        outcome,
+        None,
+    )
 }
 
 /// Cancel the reminder only; the item stays active. Idempotent.
@@ -527,6 +598,51 @@ pub fn cancel_for_inactive_item(
     cancel_existing(tx, clock.now(), item_id)
 }
 
+/// Record a completion or cancellation event for an item and cancel its reminder in the same
+/// transaction, so the item can never be inactive with a live reminder after a crash.
+/// Idempotent: replaying the identical event cancels nothing twice.
+pub fn end_item_with_event(
+    tx: &Transaction<'_>,
+    clock: &dyn Clock,
+    event: &Event,
+    expected_revision: i32,
+) -> Result<Option<ReminderRecord>, ReminderStateError> {
+    if !matches!(
+        event.event_type,
+        EventType::Completion | EventType::Cancellation
+    ) {
+        return Err(ReminderStateError::NotALifecycleEvent);
+    }
+    save_event_in_tx(tx, event, expected_revision)?;
+    cancel_existing(tx, clock.now(), &event.item_id)
+}
+
+/// Cancel the reminder of every item that is no longer active (completed, cancelled or
+/// deleted by any path) and whose reminder is not yet cancelled. Run at startup or before
+/// reconciling with the OS; returns the reminders it cancelled.
+pub fn reconcile_inactive_items(
+    tx: &Transaction<'_>,
+    clock: &dyn Clock,
+) -> Result<Vec<ReminderRecord>, ReminderStateError> {
+    let mut statement = tx.prepare(
+        "SELECT reminders.item_id FROM reminders
+         JOIN items ON items.item_id = reminders.item_id
+         WHERE items.lifecycle_state != 'active' AND reminders.request_state != 'cancelled'
+         ORDER BY reminders.created_at, reminders.reminder_id",
+    )?;
+    let item_ids = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    let mut cancelled = Vec::new();
+    for item_id in item_ids {
+        if let Some(record) = cancel_existing(tx, clock.now(), &item_id)? {
+            cancelled.push(record);
+        }
+    }
+    Ok(cancelled)
+}
+
 pub fn get_reminder(
     tx: &Transaction<'_>,
     item_id: &str,
@@ -550,13 +666,17 @@ pub fn list_operations(
     rows.into_iter().map(decode_operation).collect()
 }
 
-/// The native set core wants installed: every `Resolved` reminder at its current generation.
+/// The native set core wants installed: every `Resolved` reminder of an active item at its
+/// current generation.
 pub fn desired_notifications(
     tx: &Transaction<'_>,
 ) -> Result<Vec<DesiredNotification>, ReminderStateError> {
     let mut statement = tx.prepare(
-        "SELECT reminder_id, item_id, schedule_generation, resolved_instant
-         FROM reminders WHERE request_state = 'resolved' ORDER BY resolved_instant, reminder_id",
+        "SELECT reminders.reminder_id, reminders.item_id, reminders.schedule_generation,
+                reminders.resolved_instant
+         FROM reminders JOIN items ON items.item_id = reminders.item_id
+         WHERE reminders.request_state = 'resolved' AND items.lifecycle_state = 'active'
+         ORDER BY reminders.resolved_instant, reminders.reminder_id",
     )?;
     let rows = statement
         .query_map([], |row| {
@@ -712,6 +832,8 @@ type ReminderColumns = (
     i64,
     String,
     String,
+    Option<String>,
+    Option<String>,
 );
 
 fn load_reminder_by_item(
@@ -722,7 +844,8 @@ fn load_reminder_by_item(
         .query_row(
             "SELECT reminder_id, item_id, request_state, schedule_state, delivery_state,
                     acknowledgment_state, resolved_instant, timezone_id, ambiguity_reason,
-                    unsupported_reason, schedule_generation, created_at, updated_at
+                    unsupported_reason, schedule_generation, created_at, updated_at,
+                    unschedulable_reason, source_phrase
              FROM reminders WHERE item_id = ?",
             [item_id],
             |row| {
@@ -740,6 +863,8 @@ fn load_reminder_by_item(
                     row.get(10)?,
                     row.get(11)?,
                     row.get(12)?,
+                    row.get(13)?,
+                    row.get(14)?,
                 ))
             },
         )
@@ -762,8 +887,10 @@ fn decode_reminder(columns: ReminderColumns) -> Result<ReminderRecord, ReminderS
         schedule_generation,
         created_at,
         updated_at,
+        unschedulable_reason,
+        source_phrase,
     ) = columns;
-    let request_state = RequestState::decode(&request_state, unsupported_reason.as_deref())?;
+    let request_state = RequestState::decode(&request_state, unschedulable_reason.as_deref())?;
     let resolved_instant = resolved_instant.as_deref().map(parse_instant).transpose()?;
     if request_state == RequestState::Resolved && resolved_instant.is_none() {
         return Err(corrupt("resolved reminder without instant", &reminder_id));
@@ -779,6 +906,7 @@ fn decode_reminder(columns: ReminderColumns) -> Result<ReminderRecord, ReminderS
         timezone_id,
         ambiguity_reason,
         unsupported_reason,
+        source_phrase,
         schedule_generation,
         created_at: parse_instant(&created_at)?,
         updated_at: parse_instant(&updated_at)?,
@@ -949,7 +1077,8 @@ fn cancel_existing(
     }
     retire_generation(tx, &record.reminder_id, record.schedule_generation, now)?;
     tx.execute(
-        "UPDATE reminders SET request_state = 'cancelled', updated_at = ? WHERE reminder_id = ?",
+        "UPDATE reminders SET request_state = 'cancelled', unschedulable_reason = NULL,
+                updated_at = ? WHERE reminder_id = ?",
         rusqlite::params![format_instant(now), &record.reminder_id],
     )?;
     load_reminder_by_item(tx, item_id)
@@ -962,7 +1091,13 @@ fn commit_outcome(
     item_id: &str,
     existing: Option<ReminderRecord>,
     outcome: TimeOutcome,
+    requested_phrase: Option<&str>,
 ) -> Result<ReminderRecord, ReminderStateError> {
+    let source_phrase = requested_phrase.map(str::to_string).or_else(|| {
+        existing
+            .as_ref()
+            .and_then(|record| record.source_phrase.clone())
+    });
     let (reminder_id, previous_generation, created_at, previous_schedule_state) = match &existing {
         Some(record) => (
             record.reminder_id.clone(),
@@ -980,49 +1115,59 @@ fn commit_outcome(
 
     let retired = retire_generation(tx, &reminder_id, previous_generation, now)?;
 
-    let (request_state, resolved_instant, timezone_id, ambiguity_reason, unsupported_reason) =
-        match &outcome {
-            TimeOutcome::Resolved {
-                instant,
-                timezone_id,
-            } => (
-                RequestState::Resolved,
-                Some(*instant),
-                Some(timezone_id.clone()),
-                None,
-                None,
-            ),
-            TimeOutcome::InPast {
-                instant,
-                timezone_id,
-            } => (
-                RequestState::Unschedulable(UnschedulableReason::TimeInPast),
-                Some(*instant),
-                Some(timezone_id.clone()),
-                None,
-                Some(UnschedulableReason::TimeInPast.as_str().to_string()),
-            ),
-            TimeOutcome::NeedsCorrection {
-                reason,
-                timezone_id,
-            } => (
-                RequestState::NotScheduledYet,
-                None,
-                Some(timezone_id.clone()),
-                Some(reason.clone()),
-                None,
-            ),
-            TimeOutcome::UnsupportedRecurrence {
-                reason,
-                timezone_id,
-            } => (
-                RequestState::UnsupportedRecurrence,
-                None,
-                Some(timezone_id.clone()),
-                None,
-                Some(reason.clone()),
-            ),
-        };
+    let (
+        request_state,
+        resolved_instant,
+        timezone_id,
+        ambiguity_reason,
+        unsupported_reason,
+        unschedulable_reason,
+    ) = match &outcome {
+        TimeOutcome::Resolved {
+            instant,
+            timezone_id,
+        } => (
+            RequestState::Resolved,
+            Some(*instant),
+            Some(timezone_id.clone()),
+            None,
+            None,
+            None,
+        ),
+        TimeOutcome::InPast {
+            instant,
+            timezone_id,
+        } => (
+            RequestState::Unschedulable(UnschedulableReason::TimeInPast),
+            Some(*instant),
+            Some(timezone_id.clone()),
+            None,
+            None,
+            Some(UnschedulableReason::TimeInPast.as_str().to_string()),
+        ),
+        TimeOutcome::NeedsCorrection {
+            reason,
+            timezone_id,
+        } => (
+            RequestState::NotScheduledYet,
+            None,
+            Some(timezone_id.clone()),
+            Some(reason.clone()),
+            None,
+            None,
+        ),
+        TimeOutcome::UnsupportedRecurrence {
+            reason,
+            timezone_id,
+        } => (
+            RequestState::UnsupportedRecurrence,
+            None,
+            Some(timezone_id.clone()),
+            None,
+            Some(reason.clone()),
+            None,
+        ),
+    };
 
     let (schedule_generation, schedule_state) = match request_state {
         RequestState::Resolved => (previous_generation + 1, ScheduleState::PendingSchedule),
@@ -1035,8 +1180,9 @@ fn commit_outcome(
             "INSERT INTO reminders
                 (reminder_id, item_id, request_state, schedule_state, delivery_state,
                  acknowledgment_state, resolved_instant, timezone_id, ambiguity_reason,
-                 unsupported_reason, schedule_generation, created_at, updated_at)
-             VALUES (?, ?, ?, ?, 'unknown', 'not_acknowledged', ?, ?, ?, ?, ?, ?, ?)",
+                 unsupported_reason, unschedulable_reason, source_phrase, schedule_generation,
+                 created_at, updated_at)
+             VALUES (?, ?, ?, ?, 'unknown', 'not_acknowledged', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rusqlite::params![
                 &reminder_id,
                 item_id,
@@ -1046,6 +1192,8 @@ fn commit_outcome(
                 &timezone_id,
                 &ambiguity_reason,
                 &unsupported_reason,
+                &unschedulable_reason,
+                &source_phrase,
                 schedule_generation,
                 format_instant(created_at),
                 format_instant(now),
@@ -1055,7 +1203,8 @@ fn commit_outcome(
         tx.execute(
             "UPDATE reminders SET request_state = ?, schedule_state = ?, resolved_instant = ?,
                 timezone_id = ?, ambiguity_reason = ?, unsupported_reason = ?,
-                schedule_generation = ?, updated_at = ?
+                unschedulable_reason = ?, source_phrase = ?, schedule_generation = ?,
+                updated_at = ?
              WHERE reminder_id = ?",
             rusqlite::params![
                 request_state.column_value(),
@@ -1064,6 +1213,8 @@ fn commit_outcome(
                 &timezone_id,
                 &ambiguity_reason,
                 &unsupported_reason,
+                &unschedulable_reason,
+                &source_phrase,
                 schedule_generation,
                 format_instant(now),
                 &reminder_id,
