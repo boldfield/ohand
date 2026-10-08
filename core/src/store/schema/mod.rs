@@ -51,6 +51,10 @@ pub const MIGRATIONS: &[MigrationStep] = &[
         target_version: 2,
         apply: add_event_payload_columns_v2,
     },
+    MigrationStep {
+        target_version: 3,
+        apply: add_unschedulable_reason_v3,
+    },
 ];
 
 /// Database handle with schema validation.
@@ -659,6 +663,15 @@ fn add_event_payload_columns_v2(tx: &Transaction<'_>) -> Result<()> {
     )?;
     tx.execute(
         "ALTER TABLE events ADD COLUMN suggestion_control_kind TEXT",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Step 3: Add unschedulable_reason column to reminders table for D05.
+fn add_unschedulable_reason_v3(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute(
+        "ALTER TABLE reminders ADD COLUMN unschedulable_reason TEXT",
         [],
     )?;
     Ok(())
