@@ -1249,11 +1249,6 @@ fn in_lexicon(token: &Token, vocabulary: &[&str]) -> bool {
 /// lexicon, and the content ends in a noun, pronoun or particle. Empty content is never a
 /// target.
 fn content_is_in_lexicon(content: &[Token]) -> bool {
-    // If content contains a session-topic phrase, allow it even if not in the reminder lexicon
-    if extract_session_topic_from_reminder_content(content).is_some() {
-        return true;
-    }
-
     let Some((verb, objects)) = content.split_first() else {
         return false;
     };
@@ -1444,24 +1439,13 @@ pub fn recognize_reminder(
     // The lexicon check above guarantees a non-empty content; a reminder is only ever proposed
     // on an action with sourced target evidence.
     let (first, last) = (content.first()?, content.last()?);
-
-    // Extract session-topic from content if present
-    let session_topic = extract_session_topic_from_reminder_content(content);
-
-    let mut proposal = provenance
-        .proposal()
-        .with_reminder_proposal(Some(reminder_from(&time, time_context)))
-        .with_item_type(Some(ItemType::Action))
-        .with_source_spans(Some(vec![SourceSpan::new(first.start, last.end)]));
-
-    if let Some((topic, span)) = session_topic {
-        proposal = proposal.with_session_topic_proposal(Some(SessionTopicProposal {
-            topic,
-            source_span: Some(span),
-        }));
-    }
-
-    Some(proposal)
+    Some(
+        provenance
+            .proposal()
+            .with_reminder_proposal(Some(reminder_from(&time, time_context)))
+            .with_item_type(Some(ItemType::Action))
+            .with_source_spans(Some(vec![SourceSpan::new(first.start, last.end)])),
+    )
 }
 
 // Session-topic phrase recognition:
@@ -1600,9 +1584,70 @@ pub fn recognize_session_topic(
     )
 }
 
+/// Try to recognize a mixed reminder+topic input where the reminder content
+/// ends with a session-topic phrase. This is called when the standard reminder
+/// parser failed (because the content didn't match the lexicon due to the topic phrase)
+/// but the topic recognizer succeeded.
+#[allow(clippy::too_many_arguments)]
+fn try_mixed_reminder_and_topic(
+    text: &str,
+    item_id: &str,
+    capture_id: &str,
+    source_revision: i32,
+    text_basis: &TextBasis,
+    request_version: &str,
+    time_context: &TimeContext,
+    topic_proposal: &Proposal,
+) -> Option<Proposal> {
+    // Check if topic has a valid topic facet (not abstaining)
+    let topic_info = topic_proposal.session_topic_proposal.as_ref()?;
+    if topic_proposal.abstention.is_some() {
+        return None;
+    }
+
+    // Try to recognize as a reminder by attempting to call recognize_reminder_for_mixed_input
+    // For "Remind me tomorrow to bring this up in therapy", we want to:
+    // 1. Find the reminder command structure ("Remind me")
+    // 2. Extract any time component ("tomorrow")
+    // 3. Use the content span from the tokens
+
+    let tokens = tokenize(text);
+    let command_index = find_command(&tokens)?;
+
+    // We found "remind me". Now skip past it and parse as if it were a reminder command
+    let rest = &tokens[command_index + 2..]; // Skip "remind me"
+
+    // Try to parse the shape (which will extract time and content)
+    let shape = parse_shape(rest, time_context)?;
+    let ParsedCommand { time, content, .. } = match shape {
+        Shape::Recurrence => return None,
+        Shape::Scheduled(parsed) => *parsed,
+    };
+
+    // Now create the proposal with both reminder (using the parsed time) and topic facets
+    let provenance = Provenance {
+        item_id,
+        capture_id,
+        source_revision,
+        text_basis: text_basis.clone(),
+        request_version,
+    };
+
+    let (first, last) = (content.first()?, content.last()?);
+    Some(
+        provenance
+            .proposal()
+            .with_reminder_proposal(Some(reminder_from(&time, time_context)))
+            .with_item_type(Some(ItemType::Action))
+            .with_source_spans(Some(vec![SourceSpan::new(first.start, last.end)]))
+            .with_session_topic_proposal(Some(topic_info.clone())),
+    )
+}
+
 /// Recognize both reminder and session-topic facets in `text`, composing their results
-/// into a single proposal that may carry both. This function is called after the individual
-/// recognizers to produce a unified proposal when both patterns are present.
+/// into a single proposal that may carry both. The reminder recognizer is unchanged.
+/// When only the reminder succeeds, this composer checks if the content contains a
+/// session-topic phrase at the end and merges both results into one proposal.
 pub fn recognize_with_composed_topics(
     text: &str,
     item_id: &str,
@@ -1626,7 +1671,7 @@ pub fn recognize_with_composed_topics(
         item_id,
         capture_id,
         source_revision,
-        text_basis,
+        text_basis.clone(),
         request_version,
     );
 
@@ -1637,10 +1682,52 @@ pub fn recognize_with_composed_topics(
             result.session_topic_proposal = t.session_topic_proposal.clone();
             Some(result)
         }
-        // Just reminder, use it
-        (Some(_), None) => reminder,
-        // Just topic, use it
-        (None, Some(_)) => topic,
+        // Just reminder, check if it has a topic phrase in content
+        (Some(r), None) if r.abstention.is_none() => {
+            if let Some(source_spans) = &r.source_spans {
+                if let Some(first_span) = source_spans.first() {
+                    // Extract content text from the span
+                    let start = first_span.start;
+                    let end = first_span.end;
+                    if let Some(content_text) = text.get(start..end) {
+                        if let Some((topic_str, topic_span)) =
+                            extract_session_topic_from_reminder_content(&tokenize(content_text))
+                        {
+                            // Adjust topic span to be relative to original text
+                            let adjusted_span =
+                                SourceSpan::new(topic_span.start + start, topic_span.end + start);
+                            let mut result = r.clone();
+                            result.session_topic_proposal = Some(SessionTopicProposal {
+                                topic: topic_str,
+                                source_span: Some(adjusted_span),
+                            });
+                            return Some(result);
+                        }
+                    }
+                }
+            }
+            reminder
+        }
+        // Topic only: check if this could be a mixed reminder+topic
+        (None, Some(t)) if t.abstention.is_none() => {
+            // If the text contains "remind me", try to parse as mixed input
+            if text.to_lowercase().contains("remind me") {
+                if let Some(mixed) = try_mixed_reminder_and_topic(
+                    text,
+                    item_id,
+                    capture_id,
+                    source_revision,
+                    &text_basis,
+                    request_version,
+                    time_context,
+                    t,
+                ) {
+                    return Some(mixed);
+                }
+            }
+            // Otherwise just return the topic-only result
+            topic
+        }
         // Neither or abstentions: use whichever is present (prefer reminder)
         _ => reminder.or(topic),
     }
