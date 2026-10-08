@@ -1,0 +1,87 @@
+# Signed device build procedure
+
+This document covers the maintainer procedure for P08b. The tooling in [`tools/apple-build/`](../../tools/apple-build/) was written and tested on Linux against synthetic `security`, `xcodebuild`, `xcrun`/`devicectl` and `mint` stand-ins (`make apple-build-test`, part of `make test`). **No real signed build, device install or Apple tool run has been observed.** Treat every statement about real Xcode behaviour below as unverified until P08b records an actual run.
+
+## Route
+
+One route is supported: **Development**. It uses an `Apple Development` identity and a Development provisioning profile that lists the target device, and installs with `devicectl`. Ad-hoc and App Store routes are intentionally not implemented: neither is needed for the two-week trial on the maintainer's own device, and an App Store build cannot be installed directly on a device.
+
+The probe is archived unsigned (`CODE_SIGNING_ALLOWED=NO`), then `xcodebuild -exportArchive` signs it from an explicit export options file written for each run:
+
+| Key | Value |
+| --- | --- |
+| `method` | `debugging` |
+| `signingStyle` | `manual` |
+| `signingCertificate` | `Apple Development` |
+| `teamID` | read from the profile |
+| `provisioningProfiles` | the probe's bundle identifier mapped to the profile **UUID read from the profile** (never its file name) |
+
+Signing at export keeps each bundle identifier's profile separate. Passing a profile specifier on the `xcodebuild` command line would apply it to every target, including the frameworks, which do not take profiles. Only the application-only probes (`BridgeProbe`, `AudioProbe`, `TranscriptionProbe`, `NotificationProbe`) are supported; schemes with embedded extensions would need one profile per bundle identifier.
+
+## Prerequisites
+
+Only the maintainer can provide these; see [the external prerequisites](../features/m1-external-prerequisites.md#signed-build-evidence-for-p08b) for the account, Xcode, device and profile steps. In short: the Xcode version pinned in `ios/project.yml` selected with `xcode-select`, an Apple Development identity, a Development profile that covers the bundle identifier and lists the iPhone, Developer Mode enabled on the iPhone, and the iPhone attached. XcodeGen (or `mint`) at the pinned version is needed because the tool runs `ios/scripts/generate.sh`.
+
+Command Line Tools alone cannot sign or reach a device.
+
+## Inputs
+
+Inputs come from the environment or from files outside the repository. The tool refuses certificate, password and profile paths that resolve inside the repository, and refuses a private-evidence directory inside it. Nothing is read from tracked files.
+
+| Variable | Required | Meaning |
+| --- | --- | --- |
+| `OHAND_SIGNING_PROFILE_PATH` | yes | Development `.mobileprovision` file |
+| `OHAND_SIGNING_CERT_PATH` | no | `.p12` holding the Apple Development identity. If set, it is imported into a per-run temporary keychain. If unset, exactly one valid Apple Development identity must already be in the user's keychains (for example the one Xcode created). |
+| `OHAND_SIGNING_CERT_PASSWORD` or `OHAND_SIGNING_CERT_PASSWORD_FILE` | with the `.p12` | Password, or a file holding it |
+| `OHAND_DEVICE_ID` | with `--install` | The device identifier `xcrun devicectl list devices` shows |
+| `OHAND_DEVICE_LABEL` | no | Content-free label for the evidence record (`a-z`, `0-9`, `-`, at most 32 characters); a random `device-xxxxxxxx` label is used otherwise |
+| `OHAND_PRIVATE_EVIDENCE_DIR` | no | Where the redacted raw run log is kept; defaults to `~/.ohand-private-evidence` |
+
+Export these in the same shell step that runs the tool. Do not pass them on a command line. The tool does not forward `OHAND_SIGNING_*` or `OHAND_DEVICE_*` to the tools it launches.
+
+## Procedure
+
+1. Check that the signing-capable toolchain is selected: `xcodebuild -version` must report the Xcode version pinned in `ios/project.yml`, and `security find-identity -v -p codesigning` must list one valid `Apple Development` identity. Do not paste that output anywhere; it contains your name and team identifier.
+2. Export the inputs above. Find the device identifier with `xcrun devicectl list devices`; do not paste that output either.
+3. Run the tool from any directory:
+
+   ```bash
+   python3 tools/apple-build/sign_probe.py --scheme BridgeProbe --install
+   ```
+
+   Without `--install` it builds and exports only. With `--install` it requires `OHAND_DEVICE_ID` and exits non-zero without touching anything when that is missing.
+4. Read the exit status: `0` success; `1` a build, signing or install stage failed (or cleanup could not remove the keychain); `2` an input was missing or unusable, with the variable named in the message. A failed `devicectl install` is exit `1`.
+5. The tool prints the name of the sanitized evidence record it wrote. By default that is `docs/validation/evidence/apple-signing/apple-signing-<UTC timestamp>-<run id>.json`, anchored to the repository root regardless of the caller's working directory (override with `--evidence-dir`). A failed run also writes a record with `"status": "failed"` and the failed stage; only a record with `"status": "succeeded"` and `install.succeeded` true counts as an install.
+6. Commit the sanitized record and follow the P08b steps in the external prerequisites document. Do not commit anything from the private evidence directory.
+
+## What the tool does
+
+- Resolves the profile with `security cms -D -i`, parses the result in memory, and takes name, UUID, team and expiry from it. The profile contents are never logged. It refuses a profile that is expired, lists no devices, provisions all devices, is not a Development profile (`get-task-allow`), or does not cover the probe's bundle identifier.
+- With a `.p12`: creates a keychain with a random per-run password under a private temporary directory, imports the identity, runs `set-key-partition-list` so `codesign` can use the key without a prompt, puts the keychain first in the user search list, and requires exactly one `Apple Development` identity in it. A `.p12` that provides only another identity class (for example Apple Distribution) is refused.
+- Installs the profile under its UUID in the Xcode profile directory for the run, then removes it afterwards unless that UUID was already installed.
+- Archives unsigned, exports with the options above, checks the exported `.ipa` holds one signed `.app`, and installs that `.app` with `xcrun devicectl device install app`.
+- Cleans up on every exit it can handle: success, a failing stage, bad input after setup, and `SIGTERM`, `SIGHUP` or `SIGINT`. It restores the original keychain search list, deletes the temporary keychain (and removes the file itself if `delete-keychain` fails), removes the installed profile and the working directory, and exits non-zero if the keychain could not be removed. `SIGKILL` or power loss cannot be handled; if that happens, look for `ohand-signing-*` directories under the temporary directory, delete the keychain inside with `security delete-keychain`, and check `security list-keychains -d user`.
+
+The `.p12` password and the temporary keychain password are passed to `security` as arguments, which are visible to other local processes for the length of each call; run it on a machine you control.
+
+## Output handling
+
+- Stdout and stderr carry fixed messages only. Output of `security`, `xcodebuild` and `devicectl` is written to `run.log` in the private evidence directory (mode `0600` in a `0700` directory), with the passwords, device identifier, team identifier and profile name/UUID replaced by labelled placeholders. The log may still include other text those tools print, such as the certificate's common name, so keep it local and out of Git.
+- The sanitized record has fixed fields only: schema, status, failed stage, collection time, build revision and whether the tree was clean, a build identifier (`<revision prefix>-<run id>`), scheme and bundle identifier, route and identity class, Xcode version, the profile's expiry date, the device label, whether install was requested/performed/succeeded, and the run id naming the private log. It carries no team identifier, certificate detail, raw device identifier, profile content, or any hash of them. The tool refuses to write the record if a registered sensitive value would appear in it.
+- The device label is not derived from the device identifier. It identifies the device only to the maintainer, who chose it.
+
+## Unsigned simulator builds
+
+`ios/scripts/build-simulator.sh` stays credential-free: it passes `CODE_SIGNING_ALLOWED=NO` (or an ad-hoc identity when `OHAND_SIMULATOR_ADHOC_SIGN=1`), never reads the variables above, and uses no signing tool. A behaviour test runs it with the signing variables set and asserts none reaches the build command or its output.
+
+## Assumptions P08b must confirm on a real Mac
+
+These could not be tested here and are expected to be corrected by the first real run if wrong:
+
+- `xcodebuild -exportArchive` accepts an unsigned archive with `method` `debugging` and the manual options above under the pinned Xcode.
+- A profile placed in `~/Library/Developer/Xcode/UserData/Provisioning Profiles` (when that directory exists) or `~/Library/MobileDevice/Provisioning Profiles` is found by name-independent UUID lookup during export.
+- `devicectl device install app` accepts the extracted `.app` and the identifier format of `OHAND_DEVICE_ID`.
+
+## Evidence and validity
+
+Reserved for P08b. No signed build or device install has been observed, and this document makes no statement about how long an install stays valid; that must come from the profile expiry observed in the maintainer's evidence record.
