@@ -218,10 +218,24 @@ targets:
         createIntermediateGroups: true
         excludes:
           - Info.plist
+          - "Tests/**"
     settings:
       PRODUCT_NAME: TranscriptionProbe
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.transcription
       INFOPLIST_FILE: TranscriptionProbe/Info.plist
+
+  TranscriptionProbeTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: TranscriptionProbe/Tests
+        createIntermediateGroups: true
+      - path: TranscriptionProbe/Shared
+        createIntermediateGroups: true
+    settings:
+      PRODUCT_NAME: TranscriptionProbeTests
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.transcription.tests
+      GENERATE_INFOPLIST_FILE: YES
 
   CredentialProbe:
     type: application
@@ -313,12 +327,14 @@ schemes:
         BridgeProbeTests: all
         CaptureProbeTests: all
         AudioProbeTests: all
+        TranscriptionProbeTests: all
     test:
       targets:
         - OhAndTests
         - BridgeProbeTests
         - CaptureProbeTests
         - AudioProbeTests
+        - TranscriptionProbeTests
   CaptureProbeTests:
     build:
       targets:
@@ -378,3 +394,10 @@ schemes:
     test:
       targets:
         - AudioProbeTests
+  TranscriptionProbeTests:
+    build:
+      targets:
+        TranscriptionProbeTests: all
+    test:
+      targets:
+        - TranscriptionProbeTests

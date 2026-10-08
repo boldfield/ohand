@@ -167,6 +167,30 @@ jobs:
           cd ios
           ./scripts/build-simulator.sh AudioProbe 2>&1 | tee .evidence/AudioProbe-build.log
 
+      - name: Build TranscriptionProbe
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd ios
+          ./scripts/build-simulator.sh TranscriptionProbe 2>&1 | tee .evidence/TranscriptionProbe-build.log
+
+      - name: Launch TranscriptionProbe smoke test
+        shell: bash
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+          SIMULATOR_NAME: ${{ steps.simulator.outputs.name }}
+          SIMULATOR_RUNTIME: ${{ steps.simulator.outputs.runtime }}
+        run: |
+          set -euo pipefail
+          echo "TranscriptionProbe smoke test: ${SIMULATOR_NAME} (iOS ${SIMULATOR_RUNTIME}, UDID ${SIMULATOR_UDID})"
+          cd ios
+          ./scripts/smoke-simulator.sh \
+            "${SIMULATOR_UDID}" \
+            .derived/Build/Products/Debug-iphonesimulator/TranscriptionProbe.app \
+            com.boldfield.ohand.probes.transcription \
+            .evidence \
+            "transcriptionprobe-launch.png" 2>&1 | tee .evidence/transcription-smoke.log
+
       - name: CaptureProbe handoff UI test and ingress smoke test
         shell: bash
         env:
