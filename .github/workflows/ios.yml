@@ -90,6 +90,25 @@ jobs:
           cd ios
           ./scripts/build-simulator.sh BridgeProbe 2>&1 | tee .evidence/BridgeProbe-build.log
 
+      - name: Build CredentialProbe
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd ios
+          OHAND_SIMULATOR_ADHOC_SIGN=1 ./scripts/build-simulator.sh CredentialProbe 2>&1 | tee .evidence/CredentialProbe-build.log
+
+      - name: Run CredentialProbe Keychain self-test
+        shell: bash
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+        run: |
+          set -euo pipefail
+          cd ios
+          ./scripts/keychain-selftest-simulator.sh \
+            "${SIMULATOR_UDID}" \
+            .derived/Build/Products/Debug-iphonesimulator/CredentialProbe.app \
+            .evidence 2>&1 | tee .evidence/keychain-selftest.log
+
       - name: Launch smoke test
         shell: bash
         env:
@@ -104,7 +123,25 @@ jobs:
             "${SIMULATOR_UDID}" \
             .derived/Build/Products/Debug-iphonesimulator/BridgeProbe.app \
             com.boldfield.ohand.probes.bridge \
-            .evidence 2>&1 | tee .evidence/smoke.log
+            .evidence \
+            "bridgeprobe-launch.png" 2>&1 | tee .evidence/smoke.log
+
+      - name: Launch CredentialProbe smoke test
+        shell: bash
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+          SIMULATOR_NAME: ${{ steps.simulator.outputs.name }}
+          SIMULATOR_RUNTIME: ${{ steps.simulator.outputs.runtime }}
+        run: |
+          set -euo pipefail
+          echo "CredentialProbe smoke test: ${SIMULATOR_NAME} (iOS ${SIMULATOR_RUNTIME}, UDID ${SIMULATOR_UDID})"
+          cd ios
+          ./scripts/smoke-simulator.sh \
+            "${SIMULATOR_UDID}" \
+            .derived/Build/Products/Debug-iphonesimulator/CredentialProbe.app \
+            com.boldfield.ohand.probes.credential \
+            .evidence \
+            "credentialprobe-launch.png" 2>&1 | tee .evidence/credential-smoke.log
 
       - name: Upload evidence
         if: always()

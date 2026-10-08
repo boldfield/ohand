@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
 # Boots a simulator by UDID, installs an app bundle, launches it and verifies it stays running.
-# Usage: smoke-simulator.sh <udid> <path/to/App.app> <bundle-id> [evidence-dir]
+# Usage: smoke-simulator.sh <udid> <path/to/App.app> <bundle-id> [evidence-dir] [screenshot-name]
 set -euo pipefail
 
 if [ "$#" -lt 3 ]; then
-  echo "usage: $0 <udid> <app-path> <bundle-id> [evidence-dir]" >&2
+  echo "usage: $0 <udid> <app-path> <bundle-id> [evidence-dir] [screenshot-name]" >&2
   exit 2
 fi
 udid="$1"
 app_path="$2"
 bundle_id="$3"
 evidence_dir="${4:-}"
+screenshot_name="${5:-}"
+
+# Derive screenshot name from bundle_id if not provided
+if [ -z "${screenshot_name}" ]; then
+  screenshot_name="$(echo "${bundle_id}" | sed 's/^.*\.\([^.]*\)$/\1-launch.png/')"
+fi
 
 if [ ! -d "${app_path}" ]; then
   echo "ERROR: ${app_path} does not exist; build it before the smoke test" >&2
@@ -44,7 +50,7 @@ fi
 
 if [ -n "${evidence_dir}" ]; then
   mkdir -p "${evidence_dir}"
-  xcrun simctl io "${udid}" screenshot "${evidence_dir}/bridgeprobe-launch.png"
+  xcrun simctl io "${udid}" screenshot "${evidence_dir}/${screenshot_name}"
 fi
 
 xcrun simctl shutdown "${udid}"
