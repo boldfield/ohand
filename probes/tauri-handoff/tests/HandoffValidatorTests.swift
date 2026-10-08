@@ -2,13 +2,15 @@ import Foundation
 import XCTest
 
 class HandoffValidatorTests: XCTestCase {
+    let validUUID = UUID(uuidString: "550e8400-e29b-41d4-a716-446655440000")!
+
     func testValidCaptureHandoff() {
         let url = URL(string: "ohand-tauri://capture?captureId=550e8400-e29b-41d4-a716-446655440000")!
         let result = HandoffValidator.validate(url: url)
 
         switch result {
         case .success(let request):
-            XCTAssertEqual(request.captureId, "550e8400-e29b-41d4-a716-446655440000")
+            XCTAssertEqual(request.captureId, validUUID)
             XCTAssertEqual(request.route, .capture)
         case .failure:
             XCTFail("Valid handoff should not fail")
@@ -25,6 +27,18 @@ class HandoffValidatorTests: XCTestCase {
         let url = URL(string: "ohand-tauri://capture?captureId=")!
         let result = HandoffValidator.validate(url: url)
         XCTAssertEqual(result, .failure(.missingCaptureId))
+    }
+
+    func testInvalidCaptureId() {
+        let url = URL(string: "ohand-tauri://capture?captureId=not-a-uuid")!
+        let result = HandoffValidator.validate(url: url)
+        XCTAssertEqual(result, .failure(.invalidCaptureId))
+    }
+
+    func testMaliciousCaptureId() {
+        let url = URL(string: "ohand-tauri://capture?captureId=<script>")!
+        let result = HandoffValidator.validate(url: url)
+        XCTAssertEqual(result, .failure(.invalidCaptureId))
     }
 
     func testInvalidRoute() {
@@ -66,13 +80,7 @@ class HandoffValidatorTests: XCTestCase {
     func testMultipleCaptureIdParameters() {
         let url = URL(string: "ohand-tauri://capture?captureId=550e8400-e29b-41d4-a716-446655440000&captureId=evil")!
         let result = HandoffValidator.validate(url: url)
-
-        switch result {
-        case .success(let request):
-            XCTAssertEqual(request.captureId, "550e8400-e29b-41d4-a716-446655440000")
-        case .failure:
-            XCTFail("Should use first captureId parameter")
-        }
+        XCTAssertEqual(result, .failure(.duplicateCaptureId))
     }
 
     func testTimestampIsSet() {

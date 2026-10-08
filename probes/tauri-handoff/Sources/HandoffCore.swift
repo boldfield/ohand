@@ -5,7 +5,7 @@ enum HandoffRoute: String, Equatable {
 }
 
 struct HandoffRequest: Equatable {
-    let captureId: String
+    let captureId: UUID
     let route: HandoffRoute
     let timestamp: String
 }
@@ -13,6 +13,8 @@ struct HandoffRequest: Equatable {
 enum HandoffError: Equatable, CustomStringConvertible {
     case invalidURL
     case missingCaptureId
+    case invalidCaptureId
+    case duplicateCaptureId
     case invalidRoute
     case missingRoute
 
@@ -20,8 +22,10 @@ enum HandoffError: Equatable, CustomStringConvertible {
         switch self {
         case .invalidURL: return "Invalid handoff URL"
         case .missingCaptureId: return "Missing captureId parameter"
+        case .invalidCaptureId: return "Invalid captureId: must be a valid UUID"
+        case .duplicateCaptureId: return "Duplicate captureId parameters"
         case .invalidRoute: return "Invalid route parameter"
-        case .missingRoute: return "Missing route in URL path"
+        case .missingRoute: return "Missing route in URL host"
         }
     }
 }
@@ -34,13 +38,11 @@ struct HandoffValidator {
             return .failure(.invalidURL)
         }
 
-        let path = url.path
-        guard !path.isEmpty else {
+        guard let hostComponent = url.host, !hostComponent.isEmpty else {
             return .failure(.missingRoute)
         }
 
-        let routeComponent = String(path.dropFirst())
-        guard let route = HandoffRoute(rawValue: routeComponent) else {
+        guard let route = HandoffRoute(rawValue: hostComponent) else {
             return .failure(.invalidRoute)
         }
 
@@ -49,10 +51,22 @@ struct HandoffValidator {
             return .failure(.missingCaptureId)
         }
 
-        guard let captureIdItem = queryItems.first(where: { $0.name == "captureId" }),
-              let captureId = captureIdItem.value,
-              !captureId.isEmpty else {
+        let captureIdItems = queryItems.filter { $0.name == "captureId" }
+
+        guard !captureIdItems.isEmpty else {
             return .failure(.missingCaptureId)
+        }
+
+        guard captureIdItems.count == 1 else {
+            return .failure(.duplicateCaptureId)
+        }
+
+        guard let captureIdValue = captureIdItems[0].value, !captureIdValue.isEmpty else {
+            return .failure(.missingCaptureId)
+        }
+
+        guard let captureId = UUID(uuidString: captureIdValue) else {
+            return .failure(.invalidCaptureId)
         }
 
         let formatter = ISO8601DateFormatter()

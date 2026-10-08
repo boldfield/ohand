@@ -1,5 +1,6 @@
 use std::fmt;
 use url::Url;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandoffRoute {
@@ -23,7 +24,7 @@ impl HandoffRoute {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandoffRequest {
-    pub capture_id: String,
+    pub capture_id: Uuid,
     pub route: HandoffRoute,
     pub timestamp: String,
 }
@@ -32,6 +33,8 @@ pub struct HandoffRequest {
 pub enum HandoffError {
     InvalidUrl,
     MissingCaptureId,
+    InvalidCaptureId,
+    DuplicateCaptureId,
     InvalidRoute,
     MissingRoute,
 }
@@ -41,8 +44,10 @@ impl fmt::Display for HandoffError {
         match self {
             HandoffError::InvalidUrl => write!(f, "Invalid handoff URL"),
             HandoffError::MissingCaptureId => write!(f, "Missing captureId parameter"),
+            HandoffError::InvalidCaptureId => write!(f, "Invalid captureId: must be a valid UUID"),
+            HandoffError::DuplicateCaptureId => write!(f, "Duplicate captureId parameters"),
             HandoffError::InvalidRoute => write!(f, "Invalid route parameter"),
-            HandoffError::MissingRoute => write!(f, "Missing route in URL path"),
+            HandoffError::MissingRoute => write!(f, "Missing route in URL host"),
         }
     }
 }
@@ -59,27 +64,39 @@ impl HandoffValidator {
             return Err(HandoffError::InvalidUrl);
         }
 
-        let route_component = parsed_url.host_str()
-            .ok_or(HandoffError::MissingRoute)?;
+        let route_component = parsed_url.host_str().ok_or(HandoffError::MissingRoute)?;
 
         if route_component.is_empty() {
             return Err(HandoffError::MissingRoute);
         }
 
-        let route = HandoffRoute::from_str(route_component)
-            .ok_or(HandoffError::InvalidRoute)?;
+        let route = HandoffRoute::from_str(route_component).ok_or(HandoffError::InvalidRoute)?;
 
         let query_pairs: Vec<(String, String)> = parsed_url
             .query_pairs()
             .map(|(k, v)| (k.into_owned(), v.into_owned()))
             .collect();
 
-        let capture_id = query_pairs
+        let capture_id_values: Vec<&String> = query_pairs
             .iter()
-            .find(|(k, _)| k == "captureId")
-            .map(|(_, v)| v.clone())
-            .filter(|v| !v.is_empty())
-            .ok_or(HandoffError::MissingCaptureId)?;
+            .filter_map(|(k, v)| if k == "captureId" { Some(v) } else { None })
+            .collect();
+
+        if capture_id_values.is_empty() {
+            return Err(HandoffError::MissingCaptureId);
+        }
+
+        if capture_id_values.len() > 1 {
+            return Err(HandoffError::DuplicateCaptureId);
+        }
+
+        let capture_id_str = capture_id_values[0];
+        if capture_id_str.is_empty() {
+            return Err(HandoffError::MissingCaptureId);
+        }
+
+        let capture_id =
+            Uuid::parse_str(capture_id_str).map_err(|_| HandoffError::InvalidCaptureId)?;
 
         let timestamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
@@ -95,13 +112,15 @@ impl HandoffValidator {
 mod tests {
     use super::*;
 
+    const VALID_UUID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
     #[test]
     fn test_valid_capture_handoff() {
-        let url = "ohand-tauri://capture?captureId=550e8400-e29b-41d4-a716-446655440000";
-        let result = HandoffValidator::validate(url);
+        let url = format!("ohand-tauri://capture?captureId={}", VALID_UUID);
+        let result = HandoffValidator::validate(&url);
         assert!(result.is_ok());
         let request = result.unwrap();
-        assert_eq!(request.capture_id, "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(request.capture_id, Uuid::parse_str(VALID_UUID).unwrap());
         assert_eq!(request.route, HandoffRoute::Capture);
     }
 
@@ -120,46 +139,61 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_route() {
-        let url = "ohand-tauri://invalid?captureId=550e8400-e29b-41d4-a716-446655440000";
+    fn test_invalid_capture_id() {
+        let url = "ohand-tauri://capture?captureId=not-a-uuid";
         let result = HandoffValidator::validate(url);
+        assert_eq!(result, Err(HandoffError::InvalidCaptureId));
+    }
+
+    #[test]
+    fn test_malicious_capture_id() {
+        let url = "ohand-tauri://capture?captureId=<script>";
+        let result = HandoffValidator::validate(url);
+        assert_eq!(result, Err(HandoffError::InvalidCaptureId));
+    }
+
+    #[test]
+    fn test_invalid_route() {
+        let url = format!("ohand-tauri://invalid?captureId={}", VALID_UUID);
+        let result = HandoffValidator::validate(&url);
         assert_eq!(result, Err(HandoffError::InvalidRoute));
     }
 
     #[test]
     fn test_missing_route() {
-        let url = "ohand-tauri://?captureId=550e8400-e29b-41d4-a716-446655440000";
-        let result = HandoffValidator::validate(url);
+        let url = format!("ohand-tauri://?captureId={}", VALID_UUID);
+        let result = HandoffValidator::validate(&url);
         assert_eq!(result, Err(HandoffError::MissingRoute));
     }
 
     #[test]
     fn test_wrong_scheme() {
-        let url = "ohand://capture?captureId=550e8400-e29b-41d4-a716-446655440000";
-        let result = HandoffValidator::validate(url);
+        let url = format!("ohand://capture?captureId={}", VALID_UUID);
+        let result = HandoffValidator::validate(&url);
         assert_eq!(result, Err(HandoffError::InvalidUrl));
     }
 
     #[test]
     fn test_malicious_route_injection() {
-        let url = "ohand-tauri://../../settings?captureId=550e8400-e29b-41d4-a716-446655440000";
-        let result = HandoffValidator::validate(url);
+        let url = format!("ohand-tauri://../../settings?captureId={}", VALID_UUID);
+        let result = HandoffValidator::validate(&url);
         assert_eq!(result, Err(HandoffError::InvalidRoute));
     }
 
     #[test]
     fn test_multiple_capture_id_parameters() {
-        let url = "ohand-tauri://capture?captureId=550e8400-e29b-41d4-a716-446655440000&captureId=evil";
-        let result = HandoffValidator::validate(url);
-        assert!(result.is_ok());
-        let request = result.unwrap();
-        assert_eq!(request.capture_id, "550e8400-e29b-41d4-a716-446655440000");
+        let url = format!(
+            "ohand-tauri://capture?captureId={}&captureId=evil",
+            VALID_UUID
+        );
+        let result = HandoffValidator::validate(&url);
+        assert_eq!(result, Err(HandoffError::DuplicateCaptureId));
     }
 
     #[test]
     fn test_timestamp_is_set() {
-        let url = "ohand-tauri://capture?captureId=550e8400-e29b-41d4-a716-446655440000";
-        let result = HandoffValidator::validate(url);
+        let url = format!("ohand-tauri://capture?captureId={}", VALID_UUID);
+        let result = HandoffValidator::validate(&url);
         assert!(result.is_ok());
         let request = result.unwrap();
         assert!(!request.timestamp.is_empty());
