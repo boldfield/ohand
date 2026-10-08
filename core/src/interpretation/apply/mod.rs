@@ -826,32 +826,51 @@ const PAST_EVENT_WORDS: &[&str] = &[
     "expired", "happened", "occurred", "ended", "started", "began", "finished", "closed", "passed",
     "arrived", "left", "went", "came", "ago",
 ];
-/// Later clauses that withdraw a request made earlier in the same capture ("..., never mind",
-/// "..., scratch that", "..., no need").
-const RETRACTION_PHRASES: &[&[&str]] = &[
+/// Idioms without a verb that withdraw a request made earlier in the same capture ("..., never
+/// mind", "..., on second thought").
+const RETRACTION_IDIOMS: &[&[&str]] = &[
     &["never", "mind"],
     &["nevermind"],
-    &["forget", "it"],
-    &["forget", "that"],
-    &["forget", "this"],
-    &["scratch", "that"],
-    &["scratch", "this"],
-    &["strike", "that"],
-    &["cancel", "that"],
-    &["cancel", "this"],
-    &["cancel", "it"],
-    &["cancel", "the"],
-    &["disregard"],
-    &["ignore", "that"],
-    &["ignore", "this"],
-    &["skip", "that"],
-    &["skip", "it"],
     &["on", "second", "thought"],
-    &["no", "need"],
-    &["no", "reminder"],
-    &["no", "reminders"],
-    &["no", "alert"],
-    &["no", "notification"],
+    &["second", "thoughts"],
+];
+/// Verbs that withdraw an earlier request whatever their object is ("forget it", "forget about
+/// it", "skip the reminder", a bare "cancel", "delete that"). Listing exact verb-object pairs
+/// would let every small rewording through, so the verb alone decides. The only exceptions are a
+/// negated verb ("don't forget the ladder" keeps the request) and an infinitive ("to cancel the
+/// subscription" is what the reminder is for).
+const RETRACTION_VERBS: &[&str] = &[
+    "forget",
+    "forgetting",
+    "cancel",
+    "cancelled",
+    "canceled",
+    "cancelling",
+    "canceling",
+    "skip",
+    "skipping",
+    "scratch",
+    "strike",
+    "ignore",
+    "disregard",
+    "delete",
+    "remove",
+    "undo",
+    "drop",
+    "nix",
+    "withdraw",
+    "retract",
+    "rescind",
+];
+/// Two-part withdrawals whose parts may be separated by other words of the same clause: "I take
+/// that back", "I changed my mind", "I'll remember on my own / by myself".
+const RETRACTION_PAIRS: &[(&[&str], &[&str])] = &[
+    (&["take", "took", "taking"], &["back"]),
+    (&["change", "changed", "changing"], &["mind"]),
+    (
+        &["remember", "handle", "manage"],
+        &["own", "myself", "ourselves"],
+    ),
 ];
 /// Plain negations (not reporting or opinion words) that withdraw an earlier request when they
 /// govern a reminder word ("actually don't remind me") or close their clause ("..., actually
@@ -1019,13 +1038,16 @@ fn states_reminder_intent(text: &str, time_span: Option<SourceSpan>) -> bool {
 }
 
 /// Whether the capture withdraws the request after character offset `after` (the end of the
-/// quoted time, or of the cue when no time was quoted). A withdrawal is an unquoted retraction
-/// phrase ("never mind", "scratch that", "forget it", "no need") or a plain negation that governs
-/// a reminder word ("actually don't remind me", "no reminder", "don't bother"), possibly through a
-/// filler ("don't actually remind me"), or that closes its clause ("..., actually don't"). A
-/// negation governing anything else ("don't forget the ladder", "I don't want to miss it") keeps
-/// the request. Rejecting too much is safe: the reminder stays unscheduled and the original
-/// intention is kept with the item.
+/// quoted time, or of the cue when no time was quoted). A withdrawal is, outside quotation marks:
+/// a retraction idiom ("never mind", "on second thought"); a retraction verb with any object or
+/// none ("forget about it", "skip the reminder", "cancel", "delete that"), unless it is negated
+/// ("don't forget the ladder") or an infinitive naming what the reminder is for ("to cancel the
+/// subscription"); a two-part construction within one clause ("I take that back", "I changed my
+/// mind", "I'll remember on my own"); or a plain negation that governs a reminder word ("actually
+/// don't remind me", "no reminder", "don't bother"), possibly through a filler ("don't actually
+/// remind me"), or that closes its clause ("..., actually don't"). A negation governing anything
+/// else ("I don't want to miss it", "it's not urgent") keeps the request. Rejecting too much is
+/// safe: the reminder stays unscheduled and the original intention is kept with the item.
 fn retracted_after(tokens: &[IntentToken], after: usize) -> bool {
     let later: Vec<&IntentToken> = tokens.iter().filter(|token| token.start >= after).collect();
     (0..later.len()).any(|index| {
@@ -1033,19 +1055,27 @@ fn retracted_after(tokens: &[IntentToken], after: usize) -> bool {
         if token.quoted || token.clause_break {
             return false;
         }
-        let phrase_matches = RETRACTION_PHRASES.iter().any(|phrase| {
-            later
-                .get(index..index + phrase.len())
-                .is_some_and(|window| {
-                    window.iter().zip(phrase.iter()).all(|(token, expected)| {
-                        !token.quoted && !token.clause_break && token.text == *expected
-                    })
-                })
-        });
-        if phrase_matches {
+        let word = token.text.as_str();
+        if matches_idiom(&later[index..]) {
             return true;
         }
-        if !RETRACTING_NEGATIONS.contains(&token.text.as_str()) {
+        if RETRACTION_VERBS.contains(&word) {
+            return !verb_is_negated_or_infinitive(&later[..index]);
+        }
+        let rest_of_clause = later[index + 1..]
+            .iter()
+            .take_while(|next| !next.clause_break)
+            .filter(|next| !next.quoted)
+            .map(|next| next.text.as_str());
+        if RETRACTION_PAIRS.iter().any(|(first_words, second_words)| {
+            first_words.contains(&word)
+                && rest_of_clause
+                    .clone()
+                    .any(|next| second_words.contains(&next))
+        }) {
+            return true;
+        }
+        if !RETRACTING_NEGATIONS.contains(&word) {
             return false;
         }
         let governed = later[index + 1..]
@@ -1055,6 +1085,29 @@ fn retracted_after(tokens: &[IntentToken], after: usize) -> bool {
             next.clause_break || (!next.quoted && RETRACTION_TARGETS.contains(&next.text.as_str()))
         })
     })
+}
+
+fn matches_idiom(window: &[&IntentToken]) -> bool {
+    RETRACTION_IDIOMS.iter().any(|idiom| {
+        window.get(..idiom.len()).is_some_and(|candidate| {
+            candidate.iter().zip(idiom.iter()).all(|(token, expected)| {
+                !token.quoted && !token.clause_break && token.text == *expected
+            })
+        })
+    })
+}
+
+/// Whether the word right before a retraction verb (skipping fillers such as "actually" or
+/// "just", within the same clause) negates it or makes it an infinitive, so the verb is not a
+/// withdrawal: "don't forget the ladder", "never cancel", "to cancel the subscription".
+fn verb_is_negated_or_infinitive(before: &[&IntentToken]) -> bool {
+    before
+        .iter()
+        .rev()
+        .take_while(|previous| !previous.clause_break)
+        .map(|previous| previous.text.as_str())
+        .find(|previous| !RETRACTION_FILLERS.contains(previous))
+        .is_some_and(|previous| previous == "to" || RETRACTING_NEGATIONS.contains(&previous))
 }
 
 /// Whether a reminder request whose cue ends at `cue_end` governs the quoted time `span`: the
