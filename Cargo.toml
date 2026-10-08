@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["core", "core/bindings", "tools/bench"]
-exclude = ["probes/tauri/src-tauri"]
+exclude = ["probes/tauri/src-tauri", "probes/tauri-handoff"]
 
 [workspace.dependencies]
 # Database

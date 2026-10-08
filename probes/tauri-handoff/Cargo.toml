@@ -1,0 +1,13 @@
+[package]
+name = "ohand-tauri-handoff"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+url = "2.5"
+chrono = "0.4"
+
+[lib]
+name = "ohand_tauri_handoff"
+path = "src/lib.rs"
