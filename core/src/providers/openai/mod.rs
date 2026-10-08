@@ -11,6 +11,23 @@ struct OpenAiRequest {
     messages: Vec<Message>,
     temperature: f32,
     response_format: ResponseFormat,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata: Option<RequestMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RequestMetadata {
+    instruction_version: String,
+    time_context: TimeContextData,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TimeContextData {
+    timezone: String,
+    locale: String,
+    reference_time: String,
+    utc_offset_at_capture: i32,
+    calendar: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -91,13 +108,25 @@ const DEFAULT_ENDPOINT: &str = "https://api.openai.com/v1/chat/completions";
 
 const SYSTEM_INSTRUCTION: &str = "You are an assistant that interprets user input and produces \
 structured JSON output. Respond only with a JSON object containing the interpretation of the user's input. \
-The output must be valid JSON with a 'kind' field indicating the type of interpretation.";
+The output must be valid JSON with a 'kind' field indicating the type of interpretation. \
+Examples: {\"kind\":\"note\",\"text\":\"...\",\"priority\":\"high\"}, {\"kind\":\"refusal\"}, {\"kind\":\"command\",\"action\":\"...\"}. \
+Provide a single JSON object. The 'kind' field indicates the interpretation type, and additional fields depend on the kind.";
 
 impl<T: HttpTransport> ProviderAdapter for OpenAiAdapter<T> {
     fn invoke(&self, call: &AdapterCall<'_>) -> Result<Vec<u8>, TransportError> {
         // Get the endpoint. OpenAI hosted uses the default API endpoint.
         let endpoint = call.profile.endpoint().unwrap_or(DEFAULT_ENDPOINT);
         let credential_ref = call.profile.credential_ref().as_str();
+
+        // Extract time context from request
+        let time_ctx = call.request.time_context();
+        let time_context_data = TimeContextData {
+            timezone: time_ctx.timezone.clone(),
+            locale: time_ctx.locale.clone(),
+            reference_time: time_ctx.reference_time.to_rfc3339(),
+            utc_offset_at_capture: time_ctx.utc_offset_at_capture,
+            calendar: time_ctx.calendar.clone(),
+        };
 
         // Build the request according to OpenAI's API spec.
         let request = OpenAiRequest {
@@ -114,6 +143,10 @@ impl<T: HttpTransport> ProviderAdapter for OpenAiAdapter<T> {
             ],
             temperature: 0.0,
             response_format: ResponseFormat::JsonObject,
+            metadata: Some(RequestMetadata {
+                instruction_version: call.request.instruction_version().to_string(),
+                time_context: time_context_data,
+            }),
         };
 
         let body = serde_json::to_vec(&request).map_err(|_| TransportError::Rejected)?;
@@ -156,13 +189,14 @@ impl<T: HttpTransport> OpenAiAdapter<T> {
         if let Ok(response) = serde_json::from_slice::<OpenAiResponse>(response_bytes) {
             // Extract the first choice's message content
             if let Some(choice) = response.choices.first() {
-                // Check for content filter rejection
+                // Check for content filter rejection or truncation - these are protocol violations
                 if let Some(reason) = &choice.finish_reason {
                     if reason == "content_filter" {
                         return Err(TransportError::Rejected);
                     }
+                    // Truncation (finish_reason == "length") is incomplete output
                     if reason == "length" {
-                        return Err(TransportError::Rejected);
+                        return Err(TransportError::InvalidOutput);
                     }
                 }
 
@@ -171,17 +205,17 @@ impl<T: HttpTransport> OpenAiAdapter<T> {
                     return Ok(content.as_bytes().to_vec());
                 }
 
-                // Handle refusal - map to TransportError, not a proposal
+                // Handle refusal - map to TransportError
                 if let Some(_refusal) = &choice.message.refusal {
                     return Err(TransportError::Rejected);
                 }
             }
-            // No valid content, refusal, or choices
-            return Err(TransportError::Rejected);
+            // No valid content, refusal, or choices - this is a protocol violation
+            Err(TransportError::InvalidOutput)
+        } else {
+            // Response is not valid OpenAI JSON - this is a protocol violation
+            Err(TransportError::InvalidOutput)
         }
-
-        // Response is not valid JSON or not a valid OpenAI response structure
-        Err(TransportError::Rejected)
     }
 
     fn map_status_code(&self, status: u16) -> TransportError {
@@ -265,18 +299,17 @@ mod tests {
 
     /// Mock HTTP transport for testing.
     #[allow(clippy::type_complexity)]
-    struct MockTransport {
+    pub struct MockTransport {
         response: Arc<Mutex<Option<Result<(u16, Vec<u8>), TransportError>>>>,
-        capture_request: Arc<Mutex<Option<CapturedRequest>>>,
+        pub capture_request: Arc<Mutex<Option<CapturedRequest>>>,
     }
 
     #[derive(Debug, Clone)]
-    #[allow(dead_code)]
-    struct CapturedRequest {
-        endpoint: String,
-        credential_ref: String,
-        body: Vec<u8>,
-        max_response_bytes: u64,
+    pub struct CapturedRequest {
+        pub endpoint: String,
+        pub credential_ref: String,
+        pub body: Vec<u8>,
+        pub max_response_bytes: u64,
     }
 
     impl MockTransport {
@@ -285,11 +318,6 @@ mod tests {
                 response: Arc::new(Mutex::new(Some(response))),
                 capture_request: Arc::new(Mutex::new(None)),
             }
-        }
-
-        #[allow(dead_code)]
-        fn captured_request(&self) -> Option<CapturedRequest> {
-            self.capture_request.lock().expect("lock").clone()
         }
     }
 
@@ -446,7 +474,7 @@ mod tests {
             DispatchLimits::default(),
         );
         let failure = result.expect_err("should fail");
-        assert_eq!(failure.kind, FailureKind::Rejected);
+        assert_eq!(failure.kind, FailureKind::InvalidOutput);
     }
 
     #[test]
@@ -454,7 +482,7 @@ mod tests {
         let harness = Harness::new();
         let result = harness.run(Ok((200, b"[1,2,3]".to_vec())), DispatchLimits::default());
         let failure = result.expect_err("should fail");
-        assert_eq!(failure.kind, FailureKind::Rejected);
+        assert_eq!(failure.kind, FailureKind::InvalidOutput);
     }
 
     #[test]
@@ -462,7 +490,7 @@ mod tests {
         let harness = Harness::new();
         let result = harness.run(Ok((200, b"".to_vec())), DispatchLimits::default());
         let failure = result.expect_err("should fail");
-        assert_eq!(failure.kind, FailureKind::Rejected);
+        assert_eq!(failure.kind, FailureKind::InvalidOutput);
     }
 
     #[test]
@@ -608,7 +636,7 @@ mod tests {
             DispatchLimits::default(),
         );
         let failure = result.expect_err("should fail");
-        assert_eq!(failure.kind, FailureKind::Rejected);
+        assert_eq!(failure.kind, FailureKind::InvalidOutput);
     }
 
     #[test]
@@ -630,7 +658,7 @@ mod tests {
             DispatchLimits::default(),
         );
         let failure = result.expect_err("should fail");
-        assert_eq!(failure.kind, FailureKind::Rejected);
+        assert_eq!(failure.kind, FailureKind::InvalidOutput);
     }
 
     #[test]
@@ -674,13 +702,14 @@ mod tests {
             DispatchLimits::default(),
         );
         let failure = result.expect_err("should fail");
-        assert_eq!(failure.kind, FailureKind::Rejected);
+        assert_eq!(failure.kind, FailureKind::InvalidOutput);
     }
 
     #[test]
     fn credential_ref_is_passed_to_transport() {
         let harness = Harness::new();
-        let transport = MockTransport::new(Ok((200, b"{}".to_vec())));
+        let transport = MockTransport::new(Ok((200, br#"{"kind":"note"}"#.to_vec())));
+        let capture_ref = transport.capture_request.clone();
         let adapter = OpenAiAdapter::new(transport);
         let request = request_for(&harness.profile, "test");
 
@@ -693,15 +722,22 @@ mod tests {
             &DispatchLimits::default(),
         );
 
-        // Note: The transport should have captured the opaque credential ref
-        // This test structure shows that credential_ref is passed to the transport
-        // In a real implementation, the transport would be responsible for resolving it
+        // Assert that the opaque credential reference was passed to the transport
+        let captured = capture_ref.lock().expect("lock").clone();
+        let captured = captured.expect("transport should capture request");
+        assert_eq!(captured.credential_ref, "openai-api-key");
+        // Verify that no secret bytes appear in the body
+        let body_str = String::from_utf8_lossy(&captured.body);
+        assert!(!body_str.contains("openai-api-key"));
+        // Verify the endpoint
+        assert_eq!(captured.endpoint, DEFAULT_ENDPOINT);
     }
 
     #[test]
     fn max_response_bytes_is_passed_to_transport() {
         let harness = Harness::new();
         let transport = MockTransport::new(Ok((200, br#"{"kind":"note"}"#.to_vec())));
+        let capture_ref = transport.capture_request.clone();
         let adapter = OpenAiAdapter::new(transport);
         let request = request_for(&harness.profile, "test");
 
@@ -718,7 +754,15 @@ mod tests {
             &limits,
         );
 
-        // The transport received the max_response_bytes parameter
-        // This ensures bounded reads are possible at the transport level
+        // Assert that the max_response_bytes parameter was passed to the transport
+        let captured = capture_ref.lock().expect("lock").clone();
+        let captured = captured.expect("transport should capture request");
+        assert_eq!(captured.max_response_bytes, 256);
+        // Verify the request body contains expected fields
+        let body_str = String::from_utf8_lossy(&captured.body);
+        assert!(body_str.contains("\"model\""));
+        assert!(body_str.contains("\"messages\""));
+        assert!(body_str.contains("\"response_format\""));
+        assert!(body_str.contains("\"json_object\""));
     }
 }
