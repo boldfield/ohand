@@ -425,6 +425,42 @@ fn check_reminder_time(fixture: &Fixture, reminder: &OracleReminder) -> Result<(
     Ok(())
 }
 
+/// Words that make up a reminder command rather than the thing to be reminded about.
+const REMINDER_COMMAND_WORDS: [&str; 11] = [
+    "remind", "me", "maybe", "please", "to", "on", "at", "by", "in", "for", "about",
+];
+
+/// Requires some action evidence span to name a reminder target: once the reminder's time phrase
+/// and the command words are removed, a content word must remain.
+fn check_reminder_target<'a>(
+    basis: &str,
+    evidence: impl Iterator<Item = &'a OracleSpan>,
+    reminder: &OracleReminder,
+) -> Result<(), String> {
+    let time_phrase = reminder.source_span.start..reminder.source_span.end;
+    let names_target = |span: &OracleSpan| {
+        let remainder: String = basis
+            .chars()
+            .enumerate()
+            .skip(span.start)
+            .take(span.end - span.start)
+            .map(|(index, c)| if time_phrase.contains(&index) { ' ' } else { c })
+            .collect();
+        remainder
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .any(|word| !REMINDER_COMMAND_WORDS.contains(&word.to_lowercase().as_str()))
+    };
+    if evidence.into_iter().any(names_target) {
+        Ok(())
+    } else {
+        Err(
+            "the action evidence names no reminder target beyond the time phrase and command words"
+                .into(),
+        )
+    }
+}
+
 fn check_correction(fixture: &Fixture) -> Result<(), String> {
     let context = &fixture.capture_context;
     let has_correction = context.user_correction.is_some();
@@ -522,6 +558,7 @@ fn check_fixture(fixture: &Fixture) -> Result<(), String> {
                     .into(),
             );
         }
+        check_reminder_target(basis, expected.source_spans.iter().flatten(), reminder)?;
         check_reminder_time(fixture, reminder)?;
     }
     let contradictions = violations(&proposal, &fixture.forbidden);
@@ -701,7 +738,7 @@ fn correction_fixture_keeps_raw_and_corrected_text() {
     assert!(fixture.input.contains("Frisday"));
     assert_eq!(
         fixture.capture_context.user_correction.as_deref(),
-        Some("Remind me Friday at 10 a.m.")
+        Some("Remind me Friday at 10 a.m. to call the plumber")
     );
 }
 
@@ -933,27 +970,31 @@ fn validator_requires_reminders_to_attach_to_an_action() {
         expected.remove("source_spans");
     });
     let corpus = load_corpus();
-    let reminder_fixtures: Vec<&Fixture> = corpus
+    let reminder_fixtures = corpus
         .fixtures
         .iter()
         .filter(|fixture| fixture.expected.reminder_proposal.is_some())
-        .collect();
-    assert!(reminder_fixtures.len() >= 8);
-    for fixture in reminder_fixtures {
-        let reminder = fixture.expected.reminder_proposal.as_ref().unwrap();
-        let evidence = fixture
-            .expected
-            .source_spans
-            .as_ref()
-            .expect("action evidence");
-        assert!(
-            evidence
-                .iter()
-                .any(|span| span.text.len() > reminder.source_span.text.len()),
-            "{}: the action evidence must include a reminder target beyond the time phrase",
-            fixture.id
-        );
-    }
+        .count();
+    assert!(reminder_fixtures >= 8);
+}
+
+#[test]
+fn validator_requires_a_reminder_target_beyond_command_words() {
+    // The pre-fix correction fixture: "Remind me " is longer than the time phrase but names no target.
+    assert_rejected("correction-user-edit", "no reminder target", |f| {
+        f["input"] = json!("Remind me Frisday at 10 a.m.");
+        f["capture_context"]["user_correction"] = json!("Remind me Friday at 10 a.m.");
+        f["expected"]["source_spans"] =
+            json!([{"start": 0, "end": 27, "text": "Remind me Friday at 10 a.m."}]);
+    });
+    assert_rejected("design-explicit-reminder", "no reminder target", |f| {
+        f["expected"]["source_spans"] =
+            json!([{"start": 0, "end": 26, "text": "Remind me Friday at 3 p.m."}]);
+    });
+    assert_rejected("date-ambiguous-maybe-friday", "no reminder target", |f| {
+        f["expected"]["source_spans"] =
+            json!([{"start": 0, "end": 25, "text": "Maybe remind me Friday to"}]);
+    });
 }
 
 #[test]

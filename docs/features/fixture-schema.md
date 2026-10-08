@@ -32,7 +32,7 @@ The file is `{"fixtures": [...]}`. Every object below rejects unknown keys and d
 
 - `item_type`: `broad_intention`, `note`, `idea` or `action`; needs `source_spans`.
 - `source_spans`: evidence for the item type, `[{start, end, text}]`.
-- `reminder_proposal`: `{quality, instant, timezone_id, source_span}`; `source_span` is the time phrase only, not "Remind me". A reminder requires `item_type: action` (reminders attach only to an active action), and the action's `source_spans` must cover more than the time phrase (the reminder target).
+- `reminder_proposal`: `{quality, instant, timezone_id, source_span}`; `source_span` is the time phrase only, not "Remind me". A reminder requires `item_type: action` (reminders attach only to an active action), and the action's `source_spans` must name the reminder target: after removing the reminder time phrase and the command words `remind`, `me`, `maybe`, `please`, `to`, `on`, `at`, `by`, `in`, `for` and `about`, some evidence span must still contain a word. "Remind me Friday at 10 a.m." therefore fails; "Remind me Friday at 10 a.m. to call the plumber" passes.
 - `session_topic_proposal`: `{topic, source_span}`.
 - `abstention`: `"UncertainTarget"`, `"Negated"`, `"Ambiguous"`, `"UnsupportedOperation"` or `{"Other": "reason"}` (I01's serde form). Only the variant is compared; the `Other` text is free. An abstention means the capture's item still exists with the source preserved, but no derived facet is applied.
 

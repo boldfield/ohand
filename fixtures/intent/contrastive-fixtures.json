@@ -879,7 +879,7 @@
     {
       "id": "correction-user-edit",
       "category": "corrections",
-      "input": "Remind me Frisday at 10 a.m.",
+      "input": "Remind me Frisday at 10 a.m. to call the plumber",
       "provenance": "synthetic, user corrected transcription",
       "text_basis": "corrected",
       "preserve": {
@@ -890,7 +890,7 @@
         "capture_type": "voice",
         "capture_instant": "2026-10-08T14:00:00Z",
         "device_timezone": "America/New_York",
-        "user_correction": "Remind me Friday at 10 a.m.",
+        "user_correction": "Remind me Friday at 10 a.m. to call the plumber",
         "correction_spans": [
           {
             "original": "Frisday",
@@ -914,8 +914,8 @@
         "source_spans": [
           {
             "start": 0,
-            "end": 27,
-            "text": "Remind me Friday at 10 a.m."
+            "end": 47,
+            "text": "Remind me Friday at 10 a.m. to call the plumber"
           }
         ]
       },
@@ -932,7 +932,7 @@
         ]
       },
       "recoverable": true,
-      "notes": "The raw transcript ('Frisday') and the user's correction are both preserved. Interpretation uses the corrected text (text_basis 'corrected'), so every span indexes into the corrected text. The reminder is explicit because the corrected date and hour are stated. 2026-10-09 10:00 America/New_York is UTC-04:00."
+      "notes": "The raw transcript ('Frisday') and the user's correction are both preserved. Interpretation uses the corrected text (text_basis 'corrected'), so every span indexes into the corrected text. The action is calling the plumber, and the reminder is explicit because the corrected date and hour are stated. 2026-10-09 10:00 America/New_York is UTC-04:00."
     },
     {
       "id": "broad-intention-get-healthier",
