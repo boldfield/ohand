@@ -15,7 +15,7 @@ screenshot_name="${5:-}"
 
 # Derive screenshot name from bundle_id if not provided
 if [ -z "${screenshot_name}" ]; then
-  screenshot_name="$(echo "${bundle_id}" | sed 's/^.*\.\([^.]*\)$/-launch-\1.png/')"
+  screenshot_name="$(echo "${bundle_id}" | sed 's/^.*\.\([^.]*\)$/\1-launch.png/')"
 fi
 
 if [ ! -d "${app_path}" ]; then

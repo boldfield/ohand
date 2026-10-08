@@ -89,6 +89,18 @@ jobs:
           cd ios
           ./scripts/build-simulator.sh CredentialProbe 2>&1 | tee .evidence/CredentialProbe-build.log
 
+      - name: Run CredentialProbe Keychain self-test
+        shell: bash
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+        run: |
+          set -euo pipefail
+          cd ios
+          ./scripts/keychain-selftest-simulator.sh \
+            "${SIMULATOR_UDID}" \
+            .derived/Build/Products/Debug-iphonesimulator/CredentialProbe.app \
+            .evidence 2>&1 | tee .evidence/keychain-selftest.log
+
       - name: Launch smoke test
         shell: bash
         env:
