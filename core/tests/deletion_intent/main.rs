@@ -58,15 +58,17 @@ fn test_deletion_intent_idempotent() {
     create_test_capture(&mut db, capture_id, "Test capture", None);
     create_test_item(&mut db, item_id, capture_id);
 
-    // Mark deletion twice (idempotent)
+    // Mark deletion twice with the same expected revision (idempotent)
     let work1 =
         mark_deletion_intent(&mut db, item_id, 0, now).expect("First deletion should succeed");
-    let work2_result = mark_deletion_intent(&mut db, item_id, 0, now);
-    // Second call should fail with revision mismatch or already deleted
-    assert!(work2_result.is_err());
+    let work2 = mark_deletion_intent(&mut db, item_id, 0, now)
+        .expect("Second deletion with same revision should be idempotent");
 
-    // First deletion should reference the item
+    // Both should reference the same item and work
     assert_eq!(work1.item_id, item_id);
+    assert_eq!(work2.item_id, item_id);
+    // The returned work should have the same deletion_work_id (idempotent)
+    assert_eq!(work1.deletion_work_id, work2.deletion_work_id);
 }
 
 #[test]
@@ -216,4 +218,183 @@ fn test_deleted_item_readonly() {
         item_state.lifecycle_state,
         ohand_core::domain::items::LifecycleState::Deleted
     );
+}
+
+#[test]
+fn test_deletion_clears_readable_content() {
+    let mut db = create_test_db();
+    let now = Utc::now();
+
+    let capture_id = "cap-clear-001";
+    let item_id = "item-clear-001";
+    let text = "Important readable text that should be cleared";
+
+    create_test_capture(&mut db, capture_id, text, None);
+    create_test_item(&mut db, item_id, capture_id);
+
+    // Verify text is stored
+    {
+        let conn = db.conn();
+        let stored_text: String = conn
+            .query_row(
+                "SELECT text FROM captures WHERE capture_id = ?",
+                [capture_id],
+                |row| row.get(0),
+            )
+            .expect("Query should succeed");
+        assert_eq!(stored_text, text);
+    }
+
+    // Mark deletion
+    mark_deletion_intent(&mut db, item_id, 0, now).expect("Deletion should succeed");
+
+    // Verify text has been cleared (set to empty string)
+    {
+        let conn = db.conn();
+        let cleared_text: String = conn
+            .query_row(
+                "SELECT text FROM captures WHERE capture_id = ?",
+                [capture_id],
+                |row| row.get(0),
+            )
+            .expect("Query should succeed");
+        assert_eq!(cleared_text, "");
+    }
+
+    // Verify session_topic is also cleared
+    {
+        let conn = db.conn();
+        let session_topic: String = conn
+            .query_row(
+                "SELECT session_topic FROM captures WHERE capture_id = ?",
+                [capture_id],
+                |row| row.get(0),
+            )
+            .expect("Query should succeed");
+        assert_eq!(session_topic, "");
+    }
+}
+
+#[test]
+fn test_racing_job_result_after_deletion() {
+    let mut db = create_test_db();
+    let now = Utc::now();
+
+    let capture_id = "cap-job-race-001";
+    let item_id = "item-job-race-001";
+
+    create_test_capture(&mut db, capture_id, "Test capture", None);
+    create_test_item(&mut db, item_id, capture_id);
+
+    // Create a running job for the item
+    let job_id = create_test_job(&mut db, item_id, "transcription", JobStatus::Running, now);
+
+    // Mark deletion
+    mark_deletion_intent(&mut db, item_id, 0, now).expect("Deletion should succeed");
+
+    // Verify the job is cancelled
+    {
+        let conn = db.conn();
+        let job_status: String = conn
+            .query_row(
+                "SELECT status FROM jobs WHERE job_id = ?",
+                [&job_id],
+                |row| row.get(0),
+            )
+            .expect("Query should succeed");
+        assert_eq!(job_status, "cancelled");
+    }
+
+    // Simulate a racing job result arriving after deletion
+    // In a real system, this would be rejected by job result application logic
+    // because the item is locked (lifecycle_state = deleted)
+    let tx = db.transaction().expect("Transaction should succeed");
+    let item_state = load_item_state(&tx, item_id)
+        .expect("Load should succeed")
+        .expect("Item should exist");
+    // Job result application should check this
+    assert_eq!(
+        item_state.lifecycle_state,
+        ohand_core::domain::items::LifecycleState::Deleted
+    );
+}
+
+#[test]
+fn test_deletion_with_stale_revision() {
+    let mut db = create_test_db();
+    let now = Utc::now();
+
+    let capture_id = "cap-stale-001";
+    let item_id = "item-stale-001";
+
+    create_test_capture(&mut db, capture_id, "Test", None);
+    create_test_item(&mut db, item_id, capture_id);
+
+    // Try to delete with a stale expected revision
+    let stale_revision = 5; // Initial revision is 0
+    let result = mark_deletion_intent(&mut db, item_id, stale_revision, now);
+
+    // Should fail with stale revision error
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("Stale delete"));
+
+    // Verify item is still active
+    let tx = db.transaction().expect("Transaction should succeed");
+    let item_state = load_item_state(&tx, item_id)
+        .expect("Load should succeed")
+        .expect("Item should exist");
+    assert_eq!(
+        item_state.lifecycle_state,
+        ohand_core::domain::items::LifecycleState::Active
+    );
+}
+
+#[test]
+fn test_deletion_creates_all_cleanup_work() {
+    let mut db = create_test_db();
+    let now = Utc::now();
+
+    let capture_id = "cap-cleanup-001";
+    let item_id = "item-cleanup-001";
+
+    create_test_capture(&mut db, capture_id, "Test", None);
+    create_test_item(&mut db, item_id, capture_id);
+
+    // Mark deletion
+    mark_deletion_intent(&mut db, item_id, 0, now).expect("Deletion should succeed");
+
+    // Verify all three cleanup work items exist
+    let pending_work = list_pending_deletion_work(&db, item_id).expect("List should succeed");
+    assert_eq!(pending_work.len(), 3);
+
+    let work_types: std::collections::HashSet<_> =
+        pending_work.iter().map(|w| &w.work_type).collect();
+    assert!(work_types.contains(&DeletionWorkType::RemoveAudio));
+    assert!(work_types.contains(&DeletionWorkType::ClearIngress));
+    assert!(work_types.contains(&DeletionWorkType::CancelNotifications));
+}
+
+#[test]
+fn test_completion_idempotency() {
+    let mut db = create_test_db();
+    let now = Utc::now();
+
+    let capture_id = "cap-comp-idem-001";
+    let item_id = "item-comp-idem-001";
+
+    create_test_capture(&mut db, capture_id, "Test", None);
+    create_test_item(&mut db, item_id, capture_id);
+
+    // Mark deletion
+    let work = mark_deletion_intent(&mut db, item_id, 0, now).expect("Deletion should succeed");
+
+    // Mark the work as completed
+    let completed = mark_deletion_work_completed(&mut db, &work.deletion_work_id, now)
+        .expect("Mark completed should succeed");
+    assert_eq!(completed.status, DeletionWorkStatus::Completed);
+
+    // Try to mark as completed again with same work_id
+    let result = mark_deletion_work_completed(&mut db, &work.deletion_work_id, now);
+    // Should fail because it's no longer Pending
+    assert!(result.is_err());
 }

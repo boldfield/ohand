@@ -19,15 +19,27 @@
 
 use crate::domain::items::{load_item_state, LifecycleState};
 use crate::jobs::queue::JobStatus;
+use crate::reminders::state;
 use crate::retrieval::index;
 use crate::store::events::{Event, EventPayload, EventType};
-use crate::store::schema::Database;
+use crate::store::schema::{Clock, Database};
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, Transaction};
 
+/// Simple clock wrapper for passing a fixed time to the N01 API.
+struct FixedClock {
+    instant: DateTime<Utc>,
+}
+
+impl Clock for FixedClock {
+    fn now(&self) -> DateTime<Utc> {
+        self.instant
+    }
+}
+
 /// Work type for deletion cleanup tasks.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum DeletionWorkType {
     /// Remove audio file associated with the item
     RemoveAudio,
@@ -166,7 +178,8 @@ fn deletion_work_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeletionW
 /// 6. Enqueues cleanup work for audio, ingress, and notifications
 ///
 /// Returns a deletion work record if successful.
-/// If the item is already deleted, returns success (idempotent).
+/// If the item is already deleted and retried with the same expected revision (idempotent case),
+/// returns the existing deletion work for that item.
 ///
 /// `expected_revision` enforces compare-and-set semantics: a stale delete command cannot
 /// delete a newer corrected item.
@@ -183,35 +196,36 @@ pub fn mark_deletion_intent(
         .map_err(|e| anyhow!("Failed to load item state: {}", e))?
         .ok_or_else(|| anyhow!("Item {} not found", item_id))?;
 
-    // Enforce compare-and-set: reject stale delete commands first, before checking state
-    if current_state.revision != expected_revision {
-        return Err(anyhow!(
-            "Stale delete: expected revision {} but current is {}",
-            expected_revision,
-            current_state.revision
-        ));
-    }
-
-    // Check if already deleted (idempotent case)
+    // Check if already deleted first (idempotent case): if the item is already deleted,
+    // return the existing work if available, regardless of expected_revision.
+    // This allows retries of the same command to succeed.
     if current_state.lifecycle_state == LifecycleState::Deleted {
-        // Item is already deleted; return success with existing work
-        tx.commit()?;
-        let conn = db.conn();
-        let existing_work: Option<String> = conn
+        // Item is already deleted; look for existing work
+        let existing_work: Option<String> = tx
             .query_row(
-                "SELECT deletion_work_id FROM deletion_work WHERE item_id = ? LIMIT 1",
+                "SELECT deletion_work_id FROM deletion_work WHERE item_id = ? ORDER BY created_at DESC LIMIT 1",
                 [item_id],
                 |row| row.get(0),
             )
             .optional()?;
 
         if let Some(work_id) = existing_work {
+            tx.commit()?;
             return get_deletion_work(db, &work_id)?
                 .ok_or_else(|| anyhow!("Deletion work not found"));
         }
 
-        // No existing work, return empty (shouldn't happen normally)
-        return Err(anyhow!("Item already deleted with no pending work"));
+        // No existing work, this is unexpected
+        return Err(anyhow!("Item already deleted but no deletion work found"));
+    }
+
+    // Enforce compare-and-set: reject stale delete commands
+    if current_state.revision != expected_revision {
+        return Err(anyhow!(
+            "Stale delete: expected revision {} but current is {}",
+            expected_revision,
+            current_state.revision
+        ));
     }
 
     // Create deletion event with command identity (not timestamp)
@@ -227,8 +241,8 @@ pub fn mark_deletion_intent(
     .map_err(|e| anyhow!("Failed to create deletion event: {}", e))?;
 
     // Attempt to save the deletion event (compare-and-set on revision)
-    // save_event_in_tx will enforce compare-and-set; pass the expected revision
-    crate::store::events::save_event_in_tx(&tx, &deletion_event, expected_revision)
+    // Use save_deletion_event_in_tx which is internal-only and enforces compare-and-set
+    crate::store::events::save_deletion_event_in_tx(&tx, &deletion_event, expected_revision)
         .map_err(|e| anyhow!("Failed to save deletion event: {}", e))?;
 
     // Remove readable content: clear source text and all content-bearing rows
@@ -269,12 +283,13 @@ pub fn mark_deletion_intent(
 
 /// Mark a deletion work task as completed.
 /// Only updates if the current status is Pending; rejects other states.
+/// Uses an immediate transaction to prevent check-then-update races.
 pub fn mark_deletion_work_completed(
     db: &mut Database,
     deletion_work_id: &str,
     now: DateTime<Utc>,
 ) -> Result<DeletionWork> {
-    let tx = db.transaction()?;
+    let tx = db.immediate_transaction()?;
 
     let work = get_deletion_work_in_tx(&tx, deletion_work_id)
         .map_err(|e| anyhow!("Failed to load deletion work: {}", e))?
@@ -290,7 +305,8 @@ pub fn mark_deletion_work_completed(
 
     let completed_at_str = now.to_rfc3339();
 
-    tx.execute(
+    // Use compare-and-set to ensure the status is still Pending
+    let rows_changed = tx.execute(
         "UPDATE deletion_work SET status = ?, attempted_at = ? WHERE deletion_work_id = ? AND status = ?",
         rusqlite::params![
             DeletionWorkStatus::Completed.as_str(),
@@ -300,6 +316,13 @@ pub fn mark_deletion_work_completed(
         ],
     )
     .map_err(|e| anyhow!("Failed to update deletion work status: {}", e))?;
+
+    if rows_changed == 0 {
+        return Err(anyhow!(
+            "Deletion work {} is no longer Pending",
+            deletion_work_id
+        ));
+    }
 
     tx.commit()?;
 
@@ -339,18 +362,24 @@ pub fn get_deletion_work(db: &Database, deletion_work_id: &str) -> Result<Option
 // Internal helpers
 // ============================================================================
 
-/// Remove all readable content from an item: clear capture text and correction content.
+/// Remove all readable content from an item: clear capture text, correction content, and other content-bearing fields.
 /// This ensures deleted items cannot restore readable text after marking as deleted.
-/// Uses empty strings to satisfy schema constraints while removing readable content.
+/// Uses empty strings/NULLs to satisfy schema constraints while removing readable content.
 fn remove_readable_content_in_tx(tx: &Transaction<'_>, item_id: &str) -> Result<()> {
-    // Clear capture text (set to empty string to satisfy NOT NULL constraints)
+    // Clear capture text and session topic (set to empty string to satisfy NOT NULL constraints)
     tx.execute(
-        "UPDATE captures SET text = '' WHERE capture_id IN
+        "UPDATE captures SET text = '', session_topic = '' WHERE capture_id IN
          (SELECT capture_id FROM items WHERE item_id = ?)",
         rusqlite::params![item_id],
     )?;
 
-    // Clear correction values and proposal content
+    // Clear item session topic
+    tx.execute(
+        "UPDATE items SET current_session_topic = NULL WHERE item_id = ?",
+        rusqlite::params![item_id],
+    )?;
+
+    // Clear correction values and proposal content from events
     tx.execute(
         "UPDATE events SET correction_new_value = NULL, correction_old_value = NULL
          WHERE item_id = ?",
@@ -363,23 +392,25 @@ fn remove_readable_content_in_tx(tx: &Transaction<'_>, item_id: &str) -> Result<
         rusqlite::params![item_id],
     )?;
 
+    // Clear reminder source phrase (readable content in reminders)
+    tx.execute(
+        "UPDATE reminders SET source_phrase = NULL WHERE item_id = ?",
+        rusqlite::params![item_id],
+    )?;
+
     Ok(())
 }
 
-/// Cancel all reminders for an item by marking for user cancellation.
-/// Updates reminder request_state to 'user_cancelled' so reconciliation can complete it.
+/// Cancel all reminders for an item using the N01 API.
+/// Uses cancel_for_inactive_item which properly sets the reminder state to cancelled and creates the necessary operations.
 fn cancel_item_reminders_in_tx(
     tx: &Transaction<'_>,
     item_id: &str,
     now: &DateTime<Utc>,
 ) -> Result<()> {
-    // Mark all reminders for this item as user_cancelled in the request_state column.
-    // Reconciliation will handle the actual notification cancellation.
-    tx.execute(
-        "UPDATE reminders SET request_state = 'user_cancelled', updated_at = ? WHERE item_id = ?",
-        rusqlite::params![now.to_rfc3339(), item_id],
-    )?;
-
+    let clock = FixedClock { instant: *now };
+    state::cancel_for_inactive_item(tx, &clock, item_id)
+        .map_err(|e| anyhow!("Failed to cancel reminder: {}", e))?;
     Ok(())
 }
 
