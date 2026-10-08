@@ -110,7 +110,12 @@ pub(super) fn decode_response(
     schema: &Value,
 ) -> Result<Vec<u8>, TransportError> {
     if response.body.len() > max_response_bytes {
-        // Handed back undecoded so the shared harness applies its size bound before any parsing.
+        // A non-2xx status is classified from the status alone, without reading the body, so a
+        // large gateway error page keeps its retry semantics. Any other oversized body is handed
+        // back undecoded so the shared harness applies its size bound before any parsing.
+        if !(200..300).contains(&response.status) {
+            return Err(map_status(response.status));
+        }
         return Ok(response.body.clone());
     }
     if let Some(error_type) = error_envelope_type(&response.body) {
@@ -130,16 +135,26 @@ pub(super) fn decode_response(
         Some("refusal") => return Err(TransportError::Rejected),
         _ => return invalid_output(),
     }
-    let Some([block]) = envelope
-        .get("content")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-    else {
+    let Some(blocks) = envelope.get("content").and_then(Value::as_array) else {
         return invalid_output();
     };
-    let is_interpret_call = block.get("type").and_then(Value::as_str) == Some("tool_use")
-        && block.get("name").and_then(Value::as_str) == Some(INTERPRETATION_TOOL_NAME);
-    let Some(input) = block.get("input").filter(|_| is_interpret_call) else {
+    // `tool_choice` is `auto`, so a valid reply may carry text or thinking blocks around the
+    // call. Those are never parsed as the proposal; only exactly one `interpret` call counts.
+    let mut interpret_input = None;
+    for block in blocks {
+        match block.get("type").and_then(Value::as_str) {
+            Some("text" | "thinking" | "redacted_thinking") => {}
+            Some("tool_use")
+                if block.get("name").and_then(Value::as_str) == Some(INTERPRETATION_TOOL_NAME) =>
+            {
+                if interpret_input.replace(block.get("input")).is_some() {
+                    return invalid_output();
+                }
+            }
+            _ => return invalid_output(),
+        }
+    }
+    let Some(Some(input)) = interpret_input else {
         return invalid_output();
     };
     if !input.is_object() || !conforms(input, schema) {

@@ -323,6 +323,32 @@ fn valid_tool_use_returns_only_the_proposal() {
 }
 
 #[test]
+fn text_and_thinking_blocks_around_the_interpret_call_are_ignored() {
+    let json_looking_text = json!({ "schema_version": 1, "annotation": { "kind": "other" } });
+    let thinking = json!({ "type": "thinking", "thinking": "synthetic", "signature": "sig" });
+    let redacted = json!({ "type": "redacted_thinking", "data": "opaque" });
+    let preamble = json!({ "type": "text", "text": "I'll record this note." });
+    let json_text = json!({ "type": "text", "text": json_looking_text.to_string() });
+    let call = tool_use(INTERPRETATION_TOOL_NAME, valid_proposal());
+    let shapes = [
+        json!([preamble, call]),
+        json!([thinking, call]),
+        json!([thinking, redacted, preamble, call]),
+        json!([json_text, call]),
+        json!([call, preamble]),
+    ];
+    for content in shapes {
+        let reply = FakeAnthropicStep::respond_json(200, &message("tool_use", content.clone()));
+        let output = Harness::new(vec![reply]).run().expect("valid reply");
+        assert_eq!(
+            Value::Object(output.proposal),
+            valid_proposal(),
+            "{content}"
+        );
+    }
+}
+
+#[test]
 fn proposal_with_unrelated_extra_fields_is_kept_for_semantic_validation() {
     let mut proposal = valid_proposal();
     proposal["session_topic"] = json!({ "name": "errands" });
@@ -401,13 +427,37 @@ fn malformed_and_unexpected_replies_are_invalid_output() {
             ),
         ),
         (
-            "text block before tool",
+            "unknown content block type",
+            FakeAnthropicStep::respond_json(
+                200,
+                &message(
+                    "tool_use",
+                    json!([{ "type": "server_tool_use", "name": "web_search" }, interpret(valid_proposal())]),
+                ),
+            ),
+        ),
+        (
+            "text and thinking but no interpret call",
             FakeAnthropicStep::respond_json(
                 200,
                 &message(
                     "tool_use",
                     json!([
-                        { "type": "text", "text": valid_proposal().to_string() },
+                        { "type": "thinking", "thinking": "hmm", "signature": "sig" },
+                        { "type": "text", "text": "done" },
+                    ]),
+                ),
+            ),
+        ),
+        (
+            "two interpret calls around a text block",
+            FakeAnthropicStep::respond_json(
+                200,
+                &message(
+                    "tool_use",
+                    json!([
+                        interpret(valid_proposal()),
+                        { "type": "text", "text": "again" },
                         interpret(valid_proposal()),
                     ]),
                 ),
@@ -862,16 +912,36 @@ fn oversized_http_body_is_rejected_by_the_size_bound() {
 }
 
 #[test]
-fn oversized_error_envelope_is_bounded_before_it_is_parsed() {
-    for (status, error_type) in [(429, "rate_limit_error"), (401, "authentication_error")] {
+fn oversized_error_envelope_with_a_success_status_is_bounded_before_it_is_parsed() {
+    for error_type in ["rate_limit_error", "authentication_error"] {
         let mut envelope = error_envelope(error_type);
         envelope["error"]["message"] = json!("x".repeat(200));
-        let harness = Harness::new(vec![FakeAnthropicStep::respond_json(status, &envelope)]);
+        let harness = Harness::new(vec![FakeAnthropicStep::respond_json(200, &envelope)]);
         let limits = DispatchLimits {
             max_response_bytes: 64,
         };
         let failure = harness.run_with(&limits).unwrap_err();
         assert_eq!(failure.kind, FailureKind::OutputTooLarge, "{error_type}");
+    }
+}
+
+#[test]
+fn oversized_non_success_bodies_keep_the_failure_class_of_their_status() {
+    let cases = [
+        (502, FailureKind::Unavailable),
+        (503, FailureKind::Unavailable),
+        (429, FailureKind::RateLimited),
+        (401, FailureKind::Unauthorized),
+        (504, FailureKind::Timeout),
+    ];
+    for (status, expected) in cases {
+        let page = format!("<html>{}</html>", "gateway ".repeat(100));
+        let harness = Harness::new(vec![FakeAnthropicStep::respond(status, page)]);
+        let limits = DispatchLimits {
+            max_response_bytes: 64,
+        };
+        let failure = harness.run_with(&limits).unwrap_err();
+        assert_eq!(failure.kind, expected, "HTTP {status}");
     }
 }
 
