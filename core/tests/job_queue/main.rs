@@ -108,6 +108,7 @@ fn test_enqueue_and_retrieve_job() -> Result<()> {
         Some("profile-v1".to_string()),
         None,
         1,
+        mock_clock.now(),
     )?;
 
     assert_eq!(job.job_id, job_id);
@@ -140,6 +141,7 @@ fn test_duplicate_job_enqueue_fails() -> Result<()> {
         None,
         None,
         1,
+        mock_clock.now(),
     )?;
 
     // Second enqueue with same job_id should fail
@@ -152,6 +154,7 @@ fn test_duplicate_job_enqueue_fails() -> Result<()> {
         None,
         None,
         1,
+        mock_clock.now(),
     );
 
     assert!(result.is_err());
@@ -174,6 +177,7 @@ fn test_claim_job_with_lease() -> Result<()> {
         None,
         None,
         1,
+        mock_clock.now(),
     )?;
 
     let now = mock_clock.now();
@@ -215,6 +219,7 @@ fn test_early_retry_denial() -> Result<()> {
         None,
         None,
         1,
+        mock_clock.now(),
     )?;
 
     // First claim and fail with backoff
@@ -275,6 +280,7 @@ fn test_expired_lease_recovery() -> Result<()> {
         None,
         None,
         1,
+        mock_clock.now(),
     )?;
 
     let now = mock_clock.now();
@@ -317,6 +323,7 @@ fn test_stale_lease_completion_rejected() -> Result<()> {
         None,
         None,
         1,
+        mock_clock.now(),
     )?;
 
     let lease_duration = Duration::seconds(10);
@@ -365,6 +372,7 @@ fn test_complete_job() -> Result<()> {
         None,
         None,
         1,
+        mock_clock.now(),
     )?;
 
     let claimed = claim_job_with_lease(&mut db, Duration::seconds(30), now)?.expect("Claim failed");
@@ -395,6 +403,7 @@ fn test_bounded_exponential_backoff() -> Result<()> {
         None,
         None,
         1,
+        mock_clock.now(),
     )?;
 
     // Claim and fail multiple times
@@ -475,6 +484,7 @@ fn test_cancellation_is_terminal() -> Result<()> {
         None,
         None,
         1,
+        mock_clock.now(),
     )?;
 
     // Claim and cancel
@@ -525,6 +535,7 @@ fn test_cancel_job() -> Result<()> {
         None,
         None,
         1,
+        mock_clock.now(),
     )?;
 
     cancel_job(&mut db, "job-1")?;
@@ -551,6 +562,7 @@ fn test_deleted_item_job_skipped() -> Result<()> {
         None,
         None,
         1,
+        mock_clock.now(),
     )?;
 
     // Create a second item and job
@@ -607,6 +619,7 @@ fn test_deleted_item_job_skipped() -> Result<()> {
         None,
         None,
         1,
+        mock_clock.now(),
     )?;
 
     // Delete the first item
@@ -648,6 +661,7 @@ fn test_stale_revision_not_claimed() -> Result<()> {
         None,
         None,
         1,
+        mock_clock.now(),
     )?;
 
     // Update item to revision 1
@@ -669,6 +683,7 @@ fn test_stale_revision_not_claimed() -> Result<()> {
         None,
         None,
         1,
+        mock_clock.now(),
     )?;
 
     // Claim should skip job-1 (stale revision) and return job-2
@@ -698,6 +713,7 @@ fn test_cannot_claim_deleted_item() -> Result<()> {
         None,
         None,
         1,
+        mock_clock.now(),
     )?;
 
     // Mark item as deleted
@@ -736,6 +752,7 @@ fn test_get_jobs_by_status() -> Result<()> {
         None,
         None,
         1,
+        mock_clock.now(),
     )?;
 
     enqueue_job(
@@ -747,6 +764,7 @@ fn test_get_jobs_by_status() -> Result<()> {
         None,
         None,
         1,
+        mock_clock.now(),
     )?;
 
     // Claim and complete one
@@ -780,6 +798,7 @@ fn test_get_jobs_for_item() -> Result<()> {
         None,
         None,
         1,
+        mock_clock.now(),
     )?;
 
     enqueue_job(
@@ -791,6 +810,7 @@ fn test_get_jobs_for_item() -> Result<()> {
         None,
         None,
         1,
+        mock_clock.now(),
     )?;
 
     let jobs = get_jobs_for_item(&db, &item_id)?;
@@ -815,6 +835,7 @@ fn test_offline_jobs_inspectable() -> Result<()> {
             None,
             None,
             1,
+            mock_clock.now(),
         )?;
     }
 
@@ -846,6 +867,7 @@ fn test_duplicate_delivery_prevention() -> Result<()> {
         Some("profile-v1".to_string()),
         None,
         1,
+        mock_clock.now(),
     )?;
 
     assert_eq!(first.job_id, job_id);
@@ -860,6 +882,7 @@ fn test_duplicate_delivery_prevention() -> Result<()> {
         Some("profile-v1".to_string()),
         None,
         1,
+        mock_clock.now(),
     );
 
     assert!(duplicate.is_err());
@@ -875,6 +898,7 @@ fn test_duplicate_delivery_prevention() -> Result<()> {
         Some("profile-v1".to_string()),
         None,
         1,
+        mock_clock.now(),
     );
     assert!(result.is_err());
     assert!(result
@@ -893,6 +917,7 @@ fn test_duplicate_delivery_prevention() -> Result<()> {
         Some("profile-v2".to_string()),
         None,
         1,
+        mock_clock.now(),
     )?;
 
     assert_eq!(second.job_id, job_id_v2);
@@ -914,6 +939,7 @@ fn test_get_expired_lease_jobs() -> Result<()> {
         None,
         None,
         1,
+        mock_clock.now(),
     )?;
 
     let now = mock_clock.now();
@@ -951,6 +977,7 @@ fn test_unsupported_job_version() -> Result<()> {
         None,
         None,
         2, // Unsupported version
+        now,
     )?;
 
     // Claim should skip unsupported version job and mark it as failed
@@ -962,6 +989,39 @@ fn test_unsupported_job_version() -> Result<()> {
 
     // Verify job was marked as failed with unsupported_job_version reason
     let job = get_job(&db, "job-1")?.expect("Job not found");
+    assert_eq!(job.status, JobStatus::Failed);
+    assert_eq!(
+        job.failure_reason,
+        Some("unsupported_job_version".to_string())
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_version_zero_rejected() -> Result<()> {
+    // Version 0 is not supported - must be rejected
+    let mock_clock = Arc::new(MockClock::new(Utc::now()));
+    let (mut db, item_id) = setup_db_with_item(&mock_clock)?;
+
+    let now = mock_clock.now();
+    enqueue_job(
+        &mut db,
+        "job-0".to_string(),
+        item_id.clone(),
+        "interpretation".to_string(),
+        0,
+        None,
+        None,
+        0, // Version 0 is unsupported
+        now,
+    )?;
+
+    // Claim should skip version 0 job and mark it as failed
+    let claimed = claim_job_with_lease(&mut db, Duration::seconds(30), now)?;
+    assert!(claimed.is_none(), "Version 0 job should not be claimed");
+
+    let job = get_job(&db, "job-0")?.expect("Job not found");
     assert_eq!(job.status, JobStatus::Failed);
     assert_eq!(
         job.failure_reason,

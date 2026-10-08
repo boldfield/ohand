@@ -970,3 +970,79 @@ fn test_unexpected_index_and_table_rejected() -> Result<()> {
     )?;
     assert_unexpected_object_rejected("CREATE TABLE stray_table (id TEXT)", "extra_table")
 }
+
+#[test]
+fn test_v1_to_v2_migration_preserves_job_rows() -> Result<()> {
+    let path = temp_db_path("v1_to_v2_jobs");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+
+    // Create a full v2 database with existing job rows
+    {
+        let clock: Arc<dyn Clock> = Arc::new(TestClock { instant });
+        let db = Database::open(&path, clock)?;
+
+        // Insert a capture and item
+        insert_source_capture(db.conn(), "capture-1")?;
+        db.conn().execute(
+            "INSERT INTO items (
+                item_id, capture_id, revision, lifecycle_state, save_state,
+                sync_state, processing_state, transcription_state, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rusqlite::params![
+                "item-1",
+                "capture-1",
+                0,
+                "active",
+                "saved",
+                "not_configured",
+                "uninterpreted",
+                "none",
+                "2026-01-15T10:30:00Z",
+                "2026-01-15T10:30:00Z"
+            ],
+        )?;
+
+        // Insert a job row (will have lease_id as NULL since we don't claim it)
+        db.conn().execute(
+            "INSERT INTO jobs (
+                job_id, job_schema_version, item_id, job_type, source_revision,
+                profile_version, request_version, status, attempt_count, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rusqlite::params![
+                "job-1",
+                1,
+                "item-1",
+                "interpretation",
+                0,
+                None::<String>,
+                None::<String>,
+                "queued",
+                0,
+                "2026-01-15T10:30:00Z"
+            ],
+        )?;
+
+        drop(db);
+    }
+
+    // Reopen the database - it should already be at v2 from the first open
+    {
+        let clock: Arc<dyn Clock> = Arc::new(TestClock { instant });
+        let db = Database::open(&path, clock)?;
+        assert_eq!(db.schema_version()?, 2);
+
+        // Verify the job row still exists and lease_id is NULL
+        let (job_id, status, lease_id): (String, String, Option<String>) = db.conn().query_row(
+            "SELECT job_id, status, lease_id FROM jobs WHERE job_id = 'job-1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+
+        assert_eq!(job_id, "job-1");
+        assert_eq!(status, "queued");
+        assert_eq!(lease_id, None, "lease_id should be NULL for jobs inserted before the column");
+    }
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}

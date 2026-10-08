@@ -9,6 +9,8 @@ use std::fmt;
 use std::str::FromStr;
 use uuid::Uuid;
 
+const SUPPORTED_JOB_SCHEMA_VERSION: i32 = 1;
+
 /// Job status enum.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum JobStatus {
@@ -133,6 +135,7 @@ pub fn enqueue_job(
     profile_version: Option<String>,
     request_version: Option<String>,
     job_schema_version: i32,
+    now: DateTime<Utc>,
 ) -> Result<Job> {
     let tx = db.immediate_transaction()?;
     let result = enqueue_job_in_tx(
@@ -144,6 +147,7 @@ pub fn enqueue_job(
         profile_version,
         request_version,
         job_schema_version,
+        now,
     )?;
     tx.commit()?;
     Ok(result)
@@ -159,6 +163,7 @@ pub fn enqueue_job_in_tx(
     profile_version: Option<String>,
     request_version: Option<String>,
     job_schema_version: i32,
+    now: DateTime<Utc>,
 ) -> Result<Job> {
     // Check if this job_id already exists
     let existing: Option<Job> = tx
@@ -201,7 +206,6 @@ pub fn enqueue_job_in_tx(
         ));
     }
 
-    let now = Utc::now();
     let created_at_str = now.to_rfc3339();
 
     tx.execute(
@@ -309,7 +313,7 @@ pub fn claim_job_with_lease_in_tx(
         };
 
         // Check for unsupported job schema version
-        if job.job_schema_version > 1 {
+        if job.job_schema_version != SUPPORTED_JOB_SCHEMA_VERSION {
             // Mark as failed with unsupported_job_version reason
             tx.execute(
                 "UPDATE jobs SET status = ?, failure_reason = ?, lease_expires_at = NULL, lease_id = NULL WHERE job_id = ?",
@@ -335,9 +339,10 @@ pub fn claim_job_with_lease_in_tx(
             None => {
                 // Item doesn't exist: cancel this job and move to next
                 tx.execute(
-                    "UPDATE jobs SET status = ? WHERE job_id = ? AND status != ?",
+                    "UPDATE jobs SET status = ?, failure_reason = ?, lease_expires_at = NULL, lease_id = NULL WHERE job_id = ? AND status != ?",
                     rusqlite::params![
                         JobStatus::Cancelled.as_str(),
+                        "item_not_found",
                         &job.job_id,
                         JobStatus::Completed.as_str()
                     ],
@@ -347,9 +352,10 @@ pub fn claim_job_with_lease_in_tx(
             Some((false, _)) => {
                 // Item is deleted: cancel this job and move to next
                 tx.execute(
-                    "UPDATE jobs SET status = ? WHERE job_id = ? AND status != ?",
+                    "UPDATE jobs SET status = ?, failure_reason = ?, lease_expires_at = NULL, lease_id = NULL WHERE job_id = ? AND status != ?",
                     rusqlite::params![
                         JobStatus::Cancelled.as_str(),
+                        "item_deleted",
                         &job.job_id,
                         JobStatus::Completed.as_str()
                     ],
@@ -359,9 +365,10 @@ pub fn claim_job_with_lease_in_tx(
             Some((true, item_revision)) if item_revision != job.source_revision => {
                 // Item has been revised since job was created: cancel as stale
                 tx.execute(
-                    "UPDATE jobs SET status = ? WHERE job_id = ? AND status IN (?, ?)",
+                    "UPDATE jobs SET status = ?, failure_reason = ?, lease_expires_at = NULL, lease_id = NULL WHERE job_id = ? AND status IN (?, ?)",
                     rusqlite::params![
                         JobStatus::Cancelled.as_str(),
+                        "stale_revision",
                         &job.job_id,
                         JobStatus::Queued.as_str(),
                         JobStatus::Running.as_str()
@@ -432,17 +439,17 @@ pub fn complete_job_in_tx(tx: &Transaction<'_>, job_id: &str, lease_id: &str) ->
         if let Some(j) = job {
             if j.status == JobStatus::Completed {
                 return Err(anyhow!("Job {} already completed", job_id));
+            } else if j.status == JobStatus::Cancelled {
+                return Err(anyhow!(
+                    "Job {} is cancelled and cannot be completed",
+                    job_id
+                ));
             } else if j.lease_id.as_deref() != Some(lease_id) {
                 return Err(anyhow!(
                     "Job {} lease mismatch: expected {}, got {:?}",
                     job_id,
                     lease_id,
                     j.lease_id
-                ));
-            } else if j.status == JobStatus::Cancelled {
-                return Err(anyhow!(
-                    "Job {} is cancelled and cannot be completed",
-                    job_id
                 ));
             }
         }
@@ -548,7 +555,7 @@ pub fn cancel_job(db: &mut Database, job_id: &str) -> Result<()> {
 pub fn cancel_job_in_tx(tx: &Transaction<'_>, job_id: &str) -> Result<()> {
     // Only cancel queued or running jobs; don't overwrite completed
     let affected = tx.execute(
-        "UPDATE jobs SET status = ?, lease_expires_at = NULL WHERE job_id = ? AND status IN (?, ?)",
+        "UPDATE jobs SET status = ?, lease_expires_at = NULL, lease_id = NULL WHERE job_id = ? AND status IN (?, ?)",
         rusqlite::params![
             JobStatus::Cancelled.as_str(),
             job_id,
