@@ -24,7 +24,12 @@ Rust tests:
 cargo test --package ohand-tauri-handoff
 ```
 
-Swift tests are part of the `OhAndTests` scheme in the iOS project.
+Swift tests:
+```bash
+xcodebuild test -scheme OhAndTests -testProductName HandoffValidatorTests
+```
+
+Swift tests must be wired into the iOS project configuration before CI runs them.
 
 ## Known limitations
 

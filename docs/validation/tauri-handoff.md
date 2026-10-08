@@ -7,7 +7,7 @@ P07 probes the handoff from the native capture entry (P02) to the candidate Taur
 | Path | Role |
 | --- | --- |
 | `probes/tauri-handoff/src/lib.rs` | `HandoffValidator` validates handoff URLs, rejects unknown routes, and extracts the capture ID. `HandoffRoute` and `HandoffRequest` types define the protocol. |
-| `probes/tauri-handoff/Cargo.toml` | Library manifest with minimal dependencies (url, chrono). |
+| `probes/tauri-handoff/Cargo.toml` | Library manifest with minimal dependencies (url, uuid, chrono). |
 | `probes/tauri-handoff/Sources/HandoffCore.swift` | Swift equivalent for unit tests and potential native integration. |
 | `probes/tauri-handoff/tests/HandoffValidatorTests.swift` | XCTest suite for Swift handoff validation logic. |
 
@@ -32,24 +32,22 @@ Rust tests (via `make test` on the workspace):
 - Invalid route paths (e.g., `invalid`, `../../settings`) return `InvalidRoute`;
 - URL with no host component returns `MissingRoute`;
 - Wrong scheme (e.g., `ohand://` or `http://`) returns `InvalidUrl`;
-- Case-insensitive scheme matching (`OHAND-TAURI://...` works);
-- Malicious path injection (`../../settings`) is rejected;
+- Malicious route injection (`../../admin` parsed as route) is rejected;
 - Timestamp is a valid ISO8601 datetime string.
 
-Swift tests (`HandoffValidatorTests` in `ios/project.yml`, run as part of `OhAndTests` scheme):
+Swift tests (must be wired into `ios/project.yml` and run as part of `OhAndTests` scheme):
 
 - Valid handoff URL with valid UUID validates to a `HandoffRequest` with the correct capture ID and route;
 - Non-UUID `captureId` values return `InvalidCaptureId`;
 - Duplicate `captureId` parameters return `DuplicateCaptureId`;
 - Invalid capture ID, route, or missing query parameters return appropriate errors;
-- Case-insensitive scheme matching works in Swift;
 - Malicious route paths are rejected.
 
 ## Limits of the simulator evidence
 
-- The simulator does not exercise the actual handoff from the system launcher, Control Center, or Shortcuts. Tests open URLs through scene delegates (`openURLContexts`), which does not invoke the system UI that users interact with.
+- The simulator does not exercise the actual handoff from the system launcher, Control Center, or Shortcuts. Unit tests call the validator directly without invoking the system URL routing.
 - Accessibility features (keyboard navigation, VoiceOver, large-text rendering, private-route isolation) are not systematically tested in the simulator; they require a physical device.
-- The handoff does not test the full webview UI, only the URL validation layer.
+- The probe validates only the URL format and capture ID; it does not test the Tauri app's reception of the handoff or the full webview UI rendering.
 
 ## Needs a physical device (not measured)
 
@@ -63,15 +61,15 @@ Swift tests (`HandoffValidatorTests` in `ios/project.yml`, run as part of `OhAnd
 
 ## Device procedure for accessibility testing
 
-When a device is available, perform the following steps on an iPhone running the latest supported OS:
+When a device is available and the P06 Tauri management app UI is implemented with a capture handoff display, perform the following steps on an iPhone running the latest supported OS:
 
 1. **Setup:**
-   - Install both the CaptureProbe and Tauri-handoff probe apps.
+   - Install both the CaptureProbe and ohand-tauri-probe apps.
    - Ensure VoiceOver is available (Settings > Accessibility > VoiceOver).
    - Ensure Dynamic Type is set to a testable size (Settings > Accessibility > Display & Text Size).
 
 2. **Keyboard navigation test:**
-   - Launch the Tauri-handoff app.
+   - Launch the ohand-tauri-probe app and initiate a handoff from CaptureProbe.
    - Connect a hardware keyboard (Bluetooth keyboard or iPad keyboard case).
    - Use Tab and Shift-Tab to navigate through the UI elements.
    - Verify that focus indicators are visible and the capture ID is reachable.
@@ -80,14 +78,14 @@ When a device is available, perform the following steps on an iPhone running the
 3. **VoiceOver test:**
    - Enable VoiceOver (Settings > Accessibility > VoiceOver > toggle On).
    - Launch the CaptureProbe app with a keyboard, shortcut, or control.
-   - Trigger a handoff to the Tauri-handoff app.
+   - Trigger a handoff to the ohand-tauri-probe app.
    - Use VoiceOver gestures (two-finger Z to go back, one-finger swipe right to next element).
    - Verify that all elements are announced, including the capture ID.
-   - Confirm that the handoff status (e.g., "Capture received") is announced.
+   - Confirm that the handoff status is announced.
 
 4. **Large-text test:**
    - Set Dynamic Type to Extra Large or Accessibility Sizes (Settings > Accessibility > Display & Text Size > Larger Accessibility Sizes).
-   - Launch the Tauri-handoff app.
+   - Launch the ohand-tauri-probe app.
    - Trigger a handoff from the CaptureProbe.
    - Verify that the capture ID and status text are fully visible and legible without truncation or overlap.
    - Confirm that layout adjusts gracefully (no clipping, no horizontal scroll required for reading the ID).
@@ -95,16 +93,17 @@ When a device is available, perform the following steps on an iPhone running the
 5. **Secret isolation test (if a sensitive-context feature is implemented):**
    - Configure a private context or sensitive-data flag in the CaptureProbe.
    - Trigger a handoff from that context.
-   - Verify that the Tauri-handoff app displays the capture ID without exposing any content or labels that indicate the context is sensitive.
+   - Verify that the ohand-tauri-probe app displays the capture ID without exposing any content or labels that indicate the context is sensitive.
    - Confirm that the handoff URL does not leak sensitive markers (e.g., `?private=true`).
 
 Document the results, toolchain version, device model and OS build. Link any video or screenshot evidence to the PR. If a feature is not testable on the device (e.g., private contexts are not yet implemented), record it as "not tested" rather than "passes by default."
 
 ## Reuse notes
 
-- The `HandoffValidator` (Rust) and `HandoffValidator` (Swift) require a valid UUID as the capture ID. Any non-UUID string (including empty, arbitrary text, or injection attempts) is rejected.
+- The `HandoffValidator` (Rust) and `HandoffCore` (Swift) require a valid UUID as the capture ID. Any non-UUID string (including empty, arbitrary text, or injection attempts) is rejected.
 - Duplicate `captureId` query parameters are rejected with `DuplicateCaptureId` to prevent ambiguous identities.
-- The `ohand-tauri` scheme must be registered in the app's `Info.plist` so the system can route handoff URLs to the Tauri app.
-- The Tauri app should decode the query parameter in JavaScript (`new URL(window.location).searchParams.get('captureId')`) or via a Tauri command that the webview invokes.
+- The P06 Tauri app must register the `ohand-tauri` scheme in its `Info.plist` so the system can route handoff URLs to the app.
+- The native bridge (between Swift and the Tauri Rust layer) must receive deep-linked URLs and pass them to the webview or to a Tauri command.
+- The webview should decode the query parameter in JavaScript (`new URL(window.location).searchParams.get('captureId')`) or request the capture ID via a Tauri command.
 - Production code should validate the capture ID against the native store (P02) to confirm it exists before displaying it in the UI.
-- If the app is not running, the system queues the handoff and delivers it as a cold launch. If the app is already foreground, the handoff is a warm launch. The Tauri app should distinguish these for logging and testing.
+- If the app is not running, the system queues the handoff and delivers it as a cold launch. If the app is already foreground, the handoff is a warm launch. The receiving code should log or handle these cases distinctly for testing.
