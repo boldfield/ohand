@@ -387,13 +387,13 @@ final class CredentialServiceTests: XCTestCase {
         let secret = "test-secret".data(using: .utf8)!
         let reference = UUID().uuidString
 
-        var query = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: testKeychainService,
             kSecAttrAccount as String: reference,
             kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
             kSecValueData as String: secret
-        ] as [String: Any]
+        ]
 
         let status = SecItemAdd(query as CFDictionary, nil)
         XCTAssertEqual(status, errSecSuccess, "Test setup: should add item")

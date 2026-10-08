@@ -184,13 +184,18 @@ public class CredentialService {
         return [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: reference,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            kSecAttrAccount as String: reference
         ]
     }
 
-    private func addKeychainItem(_ secret: Data, reference: String) throws {
+    private func keychainAddAttributes(for reference: String) -> [String: Any] {
         var attributes = keychainQueryAttributes(for: reference)
+        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        return attributes
+    }
+
+    private func addKeychainItem(_ secret: Data, reference: String) throws {
+        var attributes = keychainAddAttributes(for: reference)
         attributes[kSecValueData as String] = secret
 
         let status = SecItemAdd(attributes as CFDictionary, nil)
