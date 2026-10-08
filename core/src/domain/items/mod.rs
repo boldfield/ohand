@@ -1,6 +1,7 @@
 // Authoritative item state projection from sources and explicit updates.
-// Precedence: source capture record, then explicit user corrections, then model annotations.
-// Model reprocessing cannot undo corrections, completion, or cancellation.
+// Precedence per field: capture record < applied model proposal < explicit user correction.
+// A value stated at capture (for example the session topic) is user intent and also outranks
+// a model proposal. Model reprocessing cannot undo corrections, completion, or cancellation.
 // Implementation owned by D04.
 
 // Re-export types from events module for convenience in D04 tests.
@@ -8,6 +9,9 @@ pub use crate::store::events::{ItemScope, ItemType};
 use anyhow::{anyhow, Result};
 use rusqlite::{OptionalExtension, Transaction};
 use std::fmt;
+
+/// Proposal schema version this build can apply. Any other version is rejected without mutation.
+pub const SUPPORTED_PROPOSAL_SCHEMA_VERSION: i32 = 1;
 
 /// Field provenance: whether a field was set by the user (correction) or is derived/default.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -37,7 +41,7 @@ pub struct ItemState {
     pub item_type: Option<ItemType>,
     /// Privacy scope: personal or work. User corrections override the capture-time default.
     pub scope: ItemScope,
-    /// Optional user-defined session topic. Updated only by explicit correction.
+    /// Optional session topic. Precedence: user correction, then topic stated at capture, then applied model proposal.
     pub session_topic: Option<String>,
     /// Lifecycle: active -> completed/cancelled -> deleted (irreversible).
     pub lifecycle_state: LifecycleState,
@@ -104,61 +108,61 @@ pub enum TransitionValidity {
 }
 
 /// Check whether a transition from current to proposed state is valid.
-/// Returns `Ok(TransitionValidity::Valid)` if allowed, or describes why it is forbidden.
+/// Returns `TransitionValidity::Valid` if allowed, or describes why it is forbidden.
 pub fn validate_state_transition(
     current: &ItemState,
     proposed: StateTransition,
-) -> Result<TransitionValidity, StateTransitionError> {
+) -> TransitionValidity {
     use TransitionValidity::*;
 
     // Deleted items accept no mutations.
     if current.lifecycle_state == LifecycleState::Deleted {
-        return Ok(NotAllowed);
+        return NotAllowed;
     }
 
     match proposed {
         StateTransition::TypeSet(_) => {
             // Type changes are allowed at any lifecycle state (even completed/cancelled).
-            Ok(Valid)
+            Valid
         }
 
         StateTransition::ScopeSet(_) => {
             // Scope changes are allowed at any lifecycle state.
-            Ok(Valid)
+            Valid
         }
 
         StateTransition::SessionTopicSet(_) => {
             // Session topic changes are allowed at any lifecycle state.
-            Ok(Valid)
+            Valid
         }
 
         StateTransition::TextCorrected(_) => {
             // Text corrections are allowed at any lifecycle state (even completed/cancelled).
-            Ok(Valid)
+            Valid
         }
 
         StateTransition::Completed => {
             match current.lifecycle_state {
-                LifecycleState::Active => Ok(Valid),
-                LifecycleState::Completed => Ok(Valid), // idempotent
-                LifecycleState::Cancelled | LifecycleState::Deleted => Ok(NotAllowed),
+                LifecycleState::Active => Valid,
+                LifecycleState::Completed => Valid, // idempotent
+                LifecycleState::Cancelled | LifecycleState::Deleted => NotAllowed,
             }
         }
 
         StateTransition::Cancelled => {
             match current.lifecycle_state {
-                LifecycleState::Active => Ok(Valid),
-                LifecycleState::Cancelled => Ok(Valid), // idempotent
-                LifecycleState::Completed | LifecycleState::Deleted => Ok(NotAllowed),
+                LifecycleState::Active => Valid,
+                LifecycleState::Cancelled => Valid, // idempotent
+                LifecycleState::Completed | LifecycleState::Deleted => NotAllowed,
             }
         }
 
         StateTransition::Deleted => {
             match current.lifecycle_state {
                 LifecycleState::Active | LifecycleState::Completed | LifecycleState::Cancelled => {
-                    Ok(Valid)
+                    Valid
                 }
-                LifecycleState::Deleted => Ok(Valid), // idempotent
+                LifecycleState::Deleted => Valid, // idempotent
             }
         }
 
@@ -169,15 +173,15 @@ pub fn validate_state_transition(
             // Check lifecycle first.
             match current.lifecycle_state {
                 LifecycleState::Completed | LifecycleState::Cancelled | LifecycleState::Deleted => {
-                    return Ok(ForbiddenOverride);
+                    return ForbiddenOverride;
                 }
                 LifecycleState::Active => {}
             }
             // On active items, model can only set type if not already user-corrected.
             if model_type.is_some() && current.provenance.type_corrected {
-                Ok(ForbiddenOverride)
+                ForbiddenOverride
             } else {
-                Ok(Valid)
+                Valid
             }
         }
     }
@@ -203,21 +207,6 @@ pub enum StateTransition {
     /// Model provided annotation (type suggestion, etc). Can be rejected if current state forbids it.
     ModelAnnotation { annotation_type: Option<ItemType> },
 }
-
-#[derive(Clone, Debug)]
-pub enum StateTransitionError {
-    InvalidProposedValue(String),
-}
-
-impl fmt::Display for StateTransitionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            StateTransitionError::InvalidProposedValue(msg) => write!(f, "Invalid value: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for StateTransitionError {}
 
 /// Load the current authoritative state of an item from the database.
 /// Returns None if the item does not exist.
@@ -324,9 +313,9 @@ pub fn load_item_state(tx: &Transaction<'_>, item_id: &str) -> Result<Option<Ite
         let applied_type: Option<String> = tx
             .query_row(
                 "SELECT proposal_type FROM proposals
-                 WHERE item_id = ? AND applied_state = 'applied' AND proposal_type IS NOT NULL AND abstained = 0 AND schema_version IS NOT NULL
+                 WHERE item_id = ? AND applied_state = 'applied' AND proposal_type IS NOT NULL AND abstained = 0 AND schema_version = ?
                  ORDER BY source_revision DESC LIMIT 1",
-                [item_id],
+                rusqlite::params![item_id, SUPPORTED_PROPOSAL_SCHEMA_VERSION],
                 |row| row.get(0),
             )
             .optional()?;
@@ -345,9 +334,9 @@ pub fn load_item_state(tx: &Transaction<'_>, item_id: &str) -> Result<Option<Ite
         let applied_topic: Option<String> = tx
             .query_row(
                 "SELECT session_topic_proposal FROM proposals
-                 WHERE item_id = ? AND applied_state = 'applied' AND session_topic_proposal IS NOT NULL AND abstained = 0 AND schema_version IS NOT NULL
+                 WHERE item_id = ? AND applied_state = 'applied' AND session_topic_proposal IS NOT NULL AND abstained = 0 AND schema_version = ?
                  ORDER BY source_revision DESC LIMIT 1",
-                [item_id],
+                rusqlite::params![item_id, SUPPORTED_PROPOSAL_SCHEMA_VERSION],
                 |row| row.get(0),
             )
             .optional()?;
@@ -524,34 +513,49 @@ pub fn rebuild_state_from_events(tx: &Transaction<'_>, item_id: &str) -> Result<
 
     // Replay applied proposals with lower precedence than user corrections.
     // Precedence: capture (source) < applied model proposals < user corrections.
-    // Order by source_revision for determinism (last one wins).
+    // Ordered by source_revision (unique among applied proposals); the latest non-null value wins,
+    // matching `load_item_state`. An invalid applied value is an error, never a silent demotion.
     let mut applied_proposals_stmt = tx.prepare(
         "SELECT proposal_type, session_topic_proposal FROM proposals
-         WHERE item_id = ? AND applied_state = 'applied' AND abstained = 0 AND schema_version IS NOT NULL
+         WHERE item_id = ? AND applied_state = 'applied' AND abstained = 0 AND schema_version = ?
          ORDER BY source_revision ASC",
     )?;
     let applied_proposals = applied_proposals_stmt
-        .query_map([item_id], |row| {
-            Ok((
-                row.get::<_, Option<String>>(0)?,
-                row.get::<_, Option<String>>(1)?,
-            ))
-        })?
+        .query_map(
+            rusqlite::params![item_id, SUPPORTED_PROPOSAL_SCHEMA_VERSION],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            },
+        )?
         .collect::<Result<Vec<_>, _>>()?;
 
+    let mut applied_type: Option<String> = None;
+    let mut applied_topic: Option<String> = None;
     for (proposal_type, session_topic_proposal) in applied_proposals {
-        // Only apply if the user hasn't corrected the field.
-        if let Some(ptype) = proposal_type {
-            if !type_corrected {
-                current_type = ptype.parse::<ItemType>().ok();
-            }
+        if proposal_type.is_some() {
+            applied_type = proposal_type;
         }
+        if session_topic_proposal.is_some() {
+            applied_topic = session_topic_proposal;
+        }
+    }
 
-        // Never override an explicit session_topic from the capture itself.
-        if let Some(session_topic) = session_topic_proposal {
-            if !session_topic_corrected && !has_capture_topic {
-                current_session_topic = Some(session_topic);
-            }
+    if !type_corrected {
+        if let Some(type_str) = applied_type {
+            current_type = Some(
+                type_str
+                    .parse::<ItemType>()
+                    .map_err(|e| anyhow!("Invalid applied proposal type: {}", e))?,
+            );
+        }
+    }
+    // A session topic stated at capture is user intent and outranks a model proposal.
+    if !session_topic_corrected && !has_capture_topic {
+        if let Some(topic) = applied_topic {
+            current_session_topic = Some(topic);
         }
     }
 
@@ -614,6 +618,8 @@ pub enum ProposalApplicationError {
     ForbiddenByLifecycle,
     /// A field the proposal tries to set was explicitly corrected by the user.
     ForbiddenByUserCorrection(String),
+    /// The proposal's schema version is not supported by this build.
+    UnsupportedSchemaVersion(i32),
     /// Database error or validation failure.
     InvalidProposal(String),
 }
@@ -641,6 +647,9 @@ impl fmt::Display for ProposalApplicationError {
                     "Field '{}' was explicitly corrected by the user; model cannot override",
                     field
                 )
+            }
+            ProposalApplicationError::UnsupportedSchemaVersion(version) => {
+                write!(f, "Unsupported proposal schema version {}", version)
             }
             ProposalApplicationError::InvalidProposal(msg) => {
                 write!(f, "Invalid proposal: {}", msg)
@@ -670,7 +679,7 @@ pub fn apply_proposal(
 
     // Fetch the proposal row, filtering by both proposal_id AND item_id (ownership check).
     #[allow(clippy::type_complexity)]
-    let proposal_row: Option<(i32, Option<i32>, Option<String>, Option<String>, i64, String)> = tx
+    let proposal_row: Option<(i32, i32, Option<String>, Option<String>, i64, String)> = tx
         .query_row(
             "SELECT source_revision, schema_version, proposal_type, session_topic_proposal, abstained, applied_state FROM proposals
              WHERE proposal_id = ? AND item_id = ? AND capture_id = ?",
@@ -700,6 +709,13 @@ pub fn apply_proposal(
         "Proposal not found or belongs to another item".to_string(),
     ))?;
 
+    // The schema version is validated before any semantic check; unsupported versions never mutate.
+    if schema_version != SUPPORTED_PROPOSAL_SCHEMA_VERSION {
+        return Err(ProposalApplicationError::UnsupportedSchemaVersion(
+            schema_version,
+        ));
+    }
+
     // Check staleness using stored source_revision.
     if stored_source_revision != current.revision {
         return Err(ProposalApplicationError::StaleProposal {
@@ -708,9 +724,16 @@ pub fn apply_proposal(
         });
     }
 
-    // Check that the proposal has not already been applied.
-    if applied_state == "applied" {
-        return Err(ProposalApplicationError::AlreadyApplied);
+    // Only an unapplied proposal can be applied.
+    match applied_state.as_str() {
+        "applied" => return Err(ProposalApplicationError::AlreadyApplied),
+        "unapplied" => {}
+        other => {
+            return Err(ProposalApplicationError::InvalidProposal(format!(
+                "Proposal is not applicable in state '{}'",
+                other
+            )))
+        }
     }
 
     // Check that the proposal is not abstained.
@@ -720,20 +743,12 @@ pub fn apply_proposal(
         ));
     }
 
-    // Validate schema_version is present.
-    if schema_version.is_none() {
-        return Err(ProposalApplicationError::InvalidProposal(
-            "Proposal has no schema_version".to_string(),
-        ));
-    }
-
     // Check that the item lifecycle permits application (completed/cancelled/deleted forbid model updates).
     if current.lifecycle_state != LifecycleState::Active {
         return Err(ProposalApplicationError::ForbiddenByLifecycle);
     }
 
     // Validate and prepare the proposed type (if present and not user-corrected).
-    let mut new_item_type = current.item_type;
     if let Some(ptype) = &proposal_type {
         if current.provenance.type_corrected {
             return Err(ProposalApplicationError::ForbiddenByUserCorrection(
@@ -741,60 +756,52 @@ pub fn apply_proposal(
             ));
         }
         // Validate that the proposed type is a valid ItemType value.
-        new_item_type = Some(ptype.parse::<ItemType>().map_err(|e| {
+        ptype.parse::<ItemType>().map_err(|e| {
             ProposalApplicationError::InvalidProposal(format!("Invalid proposal_type: {}", e))
-        })?);
+        })?;
     }
 
-    // Validate and prepare the proposed session_topic (if present and not user-corrected).
-    let mut new_session_topic = current.session_topic.clone();
-    if let Some(topic) = &session_topic_proposal {
-        if current.provenance.session_topic_corrected {
-            return Err(ProposalApplicationError::ForbiddenByUserCorrection(
-                "session_topic".to_string(),
-            ));
-        }
-        // Also check that the capture didn't have an explicit session_topic.
-        // If it did, the proposal should not override it.
-        let capture_topic: Option<String> = tx
-            .query_row(
-                "SELECT session_topic FROM captures WHERE capture_id = ?",
-                [&current.capture_id],
-                |row| row.get(0),
-            )
-            .map_err(|e| ProposalApplicationError::InvalidProposal(e.to_string()))?;
-
-        if capture_topic.is_some() {
-            // Capture has an explicit session_topic; don't override it.
-            // This is not an error; just preserve the current state.
-            new_session_topic = current.session_topic.clone();
-        } else {
-            new_session_topic = Some(topic.clone());
-        }
+    // A session topic proposal is validated against user corrections here. A topic stated at
+    // capture outranks the model, so the proposal is recorded as applied but cannot change the
+    // topic (the projection enforces this identically on load and rebuild).
+    if session_topic_proposal.is_some() && current.provenance.session_topic_corrected {
+        return Err(ProposalApplicationError::ForbiddenByUserCorrection(
+            "session_topic".to_string(),
+        ));
     }
 
-    // Mark proposal as applied and update the item's authoritative state in a single transaction.
+    // Supersede any proposal already applied for this revision, then apply this one, so exactly
+    // one proposal is applied per item revision.
+    tx.execute(
+        "UPDATE proposals SET applied_state = 'superseded'
+         WHERE item_id = ? AND source_revision = ? AND applied_state = 'applied' AND proposal_id != ?",
+        rusqlite::params![item_id, stored_source_revision, proposal_id],
+    )
+    .map_err(|e| ProposalApplicationError::InvalidProposal(e.to_string()))?;
     tx.execute(
         "UPDATE proposals SET applied_state = 'applied' WHERE proposal_id = ?",
         [proposal_id],
     )
     .map_err(|e| ProposalApplicationError::InvalidProposal(e.to_string()))?;
 
-    // Update the items table with the new type and session_topic.
-    // Do not bump revision; revision is derived from events and corrections only.
-    let new_item_type_str = new_item_type.as_ref().map(|t| t.as_str());
-    tx.execute(
-        "UPDATE items SET item_type = ?, current_session_topic = ? WHERE item_id = ?",
-        rusqlite::params![new_item_type_str, new_session_topic, item_id],
-    )
-    .map_err(|e| ProposalApplicationError::InvalidProposal(e.to_string()))?;
-
-    // Rebuild the state to include the newly applied proposal.
+    // Rebuild the projection from retained records and persist the derived fields into the
+    // authoritative items row so every reader sees one state. Revision is not bumped: applying
+    // derived output never increments it.
     let updated_state = rebuild_state_from_events(tx, item_id)
         .map_err(|e| ProposalApplicationError::InvalidProposal(e.to_string()))?
         .ok_or(ProposalApplicationError::InvalidProposal(
             "Failed to rebuild item state after proposal application".to_string(),
         ))?;
+
+    tx.execute(
+        "UPDATE items SET item_type = ?, current_session_topic = ? WHERE item_id = ?",
+        rusqlite::params![
+            updated_state.item_type.as_ref().map(|t| t.as_str()),
+            updated_state.session_topic,
+            item_id
+        ],
+    )
+    .map_err(|e| ProposalApplicationError::InvalidProposal(e.to_string()))?;
 
     Ok(updated_state)
 }
@@ -837,7 +844,7 @@ mod tests {
     }
 
     #[test]
-    fn test_transition_completable_only_when_active() -> Result<(), StateTransitionError> {
+    fn test_transition_completable_only_when_active() {
         let mut state = ItemState {
             item_id: "test".to_string(),
             capture_id: "cap".to_string(),
@@ -854,7 +861,7 @@ mod tests {
 
         // Active -> Completed is valid.
         assert_eq!(
-            validate_state_transition(&state, StateTransition::Completed)?,
+            validate_state_transition(&state, StateTransition::Completed),
             TransitionValidity::Valid
         );
 
@@ -863,21 +870,19 @@ mod tests {
 
         // Completed -> Cancelled is not allowed.
         assert_eq!(
-            validate_state_transition(&state, StateTransition::Cancelled)?,
+            validate_state_transition(&state, StateTransition::Cancelled),
             TransitionValidity::NotAllowed
         );
 
         // But Completed -> Completed (idempotent) is valid.
         assert_eq!(
-            validate_state_transition(&state, StateTransition::Completed)?,
+            validate_state_transition(&state, StateTransition::Completed),
             TransitionValidity::Valid
         );
-
-        Ok(())
     }
 
     #[test]
-    fn test_model_cannot_override_completed() -> Result<(), StateTransitionError> {
+    fn test_model_cannot_override_completed() {
         let state = ItemState {
             item_id: "test".to_string(),
             capture_id: "cap".to_string(),
@@ -899,15 +904,13 @@ mod tests {
                 StateTransition::ModelAnnotation {
                     annotation_type: Some(ItemType::Action)
                 }
-            )?,
+            ),
             TransitionValidity::ForbiddenOverride
         );
-
-        Ok(())
     }
 
     #[test]
-    fn test_deleted_item_readonly() -> Result<(), StateTransitionError> {
+    fn test_deleted_item_readonly() {
         let state = ItemState {
             item_id: "test".to_string(),
             capture_id: "cap".to_string(),
@@ -924,20 +927,18 @@ mod tests {
 
         // Any transition from deleted should be rejected as NotAllowed.
         assert_eq!(
-            validate_state_transition(&state, StateTransition::Completed)?,
+            validate_state_transition(&state, StateTransition::Completed),
             TransitionValidity::NotAllowed
         );
 
         assert_eq!(
-            validate_state_transition(&state, StateTransition::TypeSet(Some(ItemType::Idea)))?,
+            validate_state_transition(&state, StateTransition::TypeSet(Some(ItemType::Idea))),
             TransitionValidity::NotAllowed
         );
-
-        Ok(())
     }
 
     #[test]
-    fn test_corrections_allowed_on_completed() -> Result<(), StateTransitionError> {
+    fn test_corrections_allowed_on_completed() {
         let state = ItemState {
             item_id: "test".to_string(),
             capture_id: "cap".to_string(),
@@ -957,20 +958,18 @@ mod tests {
             validate_state_transition(
                 &state,
                 StateTransition::TextCorrected("updated".to_string())
-            )?,
+            ),
             TransitionValidity::Valid
         );
 
         assert_eq!(
-            validate_state_transition(&state, StateTransition::ScopeSet(ItemScope::Work))?,
+            validate_state_transition(&state, StateTransition::ScopeSet(ItemScope::Work)),
             TransitionValidity::Valid
         );
-
-        Ok(())
     }
 
     #[test]
-    fn test_model_cannot_override_user_corrected_type() -> Result<(), StateTransitionError> {
+    fn test_model_cannot_override_user_corrected_type() {
         let state = ItemState {
             item_id: "test".to_string(),
             capture_id: "cap".to_string(),
@@ -997,10 +996,8 @@ mod tests {
                 StateTransition::ModelAnnotation {
                     annotation_type: Some(ItemType::Idea)
                 }
-            )?,
+            ),
             TransitionValidity::ForbiddenOverride
         );
-
-        Ok(())
     }
 }

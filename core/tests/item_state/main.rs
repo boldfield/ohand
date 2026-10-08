@@ -386,7 +386,7 @@ fn test_model_cannot_override_completion() -> Result<()> {
         StateTransition::ModelAnnotation {
             annotation_type: Some(ItemType::Action),
         },
-    )?;
+    );
 
     assert_eq!(result, TransitionValidity::ForbiddenOverride);
     Ok(())
@@ -423,7 +423,7 @@ fn test_model_cannot_override_cancellation() -> Result<()> {
         StateTransition::ModelAnnotation {
             annotation_type: Some(ItemType::Idea),
         },
-    )?;
+    );
 
     assert_eq!(result, TransitionValidity::ForbiddenOverride);
     Ok(())
@@ -449,7 +449,7 @@ fn test_model_can_annotate_active_item() -> Result<()> {
         StateTransition::ModelAnnotation {
             annotation_type: Some(ItemType::Action),
         },
-    )?;
+    );
 
     assert_eq!(result, TransitionValidity::Valid);
     Ok(())
@@ -484,11 +484,11 @@ fn test_user_corrections_allowed_on_completed() -> Result<()> {
     let text_result = validate_state_transition(
         &state,
         StateTransition::TextCorrected("actually called the electrician".to_string()),
-    )?;
+    );
     assert_eq!(text_result, TransitionValidity::Valid);
 
     let scope_result =
-        validate_state_transition(&state, StateTransition::ScopeSet(ItemScope::Work))?;
+        validate_state_transition(&state, StateTransition::ScopeSet(ItemScope::Work));
     assert_eq!(scope_result, TransitionValidity::Valid);
 
     Ok(())
@@ -525,7 +525,7 @@ fn test_deleted_item_rejects_all_transitions() -> Result<()> {
     ];
 
     for transition in transitions {
-        let result = validate_state_transition(&state, transition)?;
+        let result = validate_state_transition(&state, transition);
         assert_eq!(result, TransitionValidity::NotAllowed);
     }
 
@@ -678,7 +678,7 @@ fn test_model_cannot_override_user_corrected_type() -> Result<()> {
         StateTransition::ModelAnnotation {
             annotation_type: Some(ItemType::Idea),
         },
-    )?;
+    );
 
     assert_eq!(result, TransitionValidity::ForbiddenOverride);
     Ok(())
@@ -779,7 +779,7 @@ fn test_apply_proposal_rejects_stale_proposal() -> Result<()> {
             "capture",
             None::<String>,
             "unapplied",
-            "type",
+            "action",
             None::<String>,
             None::<String>,
             None::<String>,
@@ -867,7 +867,7 @@ fn test_apply_proposal_rejects_user_corrected_field() -> Result<()> {
             "capture",
             None::<String>,
             "unapplied",
-            "type",
+            "idea",
             None::<String>,
             None::<String>,
             None::<String>,
@@ -1244,5 +1244,302 @@ fn test_obligation_gating_after_model_apply() -> Result<()> {
         "After model apply to action, item should carry obligation"
     );
 
+    Ok(())
+}
+
+fn insert_proposal(
+    db: &mut Database,
+    proposal_id: &str,
+    item_id: &str,
+    source_revision: i32,
+    schema_version: i32,
+    proposal_type: Option<&str>,
+    session_topic_proposal: Option<&str>,
+) -> Result<()> {
+    let tx = db.transaction()?;
+    tx.execute(
+        "INSERT INTO proposals (proposal_id, item_id, capture_id, source_revision, schema_version, text_basis_kind, text_basis_id, applied_state, proposal_type, reminder_proposal, session_topic_proposal, source_spans, abstained, request_version, created_at)
+         VALUES (?, ?, ?, ?, ?, 'capture', NULL, 'unapplied', ?, NULL, ?, NULL, 0, NULL, '2026-01-15T10:30:00Z')",
+        rusqlite::params![
+            proposal_id,
+            item_id,
+            format!("cap-{}", item_id),
+            source_revision,
+            schema_version,
+            proposal_type,
+            session_topic_proposal,
+        ],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn proposal_applied_state(db: &mut Database, proposal_id: &str) -> Result<String> {
+    let tx = db.transaction()?;
+    let state = tx.query_row(
+        "SELECT applied_state FROM proposals WHERE proposal_id = ?",
+        [proposal_id],
+        |row| row.get(0),
+    )?;
+    tx.commit()?;
+    Ok(state)
+}
+
+#[test]
+fn test_apply_proposal_rejects_unsupported_schema_version() -> Result<()> {
+    let path = temp_db_path("apply_unsupported_schema");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let tx = db.transaction()?;
+    insert_test_item(&tx, "item-1", "call the roofer")?;
+    tx.commit()?;
+    insert_proposal(
+        &mut db,
+        "prop-v999",
+        "item-1",
+        0,
+        999,
+        Some("action"),
+        Some("home"),
+    )?;
+
+    let tx = db.transaction()?;
+    let result = apply_proposal(&tx, "item-1", "prop-v999");
+    tx.commit()?;
+    assert_eq!(
+        result.unwrap_err(),
+        ProposalApplicationError::UnsupportedSchemaVersion(999)
+    );
+
+    let tx = db.transaction()?;
+    let state = load_item_state(&tx, "item-1")?.expect("item should exist");
+    let snapshot = get_item_snapshot(&tx, "item-1")?.expect("snapshot should exist");
+    tx.commit()?;
+    assert_eq!(state.item_type, None);
+    assert_eq!(state.session_topic, None);
+    assert_eq!(snapshot.item_type, None);
+    assert_eq!(proposal_applied_state(&mut db, "prop-v999")?, "unapplied");
+    Ok(())
+}
+
+#[test]
+fn test_apply_proposal_rejects_unparseable_type_and_preserves_prior_state() -> Result<()> {
+    let path = temp_db_path("apply_unparseable_type");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let tx = db.transaction()?;
+    insert_test_item(&tx, "item-1", "call the roofer")?;
+    tx.commit()?;
+    insert_proposal(&mut db, "prop-good", "item-1", 0, 1, Some("idea"), None)?;
+    let tx = db.transaction()?;
+    apply_proposal(&tx, "item-1", "prop-good")?;
+    tx.commit()?;
+
+    // A newer proposal for the same revision carries an invalid type: the prior idea stays.
+    insert_proposal(&mut db, "prop-bad", "item-1", 0, 1, Some("garbage!!"), None)?;
+    let tx = db.transaction()?;
+    let result = apply_proposal(&tx, "item-1", "prop-bad");
+    tx.commit()?;
+    match result {
+        Err(ProposalApplicationError::InvalidProposal(msg)) if msg.contains("proposal_type") => {}
+        other => panic!(
+            "expected InvalidProposal for unparseable type, got {:?}",
+            other
+        ),
+    }
+
+    let tx = db.transaction()?;
+    let state = load_item_state(&tx, "item-1")?.expect("item should exist");
+    let rebuilt = rebuild_state_from_events(&tx, "item-1")?.expect("rebuilt should exist");
+    tx.commit()?;
+    assert_eq!(state.item_type, Some(ItemType::Idea));
+    assert_eq!(state, rebuilt);
+    assert_eq!(proposal_applied_state(&mut db, "prop-good")?, "applied");
+    assert_eq!(proposal_applied_state(&mut db, "prop-bad")?, "unapplied");
+    Ok(())
+}
+
+#[test]
+fn test_newer_proposal_for_same_revision_supersedes_older() -> Result<()> {
+    let path = temp_db_path("apply_supersede");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let tx = db.transaction()?;
+    insert_test_item(&tx, "item-1", "call the roofer")?;
+    tx.commit()?;
+    insert_proposal(
+        &mut db,
+        "prop-old",
+        "item-1",
+        0,
+        1,
+        Some("idea"),
+        Some("home"),
+    )?;
+    insert_proposal(&mut db, "prop-new", "item-1", 0, 1, Some("action"), None)?;
+
+    let tx = db.transaction()?;
+    apply_proposal(&tx, "item-1", "prop-old")?;
+    tx.commit()?;
+    let tx = db.transaction()?;
+    let applied = apply_proposal(&tx, "item-1", "prop-new")?;
+    tx.commit()?;
+
+    assert_eq!(applied.item_type, Some(ItemType::Action));
+    assert_eq!(applied.session_topic, None);
+    assert_eq!(proposal_applied_state(&mut db, "prop-old")?, "superseded");
+    assert_eq!(proposal_applied_state(&mut db, "prop-new")?, "applied");
+
+    let tx = db.transaction()?;
+    let state = load_item_state(&tx, "item-1")?.expect("item should exist");
+    let rebuilt = rebuild_state_from_events(&tx, "item-1")?.expect("rebuilt should exist");
+    let snapshot = get_item_snapshot(&tx, "item-1")?.expect("snapshot should exist");
+    tx.commit()?;
+    assert_eq!(state, applied);
+    assert_eq!(state, rebuilt);
+    assert_eq!(snapshot.item_type, Some(ItemType::Action));
+
+    // A superseded proposal cannot be re-applied.
+    let tx = db.transaction()?;
+    let result = apply_proposal(&tx, "item-1", "prop-old");
+    tx.commit()?;
+    assert!(matches!(
+        result,
+        Err(ProposalApplicationError::InvalidProposal(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn test_capture_session_topic_outranks_model_topic_proposal() -> Result<()> {
+    let path = temp_db_path("capture_topic_precedence");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let tx = db.transaction()?;
+    insert_test_item(&tx, "item-1", "bring this up in therapy")?;
+    tx.execute(
+        "UPDATE captures SET session_topic = 'therapy' WHERE capture_id = 'cap-item-1'",
+        [],
+    )?;
+    tx.commit()?;
+    insert_proposal(
+        &mut db,
+        "prop-1",
+        "item-1",
+        0,
+        1,
+        Some("note"),
+        Some("model-topic"),
+    )?;
+
+    let tx = db.transaction()?;
+    let applied = apply_proposal(&tx, "item-1", "prop-1")?;
+    tx.commit()?;
+    assert_eq!(applied.session_topic, Some("therapy".to_string()));
+    assert_eq!(applied.item_type, Some(ItemType::Note));
+
+    let tx = db.transaction()?;
+    let state = load_item_state(&tx, "item-1")?.expect("item should exist");
+    let rebuilt = rebuild_state_from_events(&tx, "item-1")?.expect("rebuilt should exist");
+    let snapshot = get_item_snapshot(&tx, "item-1")?.expect("snapshot should exist");
+    tx.commit()?;
+    assert_eq!(state.session_topic, Some("therapy".to_string()));
+    assert_eq!(state, rebuilt);
+    assert_eq!(snapshot.item_type, Some(ItemType::Note));
+    Ok(())
+}
+
+#[test]
+fn test_model_topic_applies_when_capture_has_none_and_rebuilds() -> Result<()> {
+    let path = temp_db_path("model_topic_applies");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let tx = db.transaction()?;
+    insert_test_item(&tx, "item-1", "call the roofer")?;
+    tx.commit()?;
+    insert_proposal(
+        &mut db,
+        "prop-1",
+        "item-1",
+        0,
+        1,
+        None,
+        Some("home repairs"),
+    )?;
+
+    let tx = db.transaction()?;
+    let applied = apply_proposal(&tx, "item-1", "prop-1")?;
+    tx.commit()?;
+    assert_eq!(applied.session_topic, Some("home repairs".to_string()));
+    assert_eq!(applied.item_type, None);
+
+    let tx = db.transaction()?;
+    let state = load_item_state(&tx, "item-1")?.expect("item should exist");
+    let rebuilt = rebuild_state_from_events(&tx, "item-1")?.expect("rebuilt should exist");
+    tx.commit()?;
+    assert_eq!(state, rebuilt);
+    Ok(())
+}
+
+#[test]
+fn test_user_correction_after_model_apply_records_model_value_as_old_value() -> Result<()> {
+    let path = temp_db_path("correction_after_model_apply");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let tx = db.transaction()?;
+    insert_test_item(&tx, "item-1", "call the roofer")?;
+    tx.commit()?;
+    insert_proposal(&mut db, "prop-1", "item-1", 0, 1, Some("action"), None)?;
+    let tx = db.transaction()?;
+    apply_proposal(&tx, "item-1", "prop-1")?;
+    tx.commit()?;
+
+    let correction_event = Event::new(
+        "evt-1".to_string(),
+        "item-1".to_string(),
+        0,
+        EventType::Correction,
+        EventPayload::Correction(Correction {
+            kind: CorrectionKind::Type,
+            old_value: Some("action".to_string()),
+            new_value: "idea".to_string(),
+        }),
+        "2026-01-15T10:31:00Z".to_string(),
+    )?;
+    save_event(&mut db, &correction_event, 0)?;
+
+    let tx = db.transaction()?;
+    let state = load_item_state(&tx, "item-1")?.expect("item should exist");
+    let rebuilt = rebuild_state_from_events(&tx, "item-1")?.expect("rebuilt should exist");
+    tx.commit()?;
+    assert_eq!(state.item_type, Some(ItemType::Idea));
+    assert!(state.provenance.type_corrected);
+    assert_eq!(state, rebuilt);
+
+    // The correction records the model-set value as its old value.
+    let tx = db.transaction()?;
+    let old_value: Option<String> = tx.query_row(
+        "SELECT old_value FROM corrections WHERE item_id = 'item-1' AND kind = 'type'",
+        [],
+        |row| row.get(0),
+    )?;
+    tx.commit()?;
+    assert_eq!(old_value, Some("action".to_string()));
+
+    // Reprocessing cannot undo the correction: a fresh proposal at the new revision is refused.
+    insert_proposal(&mut db, "prop-2", "item-1", 1, 1, Some("action"), None)?;
+    let tx = db.transaction()?;
+    let result = apply_proposal(&tx, "item-1", "prop-2");
+    tx.commit()?;
+    assert_eq!(
+        result.unwrap_err(),
+        ProposalApplicationError::ForbiddenByUserCorrection("type".to_string())
+    );
     Ok(())
 }
