@@ -55,6 +55,10 @@ pub const MIGRATIONS: &[MigrationStep] = &[
         target_version: 3,
         apply: add_unschedulable_reason_v3,
     },
+    MigrationStep {
+        target_version: 4,
+        apply: add_profile_revocation_and_requeue_v4,
+    },
 ];
 
 /// Database handle with schema validation.
@@ -672,6 +676,28 @@ fn add_event_payload_columns_v2(tx: &Transaction<'_>) -> Result<()> {
 fn add_unschedulable_reason_v3(tx: &Transaction<'_>) -> Result<()> {
     tx.execute(
         "ALTER TABLE reminders ADD COLUMN unschedulable_reason TEXT",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Step 4: explicit profile revocation (V03) and the durable job requeue link (V03).
+fn add_profile_revocation_and_requeue_v4(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute(
+        "ALTER TABLE provider_profiles ADD COLUMN revoked_at TEXT",
+        [],
+    )?;
+    // One row per explicit requeue: the retired job and the job that replaced it.
+    tx.execute(
+        "CREATE TABLE job_requeues (
+            new_job_id TEXT PRIMARY KEY,
+            old_job_id TEXT NOT NULL UNIQUE,
+            from_profile_version TEXT,
+            to_profile_version TEXT NOT NULL,
+            requeued_at TEXT NOT NULL,
+            FOREIGN KEY (new_job_id) REFERENCES jobs(job_id) ON DELETE CASCADE,
+            FOREIGN KEY (old_job_id) REFERENCES jobs(job_id) ON DELETE CASCADE
+        )",
         [],
     )?;
     Ok(())

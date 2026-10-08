@@ -261,7 +261,7 @@ pub fn get_job(db: &Database, job_id: &str) -> Result<Option<Job>> {
         .map_err(|e| anyhow!(e))
 }
 
-fn get_job_internal(tx: &Transaction<'_>, job_id: &str) -> Result<Option<Job>> {
+pub(crate) fn get_job_internal(tx: &Transaction<'_>, job_id: &str) -> Result<Option<Job>> {
     tx.query_row(
         &format!("SELECT {} FROM jobs WHERE job_id = ?", JOB_COLUMNS),
         [job_id],
@@ -276,7 +276,9 @@ fn get_job_internal(tx: &Transaction<'_>, job_id: &str) -> Result<Option<Job>> {
 /// `attempt_count` is the lease token that `complete_job` / `fail_job_with_backoff` must present.
 /// Candidates that can never run are resolved durably inside the claim transaction and skipped:
 /// unsupported schema versions become `failed` (`unsupported_job_version`); jobs whose item is
-/// missing, deleted or revised past `source_revision` become `cancelled` with the reason recorded.
+/// missing, deleted or revised past `source_revision` become `cancelled` with the reason recorded;
+/// jobs whose pinned profile was revoked or no longer exists become `cancelled`
+/// ([`PROFILE_REVOKED_REASON`] / [`PROFILE_MISSING_REASON`]) with their lease cleared.
 /// Returns None if nothing is eligible.
 pub fn claim_job_with_lease(
     db: &mut Database,
@@ -332,6 +334,39 @@ pub fn claim_job_with_lease_in_tx(
                 ],
             )?;
             continue;
+        }
+
+        // A job pinned to a revoked or deleted profile version is retired without being
+        // claimed. Expired-lease running jobs are retired too, so the search cannot spin.
+        if let Some(ref profile_version) = job.profile_version {
+            let revoked_at: Option<Option<String>> = tx
+                .query_row(
+                    "SELECT revoked_at FROM provider_profiles WHERE profile_version = ?",
+                    [profile_version],
+                    |row| row.get(0),
+                )
+                .optional()?;
+
+            let retire_reason = match revoked_at {
+                None => Some(PROFILE_MISSING_REASON),
+                Some(Some(_)) => Some(PROFILE_REVOKED_REASON),
+                Some(None) => None,
+            };
+
+            if let Some(retire_reason) = retire_reason {
+                tx.execute(
+                    "UPDATE jobs SET status = ?, failure_reason = ?, lease_expires_at = NULL \
+                     WHERE job_id = ? AND status IN (?, ?)",
+                    rusqlite::params![
+                        JobStatus::Cancelled.as_str(),
+                        retire_reason,
+                        &job.job_id,
+                        JobStatus::Queued.as_str(),
+                        JobStatus::Running.as_str()
+                    ],
+                )?;
+                continue;
+            }
         }
 
         // Check item exists and is not deleted, and check revision staleness
@@ -440,12 +475,83 @@ fn lease_rejection(
 /// claim; a stale holder whose lease was reclaimed presents an older attempt and is rejected.
 pub fn complete_job(db: &mut Database, job_id: &str, lease_attempt: i32) -> Result<()> {
     let tx = db.immediate_transaction()?;
-    complete_job_in_tx(&tx, job_id, lease_attempt)?;
+    if let Err(completion_error) = complete_job_in_tx(&tx, job_id, lease_attempt) {
+        // A rejected result for a vanished profile still persists the job's retirement.
+        let retired_for_missing_profile: bool = tx
+            .query_row(
+                "SELECT 1 FROM jobs WHERE job_id = ? AND status = ? AND failure_reason = ?",
+                rusqlite::params![
+                    job_id,
+                    JobStatus::Cancelled.as_str(),
+                    PROFILE_MISSING_REASON
+                ],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if retired_for_missing_profile {
+            tx.commit()?;
+        }
+        return Err(completion_error);
+    }
     tx.commit()?;
     Ok(())
 }
 
+/// Failure reason recorded when a job is retired because its pinned profile row no longer exists.
+pub const PROFILE_MISSING_REASON: &str = "profile_missing";
+
+/// Failure reason recorded when a job is retired because its pinned profile was revoked.
+pub const PROFILE_REVOKED_REASON: &str = "profile_revoked";
+
 pub fn complete_job_in_tx(tx: &Transaction<'_>, job_id: &str, lease_attempt: i32) -> Result<()> {
+    // Check if job's profile has been revoked; if so, reject the result
+    let profile_version: Option<String> = tx
+        .query_row(
+            "SELECT profile_version FROM jobs WHERE job_id = ?",
+            [job_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+
+    if let Some(profile_ver) = profile_version {
+        let revoked_at: Option<Option<String>> = tx
+            .query_row(
+                "SELECT revoked_at FROM provider_profiles WHERE profile_version = ?",
+                [&profile_ver],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        if matches!(revoked_at, Some(Some(_))) {
+            return Err(anyhow!(
+                "Job {} result rejected: profile was revoked",
+                job_id
+            ));
+        }
+
+        if revoked_at.is_none() {
+            // The pinned profile no longer exists: the destination is gone, so the late result is
+            // ineligible. Leave an inspectable terminal disposition on the job.
+            tx.execute(
+                "UPDATE jobs SET status = ?, failure_reason = ?, lease_expires_at = NULL \
+                 WHERE job_id = ? AND status IN (?, ?)",
+                rusqlite::params![
+                    JobStatus::Cancelled.as_str(),
+                    PROFILE_MISSING_REASON,
+                    job_id,
+                    JobStatus::Queued.as_str(),
+                    JobStatus::Running.as_str()
+                ],
+            )?;
+            return Err(anyhow!(
+                "Job {} result rejected: pinned profile no longer exists",
+                job_id
+            ));
+        }
+    }
+
     let affected = tx.execute(
         "UPDATE jobs SET status = ?, lease_expires_at = NULL \
          WHERE job_id = ? AND status = ? AND attempt_count = ?",
