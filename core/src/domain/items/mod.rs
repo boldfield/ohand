@@ -213,6 +213,21 @@ pub enum StateTransition {
 /// Rebuilds state from: capture (source of truth), item record (current values and lifecycle),
 /// corrections (user updates), and events (lifecycle changes).
 pub fn load_item_state(tx: &Transaction<'_>, item_id: &str) -> Result<Option<ItemState>> {
+    load_item_state_with(tx, item_id, true)
+}
+
+/// Load the item state exactly as the `items` row stores it (the values read by
+/// `get_item_snapshot`, obligation gating and correction compare-and-set), without
+/// re-deriving model fields from proposal history.
+pub fn load_stored_item_state(tx: &Transaction<'_>, item_id: &str) -> Result<Option<ItemState>> {
+    load_item_state_with(tx, item_id, false)
+}
+
+fn load_item_state_with(
+    tx: &Transaction<'_>,
+    item_id: &str,
+    resolve_applied_proposals: bool,
+) -> Result<Option<ItemState>> {
     type ItemRow = (
         String,
         i32,
@@ -308,7 +323,7 @@ pub fn load_item_state(tx: &Transaction<'_>, item_id: &str) -> Result<Option<Ite
 
     // Resolve item type: user correction takes precedence over applied proposals.
     let mut resolved_type = parsed_item_type;
-    if !type_corrected {
+    if resolve_applied_proposals && !type_corrected {
         // Check for applied proposals with type (ordered by source_revision for determinism).
         let applied_type: Option<String> = tx
             .query_row(
@@ -330,7 +345,7 @@ pub fn load_item_state(tx: &Transaction<'_>, item_id: &str) -> Result<Option<Ite
 
     // Similarly, check for applied session_topic if not user-corrected.
     // But never override an explicit session_topic from the capture itself.
-    if !session_topic_corrected && !has_capture_topic {
+    if resolve_applied_proposals && !session_topic_corrected && !has_capture_topic {
         let applied_topic: Option<String> = tx
             .query_row(
                 "SELECT session_topic_proposal FROM proposals
@@ -388,12 +403,14 @@ pub fn load_item_state(tx: &Transaction<'_>, item_id: &str) -> Result<Option<Ite
 
 /// Verify that the state snapshot stored in the database can be rebuilt from retained records.
 /// If the stored snapshot differs from the rebuilt state, returns the discrepancy.
+/// The stored side is the raw `items` row projection, so drift in a model-derived column
+/// is reported rather than masked by re-resolving proposals.
 /// This is used to detect stale or corrupted derived output.
 pub fn verify_state_integrity(
     tx: &Transaction<'_>,
     item_id: &str,
 ) -> Result<Option<StateIntegrityIssue>> {
-    let stored = load_item_state(tx, item_id)?;
+    let stored = load_stored_item_state(tx, item_id)?;
     let rebuilt = rebuild_state_from_events(tx, item_id)?;
 
     match (stored, rebuilt) {

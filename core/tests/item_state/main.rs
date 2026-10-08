@@ -1247,6 +1247,50 @@ fn test_obligation_gating_after_model_apply() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn test_integrity_check_detects_drift_in_model_derived_items_columns() -> Result<()> {
+    let path = temp_db_path("integrity_drift");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let tx = db.transaction()?;
+    insert_test_item(&tx, "item-1", "call the roofer")?;
+    tx.commit()?;
+    insert_proposal(&mut db, "prop-action", "item-1", 0, 1, Some("action"), None)?;
+
+    let tx = db.transaction()?;
+    apply_proposal(&tx, "item-1", "prop-action")?;
+    tx.commit()?;
+
+    // Consistent after a legitimate apply.
+    let tx = db.transaction()?;
+    assert_eq!(
+        ohand_core::domain::items::verify_state_integrity(&tx, "item-1")?,
+        None
+    );
+    tx.commit()?;
+
+    // Drift only the items column, leaving the applied proposal intact.
+    let tx = db.transaction()?;
+    tx.execute(
+        "UPDATE items SET item_type = 'idea' WHERE item_id = 'item-1'",
+        [],
+    )?;
+    let snapshot = get_item_snapshot(&tx, "item-1")?.expect("snapshot should exist");
+    assert_eq!(snapshot.item_type, Some(ItemType::Idea));
+    let issue = ohand_core::domain::items::verify_state_integrity(&tx, "item-1")?;
+    tx.commit()?;
+
+    match issue {
+        Some(ohand_core::domain::items::StateIntegrityIssue::Mismatch { stored, rebuilt }) => {
+            assert_eq!(stored.item_type, Some(ItemType::Idea));
+            assert_eq!(rebuilt.item_type, Some(ItemType::Action));
+        }
+        other => panic!("expected integrity mismatch, got {:?}", other),
+    }
+    Ok(())
+}
+
 fn insert_proposal(
     db: &mut Database,
     proposal_id: &str,
