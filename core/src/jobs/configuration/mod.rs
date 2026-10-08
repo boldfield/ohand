@@ -165,20 +165,66 @@ pub fn revoke_profile_and_retire_jobs_in_tx(
 
 /// Retire a specific job and create a new requeue job in one transaction.
 /// The old job is marked as cancelled with reason 'requeued'. The new job is created pinned
-/// to a new profile version. This creates an inspectable record that the new job supersedes the old.
-#[allow(clippy::too_many_arguments)]
+/// to a new profile version, with all other fields copied from the old job.
+/// This ensures atomicity and creates an inspectable record: the old job's failure_reason
+/// is set to 'requeued', and the new job can be located through the item_id and job_type.
 pub fn requeue_job_to_new_profile_in_tx(
     tx: &Transaction<'_>,
     old_job_id: &str,
     new_job_id: String,
-    item_id: String,
-    job_type: String,
-    source_revision: i32,
     new_profile_version: String,
-    request_version: Option<String>,
-    job_schema_version: i32,
     now: DateTime<Utc>,
 ) -> Result<()> {
+    // Load the old job to copy its fields
+    let (item_id, job_type, source_revision, job_schema_version, request_version): (
+        String,
+        String,
+        i32,
+        i32,
+        Option<String>,
+    ) = tx
+        .query_row(
+            "SELECT item_id, job_type, source_revision, job_schema_version, request_version \
+             FROM jobs WHERE job_id = ?",
+            [old_job_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .context("loading old job for requeue")?;
+
+    // Validate that the new profile exists and is not revoked
+    let profile_exists: Option<Option<String>> = tx
+        .query_row(
+            "SELECT revoked_at FROM provider_profiles WHERE profile_version = ?",
+            [&new_profile_version],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("checking new profile availability")?;
+
+    match profile_exists {
+        None => {
+            return Err(anyhow!(
+                "New profile {} does not exist",
+                new_profile_version
+            ))
+        }
+        Some(Some(_)) => {
+            return Err(anyhow!(
+                "New profile {} is revoked and cannot be used for requeue",
+                new_profile_version
+            ))
+        }
+        Some(None) => {}
+    }
+
     // Retire the old job: mark as cancelled with reason 'requeued'
     let affected = tx.execute(
         "UPDATE jobs SET status = ?, failure_reason = ?, lease_expires_at = NULL \
@@ -193,7 +239,7 @@ pub fn requeue_job_to_new_profile_in_tx(
         ));
     }
 
-    // Create the new job pinned to the new profile version
+    // Create the new job pinned to the new profile version, copying fields from old job
     let created_at_str = now.to_rfc3339();
     tx.execute(
         "INSERT INTO jobs (

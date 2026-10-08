@@ -564,12 +564,7 @@ fn test_explicit_requeue_after_profile_change() -> Result<()> {
             &tx,
             "job-on-old-profile",
             "job-on-new-profile".to_string(),
-            item_id.clone(),
-            "interpret".to_string(),
-            0,
             new_profile.to_string(),
-            None,
-            1,
             now,
         )?;
         tx.commit()?;
@@ -888,12 +883,7 @@ fn test_requeue_creates_inspectable_record() -> Result<()> {
             &tx,
             "job-to-requeue",
             "job-requeued".to_string(),
-            item_id,
-            "interpret".to_string(),
-            0,
             new_profile.to_string(),
-            None,
-            1,
             now,
         )?;
         tx.commit()?;
