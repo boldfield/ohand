@@ -23,14 +23,17 @@ See [`docs/validation/tauri-build.md`](../../docs/validation/tauri-build.md) for
 
 ```bash
 cd probes/tauri
-tauri build --target aarch64-apple-ios-sim
+npm ci
+cd src-tauri && cargo tauri ios init && cd ..
+cargo tauri ios build --target aarch64-sim
 ```
 
 ### Test on simulator
 
 ```bash
 xcrun simctl boot "iPhone 16"
-tauri ios dev --target aarch64-apple-ios-sim
+cargo tauri ios build --target aarch64-sim
+# Then install and launch using simctl (see docs/validation/tauri-build.md)
 ```
 
 ### Expected result

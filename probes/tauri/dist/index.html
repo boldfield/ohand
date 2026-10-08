@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+    <title>Oh And Tauri Probe</title>
+    <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+    <div class="container">
+        <h1>Oh And Tauri Probe</h1>
+        <p>Minimal Tauri 2 iOS management-shell feasibility test</p>
+
+        <div class="section">
+            <h2>Native Round-Trip Test</h2>
+            <input
+                id="messageInput"
+                type="text"
+                placeholder="Enter text to echo"
+                value="Hello from Tauri"
+            />
+            <button id="echoButton">Echo</button>
+            <p id="result"></p>
+        </div>
+
+        <div class="section">
+            <h2>Status</h2>
+            <p id="status">Ready to test</p>
+        </div>
+    </div>
+
+    <script src="main.js"></script>
+</body>
+</html>

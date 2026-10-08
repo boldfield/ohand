@@ -258,9 +258,15 @@ rustup override set $(cat ../../rust-toolchain.toml | grep channel | cut -d'"' -
 - Ensure Rust command is registered via `generate_handler![echo_message]`
 - Check CSP in index.html allows inline scripts
 
+## Validation Status
+
+Simulator validation is in progress. The workflow builds the probe, launches it on a simulator, and verifies the Rust-to-JavaScript IPC round-trip by capturing logs and asserting the echo command executed.
+
+When the workflow passes, the build evidence (build.log, app.log, roundtrip.log, screenshot.png) will be linked here.
+
 ## Live Device Testing
 
-Simulator validation passes and device testing is separate. To test on a physical iPhone 16:
+Device testing is separate. To test on a physical iPhone 16:
 
 1. Obtain Apple Developer signing credentials
 2. Configure signing in Xcode (team/provisioning profile)

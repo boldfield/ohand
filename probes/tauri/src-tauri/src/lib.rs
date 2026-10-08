@@ -1,5 +1,6 @@
 #[tauri::command]
 fn echo_message(input: String) -> String {
+    eprintln!("[tauri-probe] Echo command called with input: {}", input);
     format!("Echo from Rust: {}", input)
 }
 

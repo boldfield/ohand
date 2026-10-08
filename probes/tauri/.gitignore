@@ -1,5 +1,4 @@
 # Tauri
-dist/
 .tauri
 node_modules/
 pnpm-lock.yaml
