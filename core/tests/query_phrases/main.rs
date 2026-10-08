@@ -127,18 +127,15 @@ fn test_date_without_time_clarification() -> Result<()> {
     let context = make_context();
     let resolution = parse_phrase("notes since 2026-01-10", &context)?;
 
+    // Date-only phrases use local midnight as the unambiguous boundary
+    // No clarification needed
     assert!(
-        resolution.clarification_needed.is_some(),
-        "Should expose clarification for date-only input"
+        resolution.clarification_needed.is_none(),
+        "Date-only phrases should use local midnight as unambiguous boundary"
     );
-    match resolution.clarification_needed {
-        Some(ClarificationKind::MissingTime { date_str }) => {
-            // When we detect MissingTime, we should not apply a filter
-            assert_eq!(date_str, "2026-01-10");
-        }
-        _ => panic!("Expected MissingTime clarification"),
-    }
-    // The filter should still be applied for convenience, but clarification is requested
+    assert!(resolution.filter.is_some());
+    let filter = resolution.filter.unwrap();
+    assert!(filter.captured_after.is_some());
     Ok(())
 }
 
@@ -777,6 +774,196 @@ fn test_fallback_search_uses_resolution_text() -> Result<()> {
         result.hits.iter().any(|h| h.item_id == "item-1"),
         "Should retrieve through fallback search text"
     );
+
+    Ok(())
+}
+
+#[test]
+fn test_today_uses_local_date_not_utc() -> Result<()> {
+    let context = TimeContext {
+        timezone: "America/Los_Angeles".to_string(),
+        locale: "en".to_string(),
+        // 2026-01-15T03:30Z (UTC) = 2026-01-14T19:30 (LA, UTC-8)
+        reference_time: DateTime::parse_from_rfc3339("2026-01-15T03:30:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc),
+        utc_offset_at_capture: -8 * 3600,
+        calendar: "gregorian".to_string(),
+    };
+
+    let resolution = parse_phrase("notes since today", &context)?;
+    assert!(resolution.filter.is_some());
+
+    let filter = resolution.filter.unwrap();
+    assert!(filter.captured_after.is_some());
+    let captured_after = filter.captured_after.unwrap();
+    // With LA timezone, "today" should be 2026-01-14 (not 2026-01-15)
+    // Local midnight 2026-01-14T00:00:00-08:00 = 2026-01-14T08:00:00Z
+    assert!(
+        captured_after.contains("2026-01-14"),
+        "Expected 2026-01-14 for LA local 'today', got {}",
+        captured_after
+    );
+    Ok(())
+}
+
+#[test]
+fn test_yesterday_uses_local_date_not_utc() -> Result<()> {
+    let context = TimeContext {
+        timezone: "America/Los_Angeles".to_string(),
+        locale: "en".to_string(),
+        // 2026-01-15T03:30Z (UTC) = 2026-01-14T19:30 (LA, UTC-8)
+        reference_time: DateTime::parse_from_rfc3339("2026-01-15T03:30:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc),
+        utc_offset_at_capture: -8 * 3600,
+        calendar: "gregorian".to_string(),
+    };
+
+    let resolution = parse_phrase("notes since yesterday", &context)?;
+    assert!(resolution.filter.is_some());
+
+    let filter = resolution.filter.unwrap();
+    assert!(filter.captured_after.is_some());
+    let captured_after = filter.captured_after.unwrap();
+    // With LA timezone at 2026-01-14T19:30 local, yesterday is 2026-01-13
+    // Local midnight 2026-01-13T00:00:00-08:00 = 2026-01-13T08:00:00Z
+    assert!(
+        captured_after.contains("2026-01-13"),
+        "Expected 2026-01-13 for LA local 'yesterday', got {}",
+        captured_after
+    );
+    Ok(())
+}
+
+#[test]
+fn test_word_boundary_matching_for_item_types() -> Result<()> {
+    let context = make_context();
+
+    // "inaction notes" should NOT match "action notes"
+    let resolution = parse_phrase("inaction notes", &context)?;
+    assert!(
+        resolution.filter.is_none(),
+        "Should not match 'inaction' as 'action'"
+    );
+
+    // But "action notes" should still match
+    let resolution2 = parse_phrase("action notes", &context)?;
+    assert!(resolution2.filter.is_some());
+    assert_eq!(resolution2.filter.unwrap().item_types, vec!["action"]);
+
+    Ok(())
+}
+
+#[test]
+fn test_dst_fold_explicit_time_withholds_filter() -> Result<()> {
+    let context = TimeContext {
+        timezone: "America/New_York".to_string(),
+        locale: "en".to_string(),
+        // Reference time after DST fold
+        reference_time: DateTime::parse_from_rfc3339("2026-01-15T10:30:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc),
+        utc_offset_at_capture: -5 * 3600,
+        calendar: "gregorian".to_string(),
+    };
+
+    // A time during DST fold (2025-11-02 01:30:00 exists twice in America/New_York)
+    let resolution = parse_phrase("notes since 2025-11-02 01:30:00", &context)?;
+
+    // Should ask for clarification, not apply a filter
+    if let Some(filter) = resolution.filter {
+        assert!(
+            filter.captured_after.is_none(),
+            "Should not apply filter for ambiguous DST time"
+        );
+    }
+    assert!(
+        resolution.clarification_needed.is_some(),
+        "Should ask for clarification on DST ambiguity"
+    );
+    match resolution.clarification_needed {
+        Some(ClarificationKind::AmbiguousTime { .. }) => {}
+        _ => panic!("Expected AmbiguousTime clarification"),
+    }
+    Ok(())
+}
+
+#[test]
+fn test_future_since_bound_asks_for_clarification() -> Result<()> {
+    let context = make_context();
+    // Tomorrow is 2026-01-16, which is after reference_time 2026-01-15T10:30Z
+    let resolution = parse_phrase("notes since tomorrow", &context)?;
+
+    // Should not apply a future filter
+    if let Some(filter) = resolution.filter {
+        assert!(
+            filter.captured_after.is_none(),
+            "Should not apply future captured_after"
+        );
+    }
+    assert!(
+        resolution.clarification_needed.is_some(),
+        "Should ask for clarification on future 'since' bound"
+    );
+    Ok(())
+}
+
+#[test]
+fn test_retrieval_with_non_utc_timezone() -> Result<()> {
+    let mut db = new_db("retrieval_nonuts")?;
+    let context = TimeContext {
+        timezone: "America/Los_Angeles".to_string(),
+        locale: "en".to_string(),
+        reference_time: DateTime::parse_from_rfc3339("2026-01-15T10:30:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc),
+        utc_offset_at_capture: -8 * 3600,
+        calendar: "gregorian".to_string(),
+    };
+
+    // Add items at specific UTC times
+    add_test_item(
+        &mut db,
+        "item-before-boundary",
+        "therapy notes from before local midnight",
+        None,
+        Some("therapy"),
+        "2026-01-14T07:59:59Z", // Before 2026-01-14T08:00Z (local midnight)
+    )?;
+
+    add_test_item(
+        &mut db,
+        "item-after-boundary",
+        "therapy notes from after local midnight",
+        None,
+        Some("therapy"),
+        "2026-01-14T08:00:00Z", // At 2026-01-14T08:00Z (local midnight)
+    )?;
+
+    let resolution = parse_phrase("private therapy notes since 2026-01-14", &context)?;
+    assert!(resolution.filter.is_some());
+
+    let filter = resolution.filter.unwrap();
+    let pagination = QueryPagination::default();
+
+    let result = scoped_query(db.conn(), "therapy", &filter, &pagination)?;
+
+    // Should retrieve item at/after the local midnight, not the one before
+    let found_after = result
+        .hits
+        .iter()
+        .any(|h| h.item_id == "item-after-boundary");
+    let found_before = result
+        .hits
+        .iter()
+        .any(|h| h.item_id == "item-before-boundary");
+
+    assert!(
+        found_after,
+        "Should include item at or after local midnight"
+    );
+    assert!(!found_before, "Should exclude item before local midnight");
 
     Ok(())
 }
