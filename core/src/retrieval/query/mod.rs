@@ -6,7 +6,7 @@ use crate::retrieval::index::{search_index, search_source_direct, SearchHit};
 use crate::store::events::ItemScope;
 
 /// Query filters for scoped text retrieval. All filters are optional (None = no filter).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct QueryFilter {
     /// Item types to include (e.g., "action", "note", "idea", "broad_intention").
     /// Empty vec means no filter.
