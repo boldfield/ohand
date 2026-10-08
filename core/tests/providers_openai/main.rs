@@ -5,6 +5,7 @@
 //! reproduces transport behavior (delay, mid-call cancellation, bounded reads, HTTP statuses).
 
 use chrono::{TimeZone, Utc};
+use ohand_core::interpretation::instructions::{M1_INSTRUCTION_TEXT, M1_INSTRUCTION_VERSION};
 use ohand_core::providers::contracts::{
     dispatch, CancelToken, CapabilityMetadata, Clock, DispatchLimits, ErrorClass, FailureKind,
     InterpretationOutput, InterpretationRequest, ManualClock, ProviderCapability, ProviderFailure,
@@ -62,7 +63,7 @@ fn request_for(profile: &ProviderProfile, text: &str) -> InterpretationRequest {
         TextBasis::Original { item_revision: 0 },
         text,
         Uuid::new_v4().to_string(),
-        "instructions-v1",
+        M1_INSTRUCTION_VERSION,
         profile,
         "route-secret-name",
         time_context(),
@@ -351,9 +352,38 @@ fn request_targets_chat_completions_with_json_object_output() {
     assert_eq!(body["messages"].as_array().unwrap().len(), 2);
     assert_eq!(call.message(0)["role"], "system");
     let system = call.message(0)["content"].as_str().unwrap().to_string();
-    assert!(system.contains("time_context"));
-    assert!(system.contains("captured_text"));
-    assert!(system.contains("untrusted"));
+    assert_eq!(
+        system, M1_INSTRUCTION_TEXT,
+        "the pinned instructions are sent byte for byte"
+    );
+}
+
+#[test]
+fn unpublished_instruction_version_is_rejected_before_any_transport_call() {
+    let harness = Harness::new(vec![Step::ok("{}")]);
+    let request = InterpretationRequest::new(
+        Uuid::new_v4().to_string(),
+        0,
+        TextBasis::Original { item_revision: 0 },
+        "call mom tomorrow",
+        Uuid::new_v4().to_string(),
+        "instructions-v1",
+        &harness.profile,
+        "route-secret-name",
+        time_context(),
+    )
+    .expect("valid request");
+    let failure = dispatch(
+        &harness.adapter,
+        &harness.profile,
+        &request,
+        harness.clock.as_ref(),
+        &harness.cancel,
+        &DispatchLimits::default(),
+    )
+    .expect_err("only the published instructions are sent");
+    assert_eq!(failure.kind, FailureKind::Rejected);
+    assert!(harness.calls().is_empty());
 }
 
 #[test]
@@ -371,13 +401,17 @@ fn model_visible_message_carries_text_time_context_and_versions() {
     .expect("success");
 
     let document = harness.only_call().user_document();
-    assert_eq!(document["captured_text"], "call mom tomorrow");
-    assert_eq!(document["instruction_version"], "instructions-v1");
-    assert_eq!(document["request_version"], request.request_version());
-    assert_eq!(document["capture_id"], request.capture_id());
-    assert_eq!(document["source_revision"], 0);
+    assert_eq!(document["source"]["text"], "call mom tomorrow");
+    assert_eq!(document["source"]["trust"], "untrusted_data");
+    assert_eq!(document["instruction_version"], M1_INSTRUCTION_VERSION);
     assert_eq!(
-        document["text_basis"],
+        document["request"]["request_version"],
+        request.request_version()
+    );
+    assert_eq!(document["request"]["capture_id"], request.capture_id());
+    assert_eq!(document["request"]["source_revision"], 0);
+    assert_eq!(
+        document["request"]["text_basis"],
         json!({"kind": "original", "item_revision": 0})
     );
     assert_eq!(document["time_context"]["timezone"], "America/Chicago");
@@ -403,7 +437,7 @@ fn captured_text_is_sent_as_data_not_as_extra_message() {
         .expect("success");
     let call = harness.only_call();
     assert_eq!(call.body_json()["messages"].as_array().unwrap().len(), 2);
-    assert_eq!(call.user_document()["captured_text"], hostile);
+    assert_eq!(call.user_document()["source"]["text"], hostile);
 }
 
 #[test]
