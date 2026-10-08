@@ -3,16 +3,17 @@ import XCTest
 
 final class CredentialServiceTests: XCTestCase {
     var credentialService: CredentialService!
+    var fakeKeychain: FakeKeychain!
     let testKeychainService = "com.boldfield.ohand.test.credentials"
 
     override func setUp() {
         super.setUp()
-        credentialService = CredentialService(keychainService: testKeychainService)
-        clearAllTestCredentials()
+        fakeKeychain = FakeKeychain()
+        credentialService = CredentialService(keychainService: testKeychainService, keychain: fakeKeychain)
     }
 
     override func tearDown() {
-        clearAllTestCredentials()
+        fakeKeychain.clear()
         super.tearDown()
     }
 
@@ -87,8 +88,8 @@ final class CredentialServiceTests: XCTestCase {
         let updated2 = "updated-twice".data(using: .utf8)!
         try credentialService.updateCredential(updated2, reference: reference)
 
-        let status = try credentialService.credentialStatus(reference: reference)
-        XCTAssertEqual(status, .present)
+        let retrieved = try credentialService.retrieveCredential(reference: reference)
+        XCTAssertEqual(retrieved, updated2, "Should have latest update")
     }
 
     func testUpdateNonexistentCredentialCreatesIt() throws {
@@ -178,7 +179,7 @@ final class CredentialServiceTests: XCTestCase {
         XCTAssertEqual(status, .absent)
     }
 
-    func testStatusDistinguishesAbsentFromInvalidated() throws {
+    func testStatusDistinguishesAbsentFromPresent() throws {
         let absentReference = UUID().uuidString
         let absentStatus = try credentialService.credentialStatus(reference: absentReference)
         XCTAssertEqual(absentStatus, .absent, "Never-added credential should be absent")
@@ -382,55 +383,53 @@ final class CredentialServiceTests: XCTestCase {
         let status = SecItemCopyMatching(query as CFDictionary, &result)
 
         XCTAssertEqual(status, errSecSuccess, "Should find the credential")
-        if let attributes = result as? [String: Any] {
-            let accessibleValue = attributes[kSecAttrAccessible as String]
-            XCTAssertEqual(
-                accessibleValue as? String,
-                kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String,
-                "Credential should use AfterFirstUnlock accessibility class"
-            )
+        guard let attributes = result as? [String: Any] else {
+            XCTFail("Should return attributes dictionary")
+            return
         }
+        let accessibleValue = attributes[kSecAttrAccessible as String]
+        XCTAssertEqual(
+            accessibleValue as? String,
+            kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String,
+            "Credential should use AfterFirstUnlock accessibility class"
+        )
     }
 
-    // MARK: - Invalidated Status Tests
+    // MARK: - Lock and Error Handling Tests
 
-    func testInvalidatedStatusForInaccessibleCredential() throws {
-        let secret = "inaccessible-secret".data(using: .utf8)!
+    func testLockErrorDuringStatusCheck() throws {
+        let secret = "test-secret".data(using: .utf8)!
         let reference = try credentialService.addCredential(secret)
 
-        let status = try credentialService.credentialStatus(reference: reference)
-        XCTAssertEqual(status, .present, "Credential should be present before device lock simulation")
+        fakeKeychain.nextCopyMatchingStatus = errSecInteractionNotAllowed
 
-        var query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: testKeychainService,
-            kSecAttrAccount as String: reference,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        ]
-
-        let updateResult = SecItemUpdate(query as CFDictionary, [:] as CFDictionary)
-        if updateResult == errSecSuccess {
-            let invalidatedStatus = try credentialService.credentialStatus(reference: reference)
-            XCTAssertEqual(invalidatedStatus, .invalidated, "Credential stored with stricter class should become invalidated")
+        XCTAssertThrowsError(try credentialService.credentialStatus(reference: reference)) { error in
+            if let credError = error as? CredentialError,
+               case .statusError(let msg) = credError {
+                XCTAssertTrue(msg.contains("locked") || msg.contains("Keychain"), "Error should explain the lock issue")
+                XCTAssertFalse(msg.contains("secret"), "Error should not leak credential")
+            } else {
+                XCTFail("Should throw statusError for lock condition")
+            }
         }
     }
 
     // MARK: - Storage Error Handling Tests
 
-    func testAddWithDeviceLockedError() throws {
+    func testAddWithKeyboardInteractionNotAllowed() throws {
         let secret = "test-secret".data(using: .utf8)!
-        let reference = UUID().uuidString
 
-        var query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: testKeychainService,
-            kSecAttrAccount as String: reference,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-            kSecValueData as String: secret
-        ]
+        fakeKeychain.nextAddStatus = errSecInteractionNotAllowed
 
-        let status = SecItemAdd(query as CFDictionary, nil)
-        XCTAssertEqual(status, errSecSuccess, "Test setup: should add item")
+        XCTAssertThrowsError(try credentialService.addCredential(secret)) { error in
+            if let credError = error as? CredentialError,
+               case .addFailed(let msg) = credError {
+                XCTAssertTrue(msg.contains("locked") || msg.contains("Keychain"), "Error should explain the lock issue")
+                XCTAssertFalse(msg.contains(String(describing: secret)), "Error should not leak credential")
+            } else {
+                XCTFail("Should throw addFailed for lock condition")
+            }
+        }
     }
 
     func testCredentialErrorsDoNotContainSecrets() throws {
@@ -449,81 +448,79 @@ final class CredentialServiceTests: XCTestCase {
         }
     }
 
-    func testInteractionNotAllowedErrorHandling() throws {
+    func testRetrieveWithLockError() throws {
         let secret = "secret".data(using: .utf8)!
         let reference = try credentialService.addCredential(secret)
 
-        do {
-            _ = try credentialService.retrieveCredential(reference: reference)
-        } catch let error as CredentialError {
-            if case .statusError(let msg) = error {
-                XCTAssertTrue(msg.contains("Keychain") || msg.contains("access"), "Error should explain the issue")
-                XCTAssertFalse(msg.contains("secret"), "Error should not contain secret value")
+        fakeKeychain.nextCopyMatchingStatus = errSecInteractionNotAllowed
+
+        XCTAssertThrowsError(try credentialService.retrieveCredential(reference: reference)) { error in
+            if let credError = error as? CredentialError {
+                let errorMessage = credError.errorDescription ?? ""
+                XCTAssertFalse(errorMessage.contains("secret"), "Error should not leak credential")
             }
         }
     }
 
-    func testSecretNeverLeakedInStatusError() throws {
-        let sensitiveSecret = "api-key-12345-secret-token".data(using: .utf8)!
-        let reference = try credentialService.addCredential(sensitiveSecret)
+    func testStatusWithAuthFailure() throws {
+        let secret = "api-key-12345-secret-token".data(using: .utf8)!
+        let reference = try credentialService.addCredential(secret)
 
-        do {
-            _ = try credentialService.credentialStatus(reference: reference)
-        } catch let error as CredentialError {
-            let errorMessage = error.errorDescription ?? ""
-            XCTAssertFalse(errorMessage.contains("api-key"), "Error should not leak credential content")
-            XCTAssertFalse(errorMessage.contains("secret-token"), "Error should not leak credential content")
-            XCTAssertFalse(errorMessage.contains("12345"), "Error should not leak credential content")
+        fakeKeychain.nextCopyMatchingStatus = errSecAuthFailed
+
+        XCTAssertThrowsError(try credentialService.credentialStatus(reference: reference)) { error in
+            if let credError = error as? CredentialError {
+                let errorMessage = credError.errorDescription ?? ""
+                XCTAssertFalse(errorMessage.contains("api-key"), "Error should not leak credential")
+                XCTAssertFalse(errorMessage.contains("secret-token"), "Error should not leak credential")
+                XCTAssertFalse(errorMessage.contains("12345"), "Error should not leak credential")
+            }
         }
     }
 
-    func testSecretNeverLeakedInAddError() throws {
+    func testAddWithAuthFailure() throws {
         let sensitiveSecret = "oauth-token-xyz789".data(using: .utf8)!
 
-        do {
-            _ = try credentialService.addCredential(sensitiveSecret)
-        } catch let error as CredentialError {
-            let errorMessage = error.errorDescription ?? ""
-            XCTAssertFalse(errorMessage.contains("oauth-token"), "Error should not leak credential content")
-            XCTAssertFalse(errorMessage.contains("xyz789"), "Error should not leak credential content")
+        fakeKeychain.nextAddStatus = errSecAuthFailed
+
+        XCTAssertThrowsError(try credentialService.addCredential(sensitiveSecret)) { error in
+            if let credError = error as? CredentialError {
+                let errorMessage = credError.errorDescription ?? ""
+                XCTAssertFalse(errorMessage.contains("oauth-token"), "Error should not leak credential")
+                XCTAssertFalse(errorMessage.contains("xyz789"), "Error should not leak credential")
+            }
         }
     }
 
-    func testSecretNeverLeakedInUpdateError() throws {
+    func testUpdateWithAuthFailure() throws {
         let originalSecret = "original-secret".data(using: .utf8)!
         let reference = try credentialService.addCredential(originalSecret)
 
         let sensitiveUpdate = "new-api-secret-key".data(using: .utf8)!
+        fakeKeychain.nextUpdateStatus = errSecAuthFailed
 
-        do {
-            _ = try credentialService.updateCredential(sensitiveUpdate, reference: reference)
-        } catch let error as CredentialError {
-            let errorMessage = error.errorDescription ?? ""
-            XCTAssertFalse(errorMessage.contains("api-secret"), "Error should not leak credential content")
-            XCTAssertFalse(errorMessage.contains("secret-key"), "Error should not leak credential content")
+        XCTAssertThrowsError(try credentialService.updateCredential(sensitiveUpdate, reference: reference)) { error in
+            if let credError = error as? CredentialError {
+                let errorMessage = credError.errorDescription ?? ""
+                XCTAssertFalse(errorMessage.contains("api-secret"), "Error should not leak credential")
+                XCTAssertFalse(errorMessage.contains("secret-key"), "Error should not leak credential")
+            }
         }
     }
 
-    func testSecretNeverLeakedInDeleteError() throws {
+    func testDeleteWithAuthFailure() throws {
         let sensitiveSecret = "delete-test-secret-123".data(using: .utf8)!
         let reference = try credentialService.addCredential(sensitiveSecret)
 
-        do {
-            _ = try credentialService.deleteCredential(reference: reference)
-        } catch let error as CredentialError {
-            let errorMessage = error.errorDescription ?? ""
-            XCTAssertFalse(errorMessage.contains("delete-test"), "Error should not leak credential content")
-            XCTAssertFalse(errorMessage.contains("secret-123"), "Error should not leak credential content")
+        fakeKeychain.nextDeleteStatus = errSecAuthFailed
+
+        XCTAssertThrowsError(try credentialService.deleteCredential(reference: reference)) { error in
+            if let credError = error as? CredentialError {
+                let errorMessage = credError.errorDescription ?? ""
+                XCTAssertFalse(errorMessage.contains("delete-test"), "Error should not leak credential")
+                XCTAssertFalse(errorMessage.contains("secret-123"), "Error should not leak credential")
+            }
         }
     }
 
-    // MARK: - Helpers
-
-    private func clearAllTestCredentials() {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: testKeychainService
-        ]
-        SecItemDelete(query as CFDictionary)
-    }
 }

@@ -42,10 +42,12 @@ public enum CredentialStatus: Equatable {
 /// Secrets never leave the Keychain and are resolved only at dispatch time by the HTTP transport.
 public class CredentialService {
     private let keychainService: String
+    private let keychain: KeychainBoundary
 
     /// Creates a credential service with the specified Keychain service name
-    public init(keychainService: String = "com.boldfield.ohand.credentials") {
+    public init(keychainService: String = "com.boldfield.ohand.credentials", keychain: KeychainBoundary? = nil) {
         self.keychainService = keychainService
+        self.keychain = keychain ?? RealKeychain()
     }
 
     /// Adds a new credential and returns an opaque reference
@@ -68,12 +70,8 @@ public class CredentialService {
             throw CredentialError.invalidReference("Empty credential reference")
         }
 
-        let keychainKey = keychainQueryAttributes(for: reference)
-
-        var query = keychainKey
-        query[kSecReturnData as String] = false
-
-        let status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: secret] as CFDictionary)
+        let query = keychainQueryAttributes(for: reference)
+        let status = keychain.update(query as CFDictionary, [kSecValueData as String: secret] as CFDictionary)
 
         switch status {
         case errSecSuccess:
@@ -100,7 +98,7 @@ public class CredentialService {
         }
 
         let query = keychainQueryAttributes(for: reference)
-        let status = SecItemDelete(query as CFDictionary)
+        let status = keychain.delete(query as CFDictionary)
 
         switch status {
         case errSecSuccess, errSecItemNotFound:
@@ -125,19 +123,20 @@ public class CredentialService {
             throw CredentialError.invalidReference("Empty credential reference")
         }
 
-        var query = keychainQueryAttributes(for: reference)
-        query[kSecReturnData as String] = false
+        let query = keychainQueryAttributes(for: reference)
 
         var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        let status = keychain.copyMatching(query as CFDictionary, &result)
 
         switch status {
         case errSecSuccess:
             return .present
         case errSecItemNotFound:
             return .absent
-        case errSecInteractionNotAllowed, errSecUserCanceled:
-            return .invalidated
+        case errSecUserCanceled:
+            throw CredentialError.statusError("User cancelled Keychain access")
+        case errSecInteractionNotAllowed:
+            throw CredentialError.statusError("Keychain interaction not allowed (device may be locked)")
         case errSecAuthFailed:
             throw CredentialError.statusError("Keychain authentication failed")
         default:
@@ -156,7 +155,7 @@ public class CredentialService {
         query[kSecReturnData as String] = true
 
         var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        let status = keychain.copyMatching(query as CFDictionary, &result)
 
         switch status {
         case errSecSuccess:
@@ -197,14 +196,14 @@ public class CredentialService {
         var attributes = keychainAddAttributes(for: reference)
         attributes[kSecValueData as String] = secret
 
-        let status = SecItemAdd(attributes as CFDictionary, nil)
+        let status = keychain.add(attributes as CFDictionary, nil)
 
         switch status {
         case errSecSuccess:
             return
         case errSecDuplicateItem:
             let query = keychainQueryAttributes(for: reference)
-            let updateStatus = SecItemUpdate(query as CFDictionary, [kSecValueData as String: secret] as CFDictionary)
+            let updateStatus = keychain.update(query as CFDictionary, [kSecValueData as String: secret] as CFDictionary)
             switch updateStatus {
             case errSecSuccess:
                 return
