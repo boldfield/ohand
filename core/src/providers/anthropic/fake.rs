@@ -109,6 +109,13 @@ impl AnthropicTransport for FakeAnthropicTransport {
             .pop_front()
             .ok_or(TransportError::Rejected)?;
 
+        // Simulate transport delay if specified. In a real test with a clock,
+        // this would advance time to simulate deadline overrun. For now, we
+        // check if delay exceeds the timeout budget and fail appropriately.
+        if step.delay_ms > timeout_ms {
+            return Err(TransportError::Timeout);
+        }
+
         match step.action {
             FakeAnthropicAction::Respond(body) => Ok(body),
             FakeAnthropicAction::Fail(error) => Err(error),

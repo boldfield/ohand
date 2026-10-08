@@ -713,3 +713,17 @@ fn unauthorized_endpoint_is_rejected() {
     let failure = result.expect_err("unauthorized endpoint");
     assert_eq!(failure.kind, FailureKind::Rejected);
 }
+
+#[test]
+fn transport_delay_exceeding_timeout_budget_is_timeout() {
+    let harness = Harness::new();
+    let result = harness.run_anthropic(
+        vec![FakeAnthropicStep::respond(
+            r#"{"id":"msg_1","type":"message","content":[{"type":"text","text":"{}"}],"stop_reason":"end_turn"}"#,
+        )
+        .after_ms(31000)],
+        DispatchLimits::default(),
+    );
+    let failure = result.expect_err("timeout from delay");
+    assert_eq!(failure.kind, FailureKind::Timeout);
+}
