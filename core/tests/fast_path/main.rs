@@ -203,27 +203,21 @@ fn spans_are_unicode_scalar_offsets_in_the_original_text() {
         Some(SourceSpan::new(12, 31))
     );
 
-    expect_explicit(
-        "\u{130}\u{130}\u{130}\u{130}, remind me 2025-10-20 14:30:00",
-        FUTURE_INSTANT,
-        FUTURE_PHRASE,
+    let symbols = "\u{1F514}\u{1F514} \u{2014} remind me tomorrow to buy milk";
+    let proposal = expect_ambiguous(symbols, "tomorrow");
+    assert_eq!(
+        selected(symbols, proposal.source_spans.unwrap()[0]),
+        "buy milk"
     );
-    expect_ambiguous("Caf\u{e9} r\u{e9}sum\u{e9}. Remind me tomorrow", "tomorrow");
-    expect_explicit(
-        "remind me 2025-10-20 14:30:00 to buy \u{e9}clairs",
-        FUTURE_INSTANT,
-        FUTURE_PHRASE,
-    );
+    expect_unrecognized("\u{130}\u{130}\u{130}\u{130}, remind me 2025-10-20 14:30:00");
+    expect_unrecognized("Caf\u{e9} r\u{e9}sum\u{e9}. Remind me tomorrow");
+    expect_unrecognized("remind me 2025-10-20 14:30:00 to buy \u{e9}clairs");
     assert!(recognize("\u{130}\u{130}\u{130}\u{130}, remind me ma\u{f1}ana").is_none());
 }
 
 #[test]
 fn leading_text_that_is_not_a_command_prefix_is_not_the_grammar() {
-    expect_explicit(
-        "it's fine, remind me 2025-10-20 14:30:00",
-        FUTURE_INSTANT,
-        FUTURE_PHRASE,
-    );
+    expect_unrecognized("it's fine, remind me 2025-10-20 14:30:00");
     expect_explicit(
         "Hey, remind me 2025-10-20 14:30:00",
         FUTURE_INSTANT,
@@ -264,11 +258,7 @@ fn negation_minimal_pair() {
         "I don\u{2019}t want you to remind me 2025-10-20 14:30:00",
         AbstentionReason::Negated,
     );
-    expect_explicit(
-        "whenever you can, remind me 2025-10-20 14:30:00",
-        FUTURE_INSTANT,
-        FUTURE_PHRASE,
-    );
+    expect_unrecognized("whenever you can, remind me 2025-10-20 14:30:00");
 }
 
 #[test]
@@ -305,11 +295,7 @@ fn quotation_minimal_pair() {
         "\u{201C}Remind me 2025-10-20 14:30:00\u{201D}",
         AbstentionReason::UncertainTarget,
     );
-    expect_explicit(
-        "\"Fine.\" Then remind me 2025-10-20 14:30:00",
-        FUTURE_INSTANT,
-        FUTURE_PHRASE,
-    );
+    expect_unrecognized("\"Fine.\" Then remind me 2025-10-20 14:30:00");
 }
 
 #[test]
@@ -365,11 +351,7 @@ fn completed_work_minimal_pair() {
         "It is done so remind me 2025-10-20 14:30:00",
         AbstentionReason::UncertainTarget,
     );
-    expect_explicit(
-        "I already did it. Remind me 2025-10-20 14:30:00",
-        FUTURE_INSTANT,
-        FUTURE_PHRASE,
-    );
+    expect_unrecognized("I already did it. Remind me 2025-10-20 14:30:00");
 }
 
 #[test]
@@ -386,7 +368,7 @@ fn absent_time_minimal_pair() {
 
 #[test]
 fn recurrence_minimal_pair() {
-    expect_ambiguous("remind me tomorrow to ask everyone", "tomorrow");
+    expect_ambiguous("remind me tomorrow to ask the landlord", "tomorrow");
     for text in [
         "remind me every Friday to call mom",
         "remind me daily",
@@ -522,8 +504,8 @@ fn trailing_retraction_negation_and_reported_speech_never_schedule() {
 fn trailing_completed_work_and_reported_speech_minimal_pairs() {
     expect_ambiguous("remind me tomorrow to buy milk", "tomorrow");
     expect_ambiguous("remind me tomorrow to ask the landlord", "tomorrow");
-    expect_ambiguous("remind me tomorrow to tell Sam", "tomorrow");
-    expect_ambiguous("remind me tomorrow to get this done", "tomorrow");
+    expect_unrecognized("remind me tomorrow to tell Sam");
+    expect_unrecognized("remind me tomorrow to get this done");
     for text in [
         "remind me tomorrow to buy milk, which I already did",
         "remind me tomorrow to buy milk which I already did",
@@ -561,8 +543,10 @@ fn competing_times_in_the_content_never_pick_one() {
 
 #[test]
 fn recurrence_is_a_request_not_content_vocabulary() {
-    expect_ambiguous("remind me tomorrow to read the weekly report", "tomorrow");
-    expect_ambiguous("remind me to read the monthly report tomorrow", "tomorrow");
+    expect_ambiguous("remind me tomorrow to read the report", "tomorrow");
+    expect_ambiguous("remind me to read the report tomorrow", "tomorrow");
+    expect_unrecognized("remind me tomorrow to read the weekly report");
+    expect_unrecognized("remind me to read the monthly report tomorrow");
     expect_unrecognized("remind me to read the monthly report");
     for text in [
         "remind me tomorrow to read the report weekly",
@@ -591,11 +575,7 @@ fn punctuation_free_retractions_in_the_content_never_schedule() {
         FUTURE_INSTANT,
         FUTURE_PHRASE,
     );
-    expect_explicit(
-        "remind me 2025-10-20 14:30:00 to cancel the subscription",
-        FUTURE_INSTANT,
-        FUTURE_PHRASE,
-    );
+    expect_unrecognized("remind me 2025-10-20 14:30:00 to cancel the subscription");
     for text in [
         "remind me 2025-10-20 14:30:00 to call mom forget about it",
         "remind me 2025-10-20 14:30:00 to call mom cancel the reminder",
@@ -674,11 +654,9 @@ fn relation_words_before_a_trailing_time_never_schedule() {
 
 #[test]
 fn recurrence_is_syntax_aware() {
-    expect_ambiguous(
-        "remind me tomorrow to review the Mondays report",
-        "tomorrow",
-    );
-    expect_ambiguous("remind me tomorrow to check every door", "tomorrow");
+    expect_ambiguous("remind me tomorrow to review the report", "tomorrow");
+    expect_unrecognized("remind me tomorrow to review the Mondays report");
+    expect_unrecognized("remind me tomorrow to check every door");
     for text in [
         "remind me every two days to call mom",
         "remind me to call mom every two days",
@@ -693,9 +671,21 @@ fn recurrence_is_syntax_aware() {
 }
 
 #[test]
-fn stop_in_the_content_is_an_ordinary_verb() {
-    expect_ambiguous("remind me to stop by mom's tomorrow", "tomorrow");
-    expect_ambiguous("remind me tomorrow to stop smoking", "tomorrow");
+fn content_outside_the_lexicon_is_left_for_the_interpreter() {
+    expect_ambiguous("remind me tomorrow to pick up the kids", "tomorrow");
+    expect_ambiguous("remind me tomorrow to take the trash out", "tomorrow");
+    expect_ambiguous("remind me tomorrow to call her back", "tomorrow");
+    for text in [
+        "remind me to stop by mom's tomorrow",
+        "remind me tomorrow to stop smoking",
+        "remind me tomorrow to call Sam",
+        "remind me tomorrow to buy milk and eggs",
+        "remind me tomorrow to pick up the",
+        "remind me tomorrow to milk",
+        "remind me tomorrow to call mom call mom call mom",
+    ] {
+        expect_unrecognized(text);
+    }
 }
 
 #[test]
@@ -751,16 +741,8 @@ fn every_before_a_time_is_unsupported_recurrence() {
 fn hypothetical_attribution_and_second_predicate_tails_never_schedule() {
     let positive = "remind me 2025-10-20 14:30:00 to call mom";
     expect_explicit(positive, FUTURE_INSTANT, FUTURE_PHRASE);
-    expect_explicit(
-        "remind me 2025-10-20 14:30:00 to be nice to mom",
-        FUTURE_INSTANT,
-        FUTURE_PHRASE,
-    );
-    expect_explicit(
-        "remind me 2025-10-20 14:30:00 to have lunch with Sam",
-        FUTURE_INSTANT,
-        FUTURE_PHRASE,
-    );
+    expect_unrecognized("remind me 2025-10-20 14:30:00 to be nice to mom");
+    expect_unrecognized("remind me 2025-10-20 14:30:00 to have lunch with Sam");
     for suffix in [
         "hypothetically",
         "hypothetically speaking",
@@ -819,16 +801,8 @@ fn speaker_label_before_the_command_never_schedules() {
 
 #[test]
 fn recurrence_anywhere_in_the_command_never_schedules_a_one_shot() {
-    expect_explicit(
-        "remind me 2025-10-20 14:30:00 to call mom at work",
-        FUTURE_INSTANT,
-        FUTURE_PHRASE,
-    );
-    expect_explicit(
-        "remind me 2025-10-20 14:30:00 to file the weekly report at work",
-        FUTURE_INSTANT,
-        FUTURE_PHRASE,
-    );
+    expect_unrecognized("remind me 2025-10-20 14:30:00 to call mom at work");
+    expect_unrecognized("remind me 2025-10-20 14:30:00 to file the weekly report at work");
     for text in [
         "remind me 2025-10-20 14:30:00 to call mom weekly at work",
         "remind me 2025-10-20 14:30:00 to call mom daily with Sam",
@@ -838,4 +812,80 @@ fn recurrence_anywhere_in_the_command_never_schedules_a_one_shot() {
     ] {
         expect_abstention(text, AbstentionReason::UnsupportedOperation);
     }
+}
+
+#[test]
+fn only_fillers_or_a_self_label_may_precede_the_command() {
+    let command = "remind me 2025-10-20 14:30:00 to bring an umbrella";
+    expect_explicit(command, FUTURE_INSTANT, FUTURE_PHRASE);
+    expect_explicit(
+        &format!("Siri, please {command}"),
+        FUTURE_INSTANT,
+        FUTURE_PHRASE,
+    );
+    for frame in [
+        "In case it rains, ",
+        "Assuming it rains, ",
+        "Provided it rains, ",
+        "When I land, ",
+        "Once I land, ",
+        "In my dream, ",
+        "In the novel, ",
+        "Theoretically, ",
+        "Supposedly, ",
+        "I got home. ",
+        "In case it rains. ",
+        "Siri ",
+    ] {
+        expect_unrecognized(&format!("{frame}{command}"));
+    }
+}
+
+#[test]
+fn unlisted_frequency_words_never_reduce_recurrence_to_a_one_shot() {
+    let positive = "remind me 2025-10-20 14:30:00 to pay the rent";
+    expect_explicit(positive, FUTURE_INSTANT, FUTURE_PHRASE);
+    for suffix in [
+        "quarterly",
+        "biweekly",
+        "fortnightly",
+        "regularly",
+        "periodically",
+        "always",
+        "forever",
+        "every so often",
+        "again and again",
+        "twice",
+        "thrice",
+        "each time",
+    ] {
+        expect_unrecognized(&format!("{positive} {suffix}"));
+    }
+    expect_explicit(
+        "remind me to call mom on 2025-10-20 14:30:00",
+        FUTURE_INSTANT,
+        FUTURE_PHRASE,
+    );
+    expect_unrecognized("remind me to call mom fortnightly on 2025-10-20 14:30:00");
+}
+
+#[test]
+fn unlisted_conditions_zones_and_retractions_in_the_content_never_schedule() {
+    let positive = "remind me 2025-10-20 14:30:00 to call mom";
+    expect_explicit(positive, FUTURE_INSTANT, FUTURE_PHRASE);
+    for suffix in [
+        "assuming it rains",
+        "in case it rains",
+        "UTC",
+        "Pacific time",
+        "nah",
+        "done",
+        "otherwise",
+        "lest",
+        "except",
+        "until answered",
+    ] {
+        expect_unrecognized(&format!("{positive} {suffix}"));
+    }
+    expect_abstention(&format!("{positive} GMT+2"), AbstentionReason::Ambiguous);
 }

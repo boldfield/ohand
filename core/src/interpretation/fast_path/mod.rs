@@ -5,20 +5,30 @@
 //! same text, so spans always select exactly the evidence they describe.
 //!
 //! ```text
-//! command  := filler* "remind" "me" ( timed | topic-first )
+//! text     := prefix "remind" "me" ( timed | topic-first ) ["please" | "thanks"] [punctuation]
+//! prefix   := filler* [ self-label ( "," | ":" | dash ) filler* ]
 //! timed    := ["on"] time ["," ] [ "to" content ]
 //! topic-first := "to" content ["on"] time
+//! content  := verb particle? object*      (closed content lexicon, at most six words)
+//! object   := determiner noun | noun | object-pronoun | particle
 //! time     := YYYY-MM-DD HH:MM:SS | YYYY-MM-DD | "tomorrow" | weekday | "next" weekday
 //! filler   := "please" | "hey" | "ok" | ... (closed list)
+//! self-label := "note to self" | "note" | "memo" | "reminder" | "todo" | "siri" | ...
 //! ```
 //!
-//! In the topic-first form the content must not end in a preposition, particle or determiner
-//! ("ahead of", "prior to", "due"): the time would be a relation target, not the reminder time.
+//! Both open ends of the command are closed by allowlists, not by deny-lists. Nothing but
+//! fillers and a self-addressed label may come before the command, in any sentence, so a frame
+//! such as "In case it rains, ...", "When I land, ..." or "In the novel, ..." is not this grammar.
+//! The content is built only from the closed content lexicon (action verbs, particles,
+//! determiners, object pronouns and a short noun list), which holds no negation, condition,
+//! frequency, zone, time, reporting, control word or preposition. Any unlisted word ("quarterly",
+//! "nah", "UTC", "assuming", "Sam") therefore makes the text not this grammar, and it is left for
+//! the approved interpreter. The word lists used below to classify known unsafe forms only choose
+//! the abstention reason; they are not the safety boundary.
 //!
-//! The command must start its clause. A speaker label before a colon, bracket or dash ("Sam:")
-//! is attribution and abstains unless it is a self-addressed label ("Note to self:"). Anything else that merely contains "remind me" (for
-//! example "can the calendar remind me ..." or "my friend asked me to remind me ...") is not
-//! this grammar and is left alone.
+//! A speaker label before a colon, bracket or dash ("Sam:") is attribution and abstains. Text
+//! that merely contains "remind me" (for example "can the calendar remind me ..." or "my friend
+//! asked me to remind me ...") is not this grammar and is left alone.
 //!
 //! Outcomes of [`recognize_reminder`]:
 //! - `None`: the text is not the supported grammar. Nothing is derived, nothing is scheduled and
@@ -451,6 +461,39 @@ const SELF_LABELS: &[&[&str]] = &[
     &["siri"],
     &["assistant"],
 ];
+
+// The content lexicon is the safety boundary of the content. A content is accepted only when it
+// is one action verb followed by an object built from these closed word lists, so no unlisted
+// word (a retraction, condition, frequency, zone, attribution or any other qualifier) can ever
+// reach a schedule: anything outside the lexicon is not this grammar and is left for the
+// approved interpreter. The lists hold no negation, time, frequency, condition, reporting or
+// control words, and no prepositions, so a lexicon content cannot carry a competing time or a
+// relation to the time. The deny-lists above only name the abstention reason for known unsafe
+// forms; they are not what keeps unlisted language from being scheduled.
+const CONTENT_VERBS: &[&str] = &[
+    "call", "phone", "text", "email", "buy", "get", "pick", "pay", "book", "check", "take",
+    "bring", "return", "water", "feed", "walk", "clean", "wash", "pack", "send", "renew", "charge",
+    "refill", "order", "mail", "visit", "fix", "submit", "print", "read", "review", "ask",
+];
+
+// Verb particles ("pick up", "take out", "call back"). They may follow the verb or end the content.
+const CONTENT_PARTICLES: &[&str] = &["up", "out", "back"];
+
+// Determiners and possessives. Each must be followed by a noun.
+const CONTENT_DETERMINERS: &[&str] = &["the", "a", "an", "my", "our", "some"];
+
+const CONTENT_OBJECT_PRONOUNS: &[&str] = &["her", "him", "them"];
+
+const CONTENT_NOUNS: &[&str] = &[
+    "mom", "dad", "grandma", "grandpa", "sister", "brother", "landlord", "dentist", "doctor",
+    "roofer", "plumber", "vet", "bank", "pharmacy", "school", "milk", "bread", "eggs", "groceries",
+    "coffee", "rent", "bill", "bills", "taxes", "invoice", "report", "prescription", "medicine",
+    "pills", "plants", "dog", "cat", "kids", "trash", "laundry", "dishes", "car", "bike", "package",
+    "parcel", "library", "books", "passport", "license", "insurance", "gift", "flowers", "tickets",
+    "umbrella", "keys", "charger", "recycling", "letter", "form", "appointment", "roof",
+];
+
+const MAX_LEXICON_CONTENT_WORDS: usize = 6;
 
 const WEEKDAYS: &[&str] = &[
     "monday",
@@ -889,19 +932,6 @@ fn current_sentence(prefix: &[Token]) -> &[Token] {
     &prefix[start..]
 }
 
-fn current_clause(prefix: &[Token]) -> &[Token] {
-    let start = prefix
-        .iter()
-        .rposition(|token| {
-            matches!(
-                token.kind,
-                TokenKind::ClauseBreak | TokenKind::SentenceBreak
-            )
-        })
-        .map_or(0, |index| index + 1);
-    &prefix[start..]
-}
-
 fn is_label_break(token: &Token) -> bool {
     token.kind == TokenKind::ClauseBreak && token.ch != ',' && token.ch != ';'
 }
@@ -912,7 +942,11 @@ fn has_speaker_label(sentence: &[Token]) -> bool {
     }
     let label: Vec<&str> = sentence
         .iter()
-        .filter(|token| token.is_word() && !FILLERS.contains(&token.lower.as_str()))
+        .filter(|token| {
+            token.is_word()
+                && token.has_letters_or_digits()
+                && !FILLERS.contains(&token.lower.as_str())
+        })
         .map(|token| token.lower.as_str())
         .collect();
     !SELF_LABELS.contains(&label.as_slice())
@@ -940,12 +974,37 @@ fn prefix_abstention(prefix: &[Token]) -> Option<AbstentionReason> {
     None
 }
 
-fn starts_its_clause(prefix: &[Token]) -> bool {
-    current_clause(prefix).iter().all(|token| {
-        token.kind == TokenKind::Quote
-            || !token.has_letters_or_digits()
-            || FILLERS.contains(&token.lower.as_str())
-    })
+/// The whole text before the command may only hold fillers ("please", "hey") and, before a
+/// comma, colon or dash, a self-addressed label or assistant name ("Note to self:", "Siri,").
+/// Any other earlier word, in this sentence or an earlier one, may frame the command ("In case
+/// it rains, ...", "When I land, ...", "In the novel, ..."), so the text is not this grammar.
+fn prefix_is_allowed(prefix: &[Token]) -> bool {
+    if prefix.iter().any(|token| token.kind == TokenKind::Quote) {
+        return false;
+    }
+    let label: Vec<&str> = prefix
+        .iter()
+        .filter(|token| {
+            token.is_word()
+                && token.has_letters_or_digits()
+                && !FILLERS.contains(&token.lower.as_str())
+        })
+        .map(|token| token.lower.as_str())
+        .collect();
+    if label.is_empty() {
+        return true;
+    }
+    let ends_with_label_break = prefix
+        .iter()
+        .rev()
+        .find(|token| !(token.is_word() && FILLERS.contains(&token.lower.as_str())))
+        .is_some_and(|token| {
+            token.kind == TokenKind::ClauseBreak
+                && matches!(token.ch, ',' | ':' | '\u{2014}' | '\u{2013}')
+        });
+    ends_with_label_break
+        && prefix.iter().all(|token| token.kind != TokenKind::SentenceBreak)
+        && SELF_LABELS[1..].contains(&label.as_slice())
 }
 
 fn has_completion(content: &[Token]) -> bool {
@@ -1010,6 +1069,38 @@ fn is_single_plain_clause(content: &[Token]) -> bool {
                 && !CONTENT_PREDICATE_WORDS.contains(&token.lower.as_str())
                 && !is_subject_contraction(token)
                 && (position == 0 || !CONTENT_CONTROL_VERBS.contains(&token.lower.as_str()))
+        })
+}
+
+fn in_lexicon(token: &Token, vocabulary: &[&str]) -> bool {
+    token.is_word() && vocabulary.contains(&token.lower.as_str())
+}
+
+/// The content grammar: `verb particle? object*`, where an object word is a determiner followed
+/// by a noun, a noun, an object pronoun or a particle, every word comes from the closed content
+/// lexicon, and the content ends in a noun, pronoun or particle.
+fn content_is_in_lexicon(content: &[Token]) -> bool {
+    let Some((verb, objects)) = content.split_first() else {
+        return true;
+    };
+    if !in_lexicon(verb, CONTENT_VERBS) || content.len() > MAX_LEXICON_CONTENT_WORDS {
+        return false;
+    }
+    let objects_are_lexicon = objects.iter().enumerate().all(|(position, token)| {
+        if in_lexicon(token, CONTENT_DETERMINERS) {
+            return objects
+                .get(position + 1)
+                .is_some_and(|next| in_lexicon(next, CONTENT_NOUNS));
+        }
+        in_lexicon(token, CONTENT_NOUNS)
+            || in_lexicon(token, CONTENT_OBJECT_PRONOUNS)
+            || in_lexicon(token, CONTENT_PARTICLES)
+    });
+    objects_are_lexicon
+        && content.last().is_some_and(|last| {
+            in_lexicon(last, CONTENT_NOUNS)
+                || in_lexicon(last, CONTENT_OBJECT_PRONOUNS)
+                || in_lexicon(last, CONTENT_PARTICLES)
         })
 }
 
@@ -1119,7 +1210,7 @@ pub fn recognize_reminder(
     if let Some(reason) = prefix_abstention(prefix) {
         return Some(provenance.abstention(reason));
     }
-    if !starts_its_clause(prefix) {
+    if !prefix_is_allowed(prefix) {
         return None;
     }
     let ParsedCommand {
@@ -1137,6 +1228,9 @@ pub fn recognize_reminder(
     }
     if dangling_relation {
         return Some(provenance.abstention(AbstentionReason::Ambiguous));
+    }
+    if !content_is_in_lexicon(content) {
+        return None;
     }
 
     let mut proposal = provenance
