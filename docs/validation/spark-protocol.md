@@ -83,12 +83,12 @@ Every value below was observed by the maintainer on the configured iPhone and is
 | Device | iPhone 16 Pro |
 | iOS version | 26.6.2 |
 | Client | a-Shell curl (observes and records HTTP status code via `curl`'s `http_code` variable) |
-| Path to endpoint | Tailscale; endpoint is private-network only (not publicly resolvable) |
-| Collection clock accuracy | Coordinator session clock converted from UTC-7 timezone; accurate to about one minute |
+| Path to endpoint | Tailscale and split-horizon DNS; the configured base URL hostname resolves to the private reverse proxy on the home LAN and to a public web forwarder elsewhere |
+| Collection clock accuracy | Phone's local clock in the screenshots, converted from UTC-7 timezone; accurate to about one minute |
 
-## Phone-context: Wi-Fi (Tailscale connected)
+## Phone-context: Wi-Fi with configured hostname (Tailscale connected)
 
-Source: evidence `spark-phone-2026-10-08`, Wi-Fi attempts, collected 2026-10-08T16:34:00Z.
+Source: evidence `spark-phone-2026-10-08`, revision 2, Wi-Fi attempts to configured hostname, collected 2026-10-08T16:34:00Z.
 
 | Request | Credential sent | HTTP status (curl observed) | Scheme | Certificate |
 | --- | --- | --- | --- | --- |
@@ -97,7 +97,7 @@ Source: evidence `spark-phone-2026-10-08`, Wi-Fi attempts, collected 2026-10-08T
 
 ## Phone-context: cellular with configured hostname (Tailscale connected)
 
-Source: evidence `spark-phone-2026-10-08`, cellular attempts to configured hostname, collected 2026-10-08T16:35:00Z.
+Source: evidence `spark-phone-2026-10-08`, revision 2, cellular attempts to configured hostname, collected 2026-10-08T16:35:00Z.
 
 | Request | Credential sent | HTTP status (curl observed) | Scheme | Certificate | Note |
 | --- | --- | --- | --- | --- | --- |
@@ -106,16 +106,32 @@ Source: evidence `spark-phone-2026-10-08`, cellular attempts to configured hostn
 
 ## Phone-context: cellular with tailnet hostname (Tailscale connected)
 
-Source: evidence `spark-phone-2026-10-08`, cellular attempts to tailnet hostname, collected 2026-10-08T16:39:00Z.
+Source: evidence `spark-phone-2026-10-08`, revision 2, cellular attempts to tailnet hostname, collected 2026-10-08T16:39:00Z.
 
 | Request | Credential sent | HTTP status (curl observed) | Scheme | Certificate |
 | --- | --- | --- | --- | --- |
 | `GET /v1/models` | No | 200 | https | Verified |
 | `GET /v1/models` | Yes | 200 | https | Verified |
 
+## Phone-context: cellular with configured hostname followed by redirect (Tailscale connected)
+
+Source: evidence `spark-phone-2026-10-08`, revision 2, cellular attempt with `curl -L`, collected 2026-10-08T16:39:00Z.
+
+| Request | Credential sent | HTTP status (curl observed) | Scheme | Certificate | Note |
+| --- | --- | --- | --- | --- | --- |
+| `GET /v1/models` (with `-L` redirect) | No | 200 | https | Verified on both hops | Public forwarder redirected to tailnet hostname; curl followed the redirect |
+
+## Phone-context: Wi-Fi with tailnet hostname (Tailscale connected)
+
+Source: evidence `spark-phone-2026-10-08`, revision 2, Wi-Fi attempt to tailnet hostname, collected 2026-10-08T16:39:00Z.
+
+| Request | Credential sent | HTTP status (curl observed) | Scheme | Certificate |
+| --- | --- | --- | --- | --- |
+| `GET /v1/models` | No | 200 | https | Verified |
+
 ## Model list observed on phone
 
-Source: evidence `spark-phone-2026-10-08`, Safari rendering of `GET /v1/models` on Wi-Fi and cellular; identical in both contexts.
+Source: evidence `spark-phone-2026-10-08`, revision 1, Safari rendering of `GET /v1/models` on Wi-Fi and cellular at 2026-10-08T06:42:00Z; identical in both contexts. This is from the first collection attempt and predates the curl observations.
 
 | Model ID |
 | --- |
@@ -132,18 +148,20 @@ Source: evidence `spark-phone-2026-10-08`, Safari rendering of `GET /v1/models` 
 
 **Transport**: Both worker-context (V08a) and phone-context (V08b) confirm HTTPS with certificate validation on all observed requests.
 - Worker-context: Probe classification `https-verified` (default trust store, verified certificates on all four requests).
-- Phone-context: Certificate verified on Wi-Fi (both credentials), cellular configured hostname (both credentials), and cellular tailnet hostname (both credentials); all 8 HTTP exchanges show verified TLS.
+- Phone-context: Certificate verified on Wi-Fi with configured hostname (both credentials), Wi-Fi with tailnet hostname (unauthenticated), cellular with configured hostname (both credentials), and cellular with tailnet hostname (both credentials); all 9 recorded HTTP exchanges show verified TLS.
 
 **Unauthenticated reachability**: Phone-context attempted unauthenticated `GET /v1/models` on Wi-Fi and cellular over Tailscale.
-- Wi-Fi with configured hostname: HTTP 200.
-- Cellular with configured hostname: HTTP 302 (redirect to tailnet).
-- Cellular with tailnet hostname: HTTP 200.
+- Wi-Fi with configured hostname: HTTP 200 (direct).
+- Cellular with configured hostname (direct curl): HTTP 302 (redirect to tailnet hostname).
+- Cellular with configured hostname (curl -L): HTTP 200 (after following redirect to tailnet).
+- Cellular with tailnet hostname: HTTP 200 (direct).
+- Wi-Fi with tailnet hostname: HTTP 200 (direct).
 - Worker-context: Unauthenticated `GET /models` received HTTP 200.
 
 **Authenticated reachability**: Phone-context also attempted authenticated `GET /v1/models` (with bearer credential) on Wi-Fi and cellular.
-- Wi-Fi with configured hostname: HTTP 200.
-- Cellular with configured hostname: HTTP 302 (same redirect, credential does not change response).
-- Cellular with tailnet hostname: HTTP 200.
+- Wi-Fi with configured hostname: HTTP 200 (direct).
+- Cellular with configured hostname: HTTP 302 (same redirect as unauthenticated; credential does not change response).
+- Cellular with tailnet hostname: HTTP 200 (direct).
 - Worker-context: Authenticated `GET /models` received HTTP 200.
 
 **Authentication behavior agreement**: Both sources observe that the endpoint returns identical HTTP status to credentialed and non-credentialed requests.
@@ -158,16 +176,29 @@ Source: evidence `spark-phone-2026-10-08`, Safari rendering of `GET /v1/models` 
 
 These facts are recorded as the exact verified compatibility boundary:
 
-1. **Collection method differs**: Worker-context V08a used `python3 tools/provider-probe/spark_probe.py` on an Odonian worker. Phone-context V08b used a-Shell curl on iPhone with Tailscale. Different tools, different network paths, and different endpoints (worker-context is the configured base URL from Odonian Secrets; phone-context is same base URL via Tailscale from a home LAN).
+1. **Collection method and paths differ**: Worker-context V08a used `python3 tools/provider-probe/spark_probe.py` on an Odonian worker. Phone-context V08b used a-Shell curl on iPhone with Tailscale. Different tools, different network paths:
+   - Worker-context: direct to the configured base URL endpoint.
+   - Phone-context on-LAN (Wi-Fi): either direct via configured hostname or via Tailscale MagicDNS (tailnet hostname); both reach the endpoint directly.
+   - Phone-context off-LAN (cellular): via Tailscale, using either the configured hostname (which resolves to a public web forwarder) or the tailnet hostname (which reaches the endpoint directly).
 
 2. **Chat request not probed on phone**: Worker-context V08a probed `POST /chat/completions` with and without credentials; both returned 200. Phone-context V08b did not attempt `POST /chat/completions`. Authentication behavior observed on `/models` does not necessarily apply to `/chat/completions`.
 
 3. **Configuration/endpoint model mismatch**: The maintainer's provider configuration lists seven models; the endpoint serves six. The missing model is the IQ3_XXS GLM variant. Whether this gap is a deployment state, ephemeral, or intended is unknown and matters to endpoint-readiness assessment in V09.
 
-4. **Public forwarder behavior on cellular**: On cellular, the configured hostname resolves to a public web forwarder (not in the artifact); the forwarder answers 302 to both unauthenticated and credentialed `GET /v1/models`. The forwarder also redirects `POST` requests (coordinator observation). Whether the public forwarder endpoint is considered part of the Spark protocol contract or is out of scope is a V09 decision.
+4. **Critical POST redirect incompatibility on configured hostname off-LAN**: The artifact records that off the LAN, the configured hostname resolves to a public web forwarder that answers 302 to both `GET /v1/models` requests and to `POST` requests (coordinator observation from the public address on 2026-10-08). Foundation URLSession (and other HTTP clients) convert an HTTP 302 redirect of a POST request into a GET request on the final URL. Therefore, a client sending `POST /chat/completions` to the configured hostname off-LAN will receive a 302 and convert it to GET, failing to complete the chat request. V09 must either use the tailnet hostname as the phone-context base URL for off-LAN communication, or require that the forwarder emit HTTP 307 or 308 (which preserve the request method), which it does not do today.
 
 5. **V08a probe result is fail**: Worker-context V08a reported exit status 1 (`fail`) because the endpoint does not enforce authentication. This is a protocol violation from the probe's perspective. Whether authentication enforcement is required for V09 readiness is a V09 decision.
 
-6. **Collection clock accuracy**: Phone-context collection times are accurate to approximately one minute (coordinator session clock converted from UTC-7), not subsecond.
+6. **Off-LAN communication requires Tailscale**: Phone-context observations show that off the home LAN (cellular network), only the Tailscale-connected tailnet hostname reaches the endpoint directly. The configured hostname goes to a public forwarder with the POST redirect incompatibility in gap 4. Nothing here tests the behavior of off-LAN requests with Tailscale disconnected.
 
-**Status**: PARTIALLY VERIFIED. V08a and V08b artifacts exist and agree on transport (HTTPS with certificate validation), unauthenticated reachability (both succeed), authenticated reachability (both succeed), and model list identity. Both sources confirm the endpoint does not enforce authentication. Unobserved: chat-path behavior on phone, whether credential is validated by the endpoint, and implications of the model configuration mismatch. V09 must evaluate whether these gaps are acceptable for the endpoint's intended use.
+7. **Collection clock accuracy**: Phone-context collection times come from the phone's local clock in the screenshots, converted from UTC-7, accurate to approximately one minute.
+
+**Status**: PARTIALLY VERIFIED. V08a and V08b artifacts exist and agree on:
+- **Transport**: HTTPS with certificate validation on all observed requests.
+- **Model list identity**: Both sources observe the same six models.
+- **Authentication behavior on `/models`**: Neither source observed authentication enforcement.
+- **On-LAN reachability**: Both unauthenticated and authenticated requests succeed on the home LAN (both the configured hostname on Wi-Fi and the tailnet hostname).
+
+Phone-context reachability off-LAN (cellular) succeeds only via the tailnet hostname or via the configured hostname with `curl -L` (which follows the redirect to tailnet). Direct requests to the configured hostname off-LAN receive HTTP 302, not direct endpoint access. The exact compatibility boundary is recorded in gap 4: a client that converts 302 POST to GET (like Foundation URLSession) cannot complete chat completions through the configured hostname off-LAN.
+
+Unobserved: chat-path behavior on phone, whether credential is validated by the endpoint, endpoint behavior with Tailscale disconnected, and implications of the model configuration mismatch. V09 must evaluate whether these gaps are acceptable for the endpoint's intended use and decide the phone-context base URL (tailnet hostname vs. forwarder configuration).
