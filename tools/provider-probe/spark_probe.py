@@ -222,19 +222,19 @@ def test_authentication(base_url, credential):
         return False, [], status, {}, tls_verified, 'response-not-json'
 
 
-def test_structured_response(base_url, credential, model_name):
+def test_structured_response(base_url, credential, model_name, response_format='json'):
     """Test OpenAI /chat/completions endpoint with structured response validation.
 
-    Sends a chat request and validates that the response structure is correct
-    and the content can be parsed as JSON if the endpoint supports JSON mode.
+    Sends a chat request with a requested JSON response format and validates that
+    the returned content parses as JSON matching the requested shape.
 
     Returns (success: bool, status_code: int, headers_dict: dict, tls_verified: bool,
              content: str, content_valid: bool, error: str)
     """
-    # Send a basic chat request (no response_format to avoid timeout on unsupported endpoints)
     body = json.dumps({
         'model': model_name,
-        'messages': [{'role': 'user', 'content': 'Hello'}],
+        'messages': [{'role': 'user', 'content': 'Respond with valid JSON only: {"status": "ok"}'}],
+        'response_format': {'type': response_format},
     })
 
     status, headers, response_body, tls_verified, error = send_request(
@@ -280,7 +280,7 @@ def test_structured_response(base_url, credential, model_name):
         if not content.strip():
             return False, status, {}, tls_verified, '', False, 'content-empty'
 
-        # Try to parse content as JSON to validate it's structured
+        # Try to parse content as JSON to validate it matches the requested format
         content_valid = False
         try:
             json.loads(content)
@@ -290,7 +290,8 @@ def test_structured_response(base_url, credential, model_name):
             pass
 
         filtered_headers = filter_headers(headers)
-        return True, status, filtered_headers, tls_verified, content, content_valid, None
+        # Fail if content was not valid JSON when JSON format was requested
+        return content_valid, status, filtered_headers, tls_verified, content, content_valid, None
 
     except json.JSONDecodeError:
         return False, status, {}, tls_verified, '', False, 'response-not-json'
@@ -299,7 +300,7 @@ def test_structured_response(base_url, credential, model_name):
 def get_probe_revision():
     """Get the current git commit hash and dirty flag.
 
-    Returns "commit[+dirty]"
+    Returns "commit[+dirty]". Excludes the evidence directory from dirty check.
     """
     try:
         import subprocess
@@ -309,9 +310,9 @@ def get_probe_revision():
             cwd=Path(__file__).parent.parent.parent
         ).decode().strip()
 
-        # Check for dirty tree
+        # Check for dirty tree, excluding the evidence directory
         status = subprocess.check_output(
-            ['git', 'status', '--porcelain'],
+            ['git', 'status', '--porcelain', '--', '.', ':!docs/validation/evidence/'],
             stderr=subprocess.DEVNULL,
             cwd=Path(__file__).parent.parent.parent
         ).decode().strip()
@@ -328,7 +329,7 @@ def main():
     )
     parser.add_argument(
         'provider_key',
-        help='Provider key to probe (e.g., "ollama")'
+        help='Provider key to probe (e.g., "spark")'
     )
     args = parser.parse_args()
 
@@ -336,7 +337,8 @@ def main():
         # Read configuration
         base_url, credential, models_list = read_provider_config(args.provider_key)
     except ProbeError as e:
-        # Explicit configuration errors should exit cleanly but with error code
+        # Explicit configuration errors with sanitized messages to stderr
+        print(f'Probe error: {str(e)}', file=sys.stderr)
         sys.exit(1)
 
     # Parse URL to extract scheme
@@ -363,6 +365,7 @@ def main():
     if unauth_error:
         # Unauthenticated request failed - this is a probe error, exit non-zero
         # Don't write evidence for a completely failed network request
+        print(f'Unauthenticated models probe failed: {unauth_error}', file=sys.stderr)
         sys.exit(1)
 
     observations['probes']['unauthenticated_models'] = {
@@ -400,9 +403,9 @@ def main():
         try:
             with open(evidence_file, 'w') as f:
                 json.dump(observations, f, indent=2)
-            f.write('\n')
-        except Exception:
-            pass  # Ignore write errors
+                f.write('\n')
+        except Exception as e:
+            print(f'Failed to write evidence artifact: {e}', file=sys.stderr)
 
         sys.exit(1)
 
@@ -416,8 +419,23 @@ def main():
         'tls_verified': auth_tls,
     }
 
-    # Select first model from endpoint or use first from config
-    selected_model = models[0] if models else models_list[0]['id']
+    # Chat probe must use a model the endpoint listed; cannot fall back to config
+    if not models:
+        observations['probes']['authenticated_models']['error'] = 'endpoint-returned-no-models'
+        # Write evidence before exiting
+        evidence_dir = Path(__file__).parent.parent.parent / 'docs' / 'validation' / 'evidence' / 'spark-probe'
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        evidence_file = evidence_dir / f'{evidence_id}.json'
+        try:
+            with open(evidence_file, 'w') as f:
+                json.dump(observations, f, indent=2)
+                f.write('\n')
+        except Exception as e:
+            print(f'Failed to write evidence artifact: {e}', file=sys.stderr)
+        print('Endpoint returned no model IDs in /models response', file=sys.stderr)
+        sys.exit(1)
+
+    selected_model = models[0]
 
     # Probe 3: Test structured response on /chat/completions
     resp_success, resp_status, resp_headers, resp_tls, resp_content, content_valid, resp_error = test_structured_response(
@@ -449,9 +467,10 @@ def main():
     try:
         with open(evidence_file, 'w') as f:
             json.dump(observations, f, indent=2)
-        f.write('\n')
-    except Exception:
-        pass  # Ignore write errors
+            f.write('\n')
+    except Exception as e:
+        print(f'Failed to write evidence artifact: {e}', file=sys.stderr)
+        sys.exit(1)
 
     # Exit with error if any probe failed
     if not auth_success or not resp_success:

@@ -385,9 +385,8 @@ class TestProviderProbe(unittest.TestCase):
             'test-token-12345',
             'model-1'
         )
-        # This should still be marked as success (200 response with valid structure)
-        # but content_valid should be False since it doesn't parse as JSON
-        self.assertTrue(success)
+        # Plain text content should fail when JSON format is requested
+        self.assertFalse(success)
         self.assertEqual(status, 200)
         self.assertFalse(content_valid)  # Content is plain text, not JSON
 
@@ -411,6 +410,165 @@ class TestProviderProbe(unittest.TestCase):
         )
         self.assertFalse(success)
         self.assertEqual(status, 401)
+
+    def test_authentication_empty_models_list(self):
+        """Test authentication when endpoint returns empty models list."""
+        StubHTTPHandler.models_list = []
+        success, models, status, headers, tls_verified, error = test_authentication(
+            self.base_url,
+            'test-token-12345'
+        )
+        self.assertTrue(success)  # Structure is valid even with empty list
+        self.assertEqual(models, [])
+        self.assertEqual(status, 200)
+        self.assertIsNone(error)
+
+
+class TestMainEndToEnd(unittest.TestCase):
+    """Test end-to-end main() execution with a stub server."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Start the stub HTTP server."""
+        cls.server = HTTPServer(('127.0.0.1', 0), StubHTTPHandler)
+        cls.port = cls.server.server_address[1]
+        cls.base_url = f'http://127.0.0.1:{cls.port}'
+
+        # Start server in a thread
+        cls.server_thread = Thread(target=cls.server.serve_forever)
+        cls.server_thread.daemon = True
+        cls.server_thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        """Stop the stub HTTP server."""
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def setUp(self):
+        """Reset server state before each test."""
+        StubHTTPHandler.auth_required = True
+        StubHTTPHandler.auth_token = 'test-token-12345'
+        StubHTTPHandler.models_list = ['model-1', 'model-2']
+        StubHTTPHandler.support_openai = True
+        StubHTTPHandler.return_json_content = True
+
+    def test_main_successful_run_writes_artifact(self):
+        """Test that main() successfully runs and writes artifact."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_file = Path(tmpdir) / 'config.json'
+            artifact_dir = Path(tmpdir) / 'evidence'
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+
+            config_file.write_text(json.dumps({
+                'providers': {
+                    'spark': {
+                        'baseUrl': self.base_url,
+                        'apiKey': 'test-token-12345',
+                        'models': [{'id': 'config-model'}]  # Will not be used if endpoint has models
+                    }
+                }
+            }))
+
+            # Mock Path to return our artifact dir
+            with patch.dict(os.environ, {'OHAND_PROVIDER_CONFIG_PATH': str(config_file)}):
+                result = subprocess.run(
+                    [sys.executable, str(Path(__file__).parent / 'spark_probe.py'), 'spark'],
+                    capture_output=True,
+                    text=True,
+                    env={**os.environ, 'OHAND_PROVIDER_CONFIG_PATH': str(config_file)}
+                )
+                # Successful run should exit 0
+                self.assertEqual(result.returncode, 0, f'stderr: {result.stderr}')
+
+    def test_main_fails_with_plain_text_structured_response(self):
+        """Test that main() fails when structured response returns plain text."""
+        StubHTTPHandler.return_json_content = False
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_file = Path(tmpdir) / 'config.json'
+            config_file.write_text(json.dumps({
+                'providers': {
+                    'spark': {
+                        'baseUrl': self.base_url,
+                        'apiKey': 'test-token-12345',
+                        'models': [{'id': 'model-1'}]
+                    }
+                }
+            }))
+
+            with patch.dict(os.environ, {'OHAND_PROVIDER_CONFIG_PATH': str(config_file)}):
+                result = subprocess.run(
+                    [sys.executable, str(Path(__file__).parent / 'spark_probe.py'), 'spark'],
+                    capture_output=True,
+                    text=True,
+                    env={**os.environ, 'OHAND_PROVIDER_CONFIG_PATH': str(config_file)}
+                )
+                # Should fail because structured response is plain text
+                self.assertNotEqual(result.returncode, 0)
+
+    def test_main_fails_with_empty_endpoint_models(self):
+        """Test that main() fails when endpoint returns no models."""
+        StubHTTPHandler.models_list = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_file = Path(tmpdir) / 'config.json'
+            config_file.write_text(json.dumps({
+                'providers': {
+                    'spark': {
+                        'baseUrl': self.base_url,
+                        'apiKey': 'test-token-12345',
+                        'models': [{'id': 'config-model'}]
+                    }
+                }
+            }))
+
+            with patch.dict(os.environ, {'OHAND_PROVIDER_CONFIG_PATH': str(config_file)}):
+                result = subprocess.run(
+                    [sys.executable, str(Path(__file__).parent / 'spark_probe.py'), 'spark'],
+                    capture_output=True,
+                    text=True,
+                    env={**os.environ, 'OHAND_PROVIDER_CONFIG_PATH': str(config_file)}
+                )
+                # Should fail because endpoint returned no models
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('no model', result.stderr)
+
+    def test_artifact_no_endpoint_or_credential_leak(self):
+        """Test that artifact doesn't contain endpoint address or credential."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_file = Path(tmpdir) / 'config.json'
+            endpoint = f'http://127.0.0.1:{self.port}'
+            credential = 'test-token-12345'
+
+            config_file.write_text(json.dumps({
+                'providers': {
+                    'spark': {
+                        'baseUrl': endpoint,
+                        'apiKey': credential,
+                        'models': [{'id': 'model-1'}]
+                    }
+                }
+            }))
+
+            with patch.dict(os.environ, {'OHAND_PROVIDER_CONFIG_PATH': str(config_file)}):
+                result = subprocess.run(
+                    [sys.executable, str(Path(__file__).parent / 'spark_probe.py'), 'spark'],
+                    capture_output=True,
+                    text=True,
+                    env={**os.environ, 'OHAND_PROVIDER_CONFIG_PATH': str(config_file)}
+                )
+
+                # Find and read the artifact file
+                evidence_dir = Path(__file__).parent.parent.parent / 'docs' / 'validation' / 'evidence' / 'spark-probe'
+                if evidence_dir.exists():
+                    artifacts = list(evidence_dir.glob('*.json'))
+                    if artifacts:
+                        artifact = artifacts[-1]  # Read the most recent one
+                        content = artifact.read_text()
+                        # Artifact should not contain the endpoint IP or credential
+                        self.assertNotIn('127.0.0.1', content)
+                        self.assertNotIn(credential, content)
+                        # Cleanup
+                        artifact.unlink()
 
 
 class TestMainExitCodes(unittest.TestCase):
