@@ -34,7 +34,7 @@ for phase in write verify; do
     echo "ERROR: relaunch phase ${phase} was skipped or failed" >&2
     exit 1
   fi
-  if ! grep -q '\*\* TEST SUCCEEDED \*\*' "${log}"; then
+  if ! grep -Eq '\*\* TEST (EXECUTE )?SUCCEEDED \*\*' "${log}"; then
     echo "ERROR: relaunch phase ${phase} did not succeed" >&2
     exit 1
   fi
