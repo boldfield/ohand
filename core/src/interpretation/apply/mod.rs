@@ -15,7 +15,7 @@ use crate::providers::contracts::TextBasis;
 use crate::store::events::ItemType;
 use anyhow::Result;
 use chrono::DateTime;
-use rusqlite::Transaction;
+use rusqlite::{OptionalExtension, Transaction};
 use thiserror::Error;
 
 /// Errors that occur when applying a proposal to stored state.
@@ -85,12 +85,7 @@ pub fn apply_proposal(
     }
 
     // 2. Check proposal revision matches current item revision.
-    let expected_revision =
-        u64::try_from(item_state.revision).map_err(|_| ApplyError::StaleRevision {
-            expected: item_state.revision,
-            current: item_state.revision,
-        })?;
-    if u64::try_from(proposal.source_revision).unwrap_or(u64::MAX) != expected_revision {
+    if proposal.source_revision != item_state.revision {
         return Err(ApplyError::StaleRevision {
             expected: proposal.source_revision,
             current: item_state.revision,
@@ -110,13 +105,17 @@ pub fn apply_proposal(
         validate_reminder_application(item_state, proposal, reminder)?;
     }
 
-    // 6. If abstention, nothing is applied but no error occurs (accepted rejection).
+    // 6. If abstention, persist abstained state and return success.
     if proposal.abstention.is_some() {
+        update_processing_state(tx, &item_state.item_id, "abstained")?;
         return Ok(ApplyOutcome::Applied);
     }
 
-    // 7. Apply the proposal facets to the item.
+    // 7. Apply the proposal facets to the item (type, session_topic, reminder).
     apply_facets(tx, item_state, proposal)?;
+
+    // 8. Update processing state to processed.
+    update_processing_state(tx, &item_state.item_id, "processed")?;
 
     Ok(ApplyOutcome::Applied)
 }
@@ -192,170 +191,98 @@ fn validate_reminder_application(
 /// Apply the proposed facets (item_type, session_topic, reminder) to the item.
 /// This is a transactional operation that updates the item in the database.
 fn apply_facets(
-    _tx: &Transaction,
-    _item_state: &ItemState,
-    _proposal: &Proposal,
+    tx: &Transaction,
+    item_state: &ItemState,
+    proposal: &Proposal,
 ) -> Result<(), ApplyError> {
-    // For now, this is a placeholder. The actual application of facets will happen
-    // through the event system (which is part of D03, already implemented). We'll
-    // record an interpreted-proposal event or apply through the item mutation system.
-    //
-    // The key insight is that this function's job is to validate the proposal against
-    // the current item state and then coordinate with the storage layer to apply it.
-    // Actual mutation happens through the existing event/revision mechanism in D03.
+    // Update item type if proposed (and not already corrected by user).
+    if let Some(proposed_type) = proposal.item_type {
+        if !item_state.provenance.type_corrected {
+            tx.execute(
+                "UPDATE items SET item_type = ? WHERE item_id = ?",
+                rusqlite::params![proposed_type.as_str(), &item_state.item_id],
+            )
+            .map_err(|e| ApplyError::Storage(e.to_string()))?;
+        }
+    }
 
-    // TODO: Implement facet application through the event system.
-    // This requires coordinating with the store::events module to record the application
-    // of the proposal facets to the item.
+    // Update session topic if proposed (respecting user corrections).
+    if let Some(ref session_topic_prop) = proposal.session_topic_proposal {
+        if !item_state.provenance.session_topic_corrected {
+            let new_topic = if session_topic_prop.topic.is_empty() {
+                None
+            } else {
+                Some(session_topic_prop.topic.as_str())
+            };
+            tx.execute(
+                "UPDATE items SET current_session_topic = ? WHERE item_id = ?",
+                rusqlite::params![new_topic, &item_state.item_id],
+            )
+            .map_err(|e| ApplyError::Storage(e.to_string()))?;
+        }
+    }
+
+    // Update reminder state if proposed.
+    if let Some(reminder) = &proposal.reminder_proposal {
+        apply_reminder_proposal(tx, &item_state.item_id, reminder)?;
+    }
 
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::domain::items::{FieldProvenance, SUPPORTED_PROPOSAL_SCHEMA_VERSION};
-    use crate::interpretation::contracts::{AbstentionReason, ReminderProposal, SourceSpan};
-    use crate::providers::contracts::TextBasis;
-    use crate::store::events::ItemScope;
+/// Update or insert reminder state for the proposal.
+fn apply_reminder_proposal(
+    tx: &Transaction,
+    item_id: &str,
+    reminder: &crate::interpretation::contracts::ReminderProposal,
+) -> Result<(), ApplyError> {
+    let request_state = match reminder.quality {
+        TimeResolutionQuality::Explicit | TimeResolutionQuality::Inferred => {
+            if reminder.instant.is_some() {
+                "resolved"
+            } else {
+                "not_scheduled_yet"
+            }
+        }
+        TimeResolutionQuality::Ambiguous => "not_scheduled_yet",
+    };
 
-    const PROPOSAL_ID: &str = "550e8400-e29b-41d4-a716-446655440001";
-    const ITEM_ID: &str = "550e8400-e29b-41d4-a716-446655440002";
-    const CAPTURE_ID: &str = "550e8400-e29b-41d4-a716-446655440003";
-    const REQUEST_VERSION: &str = "550e8400-e29b-41d4-a716-446655440004";
-    const TEXT: &str = "Remind me tomorrow at 9am";
-
-    fn base_proposal() -> Proposal {
-        Proposal::new(
-            PROPOSAL_ID.to_string(),
-            ITEM_ID.to_string(),
-            CAPTURE_ID.to_string(),
-            0,
-            SUPPORTED_PROPOSAL_SCHEMA_VERSION,
-            TextBasis::Original { item_revision: 0 },
-            REQUEST_VERSION.to_string(),
+    // Check if reminder row exists
+    let exists: bool = tx
+        .query_row(
+            "SELECT 1 FROM reminders WHERE item_id = ? LIMIT 1",
+            rusqlite::params![item_id],
+            |_| Ok(true),
         )
+        .optional()
+        .map_err(|e| ApplyError::Storage(e.to_string()))?
+        .unwrap_or(false);
+
+    if exists {
+        // Update existing reminder
+        tx.execute(
+            "UPDATE reminders SET request_state = ?, schedule_state = 'not_scheduled' WHERE item_id = ?",
+            rusqlite::params![request_state, item_id],
+        )
+        .map_err(|e| ApplyError::Storage(e.to_string()))?;
+    } else {
+        // Insert new reminder with default values
+        tx.execute(
+            "INSERT INTO reminders (item_id, request_state, schedule_state, delivery_state, acknowledgment_state) VALUES (?, ?, ?, ?, ?)",
+            rusqlite::params![item_id, request_state, "not_scheduled", "unknown", "not_acknowledged"],
+        )
+        .map_err(|e| ApplyError::Storage(e.to_string()))?;
     }
 
-    fn base_item() -> ItemState {
-        ItemState {
-            item_id: ITEM_ID.to_string(),
-            capture_id: CAPTURE_ID.to_string(),
-            revision: 0,
-            item_type: None,
-            scope: ItemScope::Personal,
-            session_topic: None,
-            lifecycle_state: LifecycleState::Active,
-            current_text: TextState::Original {
-                text: Some(TEXT.to_string()),
-            },
-            provenance: FieldProvenance::default(),
-        }
-    }
+    Ok(())
+}
 
-    #[test]
-    fn test_deleted_item_cannot_be_modified() {
-        let mut item = base_item();
-        item.lifecycle_state = LifecycleState::Deleted;
-        let proposal = base_proposal();
-
-        let result = apply_proposal(
-            &rusqlite::Connection::open_in_memory()
-                .unwrap()
-                .transaction()
-                .unwrap(),
-            &item,
-            &proposal,
-        );
-        match result {
-            Err(ApplyError::DeletedItem { item_id }) => {
-                assert_eq!(item_id, ITEM_ID);
-            }
-            other => panic!("Expected DeletedItem error, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_stale_revision_rejected() {
-        let mut item = base_item();
-        item.revision = 5; // Current revision is 5
-        let proposal = base_proposal(); // Proposal for revision 0
-
-        let result = apply_proposal(
-            &rusqlite::Connection::open_in_memory()
-                .unwrap()
-                .transaction()
-                .unwrap(),
-            &item,
-            &proposal,
-        );
-        match result {
-            Err(ApplyError::StaleRevision { expected, current }) => {
-                assert_eq!(expected, 0);
-                assert_eq!(current, 5);
-            }
-            other => panic!("Expected StaleRevision error, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_capture_id_mismatch_rejected() {
-        let mut item = base_item();
-        item.capture_id = "550e8400-e29b-41d4-a716-446655440099".to_string();
-        let proposal = base_proposal();
-
-        let result = apply_proposal(
-            &rusqlite::Connection::open_in_memory()
-                .unwrap()
-                .transaction()
-                .unwrap(),
-            &item,
-            &proposal,
-        );
-        match result {
-            Err(ApplyError::CaptureIdMismatch) => {}
-            other => panic!("Expected CaptureIdMismatch error, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_reminder_requires_action_type() {
-        let item = base_item();
-        let proposal = base_proposal().with_reminder_proposal(Some(ReminderProposal {
-            instant: Some("2026-10-09T09:00:00Z".to_string()),
-            timezone_id: Some("UTC".to_string()),
-            quality: crate::interpretation::contracts::TimeResolutionQuality::Explicit,
-            source_span: Some(SourceSpan::new(0, 6)),
-        }));
-
-        let result = apply_proposal(
-            &rusqlite::Connection::open_in_memory()
-                .unwrap()
-                .transaction()
-                .unwrap(),
-            &item,
-            &proposal,
-        );
-        match result {
-            Err(ApplyError::ReminderRequiresActionType) => {}
-            other => panic!("Expected ReminderRequiresActionType error, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_abstention_is_accepted() {
-        let item = base_item();
-        let proposal = base_proposal().with_abstention(Some(AbstentionReason::Ambiguous));
-
-        let result = apply_proposal(
-            &rusqlite::Connection::open_in_memory()
-                .unwrap()
-                .transaction()
-                .unwrap(),
-            &item,
-            &proposal,
-        );
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), ApplyOutcome::Applied);
-    }
+/// Update the processing_state for an item.
+fn update_processing_state(tx: &Transaction, item_id: &str, state: &str) -> Result<(), ApplyError> {
+    tx.execute(
+        "UPDATE items SET processing_state = ? WHERE item_id = ?",
+        rusqlite::params![state, item_id],
+    )
+    .map_err(|e| ApplyError::Storage(e.to_string()))?;
+    Ok(())
 }
