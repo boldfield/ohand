@@ -60,6 +60,7 @@ targets:
       PRODUCT_NAME: OhAnd
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.app
       INFOPLIST_FILE: AppAssembly/Info.plist
+      CODE_SIGN_ENTITLEMENTS: Config/OhAndApp.entitlements
     dependencies:
       - target: OhAndServices
       - target: OhAndCaptureControl
