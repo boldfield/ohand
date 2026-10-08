@@ -16,6 +16,13 @@ fn test_time_context() -> TimeContext {
     }
 }
 
+fn get_span_text(text: &str, start: usize, end: usize) -> String {
+    text.chars()
+        .skip(start)
+        .take(end - start)
+        .collect::<String>()
+}
+
 #[test]
 fn test_explicit_reminder_with_date_and_time() {
     let context = test_time_context();
@@ -36,6 +43,11 @@ fn test_explicit_reminder_with_date_and_time() {
     let reminder = p.reminder_proposal.unwrap();
     assert!(reminder.instant.is_some());
     assert_eq!(reminder.quality, TimeResolutionQuality::Explicit);
+    // Verify span selects the correct time phrase
+    if let Some(span) = reminder.source_span {
+        let span_text = get_span_text(text, span.start, span.end);
+        assert_eq!(span_text, "2025-10-20 14:30:00");
+    }
 }
 
 #[test]
@@ -197,9 +209,9 @@ fn test_hypothetical_she_thinks() {
 }
 
 #[test]
-fn test_completed_work() {
+fn test_completed_work_with_remind_me() {
     let context = test_time_context();
-    let text = "already reminded myself";
+    let text = "I already did it, remind me 2025-10-20 14:30:00";
     let proposal = recognize_reminder(
         text,
         "550e8400-e29b-41d4-a716-446655440000",
@@ -210,8 +222,35 @@ fn test_completed_work() {
         &context,
     );
 
-    // Should abstain or return None since there's no "remind me" pattern
-    assert!(proposal.is_none() || proposal.unwrap().abstention.is_some());
+    // Completed work should abstain
+    assert!(proposal.is_some());
+    let p = proposal.unwrap();
+    assert_eq!(p.abstention, Some(AbstentionReason::UncertainTarget));
+    assert!(p.reminder_proposal.is_none());
+}
+
+#[test]
+fn test_completed_work_positive_control() {
+    let context = test_time_context();
+    let text = "remind me 2025-10-20 14:30:00";
+    let proposal = recognize_reminder(
+        text,
+        "550e8400-e29b-41d4-a716-446655440000",
+        "550e8400-e29b-41d4-a716-446655440001",
+        0,
+        TextBasis::Original { item_revision: 0 },
+        "550e8400-e29b-41d4-a716-446655440002",
+        &context,
+    );
+
+    // Without the "already" marker, should produce an explicit reminder
+    assert!(proposal.is_some());
+    let p = proposal.unwrap();
+    assert!(p.reminder_proposal.is_some());
+    assert_eq!(
+        p.reminder_proposal.unwrap().quality,
+        TimeResolutionQuality::Explicit
+    );
 }
 
 #[test]
@@ -289,7 +328,7 @@ fn test_non_reminder_text_returns_none() {
 }
 
 #[test]
-fn test_tell_me_pattern() {
+fn test_tell_me_pattern_not_supported() {
     let context = test_time_context();
     let text = "tell me tomorrow";
     let proposal = recognize_reminder(
@@ -302,10 +341,26 @@ fn test_tell_me_pattern() {
         &context,
     );
 
-    // "tell me" should be recognized similarly to "remind me"
-    assert!(proposal.is_some());
-    let p = proposal.unwrap();
-    assert!(p.reminder_proposal.is_some());
+    // "tell me" is not a supported reminder command and should return None
+    assert!(proposal.is_none());
+}
+
+#[test]
+fn test_tell_me_joke_not_intercepted() {
+    let context = test_time_context();
+    let text = "tell me a joke";
+    let proposal = recognize_reminder(
+        text,
+        "550e8400-e29b-41d4-a716-446655440000",
+        "550e8400-e29b-41d4-a716-446655440001",
+        0,
+        TextBasis::Original { item_revision: 0 },
+        "550e8400-e29b-41d4-a716-446655440002",
+        &context,
+    );
+
+    // Should return None, not intercept for interpreter
+    assert!(proposal.is_none());
 }
 
 #[test]
@@ -389,4 +444,162 @@ fn test_multiple_negations() {
     assert!(proposal.is_some());
     let p = proposal.unwrap();
     assert_eq!(p.abstention, Some(AbstentionReason::Negated));
+}
+
+#[test]
+fn test_contraction_apostrophe_not_quote() {
+    let context = test_time_context();
+    let text = "it's fine, remind me 2025-10-20 14:30:00";
+    let proposal = recognize_reminder(
+        text,
+        "550e8400-e29b-41d4-a716-446655440000",
+        "550e8400-e29b-41d4-a716-446655440001",
+        0,
+        TextBasis::Original { item_revision: 0 },
+        "550e8400-e29b-41d4-a716-446655440002",
+        &context,
+    );
+
+    // Contraction apostrophe should not trigger quote detection
+    assert!(proposal.is_some());
+    let p = proposal.unwrap();
+    assert!(p.reminder_proposal.is_some());
+    assert_eq!(
+        p.reminder_proposal.unwrap().quality,
+        TimeResolutionQuality::Explicit
+    );
+}
+
+#[test]
+fn test_quoted_reminder_abstains() {
+    let context = test_time_context();
+    let text = "he said 'remind me 2025-10-20 14:30:00'";
+    let proposal = recognize_reminder(
+        text,
+        "550e8400-e29b-41d4-a716-446655440000",
+        "550e8400-e29b-41d4-a716-446655440001",
+        0,
+        TextBasis::Original { item_revision: 0 },
+        "550e8400-e29b-41d4-a716-446655440002",
+        &context,
+    );
+
+    // Real quote should trigger quote detection
+    assert!(proposal.is_some());
+    let p = proposal.unwrap();
+    assert_eq!(p.abstention, Some(AbstentionReason::UncertainTarget));
+}
+
+#[test]
+fn test_unicode_case_folding_ascii() {
+    let context = test_time_context();
+    let text = "remind me 2025-10-20 14:30:00";
+    let proposal = recognize_reminder(
+        text,
+        "550e8400-e29b-41d4-a716-446655440000",
+        "550e8400-e29b-41d4-a716-446655440001",
+        0,
+        TextBasis::Original { item_revision: 0 },
+        "550e8400-e29b-41d4-a716-446655440002",
+        &context,
+    );
+
+    assert!(proposal.is_some());
+    let p = proposal.unwrap();
+    let reminder = p.reminder_proposal.unwrap();
+    if let Some(span) = reminder.source_span {
+        let span_text = get_span_text(text, span.start, span.end);
+        assert_eq!(span_text, "2025-10-20 14:30:00");
+        assert!(reminder.instant.is_some());
+    }
+}
+
+#[test]
+fn test_uppercase_remind_me() {
+    let context = test_time_context();
+    let text = "REMIND ME 2025-10-20 14:30:00";
+    let proposal = recognize_reminder(
+        text,
+        "550e8400-e29b-41d4-a716-446655440000",
+        "550e8400-e29b-41d4-a716-446655440001",
+        0,
+        TextBasis::Original { item_revision: 0 },
+        "550e8400-e29b-41d4-a716-446655440002",
+        &context,
+    );
+
+    assert!(proposal.is_some());
+    let p = proposal.unwrap();
+    let reminder = p.reminder_proposal.unwrap();
+    if let Some(span) = reminder.source_span {
+        let span_text = get_span_text(text, span.start, span.end);
+        assert_eq!(span_text, "2025-10-20 14:30:00");
+    }
+}
+
+#[test]
+fn test_reminder_tomorrow() {
+    let context = test_time_context();
+    let text = "remind me tomorrow";
+    let proposal = recognize_reminder(
+        text,
+        "550e8400-e29b-41d4-a716-446655440000",
+        "550e8400-e29b-41d4-a716-446655440001",
+        0,
+        TextBasis::Original { item_revision: 0 },
+        "550e8400-e29b-41d4-a716-446655440002",
+        &context,
+    );
+
+    assert!(proposal.is_some());
+    let p = proposal.unwrap();
+    let reminder = p.reminder_proposal.unwrap();
+    if let Some(span) = reminder.source_span {
+        let span_text = get_span_text(text, span.start, span.end);
+        assert_eq!(span_text, "tomorrow");
+    }
+}
+
+#[test]
+fn test_maybe_remind_me_is_hypothetical() {
+    let context = test_time_context();
+    let text = "maybe remind me 2025-10-20 14:30:00";
+    let proposal = recognize_reminder(
+        text,
+        "550e8400-e29b-41d4-a716-446655440000",
+        "550e8400-e29b-41d4-a716-446655440001",
+        0,
+        TextBasis::Original { item_revision: 0 },
+        "550e8400-e29b-41d4-a716-446655440002",
+        &context,
+    );
+
+    // Hypothetical marker should abstain
+    assert!(proposal.is_some());
+    let p = proposal.unwrap();
+    assert_eq!(p.abstention, Some(AbstentionReason::UncertainTarget));
+}
+
+#[test]
+fn test_hypothetical_doesnt_match_mayor() {
+    let context = test_time_context();
+    let text = "the mayor called, remind me 2025-10-20 14:30:00";
+    let proposal = recognize_reminder(
+        text,
+        "550e8400-e29b-41d4-a716-446655440000",
+        "550e8400-e29b-41d4-a716-446655440001",
+        0,
+        TextBasis::Original { item_revision: 0 },
+        "550e8400-e29b-41d4-a716-446655440002",
+        &context,
+    );
+
+    // "mayor" contains "may" but has word boundaries, so shouldn't match hypothetical marker
+    assert!(proposal.is_some());
+    let p = proposal.unwrap();
+    assert!(p.reminder_proposal.is_some());
+    assert_eq!(
+        p.reminder_proposal.unwrap().quality,
+        TimeResolutionQuality::Explicit
+    );
 }
