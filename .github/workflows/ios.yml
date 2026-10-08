@@ -82,6 +82,30 @@ jobs:
           cd ios
           ./scripts/build-simulator.sh BridgeProbe 2>&1 | tee .evidence/BridgeProbe-build.log
 
+      - name: Build CaptureProbe
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd ios
+          ./scripts/build-simulator.sh CaptureProbe 2>&1 | tee .evidence/CaptureProbe-build.log
+
+      - name: Run CaptureProbeTests on simulator
+        shell: bash
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+        run: |
+          set -euo pipefail
+          cd ios
+          xcodebuild test \
+            -project OhAnd.xcodeproj \
+            -scheme CaptureProbeTests \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
+            -derivedDataPath .derived \
+            -resultBundlePath .evidence/CaptureProbeTests.xcresult \
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tee .evidence/CaptureProbeTests.log
+
       - name: Launch smoke test
         shell: bash
         env:
@@ -96,7 +120,12 @@ jobs:
             "${SIMULATOR_UDID}" \
             .derived/Build/Products/Debug-iphonesimulator/BridgeProbe.app \
             com.boldfield.ohand.probes.bridge \
-            .evidence 2>&1 | tee .evidence/smoke.log
+            .evidence 2>&1 | tee .evidence/smoke-bridge.log
+          ./scripts/smoke-capture-simulator.sh \
+            "${SIMULATOR_UDID}" \
+            .derived/Build/Products/Debug-iphonesimulator/CaptureProbe.app \
+            com.boldfield.ohand.probes.capture \
+            .evidence 2>&1 | tee .evidence/smoke-capture.log
 
       - name: Upload evidence
         if: always()

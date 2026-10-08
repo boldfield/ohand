@@ -1,7 +1,5 @@
 import AppIntents
 
-// Compiled into both CaptureProbe and CaptureProbeControl. A control that launches its host app must use an
-// OpenIntent that is a member of both targets; the system then runs it in the foreground app.
 struct ProbeOpenCaptureIntent: OpenIntent {
     static let title: LocalizedStringResource = "Open Capture Probe"
 

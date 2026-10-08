@@ -1,5 +1,4 @@
 import UIKit
-import Foundation
 
 @main
 class CaptureProbeDelegateAdapter: UIResponder, UIApplicationDelegate {
@@ -39,6 +38,7 @@ class CaptureProbeSceneDelegate: UIResponder, UIWindowSceneDelegate {
 class CaptureProbeViewController: UIViewController {
     private var ingressLabel: UILabel!
     private var statusLabel: UILabel!
+    private let captureId = UUID().uuidString
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -98,21 +98,55 @@ class CaptureProbeViewController: UIViewController {
     }
 
     private func createIngressRecord() {
-        let captureId = UUID().uuidString
-        let now = ISO8601DateFormatter().string(from: Date())
-        let isLocked = !UIApplication.shared.isProtectedDataAvailable
+        Task {
+            do {
+                let store = try ProbeStore()
+                defer { store.close() }
 
-        DispatchQueue.main.async {
-            self.ingressLabel.text = """
-            Capture ID: \(captureId)
-            Time: \(now)
-            Locked: \(isLocked)
-            """
-            self.statusLabel.text = "Ingress record created"
-        }
+                let now = ISO8601DateFormatter().string(from: Date())
+                let calendar = Calendar.current
+                let timeZone = TimeZone.current
+                let locale = Locale.current
+                let isLocked = !UIApplication.shared.isProtectedDataAvailable
 
-        DispatchQueue.global().async {
-            print("Probe ingress: ID=\(captureId) locked=\(isLocked)")
+                let record = CaptureRecord(
+                    captureId: captureId,
+                    text: nil,
+                    audioReference: nil,
+                    captureInstant: now,
+                    timezoneId: timeZone.identifier,
+                    utcOffsetMinutes: Int32(timeZone.secondsFromGMT() / 60),
+                    locale: locale.identifier,
+                    calendar: calendar.identifier,
+                    itemScope: "personal",
+                    routeId: "route-local",
+                    entryLocked: isLocked,
+                    createdAt: now,
+                    sessionTopic: nil
+                )
+
+                let result = try store.save(record)
+
+                DispatchQueue.main.async {
+                    self.ingressLabel.text = """
+                    Capture ID: \(self.captureId)
+                    Entry Time: \(now)
+                    Locked: \(isLocked)
+                    Idempotent: \(!result.idempotentReplay)
+                    """
+                    self.statusLabel.text = "Ingress record persisted"
+                }
+            } catch let error as BoundaryFailure {
+                DispatchQueue.main.async {
+                    self.ingressLabel.text = "Error: \(error.code)"
+                    self.statusLabel.text = "Failed to persist"
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.ingressLabel.text = "Unexpected error"
+                    self.statusLabel.text = "Failed to persist"
+                }
+            }
         }
     }
 }
