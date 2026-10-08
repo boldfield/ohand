@@ -229,11 +229,12 @@ fn filter_hits_in_db(
     }
 
     // Add date range filters if specified (compare as UTC).
+    // Use julianday() to preserve fractional seconds in the comparison.
     if captured_after_utc.is_some() {
-        where_clauses.push("datetime(c.capture_instant, 'auto') >= datetime(?)".to_string());
+        where_clauses.push("julianday(c.capture_instant) >= julianday(?)".to_string());
     }
     if captured_before_utc.is_some() {
-        where_clauses.push("datetime(c.capture_instant, 'auto') <= datetime(?)".to_string());
+        where_clauses.push("julianday(c.capture_instant) <= julianday(?)".to_string());
     }
 
     // Add session_topic filter if specified.
@@ -927,6 +928,136 @@ mod tests {
 
         assert_eq!(result.hits.len(), 0);
         assert_eq!(result.total_accessible, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn date_filter_fractional_after_both_paths() -> Result<()> {
+        // Test both scoped_query and scoped_query_direct with fractional second boundaries
+        let mut db = new_db("date_filter_fractional_after")?;
+
+        let add_item_with_capture = |db: &mut Database, id: &str, instant: &str| -> Result<()> {
+            let capture_id = format!("cap-{id}");
+            let tx = db.immediate_transaction()?;
+            let capture = Capture::new(
+                capture_id.clone(),
+                Some("test".to_string()),
+                None,
+                instant.to_string(),
+                "UTC".to_string(),
+                0,
+                "en".to_string(),
+                "gregorian".to_string(),
+                "personal".to_string(),
+                "route-1".to_string(),
+                false,
+                instant.to_string(),
+                None,
+            )?;
+            crate::store::captures::save_capture_in_tx(&tx, &capture)?;
+            tx.execute(
+                "INSERT INTO items (item_id, capture_id, revision, item_type, lifecycle_state,
+                                   save_state, sync_state, processing_state, transcription_state, created_at, updated_at)
+                 VALUES (?, ?, 0, 'note', 'active', 'saved', 'not_synced', 'unprocessed', 'unprocessed', ?, ?)",
+                rusqlite::params![id, &capture_id, instant, instant],
+            )?;
+            sync_item_in_tx(&tx, id)?;
+            tx.commit()?;
+            Ok(())
+        };
+
+        // Add items at 2026-01-15T10:30:00.200Z and 2026-01-15T10:30:00.900Z
+        add_item_with_capture(&mut db, "item-200ms", "2026-01-15T10:30:00.200Z")?;
+        add_item_with_capture(&mut db, "item-900ms", "2026-01-15T10:30:00.900Z")?;
+
+        // Test scoped_query with captured_after at 500ms
+        let mut filter = QueryFilter::personal_only();
+        filter.captured_after = Some("2026-01-15T10:30:00.500Z".to_string());
+        let pagination = QueryPagination::default();
+        let result = scoped_query(db.conn(), "test", &filter, &pagination)?;
+
+        assert_eq!(
+            result.hits.len(),
+            1,
+            "scoped_query: only item-900ms should match after 500ms"
+        );
+        assert_eq!(result.hits[0].item_id, "item-900ms");
+        assert_eq!(result.total_accessible, 1);
+
+        // Test scoped_query_direct with the same filter
+        let result_direct = scoped_query_direct(db.conn(), "test", &filter, &pagination)?;
+        assert_eq!(
+            result_direct.hits.len(),
+            1,
+            "scoped_query_direct: only item-900ms should match after 500ms"
+        );
+        assert_eq!(result_direct.hits[0].item_id, "item-900ms");
+        assert_eq!(result_direct.total_accessible, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn date_filter_fractional_before_both_paths() -> Result<()> {
+        let mut db = new_db("date_filter_fractional_before")?;
+
+        let add_item_with_capture = |db: &mut Database, id: &str, instant: &str| -> Result<()> {
+            let capture_id = format!("cap-{id}");
+            let tx = db.immediate_transaction()?;
+            let capture = Capture::new(
+                capture_id.clone(),
+                Some("test".to_string()),
+                None,
+                instant.to_string(),
+                "UTC".to_string(),
+                0,
+                "en".to_string(),
+                "gregorian".to_string(),
+                "personal".to_string(),
+                "route-1".to_string(),
+                false,
+                instant.to_string(),
+                None,
+            )?;
+            crate::store::captures::save_capture_in_tx(&tx, &capture)?;
+            tx.execute(
+                "INSERT INTO items (item_id, capture_id, revision, item_type, lifecycle_state,
+                                   save_state, sync_state, processing_state, transcription_state, created_at, updated_at)
+                 VALUES (?, ?, 0, 'note', 'active', 'saved', 'not_synced', 'unprocessed', 'unprocessed', ?, ?)",
+                rusqlite::params![id, &capture_id, instant, instant],
+            )?;
+            sync_item_in_tx(&tx, id)?;
+            tx.commit()?;
+            Ok(())
+        };
+
+        add_item_with_capture(&mut db, "item-200ms", "2026-01-15T10:30:00.200Z")?;
+        add_item_with_capture(&mut db, "item-900ms", "2026-01-15T10:30:00.900Z")?;
+
+        // Test scoped_query with captured_before at 500ms
+        let mut filter = QueryFilter::personal_only();
+        filter.captured_before = Some("2026-01-15T10:30:00.500Z".to_string());
+        let pagination = QueryPagination::default();
+        let result = scoped_query(db.conn(), "test", &filter, &pagination)?;
+
+        assert_eq!(
+            result.hits.len(),
+            1,
+            "scoped_query: only item-200ms should match before 500ms"
+        );
+        assert_eq!(result.hits[0].item_id, "item-200ms");
+        assert_eq!(result.total_accessible, 1);
+
+        // Test scoped_query_direct with the same filter
+        let result_direct = scoped_query_direct(db.conn(), "test", &filter, &pagination)?;
+        assert_eq!(
+            result_direct.hits.len(),
+            1,
+            "scoped_query_direct: only item-200ms should match before 500ms"
+        );
+        assert_eq!(result_direct.hits[0].item_id, "item-200ms");
+        assert_eq!(result_direct.total_accessible, 1);
+
         Ok(())
     }
 }
