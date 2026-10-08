@@ -558,3 +558,51 @@ fn original_phrase_is_preserved_and_case_is_ignored_for_keywords() -> Result<()>
     );
     Ok(())
 }
+
+#[test]
+fn malformed_ordinal_suffix_is_unrecognized_not_a_committed_date() -> Result<()> {
+    let context = utc_context();
+    for phrase in ["notes since jan 10garbage", "notes since jan 10xyz 2025"] {
+        let resolution = parse_phrase(phrase, &context)?;
+        assert!(resolution.filter.is_none(), "{phrase}");
+        assert!(
+            matches!(
+                resolution.clarification_needed,
+                Some(ClarificationKind::UnrecognizedDate { .. })
+            ),
+            "{phrase}"
+        );
+        assert_eq!(resolution.fallback_search_text, phrase);
+    }
+    for (phrase, expected) in [
+        ("notes since jan 10", "2026-01-10T00:00:00+00:00"),
+        ("notes since jan 1st", "2026-01-01T00:00:00+00:00"),
+        ("notes since jan 2nd", "2026-01-02T00:00:00+00:00"),
+        ("notes since jan 3rd", "2026-01-03T00:00:00+00:00"),
+        ("notes since jan 10th", "2026-01-10T00:00:00+00:00"),
+    ] {
+        let resolution = parse_phrase(phrase, &context)?;
+        let filter = resolution.filter.expect(phrase);
+        assert_eq!(filter.captured_after.as_deref(), Some(expected), "{phrase}");
+    }
+    Ok(())
+}
+
+#[test]
+fn fully_skipped_local_date_withholds_the_bound_instead_of_using_the_next_day() -> Result<()> {
+    // Pacific/Apia skipped 2011-12-30 entirely when it crossed the date line.
+    let context = context_in("Pacific/Apia", "2012-01-01T12:00:00Z");
+    let skipped = parse_phrase("notes since 2011-12-30", &context)?;
+    assert!(skipped.filter.is_none());
+    assert!(matches!(
+        skipped.clarification_needed,
+        Some(ClarificationKind::AmbiguousTime { .. })
+    ));
+    assert_eq!(skipped.fallback_search_text, "notes since 2011-12-30");
+
+    let existing = parse_phrase("notes since 2011-12-31", &context)?;
+    let filter = existing.filter.expect("2011-12-31 exists locally");
+    assert!(existing.clarification_needed.is_none());
+    assert!(filter.captured_after.is_some());
+    Ok(())
+}

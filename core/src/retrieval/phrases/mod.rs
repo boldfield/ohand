@@ -307,7 +307,12 @@ fn resolve_since(date_text: &str, context: &TimeContext) -> Result<SinceOutcome>
         return unrecognized();
     };
 
-    let bound = start_of_local_day(tz, date)?;
+    let Some(bound) = start_of_local_day(tz, date) else {
+        return Ok(SinceOutcome::Clarify(ClarificationKind::AmbiguousTime {
+            phrase,
+            reason: format!("No valid local time exists on {date} in {tz}"),
+        }));
+    };
     if bound > context.reference_time {
         return Ok(SinceOutcome::Clarify(ClarificationKind::FutureSinceBound {
             phrase,
@@ -351,19 +356,19 @@ fn explicit_time_bound(
 }
 
 /// Earliest instant of the local calendar day; when local midnight does not exist (DST gap),
-/// the first instant that does.
-fn start_of_local_day(tz: Tz, date: NaiveDate) -> Result<DateTime<Utc>> {
+/// the first instant that does. `None` when the whole local date was skipped.
+fn start_of_local_day(tz: Tz, date: NaiveDate) -> Option<DateTime<Utc>> {
     let midnight = date.and_time(NaiveTime::MIN);
-    for minutes_after_midnight in 0..=(24 * 60) {
+    for minutes_after_midnight in 0..(24 * 60) {
         let candidate = midnight + Duration::minutes(minutes_after_midnight);
         match tz.from_local_datetime(&candidate) {
             LocalResult::Single(instant) | LocalResult::Ambiguous(instant, _) => {
-                return Ok(instant.with_timezone(&Utc));
+                return Some(instant.with_timezone(&Utc));
             }
             LocalResult::None => {}
         }
     }
-    Err(anyhow!("no valid local time on {date} in {tz}"))
+    None
 }
 
 fn parse_weekday(text: &str) -> Option<Weekday> {
@@ -394,6 +399,10 @@ fn parse_month_day(text: &str, today: NaiveDate) -> Option<NaiveDate> {
     }
     let month = parse_month(words[0])?;
     let day_digits = words[1].trim_end_matches(|c: char| c.is_alphabetic());
+    let suffix = &words[1][day_digits.len()..];
+    if !matches!(suffix, "" | "st" | "nd" | "rd" | "th") {
+        return None;
+    }
     let day: u32 = day_digits.parse().ok()?;
     match words.get(2) {
         Some(year_text) => {
