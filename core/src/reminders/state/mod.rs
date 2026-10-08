@@ -206,6 +206,9 @@ pub fn apply_resolution(state: &mut ReminderState, resolution: &ResolutionResult
             return Ok(());
         }
 
+        // Validate that the resolved time is not in the past (catches fabricated deadlines)
+        validate_resolved_time(resolved_time, Utc::now())?;
+
         state.request_state = RequestState::Resolved;
         state.resolved_instant = Some(resolved_time);
         state.timezone_id = resolution.context.timezone.clone().into();
