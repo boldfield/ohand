@@ -203,8 +203,6 @@ targets:
     sources:
       - path: AudioProbe/Tests
         createIntermediateGroups: true
-      - path: AudioProbe/Sources
-        createIntermediateGroups: true
     settings:
       PRODUCT_NAME: AudioProbeTests
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.audio.tests

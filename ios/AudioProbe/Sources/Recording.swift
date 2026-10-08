@@ -10,7 +10,7 @@ struct AudioRecordingResult {
     var description: String {
         if success {
             return "Saved: \(durationSeconds)s, \(fileSize) bytes"
-        } else if let partial = filePath {
+        } else if filePath != nil {
             return "Partial: \(durationSeconds)s, \(fileSize) bytes, \(interruption ?? "unknown")"
         } else {
             return "Failed: \(interruption ?? "no file")"
@@ -24,6 +24,9 @@ class AudioRecorder: NSObject, AVAudioRecorderDelegate {
     var recordingDestination: URL?
     var lastInterruptionReason: String?
     var hadInterruptionGap: Bool = false
+    var recordingFinalizationLock = NSLock()
+    var recordingFinalized = false
+    var finalizationSuccess = true
 
     override init() {
         super.init()
@@ -112,7 +115,30 @@ class AudioRecorder: NSObject, AVAudioRecorderDelegate {
             )
         }
 
+        recordingFinalizationLock.lock()
+        recordingFinalized = false
+        finalizationSuccess = true
+        recordingFinalizationLock.unlock()
+
         recorder.stop()
+
+        if !waitForFinalization(timeout: 2.0) {
+            defer {
+                self.recorder = nil
+                recordingStartTime = nil
+            }
+            return AudioRecordingResult(
+                success: false,
+                durationSeconds: Date().timeIntervalSince(startTime),
+                filePath: nil,
+                fileSize: 0,
+                interruption: "Finalization timeout"
+            )
+        }
+
+        recordingFinalizationLock.lock()
+        let success = finalizationSuccess
+        recordingFinalizationLock.unlock()
 
         let duration = Date().timeIntervalSince(startTime)
 
@@ -131,20 +157,20 @@ class AudioRecorder: NSObject, AVAudioRecorderDelegate {
                 }
             }
 
-            if isRecoverable {
+            if !success || !isRecoverable {
                 return AudioRecordingResult(
                     success: false,
                     durationSeconds: duration,
-                    filePath: filePath,
-                    fileSize: fileSize,
+                    filePath: nil,
+                    fileSize: 0,
                     interruption: interruptionReason
                 )
             } else {
                 return AudioRecordingResult(
                     success: false,
                     durationSeconds: duration,
-                    filePath: nil,
-                    fileSize: 0,
+                    filePath: filePath,
+                    fileSize: fileSize,
                     interruption: interruptionReason
                 )
             }
@@ -185,7 +211,7 @@ class AudioRecorder: NSObject, AVAudioRecorderDelegate {
             }
         }
 
-        if isRecoverable {
+        if success && isRecoverable {
             return AudioRecordingResult(
                 success: true,
                 durationSeconds: duration,
@@ -199,7 +225,7 @@ class AudioRecorder: NSObject, AVAudioRecorderDelegate {
                 durationSeconds: duration,
                 filePath: nil,
                 fileSize: 0,
-                interruption: "File not recoverable"
+                interruption: success ? "File not recoverable" : "Recording finalization failed"
             )
         }
     }
@@ -215,7 +241,26 @@ class AudioRecorder: NSObject, AVAudioRecorderDelegate {
             )
         }
 
+        recordingFinalizationLock.lock()
+        recordingFinalized = false
+        finalizationSuccess = true
+        recordingFinalizationLock.unlock()
+
         recorder.stop()
+
+        if !waitForFinalization(timeout: 2.0) {
+            defer {
+                self.recorder = nil
+                recordingStartTime = nil
+            }
+            return AudioRecordingResult(
+                success: false,
+                durationSeconds: Date().timeIntervalSince(startTime),
+                filePath: nil,
+                fileSize: 0,
+                interruption: "Finalization timeout"
+            )
+        }
 
         let duration = Date().timeIntervalSince(startTime)
         let filePath = recorder.url.path
@@ -256,6 +301,22 @@ class AudioRecorder: NSObject, AVAudioRecorderDelegate {
         return (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int ?? 0
     }
 
+    private func waitForFinalization(timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            recordingFinalizationLock.lock()
+            let finalized = recordingFinalized
+            recordingFinalizationLock.unlock()
+
+            if finalized {
+                return true
+            }
+
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        return false
+    }
+
     @objc private func handleAudioInterruption(_ notification: Notification) {
         guard let userInfo = notification.userInfo,
               let typeValue = userInfo[AVAudioSession.interruptionTypeKey] as? UInt,
@@ -282,6 +343,11 @@ class AudioRecorder: NSObject, AVAudioRecorderDelegate {
     }
 
     func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
+        recordingFinalizationLock.lock()
+        finalizationSuccess = flag
+        recordingFinalized = true
+        recordingFinalizationLock.unlock()
+
         if !flag {
             lastInterruptionReason = "Recording finished with error"
         }

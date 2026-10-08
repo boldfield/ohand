@@ -58,6 +58,15 @@ jobs:
       - name: Generate Xcode project
         run: cd ios && ./scripts/generate.sh
 
+      - name: Grant simulator microphone and audio permissions
+        shell: bash
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+        run: |
+          set -euo pipefail
+          xcrun simctl privacy "$SIMULATOR_UDID" grant microphone com.boldfield.ohand.probes.audio
+          xcrun simctl privacy "$SIMULATOR_UDID" grant microphone com.boldfield.ohand.tests
+
       # Ad-hoc signed so the hosted test bundle carries the app's Keychain entitlement (V04 real-Keychain tests).
       - name: Run OhAndTests on simulator
         shell: bash

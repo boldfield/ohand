@@ -22,7 +22,7 @@ class AudioProbeRecordingTests: XCTestCase {
         let started = recorder.startRecording(to: testRecordingURL)
         XCTAssertTrue(started, "Recording should start successfully")
         XCTAssertNotNil(recorder.recordingStartTime, "Recording start time should be set")
-        recorder.stopRecording()
+        _ = recorder.stopRecording()
     }
 
     func testRecordingStopsAndReturnsResult() {
@@ -141,15 +141,12 @@ class AudioProbeRecordingTests: XCTestCase {
 
         let result = recorder.stopRecording()
         XCTAssertFalse(result.success, "Recording interrupted should not be marked as successful")
-        XCTAssertNotNil(result.filePath, "Interrupted recording should have a partial file")
+        let filePath = XCTUnwrap(result.filePath, "Interrupted recording should have a partial file")
         XCTAssertEqual(result.interruption, "Audio interrupted", "Interruption reason should be recorded")
 
-        if let filePath = result.filePath {
-            let audioFileURL = URL(fileURLWithPath: filePath)
-            if let audioFile = try? AVAudioFile(forReading: audioFileURL) {
-                XCTAssertGreaterThan(audioFile.length, 0, "Interrupted partial file should be readable and contain audio")
-            }
-        }
+        let audioFileURL = URL(fileURLWithPath: filePath)
+        let audioFile = try XCTUnwrap(try? AVAudioFile(forReading: audioFileURL), "Partial file should be readable")
+        XCTAssertGreaterThan(audioFile.length, 0, "Interrupted partial file should contain audio")
     }
 
     func testInterruptionWithResume() {
@@ -196,6 +193,12 @@ class AudioProbeRecordingTests: XCTestCase {
         let result = recorder.stopRecording()
         XCTAssertFalse(result.success, "Recording with interruption and resume should not report clean success")
         XCTAssertEqual(result.interruption, "Interrupted and resumed", "Should track that interruption occurred despite resume")
+
+        if let filePath = result.filePath {
+            let audioFileURL = URL(fileURLWithPath: filePath)
+            let audioFile = try XCTUnwrap(try? AVAudioFile(forReading: audioFileURL), "Interrupted+resumed file should be readable")
+            XCTAssertGreaterThan(audioFile.length, 0, "File should contain audio despite interruption")
+        }
     }
 
     func testCancelledRecovery() {
@@ -210,20 +213,15 @@ class AudioProbeRecordingTests: XCTestCase {
 
         let result = recorder.cancelRecording()
         XCTAssertFalse(result.success, "Cancelled recording should not be successful")
-        XCTAssertNotNil(result.filePath, "Cancelled recording should preserve partial file path")
+        let filePath = XCTUnwrap(result.filePath, "Cancelled recording should preserve partial file path")
         XCTAssertEqual(result.interruption, "Cancelled", "Interruption reason should be 'Cancelled'")
 
-        if let filePath = result.filePath {
-            let fileExists = FileManager.default.fileExists(atPath: filePath)
-            XCTAssertTrue(fileExists, "Cancelled partial file should exist")
+        let fileExists = FileManager.default.fileExists(atPath: filePath)
+        XCTAssertTrue(fileExists, "Cancelled partial file should exist")
 
-            if fileExists {
-                let audioFileURL = URL(fileURLWithPath: filePath)
-                if let audioFile = try? AVAudioFile(forReading: audioFileURL) {
-                    XCTAssertGreaterThan(audioFile.length, 0, "Partial file should be readable and contain audio data")
-                }
-            }
-        }
+        let audioFileURL = URL(fileURLWithPath: filePath)
+        let audioFile = try XCTUnwrap(try? AVAudioFile(forReading: audioFileURL), "Partial file should be readable")
+        XCTAssertGreaterThan(audioFile.length, 0, "Partial file should contain audio data")
     }
 
     func testDoubleStopDoesNotReportSuccessTwice() {
@@ -257,5 +255,42 @@ class AudioProbeRecordingTests: XCTestCase {
 
         let result2 = recorder.stopRecording()
         XCTAssertFalse(result2.success, "Second stop should also fail")
+    }
+
+    func testUnreadableInterruptedFileFails() {
+        let started = recorder.startRecording(to: testRecordingURL)
+        XCTAssertTrue(started)
+
+        let waitExpectation = XCTestExpectation(description: "Record very briefly")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            waitExpectation.fulfill()
+        }
+        wait(for: [waitExpectation], timeout: 2)
+
+        let interruptionNotification = Notification(
+            name: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance(),
+            userInfo: [
+                AVAudioSession.interruptionTypeKey: AVAudioSession.InterruptionType.began.rawValue
+            ]
+        )
+        NotificationCenter.default.post(interruptionNotification)
+
+        let result = recorder.stopRecording()
+        XCTAssertFalse(result.success, "Interrupted recording should fail")
+        if result.filePath != nil {
+            XCTAssertNil(result.filePath, "Unrecoverable interrupted file should not return a path")
+        }
+    }
+
+    func testMicrophonePermissionDenial() {
+        let session = AVAudioSession.sharedInstance()
+        if session.recordPermission == .denied {
+            let started = recorder.startRecording(to: testRecordingURL)
+            XCTAssertFalse(started, "Recording should fail when microphone is denied")
+            XCTAssertEqual(recorder.lastInterruptionReason, "Microphone permission denied")
+        } else {
+            XCTSkip("Microphone permission is not denied; skipping denial test")
+        }
     }
 }
