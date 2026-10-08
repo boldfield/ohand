@@ -1,6 +1,7 @@
 // Integration tests for suggestion eligibility (S01)
 
 use chrono::{DateTime, Duration, Utc};
+use ohand_core::domain::items;
 use ohand_core::store::captures;
 use ohand_core::store::captures::Capture;
 use ohand_core::store::events::{
@@ -339,22 +340,8 @@ fn test_not_now_within_cooldown_not_eligible() -> anyhow::Result<()> {
 
     events::save_event_in_tx(&tx, &event, 0)?;
 
-    // User marks as "not now"
-    let event = Event::new(
-        "event-2".to_string(),
-        item_id.to_string(),
-        1,
-        events::EventType::SuggestionControl,
-        EventPayload::SuggestionControl(events::SuggestionControlPayload {
-            kind: SuggestionControlKind::NotNow,
-        }),
-        "2026-10-08T11:00:00Z".to_string(),
-    )?;
-
-    events::save_event_in_tx(&tx, &event, 1)?;
-
-    // Apply the standard not-now cooldown at base_time
-    eligibility::apply_not_now_cooldown(&tx, item_id, base_time)?;
+    // Record NotNow response atomically (event + cooldown in one call)
+    eligibility::record_not_now(&tx, item_id, "event-2", 1, base_time)?;
 
     tx.commit()?;
 
@@ -399,22 +386,8 @@ fn test_not_now_after_cooldown_is_eligible() -> anyhow::Result<()> {
 
     events::save_event_in_tx(&tx, &event, 0)?;
 
-    // User marks as "not now"
-    let event = Event::new(
-        "event-2".to_string(),
-        item_id.to_string(),
-        1,
-        events::EventType::SuggestionControl,
-        EventPayload::SuggestionControl(events::SuggestionControlPayload {
-            kind: SuggestionControlKind::NotNow,
-        }),
-        "2026-10-08T11:00:00Z".to_string(),
-    )?;
-
-    events::save_event_in_tx(&tx, &event, 1)?;
-
-    // Apply the standard not-now cooldown at base_time
-    eligibility::apply_not_now_cooldown(&tx, item_id, base_time)?;
+    // Record NotNow response atomically (event + cooldown in one call)
+    eligibility::record_not_now(&tx, item_id, "event-2", 1, base_time)?;
 
     tx.commit()?;
 
@@ -687,19 +660,8 @@ fn test_snoozed_item_not_selected() -> anyhow::Result<()> {
     )?;
     events::save_event_in_tx(&tx, &event, 0)?;
 
-    // Mark as not-now with cooldown
-    let event = Event::new(
-        "event-2".to_string(),
-        item_id.to_string(),
-        1,
-        events::EventType::SuggestionControl,
-        EventPayload::SuggestionControl(events::SuggestionControlPayload {
-            kind: SuggestionControlKind::NotNow,
-        }),
-        "2026-10-08T11:00:00Z".to_string(),
-    )?;
-    events::save_event_in_tx(&tx, &event, 1)?;
-    eligibility::apply_not_now_cooldown(&tx, item_id, base_time)?;
+    // Mark as not-now with cooldown (atomically in one call)
+    eligibility::record_not_now(&tx, item_id, "event-2", 1, base_time)?;
     tx.commit()?;
 
     // Should not be selected while snoozed
@@ -914,9 +876,9 @@ fn test_not_now_only_becomes_eligible_after_cooldown() -> anyhow::Result<()> {
     let mut db = test_db()?;
     let capture_id = "capture-not-now-only";
     let item_id = "item-not-now-only";
-    let base_time = "2026-10-08T10:00:00Z".parse::<DateTime<Utc>>()?;
-    let during_cooldown = base_time + Duration::minutes(30);
-    let after_cooldown = base_time + Duration::hours(2);
+    let not_now_time = "2026-10-08T10:00:00Z".parse::<DateTime<Utc>>()?;
+    let during_cooldown = not_now_time + Duration::minutes(30);
+    let after_cooldown = not_now_time + Duration::hours(2);
 
     let capture = make_test_capture(capture_id, "Not-now test action")?;
     captures::save_capture(&mut db, &capture)?;
@@ -939,21 +901,8 @@ fn test_not_now_only_becomes_eligible_after_cooldown() -> anyhow::Result<()> {
     )?;
     events::save_event_in_tx(&tx, &event, 0)?;
 
-    // Record NotNow event
-    let event = Event::new(
-        "event-2".to_string(),
-        item_id.to_string(),
-        1,
-        events::EventType::SuggestionControl,
-        EventPayload::SuggestionControl(events::SuggestionControlPayload {
-            kind: SuggestionControlKind::NotNow,
-        }),
-        "2026-10-08T11:00:00Z".to_string(),
-    )?;
-    events::save_event_in_tx(&tx, &event, 1)?;
-
-    // Apply cooldown atomically at base_time
-    eligibility::apply_not_now_cooldown(&tx, item_id, base_time)?;
+    // Record NotNow response atomically (event + cooldown in one call)
+    eligibility::record_not_now(&tx, item_id, "event-2", 1, not_now_time)?;
     tx.commit()?;
 
     // During cooldown: not eligible
@@ -967,5 +916,199 @@ fn test_not_now_only_becomes_eligible_after_cooldown() -> anyhow::Result<()> {
     let elig = eligibility::check_eligibility(&tx, item_id, after_cooldown)?;
     assert!(elig.eligible);
     assert_eq!(elig.reason, EligibilityReason::ActiveAction);
+    Ok(())
+}
+
+#[test]
+fn test_not_now_exact_boundary() -> anyhow::Result<()> {
+    let mut db = test_db()?;
+    let capture_id = "capture-boundary";
+    let item_id = "item-boundary";
+    let not_now_time = "2026-10-08T10:00:00Z".parse::<DateTime<Utc>>()?;
+    let one_sec_before = not_now_time + Duration::hours(1) - Duration::seconds(1);
+    let exactly_at = not_now_time + Duration::hours(1);
+    let one_sec_after = not_now_time + Duration::hours(1) + Duration::seconds(1);
+
+    let capture = make_test_capture(capture_id, "Boundary test action")?;
+    captures::save_capture(&mut db, &capture)?;
+
+    let tx = db.immediate_transaction()?;
+    create_test_item(&tx, item_id, capture_id)?;
+
+    // Type as action
+    let event = Event::new(
+        "event-1".to_string(),
+        item_id.to_string(),
+        0,
+        events::EventType::Correction,
+        EventPayload::Correction(Correction {
+            kind: CorrectionKind::Type,
+            old_value: None,
+            new_value: "action".to_string(),
+        }),
+        "2026-10-08T10:00:00Z".to_string(),
+    )?;
+    events::save_event_in_tx(&tx, &event, 0)?;
+
+    // Record NotNow response atomically
+    eligibility::record_not_now(&tx, item_id, "event-2", 1, not_now_time)?;
+    tx.commit()?;
+
+    // One second before cooldown expires: not eligible
+    let tx = db.transaction()?;
+    let elig = eligibility::check_eligibility(&tx, item_id, one_sec_before)?;
+    assert!(
+        !elig.eligible,
+        "Should be ineligible one second before cooldown expiry"
+    );
+    drop(tx);
+
+    // Exactly at cooldown expiry: eligible
+    let tx = db.transaction()?;
+    let elig = eligibility::check_eligibility(&tx, item_id, exactly_at)?;
+    assert!(
+        elig.eligible,
+        "Should be eligible at exactly cooldown expiry"
+    );
+    assert_eq!(elig.reason, EligibilityReason::ActiveAction);
+    drop(tx);
+
+    // One second after: eligible
+    let tx = db.transaction()?;
+    let elig = eligibility::check_eligibility(&tx, item_id, one_sec_after)?;
+    assert!(
+        elig.eligible,
+        "Should be eligible one second after cooldown expiry"
+    );
+    assert_eq!(elig.reason, EligibilityReason::ActiveAction);
+    Ok(())
+}
+
+#[test]
+fn test_rotation_with_fixed_clock() -> anyhow::Result<()> {
+    let mut db = test_db()?;
+    let base_time = "2026-10-08T10:00:00Z".parse::<DateTime<Utc>>()?;
+
+    // Create three test items
+    for i in 1..=3 {
+        let capture_id = format!("capture-rot-{}", i);
+        let item_id = format!("item-rot-{}", i);
+        let capture = make_test_capture(&capture_id, &format!("Rotation test action {}", i))?;
+        captures::save_capture(&mut db, &capture)?;
+
+        let tx = db.immediate_transaction()?;
+        create_test_item(&tx, &item_id, &capture_id)?;
+
+        // Type as action
+        let event = Event::new(
+            format!("event-1-{}", i),
+            item_id.clone(),
+            0,
+            events::EventType::Correction,
+            EventPayload::Correction(Correction {
+                kind: CorrectionKind::Type,
+                old_value: None,
+                new_value: "action".to_string(),
+            }),
+            "2026-10-08T10:00:00Z".to_string(),
+        )?;
+        events::save_event_in_tx(&tx, &event, 0)?;
+        tx.commit()?;
+    }
+
+    // Perform multiple selections at the same clock time
+    let tx = db.immediate_transaction()?;
+
+    // Selection 1: should get item-rot-1 (first by item_id)
+    let selected = eligibility::select_eligible_item(&tx, base_time, None)?;
+    assert_eq!(selected, Some("item-rot-1".to_string()));
+    tx.commit()?;
+
+    // Selection 2 (same instant)
+    let tx = db.immediate_transaction()?;
+    let selected = eligibility::select_eligible_item(&tx, base_time, None)?;
+    assert_eq!(
+        selected,
+        Some("item-rot-2".to_string()),
+        "Should rotate to item-rot-2"
+    );
+    tx.commit()?;
+
+    // Selection 3 (same instant)
+    let tx = db.immediate_transaction()?;
+    let selected = eligibility::select_eligible_item(&tx, base_time, None)?;
+    assert_eq!(
+        selected,
+        Some("item-rot-3".to_string()),
+        "Should rotate to item-rot-3"
+    );
+    tx.commit()?;
+
+    // Selection 4 (same instant) - should complete the cycle
+    let tx = db.immediate_transaction()?;
+    let selected = eligibility::select_eligible_item(&tx, base_time, None)?;
+    assert_eq!(
+        selected,
+        Some("item-rot-1".to_string()),
+        "Should rotate back to item-rot-1"
+    );
+    tx.commit()?;
+
+    // Selection 5 - continue rotation
+    let tx = db.immediate_transaction()?;
+    let selected = eligibility::select_eligible_item(&tx, base_time, None)?;
+    assert_eq!(
+        selected,
+        Some("item-rot-2".to_string()),
+        "Should continue to item-rot-2"
+    );
+    tx.commit()?;
+
+    Ok(())
+}
+
+#[test]
+fn test_nonresponse_preserves_lifecycle_and_importance() -> anyhow::Result<()> {
+    let mut db = test_db()?;
+    let capture_id = "capture-nonresp";
+    let item_id = "item-nonresp";
+    let eval_time = "2026-10-08T10:00:00Z".parse::<DateTime<Utc>>()?;
+
+    let capture = make_test_capture(capture_id, "Nonresponse test action")?;
+    captures::save_capture(&mut db, &capture)?;
+
+    let tx = db.immediate_transaction()?;
+    create_test_item(&tx, item_id, capture_id)?;
+
+    // Type as action
+    let event = Event::new(
+        "event-1".to_string(),
+        item_id.to_string(),
+        0,
+        events::EventType::Correction,
+        EventPayload::Correction(Correction {
+            kind: CorrectionKind::Type,
+            old_value: None,
+            new_value: "action".to_string(),
+        }),
+        "2026-10-08T10:00:00Z".to_string(),
+    )?;
+    events::save_event_in_tx(&tx, &event, 0)?;
+    tx.commit()?;
+
+    // Select the item three times - nonresponse should not change lifecycle
+    for _ in 1..=3 {
+        let tx = db.immediate_transaction()?;
+        let selected = eligibility::select_eligible_item(&tx, eval_time, None)?;
+        assert_eq!(selected, Some(item_id.to_string()));
+
+        // Verify item is still active and typed
+        let item_state = items::load_item_state(&tx, item_id)?.expect("Item should exist");
+        assert_eq!(item_state.lifecycle_state, items::LifecycleState::Active);
+        assert_eq!(item_state.item_type, Some(events::ItemType::Action));
+
+        tx.commit()?;
+    }
+
     Ok(())
 }

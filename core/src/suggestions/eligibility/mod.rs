@@ -62,6 +62,19 @@ pub struct Eligibility {
     pub reason: EligibilityReason,
 }
 
+/// Candidate item for rotation selection.
+#[derive(Clone, Debug)]
+struct EligibleItemCandidate {
+    /// Item identifier
+    item_id: String,
+    /// Last time this item was selected (None if never selected)
+    last_selected_at: Option<DateTime<Utc>>,
+    /// Selection sequence for tie-breaking when timestamps are equal
+    selection_sequence: Option<i32>,
+    /// Reason why this item is eligible
+    reason: String,
+}
+
 /// Check whether an item is eligible for proactive suggestions.
 /// Returns eligibility status and the reason.
 ///
@@ -248,7 +261,8 @@ fn get_snooze_expiry(
 }
 
 /// Record that an item was selected for suggestion with a reason.
-/// Updates the suggestion_eligibility table with selection timestamp and reason.
+/// Updates the suggestion_eligibility table with selection timestamp, reason, and sequence.
+/// The selection_sequence increments to ensure rotation advances even when clock doesn't.
 pub fn record_selection(
     tx: &Transaction<'_>,
     item_id: &str,
@@ -256,21 +270,36 @@ pub fn record_selection(
     now: DateTime<Utc>,
 ) -> Result<()> {
     let now_str = now.to_rfc3339();
+
+    // Get the next sequence number (max sequence + 1, or 1 if no records yet)
+    let next_sequence: i32 = tx
+        .query_row(
+            "SELECT COALESCE(MAX(selection_sequence), 0) + 1 FROM suggestion_eligibility",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(1);
+
     tx.execute(
-        "INSERT INTO suggestion_eligibility (item_id, eligible, snoozed, pull_only, last_selected_at, selection_reason, created_at, updated_at)
-         VALUES (?, 1, 0, 0, ?, ?, ?, ?)
+        "INSERT INTO suggestion_eligibility (item_id, eligible, snoozed, pull_only, last_selected_at, selection_reason, selection_sequence, created_at, updated_at)
+         VALUES (?, 1, 0, 0, ?, ?, ?, ?, ?)
          ON CONFLICT(item_id) DO UPDATE SET
            last_selected_at = ?,
            selection_reason = ?,
+           selection_sequence = ?,
+           eligible = 1,
+           snoozed = 0,
            updated_at = ?",
         rusqlite::params![
             item_id,
             &now_str,
             reason,
+            next_sequence,
             &now_str,
             &now_str,
             &now_str,
             reason,
+            next_sequence,
             &now_str,
         ],
     )?;
@@ -309,18 +338,41 @@ fn set_snooze(
     Ok(())
 }
 
-/// Apply the standard NOT_NOW_COOLDOWN to an item atomically.
-/// Records the SuggestionControl event and applies the cooldown in one operation.
-/// The cooldown is anchored at the provided evaluation instant.
+/// Record a "not now" response and apply its cooldown atomically.
+/// Saves the NotNow SuggestionControl event and applies the cooldown in one transaction.
+/// The cooldown is anchored at the event's happened_at time.
 ///
-/// This is the authoritative API for "not now" responses; it ensures the cooldown
-/// is applied immediately and durably, not as a separate step.
-pub fn apply_not_now_cooldown(
+/// This is the authoritative API for "not now" responses. Callers should not
+/// separately call set_snooze or save the event; this function handles both.
+pub fn record_not_now(
     tx: &Transaction<'_>,
     item_id: &str,
-    evaluation_instant: DateTime<Utc>,
+    event_id: &str,
+    current_revision: i32,
+    event_time: DateTime<Utc>,
 ) -> Result<()> {
-    set_snooze(tx, item_id, NOT_NOW_COOLDOWN, evaluation_instant)
+    // Validate the item exists
+    let _item_state = crate::domain::items::load_item_state(tx, item_id)?
+        .ok_or_else(|| anyhow!("Item {} not found", item_id))?;
+
+    // Create and save the NotNow SuggestionControl event
+    let event = events::Event::new(
+        event_id.to_string(),
+        item_id.to_string(),
+        current_revision,
+        events::EventType::SuggestionControl,
+        events::EventPayload::SuggestionControl(events::SuggestionControlPayload {
+            kind: SuggestionControlKind::NotNow,
+        }),
+        event_time.to_rfc3339(),
+    )?;
+
+    events::save_event_in_tx(tx, &event, current_revision)?;
+
+    // Apply the cooldown anchored at the event time
+    set_snooze(tx, item_id, NOT_NOW_COOLDOWN, event_time)?;
+
+    Ok(())
 }
 
 /// Mark an item as pull-only (stop suggesting).
@@ -369,21 +421,22 @@ pub fn select_eligible_item(
         .collect::<Result<Vec<_>, _>>()?;
 
     // Check each item for eligibility, tracking the best candidate
-    let mut eligible_items: Vec<(String, Option<DateTime<Utc>>, String)> = Vec::new();
+    let mut eligible_items: Vec<EligibleItemCandidate> = Vec::new();
 
     for item_id in items {
         match check_eligibility_with_scope(tx, &item_id, evaluation_instant, scope_filter) {
             Ok(eligibility) if eligibility.eligible => {
-                // Get the last selection time for rotation ordering
-                let last_selected_at: Option<Option<String>> = tx
+                // Get the last selection time and sequence for rotation ordering
+                let (last_selected_at_str, sequence): (Option<String>, Option<i32>) = tx
                     .query_row(
-                        "SELECT last_selected_at FROM suggestion_eligibility WHERE item_id = ?",
+                        "SELECT last_selected_at, selection_sequence FROM suggestion_eligibility WHERE item_id = ?",
                         [&item_id],
-                        |row| row.get(0),
+                        |row| Ok((row.get(0)?, row.get(1)?)),
                     )
-                    .optional()?;
+                    .optional()?
+                    .unwrap_or((None, None));
 
-                let last_selected_dt = match last_selected_at.and_then(|s| s) {
+                let last_selected_dt = match last_selected_at_str {
                     Some(s) => Some(
                         s.parse::<DateTime<Utc>>()
                             .map_err(|e| anyhow!("Invalid last_selected_at: {}", e))?,
@@ -393,7 +446,12 @@ pub fn select_eligible_item(
 
                 // Store the actual reason the item was eligible
                 let reason_str = eligibility.reason.as_str().to_string();
-                eligible_items.push((item_id, last_selected_dt, reason_str));
+                eligible_items.push(EligibleItemCandidate {
+                    item_id,
+                    last_selected_at: last_selected_dt,
+                    selection_sequence: sequence,
+                    reason: reason_str,
+                });
             }
             Ok(_) => {
                 // Item is not eligible, skip it
@@ -409,21 +467,42 @@ pub fn select_eligible_item(
         return Ok(None);
     }
 
-    // Sort by last_selected_at (None values first = oldest), then by item_id for determinism
-    eligible_items.sort_by(|a, b| match (a.1, b.1) {
-        (None, None) => a.0.cmp(&b.0),
+    // Sort by last_selected_at (None values first = oldest), then by selection_sequence, then by item_id
+    eligible_items.sort_by(|a, b| match (a.last_selected_at, b.last_selected_at) {
+        (None, None) => match (a.selection_sequence, b.selection_sequence) {
+            (None, None) => a.item_id.cmp(&b.item_id),
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            (Some(sa), Some(sb)) => match sa.cmp(&sb) {
+                std::cmp::Ordering::Equal => a.item_id.cmp(&b.item_id),
+                other => other,
+            },
+        },
         (None, Some(_)) => std::cmp::Ordering::Less,
         (Some(_), None) => std::cmp::Ordering::Greater,
         (Some(ta), Some(tb)) => match ta.cmp(&tb) {
-            std::cmp::Ordering::Equal => a.0.cmp(&b.0),
+            std::cmp::Ordering::Equal => match (a.selection_sequence, b.selection_sequence) {
+                (None, None) => a.item_id.cmp(&b.item_id),
+                (None, Some(_)) => std::cmp::Ordering::Less,
+                (Some(_), None) => std::cmp::Ordering::Greater,
+                (Some(sa), Some(sb)) => match sa.cmp(&sb) {
+                    std::cmp::Ordering::Equal => a.item_id.cmp(&b.item_id),
+                    other => other,
+                },
+            },
             other => other,
         },
     });
 
-    // Select the first item (oldest last_selected_at)
-    if let Some((item_id, _, reason)) = eligible_items.first() {
-        record_selection(tx, item_id, reason, evaluation_instant)?;
-        return Ok(Some(item_id.clone()));
+    // Select the first item (oldest last_selected_at, then oldest selection_sequence)
+    if let Some(candidate) = eligible_items.first() {
+        record_selection(
+            tx,
+            &candidate.item_id,
+            &candidate.reason,
+            evaluation_instant,
+        )?;
+        return Ok(Some(candidate.item_id.clone()));
     }
 
     Ok(None)

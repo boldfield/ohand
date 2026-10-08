@@ -610,6 +610,7 @@ fn create_tables_v1(tx: &Transaction<'_>) -> Result<()> {
             snoozed_until TEXT,
             last_selected_at TEXT,
             selection_reason TEXT,
+            selection_sequence INTEGER,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY (item_id) REFERENCES items(item_id)
