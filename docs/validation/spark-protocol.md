@@ -148,7 +148,7 @@ Source: evidence `spark-phone-2026-10-08`, revision 1, Safari rendering of `GET 
 
 **Transport**: Both worker-context (V08a) and phone-context (V08b) confirm HTTPS with certificate validation on all observed requests.
 - Worker-context: Probe classification `https-verified` (default trust store, verified certificates on all four requests).
-- Phone-context: Certificate verified on Wi-Fi with configured hostname (both credentials), Wi-Fi with tailnet hostname (unauthenticated), cellular with configured hostname (both credentials), and cellular with tailnet hostname (both credentials); all 9 recorded HTTP exchanges show verified TLS.
+- Phone-context: the artifact records 8 attempts, each over https with a verified certificate: Wi-Fi with configured hostname (both credentials), Wi-Fi with tailnet hostname (unauthenticated only), cellular with configured hostname (both credentials, ending in 302), cellular with tailnet hostname (both credentials), and cellular with configured hostname using `curl -L` (unauthenticated; verified on both hops).
 
 **Unauthenticated reachability**: Phone-context attempted unauthenticated `GET /v1/models` on Wi-Fi and cellular over Tailscale.
 - Wi-Fi with configured hostname: HTTP 200 (direct).
@@ -166,7 +166,7 @@ Source: evidence `spark-phone-2026-10-08`, revision 1, Safari rendering of `GET 
 
 **Authentication behavior agreement**: Both sources observe that the endpoint returns identical HTTP status to credentialed and non-credentialed requests.
 - Worker-context: Both `models-unauthenticated` and `models-authenticated` returned 200; endpoint does not enforce authentication.
-- Phone-context: Unauthenticated and credentialed `GET /v1/models` returned identical statuses (200 on home LAN and tailnet, 302 on public forwarder); endpoint does not require credential.
+- Phone-context: Unauthenticated and credentialed `GET /v1/models` returned identical statuses in every paired attempt (200 via the configured hostname on Wi-Fi and via the tailnet hostname on cellular, 302 via the configured hostname on cellular); the Wi-Fi tailnet attempt had no credentialed pair; endpoint does not require credential.
 
 **Model list agreement**: Both worker-context and phone-context artifacts list six identical model identifiers.
 - Worker-context: `models-authenticated` response body.
@@ -177,7 +177,7 @@ Source: evidence `spark-phone-2026-10-08`, revision 1, Safari rendering of `GET 
 These facts are recorded as the exact verified compatibility boundary:
 
 1. **Collection method and paths differ**: Worker-context V08a used `python3 tools/provider-probe/spark_probe.py` on an Odonian worker. Phone-context V08b used a-Shell curl on iPhone with Tailscale. Different tools, different network paths:
-   - Worker-context: direct to the configured base URL endpoint.
+   - Worker-context: the V08a artifact records `collection_context: odonian-worker` and the configured scheme; the worker network path is not recorded (it does not say whether the worker reached the endpoint directly, through the reverse proxy or through the forwarder).
    - Phone-context on-LAN (Wi-Fi): either direct via configured hostname or via Tailscale MagicDNS (tailnet hostname); both reach the endpoint directly.
    - Phone-context off-LAN (cellular): via Tailscale, using either the configured hostname (which resolves to a public web forwarder) or the tailnet hostname (which reaches the endpoint directly).
 
@@ -185,7 +185,7 @@ These facts are recorded as the exact verified compatibility boundary:
 
 3. **Configuration/endpoint model mismatch**: The maintainer's provider configuration lists seven models; the endpoint serves six. The missing model is the IQ3_XXS GLM variant. Whether this gap is a deployment state, ephemeral, or intended is unknown and matters to endpoint-readiness assessment in V09.
 
-4. **Critical POST redirect incompatibility on configured hostname off-LAN**: The artifact records that off the LAN, the configured hostname resolves to a public web forwarder that answers 302 to both `GET /v1/models` requests and to `POST` requests (coordinator observation from the public address on 2026-10-08). Foundation URLSession (and other HTTP clients) convert an HTTP 302 redirect of a POST request into a GET request on the final URL. Therefore, a client sending `POST /chat/completions` to the configured hostname off-LAN will receive a 302 and convert it to GET, failing to complete the chat request. V09 must either use the tailnet hostname as the phone-context base URL for off-LAN communication, or require that the forwarder emit HTTP 307 or 308 (which preserve the request method), which it does not do today.
+4. **Critical POST redirect incompatibility on configured hostname off-LAN**: The artifact records that off the LAN, the configured hostname resolves to a public web forwarder that answers 302 to both `GET /v1/models` requests and to `POST` requests (coordinator observation from the public address on 2026-10-08). The artifact names Foundation URLSession as an example of a client that converts a redirected POST to GET on a 302. Therefore, a client of that kind sending `POST /chat/completions` to the configured hostname off-LAN will receive a 302 and convert it to GET, failing to complete the chat request. V09 must either use the tailnet hostname as the phone-context base URL for off-LAN communication, or require that the forwarder emit HTTP 307 or 308 (which preserve the request method), which it does not do today.
 
 5. **V08a probe result is fail**: Worker-context V08a reported exit status 1 (`fail`) because the endpoint does not enforce authentication. This is a protocol violation from the probe's perspective. Whether authentication enforcement is required for V09 readiness is a V09 decision.
 
@@ -197,7 +197,7 @@ These facts are recorded as the exact verified compatibility boundary:
 - **Transport**: HTTPS with certificate validation on all observed requests.
 - **Model list identity**: Both sources observe the same six models.
 - **Authentication behavior on `/models`**: Neither source observed authentication enforcement.
-- **On-LAN reachability**: Both unauthenticated and authenticated requests succeed on the home LAN (both the configured hostname on Wi-Fi and the tailnet hostname).
+- **On-LAN reachability**: Both unauthenticated and authenticated requests succeed via the configured hostname on Wi-Fi. The tailnet hostname on Wi-Fi was observed unauthenticated only (one attempt, HTTP 200); no authenticated tailnet request on Wi-Fi was recorded.
 
 Phone-context reachability off-LAN (cellular) succeeds only via the tailnet hostname or via the configured hostname with `curl -L` (which follows the redirect to tailnet). Direct requests to the configured hostname off-LAN receive HTTP 302, not direct endpoint access. The exact compatibility boundary is recorded in gap 4: a client that converts 302 POST to GET (like Foundation URLSession) cannot complete chat completions through the configured hostname off-LAN.
 
