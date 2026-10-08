@@ -3,7 +3,7 @@
 use super::AnthropicTransport;
 use crate::providers::contracts::TransportError;
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone)]
 pub struct FakeAnthropicStep {
@@ -48,21 +48,35 @@ pub struct RecordedAnthropicCall {
     pub max_response_bytes: usize,
 }
 
-pub struct FakeAnthropicTransport {
+pub struct FakeAnthropicTransportInner {
     script: Mutex<VecDeque<FakeAnthropicStep>>,
     calls: Mutex<Vec<RecordedAnthropicCall>>,
+}
+
+pub struct FakeAnthropicTransport {
+    inner: Arc<FakeAnthropicTransportInner>,
+}
+
+impl Clone for FakeAnthropicTransport {
+    fn clone(&self) -> Self {
+        FakeAnthropicTransport {
+            inner: self.inner.clone(),
+        }
+    }
 }
 
 impl FakeAnthropicTransport {
     pub fn new(script: impl IntoIterator<Item = FakeAnthropicStep>) -> Self {
         FakeAnthropicTransport {
-            script: Mutex::new(script.into_iter().collect()),
-            calls: Mutex::new(Vec::new()),
+            inner: Arc::new(FakeAnthropicTransportInner {
+                script: Mutex::new(script.into_iter().collect()),
+                calls: Mutex::new(Vec::new()),
+            }),
         }
     }
 
     pub fn calls(&self) -> Vec<RecordedAnthropicCall> {
-        self.calls.lock().expect("calls lock").clone()
+        self.inner.calls.lock().expect("calls lock").clone()
     }
 }
 
@@ -75,7 +89,8 @@ impl AnthropicTransport for FakeAnthropicTransport {
         timeout_ms: u64,
         max_response_bytes: usize,
     ) -> Result<Vec<u8>, TransportError> {
-        self.calls
+        self.inner
+            .calls
             .lock()
             .expect("calls lock")
             .push(RecordedAnthropicCall {
@@ -87,6 +102,7 @@ impl AnthropicTransport for FakeAnthropicTransport {
             });
 
         let step = self
+            .inner
             .script
             .lock()
             .expect("script lock")

@@ -12,6 +12,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 const ORIGIN: &str = "https://api.anthropic.com";
+const ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
 
 fn text_capability() -> CapabilityMetadata {
     CapabilityMetadata::supported(
@@ -391,4 +392,154 @@ fn unavailable_provider_returns_transient_error() {
     );
     let failure = result.expect_err("unavailable");
     assert_eq!(failure.kind, FailureKind::Unavailable);
+}
+
+// ---- request building verification ----
+
+#[test]
+fn request_includes_tool_use_for_structured_output() {
+    let harness = Harness::new();
+    let fake = FakeAnthropicTransport::new(vec![FakeAnthropicStep::respond(
+        r#"{"id":"msg_1","type":"message","content":[{"type":"tool_use","id":"t1","name":"interpret","input":{}}],"stop_reason":"tool_use"}"#,
+    )]);
+    let adapter = AnthropicAdapter::new(Box::new(fake.clone()));
+    let request = request_for(&harness.profile, "call mom");
+    dispatch(
+        &adapter,
+        &harness.profile,
+        &request,
+        harness.clock.as_ref(),
+        &harness.cancel,
+        &DispatchLimits::default(),
+    )
+    .expect("success");
+
+    let calls = fake.calls();
+    assert_eq!(calls.len(), 1);
+    let call = &calls[0];
+    let body_str = String::from_utf8_lossy(&call.body);
+    assert!(
+        body_str.contains("\"tools\""),
+        "Request should include tools"
+    );
+    assert!(
+        body_str.contains("\"tool_choice\""),
+        "Request should include tool_choice"
+    );
+}
+
+#[test]
+fn request_includes_system_prompt_with_context() {
+    let harness = Harness::new();
+    let fake = FakeAnthropicTransport::new(vec![FakeAnthropicStep::respond(
+        r#"{"id":"msg_1","type":"message","content":[{"type":"tool_use","id":"t1","name":"interpret","input":{}}],"stop_reason":"tool_use"}"#,
+    )]);
+    let adapter = AnthropicAdapter::new(Box::new(fake.clone()));
+    let request = request_for(&harness.profile, "test");
+    dispatch(
+        &adapter,
+        &harness.profile,
+        &request,
+        harness.clock.as_ref(),
+        &harness.cancel,
+        &DispatchLimits::default(),
+    )
+    .expect("success");
+
+    let calls = fake.calls();
+    assert_eq!(calls.len(), 1);
+    let call = &calls[0];
+    let body_str = String::from_utf8_lossy(&call.body);
+    assert!(
+        body_str.contains("\"system\""),
+        "Request should include system prompt"
+    );
+    assert!(
+        body_str.contains("interpreter"),
+        "System prompt should mention interpreter"
+    );
+    assert!(
+        body_str.contains("instructions-v1"),
+        "System prompt should include instruction version"
+    );
+    assert!(
+        body_str.contains("UTC"),
+        "System prompt should include timezone"
+    );
+}
+
+#[test]
+fn request_uses_profile_endpoint_and_credential() {
+    let harness = Harness::new();
+    let fake = FakeAnthropicTransport::new(vec![FakeAnthropicStep::respond(
+        r#"{"id":"msg_1","type":"message","content":[{"type":"tool_use","id":"t1","name":"interpret","input":{}}],"stop_reason":"tool_use"}"#,
+    )]);
+    let adapter = AnthropicAdapter::new(Box::new(fake.clone()));
+    let request = request_for(&harness.profile, "test");
+    dispatch(
+        &adapter,
+        &harness.profile,
+        &request,
+        harness.clock.as_ref(),
+        &harness.cancel,
+        &DispatchLimits::default(),
+    )
+    .expect("success");
+
+    let calls = fake.calls();
+    assert_eq!(calls.len(), 1);
+    let call = &calls[0];
+    assert_eq!(call.endpoint, ENDPOINT);
+    assert_eq!(call.api_key_ref, "anthropic-key-ref");
+}
+
+#[test]
+fn refusal_stop_reason_is_rejected() {
+    let harness = Harness::new();
+    let anthropic_response = r#"{
+        "id": "msg_123",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+            {"type": "text", "text": "{\"kind\":\"note\"}"}
+        ],
+        "stop_reason": "refusal"
+    }"#;
+    let result = harness.run_anthropic(
+        vec![FakeAnthropicStep::respond(anthropic_response)],
+        DispatchLimits::default(),
+    );
+    let failure = result.expect_err("refusal");
+    assert_eq!(failure.kind, FailureKind::Rejected);
+}
+
+#[test]
+fn endpoint_must_be_authorized() {
+    let harness = Harness::new();
+    let fake = FakeAnthropicTransport::new(vec![FakeAnthropicStep::respond(
+        r#"{"id":"msg_1","type":"message","content":[{"type":"tool_use","id":"t1","name":"interpret","input":{}}],"stop_reason":"tool_use"}"#,
+    )]);
+    let adapter = AnthropicAdapter::new(Box::new(fake.clone()));
+    let request = request_for(&harness.profile, "test");
+    dispatch(
+        &adapter,
+        &harness.profile,
+        &request,
+        harness.clock.as_ref(),
+        &harness.cancel,
+        &DispatchLimits::default(),
+    )
+    .expect("success");
+
+    let calls = fake.calls();
+    assert_eq!(calls.len(), 1);
+    let call = &calls[0];
+    assert!(
+        harness
+            .profile
+            .authorized_destinations()
+            .iter()
+            .any(|dest| call.endpoint.starts_with(dest)),
+        "Endpoint should be authorized by profile destinations"
+    );
 }
