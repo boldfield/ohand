@@ -69,6 +69,23 @@ impl HandoffValidator {
             return Err(HandoffError::InvalidUrl);
         }
 
+        if parsed_url.username() != "" || parsed_url.password().is_some() {
+            return Err(HandoffError::InvalidUrl);
+        }
+
+        if parsed_url.port().is_some() {
+            return Err(HandoffError::InvalidUrl);
+        }
+
+        if parsed_url.fragment().is_some() {
+            return Err(HandoffError::InvalidUrl);
+        }
+
+        let path = parsed_url.path();
+        if !path.is_empty() && path != "/" {
+            return Err(HandoffError::InvalidUrl);
+        }
+
         let route_component = parsed_url.host_str().ok_or(HandoffError::MissingRoute)?;
 
         if route_component.is_empty() {
@@ -95,6 +112,12 @@ impl HandoffValidator {
 
         if capture_id_values.len() > 1 {
             return Err(HandoffError::DuplicateCaptureId);
+        }
+
+        for (k, _) in query_pairs.iter() {
+            if k != "captureId" {
+                return Err(HandoffError::InvalidUrl);
+            }
         }
 
         let capture_id_str = capture_id_values[0];
@@ -184,7 +207,14 @@ mod tests {
     fn test_malicious_route_injection() {
         let url = format!("ohand-tauri://../../settings?captureId={}", VALID_UUID);
         let result = HandoffValidator::validate(&url);
-        assert_eq!(result, Err(HandoffError::InvalidRoute));
+        assert_eq!(result, Err(HandoffError::InvalidUrl));
+    }
+
+    #[test]
+    fn test_rejects_path_with_traversal() {
+        let url = format!("ohand-tauri://capture/../../admin?captureId={}", VALID_UUID);
+        let result = HandoffValidator::validate(&url);
+        assert_eq!(result, Err(HandoffError::InvalidUrl));
     }
 
     #[test]
@@ -204,5 +234,40 @@ mod tests {
         assert!(result.is_ok());
         let request = result.unwrap();
         assert!(!request.timestamp.is_empty());
+    }
+
+    #[test]
+    fn test_rejects_url_with_path() {
+        let url = format!("ohand-tauri://capture/settings?captureId={}", VALID_UUID);
+        let result = HandoffValidator::validate(&url);
+        assert_eq!(result, Err(HandoffError::InvalidUrl));
+    }
+
+    #[test]
+    fn test_rejects_url_with_user_info() {
+        let url = format!("ohand-tauri://user@capture?captureId={}", VALID_UUID);
+        let result = HandoffValidator::validate(&url);
+        assert_eq!(result, Err(HandoffError::InvalidUrl));
+    }
+
+    #[test]
+    fn test_rejects_url_with_port() {
+        let url = format!("ohand-tauri://capture:8080?captureId={}", VALID_UUID);
+        let result = HandoffValidator::validate(&url);
+        assert_eq!(result, Err(HandoffError::InvalidUrl));
+    }
+
+    #[test]
+    fn test_rejects_url_with_fragment() {
+        let url = format!("ohand-tauri://capture?captureId={}#section", VALID_UUID);
+        let result = HandoffValidator::validate(&url);
+        assert_eq!(result, Err(HandoffError::InvalidUrl));
+    }
+
+    #[test]
+    fn test_rejects_url_with_extra_query_parameters() {
+        let url = format!("ohand-tauri://capture?captureId={}&extra=value", VALID_UUID);
+        let result = HandoffValidator::validate(&url);
+        assert_eq!(result, Err(HandoffError::InvalidUrl));
     }
 }
