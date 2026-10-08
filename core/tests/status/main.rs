@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use std::sync::Arc;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -8,6 +8,10 @@ use ohand_core::domain::status::{
     ItemStatus, ProcessingJobStatus, ProcessingState, ReminderDeliveryState, ReminderRequestState,
     ReminderScheduleState, SaveState, SyncState, TranscriptionState, UnschedulableReason,
 };
+use ohand_core::jobs::queue::{
+    claim_job_with_lease, complete_job, enqueue_job, fail_job_with_backoff, get_job, Job, JobStatus,
+};
+use ohand_core::privacy::routing::{JOB_TYPE_INTERPRET, JOB_TYPE_TRANSCRIPTION_ATTACHMENT};
 use ohand_core::store::schema::{Clock, Database};
 
 struct TestClock {
@@ -96,32 +100,6 @@ fn insert_test_reminder(
             acknowledgment_state,
             unschedulable_reason,
             "2026-01-15T10:30:00Z",
-            "2026-01-15T10:30:00Z",
-        ],
-    )?;
-    Ok(())
-}
-
-fn insert_test_job(
-    tx: &rusqlite::Transaction<'_>,
-    item_id: &str,
-    status: &str,
-    failure_reason: Option<&str>,
-) -> Result<()> {
-    let job_id = Uuid::new_v4().to_string();
-
-    tx.execute(
-        "INSERT INTO jobs (job_id, job_schema_version, item_id, job_type, source_revision, status, failure_reason, attempt_count, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        rusqlite::params![
-            &job_id,
-            1,
-            item_id,
-            "interpretation",
-            0,
-            status,
-            failure_reason,
-            1,
             "2026-01-15T10:30:00Z",
         ],
     )?;
@@ -599,96 +577,221 @@ fn test_distinguishable_reminder_error_states() -> Result<()> {
     Ok(())
 }
 
+fn enqueue_for_item(
+    db: &mut Database,
+    item_id: &str,
+    job_type: &str,
+    job_schema_version: i32,
+    now: DateTime<Utc>,
+) -> Result<Job> {
+    enqueue_job(
+        db,
+        format!("job-{}-{}", item_id, job_type),
+        item_id.to_string(),
+        job_type.to_string(),
+        0,
+        Some("profile-1".to_string()),
+        Some("request-1".to_string()),
+        job_schema_version,
+        now,
+    )
+}
+
+fn insert_unprocessed_text_item(db: &mut Database, item_id: &str) -> Result<()> {
+    let tx = db.transaction()?;
+    insert_test_item_with_status(
+        &tx,
+        item_id,
+        "text",
+        "saved_local",
+        "not_configured",
+        "unprocessed",
+        Some("not_applicable"),
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn load_status(db: &mut Database, item_id: &str) -> Result<ItemStatus> {
+    let tx = db.transaction()?;
+    let status = ItemStatus::load(&tx, item_id)?.expect("item should exist");
+    tx.commit()?;
+    Ok(status)
+}
+
+fn fail_claimed_job(db: &mut Database, now: DateTime<Utc>, failure_reason: &str) -> Result<Job> {
+    let claimed = claim_job_with_lease(db, Duration::seconds(60), now)?.expect("job is claimable");
+    fail_job_with_backoff(
+        db,
+        &claimed.job_id,
+        failure_reason.to_string(),
+        30,
+        600,
+        now,
+        claimed.attempt_count,
+    )?;
+    Ok(get_job(db, &claimed.job_id)?.expect("job exists"))
+}
+
 #[test]
-fn test_outage_retry_distinguishable_from_never_attempted() -> Result<()> {
+fn test_outage_retry_distinguishable_from_never_attempted_and_config_wait() -> Result<()> {
     let tmpdir = TempDir::new()?;
     let path = temp_db_path(&tmpdir, "outage");
     let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
     let mut db = make_test_db(&path, instant)?;
 
-    let tx = db.transaction()?;
-    // Item with outage retry
-    insert_test_item_with_status(
-        &tx,
+    for item_id in [
         "outage-retry",
-        "text",
-        "saved_local",
-        "not_configured",
-        "unprocessed",
-        Some("transcribed"),
-    )?;
-    insert_test_job(&tx, "outage-retry", "pending", Some("transient_error"))?;
-
-    // Item never attempted (no job)
-    insert_test_item_with_status(
-        &tx,
+        "unauthorized-wait",
+        "unsupported-version-wait",
         "never-attempted",
-        "text",
-        "saved_local",
-        "not_configured",
-        "unprocessed",
-        Some("transcribed"),
+    ] {
+        insert_unprocessed_text_item(&mut db, item_id)?;
+    }
+
+    // Outage: a transient failure recorded through the production queue API. Each job is
+    // driven to its state before the next is enqueued so the oldest-first claim picks it.
+    enqueue_for_item(&mut db, "outage-retry", JOB_TYPE_INTERPRET, 1, instant)?;
+    let retried = fail_claimed_job(&mut db, instant, "transient")?;
+    assert_eq!(retried.status, JobStatus::Queued);
+    assert!(retried.next_attempt_at.is_some());
+
+    // Configuration wait: an unauthorized failure on the same queue API.
+    enqueue_for_item(&mut db, "unauthorized-wait", JOB_TYPE_INTERPRET, 1, instant)?;
+    fail_claimed_job(&mut db, instant, "unauthorized")?;
+
+    // Configuration wait: the queue itself stops a job with an unsupported schema version.
+    enqueue_for_item(
+        &mut db,
+        "unsupported-version-wait",
+        JOB_TYPE_INTERPRET,
+        99,
+        instant,
     )?;
+    assert!(claim_job_with_lease(&mut db, Duration::seconds(60), instant)?.is_none());
+    let stopped = get_job(&db, "job-unsupported-version-wait-interpret")?.expect("job exists");
+    assert_eq!(stopped.status, JobStatus::Failed);
 
-    // Item waiting for config
-    insert_test_item_with_status(
-        &tx,
-        "config-wait",
-        "text",
-        "saved_local",
-        "not_configured",
-        "unprocessed",
-        Some("transcribed"),
-    )?;
-    insert_test_job(&tx, "config-wait", "pending", Some("config_wait"))?;
+    // Never attempted: freshly queued job.
+    enqueue_for_item(&mut db, "never-attempted", JOB_TYPE_INTERPRET, 1, instant)?;
 
-    tx.commit()?;
+    let outage = load_status(&mut db, "outage-retry")?;
+    let unauthorized = load_status(&mut db, "unauthorized-wait")?;
+    let unsupported = load_status(&mut db, "unsupported-version-wait")?;
+    let never_attempted = load_status(&mut db, "never-attempted")?;
 
-    let tx = db.transaction()?;
-    let outage = ItemStatus::load(&tx, "outage-retry")?.expect("item should exist");
-    let never_attempted = ItemStatus::load(&tx, "never-attempted")?.expect("item should exist");
-    let config_wait = ItemStatus::load(&tx, "config-wait")?.expect("item should exist");
-    tx.commit()?;
+    for status in [&outage, &unauthorized, &unsupported, &never_attempted] {
+        assert_eq!(status.processing_state, ProcessingState::Unprocessed);
+        assert!(!status.claims_user_attention());
+    }
 
-    // All are unprocessed processing state
-    assert_eq!(outage.processing_state, ProcessingState::Unprocessed);
-    assert_eq!(
-        never_attempted.processing_state,
-        ProcessingState::Unprocessed
-    );
-    assert_eq!(config_wait.processing_state, ProcessingState::Unprocessed);
-
-    // But job statuses differ
     assert_eq!(
         outage.processing_job_status,
-        Some(ProcessingJobStatus::RetryingAfterTransient),
-        "outage retry must be distinguishable"
+        Some(ProcessingJobStatus::RetryingAfterTransient)
     );
     assert_eq!(
-        never_attempted.processing_job_status, None,
-        "never-attempted has no job"
+        unauthorized.processing_job_status,
+        Some(ProcessingJobStatus::AwaitingConfiguration)
     );
     assert_eq!(
-        config_wait.processing_job_status,
-        Some(ProcessingJobStatus::AwaitingConfiguration),
-        "config-wait must be distinguishable from outage"
+        unsupported.processing_job_status,
+        Some(ProcessingJobStatus::AwaitingConfiguration)
     );
-
-    // All assertions show they are distinct
-    assert_ne!(
-        outage.processing_job_status, never_attempted.processing_job_status,
-        "outage and never-attempted must differ"
-    );
-    assert_ne!(
-        outage.processing_job_status, config_wait.processing_job_status,
-        "outage and config-wait must differ"
-    );
+    assert_eq!(never_attempted.processing_job_status, None);
 
     Ok(())
 }
 
 #[test]
-#[allow(deprecated)]
+fn test_only_interpretation_jobs_drive_processing_job_status() -> Result<()> {
+    let tmpdir = TempDir::new()?;
+    let path = temp_db_path(&tmpdir, "jobtype");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    insert_unprocessed_text_item(&mut db, "item-1")?;
+    enqueue_for_item(&mut db, "item-1", JOB_TYPE_INTERPRET, 1, instant)?;
+    fail_claimed_job(&mut db, instant, "transient")?;
+
+    // A newer job of another type for the same item must not change the interpretation status.
+    let later = instant + Duration::seconds(5);
+    enqueue_for_item(
+        &mut db,
+        "item-1",
+        JOB_TYPE_TRANSCRIPTION_ATTACHMENT,
+        1,
+        later,
+    )?;
+    assert_eq!(
+        load_status(&mut db, "item-1")?.processing_job_status,
+        Some(ProcessingJobStatus::RetryingAfterTransient)
+    );
+
+    // Once the interpretation retry succeeds the wait disappears.
+    let retry_time = instant + Duration::seconds(600);
+    let claimed =
+        claim_job_with_lease(&mut db, Duration::seconds(60), retry_time)?.expect("retry is due");
+    assert_eq!(claimed.job_type, JOB_TYPE_INTERPRET);
+    complete_job(&mut db, &claimed.job_id, claimed.attempt_count)?;
+    assert_eq!(load_status(&mut db, "item-1")?.processing_job_status, None);
+
+    Ok(())
+}
+
+#[test]
+fn test_unschedulable_reason_must_match_request_state() -> Result<()> {
+    let tmpdir = TempDir::new()?;
+    let path = temp_db_path(&tmpdir, "reasonpair");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let tx = db.transaction()?;
+    insert_test_item_with_status(
+        &tx,
+        "no-reason",
+        "text",
+        "saved_local",
+        "not_configured",
+        "processed",
+        Some("not_applicable"),
+    )?;
+    insert_test_reminder(
+        &tx,
+        "no-reason",
+        "unschedulable",
+        "not_scheduled",
+        "unknown",
+        "not_acknowledged",
+        None,
+    )?;
+    insert_test_item_with_status(
+        &tx,
+        "stray-reason",
+        "text",
+        "saved_local",
+        "not_configured",
+        "processed",
+        Some("not_applicable"),
+    )?;
+    insert_test_reminder(
+        &tx,
+        "stray-reason",
+        "resolved",
+        "scheduled",
+        "unknown",
+        "not_acknowledged",
+        Some("time_in_past"),
+    )?;
+    tx.commit()?;
+
+    let tx = db.transaction()?;
+    assert!(ItemStatus::load(&tx, "no-reason").is_err());
+    assert!(ItemStatus::load(&tx, "stray-reason").is_err());
+    tx.commit()?;
+    Ok(())
+}
+
+#[test]
 fn test_attention_predicate_only_acknowledged_claims_attention() -> Result<()> {
     let tmpdir = TempDir::new()?;
     let path = temp_db_path(&tmpdir, "attention");
@@ -856,15 +959,6 @@ fn test_attention_predicate_only_acknowledged_claims_attention() -> Result<()> {
     assert!(!ambiguous.claims_user_attention());
     assert!(!pending_schedule.claims_user_attention());
     assert!(!schedule_failed.claims_user_attention());
-
-    // Backward compat: never_claims_attention is opposite of claims_user_attention
-    assert!(!acknowledged.never_claims_attention());
-    assert!(delivered_not_ack.never_claims_attention());
-    assert!(opened_not_ack.never_claims_attention());
-    assert!(unschedulable.never_claims_attention());
-    assert!(ambiguous.never_claims_attention());
-    assert!(pending_schedule.never_claims_attention());
-    assert!(schedule_failed.never_claims_attention());
 
     Ok(())
 }

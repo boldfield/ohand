@@ -1036,3 +1036,46 @@ fn test_v1_to_v2_migration_preserves_data() -> Result<()> {
     let _ = std::fs::remove_file(&path);
     Ok(())
 }
+
+#[test]
+fn test_v2_to_v3_migration_preserves_reminder_rows() -> Result<()> {
+    let path = temp_db_path("v2_to_v3_upgrade");
+    let instant = instant_for_tests()?;
+
+    {
+        let db = open_with(&path, instant, &MIGRATIONS[..2])?;
+        assert_eq!(db.schema_version()?, 2);
+
+        insert_source_capture(db.conn(), "cap-1")?;
+        db.conn().execute(
+            "INSERT INTO items (item_id, capture_id, revision, lifecycle_state, save_state, sync_state, processing_state, transcription_state, created_at, updated_at)
+             VALUES (?, ?, 0, 'active', 'saved_local', 'not_configured', 'processed', 'not_applicable', ?, ?)",
+            rusqlite::params!["item-1", "cap-1", "2026-01-15T10:30:00Z", "2026-01-15T10:30:00Z"],
+        )?;
+        db.conn().execute(
+            "INSERT INTO reminders (reminder_id, item_id, request_state, schedule_state, delivery_state, acknowledgment_state, created_at, updated_at)
+             VALUES ('rem-1', 'item-1', 'resolved', 'scheduled', 'unknown', 'not_acknowledged', ?, ?)",
+            rusqlite::params!["2026-01-15T10:30:00Z", "2026-01-15T10:30:00Z"],
+        )?;
+    }
+
+    {
+        let db = make_test_db(&path, instant)?;
+        assert_eq!(db.schema_version()?, 3);
+        let (request_state, schedule_state, unschedulable_reason): (String, String, Option<String>) =
+            db.conn().query_row(
+                "SELECT request_state, schedule_state, unschedulable_reason FROM reminders WHERE reminder_id = 'rem-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+        assert_eq!(request_state, "resolved");
+        assert_eq!(schedule_state, "scheduled");
+        assert_eq!(
+            unschedulable_reason, None,
+            "existing reminder rows gain a NULL unschedulable_reason"
+        );
+    }
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}

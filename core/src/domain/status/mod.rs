@@ -14,6 +14,8 @@
 // ambiguity each have explicit distinguishable status values and never claim
 // user attention by themselves.
 
+use crate::jobs::queue::JobStatus;
+use crate::privacy::routing::JOB_TYPE_INTERPRET;
 use std::fmt;
 use std::str::FromStr;
 
@@ -501,18 +503,11 @@ impl ItemStatus {
     ) -> anyhow::Result<Option<ItemStatus>> {
         use rusqlite::OptionalExtension;
 
-        let row: Option<(String, String, String, Option<String>)> = tx
+        let row: Option<(String, String, String, String)> = tx
             .query_row(
                 "SELECT save_state, sync_state, processing_state, transcription_state FROM items WHERE item_id = ?",
                 [item_id],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                    ))
-                },
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()?;
 
@@ -524,40 +519,13 @@ impl ItemStatus {
         let save_state = save_str.parse::<SaveState>()?;
         let sync_state = sync_str.parse::<SyncState>()?;
         let processing_state = processing_str.parse::<ProcessingState>()?;
-        let transcription_state = transcription_str
-            .as_deref()
-            .map(|s| s.parse::<TranscriptionState>())
-            .transpose()?
-            .unwrap_or(TranscriptionState::NotApplicable);
+        let transcription_state = transcription_str.parse::<TranscriptionState>()?;
 
-        // Load processing job status if item is unprocessed/processing
         let processing_job_status = if matches!(
             processing_state,
             ProcessingState::Unprocessed | ProcessingState::Processing
         ) {
-            let job_row: Option<(Option<String>, Option<String>)> = tx
-                .query_row(
-                    "SELECT status, failure_reason FROM jobs WHERE item_id = ? ORDER BY created_at DESC LIMIT 1",
-                    [item_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()?;
-
-            match job_row {
-                Some((Some(status_str), failure_reason)) if status_str == "pending" => {
-                    // Determine job status based on failure reason
-                    match failure_reason.as_deref() {
-                        Some("transient_error") | Some("network_error") | Some("timeout_error") => {
-                            Some(ProcessingJobStatus::RetryingAfterTransient)
-                        }
-                        Some("configuration_error") | Some("config_wait") => {
-                            Some(ProcessingJobStatus::AwaitingConfiguration)
-                        }
-                        _ => None,
-                    }
-                }
-                _ => None,
-            }
+            load_interpretation_job_status(tx, item_id)?
         } else {
             None
         };
@@ -600,6 +568,20 @@ impl ItemStatus {
             (None, None, None, None, None)
         };
 
+        match (reminder_request_state, unschedulable_reason) {
+            (Some(ReminderRequestState::Unschedulable), None) => {
+                anyhow::bail!("Unschedulable reminder for item {item_id} has no recorded reason")
+            }
+            (Some(request_state), Some(_))
+                if request_state != ReminderRequestState::Unschedulable =>
+            {
+                anyhow::bail!(
+                    "Reminder for item {item_id} records an unschedulable reason while {request_state}"
+                )
+            }
+            _ => {}
+        }
+
         Ok(Some(ItemStatus {
             item_id: item_id.to_string(),
             save_state,
@@ -625,13 +607,52 @@ impl ItemStatus {
             Some(ReminderAcknowledgmentState::Acknowledged)
         )
     }
+}
 
-    /// Check if this status never claims user attention (for backward compatibility).
-    /// Deprecated: use !claims_user_attention() instead.
-    #[deprecated(since = "0.1.0", note = "use !claims_user_attention() instead")]
-    pub fn never_claims_attention(&self) -> bool {
-        !self.claims_user_attention()
-    }
+/// Failure reasons (F01 error classes plus the queue's own stop reason) that mean the job waits
+/// for the user to fix configuration or authorization rather than for the provider to recover.
+const CONFIGURATION_WAIT_REASONS: &[&str] =
+    &["unauthorized", "unsupported", "unsupported_job_version"];
+
+/// Derive the retry/configuration wait of the newest interpretation job from what the durable
+/// queue persists: a retry after `fail_job_with_backoff` is a `queued` job with attempts made
+/// and `next_attempt_at` set; an explicit configuration stop is a `failed` job (or a backed-off
+/// job) carrying a configuration-class reason. A never-attempted job reports nothing.
+fn load_interpretation_job_status(
+    tx: &rusqlite::Transaction<'_>,
+    item_id: &str,
+) -> anyhow::Result<Option<ProcessingJobStatus>> {
+    use rusqlite::OptionalExtension;
+
+    let job_row: Option<(String, Option<String>, i32, Option<String>)> = tx
+        .query_row(
+            "SELECT status, failure_reason, attempt_count, next_attempt_at FROM jobs \
+             WHERE item_id = ? AND job_type = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            rusqlite::params![item_id, JOB_TYPE_INTERPRET],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+
+    let Some((status_str, failure_reason, attempt_count, next_attempt_at)) = job_row else {
+        return Ok(None);
+    };
+    let is_configuration_wait = failure_reason
+        .as_deref()
+        .is_some_and(|reason| CONFIGURATION_WAIT_REASONS.contains(&reason));
+
+    Ok(match status_str.parse::<JobStatus>()? {
+        JobStatus::Failed if is_configuration_wait => {
+            Some(ProcessingJobStatus::AwaitingConfiguration)
+        }
+        JobStatus::Queued if attempt_count > 0 && next_attempt_at.is_some() => {
+            if is_configuration_wait {
+                Some(ProcessingJobStatus::AwaitingConfiguration)
+            } else {
+                Some(ProcessingJobStatus::RetryingAfterTransient)
+            }
+        }
+        _ => None,
+    })
 }
 
 #[cfg(test)]
