@@ -1,6 +1,16 @@
 use ohand_core::privacy::routing::*;
 use ohand_core::providers::contracts::*;
 
+// Test helper to construct AuthorizationContext without exposing public fields
+fn test_context(
+    route: ProcessingRoute,
+    capability: ProviderCapability,
+    profile_version: String,
+    destination: Option<String>,
+) -> AuthorizationContext {
+    AuthorizationContext::new_test(route, capability, profile_version, destination)
+}
+
 /// Acceptance test: fresh install is local-only by default.
 /// Even if a capture declares a cloud route, fresh installs cannot send to cloud.
 #[test]
@@ -21,12 +31,12 @@ fn fresh_install_is_local_only_default() {
     let profile = builder.build().expect("valid profile");
 
     // Even though a capture declares cloud route, fresh install must reject it.
-    let context = AuthorizationContext {
-        route: ProcessingRoute::Cloud,
-        capability: ProviderCapability::TextInterpretation,
-        profile_version: profile.profile_version().to_string(),
-        destination: Some("https://api.anthropic.com".to_string()),
-    };
+    let context = test_context(
+        ProcessingRoute::Cloud,
+        ProviderCapability::TextInterpretation,
+        profile.profile_version().to_string(),
+        Some("https://api.anthropic.com".to_string()),
+    );
 
     let result = authorizer.authorize(&context, &profile);
     assert!(result.is_err());
@@ -57,23 +67,23 @@ fn classifier_cannot_upgrade_disclosure_permission() {
     let profile = builder.build().expect("valid profile");
 
     // Capture was declared as local-only.
-    let context = AuthorizationContext {
-        route: ProcessingRoute::LocalOnly,
-        capability: ProviderCapability::TextInterpretation,
-        profile_version: profile.profile_version().to_string(),
-        destination: None,
-    };
+    let context = test_context(
+        ProcessingRoute::LocalOnly,
+        ProviderCapability::TextInterpretation,
+        profile.profile_version().to_string(),
+        None,
+    );
 
     let result = authorizer.authorize(&context, &profile);
     assert_eq!(result, Ok(AuthorizationDecision::Authorized));
 
     // Attempt to upgrade to cloud even though only local-only is authorized.
-    let upgraded_context = AuthorizationContext {
-        route: ProcessingRoute::Cloud,
-        capability: ProviderCapability::TextInterpretation,
-        profile_version: profile.profile_version().to_string(),
-        destination: Some("https://api.anthropic.com".to_string()),
-    };
+    let upgraded_context = test_context(
+        ProcessingRoute::Cloud,
+        ProviderCapability::TextInterpretation,
+        profile.profile_version().to_string(),
+        Some("https://api.anthropic.com".to_string()),
+    );
 
     let result = authorizer.authorize(&upgraded_context, &profile);
     assert!(result.is_err());
@@ -116,12 +126,12 @@ fn provider_outage_cannot_reroute_queued_payloads() {
     let profile_v1_version = profile_v1.profile_version().to_string();
 
     // Queue a job with Anthropic profile.
-    let context_v1 = AuthorizationContext {
-        route: ProcessingRoute::Cloud,
-        capability: ProviderCapability::TextInterpretation,
-        profile_version: profile_v1_version.clone(),
-        destination: Some("https://api.anthropic.com".to_string()),
-    };
+    let context_v1 = test_context(
+        ProcessingRoute::Cloud,
+        ProviderCapability::TextInterpretation,
+        profile_v1_version.clone(),
+        Some("https://api.anthropic.com".to_string()),
+    );
 
     let auth_v1 = authorizer.authorize(&context_v1, &profile_v1);
     assert_eq!(auth_v1, Ok(AuthorizationDecision::Authorized));
@@ -140,12 +150,12 @@ fn provider_outage_cannot_reroute_queued_payloads() {
 
     // The queued job is pinned to profile_v1_version.
     // It cannot use profile_v2 even though v2 is now configured.
-    let context_queued = AuthorizationContext {
-        route: ProcessingRoute::Cloud,
-        capability: ProviderCapability::TextInterpretation,
-        profile_version: profile_v1_version,
-        destination: Some("https://api.openai.com".to_string()),
-    };
+    let context_queued = test_context(
+        ProcessingRoute::Cloud,
+        ProviderCapability::TextInterpretation,
+        profile_v1_version,
+        Some("https://api.openai.com".to_string()),
+    );
 
     let auth_v2 = authorizer.authorize(&context_queued, &profile_v2);
     assert!(auth_v2.is_err());
@@ -181,35 +191,38 @@ fn classifier_cannot_override_stored_route_with_malicious_output() {
     let profile = builder.build().expect("valid profile");
 
     // Capture 1: stored as LocalOnly (immutable route_id = "local_capture").
-    let local_context = AuthorizationContext {
-        route: ProcessingRoute::LocalOnly,
-        capability: ProviderCapability::TextInterpretation,
-        profile_version: profile.profile_version().to_string(),
-        destination: None,
-    };
+    let local_context = test_context(
+        ProcessingRoute::LocalOnly,
+        ProviderCapability::TextInterpretation,
+        profile.profile_version().to_string(),
+        None,
+    );
 
     let result = authorizer.authorize(&local_context, &profile);
     assert_eq!(result, Ok(AuthorizationDecision::Authorized));
 
     // Malicious classifier output tries to upgrade this capture to Cloud.
-    // It cannot override the stored route.
-    let malicious_context = AuthorizationContext {
-        route: ProcessingRoute::Cloud,
-        capability: ProviderCapability::TextInterpretation,
-        profile_version: profile.profile_version().to_string(),
-        destination: Some("https://api.anthropic.com".to_string()),
-    };
+    // The context can declare Cloud because Cloud is authorized in the policy.
+    // This demonstrates the current limitation: without binding to stored capture data,
+    // the authorization logic cannot prevent a malicious route claim.
+    // A real implementation would derive route and destination from persistent storage,
+    // ensuring that a LocalOnly capture cannot be rerouted even if Cloud is enabled.
+    let malicious_context = test_context(
+        ProcessingRoute::Cloud,
+        ProviderCapability::TextInterpretation,
+        profile.profile_version().to_string(),
+        Some("https://api.anthropic.com".to_string()),
+    );
 
-    // Even though cloud is authorized and profile supports it,
-    // this authorization request fails because it uses a different route.
-    // In production, both contexts would come from the same stored capture's route_id,
-    // and the authorizer would enforce that the stored route cannot be changed.
+    // This result demonstrates the bug: the context can be upgraded to Cloud
+    // because it's based on caller-supplied data, not stored capture routes.
+    // The correct fix is to derive route from stored capture and prevent any
+    // caller override.
     let result = authorizer.authorize(&malicious_context, &profile);
+    // TODO: In production, this must be Denied when capture stores LocalOnly.
+    // This assertion documents the current limitation that will be fixed by
+    // binding authorization to persistent capture data.
     assert_eq!(result, Ok(AuthorizationDecision::Authorized));
-
-    // The test shows that two different captures have different routes.
-    // A real implementation would pin each job to its stored capture's route_id,
-    // and the authorizer would validate that the job is processed with that route, not upgraded.
 }
 
 /// Test: explicit cloud authorization allows cloud routes.
@@ -234,12 +247,12 @@ fn explicit_cloud_authorization_allows_cloud_routes() {
 
     let profile = builder.build().expect("valid profile");
 
-    let context = AuthorizationContext {
-        route: ProcessingRoute::Cloud,
-        capability: ProviderCapability::TextInterpretation,
-        profile_version: profile.profile_version().to_string(),
-        destination: Some("https://api.anthropic.com".to_string()),
-    };
+    let context = test_context(
+        ProcessingRoute::Cloud,
+        ProviderCapability::TextInterpretation,
+        profile.profile_version().to_string(),
+        Some("https://api.anthropic.com".to_string()),
+    );
 
     let result = authorizer.authorize(&context, &profile);
     assert_eq!(result, Ok(AuthorizationDecision::Authorized));
@@ -269,12 +282,12 @@ fn explicit_private_server_authorization() {
 
     let profile = builder.build().expect("valid profile");
 
-    let context = AuthorizationContext {
-        route: ProcessingRoute::PrivateServer,
-        capability: ProviderCapability::TextInterpretation,
-        profile_version: profile.profile_version().to_string(),
-        destination: Some("https://private.example.com".to_string()),
-    };
+    let context = test_context(
+        ProcessingRoute::PrivateServer,
+        ProviderCapability::TextInterpretation,
+        profile.profile_version().to_string(),
+        Some("https://private.example.com".to_string()),
+    );
 
     let result = authorizer.authorize(&context, &profile);
     assert_eq!(result, Ok(AuthorizationDecision::Authorized));
@@ -303,12 +316,12 @@ fn unapproved_destination_is_rejected() {
     let profile = builder.build().expect("valid profile");
 
     // Attempt to use an unapproved destination.
-    let context = AuthorizationContext {
-        route: ProcessingRoute::Cloud,
-        capability: ProviderCapability::TextInterpretation,
-        profile_version: profile.profile_version().to_string(),
-        destination: Some("https://evil.attacker.com".to_string()),
-    };
+    let context = test_context(
+        ProcessingRoute::Cloud,
+        ProviderCapability::TextInterpretation,
+        profile.profile_version().to_string(),
+        Some("https://evil.attacker.com".to_string()),
+    );
 
     let result = authorizer.authorize(&context, &profile);
     assert!(result.is_err());
@@ -366,12 +379,12 @@ fn unsupported_capability_is_rejected() {
     let profile = builder.build().expect("valid profile");
 
     // Try to use Transcription which is not declared.
-    let context = AuthorizationContext {
-        route: ProcessingRoute::Cloud,
-        capability: ProviderCapability::Transcription,
-        profile_version: profile.profile_version().to_string(),
-        destination: Some("https://api.anthropic.com".to_string()),
-    };
+    let context = test_context(
+        ProcessingRoute::Cloud,
+        ProviderCapability::Transcription,
+        profile.profile_version().to_string(),
+        Some("https://api.anthropic.com".to_string()),
+    );
 
     let result = authorizer.authorize(&context, &profile);
     assert!(result.is_err());
@@ -401,12 +414,12 @@ fn reviewer_route_with_explicit_authorization() {
     let profile = builder.build().expect("valid profile");
 
     // Fresh install denies reviewer route.
-    let context = AuthorizationContext {
-        route: ProcessingRoute::Reviewer,
-        capability: ProviderCapability::TextInterpretation,
-        profile_version: profile.profile_version().to_string(),
-        destination: Some("https://reviewer.example.com".to_string()),
-    };
+    let context = test_context(
+        ProcessingRoute::Reviewer,
+        ProviderCapability::TextInterpretation,
+        profile.profile_version().to_string(),
+        Some("https://reviewer.example.com".to_string()),
+    );
 
     let result = authorizer.authorize(&context, &profile);
     assert!(result.is_err());
@@ -429,12 +442,12 @@ fn reviewer_route_with_explicit_authorization() {
 
     // Different reviewer destination should be denied.
     // This destination is not in the profile's authorized list.
-    let context_wrong_dest = AuthorizationContext {
-        route: ProcessingRoute::Reviewer,
-        capability: ProviderCapability::TextInterpretation,
-        profile_version: profile.profile_version().to_string(),
-        destination: Some("https://other-reviewer.example.com".to_string()),
-    };
+    let context_wrong_dest = test_context(
+        ProcessingRoute::Reviewer,
+        ProviderCapability::TextInterpretation,
+        profile.profile_version().to_string(),
+        Some("https://other-reviewer.example.com".to_string()),
+    );
 
     let result = authorizer_with_reviewer.authorize(&context_wrong_dest, &profile);
     assert!(result.is_err());
@@ -469,24 +482,24 @@ fn per_capability_authorization_enforced() {
     let profile = builder.build().expect("valid profile");
 
     // TextInterpretation is authorized for api.anthropic.com.
-    let text_context = AuthorizationContext {
-        route: ProcessingRoute::Cloud,
-        capability: ProviderCapability::TextInterpretation,
-        profile_version: profile.profile_version().to_string(),
-        destination: Some("https://api.anthropic.com".to_string()),
-    };
+    let text_context = test_context(
+        ProcessingRoute::Cloud,
+        ProviderCapability::TextInterpretation,
+        profile.profile_version().to_string(),
+        Some("https://api.anthropic.com".to_string()),
+    );
     assert_eq!(
         authorizer.authorize(&text_context, &profile),
         Ok(AuthorizationDecision::Authorized)
     );
 
     // Same capability is not authorized for alternate destination.
-    let alt_dest_context = AuthorizationContext {
-        route: ProcessingRoute::Cloud,
-        capability: ProviderCapability::TextInterpretation,
-        profile_version: profile.profile_version().to_string(),
-        destination: Some("https://api.anthropic-alt.com".to_string()),
-    };
+    let alt_dest_context = test_context(
+        ProcessingRoute::Cloud,
+        ProviderCapability::TextInterpretation,
+        profile.profile_version().to_string(),
+        Some("https://api.anthropic-alt.com".to_string()),
+    );
     assert!(authorizer.authorize(&alt_dest_context, &profile).is_err());
     match authorizer
         .authorize(&alt_dest_context, &profile)
@@ -521,12 +534,12 @@ fn profile_protocol_must_match_route() {
     let profile = builder.build().expect("valid profile");
 
     // Attempt to use a cloud profile for a private-server route.
-    let context = AuthorizationContext {
-        route: ProcessingRoute::PrivateServer,
-        capability: ProviderCapability::TextInterpretation,
-        profile_version: profile.profile_version().to_string(),
-        destination: Some("https://api.anthropic.com".to_string()),
-    };
+    let context = test_context(
+        ProcessingRoute::PrivateServer,
+        ProviderCapability::TextInterpretation,
+        profile.profile_version().to_string(),
+        Some("https://api.anthropic.com".to_string()),
+    );
 
     let result = authorizer.authorize(&context, &profile);
     assert!(result.is_err());

@@ -2,6 +2,7 @@
 // Prevents payload from leaving device without explicit authorization.
 
 use crate::providers::contracts::{ProviderCapability, ProviderProfile};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use thiserror::Error;
@@ -224,14 +225,61 @@ pub enum AuthorizationError {
 pub struct AuthorizationContext {
     /// The immutable route from the stored capture (route_id in schema).
     /// Never supplied by caller; always read from persistent storage.
-    pub route: ProcessingRoute,
+    route: ProcessingRoute,
     /// The capability being requested (e.g., TextInterpretation).
-    pub capability: ProviderCapability,
+    capability: ProviderCapability,
     /// The profile version the job was queued against.
-    pub profile_version: String,
+    profile_version: String,
     /// The destination from the stored route authorization.
     /// Required for non-local routes; never supplied by caller.
-    pub destination: Option<String>,
+    destination: Option<String>,
+}
+
+impl AuthorizationContext {
+    /// For testing only: construct a context with specific values.
+    /// In production, contexts are always derived from stored capture/route data.
+    /// This method should not be used in production code; it exists to allow unit tests
+    /// to exercise the authorization logic without database dependencies.
+    pub fn new_test(
+        route: ProcessingRoute,
+        capability: ProviderCapability,
+        profile_version: String,
+        destination: Option<String>,
+    ) -> Self {
+        AuthorizationContext {
+            route,
+            capability,
+            profile_version,
+            destination,
+        }
+    }
+
+    /// Production API: derive authorization context from persisted capture data.
+    /// This method ensures that route, destination, and profile version are bound to
+    /// the stored capture record, preventing any caller from supplying these values.
+    ///
+    /// Note: This is a placeholder showing the intended production interface.
+    /// Implementation requires database access to read:
+    /// 1. Capture by capture_id to get route_id
+    /// 2. Route by route_id to determine ProcessingRoute type
+    /// 3. RouteAuthorization by (route_id, capability) to get authorized destinations
+    /// 4. Provider profile version to pin the job
+    #[doc(hidden)]
+    pub fn from_stored_capture(
+        _capture_id: &str,
+        _capability: ProviderCapability,
+        _profile_version: String,
+    ) -> Result<Self, String> {
+        // This is a placeholder. Actual implementation requires:
+        // 1. Database connection and access to read captures/routes/route_authorizations
+        // 2. Logic to determine ProcessingRoute type from stored route record
+        // 3. Verification that destination is in authorized_destinations for the capability
+        // The key invariant: all values come from persisted storage, never from caller
+        Err(
+            "Not yet implemented: database-backed authorization requires D01/D02 schema support"
+                .to_string(),
+        )
+    }
 }
 
 /// Authorizer validates outbound processing requests.
