@@ -577,15 +577,10 @@ pub fn save_event_in_tx(
 
     // Deleted items accept nothing (a racing correction must not restore readable text).
     // Completed and cancelled items stay correctable but take no further lifecycle or
-    // suggestion events, except they can be deleted.
+    // suggestion events.
     let allowed = match current.lifecycle_state.as_str() {
         "deleted" => false,
-        "completed" | "cancelled" => {
-            matches!(
-                event.event_type,
-                EventType::Correction | EventType::Deletion
-            )
-        }
+        "completed" | "cancelled" => matches!(event.event_type, EventType::Correction),
         _ => true,
     };
     if !allowed {
@@ -685,12 +680,6 @@ pub fn save_event_in_tx(
         EventType::Cancellation => {
             tx.execute(
                 "UPDATE items SET lifecycle_state = 'cancelled' WHERE item_id = ?",
-                [event.item_id.as_str()],
-            )?;
-        }
-        EventType::Deletion => {
-            tx.execute(
-                "UPDATE items SET lifecycle_state = 'deleted' WHERE item_id = ?",
                 [event.item_id.as_str()],
             )?;
         }

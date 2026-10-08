@@ -1,40 +1,71 @@
 // Helper functions for deletion_intent tests.
 
-use chrono::Utc;
-use ohand_core::jobs::queue::{enqueue_job, JobStatus};
+use chrono::{DateTime, TimeZone, Utc};
+use ohand_core::jobs::queue::enqueue_job;
 use ohand_core::store::captures::{save_capture, Capture};
 use ohand_core::store::schema::{Database, SystemClock};
-use std::fs;
+use std::ops::{Deref, DerefMut};
+use std::path::PathBuf;
 use std::sync::Arc;
+use tempfile::TempDir;
 
-pub fn create_test_db() -> Database {
-    // Create a temporary database file for testing
-    let temp_dir = std::env::temp_dir();
-    let test_db_path = temp_dir.join(format!("test_deletion_{}.db", uuid::Uuid::new_v4()));
-
-    // Clean up any existing file
-    let _ = fs::remove_file(&test_db_path);
-
-    let db = Database::open(
-        test_db_path.to_str().expect("Path should be valid"),
-        Arc::new(SystemClock),
-    )
-    .expect("Database should open");
-
-    db
+pub fn fixed_instant(minute: u32) -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 1, 15, 10, minute, 0)
+        .single()
+        .expect("fixed instant is valid")
 }
 
-pub fn create_test_capture(
-    db: &mut Database,
-    capture_id: &str,
-    text: &str,
-    audio_reference: Option<&str>,
-) {
-    let now = Utc::now();
-    let capture = Capture::new(
+/// A file-backed database that can be closed and reopened to model a process restart.
+pub struct TestDb {
+    database: Option<Database>,
+    path: PathBuf,
+    _directory: TempDir,
+}
+
+impl TestDb {
+    pub fn reopen(&mut self) {
+        self.database = None;
+        self.database = Some(open_database(&self.path));
+    }
+}
+
+impl Deref for TestDb {
+    type Target = Database;
+    fn deref(&self) -> &Database {
+        self.database.as_ref().expect("database is open")
+    }
+}
+
+impl DerefMut for TestDb {
+    fn deref_mut(&mut self) -> &mut Database {
+        self.database.as_mut().expect("database is open")
+    }
+}
+
+fn open_database(path: &std::path::Path) -> Database {
+    Database::open(
+        path.to_str().expect("path is valid UTF-8"),
+        Arc::new(SystemClock),
+    )
+    .expect("Database should open")
+}
+
+pub fn create_test_db() -> TestDb {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let path = directory.path().join("deletion.db");
+    let database = open_database(&path);
+    TestDb {
+        database: Some(database),
+        path,
+        _directory: directory,
+    }
+}
+
+pub fn build_capture(capture_id: &str, text: &str, audio_reference: Option<&str>) -> Capture {
+    Capture::new(
         capture_id.to_string(),
         Some(text.to_string()),
-        audio_reference.map(|s| s.to_string()),
+        audio_reference.map(|reference| reference.to_string()),
         "2026-01-15T10:30:00+00:00".to_string(),
         "UTC".to_string(),
         0,
@@ -43,42 +74,37 @@ pub fn create_test_capture(
         "personal".to_string(),
         "route-default".to_string(),
         false,
-        now.to_rfc3339(),
+        fixed_instant(0).to_rfc3339(),
         None,
     )
-    .expect("Capture::new should not fail");
-    save_capture(db, &capture).expect("Capture should save");
+    .expect("Capture::new should not fail")
+}
+
+pub fn create_test_capture(
+    db: &mut Database,
+    capture_id: &str,
+    text: &str,
+    audio_reference: Option<&str>,
+) {
+    save_capture(db, &build_capture(capture_id, text, audio_reference))
+        .expect("Capture should save");
 }
 
 pub fn create_test_item(db: &mut Database, item_id: &str, capture_id: &str) {
-    let now = Utc::now();
+    let created_at = fixed_instant(0).to_rfc3339();
     let tx = db.transaction().expect("Transaction should succeed");
-
     tx.execute(
         "INSERT INTO items (item_id, capture_id, revision, lifecycle_state, save_state,
                             sync_state, processing_state, transcription_state, created_at, updated_at)
          VALUES (?, ?, 0, 'active', 'saved', 'not_configured', 'pending', 'pending', ?, ?)",
-        rusqlite::params![item_id, capture_id, now.to_rfc3339(), now.to_rfc3339()],
+        rusqlite::params![item_id, capture_id, created_at, created_at],
     )
     .expect("Insert should succeed");
-
     tx.commit().expect("Commit should succeed");
 }
 
-pub fn create_test_job(
-    db: &mut Database,
-    item_id: &str,
-    job_type: &str,
-    status: JobStatus,
-    created_at: chrono::DateTime<chrono::Utc>,
-) -> String {
-    let job_id = format!(
-        "job-{}-{}-{}",
-        item_id,
-        job_type,
-        created_at.timestamp_millis()
-    );
-
+pub fn create_queued_job(db: &mut Database, item_id: &str, job_type: &str) -> String {
+    let job_id = format!("job-{}-{}", item_id, job_type);
     enqueue_job(
         db,
         job_id.clone(),
@@ -88,21 +114,9 @@ pub fn create_test_job(
         None,
         None,
         1,
-        created_at,
+        fixed_instant(1),
     )
     .expect("Job should enqueue");
-
-    // Update status if needed
-    if status != JobStatus::Queued {
-        let tx = db.transaction().expect("Transaction should succeed");
-        tx.execute(
-            "UPDATE jobs SET status = ? WHERE job_id = ?",
-            rusqlite::params![status.as_str(), &job_id],
-        )
-        .expect("Update should succeed");
-        tx.commit().expect("Commit should succeed");
-    }
-
     job_id
 }
 
@@ -114,4 +128,10 @@ pub fn set_item_lifecycle_state(db: &mut Database, item_id: &str, lifecycle_stat
     )
     .expect("Update should succeed");
     tx.commit().expect("Commit should succeed");
+}
+
+pub fn count_rows(db: &Database, sql: &str, parameter: &str) -> i64 {
+    db.conn()
+        .query_row(sql, [parameter], |row| row.get(0))
+        .expect("count query should succeed")
 }
