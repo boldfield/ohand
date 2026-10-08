@@ -175,6 +175,15 @@ struct IngressOutcome: Equatable {
             "Result: \(statusText)",
         ]
     }
+
+    /// Builds a handoff URL to the Tauri management shell with the capture ID.
+    func buildHandoffURL() -> URL? {
+        var components = URLComponents()
+        components.scheme = "ohand-tauri"
+        components.host = "capture"
+        components.queryItems = [URLQueryItem(name: "captureId", value: captureId)]
+        return components.url
+    }
 }
 
 /// Owns the per-entry capture ID. Only a handoff (the control's intent or the shortcut URL) creates an entry: it

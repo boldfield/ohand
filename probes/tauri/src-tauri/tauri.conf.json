@@ -17,6 +17,18 @@
       "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'"
     }
   },
+  "plugins": {
+    "deep-link": {
+      "ios": {
+        "custom": [
+          {
+            "scheme": "ohand-tauri",
+            "host": "capture"
+          }
+        ]
+      }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",

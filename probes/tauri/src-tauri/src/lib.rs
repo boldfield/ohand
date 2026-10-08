@@ -59,6 +59,31 @@ fn handle_handoff_url(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            let app_handle = app.handle().clone();
+            app_handle.listen_global("tauri://deep-link", move |event| {
+                if let tauri::Event::Url(url) = event.payload() {
+                    let url_str = url.clone();
+                    if url_str.starts_with("ohand-tauri://") {
+                        if let Ok(data_dir) = app_handle.path().app_data_dir() {
+                            let _ = fs::create_dir_all(&data_dir);
+                            if let Ok(request) = HandoffValidator::validate(&url_str) {
+                                let response = serde_json::json!({
+                                    "success": true,
+                                    "captureId": request.capture_id.to_string(),
+                                    "route": request.route.as_str(),
+                                    "timestamp": request.timestamp,
+                                });
+                                if let Ok(bytes) = serde_json::to_vec_pretty(&response) {
+                                    let _ = fs::write(data_dir.join(HANDOFF_RECORD_FILE), bytes);
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![echo_message, record_roundtrip, handle_handoff_url])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

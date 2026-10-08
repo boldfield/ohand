@@ -515,4 +515,45 @@ final class IngressFlowTests: XCTestCase {
         let record = try assertActivationCommittedOneEntry(harness, source: .shortcutURL, launchKind: .cold, expectedRecordCount: 1)
         XCTAssertEqual(record.captureId, strandedId)
     }
+
+    // MARK: Handoff URL building for Tauri shell
+
+    func testOutcomeCanBuildHandoffURLForTauriShell() {
+        let outcome = IngressOutcome(
+            captureId: "550e8400-e29b-41d4-a716-446655440000",
+            source: .controlIntent,
+            launchKind: .cold,
+            protectedDataAvailable: true,
+            status: .saved
+        )
+
+        let url = try XCTUnwrap(outcome.buildHandoffURL())
+        XCTAssertEqual(url.scheme?.lowercased(), "ohand-tauri")
+        XCTAssertEqual(url.host?.lowercased(), "capture")
+
+        let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+        let captureId = components.queryItems?.first(where: { $0.name == "captureId" })?.value
+        XCTAssertEqual(captureId, "550e8400-e29b-41d4-a716-446655440000")
+    }
+
+    func testHandoffURLContainsOnlyTheSchemeHostAndCaptureId() {
+        let outcome = IngressOutcome(
+            captureId: "550e8400-e29b-41d4-a716-446655440000",
+            source: .shortcutURL,
+            launchKind: .warm,
+            protectedDataAvailable: false,
+            status: .replayed
+        )
+
+        let url = try XCTUnwrap(outcome.buildHandoffURL())
+        let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+
+        XCTAssertNil(components.path)
+        XCTAssertNil(components.user)
+        XCTAssertNil(components.port)
+        XCTAssertNil(components.fragment)
+
+        let queryItemNames = Set(components.queryItems?.map { $0.name } ?? [])
+        XCTAssertEqual(queryItemNames, ["captureId"])
+    }
 }
