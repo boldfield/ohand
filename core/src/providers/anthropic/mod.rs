@@ -10,8 +10,10 @@
 use std::fmt;
 use std::sync::Arc;
 
-use serde_json::{json, Value};
+use serde_json::Value;
 use thiserror::Error;
+
+use crate::interpretation::instructions::output_schema;
 
 use super::contracts::{
     AdapterCall, CancelToken, ProviderAdapter, ProviderCapability, ProviderProtocol,
@@ -49,8 +51,7 @@ pub struct AnthropicSettings {
     pub api_version: String,
     pub max_output_tokens: u32,
     /// Input schema of the `interpret` tool for profiles declaring `JsonSchema` output. The default
-    /// enforces only the versioned envelope (`schema_version`); the interpretation contract
-    /// supplies the full proposal schema.
+    /// is the pinned M1 output contract published with the interpretation instructions.
     pub proposal_schema: Value,
 }
 
@@ -60,11 +61,7 @@ impl Default for AnthropicSettings {
             endpoint: ANTHROPIC_MESSAGES_ENDPOINT.to_string(),
             api_version: ANTHROPIC_API_VERSION.to_string(),
             max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
-            proposal_schema: json!({
-                "type": "object",
-                "properties": { "schema_version": { "type": "integer" } },
-                "required": ["schema_version"],
-            }),
+            proposal_schema: output_schema(),
         }
     }
 }
