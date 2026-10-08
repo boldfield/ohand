@@ -1,6 +1,8 @@
 # M1 task refinement — 2026-10-07
 
-This execution overlay replaces 23 never-started task groups with 48 smaller implementation tasks. The other 55 never-started tasks retain their scope. Twenty already completed, attempted, active or externally blocked groups were excluded. The effective M1 graph contains 123 tasks. This changes implementation granularity, not product scope or milestone exit criteria.
+This execution overlay replaces 24 task groups with 50 smaller implementation tasks. The other 55 never-started tasks retain their scope. Nineteen already completed, attempted, active or externally blocked groups were excluded. The effective M1 graph contains 124 tasks. This changes implementation granularity, not product scope or milestone exit criteria.
+
+Addendum 2026-10-08: V08 was originally excluded as an externally blocked evidence task. After two rejected review rounds on its PR #60, it is now split into V08a (worker-executable server-side probe) and V08b (maintainer-supplied phone-context evidence). The original task `939fe62e` is retired; see the replacement map and the V08a/V08b slices below.
 
 ## Execution authority
 
@@ -25,6 +27,8 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
 - B01a ownership allowance (explicit, one-time, serialized by B01a's place after P01): besides its owned paths it may (1) remove the committed `core/bindings/include/ohand_bindings.h` and the `core/bindings/tests/header_drift.rs` test that compared against it, together with the `cbindgen` dev-dependency and its `Cargo.lock` entries; (2) edit `core/bindings/build-ios.sh` and the two `HEADER_SEARCH_PATHS` lines in `ios/project.yml` so Xcode builds use the generated header; (3) add `bindings-check`/`bindings-test` to `Makefile` and wire them into `check` and `test`; (4) update stale comments and `docs/validation/core-binding.md`. `tools/bindings` is a separate Cargo workspace, so the root `Cargo.toml` is unchanged. B01b and B01c add exports only under `core/src/ffi/` (a file and its `pub mod` line in `core/src/ffi/mod.rs`); they do not edit `core/bindings/src/lib.rs`, the generator or these shared files.
 
 - C02a additionally waits for D04 and R01 because import must atomically create the item projection and index. B01a can build the binding pipeline after P01; runtime and production exports still wait for D05/V01.
+
+- V08 conflated two evidence sources with different owners. Its server-side probe runs from the Odonian worker, which now has verified read access to the provider configuration file. Its phone-context reachability evidence can only come from the maintainer's iPhone, which reaches the Spark endpoint over Tailscale rather than a public address or the worker's network. V08a owns the probe tool, its tests and the Linux-context findings; V08b owns the phone-context section and the final verified status. V09 now depends on V08b, the last child, so the adapter still cannot start before both evidence sources exist. V08a must not be approved on the strength of a prose status: every published value comes from a committed sanitized artifact produced by the probe as submitted.
 
 - V06 and V07 now depend on V01 alone: they implement Rust adapters against its transport interface using fixtures. V05 is the native effect implementation and remains required by app composition/integration, not by independent protocol adapter implementation. This is an explicit dependency override for those retained tasks.
 
@@ -61,6 +65,7 @@ Smaller changes reduce the amount of code and context per review/repair cycle. T
 | T04 | T04a, T04b | Outbound processing authorization and local read/output privacy are different attack surfaces. |
 | T12 | T12a, T12b | Provider/permission failures and destructive lifecycle races form two bounded UI journeys. |
 | L05 | L05a, L05b | The original Swift-only scope omitted Rust-owned reset fencing. Separate the atomic core reset operation from native cleanup orchestration. |
+| V08 | V08a, V08b | The worker can only produce server-side protocol evidence; phone-context reachability over Tailscale is a maintainer input. Separate them so the probe can be reviewed and landed while the device evidence stays an honest block. |
 
 ## Retained unstarted tasks
 
@@ -220,6 +225,50 @@ Acceptance:
 Source pointers (baseline above): `docs/architecture/m1-contracts.md:250`, `AGENTS.md:45`, `core/src/providers/contracts/mod.rs:1`, `core/src/providers/contracts/dispatch.rs:154`, `core/src/providers/contracts/request.rs:197`.
 
 Contributes to original V05 criteria: 1, 2, 3.
+
+### V08a
+
+Verify the Spark serving protocol from the worker context
+
+Build a fail-closed, tested probe that inspects the user-controlled endpoint with authorized synthetic requests from the Odonian worker, and record only values the probe actually observed.
+
+Owned paths: `tools/provider-probe/`, `docs/validation/spark-protocol.md`, `docs/validation/evidence/spark-probe/`.
+
+Dependencies: V01, F07.
+
+Context: PR #60 on branch `mr/939fe62e` holds the retired V08 attempt. Its code may be reused, but every finding from both review rounds recorded on task `939fe62e` must be resolved; the reviewers' findings are the defect list for this slice. The worker reads the provider configuration from `/etc/ohand-provider/models.json` or the non-secret `OHAND_PROVIDER_CONFIG_PATH`, per `docs/features/m1-external-prerequisites.md`. The endpoint may be reachable over cleartext HTTP on a private network; record the scheme that is actually configured and never report TLS that was not negotiated and verified.
+
+Acceptance:
+
+1. The probe fails closed. An unauthenticated request that succeeds is reported as "authentication not required", not as reachability success. An unknown or cleartext scheme is reported as such, and TLS is only reported when the certificate was verified by the default trust store. A models or chat response is only classified OpenAI-compatible when the body parses and has the expected structure. A structured-response probe passes only when the returned message content parses as JSON matching the requested shape. Any failed probe makes the tool exit non-zero. The provider key is explicit, a missing or empty base URL or credential is an explicit error, and no model name is hardcoded: chat probes use a model the endpoint listed.
+2. Focused tests against a local stub HTTP server cover each classification above, the failure paths, the exit codes, and the sanitization guarantee that neither the endpoint address nor the credential appears in stdout, stderr or the sanitized artifact. The tests run under the existing `make test` entry point or a documented Python test command executed by CI.
+3. The probe was run as submitted from the worker. It writes a named sanitized evidence artifact, committed under `docs/validation/evidence/spark-probe/`, that records the evidence identifier, the probe revision (git commit, with a dirty-tree flag), the collection time, each request's method, path, whether a credential was sent, the HTTP status, an allowlisted subset of response headers (at least `server`, `content-type`, `date`), the parsed model identifiers returned by the endpoint, and the structured-response result. The endpoint address and credential are never written to any artifact; the Kubernetes Secret and its mount revision are the auditable private reference.
+4. `docs/validation/spark-protocol.md` contains only observed values, each citing the evidence identifier, probe revision and collection time, and a compatibility matrix derived from the endpoint's own `/models` response. It states explicitly that phone-context reachability is unverified and owned by V08b, and the task result repeats that. Approval of this slice does not complete V08.
+
+Source pointers (baseline above): `docs/features/m1-external-prerequisites.md`, `docs/validation/m1-protocol.md:122`, `AGENTS.md:45`, PR #60 files `tools/provider-probe/spark_probe.py` and `docs/validation/spark-protocol.md`.
+
+Contributes to original V08 criteria: 1, 3, and the authentication/TLS/structured-response part of 2.
+
+### V08b
+
+Record phone-context reachability of the Spark endpoint
+
+Fold the maintainer-collected iPhone-over-Tailscale evidence into the protocol document and set the final verified status.
+
+Owned paths: `docs/validation/spark-protocol.md`, `docs/validation/evidence/spark-phone/`.
+
+Dependencies: V08a.
+
+Context: this task starts blocked. The maintainer collects the evidence from the iPhone, with Tailscale connected, on both Wi-Fi and cellular, following the procedure in `docs/features/m1-external-prerequisites.md`, commits the sanitized record under `docs/validation/evidence/spark-phone/`, and then unblocks this task naming that file. A worker that is claimed without such a file in the repository must re-block with that exact missing prerequisite and must not substitute worker, simulator or Mac reachability.
+
+Acceptance:
+
+1. `docs/validation/spark-protocol.md` gains a phone-context section whose every value cites the maintainer's named artifact, its collection time and the network context (Wi-Fi or cellular, Tailscale connected) for both an unauthenticated and an authenticated request, including HTTP status, scheme, and certificate outcome.
+2. The document's overall status becomes verified only if both the V08a server-side artifact and the phone-context artifact exist and agree on protocol and authentication behavior; any disagreement is recorded as the exact verified compatibility boundary for V09 rather than resolved by prose.
+
+Source pointers (baseline above): `docs/features/m1-external-prerequisites.md`, `docs/validation/m1-protocol.md:122`.
+
+Contributes to original V08 criteria: 2, 3.
 
 ### I03a
 
