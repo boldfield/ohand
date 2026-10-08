@@ -375,8 +375,8 @@ final class CredentialServiceTests: XCTestCase {
             let accessibleValue = attributes[kSecAttrAccessible as String]
             XCTAssertEqual(
                 accessibleValue as? String,
-                kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String,
-                "Credential should use AfterFirstUnlock accessibility class"
+                kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String,
+                "Credential should use WhenUnlocked accessibility class"
             )
         }
     }
@@ -391,7 +391,7 @@ final class CredentialServiceTests: XCTestCase {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: testKeychainService,
             kSecAttrAccount as String: reference,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
             kSecValueData as String: secret
         ] as [String: Any]
 
