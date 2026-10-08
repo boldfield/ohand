@@ -276,7 +276,9 @@ pub(crate) fn get_job_internal(tx: &Transaction<'_>, job_id: &str) -> Result<Opt
 /// `attempt_count` is the lease token that `complete_job` / `fail_job_with_backoff` must present.
 /// Candidates that can never run are resolved durably inside the claim transaction and skipped:
 /// unsupported schema versions become `failed` (`unsupported_job_version`); jobs whose item is
-/// missing, deleted or revised past `source_revision` become `cancelled` with the reason recorded.
+/// missing, deleted or revised past `source_revision` become `cancelled` with the reason recorded;
+/// jobs whose pinned profile was revoked or no longer exists become `cancelled`
+/// ([`PROFILE_REVOKED_REASON`] / [`PROFILE_MISSING_REASON`]) with their lease cleared.
 /// Returns None if nothing is eligible.
 pub fn claim_job_with_lease(
     db: &mut Database,
@@ -347,7 +349,7 @@ pub fn claim_job_with_lease_in_tx(
 
             let retire_reason = match revoked_at {
                 None => Some(PROFILE_MISSING_REASON),
-                Some(Some(_)) => Some("profile_revoked"),
+                Some(Some(_)) => Some(PROFILE_REVOKED_REASON),
                 Some(None) => None,
             };
 
@@ -498,6 +500,9 @@ pub fn complete_job(db: &mut Database, job_id: &str, lease_attempt: i32) -> Resu
 
 /// Failure reason recorded when a job is retired because its pinned profile row no longer exists.
 pub const PROFILE_MISSING_REASON: &str = "profile_missing";
+
+/// Failure reason recorded when a job is retired because its pinned profile was revoked.
+pub const PROFILE_REVOKED_REASON: &str = "profile_revoked";
 
 pub fn complete_job_in_tx(tx: &Transaction<'_>, job_id: &str, lease_attempt: i32) -> Result<()> {
     // Check if job's profile has been revoked; if so, reject the result

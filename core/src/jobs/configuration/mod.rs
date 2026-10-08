@@ -13,7 +13,10 @@
 //! ([`revoke_profile`]) stamps `revoked_at` on the profile and retires every queued or running
 //! job pinned to it.
 
-use crate::jobs::queue::{enqueue_job_in_tx, get_job_internal, Job};
+use crate::jobs::queue::{
+    enqueue_job_in_tx, get_job_internal, Job, JobStatus, PROFILE_MISSING_REASON,
+    PROFILE_REVOKED_REASON,
+};
 use crate::privacy::routing::{authorize_job, AuthorizationDecision, DenialReason};
 use crate::store::schema::Database;
 use anyhow::{anyhow, Context, Result};
@@ -173,7 +176,11 @@ pub fn revoke_profile_and_retire_jobs_in_tx(
     tx.execute(
         "UPDATE jobs SET status = ?, failure_reason = ?, lease_expires_at = NULL \
          WHERE profile_version = ? AND status IN ('queued', 'running')",
-        rusqlite::params!["cancelled", "profile_revoked", profile_version],
+        rusqlite::params![
+            JobStatus::Cancelled.as_str(),
+            PROFILE_REVOKED_REASON,
+            profile_version
+        ],
     )
     .context("retiring jobs for revoked profile")?;
 
@@ -227,7 +234,7 @@ pub fn get_requeue_record(conn: &Connection, job_id: &str) -> Result<Option<Requ
     .transpose()
 }
 
-/// Explicitly move a queued or running job to another profile version in its own transaction.
+/// Explicitly move a job to another profile version in its own transaction.
 /// See [`requeue_job_to_new_profile_in_tx`].
 pub fn requeue_job_to_new_profile(
     db: &mut Database,
@@ -245,6 +252,12 @@ pub fn requeue_job_to_new_profile(
 
 /// Retire `old_job_id` (`cancelled`, failure_reason `requeued`) and enqueue a replacement pinned
 /// to `new_profile_version`, recording the link in `job_requeues`.
+///
+/// Queued and running jobs can be requeued, and so can jobs already retired by a configuration
+/// change (`cancelled` with [`PROFILE_REVOKED_REASON`] or [`PROFILE_MISSING_REASON`]): this is the
+/// explicit retry after revocation or profile removal. Such a job keeps its original
+/// configuration disposition; the `job_requeues` row records that it was retried. Every other
+/// terminal job (completed, failed, cancelled for any other reason) stays fenced.
 ///
 /// The replacement copies item, job type, source revision, schema version and request version
 /// from the old job and goes through the shared enqueue duplicate guard, so equivalent work that
@@ -276,10 +289,13 @@ pub fn requeue_job_to_new_profile_in_tx(
 
     let old_job =
         get_job_internal(tx, old_job_id)?.ok_or_else(|| anyhow!("Job {} not found", old_job_id))?;
-    if !matches!(
-        old_job.status,
-        crate::jobs::queue::JobStatus::Queued | crate::jobs::queue::JobStatus::Running
-    ) {
+    let is_active = matches!(old_job.status, JobStatus::Queued | JobStatus::Running);
+    let is_configuration_retired = old_job.status == JobStatus::Cancelled
+        && matches!(
+            old_job.failure_reason.as_deref(),
+            Some(PROFILE_REVOKED_REASON) | Some(PROFILE_MISSING_REASON)
+        );
+    if !is_active && !is_configuration_retired {
         return Err(anyhow!(
             "Job {} is {} and cannot be requeued",
             old_job_id,
@@ -337,16 +353,19 @@ pub fn requeue_job_to_new_profile_in_tx(
         now,
     )?;
 
-    let retired = tx.execute(
-        "UPDATE jobs SET status = ?, failure_reason = ?, lease_expires_at = NULL \
-         WHERE job_id = ? AND status IN ('queued', 'running')",
-        rusqlite::params!["cancelled", "requeued", old_job_id],
-    )?;
-    if retired == 0 {
-        return Err(anyhow!(
-            "Job {} could not be retired for requeue",
-            old_job_id
-        ));
+    // A configuration-retired job is already terminal and keeps its disposition.
+    if is_active {
+        let retired = tx.execute(
+            "UPDATE jobs SET status = ?, failure_reason = ?, lease_expires_at = NULL \
+             WHERE job_id = ? AND status IN ('queued', 'running')",
+            rusqlite::params![JobStatus::Cancelled.as_str(), "requeued", old_job_id],
+        )?;
+        if retired == 0 {
+            return Err(anyhow!(
+                "Job {} could not be retired for requeue",
+                old_job_id
+            ));
+        }
     }
 
     tx.execute(

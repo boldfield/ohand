@@ -1285,3 +1285,157 @@ fn test_reclaim_after_lease_expiry_retires_job_with_missing_profile() -> Result<
     );
     Ok(())
 }
+
+/// Explicit retry after revocation: a job retired by `revoke_profile` can be requeued to a live
+/// profile. The replacement is the only work that dispatches, the retired job keeps its
+/// `profile_revoked` disposition and the link is recorded.
+#[test]
+fn test_requeue_after_revocation_dispatches_only_replacement() -> Result<()> {
+    let clock = Arc::new(MockClock::new(Utc::now()));
+    let (mut db, item_id) = setup_test_db(&clock)?;
+    let now = clock.now();
+
+    let revoked_profile = "profile-retry-revoked-aaaa";
+    let live_profile = "profile-retry-live-bbbb";
+    create_profile(&mut db, "p-retry-revoked", revoked_profile)?;
+    create_profile(&mut db, "p-retry-live", live_profile)?;
+    enqueue_interpret(&mut db, "job-retry-old", &item_id, revoked_profile, now)?;
+
+    revoke_profile(&mut db, revoked_profile, now)?;
+    assert_eq!(
+        job_state(&db, "job-retry-old")?,
+        ("cancelled".to_string(), Some("profile_revoked".to_string()))
+    );
+    assert!(claim_job_with_lease(&mut db, Duration::minutes(5), now)?.is_none());
+
+    let replacement = requeue_job_to_new_profile(
+        &mut db,
+        "job-retry-old",
+        "job-retry-new".to_string(),
+        live_profile.to_string(),
+        now,
+    )?;
+    assert_eq!(replacement.profile_version, Some(live_profile.to_string()));
+    assert_eq!(replacement.status, JobStatus::Queued);
+
+    // The retired job keeps its configuration disposition and stays undispatchable.
+    assert_eq!(
+        job_state(&db, "job-retry-old")?,
+        ("cancelled".to_string(), Some("profile_revoked".to_string()))
+    );
+    assert!(matches!(
+        resolve_execution_target(db.conn(), "job-retry-old")?,
+        ExecutionResolution::Denied(_)
+    ));
+
+    let record = get_requeue_record(db.conn(), "job-retry-new")?.expect("requeue record");
+    assert_eq!(record.old_job_id, "job-retry-old");
+    assert_eq!(record.new_job_id, "job-retry-new");
+    assert_eq!(
+        record.from_profile_version,
+        Some(revoked_profile.to_string())
+    );
+    assert_eq!(record.to_profile_version, live_profile);
+
+    // Retrying the same requeue returns the existing replacement instead of a second job.
+    let retry = requeue_job_to_new_profile(
+        &mut db,
+        "job-retry-old",
+        "job-retry-new-dup".to_string(),
+        live_profile.to_string(),
+        now,
+    )?;
+    assert_eq!(retry.job_id, "job-retry-new");
+
+    let claimed = claim_job_with_lease(&mut db, Duration::minutes(5), now)?
+        .expect("replacement should be claimable");
+    assert_eq!(claimed.job_id, "job-retry-new");
+    assert_eq!(
+        expect_remote(&db, "job-retry-new")?.profile_version,
+        live_profile
+    );
+    assert!(claim_job_with_lease(&mut db, Duration::minutes(5), now)?.is_none());
+    Ok(())
+}
+
+/// A job retired at claim because its pinned profile disappeared can also be explicitly retried
+/// on a live profile.
+#[test]
+fn test_requeue_after_profile_missing_dispatches_replacement() -> Result<()> {
+    let clock = Arc::new(MockClock::new(Utc::now()));
+    let (mut db, item_id) = setup_test_db(&clock)?;
+    let now = clock.now();
+
+    let vanished_profile = "profile-retry-vanished-cccc";
+    let live_profile = "profile-retry-live-dddd";
+    create_profile(&mut db, "p-retry-vanished", vanished_profile)?;
+    create_profile(&mut db, "p-retry-live-2", live_profile)?;
+    enqueue_interpret(&mut db, "job-missing-old", &item_id, vanished_profile, now)?;
+    db.conn().execute(
+        "DELETE FROM provider_profiles WHERE profile_version = ?",
+        [vanished_profile],
+    )?;
+    assert!(claim_job_with_lease(&mut db, Duration::minutes(5), now)?.is_none());
+    assert_eq!(
+        job_state(&db, "job-missing-old")?,
+        ("cancelled".to_string(), Some("profile_missing".to_string()))
+    );
+
+    requeue_job_to_new_profile(
+        &mut db,
+        "job-missing-old",
+        "job-missing-new".to_string(),
+        live_profile.to_string(),
+        now,
+    )?;
+    assert_eq!(
+        job_state(&db, "job-missing-old")?,
+        ("cancelled".to_string(), Some("profile_missing".to_string()))
+    );
+    let claimed = claim_job_with_lease(&mut db, Duration::minutes(5), now)?
+        .expect("replacement should be claimable");
+    assert_eq!(claimed.job_id, "job-missing-new");
+    assert_eq!(
+        get_requeue_record(db.conn(), "job-missing-old")?
+            .expect("requeue record")
+            .new_job_id,
+        "job-missing-new"
+    );
+    Ok(())
+}
+
+/// Only configuration-retired jobs reopen for requeue; a job cancelled for another reason stays
+/// fenced and no replacement or link is created.
+#[test]
+fn test_requeue_rejects_job_cancelled_for_other_reason() -> Result<()> {
+    let clock = Arc::new(MockClock::new(Utc::now()));
+    let (mut db, item_id) = setup_test_db(&clock)?;
+    let now = clock.now();
+
+    let old_profile = "profile-other-cancel-old-eeee";
+    let new_profile = "profile-other-cancel-new-ffff";
+    create_profile(&mut db, "p-other-cancel-old", old_profile)?;
+    create_profile(&mut db, "p-other-cancel-new", new_profile)?;
+    enqueue_interpret(&mut db, "job-other-cancel", &item_id, old_profile, now)?;
+    db.conn().execute(
+        "UPDATE jobs SET status = 'cancelled', failure_reason = 'item_deleted' WHERE job_id = ?",
+        ["job-other-cancel"],
+    )?;
+
+    assert!(requeue_job_to_new_profile(
+        &mut db,
+        "job-other-cancel",
+        "job-other-cancel-new".to_string(),
+        new_profile.to_string(),
+        now,
+    )
+    .is_err());
+    assert_eq!(get_requeue_record(db.conn(), "job-other-cancel")?, None);
+    let replacement_count: i64 = db.conn().query_row(
+        "SELECT COUNT(*) FROM jobs WHERE job_id = ?",
+        ["job-other-cancel-new"],
+        |row| row.get(0),
+    )?;
+    assert_eq!(replacement_count, 0);
+    Ok(())
+}
