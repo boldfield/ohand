@@ -107,3 +107,138 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
+
+  tauri-probe:
+    name: Tauri 2 iOS probe build and round-trip test
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+        working-directory: probes/tauri
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select pinned Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '16.4'
+
+      - name: Record toolchain versions
+        run: |
+          set -euo pipefail
+          mkdir -p .evidence
+          {
+            echo "=== Runner ===" && sw_vers
+            echo "=== Xcode ===" && xcodebuild -version
+            echo "=== Simulator SDK ===" && xcrun --sdk iphonesimulator --show-sdk-version
+            echo "=== Node ===" && node --version && npm --version
+          } 2>&1 | tee .evidence/toolchain.txt
+
+      - name: Install pinned Rust toolchain and iOS simulator target
+        run: |
+          set -euo pipefail
+          # rustup reads the repository rust-toolchain.toml and installs the pinned channel.
+          rustup show active-toolchain
+          rustup target add aarch64-apple-ios-sim
+          { rustc --version && cargo --version; } 2>&1 | tee -a .evidence/toolchain.txt
+
+      - name: Install pinned Tauri CLI from package-lock.json
+        run: |
+          set -euo pipefail
+          npm ci
+          npx tauri --version 2>&1 | tee -a .evidence/toolchain.txt
+
+      - name: Check JavaScript boundary and lockfile coherence
+        run: |
+          set -euo pipefail
+          # No provider credentials, remote scripts or network calls in the webview assets.
+          if grep -rEin 'api[_-]?key|secret|bearer|authorization|https?://|fetch\(|XMLHttpRequest' dist; then
+            echo "FAILURE: webview assets reference credentials or remote endpoints"
+            exit 1
+          fi
+          (cd src-tauri && cargo metadata --locked --format-version 1 > /dev/null)
+
+      - name: Select simulator
+        id: simulator
+        run: |
+          set -euo pipefail
+          sdk_version="$(xcrun --sdk iphonesimulator --show-sdk-version)"
+          xcrun simctl list -j devices available > /tmp/simctl-devices.json
+          python3 ../../ios/scripts/select_simulator.py \
+            --input /tmp/simctl-devices.json \
+            --max-runtime "${sdk_version}" | tee .evidence/simulator.txt >> "$GITHUB_OUTPUT"
+          cat .evidence/simulator.txt
+
+      - name: Initialize generated Tauri iOS project
+        run: |
+          set -euo pipefail
+          npx tauri ios init --ci 2>&1 | tee .evidence/ios-init.log
+
+      - name: Build Tauri probe for iOS simulator
+        run: |
+          set -euo pipefail
+          npx tauri ios build --ci --debug --target aarch64-sim 2>&1 | tee .evidence/build.log
+
+      - name: Install, launch and assert echo round-trip
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+          SIMULATOR_NAME: ${{ steps.simulator.outputs.name }}
+          SIMULATOR_RUNTIME: ${{ steps.simulator.outputs.runtime }}
+        run: |
+          set -euo pipefail
+          bundle_id="com.boldfield.ohand.tauri-probe"
+          echo "Device: ${SIMULATOR_NAME} (iOS ${SIMULATOR_RUNTIME}, UDID ${SIMULATOR_UDID})" | tee .evidence/roundtrip.log
+
+          find src-tauri/gen/apple -name '*.app' -type d | tee .evidence/app-bundles.txt
+          app_path="$(grep -m1 '\.app$' .evidence/app-bundles.txt || true)"
+          if [ -z "${app_path}" ]; then
+            echo "FAILURE: no .app bundle produced by the build" | tee -a .evidence/roundtrip.log
+            exit 1
+          fi
+          echo "App bundle: ${app_path}" | tee -a .evidence/roundtrip.log
+
+          xcrun simctl bootstatus "${SIMULATOR_UDID}" -b 2>&1 | tee -a .evidence/roundtrip.log
+          xcrun simctl install "${SIMULATOR_UDID}" "${app_path}" 2>&1 | tee -a .evidence/roundtrip.log
+          launch_output="$(xcrun simctl launch --stdout="$PWD/.evidence/app-stdout.log" --stderr="$PWD/.evidence/app-stderr.log" "${SIMULATOR_UDID}" "${bundle_id}")"
+          echo "${launch_output}" | tee -a .evidence/roundtrip.log
+          app_pid="${launch_output##*: }"
+
+          data_dir="$(xcrun simctl get_app_container "${SIMULATOR_UDID}" "${bundle_id}" data)"
+          record_file="$(find "${data_dir}" -name roundtrip.json | head -1 || true)"
+          for _ in $(seq 1 60); do
+            [ -n "${record_file}" ] && break
+            sleep 1
+            record_file="$(find "${data_dir}" -name roundtrip.json | head -1 || true)"
+          done
+          if [ -z "${record_file}" ]; then
+            echo "FAILURE: webview never reported a rendered round-trip result" | tee -a .evidence/roundtrip.log
+            find "${data_dir}" | tee -a .evidence/roundtrip.log
+            exit 1
+          fi
+          cp "${record_file}" .evidence/roundtrip.json
+          cat .evidence/roundtrip.json | tee -a .evidence/roundtrip.log
+
+          python3 - <<'PY'
+          import json, sys
+          record = json.load(open(".evidence/roundtrip.json"))
+          expected = {"status": "Success", "rendered_result": "Echo from Rust: Hello from Tauri"}
+          if record != expected:
+              sys.exit(f"FAILURE: round-trip record {record!r} != {expected!r}")
+          print("ASSERTED: webview rendered the value returned by the Rust command")
+          PY
+
+          kill -0 "${app_pid}" || { echo "FAILURE: app is not running after round-trip" | tee -a .evidence/roundtrip.log; exit 1; }
+          xcrun simctl io "${SIMULATOR_UDID}" screenshot .evidence/screenshot.png
+          test -s .evidence/screenshot.png
+          echo "Tauri probe passed" | tee -a .evidence/roundtrip.log
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tauri-probe-evidence
+          path: probes/tauri/.evidence
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
