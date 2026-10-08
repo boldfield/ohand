@@ -7,6 +7,18 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+fn is_secret_or_endpoint(value: &str) -> bool {
+    let value_lower = value.to_lowercase();
+    value.contains("://")
+        || value.contains(":") && value.contains("@")
+        || value_lower.contains("secret")
+        || value_lower.contains("password")
+        || value_lower.contains("token")
+        || value_lower.contains("key")
+        || value.contains("/var/")
+        || value.contains(".db") && value.contains("/")
+}
+
 /// Versioned benchmark experiment pinning corpus, instructions, and profile selections.
 ///
 /// An experiment specifies:
@@ -48,7 +60,7 @@ pub struct UnknownMetadata {
 
 impl Experiment {
     /// Create a new experiment with all required identifiers.
-    /// Returns error if any required identifier is empty.
+    /// Returns error if any required identifier is empty or contains credentials/secrets.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         corpus_version: impl Into<String>,
@@ -74,6 +86,11 @@ impl Experiment {
         }
         if source_context.is_empty() {
             return Err("source_context must not be empty".to_string());
+        }
+        if is_secret_or_endpoint(&source_context) {
+            return Err(
+                "source_context must not contain credentials or private endpoints".to_string(),
+            );
         }
         if instruction_version.is_empty() {
             return Err("instruction_version must not be empty".to_string());
@@ -109,6 +126,11 @@ impl Experiment {
                 unknown_fields: Vec::new(),
             },
         })
+    }
+
+    /// Set explicit unknown metadata fields.
+    pub fn set_unknown_fields(&mut self, fields: Vec<String>) {
+        self.unknown_metadata.unknown_fields = fields;
     }
 }
 
@@ -245,15 +267,27 @@ impl Attempt {
     }
 
     /// Mark this attempt as failed with a reason.
-    pub fn fail(&mut self, reason: impl Into<String>) {
+    /// Returns error if reason contains credentials or secret patterns.
+    pub fn fail(&mut self, reason: impl Into<String>) -> Result<(), String> {
+        let reason_str = reason.into();
+        if is_secret_or_endpoint(&reason_str) {
+            return Err("failure_reason must not contain credentials or endpoints".to_string());
+        }
         self.state = AttemptState::Failed;
-        self.failure_reason = Some(reason.into());
+        self.failure_reason = Some(reason_str);
+        Ok(())
     }
 
     /// Mark this attempt state as unknown with a reason.
-    pub fn mark_unknown(&mut self, reason: impl Into<String>) {
+    /// Returns error if reason contains credentials or secret patterns.
+    pub fn mark_unknown(&mut self, reason: impl Into<String>) -> Result<(), String> {
+        let reason_str = reason.into();
+        if is_secret_or_endpoint(&reason_str) {
+            return Err("failure_reason must not contain credentials or endpoints".to_string());
+        }
         self.state = AttemptState::Unknown;
-        self.failure_reason = Some(reason.into());
+        self.failure_reason = Some(reason_str);
+        Ok(())
     }
 }
 
@@ -281,18 +315,181 @@ mod tests {
 
     #[test]
     fn test_experiment_rejects_empty_identifiers() {
-        let result = Experiment::new(
-            "",
+        let base_args = (
+            "v1.0",
             "2026-10-08T12:00:00Z",
             "instr",
             "pa",
             "1",
             "pb",
             "1",
-            "b",
+            "build",
         );
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("corpus_version"));
+
+        let result = Experiment::new(
+            "",
+            base_args.1,
+            base_args.2,
+            base_args.3,
+            base_args.4,
+            base_args.5,
+            base_args.6,
+            base_args.7,
+        );
+        assert!(result.is_err() && result.unwrap_err().contains("corpus_version"));
+
+        let result = Experiment::new(
+            base_args.0,
+            "",
+            base_args.2,
+            base_args.3,
+            base_args.4,
+            base_args.5,
+            base_args.6,
+            base_args.7,
+        );
+        assert!(result.is_err() && result.unwrap_err().contains("source_context"));
+
+        let result = Experiment::new(
+            base_args.0,
+            base_args.1,
+            "",
+            base_args.3,
+            base_args.4,
+            base_args.5,
+            base_args.6,
+            base_args.7,
+        );
+        assert!(result.is_err() && result.unwrap_err().contains("instruction_version"));
+
+        let result = Experiment::new(
+            base_args.0,
+            base_args.1,
+            base_args.2,
+            "",
+            base_args.4,
+            base_args.5,
+            base_args.6,
+            base_args.7,
+        );
+        assert!(result.is_err() && result.unwrap_err().contains("profile_a_id"));
+
+        let result = Experiment::new(
+            base_args.0,
+            base_args.1,
+            base_args.2,
+            base_args.3,
+            "",
+            base_args.5,
+            base_args.6,
+            base_args.7,
+        );
+        assert!(result.is_err() && result.unwrap_err().contains("profile_a_version"));
+
+        let result = Experiment::new(
+            base_args.0,
+            base_args.1,
+            base_args.2,
+            base_args.3,
+            base_args.4,
+            "",
+            base_args.6,
+            base_args.7,
+        );
+        assert!(result.is_err() && result.unwrap_err().contains("profile_b_id"));
+
+        let result = Experiment::new(
+            base_args.0,
+            base_args.1,
+            base_args.2,
+            base_args.3,
+            base_args.4,
+            base_args.5,
+            "",
+            base_args.7,
+        );
+        assert!(result.is_err() && result.unwrap_err().contains("profile_b_version"));
+
+        let result = Experiment::new(
+            base_args.0,
+            base_args.1,
+            base_args.2,
+            base_args.3,
+            base_args.4,
+            base_args.5,
+            base_args.6,
+            "",
+        );
+        assert!(result.is_err() && result.unwrap_err().contains("build_revision"));
+    }
+
+    #[test]
+    fn test_experiment_rejects_credentials_in_source_context() {
+        let base_args = ("v1.0", "instr", "pa", "1", "pb", "1", "build");
+
+        let result = Experiment::new(
+            "v1",
+            "http://user:pass@example.com",
+            base_args.1,
+            base_args.2,
+            base_args.3,
+            base_args.4,
+            base_args.5,
+            base_args.6,
+        );
+        assert!(result.is_err() && result.unwrap_err().contains("credentials"));
+
+        let result = Experiment::new(
+            "v1",
+            "/var/mobile/ohand/production.sqlite",
+            base_args.1,
+            base_args.2,
+            base_args.3,
+            base_args.4,
+            base_args.5,
+            base_args.6,
+        );
+        assert!(result.is_err() && result.unwrap_err().contains("credentials"));
+
+        let result = Experiment::new(
+            "v1",
+            "https://user:token@api.internal/path",
+            base_args.1,
+            base_args.2,
+            base_args.3,
+            base_args.4,
+            base_args.5,
+            base_args.6,
+        );
+        assert!(result.is_err() && result.unwrap_err().contains("credentials"));
+    }
+
+    #[test]
+    fn test_experiment_unknown_metadata_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+        let mut exp = Experiment::new(
+            "v1.0",
+            "2026-10-08T12:00:00Z",
+            "instr-v1",
+            "profile-a",
+            "1.0",
+            "profile-b",
+            "1.0",
+            "build-123",
+        )?;
+
+        assert_eq!(exp.unknown_metadata.unknown_fields.len(), 0);
+
+        exp.set_unknown_fields(vec!["field1".to_string(), "field2".to_string()]);
+        assert_eq!(exp.unknown_metadata.unknown_fields.len(), 2);
+
+        let json = serde_json::to_string(&exp)?;
+        let deserialized: Experiment = serde_json::from_str(&json)?;
+        assert_eq!(
+            deserialized.unknown_metadata.unknown_fields,
+            exp.unknown_metadata.unknown_fields
+        );
+
+        Ok(())
     }
 
     #[test]
@@ -325,7 +522,7 @@ mod tests {
         assert_eq!(attempt.elapsed_ms, Some(1500));
 
         let mut attempt2 = Attempt::new("case-2", "b").unwrap();
-        attempt2.fail("connection timeout");
+        assert!(attempt2.fail("connection timeout").is_ok());
         assert_eq!(attempt2.state, AttemptState::Failed);
         assert!(attempt2.failure_reason.is_some());
     }
@@ -334,5 +531,66 @@ mod tests {
     fn test_attempt_rejects_invalid_arm() {
         let result = Attempt::new("case-1", "c");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_attempt_rejects_credentials_in_failure_reason() {
+        let mut attempt = Attempt::new("case-1", "a").unwrap();
+        let result = attempt.fail("error at http://user:token@api.example.com");
+        assert!(result.is_err() && result.unwrap_err().contains("credentials"));
+
+        let mut attempt = Attempt::new("case-1", "a").unwrap();
+        let result = attempt.fail("failed at /var/mobile/production.db");
+        assert!(result.is_err() && result.unwrap_err().contains("credentials"));
+    }
+
+    #[test]
+    fn test_attempt_rejects_credentials_in_unknown_reason() {
+        let mut attempt = Attempt::new("case-1", "a").unwrap();
+        let result = attempt.mark_unknown("unknown: password=secret123");
+        assert!(result.is_err() && result.unwrap_err().contains("credentials"));
+    }
+
+    #[test]
+    fn test_attempt_accepts_normal_failure_reason() {
+        let mut attempt = Attempt::new("case-1", "a").unwrap();
+        let result = attempt.fail("timeout after 30s");
+        assert!(result.is_ok());
+        assert_eq!(
+            attempt.failure_reason,
+            Some("timeout after 30s".to_string())
+        );
+    }
+
+    #[test]
+    fn test_record_round_trip_serde() -> Result<(), Box<dyn std::error::Error>> {
+        let exp = Experiment::new(
+            "v1.0",
+            "2026-10-08T12:00:00Z",
+            "instr-v1",
+            "profile-a",
+            "1.0",
+            "profile-b",
+            "1.0",
+            "build-123",
+        )?;
+
+        let case = Case::new(&exp.id, "case-001", "test content")?;
+        let mut attempt = Attempt::new(&case.id, "a")?;
+        attempt.complete(1500, Some(serde_json::json!({"result": "ok"})));
+
+        let exp_json = serde_json::to_string(&exp)?;
+        let case_json = serde_json::to_string(&case)?;
+        let attempt_json = serde_json::to_string(&attempt)?;
+
+        let exp_loaded: Experiment = serde_json::from_str(&exp_json)?;
+        let case_loaded: Case = serde_json::from_str(&case_json)?;
+        let attempt_loaded: Attempt = serde_json::from_str(&attempt_json)?;
+
+        assert_eq!(exp_loaded, exp);
+        assert_eq!(case_loaded, case);
+        assert_eq!(attempt_loaded, attempt);
+
+        Ok(())
     }
 }

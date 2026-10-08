@@ -23,8 +23,10 @@ pub enum JournalError {
     Deserialization(String),
     #[error("schema mismatch: expected {expected}, got {actual}")]
     SchemaMismatch { expected: u32, actual: u32 },
-    #[error("truncated or corrupt record")]
+    #[error("truncated record at end of file")]
     Truncated,
+    #[error("corruption in middle of file at line {line}: {reason}")]
+    Corruption { line: usize, reason: String },
     #[error("unknown record type: {0}")]
     UnknownRecordType(String),
 }
@@ -56,13 +58,63 @@ pub struct JournalWriter {
 
 impl JournalWriter {
     /// Open or create a journal file for appending.
+    /// Detects and repairs any truncated tail.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, JournalError> {
+        let path_ref = path.as_ref();
+
+        if path_ref.exists() {
+            Self::repair_truncated_tail(path_ref)?;
+        }
+
         let file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
             .map_err(|e| JournalError::Io(e.to_string()))?;
         Ok(JournalWriter { file })
+    }
+
+    /// Detect and repair a truncated tail in an existing journal.
+    fn repair_truncated_tail(path: &Path) -> Result<(), JournalError> {
+        use std::io::Read;
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|e| JournalError::Io(e.to_string()))?;
+
+        let mut contents = Vec::new();
+        file.read_to_end(&mut contents)
+            .map_err(|e| JournalError::Io(e.to_string()))?;
+
+        if contents.is_empty() {
+            return Ok(());
+        }
+
+        let text = std::str::from_utf8(&contents).unwrap_or("");
+        let lines: Vec<&str> = text.lines().collect();
+
+        if lines.is_empty() {
+            return Ok(());
+        }
+
+        let last_line = lines.last().unwrap();
+        if serde_json::from_str::<JournalRecord>(last_line).is_ok() {
+            return Ok(());
+        }
+
+        if lines.len() > 1 {
+            let truncate_pos = contents.len();
+            let last_newline = contents[..truncate_pos].iter().rposition(|&b| b == b'\n');
+
+            if let Some(pos) = last_newline {
+                file.set_len((pos + 1) as u64)
+                    .map_err(|e| JournalError::Io(e.to_string()))?;
+            }
+        }
+
+        Ok(())
     }
 
     /// Append an experiment record.
@@ -88,6 +140,9 @@ impl JournalWriter {
         self.file
             .flush()
             .map_err(|e| JournalError::Io(e.to_string()))?;
+        self.file
+            .sync_data()
+            .map_err(|e| JournalError::Io(e.to_string()))?;
         Ok(())
     }
 }
@@ -102,8 +157,10 @@ impl JournalReader {
     /// Open an existing journal and recover from any truncation.
     ///
     /// If the journal is empty, returns a reader with zero records.
-    /// If truncation is detected, all complete records are preserved,
+    /// If truncation is detected at EOF, all complete records are preserved,
     /// and any Started attempts at the end are marked as Unknown.
+    /// Mid-file corruption returns an error.
+    /// Ambiguous started attempts (not preceded by truncation) are also marked Unknown.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, JournalError> {
         let file = File::open(&path)
             .map_err(|e| JournalError::Io(format!("failed to open journal: {}", e)))?;
@@ -116,8 +173,12 @@ impl JournalReader {
             truncation_reason: None,
         };
 
-        for (line_num, line) in reader.lines().enumerate() {
-            let line = line.map_err(|e| JournalError::Io(e.to_string()))?;
+        let lines: Vec<String> = reader
+            .lines()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| JournalError::Io(e.to_string()))?;
+
+        for (line_idx, line) in lines.iter().enumerate() {
             let line = line.trim();
 
             if line.is_empty() {
@@ -126,30 +187,39 @@ impl JournalReader {
 
             match serde_json::from_str::<JournalRecord>(line) {
                 Ok(record) => {
+                    Self::validate_schema_version(&record)?;
                     records.push(record);
                     recovery.records_read += 1;
                 }
                 Err(e) => {
-                    // Truncated line or corrupt JSON - mark and stop reading
-                    recovery.truncation_reason =
-                        Some(format!("truncation at line {}: {}", line_num + 1, e));
+                    let is_last_line = line_idx == lines.len() - 1;
 
-                    // Mark any trailing Started attempts as Unknown
-                    for record in records.iter_mut().rev() {
-                        match record {
-                            JournalRecord::Attempt(attempt) => {
-                                if attempt.state == crate::records::AttemptState::Started {
-                                    attempt.state = crate::records::AttemptState::Unknown;
-                                    attempt.failure_reason = Some(
-                                        "marked unknown due to journal truncation".to_string(),
-                                    );
-                                    recovery.ambiguous_started_attempts += 1;
-                                } else {
-                                    break;
-                                }
-                            }
-                            _ => break,
+                    if is_last_line {
+                        recovery.truncation_reason =
+                            Some(format!("truncation at line {}: {}", line_idx + 1, e));
+
+                        if line.contains("\"state\":\"started\"")
+                            || line.contains("\"state\": \"started\"")
+                        {
+                            let unknown_attempt = Attempt {
+                                id: "truncated".to_string(),
+                                case_id: "unknown".to_string(),
+                                arm: "unknown".to_string(),
+                                state: crate::records::AttemptState::Unknown,
+                                elapsed_ms: None,
+                                usage_tokens: None,
+                                failure_reason: Some("truncated during write".to_string()),
+                                provider_output: None,
+                                schema_version: 1,
+                            };
+                            records.push(JournalRecord::Attempt(unknown_attempt));
+                            recovery.ambiguous_started_attempts += 1;
                         }
+                    } else {
+                        return Err(JournalError::Corruption {
+                            line: line_idx + 1,
+                            reason: e.to_string(),
+                        });
                     }
 
                     break;
@@ -157,7 +227,76 @@ impl JournalReader {
             }
         }
 
+        Self::mark_ambiguous_started_attempts(&mut records, &mut recovery);
+
         Ok(JournalReader { records, recovery })
+    }
+
+    /// Validate schema version in a record.
+    fn validate_schema_version(record: &JournalRecord) -> Result<(), JournalError> {
+        match record {
+            JournalRecord::Experiment(exp) => {
+                if exp.schema_version != 1 {
+                    return Err(JournalError::SchemaMismatch {
+                        expected: 1,
+                        actual: exp.schema_version,
+                    });
+                }
+            }
+            JournalRecord::Case(case) => {
+                if case.schema_version != 1 {
+                    return Err(JournalError::SchemaMismatch {
+                        expected: 1,
+                        actual: case.schema_version,
+                    });
+                }
+            }
+            JournalRecord::Attempt(attempt) => {
+                if attempt.schema_version != 1 {
+                    return Err(JournalError::SchemaMismatch {
+                        expected: 1,
+                        actual: attempt.schema_version,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Mark ambiguous started attempts as Unknown.
+    /// This handles both truncation-induced and natural EOF cases.
+    fn mark_ambiguous_started_attempts(
+        records: &mut [JournalRecord],
+        recovery: &mut TruncationRecovery,
+    ) {
+        let mut found_ambiguous = false;
+
+        for record in records.iter().rev() {
+            if let JournalRecord::Attempt(attempt) = record {
+                if attempt.state == crate::records::AttemptState::Started {
+                    found_ambiguous = true;
+                    break;
+                }
+            }
+        }
+
+        if found_ambiguous {
+            for record in records.iter_mut().rev() {
+                match record {
+                    JournalRecord::Attempt(attempt) => {
+                        if attempt.state == crate::records::AttemptState::Started {
+                            attempt.state = crate::records::AttemptState::Unknown;
+                            attempt.failure_reason =
+                                Some("marked unknown due to ambiguous journal state".to_string());
+                            recovery.ambiguous_started_attempts += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+        }
     }
 
     /// Get all records read from the journal.
@@ -295,7 +434,7 @@ mod tests {
         let case = Case::new(&exp.id, "case-1", "content")?;
         let mut attempt_a = Attempt::new(&case.id, "a")?;
         attempt_a.complete(1000, None);
-        let attempt_b = Attempt::new(&case.id, "b")?; // Still in Started state
+        let attempt_b = Attempt::new(&case.id, "b")?;
 
         let mut writer = JournalWriter::open(file.path())?;
         writer.write_experiment(&exp)?;
@@ -303,21 +442,128 @@ mod tests {
         writer.write_attempt(&attempt_a)?;
         writer.write_attempt(&attempt_b)?;
 
-        // Simulate truncation after attempt_b write started
         {
-            let mut f = fs::OpenOptions::new().append(true).open(file.path())?;
-            write!(f, r#"{{"record_type":"attempt","id":"incomplete"#)?;
-            f.flush()?;
+            let f = fs::OpenOptions::new().write(true).open(file.path())?;
+            let file_size = f.metadata()?.len();
+            f.set_len(file_size - 10)?;
         }
 
         let reader = JournalReader::open(file.path())?;
         assert_eq!(reader.recovery.ambiguous_started_attempts, 1);
         let attempts = reader.attempts();
         assert_eq!(attempts.len(), 2);
-        // First attempt is unaffected
         assert_eq!(attempts[0].state, crate::records::AttemptState::Completed);
-        // Second attempt is marked unknown due to truncation
         assert_eq!(attempts[1].state, crate::records::AttemptState::Unknown);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_append_after_truncation_repair() -> Result<(), Box<dyn std::error::Error>> {
+        let file = NamedTempFile::new()?;
+
+        let exp = Experiment::new("v1", "ctx", "instr", "pa", "1", "pb", "1", "build")?;
+        let case = Case::new(&exp.id, "case-1", "content")?;
+        let mut attempt_a = Attempt::new(&case.id, "a")?;
+        attempt_a.complete(1000, None);
+
+        {
+            let mut writer = JournalWriter::open(file.path())?;
+            writer.write_experiment(&exp)?;
+            writer.write_case(&case)?;
+            writer.write_attempt(&attempt_a)?;
+        }
+
+        {
+            let f = fs::OpenOptions::new().write(true).open(file.path())?;
+            let file_size = f.metadata()?.len();
+            f.set_len(file_size - 5)?;
+        }
+
+        {
+            let mut writer = JournalWriter::open(file.path())?;
+            let mut attempt_b = Attempt::new(&case.id, "b")?;
+            attempt_b.complete(2000, None);
+            writer.write_attempt(&attempt_b)?;
+        }
+
+        let reader = JournalReader::open(file.path())?;
+        let attempts = reader.attempts();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].state, crate::records::AttemptState::Completed);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_mid_file_corruption_returns_error() -> Result<(), Box<dyn std::error::Error>> {
+        let file = NamedTempFile::new()?;
+
+        let exp = Experiment::new("v1", "ctx", "instr", "pa", "1", "pb", "1", "build")?;
+        let case = Case::new(&exp.id, "case-1", "content")?;
+
+        let mut writer = JournalWriter::open(file.path())?;
+        writer.write_experiment(&exp)?;
+        writer.write_case(&case)?;
+
+        {
+            let mut f = fs::OpenOptions::new().append(true).open(file.path())?;
+            writeln!(f, "corrupted json line")?;
+            let json = r#"{"record_type":"case","id":"valid","experiment_id":"exp-id","case_id":"c-1","content":"ct","schema_version":1}"#;
+            writeln!(f, "{}", json)?;
+            f.flush()?;
+        }
+
+        let result = JournalReader::open(file.path());
+        assert!(matches!(result, Err(JournalError::Corruption { .. })));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_schema_mismatch_detection() -> Result<(), Box<dyn std::error::Error>> {
+        let file = NamedTempFile::new()?;
+
+        {
+            let mut f = fs::File::create(file.path())?;
+            let json = r#"{"record_type":"experiment","id":"e1","schema_version":99,"corpus_version":"v1","source_context":"ctx","instruction_version":"instr","profile_a_id":"pa","profile_a_version":"1","profile_b_id":"pb","profile_b_version":"1","build_revision":"build","unknown_metadata":{"unknown_fields":[]}}"#;
+            writeln!(&mut f, "{}", json)?;
+        }
+
+        let result = JournalReader::open(file.path());
+        assert!(matches!(
+            result,
+            Err(JournalError::SchemaMismatch {
+                expected: 1,
+                actual: 99
+            })
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_started_attempt_at_eof_marked_unknown() -> Result<(), Box<dyn std::error::Error>> {
+        let file = NamedTempFile::new()?;
+
+        let exp = Experiment::new("v1", "ctx", "instr", "pa", "1", "pb", "1", "build")?;
+        let case = Case::new(&exp.id, "case-1", "content")?;
+        let mut attempt_a = Attempt::new(&case.id, "a")?;
+        attempt_a.complete(1000, None);
+        let attempt_b = Attempt::new(&case.id, "b")?;
+
+        let mut writer = JournalWriter::open(file.path())?;
+        writer.write_experiment(&exp)?;
+        writer.write_case(&case)?;
+        writer.write_attempt(&attempt_a)?;
+        writer.write_attempt(&attempt_b)?;
+
+        let reader = JournalReader::open(file.path())?;
+        let attempts = reader.attempts();
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].state, crate::records::AttemptState::Completed);
+        assert_eq!(attempts[1].state, crate::records::AttemptState::Unknown);
+        assert_eq!(reader.recovery.ambiguous_started_attempts, 1);
 
         Ok(())
     }
