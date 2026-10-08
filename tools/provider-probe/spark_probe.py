@@ -13,13 +13,14 @@ with sanitized references for audit.
 import json
 import sys
 import os
+import uuid
 from datetime import datetime
 from dataclasses import dataclass, asdict
 from typing import Optional, Dict, Any
-import hashlib
 import urllib.request
 import urllib.error
 import ssl
+from urllib.parse import urlparse
 
 
 @dataclass
@@ -27,26 +28,43 @@ class ProbeResult:
     """Sanitized result of a single probe request."""
     timestamp: str
     request_type: str
-    endpoint_hash: str
+    evidence_id: str
     success: bool
     status_code: Optional[int]
-    protocol: str
+    protocol: Optional[str]
     auth_required: bool
     auth_success: Optional[bool]
     response_structure: Optional[str]
     model_count: Optional[int]
+    serving_software: Optional[str]
     error_message: Optional[str]
 
 
 class SparkProbe:
     """Probe Spark endpoint compatibility and reachability."""
 
-    def __init__(self, config_path: str = "/etc/ohand-provider/models.json"):
+    def __init__(self, config_path: Optional[str] = None, provider_key: Optional[str] = None):
         """Initialize probe with provider configuration."""
+        if config_path is None:
+            config_path = os.environ.get("OHAND_PROVIDER_CONFIG_PATH", "/etc/ohand-provider/models.json")
+
+        self.evidence_id = f"spark-probe-{uuid.uuid4().hex[:12]}"
         self.config = self._load_config(config_path)
-        self.provider_config = self.config.get("providers", {}).get("ollama", {})
-        self.base_url = self.provider_config.get("baseUrl", "")
-        self.api_key = self.provider_config.get("apiKey", "")
+
+        if provider_key is None:
+            provider_key = os.environ.get("OHAND_PROVIDER_KEY", "ollama")
+
+        self.provider_config = self.config.get("providers", {}).get(provider_key, {})
+        self.base_url = self.provider_config.get("baseUrl", "").strip()
+        self.api_key = self.provider_config.get("apiKey", "").strip()
+
+        if not self.base_url:
+            print(f"Error: baseUrl not configured for provider '{provider_key}'", file=sys.stderr)
+            sys.exit(1)
+        if not self.api_key:
+            print(f"Error: apiKey not configured for provider '{provider_key}'", file=sys.stderr)
+            sys.exit(1)
+
         self.results: list[ProbeResult] = []
 
     def _load_config(self, path: str) -> Dict[str, Any]:
@@ -61,18 +79,20 @@ class SparkProbe:
             print(f"Error: Failed to parse config: {e}", file=sys.stderr)
             sys.exit(1)
 
-    def _hash_endpoint(self) -> str:
-        """Create a sanitized hash of the endpoint for audit."""
-        return hashlib.sha256(self.base_url.encode()).hexdigest()[:16]
+    def _get_protocol(self) -> str:
+        """Extract protocol from base URL."""
+        parsed = urlparse(self.base_url)
+        return parsed.scheme if parsed.scheme in ("http", "https") else "https"
 
     def _make_request(self, endpoint: str, method: str = "POST",
-                     data: Optional[str] = None, headers: Optional[Dict] = None) -> tuple[int, str]:
-        """Make HTTP request to endpoint."""
+                     data: Optional[str] = None, headers: Optional[Dict] = None,
+                     include_auth: bool = True) -> tuple[int, str, Dict[str, str]]:
+        """Make HTTP request to endpoint. Returns (status_code, body, headers)."""
         if not headers:
             headers = {}
 
         headers["User-Agent"] = "spark-probe/1.0"
-        if self.api_key:
+        if include_auth and self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
         try:
@@ -83,52 +103,57 @@ class SparkProbe:
                 method=method
             )
 
-            # Create SSL context (allows self-signed certs for testing)
             ctx = ssl.create_default_context()
 
             try:
                 with urllib.request.urlopen(req, context=ctx, timeout=10) as resp:
-                    return resp.status, resp.read().decode('utf-8')
+                    resp_headers = dict(resp.headers)
+                    return resp.status, resp.read().decode('utf-8'), resp_headers
             except urllib.error.HTTPError as e:
-                return e.code, e.read().decode('utf-8')
+                resp_headers = dict(e.headers) if hasattr(e, 'headers') else {}
+                return e.code, e.read().decode('utf-8'), resp_headers
         except Exception as e:
             raise Exception(f"Request failed: {e}")
 
-    def probe_reachability(self) -> bool:
-        """Test basic endpoint reachability."""
+    def probe_reachability_unauthenticated(self) -> bool:
+        """Test endpoint reachability without authentication to verify auth is required."""
         try:
-            status, _ = self._make_request(
+            status, _, resp_headers = self._make_request(
                 f"{self.base_url}/models",
                 method="GET",
-                headers={"Accept": "application/json"}
+                headers={"Accept": "application/json"},
+                include_auth=False
             )
+            auth_required = status in (401, 403)
             result = ProbeResult(
                 timestamp=datetime.utcnow().isoformat() + "Z",
-                request_type="reachability",
-                endpoint_hash=self._hash_endpoint(),
-                success=status == 200,
+                request_type="reachability_unauth",
+                evidence_id=self.evidence_id,
+                success=True,
                 status_code=status,
-                protocol="https",
-                auth_required=False,
+                protocol=self._get_protocol(),
+                auth_required=auth_required,
                 auth_success=None,
                 response_structure=None,
                 model_count=None,
+                serving_software=resp_headers.get("Server"),
                 error_message=None
             )
             self.results.append(result)
-            return result.success
+            return True
         except Exception as e:
             result = ProbeResult(
                 timestamp=datetime.utcnow().isoformat() + "Z",
-                request_type="reachability",
-                endpoint_hash=self._hash_endpoint(),
+                request_type="reachability_unauth",
+                evidence_id=self.evidence_id,
                 success=False,
                 status_code=None,
-                protocol="https",
-                auth_required=False,
+                protocol=self._get_protocol(),
+                auth_required=None,
                 auth_success=None,
                 response_structure=None,
                 model_count=None,
+                serving_software=None,
                 error_message=str(e)
             )
             self.results.append(result)
@@ -137,7 +162,7 @@ class SparkProbe:
     def probe_models_list(self) -> bool:
         """Test models list endpoint with authentication."""
         try:
-            status, resp_body = self._make_request(
+            status, resp_body, resp_headers = self._make_request(
                 f"{self.base_url}/models",
                 method="GET",
                 headers={"Accept": "application/json"}
@@ -146,7 +171,7 @@ class SparkProbe:
             success = status == 200
             model_count = None
             resp_structure = None
-            auth_success = None
+            auth_success = status != 401 and status != 403
 
             if success:
                 resp_json = json.loads(resp_body)
@@ -155,20 +180,19 @@ class SparkProbe:
                     resp_structure = "openai-list"
                 else:
                     resp_structure = "unknown"
-            else:
-                auth_success = status != 401 and status != 403
 
             result = ProbeResult(
                 timestamp=datetime.utcnow().isoformat() + "Z",
                 request_type="models_list",
-                endpoint_hash=self._hash_endpoint(),
+                evidence_id=self.evidence_id,
                 success=success,
                 status_code=status,
-                protocol="https",
+                protocol=self._get_protocol(),
                 auth_required=True,
                 auth_success=auth_success,
                 response_structure=resp_structure,
                 model_count=model_count,
+                serving_software=resp_headers.get("Server"),
                 error_message=None if success else f"HTTP {status}"
             )
             self.results.append(result)
@@ -177,14 +201,15 @@ class SparkProbe:
             result = ProbeResult(
                 timestamp=datetime.utcnow().isoformat() + "Z",
                 request_type="models_list",
-                endpoint_hash=self._hash_endpoint(),
+                evidence_id=self.evidence_id,
                 success=False,
                 status_code=None,
-                protocol="https",
+                protocol=self._get_protocol(),
                 auth_required=True,
                 auth_success=None,
                 response_structure=None,
                 model_count=None,
+                serving_software=None,
                 error_message=str(e)
             )
             self.results.append(result)
@@ -202,7 +227,7 @@ class SparkProbe:
                 "stream": False
             }
 
-            status, resp_body = self._make_request(
+            status, resp_body, resp_headers = self._make_request(
                 f"{self.base_url}/chat/completions",
                 method="POST",
                 data=json.dumps(request_body),
@@ -220,14 +245,15 @@ class SparkProbe:
             result = ProbeResult(
                 timestamp=datetime.utcnow().isoformat() + "Z",
                 request_type="chat_completion",
-                endpoint_hash=self._hash_endpoint(),
+                evidence_id=self.evidence_id,
                 success=success,
                 status_code=status,
-                protocol="https",
+                protocol=self._get_protocol(),
                 auth_required=True,
                 auth_success=status != 401 and status != 403,
                 response_structure=resp_structure,
                 model_count=None,
+                serving_software=resp_headers.get("Server"),
                 error_message=None if success else f"HTTP {status}"
             )
             self.results.append(result)
@@ -236,14 +262,77 @@ class SparkProbe:
             result = ProbeResult(
                 timestamp=datetime.utcnow().isoformat() + "Z",
                 request_type="chat_completion",
-                endpoint_hash=self._hash_endpoint(),
+                evidence_id=self.evidence_id,
                 success=False,
                 status_code=None,
-                protocol="https",
+                protocol=self._get_protocol(),
                 auth_required=True,
                 auth_success=None,
                 response_structure=None,
                 model_count=None,
+                serving_software=None,
+                error_message=str(e)
+            )
+            self.results.append(result)
+            return False
+
+    def probe_response_format(self, model: str = "gpt-oss:20b") -> bool:
+        """Test structured response format (JSON mode) support."""
+        try:
+            request_body = {
+                "model": model,
+                "messages": [
+                    {"role": "user", "content": "respond with json"}
+                ],
+                "response_format": {"type": "json_object"},
+                "max_tokens": 20,
+                "stream": False
+            }
+
+            status, resp_body, resp_headers = self._make_request(
+                f"{self.base_url}/chat/completions",
+                method="POST",
+                data=json.dumps(request_body),
+                headers={"Content-Type": "application/json", "Accept": "application/json"}
+            )
+
+            success = status == 200
+            resp_structure = None
+
+            if success:
+                resp_json = json.loads(resp_body)
+                if "choices" in resp_json:
+                    resp_structure = "openai-chat-json"
+
+            result = ProbeResult(
+                timestamp=datetime.utcnow().isoformat() + "Z",
+                request_type="response_format",
+                evidence_id=self.evidence_id,
+                success=success,
+                status_code=status,
+                protocol=self._get_protocol(),
+                auth_required=True,
+                auth_success=status != 401 and status != 403,
+                response_structure=resp_structure,
+                model_count=None,
+                serving_software=resp_headers.get("Server"),
+                error_message=None if success else f"HTTP {status}"
+            )
+            self.results.append(result)
+            return success
+        except Exception as e:
+            result = ProbeResult(
+                timestamp=datetime.utcnow().isoformat() + "Z",
+                request_type="response_format",
+                evidence_id=self.evidence_id,
+                success=False,
+                status_code=None,
+                protocol=self._get_protocol(),
+                auth_required=True,
+                auth_success=None,
+                response_structure=None,
+                model_count=None,
+                serving_software=None,
                 error_message=str(e)
             )
             self.results.append(result)
@@ -253,16 +342,21 @@ class SparkProbe:
         """Return sanitized results for documentation."""
         return {
             "collection_time": datetime.utcnow().isoformat() + "Z",
-            "endpoint_identifier": self._hash_endpoint(),
-            "protocol": "https",
+            "evidence_id": self.evidence_id,
+            "protocol": self._get_protocol(),
             "api_type": "openai-compatible",
             "probes": [asdict(r) for r in self.results],
             "note": "Endpoint address and credentials are omitted from this output."
         }
 
-    def save_raw_evidence(self, path: str) -> None:
-        """Save raw evidence locally for audit (includes credentials/addresses)."""
+    def save_raw_evidence(self, output_dir: str) -> str:
+        """Save raw evidence locally for audit (includes credentials/addresses).
+
+        Returns the path where evidence was saved.
+        """
         evidence = {
+            "evidence_id": self.evidence_id,
+            "probe_revision": self._get_probe_revision(),
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "endpoint": self.base_url,
             "api_type": self.provider_config.get("api"),
@@ -272,12 +366,24 @@ class SparkProbe:
             "note": "Raw evidence containing private endpoint and configuration details"
         }
 
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, 'w') as f:
+        os.makedirs(output_dir, exist_ok=True)
+        evidence_path = os.path.join(output_dir, f"{self.evidence_id}.json")
+
+        with open(evidence_path, 'w') as f:
             json.dump(evidence, f, indent=2)
 
-        # Set restrictive permissions
-        os.chmod(path, 0o600)
+        os.chmod(evidence_path, 0o600)
+        return evidence_path
+
+    def _get_probe_revision(self) -> str:
+        """Get probe script revision/build identifier."""
+        try:
+            result = os.popen("git rev-parse HEAD 2>/dev/null").read().strip()
+            if result:
+                return result[:12]
+        except:
+            pass
+        return "unknown"
 
 
 def main():
@@ -285,39 +391,51 @@ def main():
     probe = SparkProbe()
 
     print("Starting Spark endpoint probe...")
-    print(f"Testing endpoint (sanitized as: {probe._hash_endpoint()})")
+    print(f"Evidence ID: {probe.evidence_id}")
 
     # Run probes
-    print("- Testing reachability...", end=" ")
-    if probe.probe_reachability():
+    all_passed = True
+
+    print("- Testing reachability (unauthenticated)...", end=" ", flush=True)
+    if probe.probe_reachability_unauthenticated():
         print("OK")
     else:
         print("FAILED")
-        print("Error: Could not reach endpoint")
-        sys.exit(1)
+        all_passed = False
 
-    print("- Testing models list...", end=" ")
+    print("- Testing models list (authenticated)...", end=" ", flush=True)
     if probe.probe_models_list():
         print("OK")
     else:
         print("FAILED")
+        all_passed = False
 
-    print("- Testing chat completion...", end=" ")
+    print("- Testing chat completion...", end=" ", flush=True)
     if probe.probe_chat_completion():
         print("OK")
     else:
         print("FAILED")
+        all_passed = False
+
+    print("- Testing response format (structured)...", end=" ", flush=True)
+    if probe.probe_response_format():
+        print("OK")
+    else:
+        print("FAILED (optional)")
 
     # Output sanitized results
     sanitized = probe.get_sanitized_results()
     print("\nSanitized results:")
     print(json.dumps(sanitized, indent=2))
 
-    # Save raw evidence
-    evidence_path = "/tmp/spark-probe-evidence.json"
-    probe.save_raw_evidence(evidence_path)
+    # Save raw evidence to XDG location
+    evidence_dir = os.path.expanduser("~/.local/share/ohand-provider-probe")
+    evidence_path = probe.save_raw_evidence(evidence_dir)
     print(f"\nRaw evidence saved to: {evidence_path}")
-    print(f"Evidence reference: spark-probe-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}")
+    print(f"Evidence reference: {probe.evidence_id}")
+
+    if not all_passed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
