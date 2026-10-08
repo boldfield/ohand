@@ -62,7 +62,7 @@ Artifact retention is bounded: `core.yml` does not upload artifacts; any future 
 
 ## Required checks for macOS workers
 
-Native iOS checks run on the standard GitHub-hosted `macos-15` runner via `.github/workflows/ios.yml` on every pull request to `main`, with Xcode pinned to 16.4 (matching `options.xcodeVersion` in `ios/project.yml`). The workflow has `contents: read` permission only, needs no secrets or signing material, and therefore also runs for fork PRs. The single `simulator` job:
+Native iOS checks run on the standard GitHub-hosted `macos-26` runner via `.github/workflows/ios.yml` on every pull request to `main`, with Xcode pinned to 26.6 and its iOS 26 simulator SDK (matching `options.xcodeVersion` in `ios/project.yml`; `ios/scripts/check_project_config.py` fails if the workflow pin and `options.xcodeVersion` disagree). The `tauri-probe` job uses the same runner and pin. The next bump is to Xcode 27 once hosted images carry it. The workflow has `contents: read` permission only, needs no secrets or signing material, and therefore also runs for fork PRs. The `simulator` job:
 
 - records `sw_vers`, Xcode, Swift, simulator SDK and the available simulators (`ios-evidence/toolchain.txt`);
 - picks one available iPhone simulator with `ios/scripts/select_simulator.py` (newest iOS runtime not newer than the pinned SDK) and logs its name, runtime and UDID (`ios-evidence/simulator.txt`);

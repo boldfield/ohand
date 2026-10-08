@@ -125,6 +125,40 @@ class ProjectConfigChecks(unittest.TestCase):
         project["targets"]["AudioProbe"]["settings"]["PRODUCT_BUNDLE_IDENTIFIER"] = "com.boldfield.ohand.probes.bridge"
         self.assertTrue(any("not unique" in e for e in checks.check_project(project)))
 
+    def write_workflow(self, directory, pins):
+        steps = "".join(
+            f"      - uses: maxim-lobanov/setup-xcode@v1\n        with:\n          xcode-version: '{pin}'\n" for pin in pins
+        ) or "      - run: echo no xcode step\n"
+        path = Path(directory) / "ios.yml"
+        path.write_text(f"name: x\njobs:\n  build:\n    runs-on: macos-26\n    steps:\n{steps}")
+        return path
+
+    def test_committed_workflow_pin_matches_project(self):
+        project = checks.load_project()
+        self.assertEqual(checks.check_workflow_xcode_pin(project), [])
+        self.assertEqual(str(project["options"]["xcodeVersion"]), "26.6")
+
+    def test_workflow_pin_disagreeing_with_project_is_reported(self):
+        project = checks.load_project()
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_workflow(directory, ["16.4"])
+            errors = checks.check_workflow_xcode_pin(project, path)
+        self.assertTrue(any("'16.4'" in e and "'26.6'" in e for e in errors), errors)
+
+    def test_project_pin_change_without_workflow_change_is_reported(self):
+        project = copy.deepcopy(checks.load_project())
+        project["options"]["xcodeVersion"] = "27.0"
+        errors = checks.check_workflow_xcode_pin(project)
+        self.assertEqual(len([e for e in errors if "'27.0'" in e]), 2, errors)
+
+    def test_job_without_exactly_one_xcode_step_is_reported(self):
+        project = checks.load_project()
+        with tempfile.TemporaryDirectory() as directory:
+            missing = self.write_workflow(directory, [])
+            self.assertTrue(any("exactly one" in e for e in checks.check_workflow_xcode_pin(project, missing)))
+            doubled = self.write_workflow(directory, ["26.6", "26.6"])
+            self.assertTrue(any("exactly one" in e for e in checks.check_workflow_xcode_pin(project, doubled)))
+
 
 if __name__ == "__main__":
     unittest.main()
