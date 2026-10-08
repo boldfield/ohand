@@ -658,6 +658,51 @@ fn failed_native_cancel_never_completes_notification_cleanup() {
     );
 }
 
+#[test]
+fn historical_failed_schedule_does_not_strand_notification_cleanup() {
+    let mut db = create_test_db();
+    let item_id = create_item_with_reminder(&mut db, "remind-hist-failed");
+
+    db.conn()
+        .execute(
+            "UPDATE reminder_operations SET operation_state = 'failed'
+             WHERE operation_type = 'schedule'",
+            [],
+        )
+        .unwrap();
+
+    let intent = mark_deletion_intent(&mut db, &item_id, 1, fixed_instant(5)).expect("deletion");
+    let notifications = work_of_type(&intent, DeletionWorkType::CancelNotifications);
+
+    let pending_cancel =
+        mark_deletion_work_completed(&mut db, &notifications.deletion_work_id, fixed_instant(6));
+    assert!(
+        pending_cancel.is_err(),
+        "an unacknowledged cancel blocks completion"
+    );
+
+    db.conn()
+        .execute(
+            "UPDATE reminder_operations SET operation_state = 'acknowledged'
+             WHERE operation_type = 'cancel' AND operation_state = 'pending'",
+            [],
+        )
+        .unwrap();
+
+    mark_deletion_work_completed(&mut db, &notifications.deletion_work_id, fixed_instant(7))
+        .expect("acknowledged deletion cancel completes notification cleanup");
+    for work in &intent.work {
+        if work.work_type != DeletionWorkType::CancelNotifications {
+            mark_deletion_work_completed(&mut db, &work.deletion_work_id, fixed_instant(8))
+                .expect("other cleanup completes");
+        }
+    }
+    assert!(matches!(
+        deletion_progress(&mut db, &item_id).unwrap(),
+        DeletionProgress::Complete
+    ));
+}
+
 // ---------------------------------------------------------------------------
 // Racing and replayed writes cannot restore readable text
 // ---------------------------------------------------------------------------
