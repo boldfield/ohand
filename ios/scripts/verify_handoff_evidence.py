@@ -35,7 +35,7 @@ def parse_phases(log_text):
     return phases, order
 
 
-def check(handoff_dir, capture_root, log_text, require_cold_without_webview=True):
+def check(handoff_dir, capture_root, log_text, require_cold_without_webview=True, shell_trace=None):
     errors = []
     phases, order = parse_phases(log_text)
     if order != EXPECTED_PHASES:
@@ -97,6 +97,13 @@ def check(handoff_dir, capture_root, log_text, require_cold_without_webview=True
         if inbox_records[cold_id]["receivedAtUnixMs"] > inbox_records[warm_id]["receivedAtUnixMs"]:
             errors.append("warm handoff is older than the cold handoff")
 
+    if shell_trace is not None:
+        trace_lines = shell_trace.splitlines()
+        if not any(line.endswith("scene-hook installed=true") for line in trace_lines):
+            errors.append("the scene connection hook was not installed in the shell")
+        if not any("scene-connect urls=1" in line for line in trace_lines):
+            errors.append("no handoff arrived through the scene connection options, so the cold launch URL was not delivered")
+
     summary = json.loads((handoff_dir / "rejections.json").read_text())
     if set(summary) != REJECTION_KEYS:
         errors.append(f"rejection summary has keys {sorted(summary)}")
@@ -113,10 +120,17 @@ def main():
     parser.add_argument("--handoff-dir", required=True, type=Path)
     parser.add_argument("--capture-root", required=True, type=Path)
     parser.add_argument("--log", required=True, type=Path)
+    parser.add_argument("--shell-trace", type=Path, help="the shell's run-events.log delivery trace")
     parser.add_argument("--allow-cold-webview", action="store_true", help="do not require the cold record to precede the web UI")
     args = parser.parse_args()
 
-    errors = check(args.handoff_dir, args.capture_root, args.log.read_text(errors="replace"), not args.allow_cold_webview)
+    errors = check(
+        args.handoff_dir,
+        args.capture_root,
+        args.log.read_text(errors="replace"),
+        not args.allow_cold_webview,
+        args.shell_trace.read_text() if args.shell_trace else None,
+    )
     if errors:
         for error in errors:
             print(f"ERROR: {error}", file=sys.stderr)

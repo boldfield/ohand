@@ -10,6 +10,7 @@ mod scene_cold_url;
 
 const ROUNDTRIP_RECORD_FILE: &str = "roundtrip.json";
 const HANDOFF_DIRECTORY: &str = "handoffs";
+const MAX_TRACE_BYTES: u64 = 16 * 1024;
 
 /// Set once the web UI has asked for the handoff list. Stored with each record to show whether a handoff
 /// was written before any web UI existed.
@@ -132,7 +133,7 @@ pub fn run() {
     });
 }
 
-/// Temporary delivery trace (task P07): lets CI show whether the OS handed the shell a URL at all on a cold launch.
+/// Delivery trace: event kinds and timestamps only, never URLs. Lets CI show that the cold-launch URL arrived.
 fn trace_run_event(app: &tauri::AppHandle, event: &tauri::RunEvent) {
     let label = match event {
         tauri::RunEvent::Ready => "ready".to_string(),
@@ -151,10 +152,15 @@ fn trace_label(app: &tauri::AppHandle, label: &str) {
     if fs::create_dir_all(&data_dir).is_err() {
         return;
     }
+    let trace_path = data_dir.join("run-events.log");
+    let trace_is_full = fs::metadata(&trace_path).is_ok_and(|metadata| metadata.len() > MAX_TRACE_BYTES);
+    if trace_is_full {
+        return;
+    }
     if let Ok(mut file) = fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(data_dir.join("run-events.log"))
+        .open(trace_path)
     {
         let _ = writeln!(file, "{} {label}", now_unix_ms());
     }

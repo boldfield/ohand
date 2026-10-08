@@ -369,7 +369,8 @@ jobs:
           python3 ../../ios/scripts/verify_handoff_evidence.py \
             --handoff-dir "${handoff_dir}" \
             --capture-root "${capture_root}" \
-            --log "${log_file}" 2>&1 | tee "${evidence_dir}/handoff-verification.txt"
+            --log "${log_file}" \
+            --shell-trace "$(dirname "${handoff_dir}")/run-events.log" 2>&1 | tee "${evidence_dir}/handoff-verification.txt"
 
       - name: Upload evidence
         if: always()

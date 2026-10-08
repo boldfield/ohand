@@ -58,7 +58,7 @@ final class ManagementHandoffUITests: XCTestCase {
             expectRejectedCount(index + 1)
         }
         expectManagementShell(shows: [coldId, warmId], phase: "rejected")
-        XCTAssertEqual(managementApp.descendants(matching: .any).matching(NSPredicate(format: "label MATCHES %@", uuidPattern)).count, 2)
+        XCTAssertEqual(managementApp.staticTexts.matching(NSPredicate(format: "label MATCHES %@", uuidPattern)).count, 2)
         print("HANDOFF-PHASE rejected - \(hostileURLs.count)")
         screenshot(managementApp, "management-rejected")
     }

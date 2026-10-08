@@ -72,6 +72,14 @@ class VerifyHandoffEvidenceTests(unittest.TestCase):
         self.write_inbox_record(COLD_ID, False, 10, captureText="private words")
         self.assertTrue(any("only identifier and delivery facts" in error for error in self.errors()))
 
+    def test_requires_the_cold_url_to_arrive_through_the_scene_hook(self):
+        good_trace = "1 scene-hook installed=true\n2 ready\n3 scene-connect urls=1\n4 opened urls=1\n"
+        self.assertEqual(self.errors(shell_trace=good_trace), [])
+        no_connect = self.errors(shell_trace="1 scene-hook installed=true\n2 ready\n4 opened urls=1\n")
+        self.assertTrue(any("cold launch URL" in error for error in no_connect))
+        not_installed = self.errors(shell_trace="1 scene-hook installed=false\n3 scene-connect urls=1\n")
+        self.assertTrue(any("not installed" in error for error in not_installed))
+
     def test_rejects_a_large_text_phase_that_hands_off_a_different_entry(self):
         log = LOG.replace(f"large-text-management {LARGE_TEXT_ID}", f"large-text-management {WARM_ID}")
         self.assertTrue(any("does not repeat" in error for error in self.errors(log)))

@@ -41,6 +41,8 @@ Both implementations are tested against the same vectors, `probes/tauri-handoff/
   grammar and, if valid, written atomically to `<app data>/handoffs/<ID>.json` (`ohand-tauri-handoff::HandoffInbox`).
   First write wins, so a replayed URL does not rewrite the record. Rejected URLs only increment a counter in
   `handoffs/rejections.json` (count, last reason code, time); the hostile URL text is never stored or shown.
+- On a cold launch the URL arrives in the scene connection options instead; `scene_cold_url.rs` forwards it to the
+  same receiver (see known risk 2). Duplicates from both paths are harmless because the first write wins.
 - A record holds `captureId`, `receivedAtUnixMs` and `webviewReady`. `webviewReady` is false when the URL arrived before
   the web UI reported it had loaded, which is what a cold launch looks like. No webview is needed to record it.
 - The web UI lists identifiers with `textContent` only and polls the `list_handoffs` command, so a handoff recorded
@@ -66,7 +68,8 @@ run by `make check`) reads the real files from both simulator data containers an
 - each shell record has only `captureId`, `receivedAtUnixMs`, `webviewReady`, and the same identifier exists as a saved
   CaptureProbe record, so identity is preserved end to end;
 - the cold record has `webviewReady == false` and the warm record `true`;
-- the rejection summary counts exactly two and uses a known reason code.
+- the rejection summary counts exactly two and uses a known reason code;
+- the shell's `run-events.log` shows the scene hook installed and a `scene-connect urls=1` delivery (the cold URL).
 
 Evidence uploaded as `tauri-probe-evidence` (7 days): `handoff-uitests.log`, `handoff-phases.txt`,
 `handoff-verification.txt`, `shell-handoffs/`, `capture-root/`, the xcresult bundle with screenshots.
@@ -102,12 +105,17 @@ pass/fail with a screenshot or screen recording. Use synthetic text only.
 
 ## Known risks
 
-1. tao 0.37.1 (via Tauri 2.12.1) parses the URL it receives from the app delegate with `Url::parse(...).unwrap()` before
-   it reaches our code. A URL that is not parseable as a URL at all could terminate the shell instead of being counted as
-   rejected. Valid-but-hostile URLs (the ones tested) reach our grammar. Mitigation belongs upstream or in a native
-   delegate in the production shell.
-2. tao's scene handling ignores `connectionOptions.URLContexts`, so a URL that cold-launches the shell might be lost in
-   scene mode. The cold phase above is where this would show up; if it fails in CI, the production shell needs a native
-   scene hook.
+1. tao 0.37.1 (via Tauri 2.12.1) has a path that can crash on a malformed URL: its app-delegate `application:openURL:`
+   handler and the universal-link handler call `Url::parse(...).unwrap()`. The scene path this shell receives URLs on
+   drops a URL that does not parse (and logs it) without reaching our counter, and our own cold-launch hook validates
+   the raw string with the grammar. Only the scene path was exercised; the unwrap paths were read in source, not tested.
+2. A cold launch by URL is lost by tao 0.37.1. The system hands the launching URL over in
+   `UISceneConnectionOptions.URLContexts`, which tao's `TaoSceneDelegate` ignores; CI showed the shell listing nothing
+   after a cold handoff while a warm one worked. `probes/tauri/src-tauri/src/scene_cold_url.rs` wraps tao's
+   `scene:willConnectToSession:options:` through the Objective-C runtime (after tao runs unchanged) and feeds the URLs
+   to the same native receiver. This depends on tao's private class name (`TaoSceneDelegate`) and selector, so a tao
+   upgrade can silently disable it: the shell writes `run-events.log` (event kinds and timestamps only, never URLs,
+   capped at 16 KiB) and the CI verifier requires a `scene-connect` line, so such a regression fails the cold phase.
+   The production shell should get this fixed upstream or in its own native scene hook.
 3. The cold `webviewReady == false` assertion depends on timing; a slow runner could flip it, which would be a false
    failure, not a false pass.
