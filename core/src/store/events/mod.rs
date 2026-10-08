@@ -6,6 +6,92 @@ use anyhow::{anyhow, Result};
 use rusqlite::{OptionalExtension, Transaction};
 use std::fmt;
 use std::str::FromStr;
+use thiserror::Error;
+
+/// Intent classification of an item. Only an explicit `Action` can carry an obligation;
+/// broad intentions, notes and ideas are preserved and searchable but never obligations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ItemType {
+    BroadIntention,
+    Note,
+    Idea,
+    Action,
+}
+
+impl ItemType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ItemType::BroadIntention => "broad_intention",
+            ItemType::Note => "note",
+            ItemType::Idea => "idea",
+            ItemType::Action => "action",
+        }
+    }
+
+    /// Whether an item of this type may carry an obligation (reminder or action suggestion).
+    pub fn can_carry_obligation(&self) -> bool {
+        matches!(self, ItemType::Action)
+    }
+}
+
+impl FromStr for ItemType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "broad_intention" => Ok(ItemType::BroadIntention),
+            "note" => Ok(ItemType::Note),
+            "idea" => Ok(ItemType::Idea),
+            "action" => Ok(ItemType::Action),
+            _ => Err(anyhow!("Unknown item type: {}", s)),
+        }
+    }
+}
+
+/// Authoritative item state returned with a stale-write rejection so callers can recover.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ItemSnapshot {
+    pub item_id: String,
+    pub revision: i32,
+    pub lifecycle_state: String,
+    pub item_type: Option<ItemType>,
+}
+
+/// Typed outcomes of event persistence.
+#[derive(Debug, Error)]
+pub enum EventError {
+    #[error(
+        "stale write on item {item_id}: expected revision {expected}, current revision {}",
+        .current.revision
+    )]
+    StaleRevision {
+        item_id: String,
+        expected: i32,
+        current: ItemSnapshot,
+    },
+    #[error("event {event_id} already exists with different content")]
+    Conflict { event_id: String },
+    #[error("event revision {event_revision} does not match expected item revision {expected}")]
+    RevisionMismatch { event_revision: i32, expected: i32 },
+    #[error("item {item_id} not found")]
+    ItemNotFound { item_id: String },
+    #[error(
+        "{event_type} event not allowed on item {item_id} in lifecycle state '{lifecycle_state}'"
+    )]
+    NotAllowedInState {
+        item_id: String,
+        lifecycle_state: String,
+        event_type: &'static str,
+    },
+    #[error("invalid event: {0}")]
+    Invalid(String),
+    #[error("stored data is corrupt: {0}")]
+    Corrupt(String),
+    #[error("storage error: {0}")]
+    Storage(#[from] rusqlite::Error),
+    #[error("database error: {0}")]
+    Database(anyhow::Error),
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EventType {
@@ -151,31 +237,43 @@ impl Event {
         if revision < 0 {
             return Err(anyhow!("revision must be non-negative"));
         }
-        Self::validate_event_type_payload_match(&event_type, &payload)?;
-        Ok(Event {
+        let event = Event {
             event_id,
             item_id,
             revision,
             event_type,
             payload,
             happened_at,
-        })
+        };
+        event.validate()?;
+        Ok(event)
     }
 
-    fn validate_event_type_payload_match(
-        event_type: &EventType,
-        payload: &EventPayload,
-    ) -> Result<()> {
-        match (event_type, payload) {
-            (EventType::Correction, EventPayload::Correction(_)) => Ok(()),
+    /// Reject contradictory type/payload pairs and unsupported values. Fields are public, so
+    /// persistence calls this again before any write.
+    pub fn validate(&self) -> Result<(), EventError> {
+        match (&self.event_type, &self.payload) {
+            (EventType::Correction, EventPayload::Correction(correction)) => {
+                if correction.kind == CorrectionKind::Type {
+                    correction
+                        .new_value
+                        .parse::<ItemType>()
+                        .map_err(|e| EventError::Invalid(e.to_string()))?;
+                    if let Some(old_value) = &correction.old_value {
+                        old_value
+                            .parse::<ItemType>()
+                            .map_err(|e| EventError::Invalid(e.to_string()))?;
+                    }
+                }
+                Ok(())
+            }
             (EventType::SuggestionControl, EventPayload::SuggestionControl(_)) => Ok(()),
             (EventType::Completion, EventPayload::Completion) => Ok(()),
             (EventType::Cancellation, EventPayload::Cancellation) => Ok(()),
-            _ => Err(anyhow!(
+            _ => Err(EventError::Invalid(format!(
                 "Invalid event type and payload combination: {:?} with {:?}",
-                event_type,
-                payload
-            )),
+                self.event_type, self.payload
+            ))),
         }
     }
 }
@@ -221,11 +319,15 @@ fn event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
                 .parse::<CorrectionKind>()
                 .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
             let old_value: Option<String> = row.get(6)?;
-            let new_value: Option<String> = row.get(7)?;
+            let new_value: String = row.get::<_, Option<String>>(7)?.ok_or_else(|| {
+                rusqlite::Error::InvalidParameterName(
+                    "correction new_value must not be null".to_string(),
+                )
+            })?;
             EventPayload::Correction(Correction {
                 kind,
                 old_value,
-                new_value: new_value.unwrap_or_default(),
+                new_value,
             })
         }
         EventType::SuggestionControl => {
@@ -260,41 +362,88 @@ fn event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
 ///
 /// If an event with the same ID already exists:
 /// - Returns the existing event if it is identical (idempotent retry)
-/// - Returns an error if it conflicts
+/// - Returns `EventError::Conflict` if the content differs
 ///
-/// Compares against the item's authoritative revision; rejects if expected_item_revision
+/// Compares against the item's authoritative revision; rejects with
+/// `EventError::StaleRevision` (carrying the current item state) if expected_item_revision
 /// doesn't match the current items.revision. On success, atomically increments items.revision.
-pub fn save_event(db: &mut Database, event: &Event, expected_item_revision: i32) -> Result<Event> {
-    let tx = db.immediate_transaction()?;
+pub fn save_event(
+    db: &mut Database,
+    event: &Event,
+    expected_item_revision: i32,
+) -> Result<Event, EventError> {
+    let tx = db.immediate_transaction().map_err(EventError::Database)?;
     let result = save_event_in_tx(&tx, event, expected_item_revision)?;
     tx.commit()?;
     Ok(result)
+}
+
+/// Read the authoritative state of an item, or `None` if it does not exist.
+pub fn get_item_snapshot(
+    tx: &Transaction<'_>,
+    item_id: &str,
+) -> Result<Option<ItemSnapshot>, EventError> {
+    let row: Option<(i32, String, Option<String>)> = tx
+        .query_row(
+            "SELECT revision, lifecycle_state, item_type FROM items WHERE item_id = ?",
+            [item_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    row.map(|(revision, lifecycle_state, item_type)| {
+        let item_type = item_type
+            .map(|stored| {
+                stored
+                    .parse::<ItemType>()
+                    .map_err(|e| EventError::Corrupt(e.to_string()))
+            })
+            .transpose()?;
+        Ok(ItemSnapshot {
+            item_id: item_id.to_string(),
+            revision,
+            lifecycle_state,
+            item_type,
+        })
+    })
+    .transpose()
+}
+
+/// Whether the item may carry an obligation. Untyped items and broad intentions, notes and
+/// ideas never can; only an item the user (or a validated interpretation) typed as an action can.
+pub fn item_can_carry_obligation(tx: &Transaction<'_>, item_id: &str) -> Result<bool, EventError> {
+    let snapshot = get_item_snapshot(tx, item_id)?.ok_or_else(|| EventError::ItemNotFound {
+        item_id: item_id.to_string(),
+    })?;
+    Ok(snapshot
+        .item_type
+        .map(|item_type| item_type.can_carry_obligation())
+        .unwrap_or(false))
 }
 
 /// Save an event within a caller-owned transaction.
 /// expected_item_revision: the item's revision at the time of the user's action.
 ///
 /// Compare-and-set semantics against items.revision: conflicting stale updates are rejected
-/// with the current item state returned in the error.
+/// with the current item state returned in `EventError::StaleRevision`.
 /// Event.revision must equal expected_item_revision (the authoritative CAS value).
+///
+/// Never writes reminders or suggestion eligibility: events record user intent only and cannot
+/// create obligations.
 pub fn save_event_in_tx(
     tx: &Transaction<'_>,
     event: &Event,
     expected_item_revision: i32,
-) -> Result<Event> {
-    // Validate event type/payload match (defensive: should be caught by Event::new, but validate before any write)
-    Event::validate_event_type_payload_match(&event.event_type, &event.payload)?;
+) -> Result<Event, EventError> {
+    event.validate()?;
 
-    // Event revision must match the CAS (expected) revision
     if event.revision != expected_item_revision {
-        return Err(anyhow!(
-            "Event revision {} does not match expected item revision {}",
-            event.revision,
-            expected_item_revision
-        ));
+        return Err(EventError::RevisionMismatch {
+            event_revision: event.revision,
+            expected: expected_item_revision,
+        });
     }
 
-    // Check if event with same ID already exists (idempotent retry)
+    // Idempotent retry: an identical event already stored has one effect.
     let existing: Option<Event> = tx
         .query_row(
             "SELECT event_id, item_id, revision, event_type, happened_at,
@@ -310,46 +459,40 @@ pub fn save_event_in_tx(
         if existing_event == *event {
             return Ok(existing_event);
         }
-        return Err(anyhow!(
-            "Event with ID {} already exists with different content",
-            event.event_id
-        ));
+        return Err(EventError::Conflict {
+            event_id: event.event_id.clone(),
+        });
     }
 
-    // Read the item's current revision and lifecycle state
-    let (current_item_revision, current_lifecycle_state): (i32, String) = tx
-        .query_row(
-            "SELECT revision, lifecycle_state FROM items WHERE item_id = ?",
-            [event.item_id.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?
-        .ok_or_else(|| anyhow!("Item {} not found", event.item_id))?;
+    let current =
+        get_item_snapshot(tx, &event.item_id)?.ok_or_else(|| EventError::ItemNotFound {
+            item_id: event.item_id.clone(),
+        })?;
 
-    // Compare-and-set: reject if expected revision doesn't match current
-    if expected_item_revision != current_item_revision {
-        return Err(anyhow!(
-            "Stale write: expected item {} revision {} but current is {}",
-            event.item_id,
-            expected_item_revision,
-            current_item_revision
-        ));
+    if expected_item_revision != current.revision {
+        return Err(EventError::StaleRevision {
+            item_id: event.item_id.clone(),
+            expected: expected_item_revision,
+            current,
+        });
     }
 
-    // Reject lifecycle transitions on terminal states (but allow corrections on terminal items)
-    if matches!(
-        current_lifecycle_state.as_str(),
-        "completed" | "cancelled" | "deleted"
-    ) && !matches!(event.event_type, EventType::Correction)
-    {
-        return Err(anyhow!(
-            "Cannot apply event to item {} in terminal lifecycle state '{}'",
-            event.item_id,
-            current_lifecycle_state
-        ));
+    // Deleted items accept nothing (a racing correction must not restore readable text).
+    // Completed and cancelled items stay correctable but take no further lifecycle or
+    // suggestion events.
+    let allowed = match current.lifecycle_state.as_str() {
+        "deleted" => false,
+        "completed" | "cancelled" => matches!(event.event_type, EventType::Correction),
+        _ => true,
+    };
+    if !allowed {
+        return Err(EventError::NotAllowedInState {
+            item_id: event.item_id.clone(),
+            lifecycle_state: current.lifecycle_state,
+            event_type: event.event_type.as_str(),
+        });
     }
 
-    // Insert the event with payload fields
     let (correction_kind, correction_old_value, correction_new_value, suggestion_control_kind) =
         match &event.payload {
             EventPayload::Correction(c) => (
@@ -381,7 +524,6 @@ pub fn save_event_in_tx(
         ],
     )?;
 
-    // If this is a Correction event, also write to the corrections table
     if let EventPayload::Correction(corr) = &event.payload {
         let correction_id = format!("{}-correction", event.event_id);
         tx.execute(
@@ -397,9 +539,15 @@ pub fn save_event_in_tx(
                 &event.happened_at,
             ],
         )?;
+        // A type correction defines the effective type; the captured source is untouched.
+        if corr.kind == CorrectionKind::Type {
+            tx.execute(
+                "UPDATE items SET item_type = ? WHERE item_id = ?",
+                rusqlite::params![&corr.new_value, &event.item_id],
+            )?;
+        }
     }
 
-    // Apply lifecycle state changes
     match event.event_type {
         EventType::Completion => {
             tx.execute(
@@ -416,7 +564,6 @@ pub fn save_event_in_tx(
         _ => {}
     }
 
-    // Atomically increment the item's revision
     tx.execute(
         "UPDATE items SET revision = revision + 1 WHERE item_id = ?",
         [event.item_id.as_str()],

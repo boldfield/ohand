@@ -4,9 +4,9 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 
 use ohand_core::store::events::{
-    delete_events_for_item, get_event, get_events_for_item, save_event, save_event_in_tx,
-    Correction, CorrectionKind, Event, EventPayload, EventType, SuggestionControlKind,
-    SuggestionControlPayload,
+    delete_events_for_item, get_event, get_events_for_item, get_item_snapshot,
+    item_can_carry_obligation, save_event, save_event_in_tx, Correction, CorrectionKind, Event,
+    EventError, EventPayload, EventType, ItemType, SuggestionControlKind, SuggestionControlPayload,
 };
 use ohand_core::store::schema::{Clock, Database};
 
@@ -195,11 +195,10 @@ fn test_conflict_on_different_content_same_id() -> Result<()> {
 
     let event2 = make_completion_event("evt-1", "item-2", 0);
     let result = save_event(&mut db, &event2, 0);
-    assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("already exists with different content"));
+    assert!(matches!(
+        result,
+        Err(EventError::Conflict { ref event_id }) if event_id == "evt-1"
+    ));
 
     let _ = std::fs::remove_file(&path);
     Ok(())
@@ -235,8 +234,20 @@ fn test_compare_and_set_stale_revision_rejected() -> Result<()> {
     let event2 = make_cancellation_event("evt-2", "item-1", 0);
     let result = save_event(&mut db, &event2, 0);
 
-    assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Stale write"));
+    match result {
+        Err(EventError::StaleRevision {
+            item_id,
+            expected,
+            current,
+        }) => {
+            assert_eq!(item_id, "item-1");
+            assert_eq!(expected, 0);
+            assert_eq!(current.revision, 1);
+            assert_eq!(current.lifecycle_state, "completed");
+            assert_eq!(current.item_type, None);
+        }
+        other => panic!("expected StaleRevision, got {:?}", other),
+    }
 
     let _ = std::fs::remove_file(&path);
     Ok(())
@@ -416,9 +427,136 @@ fn test_correction_with_no_old_value() -> Result<()> {
     Ok(())
 }
 
+fn assert_no_obligation_rows(tx: &rusqlite::Transaction<'_>, item_id: &str) -> Result<()> {
+    let reminders: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM reminders WHERE item_id = ?",
+        [item_id],
+        |row| row.get(0),
+    )?;
+    let suggestions: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM suggestion_eligibility WHERE item_id = ?",
+        [item_id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(
+        reminders, 0,
+        "events must not create reminders for {item_id}"
+    );
+    assert_eq!(
+        suggestions, 0,
+        "events must not create suggestion eligibility for {item_id}"
+    );
+    Ok(())
+}
+
 #[test]
 fn test_notes_ideas_actions_distinct() -> Result<()> {
     let path = temp_db_path("intent_distinct");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let cases = [
+        ("item-broad", ItemType::BroadIntention, false),
+        ("item-note", ItemType::Note, false),
+        ("item-idea", ItemType::Idea, false),
+        ("item-action", ItemType::Action, true),
+    ];
+
+    let tx = db.transaction()?;
+    for (item_id, _, _) in cases {
+        insert_test_item(&tx, item_id)?;
+    }
+    tx.commit()?;
+
+    // An untyped item cannot carry an obligation either.
+    let tx = db.transaction()?;
+    assert_eq!(
+        get_item_snapshot(&tx, "item-note")?.unwrap().item_type,
+        None
+    );
+    assert!(!item_can_carry_obligation(&tx, "item-note")?);
+    tx.commit()?;
+
+    for (item_id, item_type, _) in cases {
+        let correction = make_correction_event(
+            &format!("evt-{item_id}"),
+            item_id,
+            0,
+            CorrectionKind::Type,
+            None,
+            item_type.as_str(),
+        );
+        save_event(&mut db, &correction, 0)?;
+    }
+
+    let tx = db.transaction()?;
+    for (item_id, item_type, carries_obligation) in cases {
+        let snapshot = get_item_snapshot(&tx, item_id)?.unwrap();
+        assert_eq!(snapshot.item_type, Some(item_type), "{item_id}");
+        assert_eq!(snapshot.revision, 1);
+        assert_eq!(
+            item_can_carry_obligation(&tx, item_id)?,
+            carries_obligation,
+            "{item_id}"
+        );
+        // Typing an item as an action is not an explicit reminder request: no obligation rows.
+        assert_no_obligation_rows(&tx, item_id)?;
+
+        // The source capture is untouched by the type correction.
+        let capture_text: String = tx.query_row(
+            "SELECT text FROM captures WHERE capture_id = (SELECT capture_id FROM items WHERE item_id = ?)",
+            [item_id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(capture_text, "test");
+
+        let events = get_events_for_item(&tx, item_id)?;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, EventType::Correction);
+    }
+
+    // Correcting action -> idea removes the ability to carry an obligation.
+    tx.commit()?;
+    let retype = make_correction_event(
+        "evt-retype",
+        "item-action",
+        1,
+        CorrectionKind::Type,
+        Some("action"),
+        "idea",
+    );
+    save_event(&mut db, &retype, 1)?;
+    let tx = db.transaction()?;
+    assert_eq!(
+        get_item_snapshot(&tx, "item-action")?.unwrap().item_type,
+        Some(ItemType::Idea)
+    );
+    assert!(!item_can_carry_obligation(&tx, "item-action")?);
+    assert_no_obligation_rows(&tx, "item-action")?;
+    // The correction history keeps both values.
+    let history: Vec<(String, Option<String>, String)> = tx
+        .prepare("SELECT kind, old_value, new_value FROM corrections WHERE item_id = 'item-action' ORDER BY revision")?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<Result<_, _>>()?;
+    assert_eq!(
+        history,
+        vec![
+            ("type".to_string(), None, "action".to_string()),
+            (
+                "type".to_string(),
+                Some("action".to_string()),
+                "idea".to_string()
+            ),
+        ]
+    );
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn test_unsupported_type_values_rejected() -> Result<()> {
+    let path = temp_db_path("bad_type");
     let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
     let mut db = make_test_db(&path, instant)?;
 
@@ -426,75 +564,193 @@ fn test_notes_ideas_actions_distinct() -> Result<()> {
     insert_test_item(&tx, "item-1")?;
     tx.commit()?;
 
-    // Create type corrections to demonstrate distinct item types
-    let note_correction =
-        make_correction_event("evt-note", "item-1", 0, CorrectionKind::Type, None, "note");
-    let idea_correction =
-        make_correction_event("evt-idea", "item-1", 1, CorrectionKind::Type, None, "idea");
-    let action_correction = make_correction_event(
-        "evt-action",
-        "item-1",
-        2,
-        CorrectionKind::Type,
-        None,
-        "action",
+    // Event::new rejects an unsupported type value.
+    let built = Event::new(
+        "evt-bad".to_string(),
+        "item-1".to_string(),
+        0,
+        EventType::Correction,
+        EventPayload::Correction(Correction {
+            kind: CorrectionKind::Type,
+            old_value: None,
+            new_value: "banana".to_string(),
+        }),
+        "2026-01-15T10:30:00Z".to_string(),
     );
-    let broad_correction = make_correction_event(
-        "evt-broad",
-        "item-1",
-        3,
-        CorrectionKind::Type,
-        None,
-        "broad_intention",
-    );
+    assert!(built.is_err());
 
-    save_event(&mut db, &note_correction, 0)?;
-    save_event(&mut db, &idea_correction, 1)?;
-    save_event(&mut db, &action_correction, 2)?;
-    save_event(&mut db, &broad_correction, 3)?;
+    // Public fields allow bypassing Event::new; persistence still rejects before any write.
+    let bypass = Event {
+        event_id: "evt-bad".to_string(),
+        item_id: "item-1".to_string(),
+        revision: 0,
+        event_type: EventType::Correction,
+        payload: EventPayload::Correction(Correction {
+            kind: CorrectionKind::Type,
+            old_value: None,
+            new_value: "banana".to_string(),
+        }),
+        happened_at: "2026-01-15T10:30:00Z".to_string(),
+    };
+    assert!(matches!(
+        save_event(&mut db, &bypass, 0),
+        Err(EventError::Invalid(_))
+    ));
+
+    let bad_old = Event {
+        payload: EventPayload::Correction(Correction {
+            kind: CorrectionKind::Type,
+            old_value: Some("banana".to_string()),
+            new_value: "note".to_string(),
+        }),
+        ..bypass.clone()
+    };
+    assert!(matches!(
+        save_event(&mut db, &bad_old, 0),
+        Err(EventError::Invalid(_))
+    ));
 
     let tx = db.transaction()?;
-    let events = get_events_for_item(&tx, "item-1")?;
+    let snapshot = get_item_snapshot(&tx, "item-1")?.unwrap();
+    assert_eq!(snapshot.revision, 0);
+    assert_eq!(snapshot.item_type, None);
+    assert!(get_events_for_item(&tx, "item-1")?.is_empty());
 
-    assert_eq!(events.len(), 4);
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
 
-    // Verify all events are Correction type with Type kind
-    assert_eq!(events[0].event_type, EventType::Correction);
-    if let EventPayload::Correction(c) = &events[0].payload {
-        assert_eq!(c.kind, CorrectionKind::Type);
-        assert_eq!(c.new_value, "note");
-    } else {
-        panic!("Expected Correction payload");
-    }
+#[test]
+fn test_mismatched_type_and_payload_rejected_at_persistence() -> Result<()> {
+    let path = temp_db_path("bypass_mismatch");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
 
-    if let EventPayload::Correction(c) = &events[1].payload {
-        assert_eq!(c.kind, CorrectionKind::Type);
-        assert_eq!(c.new_value, "idea");
-    } else {
-        panic!("Expected Correction payload");
-    }
+    let tx = db.transaction()?;
+    insert_test_item(&tx, "item-1")?;
+    tx.commit()?;
 
-    if let EventPayload::Correction(c) = &events[2].payload {
-        assert_eq!(c.kind, CorrectionKind::Type);
-        assert_eq!(c.new_value, "action");
-    } else {
-        panic!("Expected Correction payload");
-    }
+    let mismatched = Event {
+        event_id: "evt-1".to_string(),
+        item_id: "item-1".to_string(),
+        revision: 0,
+        event_type: EventType::Completion,
+        payload: EventPayload::Correction(Correction {
+            kind: CorrectionKind::Text,
+            old_value: None,
+            new_value: "x".to_string(),
+        }),
+        happened_at: "2026-01-15T10:30:00Z".to_string(),
+    };
+    assert!(matches!(
+        save_event(&mut db, &mismatched, 0),
+        Err(EventError::Invalid(_))
+    ));
 
-    if let EventPayload::Correction(c) = &events[3].payload {
-        assert_eq!(c.kind, CorrectionKind::Type);
-        assert_eq!(c.new_value, "broad_intention");
-    } else {
-        panic!("Expected Correction payload");
-    }
+    let tx = db.transaction()?;
+    let snapshot = get_item_snapshot(&tx, "item-1")?.unwrap();
+    assert_eq!(snapshot.revision, 0);
+    assert_eq!(snapshot.lifecycle_state, "active");
+    let correction_rows: i64 =
+        tx.query_row("SELECT COUNT(*) FROM corrections", [], |row| row.get(0))?;
+    assert_eq!(correction_rows, 0);
 
-    // Verify the original capture text is unchanged after all corrections
-    let capture_text: String = tx.query_row(
-        "SELECT text FROM captures WHERE capture_id = (SELECT capture_id FROM items WHERE item_id = ?)",
-        ["item-1"],
-        |row| row.get(0),
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn test_deleted_item_rejects_every_event() -> Result<()> {
+    let path = temp_db_path("deleted_rejects");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let tx = db.transaction()?;
+    insert_test_item(&tx, "item-1")?;
+    tx.execute(
+        "UPDATE items SET lifecycle_state = 'deleted' WHERE item_id = 'item-1'",
+        [],
     )?;
-    assert_eq!(capture_text, "test");
+    tx.commit()?;
+
+    let events = [
+        make_correction_event(
+            "evt-1",
+            "item-1",
+            0,
+            CorrectionKind::Text,
+            None,
+            "resurrected",
+        ),
+        make_completion_event("evt-2", "item-1", 0),
+        make_cancellation_event("evt-3", "item-1", 0),
+        make_suggestion_control_event("evt-4", "item-1", 0, SuggestionControlKind::NotNow),
+    ];
+    for event in &events {
+        assert!(matches!(
+            save_event(&mut db, event, 0),
+            Err(EventError::NotAllowedInState { ref lifecycle_state, .. })
+                if lifecycle_state == "deleted"
+        ));
+    }
+
+    let tx = db.transaction()?;
+    assert!(get_events_for_item(&tx, "item-1")?.is_empty());
+    let correction_rows: i64 =
+        tx.query_row("SELECT COUNT(*) FROM corrections", [], |row| row.get(0))?;
+    assert_eq!(correction_rows, 0);
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn test_completed_item_stays_correctable_but_takes_no_suggestion_control() -> Result<()> {
+    let path = temp_db_path("completed_correctable");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let tx = db.transaction()?;
+    insert_test_item(&tx, "item-1")?;
+    tx.commit()?;
+
+    save_event(&mut db, &make_completion_event("evt-1", "item-1", 0), 0)?;
+
+    let control =
+        make_suggestion_control_event("evt-2", "item-1", 1, SuggestionControlKind::NotNow);
+    assert!(matches!(
+        save_event(&mut db, &control, 1),
+        Err(EventError::NotAllowedInState { .. })
+    ));
+
+    let correction =
+        make_correction_event("evt-3", "item-1", 1, CorrectionKind::Type, None, "note");
+    save_event(&mut db, &correction, 1)?;
+
+    let tx = db.transaction()?;
+    let snapshot = get_item_snapshot(&tx, "item-1")?.unwrap();
+    assert_eq!(snapshot.revision, 2);
+    assert_eq!(snapshot.lifecycle_state, "completed");
+    assert_eq!(snapshot.item_type, Some(ItemType::Note));
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn test_null_correction_new_value_is_corruption() -> Result<()> {
+    let path = temp_db_path("null_new_value");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let tx = db.transaction()?;
+    insert_test_item(&tx, "item-1")?;
+    tx.execute(
+        "INSERT INTO events (event_id, item_id, revision, event_type, happened_at, correction_kind)
+         VALUES ('evt-1', 'item-1', 0, 'correction', '2026-01-15T10:30:00Z', 'text')",
+        [],
+    )?;
+    assert!(get_event(&tx, "evt-1").is_err());
 
     let _ = std::fs::remove_file(&path);
     Ok(())
@@ -618,7 +874,7 @@ fn test_get_events_for_item_ordered() -> Result<()> {
 
     // Create three non-terminal events that preserve ordering
     let evt0 = make_correction_event("evt-0", "item-1", 0, CorrectionKind::Text, None, "val0");
-    let evt1 = make_correction_event("evt-1", "item-1", 1, CorrectionKind::Type, None, "val1");
+    let evt1 = make_correction_event("evt-1", "item-1", 1, CorrectionKind::Type, None, "idea");
     let evt2 = make_correction_event("evt-2", "item-1", 2, CorrectionKind::Scope, None, "val2");
 
     save_event(&mut db, &evt0, 0)?;
@@ -841,11 +1097,11 @@ fn test_no_transitions_after_completion() -> Result<()> {
     let cancellation = make_cancellation_event("evt-2", "item-1", 1);
     let result = save_event(&mut db, &cancellation, 1);
 
-    assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("terminal lifecycle state"));
+    assert!(matches!(
+        result,
+        Err(EventError::NotAllowedInState { ref lifecycle_state, .. })
+            if lifecycle_state == "completed" || lifecycle_state == "cancelled"
+    ));
 
     let _ = std::fs::remove_file(&path);
     Ok(())
@@ -868,11 +1124,11 @@ fn test_no_transitions_after_cancellation() -> Result<()> {
     let completion = make_completion_event("evt-2", "item-1", 1);
     let result = save_event(&mut db, &completion, 1);
 
-    assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("terminal lifecycle state"));
+    assert!(matches!(
+        result,
+        Err(EventError::NotAllowedInState { ref lifecycle_state, .. })
+            if lifecycle_state == "completed" || lifecycle_state == "cancelled"
+    ));
 
     let _ = std::fs::remove_file(&path);
     Ok(())
@@ -900,8 +1156,15 @@ fn test_event_revision_must_match_expected() -> Result<()> {
 
     let result = save_event(&mut db, &event, 0);
 
-    assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("Event revision"));
+    assert!(matches!(
+        result,
+        Err(EventError::RevisionMismatch {
+            event_revision: 9999,
+            expected: 0
+        })
+    ));
+    let tx = db.transaction()?;
+    assert_eq!(get_item_snapshot(&tx, "item-1")?.unwrap().revision, 0);
 
     let _ = std::fs::remove_file(&path);
     Ok(())
