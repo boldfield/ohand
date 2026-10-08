@@ -219,11 +219,18 @@ final class IngressFlowTests: XCTestCase {
         let log: RenderLog
     }
 
-    private func makeSceneHarness(writer: FlakyWriter? = nil) -> SceneHarness {
+    private final class TestClock {
+        var current = Date(timeIntervalSince1970: 1_800_000_000)
+        func advance(_ seconds: TimeInterval) { current = current.addingTimeInterval(seconds) }
+    }
+
+    private func makeSceneHarness(writer: FlakyWriter? = nil, clock: TestClock? = nil) -> SceneHarness {
         let store = writer.map { writer in
             IngressStore(rootDirectory: rootDirectory, writeData: { data, url in try writer.write(data, to: url) })
         } ?? IngressStore(rootDirectory: rootDirectory)
-        let flow = IngressFlow(store: store, notificationCenter: NotificationCenter())
+        let flow = clock.map { clock in
+            IngressFlow(store: store, notificationCenter: NotificationCenter(), now: { clock.current })
+        } ?? IngressFlow(store: store, notificationCenter: NotificationCenter())
         IngressFlow.live = flow
         let session = IngressSession(flow: flow)
         let log = RenderLog()
@@ -312,6 +319,39 @@ final class IngressFlowTests: XCTestCase {
         enterForeground(harness)
 
         try assertSingleControlEntry(harness, launchKind: .warm, expectedRecordCount: 2)
+    }
+
+    func testControlActivationLongAfterAnUnrelatedDirectEntryGetsItsOwnRecord() async throws {
+        let clock = TestClock()
+        let harness = makeSceneHarness(clock: clock)
+        enterForeground(harness)
+        let directRecord = try XCTUnwrap(harness.flow.store.allRecords().first)
+        XCTAssertEqual(directRecord.source, .directLaunch)
+
+        clock.advance(120)
+        try await performControlAndWaitForRender(harness)
+
+        let records = harness.flow.store.allRecords()
+        XCTAssertEqual(records.count, 2)
+        XCTAssertEqual(harness.flow.store.loadRecord(captureId: directRecord.captureId), directRecord)
+        let controlRecord = try XCTUnwrap(records.first { $0.captureId != directRecord.captureId })
+        XCTAssertEqual(controlRecord.source, .controlIntent)
+        let lastRendered = try XCTUnwrap(harness.log.outcomes.last)
+        XCTAssertEqual(lastRendered.captureId, controlRecord.captureId)
+        XCTAssertEqual(lastRendered.source, .controlIntent)
+        XCTAssertEqual(lastRendered.status, .saved)
+        XCTAssertNil(harness.flow.store.loadPending())
+    }
+
+    func testControlActivationWithinTheClaimWindowStillClaimsTheForegroundEntry() async throws {
+        let clock = TestClock()
+        let harness = makeSceneHarness(clock: clock)
+        enterForeground(harness)
+        clock.advance(1)
+
+        try await performControlAndWaitForRender(harness)
+
+        try assertSingleControlEntry(harness, launchKind: .cold, expectedRecordCount: 1)
     }
 
     func testSecondControlTapInTheSameForegroundSessionIsANewEntry() async throws {

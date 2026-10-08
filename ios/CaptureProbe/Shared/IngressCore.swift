@@ -199,7 +199,10 @@ struct IngressOutcome: Equatable {
 ///
 /// It also remembers the entry committed during the current foreground session. A control handoff that arrives
 /// after the scene already committed a direct-launch entry claims that entry (relabelling its source) instead of
-/// minting a second ID, so one control activation yields one record whichever callback runs first.
+/// minting a second ID, so one control activation yields one record whichever callback runs first. The claim is
+/// bounded: it only applies within `claimWindow` of that commit, because only then can the foreground callback
+/// belong to the same activation as the intent. A later control tap in a long-lived foreground session never
+/// relabels the earlier entry; it gets its own record and ID.
 final class IngressFlow {
     static let handoffRegisteredNotification = Notification.Name("com.boldfield.ohand.probes.capture.handoff")
     static var live = IngressFlow(store: IngressStore(rootDirectory: IngressStore.defaultRootDirectory()))
@@ -212,15 +215,19 @@ final class IngressFlow {
     private var inMemoryPending: PendingEntry?
     private var sessionEntry: IngressOutcome?
     private var sessionEntryClaimed = false
+    private var sessionEntryCommittedAt = Date.distantPast
+    private let claimWindow: TimeInterval
 
     init(
         store: IngressStore,
         notificationCenter: NotificationCenter = .default,
+        claimWindow: TimeInterval = 5,
         now: @escaping () -> Date = Date.init,
         makeCaptureId: @escaping () -> String = { UUID().uuidString }
     ) {
         self.store = store
         self.notificationCenter = notificationCenter
+        self.claimWindow = claimWindow
         self.now = now
         self.makeCaptureId = makeCaptureId
     }
@@ -237,6 +244,7 @@ final class IngressFlow {
         defer { lock.unlock() }
         sessionEntry = nil
         sessionEntryClaimed = false
+        sessionEntryCommittedAt = Date.distantPast
     }
 
     private func timestamp() -> String {
@@ -268,7 +276,8 @@ final class IngressFlow {
         lock.lock()
         defer { lock.unlock() }
         let hasPending = (inMemoryPending ?? store.loadPending()) != nil
-        if source == .controlIntent, !hasPending, let entry = sessionEntry, !sessionEntryClaimed {
+        let withinClaimWindow = now().timeIntervalSince(sessionEntryCommittedAt) <= claimWindow
+        if source == .controlIntent, !hasPending, withinClaimWindow, let entry = sessionEntry, !sessionEntryClaimed {
             sessionEntryClaimed = true
             if entry.source != .controlIntent, (try? store.updateSource(captureId: entry.captureId, to: .controlIntent)) != nil {
                 sessionEntry = entry.withSource(.controlIntent)
@@ -319,6 +328,7 @@ final class IngressFlow {
             inMemoryPending = nil
             let committed = outcome(result == .created ? .saved : .replayed)
             sessionEntry = committed
+            sessionEntryCommittedAt = now()
             sessionEntryClaimed = record.source == .controlIntent
             return committed
         } catch {
