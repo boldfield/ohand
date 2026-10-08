@@ -573,7 +573,10 @@ mod tests {
         // Write a started attempt but truncate it before completion
         let mut f = fs::OpenOptions::new().append(true).open(file.path())?;
         use std::io::Write as StdWrite;
-        write!(f, r#"{{"record_type":"attempt","id":"b-attempt","case_id":""#)?;
+        write!(
+            f,
+            r#"{{"record_type":"attempt","id":"b-attempt","case_id":""#
+        )?;
         f.sync_all()?;
         drop(f);
 
