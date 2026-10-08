@@ -308,7 +308,7 @@
       },
       "recoverable": false,
       "recovery_notes": "Quoted speech contains nested instruction; the speaker is reporting someone else's words, not issuing a direct instruction.",
-      "notes": "Quoted/reported speech (especially nested 'remind me') must not be interpreted as a direct instruction. Must abstain or preserve as idea, not schedule. The capture still creates its item with the source preserved; the abstention means no derived facet (item type, reminder or topic) is applied."
+      "notes": "Quoted/reported speech (especially nested 'remind me') must not be interpreted as a direct instruction. Encoded outcome: abstain with Other(\"quoted speech\"); nothing is scheduled. The capture still creates its item with the source preserved; the abstention means no derived facet (item type, reminder or topic) is applied."
     },
     {
       "id": "hypothetical-question",
@@ -484,7 +484,7 @@
       },
       "recoverable": false,
       "recovery_notes": "The transcript names a date (next Monday) but no hour, so the time of day the user intends cannot be recovered.",
-      "notes": "Date without explicit time is ambiguous per I02 MissingHour. 'Next Monday' is identified but no time is provided. Must abstain or mark as ambiguous. No instant should be inferred."
+      "notes": "Date without explicit time is ambiguous per I02 MissingHour. 'Next Monday' is identified but no time is provided. Encoded outcome: an ambiguous reminder_proposal on the time phrase with no instant; no abstention."
     },
     {
       "id": "date-ambiguous-friday",
@@ -517,7 +517,7 @@
       },
       "recoverable": false,
       "recovery_notes": "The transcript names a date (Friday) but no hour, so the time of day the user intends cannot be recovered.",
-      "notes": "Date without explicit time is ambiguous per I02 MissingHour. 'Friday' identifies a date but no time is provided. Must abstain or mark as ambiguous. No instant should be inferred."
+      "notes": "Date without explicit time is ambiguous per I02 MissingHour. 'Friday' identifies a date but no time is provided. Encoded outcome: an ambiguous reminder_proposal on the time phrase with no instant; no abstention."
     },
     {
       "id": "date-ambiguous-maybe-friday",
@@ -682,7 +682,7 @@
       },
       "recoverable": false,
       "recovery_notes": "Initial 'Remind' is missing; target intent is uncertain without it.",
-      "notes": "ASR errors that drop significant words make intent uncertain. Must abstain, not guess the missing prefix. Transcript is authoritative; cannot invent missing audio."
+      "notes": "ASR errors that drop significant words make intent uncertain. Encoded outcome: abstain with UncertainTarget; do not guess the missing prefix. Transcript is authoritative; cannot invent missing audio."
     },
     {
       "id": "asr-dropped-word-action",
@@ -1058,7 +1058,7 @@
       },
       "recoverable": false,
       "recovery_notes": "No semantic content; cannot determine intent from filler words alone.",
-      "notes": "Pure filler/noise with no semantic content must abstain. No item should be created."
+      "notes": "Pure filler/noise with no semantic content: the capture still creates its item with the source preserved; the abstention (UncertainTarget) means no derived facet (item type, reminder or topic) is applied."
     },
     {
       "id": "very-long-transcript",
