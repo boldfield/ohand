@@ -12,13 +12,14 @@ udid="$1"
 app_path="$2"
 evidence_dir="$3"
 bundle_id="com.boldfield.ohand.probes.credential"
-console_log="${evidence_dir}/keychain-selftest-console.log"
 
 if [ ! -d "${app_path}" ]; then
   echo "ERROR: ${app_path} does not exist; build it before the self-test" >&2
   exit 1
 fi
 mkdir -p "${evidence_dir}"
+evidence_dir="$(cd "${evidence_dir}" && pwd)"
+console_log="${evidence_dir}/keychain-selftest-console.log"
 
 xcrun simctl bootstatus "${udid}" -b
 xcrun simctl install "${udid}" "${app_path}"
