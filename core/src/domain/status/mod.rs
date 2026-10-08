@@ -71,24 +71,12 @@ impl FromStr for SaveState {
 pub enum SyncState {
     /// Sync is not configured (M1 baseline).
     NotConfigured,
-    /// Sync is configured but not yet synced.
-    NotSynced,
-    /// Sync is pending (in progress).
-    Syncing,
-    /// Capture has been synced.
-    Synced,
-    /// Sync failed due to network/provider issue.
-    SyncFailed,
 }
 
 impl SyncState {
     pub fn as_str(&self) -> &'static str {
         match self {
             SyncState::NotConfigured => "not_configured",
-            SyncState::NotSynced => "not_synced",
-            SyncState::Syncing => "syncing",
-            SyncState::Synced => "synced",
-            SyncState::SyncFailed => "sync_failed",
         }
     }
 }
@@ -105,10 +93,6 @@ impl FromStr for SyncState {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "not_configured" => Ok(SyncState::NotConfigured),
-            "not_synced" => Ok(SyncState::NotSynced),
-            "syncing" => Ok(SyncState::Syncing),
-            "synced" => Ok(SyncState::Synced),
-            "sync_failed" => Ok(SyncState::SyncFailed),
             _ => Err(ParseStateError(format!("Unknown SyncState: {}", s))),
         }
     }
@@ -165,9 +149,11 @@ impl FromStr for ProcessingState {
 }
 
 /// Transcription state: audio transcription result per F01 contract.
-/// Only applies to voice captures; text captures are not_applicable (not represented).
+/// Only applies to voice captures; text captures have state not_applicable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TranscriptionState {
+    /// Not applicable: source is text, not audio.
+    NotApplicable,
     /// Audio saved, on-device transcription not started.
     AudioPending,
     /// Transcription in progress.
@@ -183,6 +169,7 @@ pub enum TranscriptionState {
 impl TranscriptionState {
     pub fn as_str(&self) -> &'static str {
         match self {
+            TranscriptionState::NotApplicable => "not_applicable",
             TranscriptionState::AudioPending => "audio_pending",
             TranscriptionState::Transcribing => "transcribing",
             TranscriptionState::Transcribed => "transcribed",
@@ -203,6 +190,7 @@ impl FromStr for TranscriptionState {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
+            "not_applicable" => Ok(TranscriptionState::NotApplicable),
             "audio_pending" => Ok(TranscriptionState::AudioPending),
             "transcribing" => Ok(TranscriptionState::Transcribing),
             "transcribed" => Ok(TranscriptionState::Transcribed),
@@ -210,6 +198,49 @@ impl FromStr for TranscriptionState {
             "transcription_failed" => Ok(TranscriptionState::TranscriptionFailed),
             _ => Err(ParseStateError(format!(
                 "Unknown TranscriptionState: {}",
+                s
+            ))),
+        }
+    }
+}
+
+/// Reason why reminder cannot be scheduled (for Unschedulable state).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnschedulableReason {
+    /// Scheduled time passed before scheduling attempt.
+    TimeInPast,
+    /// OS notification permission denied.
+    PermissionDenied,
+    /// System resource capacity exceeded.
+    CapacityExceeded,
+}
+
+impl UnschedulableReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            UnschedulableReason::TimeInPast => "time_in_past",
+            UnschedulableReason::PermissionDenied => "permission_denied",
+            UnschedulableReason::CapacityExceeded => "capacity_exceeded",
+        }
+    }
+}
+
+impl fmt::Display for UnschedulableReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for UnschedulableReason {
+    type Err = ParseStateError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "time_in_past" => Ok(UnschedulableReason::TimeInPast),
+            "permission_denied" => Ok(UnschedulableReason::PermissionDenied),
+            "capacity_exceeded" => Ok(UnschedulableReason::CapacityExceeded),
+            _ => Err(ParseStateError(format!(
+                "Unknown UnschedulableReason: {}",
                 s
             ))),
         }
@@ -416,6 +447,7 @@ pub struct ItemStatus {
     pub reminder_schedule_state: Option<ReminderScheduleState>,
     pub reminder_delivery_state: Option<ReminderDeliveryState>,
     pub reminder_acknowledgment_state: Option<ReminderAcknowledgmentState>,
+    pub unschedulable_reason: Option<UnschedulableReason>,
 }
 
 impl ItemStatus {
@@ -427,7 +459,7 @@ impl ItemStatus {
     ) -> anyhow::Result<Option<ItemStatus>> {
         use rusqlite::OptionalExtension;
 
-        let row: Option<(String, String, String, String)> = tx
+        let row: Option<(String, String, String, Option<String>)> = tx
             .query_row(
                 "SELECT save_state, sync_state, processing_state, transcription_state FROM items WHERE item_id = ?",
                 [item_id],
@@ -450,12 +482,16 @@ impl ItemStatus {
         let save_state = save_str.parse::<SaveState>()?;
         let sync_state = sync_str.parse::<SyncState>()?;
         let processing_state = processing_str.parse::<ProcessingState>()?;
-        let transcription_state = transcription_str.parse::<TranscriptionState>()?;
+        let transcription_state = transcription_str
+            .as_deref()
+            .map(|s| s.parse::<TranscriptionState>())
+            .transpose()?
+            .unwrap_or(TranscriptionState::NotApplicable);
 
         // Load reminder states if a reminder row exists for this item
-        let reminder_row: Option<(String, String, String, String)> = tx
+        let reminder_row: Option<(String, String, String, String, Option<String>)> = tx
             .query_row(
-                "SELECT request_state, schedule_state, delivery_state, acknowledgment_state FROM reminders WHERE item_id = ?",
+                "SELECT request_state, schedule_state, delivery_state, acknowledgment_state, unschedulable_reason FROM reminders WHERE item_id = ?",
                 [item_id],
                 |row| {
                     Ok((
@@ -463,6 +499,7 @@ impl ItemStatus {
                         row.get(1)?,
                         row.get(2)?,
                         row.get(3)?,
+                        row.get(4)?,
                     ))
                 },
             )
@@ -473,15 +510,20 @@ impl ItemStatus {
             reminder_schedule_state,
             reminder_delivery_state,
             reminder_acknowledgment_state,
-        ) = if let Some((req_str, sched_str, deliv_str, ack_str)) = reminder_row {
+            unschedulable_reason,
+        ) = if let Some((req_str, sched_str, deliv_str, ack_str, reason_str)) = reminder_row {
             (
                 Some(req_str.parse::<ReminderRequestState>()?),
                 Some(sched_str.parse::<ReminderScheduleState>()?),
                 Some(deliv_str.parse::<ReminderDeliveryState>()?),
                 Some(ack_str.parse::<ReminderAcknowledgmentState>()?),
+                reason_str
+                    .as_deref()
+                    .map(|s| s.parse::<UnschedulableReason>())
+                    .transpose()?,
             )
         } else {
-            (None, None, None, None)
+            (None, None, None, None, None)
         };
 
         Ok(Some(ItemStatus {
@@ -494,7 +536,17 @@ impl ItemStatus {
             reminder_schedule_state,
             reminder_delivery_state,
             reminder_acknowledgment_state,
+            unschedulable_reason,
         }))
+    }
+
+    /// Check if this status ever claims user attention.
+    /// Unschedulable, pending, and outage states never claim attention by themselves.
+    pub fn never_claims_attention(&self) -> bool {
+        matches!(
+            self.reminder_request_state,
+            Some(ReminderRequestState::Unschedulable | ReminderRequestState::NotScheduledYet)
+        )
     }
 }
 
@@ -513,17 +565,10 @@ mod tests {
 
     #[test]
     fn test_sync_state_roundtrip() {
-        for state in [
-            SyncState::NotConfigured,
-            SyncState::NotSynced,
-            SyncState::Syncing,
-            SyncState::Synced,
-            SyncState::SyncFailed,
-        ] {
-            let s = state.as_str();
-            let parsed: SyncState = s.parse().expect("should parse");
-            assert_eq!(state, parsed);
-        }
+        let state = SyncState::NotConfigured;
+        let s = state.as_str();
+        let parsed: SyncState = s.parse().expect("should parse");
+        assert_eq!(state, parsed);
     }
 
     #[test]
@@ -551,6 +596,7 @@ mod tests {
     #[test]
     fn test_transcription_state_roundtrip() {
         for state in [
+            TranscriptionState::NotApplicable,
             TranscriptionState::AudioPending,
             TranscriptionState::Transcribing,
             TranscriptionState::Transcribed,
@@ -619,6 +665,19 @@ mod tests {
     }
 
     #[test]
+    fn test_unschedulable_reason_roundtrip() {
+        for reason in [
+            UnschedulableReason::TimeInPast,
+            UnschedulableReason::PermissionDenied,
+            UnschedulableReason::CapacityExceeded,
+        ] {
+            let s = reason.as_str();
+            let parsed: UnschedulableReason = s.parse().expect("should parse");
+            assert_eq!(reason, parsed);
+        }
+    }
+
+    #[test]
     fn test_invalid_state_strings() {
         assert!("invalid".parse::<SaveState>().is_err());
         assert!("invalid".parse::<SyncState>().is_err());
@@ -628,5 +687,6 @@ mod tests {
         assert!("invalid".parse::<ReminderScheduleState>().is_err());
         assert!("invalid".parse::<ReminderDeliveryState>().is_err());
         assert!("invalid".parse::<ReminderAcknowledgmentState>().is_err());
+        assert!("invalid".parse::<UnschedulableReason>().is_err());
     }
 }
