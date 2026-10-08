@@ -33,7 +33,7 @@ use crate::domain::items::{
 };
 use crate::domain::status::{ProcessingState, ReminderRequestState};
 use crate::interpretation::contracts::{
-    Proposal, ReminderProposal, TextBasis, TimeResolutionQuality,
+    Proposal, ReminderProposal, SourceSpan, TextBasis, TimeResolutionQuality,
 };
 use crate::jobs::queue::{complete_job_in_tx, get_job_internal, Job, JobStatus};
 use crate::privacy::routing::{authorize_job, DenialReason, JOB_TYPE_INTERPRET};
@@ -684,7 +684,7 @@ fn record_reminder(
     {
         return Ok(ReminderDisposition::NotRecorded);
     }
-    if !states_reminder_intent(basis_text) {
+    if !states_reminder_intent(basis_text, candidate.source_span) {
         return Ok(ReminderDisposition::NoExplicitIntent);
     }
 
@@ -770,10 +770,12 @@ fn candidate_contradiction(
     None
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Token<'text> {
-    Word { text: &'text str, quoted: bool },
-    ClauseBreak,
+struct IntentToken {
+    text: String,
+    quoted: bool,
+    clause_break: bool,
+    start: usize,
+    end: usize,
 }
 
 const REMINDER_CUES: &[&[&str]] = &[
@@ -789,73 +791,153 @@ const NEGATING_WORDS: &[&str] = &[
     "not", "no", "never", "dont", "don't", "doesnt", "doesn't", "didnt", "didn't", "wont", "won't",
     "cant", "can't", "cannot", "without", "if", "said", "says",
 ];
+const COMPLETED_WORDS: &[&str] = &[
+    "already",
+    "had",
+    "have",
+    "has",
+    "did",
+    "was",
+    "were",
+    "been",
+    "previously",
+    "earlier",
+];
+const MODAL_WORDS: &[&str] = &[
+    "will", "would", "can", "could", "shall", "should", "may", "might", "must", "do", "does",
+];
+const FIRST_PERSON_REQUESTERS: &[&str] = &["i'll", "i'd", "we'll", "we'd", "you'll", "you'd"];
+const SUBJECT_PRONOUNS: &[&str] = &["i", "you", "we"];
+const REQUEST_LEAD_INS: &[&str] = &[
+    "please", "pls", "kindly", "to", "and", "then", "also", "hey", "ok", "okay", "now", "need",
+    "want", "like",
+];
 const NEGATION_LOOKBACK: usize = 4;
 
-fn tokenize_intent_text(text: &str) -> Vec<(String, bool, bool)> {
-    // (lowercased word, quoted, is_clause_break)
+fn tokenize_intent_text(text: &str) -> Vec<IntentToken> {
+    let characters: Vec<char> = text.chars().collect();
     let mut tokens = Vec::new();
     let mut word = String::new();
+    let mut word_start = 0;
     let mut quoted = false;
-    let flush = |word: &mut String, quoted: bool, tokens: &mut Vec<(String, bool, bool)>| {
+    let flush = |word: &mut String,
+                 start: usize,
+                 end: usize,
+                 quoted: bool,
+                 tokens: &mut Vec<IntentToken>| {
         if !word.is_empty() {
-            tokens.push((std::mem::take(word), quoted, false));
+            tokens.push(IntentToken {
+                text: std::mem::take(word),
+                quoted,
+                clause_break: false,
+                start,
+                end,
+            });
         }
     };
-    for character in text.chars() {
+    for (index, character) in characters.iter().copied().enumerate() {
+        let between_digits = index > 0
+            && characters[index - 1].is_ascii_digit()
+            && characters
+                .get(index + 1)
+                .is_some_and(|next| next.is_ascii_digit());
         match character {
             '"' | '\u{201c}' | '\u{201d}' => {
-                flush(&mut word, quoted, &mut tokens);
+                flush(&mut word, word_start, index, quoted, &mut tokens);
                 quoted = !quoted;
             }
-            '\'' | '\u{2019}' => word.push('\''),
-            '.' | ',' | ';' | ':' | '!' | '?' | '\n' | '(' | ')' => {
-                flush(&mut word, quoted, &mut tokens);
-                tokens.push((String::new(), quoted, true));
+            '\'' | '\u{2019}' => {
+                if word.is_empty() {
+                    word_start = index;
+                }
+                word.push('\'');
             }
-            other if other.is_alphanumeric() => word.extend(other.to_lowercase()),
-            _ => flush(&mut word, quoted, &mut tokens),
+            '.' | ',' | ':' if between_digits => word.push(character),
+            '.' | ',' | ';' | ':' | '!' | '?' | '\n' | '(' | ')' => {
+                flush(&mut word, word_start, index, quoted, &mut tokens);
+                tokens.push(IntentToken {
+                    text: String::new(),
+                    quoted,
+                    clause_break: true,
+                    start: index,
+                    end: index + 1,
+                });
+            }
+            other if other.is_alphanumeric() => {
+                if word.is_empty() {
+                    word_start = index;
+                }
+                word.extend(other.to_lowercase());
+            }
+            _ => flush(&mut word, word_start, index, quoted, &mut tokens),
         }
     }
-    flush(&mut word, quoted, &mut tokens);
+    flush(&mut word, word_start, characters.len(), quoted, &mut tokens);
     tokens
 }
 
 /// Whether `text` itself asks for a reminder: a documented cue ("remind me", "set a reminder",
-/// "alert/notify/ping me") outside quotation marks and without a negating or reported-speech word
-/// ("don't", "never", "if", "said", ...) earlier in the same clause. The model's candidate is never
-/// evidence of intent; a dated fact such as "the quote expires 2026-01-16 09:00:00" is not a request.
-fn states_reminder_intent(text: &str) -> bool {
+/// "alert/notify/ping me") outside quotation marks, as a present-tense first-person request (no
+/// negating or reported-speech word, no completed-work word such as "already", no third-party
+/// subject) earlier in the same clause.
+///
+/// With a `time_span` (character offsets of the phrase the model quoted), the request must also
+/// govern that phrase: the span starts after the cue with no clause break in between. The model's
+/// candidate is never evidence of intent, and its choice of span cannot attach an unrelated date
+/// ("the quote expires 2026-01-16 09:00:00") to a request made elsewhere in the text.
+fn states_reminder_intent(text: &str, time_span: Option<SourceSpan>) -> bool {
     let tokens = tokenize_intent_text(text);
-    let words: Vec<Token<'_>> = tokens
-        .iter()
-        .map(|(word, quoted, is_break)| {
-            if *is_break {
-                Token::ClauseBreak
-            } else {
-                Token::Word {
-                    text: word.as_str(),
-                    quoted: *quoted,
-                }
-            }
-        })
-        .collect();
-    (0..words.len()).any(|start| {
+    (0..tokens.len()).any(|start| {
         REMINDER_CUES.iter().any(|cue| {
-            let matches_cue = words.get(start..start + cue.len()).is_some_and(|window| {
-                window.iter().zip(cue.iter()).all(|(token, expected)| {
-                    matches!(token, Token::Word { text, quoted: false } if text == expected)
-                })
+            let Some(window) = tokens.get(start..start + cue.len()) else {
+                return false;
+            };
+            let matches_cue = window.iter().zip(cue.iter()).all(|(token, expected)| {
+                !token.quoted && !token.clause_break && token.text == *expected
             });
-            matches_cue && !negated_before(&words, start)
+            if !matches_cue || !is_present_first_person_request(&tokens, start, cue[0]) {
+                return false;
+            }
+            let cue_end = window[cue.len() - 1].end;
+            time_span.is_none_or(|span| {
+                span.start >= cue_end
+                    && !tokens.iter().any(|token| {
+                        token.clause_break && token.start >= cue_end && token.start < span.start
+                    })
+            })
         })
     })
 }
 
-fn negated_before(words: &[Token<'_>], cue_start: usize) -> bool {
-    words[..cue_start]
+fn is_present_first_person_request(tokens: &[IntentToken], cue_start: usize, verb: &str) -> bool {
+    let clause_words: Vec<&str> = tokens[..cue_start]
         .iter()
         .rev()
+        .take_while(|token| !token.clause_break)
+        .map(|token| token.text.as_str())
+        .collect();
+    if clause_words
+        .iter()
         .take(NEGATION_LOOKBACK)
-        .take_while(|token| matches!(token, Token::Word { .. }))
-        .any(|token| matches!(token, Token::Word { text, .. } if NEGATING_WORDS.contains(text)))
+        .any(|word| NEGATING_WORDS.contains(word) || COMPLETED_WORDS.contains(word))
+    {
+        return false;
+    }
+    let Some(&previous) = clause_words.first() else {
+        return true;
+    };
+    let before_previous = clause_words.get(1).copied();
+    if REQUEST_LEAD_INS.contains(&previous) || FIRST_PERSON_REQUESTERS.contains(&previous) {
+        return true;
+    }
+    if MODAL_WORDS.contains(&previous) {
+        return before_previous.is_none_or(|subject| SUBJECT_PRONOUNS.contains(&subject));
+    }
+    if SUBJECT_PRONOUNS.contains(&previous) {
+        let inverted_question = before_previous.is_some_and(|word| MODAL_WORDS.contains(&word));
+        let delegated = before_previous.is_some_and(|word| REQUEST_LEAD_INS.contains(&word));
+        return (inverted_question || delegated)
+            || (previous == "you" && verb != "set" && verb != "add");
+    }
+    false
 }

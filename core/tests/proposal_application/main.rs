@@ -1379,6 +1379,10 @@ fn a_dated_fact_that_does_not_ask_for_a_reminder_stays_unscheduled() {
         "don't remind me to call the roofer 2026-01-16 09:00:00",
         "she said \"remind me to call the roofer 2026-01-16 09:00:00\"",
         "if you remind me call the roofer 2026-01-16 09:00:00",
+        "remind me to call Bob. the roof quote expires 2026-01-16 09:00:00",
+        "remind me to call Bob tomorrow; the roof quote expires 2026-01-16 09:00:00",
+        "I already set a reminder for 2026-01-16 09:00:00",
+        "Bob will remind me 2026-01-16 09:00:00",
     ] {
         let (fixture, disposition) = apply_reminder_candidate(
             text,
@@ -1392,6 +1396,32 @@ fn a_dated_fact_that_does_not_ask_for_a_reminder_stays_unscheduled() {
         assert_eq!(fixture.reminder_effects(), None, "{text}");
         assert_eq!(fixture.durable().item_type.as_deref(), Some("action"));
         assert_eq!(fixture.durable().processing_state, "processed");
+    }
+}
+
+#[test]
+fn natural_first_person_reminder_requests_bind_to_the_quoted_time() {
+    for text in [
+        "please remind me to call the roofer 2026-01-16 09:00:00",
+        "can you remind me to call the roofer at 2026-01-16 09:00:00",
+        "I need to set a reminder for 2026-01-16 09:00:00",
+        "set a reminder for 2026-01-16 09:00:00 to call the roofer",
+        "I'll need you to remind me on 2026-01-16 09:00:00",
+    ] {
+        let (fixture, disposition) = apply_reminder_candidate(
+            text,
+            "2026-01-16 09:00:00",
+            Some("2026-01-16T09:00:00Z"),
+            TimeResolutionQuality::Explicit,
+            ItemType::Action,
+        );
+
+        assert_eq!(
+            disposition,
+            ReminderDisposition::Recorded(ReminderRequestState::Resolved),
+            "{text}"
+        );
+        assert!(fixture.reminder_effects().is_some(), "{text}");
     }
 }
 
