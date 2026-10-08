@@ -58,7 +58,7 @@ final class ManagementHandoffUITests: XCTestCase {
             expectRejectedCount(index + 1)
         }
         expectManagementShell(shows: [coldId, warmId], phase: "rejected")
-        XCTAssertEqual(managementApp.staticTexts.matching(NSPredicate(format: "label MATCHES %@", uuidPattern)).count, 2)
+        XCTAssertEqual(managementApp.descendants(matching: .any).matching(NSPredicate(format: "label MATCHES %@", uuidPattern)).count, 2)
         print("HANDOFF-PHASE rejected - \(hostileURLs.count)")
         screenshot(managementApp, "management-rejected")
     }
@@ -69,6 +69,10 @@ final class ManagementHandoffUITests: XCTestCase {
             return
         }
 
+        managementApp.terminate()
+        managementApp.launchArguments = largeTextArguments
+        managementApp.launch()
+        XCTAssertTrue(managementApp.wait(for: .runningForeground, timeout: 30))
         captureApp.terminate()
         captureApp.launchArguments = largeTextArguments
         captureApp.launch()
@@ -86,16 +90,8 @@ final class ManagementHandoffUITests: XCTestCase {
         screenshot(captureApp, "capture-large-text")
         print("HANDOFF-PHASE large-text-capture \(entryId) scrolls=\(scrolls)")
 
-        managementApp.terminate()
-        managementApp.launchArguments = largeTextArguments
-        managementApp.launch()
-        XCTAssertTrue(managementApp.wait(for: .runningForeground, timeout: 30))
-        captureApp.activate()
         tapManagementButton()
-        XCTAssertTrue(
-            managementApp.staticTexts[entryId].waitForExistence(timeout: 30),
-            "handed-off identifier not shown at the largest text size"
-        )
+        expectManagementShell(shows: [entryId], phase: "large-text-management")
         screenshot(managementApp, "management-large-text")
         print("HANDOFF-PHASE large-text-management \(entryId) ok")
     }
@@ -125,20 +121,22 @@ final class ManagementHandoffUITests: XCTestCase {
 
     private func expectManagementShell(shows captureIds: [String], phase: String) {
         for captureId in captureIds {
-            XCTAssertTrue(
-                managementApp.staticTexts[captureId].waitForExistence(timeout: 30),
-                "\(phase): management shell does not list \(captureId)"
-            )
+            let found = shellElements(labelContaining: captureId).firstMatch.waitForExistence(timeout: 30)
+            if !found { print("SHELL-DEBUG \(phase) missing \(captureId)\n\(managementApp.debugDescription)") }
+            XCTAssertTrue(found, "\(phase): management shell does not list \(captureId)")
         }
         screenshot(managementApp, "management-\(phase)")
     }
 
+    private func shellElements(labelContaining text: String) -> XCUIElementQuery {
+        managementApp.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", text))
+    }
+
     private func expectRejectedCount(_ count: Int) {
         XCTAssertTrue(managementApp.wait(for: .runningForeground, timeout: 30), "management shell not foreground")
-        let summary = managementApp.staticTexts.matching(
-            NSPredicate(format: "label CONTAINS %@", "Handoffs rejected: \(count).")
-        ).firstMatch
-        XCTAssertTrue(summary.waitForExistence(timeout: 30), "shell never reported \(count) rejected handoff(s)")
+        let found = shellElements(labelContaining: "Handoffs rejected: \(count).").firstMatch.waitForExistence(timeout: 30)
+        if !found { print("SHELL-DEBUG rejected missing count \(count)\n\(managementApp.debugDescription)") }
+        XCTAssertTrue(found, "shell never reported \(count) rejected handoff(s)")
     }
 
     private func screenshot(_ app: XCUIApplication, _ name: String) {
