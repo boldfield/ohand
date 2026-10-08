@@ -1,53 +1,123 @@
 {
   "evidence_id": "spark-phone-2026-10-08",
+  "revision": 2,
   "task": "V08b",
   "collector": "maintainer",
   "device": "iPhone 16 Pro",
   "ios_version": "26.6.2",
-  "client": "Safari, plain navigation to the models path of the configured base URL",
-  "path_to_endpoint": "Tailscale; endpoint is private-network only (not publicly resolvable)",
-  "scheme": "https",
-  "credential_sent": false,
-  "note": "The endpoint enforces no authentication (confirmed by the coordinator from a Mac on the private network at 2026-10-08T06:40Z: unauthenticated GET /models and POST /chat/completions both returned 200). A browser cannot attach a bearer header, and there is nothing for it to prove, so only the unauthenticated request was made. Endpoint address, SSID, carrier and Tailscale node names are intentionally omitted.",
+  "client": "a-Shell curl, status taken from curl's http_code and ssl_verify_result write-out; screenshots of each terminal session retained privately by the maintainer",
+  "hostnames": {
+    "configured": "the base URL hostname from the provider configuration; split-horizon DNS: resolves to the private reverse proxy on the home LAN and to a public web forwarder elsewhere",
+    "tailnet": "the Spark node's Tailscale MagicDNS name; resolvable only with Tailscale connected"
+  },
   "attempts": [
     {
       "network": "wifi",
       "tailscale_connected": true,
-      "collection_time": "2026-10-08T06:42:00Z",
-      "result": "success",
-      "http_status_inferred": 200,
-      "certificate": "validated, no Safari warning",
-      "models_count": 6,
-      "model_ids": [
-        "deepseek-flash-iq3:latest",
-        "qwen3.8:27b",
-        "qwen3.5:122b",
-        "gpt-oss:120b",
-        "gpt-oss:20b",
-        "glm-5.3-flash"
-      ]
+      "hostname": "configured",
+      "request": "GET /v1/models",
+      "credential_sent": false,
+      "http_status_observed": 200,
+      "tls": "https, certificate verified (curl ssl_verify_result=0)",
+      "collection_time": "2026-10-08T16:34:00Z"
+    },
+    {
+      "network": "wifi",
+      "tailscale_connected": true,
+      "hostname": "configured",
+      "request": "GET /v1/models",
+      "credential_sent": true,
+      "http_status_observed": 200,
+      "tls": "https, certificate verified (curl ssl_verify_result=0)",
+      "collection_time": "2026-10-08T16:34:00Z"
     },
     {
       "network": "cellular",
       "tailscale_connected": true,
-      "collection_time": "2026-10-08T06:44:30Z",
-      "result": "success",
-      "http_status_inferred": 200,
-      "certificate": "validated, no Safari warning",
-      "models_count": 6,
-      "model_ids": [
-        "deepseek-flash-iq3:latest",
-        "qwen3.8:27b",
-        "qwen3.5:122b",
-        "gpt-oss:120b",
-        "gpt-oss:20b",
-        "glm-5.3-flash"
-      ]
+      "hostname": "configured",
+      "request": "GET /v1/models",
+      "credential_sent": false,
+      "http_status_observed": 302,
+      "tls": "https, certificate verified (curl ssl_verify_result=0)",
+      "collection_time": "2026-10-08T16:35:00Z",
+      "note": "Public forwarder answered a redirect to the tailnet hostname; curl without -L stops here."
+    },
+    {
+      "network": "cellular",
+      "tailscale_connected": true,
+      "hostname": "configured",
+      "request": "GET /v1/models",
+      "credential_sent": true,
+      "http_status_observed": 302,
+      "tls": "https, certificate verified (curl ssl_verify_result=0)",
+      "collection_time": "2026-10-08T16:35:00Z",
+      "note": "Same redirect; the credential does not change the response."
+    },
+    {
+      "network": "cellular",
+      "tailscale_connected": true,
+      "hostname": "tailnet",
+      "request": "GET /v1/models",
+      "credential_sent": false,
+      "http_status_observed": 200,
+      "tls": "https, certificate verified (curl ssl_verify_result=0)",
+      "collection_time": "2026-10-08T16:39:00Z"
+    },
+    {
+      "network": "cellular",
+      "tailscale_connected": true,
+      "hostname": "tailnet",
+      "request": "GET /v1/models",
+      "credential_sent": true,
+      "http_status_observed": 200,
+      "tls": "https, certificate verified (curl ssl_verify_result=0)",
+      "collection_time": "2026-10-08T16:39:00Z"
+    },
+    {
+      "network": "cellular",
+      "tailscale_connected": true,
+      "hostname": "configured",
+      "request": "GET /v1/models with curl -L",
+      "credential_sent": false,
+      "http_status_observed": 200,
+      "final_url": "tailnet hostname, same path",
+      "tls": "https, certificate verified on both hops",
+      "collection_time": "2026-10-08T16:39:00Z"
+    },
+    {
+      "network": "wifi",
+      "tailscale_connected": true,
+      "hostname": "tailnet",
+      "request": "GET /v1/models",
+      "credential_sent": false,
+      "http_status_observed": 200,
+      "tls": "https, certificate verified (curl ssl_verify_result=0)",
+      "collection_time": "2026-10-08T16:39:00Z"
     }
   ],
+  "model_list": {
+    "source": "Safari rendering of GET /v1/models on Wi-Fi and cellular (revision 1, 2026-10-08T06:42Z), identical in both contexts",
+    "count": 6,
+    "model_ids": [
+      "deepseek-flash-iq3:latest",
+      "qwen3.8:27b",
+      "qwen3.5:122b",
+      "gpt-oss:120b",
+      "gpt-oss:20b",
+      "glm-5.3-flash"
+    ]
+  },
+  "authentication": "Not enforced. Unauthenticated and credentialed requests returned identical statuses in every context, consistent with the V08a worker-context artifact.",
+  "compatibility_boundary": [
+    "On the home LAN the configured hostname reaches the endpoint directly.",
+    "Off the LAN the configured hostname resolves to a public web forwarder that answers 302 to the tailnet hostname. The forwarder also answers 302 to POST requests (coordinator observation from the public address, 2026-10-08). An HTTP client that converts a redirected POST to GET, which Foundation URLSession does for 302, cannot complete chat completions through the configured hostname off-LAN.",
+    "The tailnet hostname reaches the endpoint directly on both Wi-Fi and cellular whenever Tailscale is connected. V09 should treat that as the phone-context base URL, or the forwarder must emit 307/308, which it does not today.",
+    "Tailscale must be connected for off-LAN use; nothing here tests behaviour with Tailscale disconnected."
+  ],
   "observations": [
-    "Both contexts returned the identical six-model list; owned_by values were ollama for five models and llamacpp for one.",
-    "Safari does not display the numeric HTTP status; 200 is inferred from the rendered JSON body. Collection times are from the coordinator session clock when the maintainer reported each result, accurate to about a minute.",
-    "The maintainer's configuration lists seven models; the endpoint serves six. The missing one is the IQ3_XXS GLM variant."
+    "Revision 1 of this record (Safari only, inferred status) is superseded by these observed statuses.",
+    "Collection times are the phone's local clock in the screenshots converted from UTC-7, accurate to about a minute.",
+    "The maintainer's configuration lists seven models; the endpoint serves six. The missing one is the IQ3_XXS GLM variant.",
+    "Endpoint addresses, the tailnet name, the credential value, SSID, carrier and node identifiers are intentionally omitted."
   ]
 }
