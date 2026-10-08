@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core"]
+members = ["core", "core/bindings"]
 exclude = ["probes/tauri/src-tauri"]
 
 [workspace.dependencies]
