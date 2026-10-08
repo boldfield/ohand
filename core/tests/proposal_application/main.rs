@@ -1383,6 +1383,13 @@ fn a_dated_fact_that_does_not_ask_for_a_reminder_stays_unscheduled() {
         "remind me to call Bob tomorrow; the roof quote expires 2026-01-16 09:00:00",
         "I already set a reminder for 2026-01-16 09:00:00",
         "Bob will remind me 2026-01-16 09:00:00",
+        "Bob is going to remind me 2026-01-16 09:00:00",
+        "Bob wants to remind me 2026-01-16 09:00:00",
+        "Bob promised to remind me 2026-01-16 09:00:00",
+        "they need to remind me 2026-01-16 09:00:00",
+        "I told Bob to remind me 2026-01-16 09:00:00",
+        "my assistant will call and remind me 2026-01-16 09:00:00",
+        "she needs to set a reminder for 2026-01-16 09:00:00",
     ] {
         let (fixture, disposition) = apply_reminder_candidate(
             text,
@@ -1407,6 +1414,12 @@ fn natural_first_person_reminder_requests_bind_to_the_quoted_time() {
         "I need to set a reminder for 2026-01-16 09:00:00",
         "set a reminder for 2026-01-16 09:00:00 to call the roofer",
         "I'll need you to remind me on 2026-01-16 09:00:00",
+        "I need you to remind me on 2026-01-16 09:00:00",
+        "I'd like you to remind me on 2026-01-16 09:00:00",
+        "we want to set a reminder for 2026-01-16 09:00:00",
+        "I'm going to set a reminder for 2026-01-16 09:00:00",
+        "need to set a reminder for 2026-01-16 09:00:00",
+        "could you please remind me on 2026-01-16 09:00:00",
     ] {
         let (fixture, disposition) = apply_reminder_candidate(
             text,

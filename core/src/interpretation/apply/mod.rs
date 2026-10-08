@@ -808,10 +808,14 @@ const MODAL_WORDS: &[&str] = &[
 ];
 const FIRST_PERSON_REQUESTERS: &[&str] = &["i'll", "i'd", "we'll", "we'd", "you'll", "you'd"];
 const SUBJECT_PRONOUNS: &[&str] = &["i", "you", "we"];
-const REQUEST_LEAD_INS: &[&str] = &[
-    "please", "pls", "kindly", "to", "and", "then", "also", "hey", "ok", "okay", "now", "need",
-    "want", "like",
+const FIRST_PERSON_SUBJECTS: &[&str] = &["i", "we", "i'll", "i'd", "we'll", "we'd"];
+const FIRST_PERSON_PROGRESSIVE: &[&str] = &["i'm", "im", "we're"];
+const POLITENESS_WORDS: &[&str] = &[
+    "please", "pls", "kindly", "and", "then", "also", "hey", "ok", "okay", "now", "just",
 ];
+/// Verbs that, followed by "to", carry the speaker's own request ("I need to", "I'd like to").
+/// Only their first-person forms are listed: "Bob wants to" or "she needs to" is not a request.
+const INTENTION_VERBS: &[&str] = &["need", "want", "like", "love"];
 const NEGATION_LOOKBACK: usize = 4;
 
 fn tokenize_intent_text(text: &str) -> Vec<IntentToken> {
@@ -923,21 +927,68 @@ fn is_present_first_person_request(tokens: &[IntentToken], cue_start: usize, ver
     {
         return false;
     }
-    let Some(&previous) = clause_words.first() else {
-        return true;
+    match skip_politeness(&clause_words) {
+        [] => true,
+        ["to", governing @ ..] => is_first_person_intention(governing),
+        ["wanna", subject @ ..] => is_first_person_subject(subject),
+        ["gonna", subject @ ..] => is_first_person_progressive(subject),
+        [previous, ..] if FIRST_PERSON_REQUESTERS.contains(previous) => true,
+        [modal, subject @ ..] if MODAL_WORDS.contains(modal) => subject
+            .first()
+            .is_none_or(|subject| SUBJECT_PRONOUNS.contains(subject)),
+        [pronoun, before @ ..] if SUBJECT_PRONOUNS.contains(pronoun) => {
+            let inverted_question = before
+                .first()
+                .is_some_and(|word| MODAL_WORDS.contains(word));
+            inverted_question || (*pronoun == "you" && verb != "set" && verb != "add")
+        }
+        _ => false,
+    }
+}
+
+/// Clause words (nearest first) before an infinitive cue ("... to remind me"): the governing verb
+/// must be the speaker's own need or intention, optionally addressed to the assistant ("I need
+/// you to"). Third-party subjects ("they need to", "Bob is going to"), third-person verb forms
+/// ("Bob wants to"), other verbs ("Bob promised to") and delegation to someone else ("I told Bob
+/// to") are not requests.
+fn is_first_person_intention(words: &[&str]) -> bool {
+    let words = match words {
+        ["you", governing @ ..] => governing,
+        other => other,
     };
-    let before_previous = clause_words.get(1).copied();
-    if REQUEST_LEAD_INS.contains(&previous) || FIRST_PERSON_REQUESTERS.contains(&previous) {
-        return true;
+    match words {
+        [verb, subject @ ..] if INTENTION_VERBS.contains(verb) => is_first_person_subject(subject),
+        ["going", subject @ ..] => is_first_person_progressive(subject),
+        _ => false,
     }
-    if MODAL_WORDS.contains(&previous) {
-        return before_previous.is_none_or(|subject| SUBJECT_PRONOUNS.contains(&subject));
+}
+
+/// Words before a first-person intention verb: none (a note such as "need to set a reminder"),
+/// "I"/"we" (possibly contracted with a modal), or a modal after "I"/"we" ("I will need to").
+fn is_first_person_subject(words: &[&str]) -> bool {
+    match skip_politeness(words) {
+        [] => true,
+        [subject, ..] if FIRST_PERSON_SUBJECTS.contains(subject) => true,
+        [modal, subject, ..] => {
+            MODAL_WORDS.contains(modal) && FIRST_PERSON_SUBJECTS.contains(subject)
+        }
+        _ => false,
     }
-    if SUBJECT_PRONOUNS.contains(&previous) {
-        let inverted_question = before_previous.is_some_and(|word| MODAL_WORDS.contains(&word));
-        let delegated = before_previous.is_some_and(|word| REQUEST_LEAD_INS.contains(&word));
-        return (inverted_question || delegated)
-            || (previous == "you" && verb != "set" && verb != "add");
+}
+
+/// Words before "going to"/"gonna": "I'm", "we're", "I am" or "we are".
+fn is_first_person_progressive(words: &[&str]) -> bool {
+    match words {
+        [subject, ..] if FIRST_PERSON_PROGRESSIVE.contains(subject) => true,
+        ["am", "i", ..] | ["are", "we", ..] => true,
+        _ => false,
     }
-    false
+}
+
+fn skip_politeness<'slice, 'word>(words: &'slice [&'word str]) -> &'slice [&'word str] {
+    let skipped = words
+        .iter()
+        .take_while(|word| POLITENESS_WORDS.contains(word))
+        .count();
+    &words[skipped..]
 }
