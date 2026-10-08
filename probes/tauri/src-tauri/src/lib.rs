@@ -5,6 +5,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ohand_tauri_handoff::{HandoffInbox, HandoffSnapshot};
 use tauri::Manager;
 
+#[cfg(target_os = "ios")]
+mod scene_cold_url;
+
 const ROUNDTRIP_RECORD_FILE: &str = "roundtrip.json";
 const HANDOFF_DIRECTORY: &str = "handoffs";
 
@@ -56,7 +59,6 @@ fn list_handoffs(
         .map_err(|error| error.to_string())
 }
 
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
 fn now_unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -67,7 +69,7 @@ fn now_unix_ms() -> u64 {
 /// Native URL receiver. It runs from the application's open-URL event, not from a webview command, so a handoff is
 /// stored whether or not the web UI has loaded.
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
-fn record_opened_urls(app: &tauri::AppHandle, urls: &[tauri::Url]) {
+fn record_opened_urls<'a>(app: &tauri::AppHandle, urls: impl Iterator<Item = &'a str>) {
     use ohand_tauri_handoff::{receive_urls, ReceiveOutcome};
 
     let inbox = match handoff_inbox(app) {
@@ -80,7 +82,7 @@ fn record_opened_urls(app: &tauri::AppHandle, urls: &[tauri::Url]) {
     let webview_ready = app.state::<WebviewReady>().0.load(Ordering::SeqCst);
     let outcomes = receive_urls(
         &inbox,
-        urls.iter().map(|url| url.as_str()),
+        urls,
         webview_ready,
         now_unix_ms(),
     );
@@ -106,13 +108,56 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    app.run(|app_handle, event| match event {
-        #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
-        tauri::RunEvent::Opened { urls } => record_opened_urls(app_handle, &urls),
-        _ => {
-            let _ = app_handle;
+    #[cfg(target_os = "ios")]
+    {
+        let handle = app.handle().clone();
+        let installed = scene_cold_url::install(move |urls| {
+            trace_label(&handle, &format!("scene-connect urls={}", urls.len()));
+            record_opened_urls(&handle, urls.iter().map(String::as_str));
+        });
+        trace_label(app.handle(), &format!("scene-hook installed={installed}"));
+    }
+
+    app.run(|app_handle, event| {
+        trace_run_event(app_handle, &event);
+        match event {
+            #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
+            tauri::RunEvent::Opened { urls } => {
+                record_opened_urls(app_handle, urls.iter().map(|url| url.as_str()))
+            }
+            _ => {
+                let _ = app_handle;
+            }
         }
     });
+}
+
+/// Temporary delivery trace (task P07): lets CI show whether the OS handed the shell a URL at all on a cold launch.
+fn trace_run_event(app: &tauri::AppHandle, event: &tauri::RunEvent) {
+    let label = match event {
+        tauri::RunEvent::Ready => "ready".to_string(),
+        tauri::RunEvent::Resumed => "resumed".to_string(),
+        #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
+        tauri::RunEvent::Opened { urls } => format!("opened urls={}", urls.len()),
+        _ => return,
+    };
+    trace_label(app, &label);
+}
+
+fn trace_label(app: &tauri::AppHandle, label: &str) {
+    use std::io::Write;
+
+    let Ok(data_dir) = app.path().app_data_dir() else { return };
+    if fs::create_dir_all(&data_dir).is_err() {
+        return;
+    }
+    if let Ok(mut file) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(data_dir.join("run-events.log"))
+    {
+        let _ = writeln!(file, "{} {label}", now_unix_ms());
+    }
 }
 
 #[cfg(test)]

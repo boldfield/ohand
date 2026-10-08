@@ -274,6 +274,7 @@ jobs:
             exit 1
           fi
           echo "App bundle: ${app_path}" | tee -a .evidence/roundtrip.log
+          plutil -p "${app_path}/Info.plist" > .evidence/app-Info.plist.txt
 
           xcrun simctl bootstatus "${SIMULATOR_UDID}" -b 2>&1 | tee -a .evidence/roundtrip.log
           xcrun simctl install "${SIMULATOR_UDID}" "${app_path}" 2>&1 | tee -a .evidence/roundtrip.log
@@ -355,6 +356,7 @@ jobs:
           find "${tauri_data_dir}" -type f | tee "${evidence_dir}/shell-container-files.txt" || true
           handoff_dir="$(find "${tauri_data_dir}" -type d -name handoffs | head -1)"
           if [ -n "${handoff_dir}" ]; then cp -R "${handoff_dir}" "${evidence_dir}/shell-handoffs"; fi
+          cp -R "${tauri_data_dir}/Library/Application Support" "${evidence_dir}/shell-app-support" || true
           if [ -d "${capture_root}" ]; then cp -R "${capture_root}" "${evidence_dir}/capture-root"; fi
 
           if [ "${uitest_status}" -ne 0 ]; then
