@@ -17,7 +17,7 @@ pub struct QueryFilter {
     /// Route IDs to include (processing/privacy-route filters).
     /// Empty vec means no filter.
     pub route_ids: Vec<String>,
-    /// Session topics to include (exact match, case-sensitive).
+    /// Session topics to include (matched case-insensitively with whitespace normalized).
     /// Empty vec means no filter. If specified, includes items with matching session_topic.
     pub session_topics: Vec<String>,
     /// Include items with no session topic set.
