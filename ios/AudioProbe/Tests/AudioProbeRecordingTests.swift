@@ -115,9 +115,9 @@ final class AudioProbeRecordingTests: XCTestCase {
         _ type: AVAudioSession.InterruptionType,
         options: AVAudioSession.InterruptionOptions? = nil
     ) {
-        var userInfo: [AnyHashable: Any] = [AVAudioSession.interruptionTypeKey: type.rawValue]
+        var userInfo: [AnyHashable: Any] = [AVAudioSessionInterruptionTypeKey: type.rawValue]
         if let options = options {
-            userInfo[AVAudioSession.interruptionOptionKey] = options.rawValue
+            userInfo[AVAudioSessionInterruptionOptionKey] = options.rawValue
         }
         notificationCenter.post(name: AVAudioSession.interruptionNotification, object: nil, userInfo: userInfo)
     }

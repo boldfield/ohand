@@ -112,7 +112,7 @@ final class AudioRecorder {
             object: nil,
             queue: nil
         ) { [weak self] notification in
-            let typeValue = notification.userInfo?[AVAudioSession.interruptionTypeKey] as? UInt
+            let typeValue = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
             if Thread.isMainThread {
                 self?.handleInterruption(typeValue: typeValue)
             } else {
