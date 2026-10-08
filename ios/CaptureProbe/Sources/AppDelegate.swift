@@ -1,4 +1,5 @@
 import UIKit
+import Foundation
 
 @main
 class CaptureProbeDelegateAdapter: UIResponder, UIApplicationDelegate {
@@ -36,6 +37,9 @@ class CaptureProbeSceneDelegate: UIResponder, UIWindowSceneDelegate {
 }
 
 class CaptureProbeViewController: UIViewController {
+    private var ingressLabel: UILabel!
+    private var statusLabel: UILabel!
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
@@ -61,18 +65,54 @@ class CaptureProbeViewController: UIViewController {
         descriptionLabel.textColor = .secondaryLabel
         container.addArrangedSubview(descriptionLabel)
 
-        let statusLabel = UILabel()
-        statusLabel.text = "Probe screen initialized"
+        statusLabel = UILabel()
+        statusLabel.text = "Creating ingress record…"
         statusLabel.font = UIFont.systemFont(ofSize: 12, weight: .light)
         statusLabel.textColor = .tertiaryLabel
         container.addArrangedSubview(statusLabel)
 
-        view.addSubview(container)
+        ingressLabel = UILabel()
+        ingressLabel.text = "—"
+        ingressLabel.font = UIFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        ingressLabel.numberOfLines = 0
+        ingressLabel.textAlignment = .center
+        container.addArrangedSubview(ingressLabel)
+
+        let scrollView = UIScrollView()
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.addSubview(container)
+        view.addSubview(scrollView)
+
         NSLayoutConstraint.activate([
-            container.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            container.centerYAnchor.constraint(equalTo: view.centerYAnchor),
-            container.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 20),
-            container.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -20)
+            scrollView.topAnchor.constraint(equalTo: view.topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            container.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
+            container.widthAnchor.constraint(lessThanOrEqualTo: scrollView.widthAnchor, constant: -40),
+            container.topAnchor.constraint(greaterThanOrEqualTo: scrollView.topAnchor, constant: 20),
+            container.bottomAnchor.constraint(lessThanOrEqualTo: scrollView.bottomAnchor, constant: -20)
         ])
+
+        createIngressRecord()
+    }
+
+    private func createIngressRecord() {
+        let captureId = UUID().uuidString
+        let now = ISO8601DateFormatter().string(from: Date())
+        let isLocked = !UIApplication.shared.isProtectedDataAvailable
+
+        DispatchQueue.main.async {
+            self.ingressLabel.text = """
+            Capture ID: \(captureId)
+            Time: \(now)
+            Locked: \(isLocked)
+            """
+            self.statusLabel.text = "Ingress record created"
+        }
+
+        DispatchQueue.global().async {
+            print("Probe ingress: ID=\(captureId) locked=\(isLocked)")
+        }
     }
 }
