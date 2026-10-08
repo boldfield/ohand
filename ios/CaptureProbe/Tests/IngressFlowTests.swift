@@ -175,9 +175,10 @@ final class IngressFlowTests: XCTestCase {
     }
 
     func testControlIntentPerformRegistersTheHandoffAndNotifiesTheScene() async throws {
-        let flow = makeFlow()
+        let center = NotificationCenter()
+        let flow = IngressFlow(store: IngressStore(rootDirectory: rootDirectory), notificationCenter: center)
         IngressFlow.live = flow
-        let notified = expectation(forNotification: IngressFlow.handoffRegisteredNotification, object: nil) { notification in
+        let notified = expectation(forNotification: IngressFlow.handoffRegisteredNotification, object: nil, notificationCenter: center) { notification in
             notification.userInfo?["captureId"] is String
         }
 
@@ -189,5 +190,178 @@ final class IngressFlowTests: XCTestCase {
         let outcome = flow.enter(source: .directLaunch, launchKind: .warm, protectedDataAvailable: true)
         XCTAssertEqual(outcome.captureId, pending.captureId)
         XCTAssertEqual(flow.store.loadRecord(captureId: pending.captureId)?.source, .controlIntent)
+    }
+
+    // MARK: Scene/intent ordering through IngressSession
+
+    private final class RenderLog {
+        private let lock = NSLock()
+        private var rendered: [IngressOutcome] = []
+        var onRender: (() -> Void)?
+
+        func append(_ outcome: IngressOutcome) {
+            lock.lock()
+            rendered.append(outcome)
+            lock.unlock()
+            onRender?()
+        }
+
+        var outcomes: [IngressOutcome] {
+            lock.lock()
+            defer { lock.unlock() }
+            return rendered
+        }
+    }
+
+    private struct SceneHarness {
+        let flow: IngressFlow
+        let session: IngressSession
+        let log: RenderLog
+    }
+
+    private func makeSceneHarness(writer: FlakyWriter? = nil) -> SceneHarness {
+        let store = writer.map { writer in
+            IngressStore(rootDirectory: rootDirectory, writeData: { data, url in try writer.write(data, to: url) })
+        } ?? IngressStore(rootDirectory: rootDirectory)
+        let flow = IngressFlow(store: store, notificationCenter: NotificationCenter())
+        IngressFlow.live = flow
+        let session = IngressSession(flow: flow)
+        let log = RenderLog()
+        session.observeHandoffs(protectedDataAvailable: { true }, onOutcome: { log.append($0) })
+        return SceneHarness(flow: flow, session: session, log: log)
+    }
+
+    private func enterForeground(_ harness: SceneHarness) {
+        harness.log.append(harness.session.willEnterForeground(protectedDataAvailable: true))
+    }
+
+    private func performControlAndWaitForRender(_ harness: SceneHarness) async throws {
+        let rendered = expectation(description: "scene rendered the handoff")
+        harness.log.onRender = { rendered.fulfill() }
+        _ = try await ProbeOpenCaptureIntent(target: .capture).perform()
+        await fulfillment(of: [rendered], timeout: 5)
+        harness.log.onRender = nil
+    }
+
+    private func performControlWhileBackgroundedOrBeforeScene() async throws {
+        _ = try await ProbeOpenCaptureIntent(target: .capture).perform()
+        await MainActor.run {}
+    }
+
+    private func assertSingleControlEntry(
+        _ harness: SceneHarness, launchKind: IngressLaunchKind, expectedRecordCount: Int,
+        file: StaticString = #filePath, line: UInt = #line
+    ) throws {
+        let records = harness.flow.store.allRecords()
+        XCTAssertEqual(records.count, expectedRecordCount, file: file, line: line)
+        let record = try XCTUnwrap(records.last, file: file, line: line)
+        XCTAssertEqual(record.source, .controlIntent, file: file, line: line)
+        XCTAssertEqual(record.launchKind, launchKind, file: file, line: line)
+
+        let lastRendered = try XCTUnwrap(harness.log.outcomes.last, file: file, line: line)
+        XCTAssertEqual(lastRendered.captureId, record.captureId, file: file, line: line)
+        XCTAssertEqual(lastRendered.source, .controlIntent, file: file, line: line)
+        XCTAssertEqual(lastRendered.status.isFailure, false, file: file, line: line)
+        XCTAssertTrue(lastRendered.displayLines.contains("Entry: controlIntent, \(launchKind.rawValue) launch"), file: file, line: line)
+        let activationIds = Set(harness.log.outcomes.map(\.captureId))
+        XCTAssertEqual(activationIds.count, expectedRecordCount, "every rendered ID must be a persisted record", file: file, line: line)
+        XCTAssertNil(harness.flow.store.loadPending(), file: file, line: line)
+    }
+
+    func testColdForegroundThenControlIntentYieldsOneRecordAndOneId() async throws {
+        let harness = makeSceneHarness()
+        enterForeground(harness)
+        XCTAssertEqual(harness.flow.store.allRecords().count, 1)
+
+        try await performControlAndWaitForRender(harness)
+
+        try assertSingleControlEntry(harness, launchKind: .cold, expectedRecordCount: 1)
+    }
+
+    func testColdControlIntentThenForegroundYieldsOneRecordAndOneId() async throws {
+        let harness = makeSceneHarness()
+        try await performControlWhileBackgroundedOrBeforeScene()
+        XCTAssertTrue(harness.flow.store.allRecords().isEmpty)
+        XCTAssertTrue(harness.log.outcomes.isEmpty)
+
+        enterForeground(harness)
+
+        try assertSingleControlEntry(harness, launchKind: .cold, expectedRecordCount: 1)
+    }
+
+    func testWarmForegroundThenControlIntentYieldsOneNewRecord() async throws {
+        let harness = makeSceneHarness()
+        enterForeground(harness)
+        harness.session.didEnterBackground()
+
+        enterForeground(harness)
+        XCTAssertEqual(harness.flow.store.allRecords().count, 2)
+        try await performControlAndWaitForRender(harness)
+
+        try assertSingleControlEntry(harness, launchKind: .warm, expectedRecordCount: 2)
+        XCTAssertEqual(harness.flow.store.allRecords().first?.source, .directLaunch)
+    }
+
+    func testWarmControlIntentWhileBackgroundedThenForegroundYieldsOneNewRecord() async throws {
+        let harness = makeSceneHarness()
+        enterForeground(harness)
+        harness.session.didEnterBackground()
+
+        try await performControlWhileBackgroundedOrBeforeScene()
+        XCTAssertEqual(harness.flow.store.allRecords().count, 1)
+        enterForeground(harness)
+
+        try assertSingleControlEntry(harness, launchKind: .warm, expectedRecordCount: 2)
+    }
+
+    func testSecondControlTapInTheSameForegroundSessionIsANewEntry() async throws {
+        let harness = makeSceneHarness()
+        enterForeground(harness)
+        try await performControlAndWaitForRender(harness)
+        let firstId = try XCTUnwrap(harness.log.outcomes.last?.captureId)
+
+        try await performControlAndWaitForRender(harness)
+
+        let records = harness.flow.store.allRecords()
+        XCTAssertEqual(records.count, 2)
+        XCTAssertEqual(records.map(\.source), [.controlIntent, .controlIntent])
+        XCTAssertNotEqual(harness.log.outcomes.last?.captureId, firstId)
+    }
+
+    func testControlIntentAdoptsTheEntryLeftPendingByAFailedDirectLaunchWrite() async throws {
+        let writer = FlakyWriter()
+        writer.failRecordWrites = true
+        let harness = makeSceneHarness(writer: writer)
+        harness.log.append(harness.session.willEnterForeground(protectedDataAvailable: false))
+        let failedId = try XCTUnwrap(harness.log.outcomes.last?.captureId)
+        XCTAssertTrue(harness.flow.store.allRecords().isEmpty)
+
+        writer.failRecordWrites = false
+        try await performControlAndWaitForRender(harness)
+
+        let records = harness.flow.store.allRecords()
+        XCTAssertEqual(records.map(\.captureId), [failedId])
+        XCTAssertEqual(records.first?.source, .controlIntent)
+        XCTAssertEqual(harness.log.outcomes.last?.status, .saved)
+    }
+
+    func testControlHandoffInTheBackgroundDoesNotRenderOrCommit() async throws {
+        let harness = makeSceneHarness()
+        enterForeground(harness)
+        harness.session.didEnterBackground()
+        let renderedBefore = harness.log.outcomes.count
+
+        try await performControlWhileBackgroundedOrBeforeScene()
+
+        XCTAssertEqual(harness.log.outcomes.count, renderedBefore)
+        XCTAssertEqual(harness.flow.store.allRecords().count, 1)
+        XCTAssertNotNil(harness.flow.store.loadPending())
+    }
+}
+
+private extension IngressOutcome.Status {
+    var isFailure: Bool {
+        if case .failed = self { return true }
+        return false
     }
 }

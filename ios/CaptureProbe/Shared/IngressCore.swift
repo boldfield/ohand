@@ -118,6 +118,23 @@ final class IngressStore {
         return .created
     }
 
+    /// Re-labels how an already committed entry was reached. The capture ID and every other field are unchanged.
+    func updateSource(captureId: String, to source: IngressSource) throws {
+        guard let existing = loadRecord(captureId: captureId) else {
+            throw NSError(domain: "IngressStore", code: 404)
+        }
+        guard existing.source != source else { return }
+        let relabeled = IngressRecord(
+            captureId: existing.captureId,
+            source: source,
+            launchKind: existing.launchKind,
+            protectedDataAvailable: existing.protectedDataAvailable,
+            committedAt: existing.committedAt,
+            syntheticText: existing.syntheticText
+        )
+        try writeData(try IngressStore.makeEncoder().encode(relabeled), recordURL(captureId: captureId))
+    }
+
     func writePresented(_ outcome: IngressOutcome) throws {
         try prepareDirectories()
         let presented = IngressPresented(
@@ -149,6 +166,16 @@ struct IngressOutcome: Equatable {
     let protectedDataAvailable: Bool
     let status: Status
 
+    func withSource(_ newSource: IngressSource) -> IngressOutcome {
+        IngressOutcome(
+            captureId: captureId,
+            source: newSource,
+            launchKind: launchKind,
+            protectedDataAvailable: protectedDataAvailable,
+            status: status
+        )
+    }
+
     var statusText: String {
         switch status {
         case .saved: return "Saved"
@@ -169,24 +196,47 @@ struct IngressOutcome: Equatable {
 
 /// Owns the per-entry capture ID. The ID is created once, kept in a durable pending-entry file (and in memory
 /// if that write fails), reused by every retry, and released only after the record is committed.
+///
+/// It also remembers the entry committed during the current foreground session. A control handoff that arrives
+/// after the scene already committed a direct-launch entry claims that entry (relabelling its source) instead of
+/// minting a second ID, so one control activation yields one record whichever callback runs first.
 final class IngressFlow {
     static let handoffRegisteredNotification = Notification.Name("com.boldfield.ohand.probes.capture.handoff")
     static var live = IngressFlow(store: IngressStore(rootDirectory: IngressStore.defaultRootDirectory()))
 
     let store: IngressStore
+    let notificationCenter: NotificationCenter
     private let now: () -> Date
     private let makeCaptureId: () -> String
     private let lock = NSLock()
     private var inMemoryPending: PendingEntry?
+    private var sessionEntry: IngressOutcome?
+    private var sessionEntryClaimed = false
 
     init(
         store: IngressStore,
+        notificationCenter: NotificationCenter = .default,
         now: @escaping () -> Date = Date.init,
         makeCaptureId: @escaping () -> String = { UUID().uuidString }
     ) {
         self.store = store
+        self.notificationCenter = notificationCenter
         self.now = now
         self.makeCaptureId = makeCaptureId
+    }
+
+    /// The entry committed during the current foreground session, with its latest source label.
+    var currentSessionEntry: IngressOutcome? {
+        lock.lock()
+        defer { lock.unlock() }
+        return sessionEntry
+    }
+
+    func endForegroundSession() {
+        lock.lock()
+        defer { lock.unlock() }
+        sessionEntry = nil
+        sessionEntryClaimed = false
     }
 
     private func timestamp() -> String {
@@ -217,7 +267,27 @@ final class IngressFlow {
     func registerHandoff(source: IngressSource) -> String {
         lock.lock()
         defer { lock.unlock() }
+        let hasPending = (inMemoryPending ?? store.loadPending()) != nil
+        if source == .controlIntent, !hasPending, let entry = sessionEntry, !sessionEntryClaimed {
+            sessionEntryClaimed = true
+            if entry.source != .controlIntent, (try? store.updateSource(captureId: entry.captureId, to: .controlIntent)) != nil {
+                sessionEntry = entry.withSource(.controlIntent)
+            }
+            return entry.captureId
+        }
         return resolvePending(source: source).captureId
+    }
+
+    /// What the control's intent runs: register the handoff, then tell a foreground scene about it.
+    @discardableResult
+    func registerControlHandoffAndAnnounce() -> String {
+        let captureId = registerHandoff(source: .controlIntent)
+        notificationCenter.post(
+            name: IngressFlow.handoffRegisteredNotification,
+            object: nil,
+            userInfo: ["captureId": captureId]
+        )
+        return captureId
     }
 
     /// Commits the pending entry (creating it when no handoff registered one). A failed commit leaves the
@@ -247,8 +317,13 @@ final class IngressFlow {
             let result = try store.commit(record)
             store.clearPending(matching: record.captureId)
             inMemoryPending = nil
-            return outcome(result == .created ? .saved : .replayed)
+            let committed = outcome(result == .created ? .saved : .replayed)
+            sessionEntry = committed
+            sessionEntryClaimed = record.source == .controlIntent
+            return committed
         } catch {
+            sessionEntry = nil
+            sessionEntryClaimed = false
             let nsError = error as NSError
             return outcome(.failed("write error \(nsError.domain) \(nsError.code)"))
         }
@@ -258,5 +333,64 @@ final class IngressFlow {
         lock.lock()
         defer { lock.unlock() }
         try? store.writePresented(outcome)
+    }
+}
+
+/// UIKit-free per-scene coordination: foreground state, cold/warm classification and the decision whether a
+/// control handoff needs a new commit or belongs to the entry the scene already committed.
+final class IngressSession {
+    private let flow: IngressFlow
+    private var hasEnteredForeground = false
+    private var handoffObserver: NSObjectProtocol?
+    private(set) var isForeground = false
+    private(set) var launchKind: IngressLaunchKind = .cold
+
+    init(flow: IngressFlow) {
+        self.flow = flow
+    }
+
+    deinit {
+        if let handoffObserver = handoffObserver {
+            flow.notificationCenter.removeObserver(handoffObserver)
+        }
+    }
+
+    /// Fires for the cold launch and for every later return from the background (warm launch).
+    func willEnterForeground(protectedDataAvailable: Bool) -> IngressOutcome {
+        isForeground = true
+        launchKind = hasEnteredForeground ? .warm : .cold
+        hasEnteredForeground = true
+        return flow.enter(source: .directLaunch, launchKind: launchKind, protectedDataAvailable: protectedDataAvailable)
+    }
+
+    func didEnterBackground() {
+        isForeground = false
+        flow.endForegroundSession()
+    }
+
+    /// Returns the outcome to render, or nil when the app is in the background; a handoff that arrives in the
+    /// background stays pending and is consumed by the next `willEnterForeground`.
+    func handoffRegistered(captureId: String, protectedDataAvailable: Bool) -> IngressOutcome? {
+        guard isForeground else { return nil }
+        if let entry = flow.currentSessionEntry, entry.captureId == captureId {
+            return entry
+        }
+        return flow.enter(source: .controlIntent, launchKind: launchKind, protectedDataAvailable: protectedDataAvailable)
+    }
+
+    func observeHandoffs(
+        protectedDataAvailable: @escaping () -> Bool,
+        onOutcome: @escaping (IngressOutcome) -> Void
+    ) {
+        handoffObserver = flow.notificationCenter.addObserver(
+            forName: IngressFlow.handoffRegisteredNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let self = self, let captureId = notification.userInfo?["captureId"] as? String else { return }
+            if let outcome = self.handoffRegistered(captureId: captureId, protectedDataAvailable: protectedDataAvailable()) {
+                onOutcome(outcome)
+            }
+        }
     }
 }

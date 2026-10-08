@@ -21,14 +21,11 @@ class CaptureProbeDelegateAdapter: UIResponder, UIApplicationDelegate {
 class CaptureProbeSceneDelegate: UIResponder, UIWindowSceneDelegate {
     var window: UIWindow?
     private let captureViewController = CaptureProbeViewController()
-    private var hasEnteredForeground = false
-    private var isForeground = false
-    private var launchKind: IngressLaunchKind = .cold
-    private var handoffObserver: NSObjectProtocol?
+    private let session = IngressSession(flow: IngressFlow.live)
 
     func scene(
         _ scene: UIScene,
-        willConnectTo session: UISceneSession,
+        willConnectTo sceneSession: UISceneSession,
         options connectionOptions: UIScene.ConnectionOptions
     ) {
         guard let windowScene = (scene as? UIWindowScene) else { return }
@@ -36,39 +33,21 @@ class CaptureProbeSceneDelegate: UIResponder, UIWindowSceneDelegate {
         window.rootViewController = captureViewController
         self.window = window
         window.makeKeyAndVisible()
-        handoffObserver = NotificationCenter.default.addObserver(
-            forName: IngressFlow.handoffRegisteredNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            self?.handoffArrivedWhileForeground()
-        }
+        session.observeHandoffs(
+            protectedDataAvailable: { UIApplication.shared.isProtectedDataAvailable },
+            onOutcome: { [weak self] outcome in self?.present(outcome) }
+        )
     }
 
-    // Fires for the cold launch and for every later return from the background (warm launch).
     func sceneWillEnterForeground(_ scene: UIScene) {
-        isForeground = true
-        launchKind = hasEnteredForeground ? .warm : .cold
-        hasEnteredForeground = true
-        presentEntry(source: .directLaunch)
+        present(session.willEnterForeground(protectedDataAvailable: UIApplication.shared.isProtectedDataAvailable))
     }
 
     func sceneDidEnterBackground(_ scene: UIScene) {
-        isForeground = false
+        session.didEnterBackground()
     }
 
-    // A handoff that arrives while the app is backgrounded is consumed by the next foreground entry.
-    private func handoffArrivedWhileForeground() {
-        guard isForeground else { return }
-        presentEntry(source: .controlIntent)
-    }
-
-    private func presentEntry(source: IngressSource) {
-        let outcome = IngressFlow.live.enter(
-            source: source,
-            launchKind: launchKind,
-            protectedDataAvailable: UIApplication.shared.isProtectedDataAvailable
-        )
+    private func present(_ outcome: IngressOutcome) {
         captureViewController.render(outcome)
         IngressFlow.live.recordPresentation(outcome)
     }

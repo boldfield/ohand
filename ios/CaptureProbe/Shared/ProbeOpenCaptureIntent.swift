@@ -15,15 +15,11 @@ struct ProbeOpenCaptureIntent: OpenIntent {
         self.target = target
     }
 
-    // Runs in the foreground app process. It only registers the pending entry (one durable capture ID); the
-    // scene commits it when it presents, so the ID is the same whichever of the two happens first.
+    // Runs in the foreground app process, possibly before or after the scene enters the foreground. It registers
+    // the handoff, which either creates the pending entry the scene will commit or claims the entry the scene
+    // already committed, so one activation yields one capture ID in both orders.
     func perform() async throws -> some IntentResult {
-        let captureId = IngressFlow.live.registerHandoff(source: .controlIntent)
-        NotificationCenter.default.post(
-            name: IngressFlow.handoffRegisteredNotification,
-            object: nil,
-            userInfo: ["captureId": captureId]
-        )
+        IngressFlow.live.registerControlHandoffAndAnnounce()
         return .result()
     }
 }
