@@ -1,4 +1,6 @@
 import UIKit
+import UserNotifications
+import os
 
 @main
 class NotificationProbeDelegateAdapter: UIResponder, UIApplicationDelegate {
@@ -8,6 +10,7 @@ class NotificationProbeDelegateAdapter: UIResponder, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
     ) -> Bool {
+        UNUserNotificationCenter.current().delegate = ForegroundPresentationRecorder.shared
         return true
     }
 
@@ -43,43 +46,75 @@ class NotificationProbeSceneDelegate: UIResponder, UIWindowSceneDelegate {
 }
 
 class NotificationProbeViewController: UIViewController {
+    private let scenarios = NotificationProbeScenarios()
+    private let resultLabel = UILabel()
+    private let logger = Logger(subsystem: "com.boldfield.ohand.probes.notification", category: "report")
+    private var runCounter = 0
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
 
         let container = UIStackView()
         container.axis = .vertical
-        container.spacing = 16
+        container.spacing = 6
         container.alignment = .center
-        container.distribution = .fillProportionally
         container.translatesAutoresizingMaskIntoConstraints = false
 
         let titleLabel = UILabel()
         titleLabel.text = "Notification Probe"
-        titleLabel.font = UIFont.systemFont(ofSize: 24, weight: .bold)
-        titleLabel.textAlignment = .center
+        titleLabel.font = UIFont.systemFont(ofSize: 20, weight: .bold)
         container.addArrangedSubview(titleLabel)
 
-        let descriptionLabel = UILabel()
-        descriptionLabel.text = "Native notification scheduling and limits\nPermission states, delivery, and platform behavior"
-        descriptionLabel.font = UIFont.systemFont(ofSize: 14, weight: .regular)
-        descriptionLabel.numberOfLines = 0
-        descriptionLabel.textAlignment = .center
-        descriptionLabel.textColor = .secondaryLabel
-        container.addArrangedSubview(descriptionLabel)
+        for scenario in ProbeScenario.allCases {
+            let button = UIButton(type: .system)
+            button.setTitle(scenario.rawValue, for: .normal)
+            button.accessibilityIdentifier = "probe.run.\(scenario.rawValue)"
+            button.addAction(UIAction { [weak self] _ in self?.run(scenario) }, for: .touchUpInside)
+            container.addArrangedSubview(button)
+        }
 
-        let statusLabel = UILabel()
-        statusLabel.text = "Probe screen initialized"
-        statusLabel.font = UIFont.systemFont(ofSize: 12, weight: .light)
-        statusLabel.textColor = .tertiaryLabel
-        container.addArrangedSubview(statusLabel)
+        resultLabel.text = "no scenario run yet"
+        resultLabel.accessibilityLabel = "no scenario run yet"
+        resultLabel.accessibilityIdentifier = "probe.lastResult"
+        resultLabel.font = UIFont.monospacedSystemFont(ofSize: 9, weight: .regular)
+        resultLabel.numberOfLines = 6
+        resultLabel.lineBreakMode = .byTruncatingTail
+        resultLabel.textColor = .secondaryLabel
+        container.addArrangedSubview(resultLabel)
 
         view.addSubview(container)
         NSLayoutConstraint.activate([
             container.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             container.centerYAnchor.constraint(equalTo: view.centerYAnchor),
-            container.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 20),
-            container.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -20)
+            container.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
+            container.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12)
         ])
+    }
+
+    private func run(_ scenario: ProbeScenario) {
+        Task { @MainActor in
+            var result: [String: String] = [:]
+            do {
+                result = try await scenarios.run(scenario)
+            } catch {
+                let nsError = error as NSError
+                result["error"] = "\(nsError.domain)#\(nsError.code)"
+            }
+            runCounter += 1
+            result["scenario"] = scenario.rawValue
+            result["run"] = String(runCounter)
+            publish(result)
+        }
+    }
+
+    private func publish(_ result: [String: String]) {
+        guard
+            let data = try? JSONSerialization.data(withJSONObject: result, options: [.sortedKeys, .withoutEscapingSlashes]),
+            let json = String(data: data, encoding: .utf8)
+        else { return }
+        resultLabel.text = json
+        resultLabel.accessibilityLabel = json
+        logger.info("\(json, privacy: .public)")
     }
 }

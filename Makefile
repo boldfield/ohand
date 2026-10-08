@@ -1,7 +1,7 @@
 PYTHON ?= python3
 export PYTHONDONTWRITEBYTECODE := 1
 
-.PHONY: check test contract-check contract-test ios-check hygiene-check hygiene-test
+.PHONY: check test contract-check contract-test ios-check ios-credential-probe hygiene-check hygiene-test
 
 # check: Validate contract correctness, compile, format, and lint.
 # F01 establishes contract-check and contract-test. F02 adds cargo targets and lint.
@@ -44,6 +44,11 @@ contract-test:
 ios-check:
 	$(PYTHON) ios/scripts/check_project_config.py
 	$(PYTHON) -m unittest discover --start-directory ios/scripts --pattern 'test_*.py' --verbose
+
+# ios-credential-probe: Ad-hoc signed simulator build of CredentialProbe (macOS with Xcode only).
+# Verifies that CredentialProbe compiles without production dependencies.
+ios-credential-probe:
+	cd ios && OHAND_SIMULATOR_ADHOC_SIGN=1 ./scripts/build-simulator.sh CredentialProbe
 
 # hygiene-test: Policy and scanner tests. Scanner tests skip locally when gitleaks is absent;
 # hygiene.yml sets HYGIENE_REQUIRE_GITLEAKS=1 so CI never skips them.
