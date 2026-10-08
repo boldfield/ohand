@@ -148,11 +148,22 @@ class AudioProbeViewController: UIViewController {
     }
 
     private func requestMicrophonePermission() {
-        AVAudioApplication.requestRecordPermission { granted in
-            DispatchQueue.main.async {
-                if !granted {
-                    self.resultLabel?.text = "Microphone permission denied"
-                    self.resultLabel?.textColor = .systemRed
+        if #available(iOS 17, *) {
+            AVAudioApplication.requestRecordPermission { granted in
+                DispatchQueue.main.async {
+                    if !granted {
+                        self.resultLabel?.text = "Microphone permission denied"
+                        self.resultLabel?.textColor = .systemRed
+                    }
+                }
+            }
+        } else {
+            AVAudioSession.sharedInstance().requestRecordPermission { granted in
+                DispatchQueue.main.async {
+                    if !granted {
+                        self.resultLabel?.text = "Microphone permission denied"
+                        self.resultLabel?.textColor = .systemRed
+                    }
                 }
             }
         }

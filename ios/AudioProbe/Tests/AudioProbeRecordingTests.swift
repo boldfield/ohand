@@ -1,5 +1,6 @@
 import XCTest
 import AVFoundation
+@testable import AudioProbe
 
 class AudioProbeRecordingTests: XCTestCase {
     var recorder: AudioRecorder!
@@ -117,5 +118,58 @@ class AudioProbeRecordingTests: XCTestCase {
         let result = recorder.stopRecording()
         XCTAssertGreaterThan(result.durationSeconds, expectedDuration - 0.1, "Duration should match recorded time")
         XCTAssertLessThan(result.durationSeconds, expectedDuration + 0.3, "Duration should not exceed recorded time by much")
+    }
+
+    func testInterruptionHandling() {
+        let started = recorder.startRecording(to: testRecordingURL)
+        XCTAssertTrue(started)
+
+        let waitExpectation = XCTestExpectation(description: "Record for interruption")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            waitExpectation.fulfill()
+        }
+        wait(for: [waitExpectation], timeout: 2)
+
+        let interruptionNotification = Notification(
+            name: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance(),
+            userInfo: [
+                AVAudioSession.interruptionTypeKey: AVAudioSession.InterruptionType.began.rawValue
+            ]
+        )
+        NotificationCenter.default.post(interruptionNotification)
+
+        let result = recorder.stopRecording()
+        XCTAssertFalse(result.success, "Recording interrupted should not be marked as successful")
+        XCTAssertNotNil(result.filePath, "Interrupted recording should have a partial file")
+        XCTAssertEqual(result.interruption, "Audio interrupted", "Interruption reason should be recorded")
+    }
+
+    func testCancelledRecovery() {
+        let started = recorder.startRecording(to: testRecordingURL)
+        XCTAssertTrue(started)
+
+        let waitExpectation = XCTestExpectation(description: "Recording duration")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            waitExpectation.fulfill()
+        }
+        wait(for: [waitExpectation], timeout: 2)
+
+        let result = recorder.cancelRecording()
+        XCTAssertFalse(result.success, "Cancelled recording should not be successful")
+        XCTAssertNotNil(result.filePath, "Cancelled recording should preserve partial file path")
+        XCTAssertEqual(result.interruption, "Cancelled", "Interruption reason should be 'Cancelled'")
+
+        if let filePath = result.filePath {
+            let fileExists = FileManager.default.fileExists(atPath: filePath)
+            XCTAssertTrue(fileExists, "Cancelled partial file should exist")
+
+            if fileExists {
+                let audioFileURL = URL(fileURLWithPath: filePath)
+                if let audioFile = try? AVAudioFile(forReading: audioFileURL) {
+                    XCTAssertGreaterThan(audioFile.length, 0, "Partial file should be readable and contain audio data")
+                }
+            }
+        }
     }
 }

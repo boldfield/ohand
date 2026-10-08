@@ -16,19 +16,20 @@ This document reports what the probe implements and what the automated checks as
 
 ## Design
 
-- **Synthetic recording with durable file handling.** `AudioRecorder` creates PCM-format audio files in the app's Documents directory. The recorder creates a unique file path for each recording session and writes atomically using Foundation's file I/O.
-- **Interruption lifecycle.** The probe observes `AVAudioSession.interruptionNotification` and `AVAudioSession.routeChangeNotification` to capture system interruptions (phone calls, audio route changes, app backgrounding). Recording can be interrupted, paused, or resumed depending on the interruption type and the app's response.
-- **Partial-file recovery.** When recording is cancelled (interrupted or explicitly stopped), the recorder preserves the partial audio file and returns its path along with duration and file size, allowing recovery of partially-recorded audio if needed.
-- **Permission handling.** On startup, the probe requests microphone permission using `AVAudioApplication.requestRecordPermission`. Recording start fails gracefully with a permission-denied status if permission is not granted; the UI displays the permission state.
+- **Synthetic recording with durable file handling.** `AudioRecorder` creates PCM-format audio files in the app's Documents directory. The recorder creates a unique file path for each recording session. `AVAudioRecorder` writes in place; recording finalization is verified by opening the file with `AVAudioFile` and confirming a non-zero frame length.
+- **Interruption lifecycle.** The probe observes `AVAudioSession.interruptionNotification` to capture audio interruptions (phone calls, competing audio). When an interruption begins, recording is flagged as interrupted. `AVAudioSession.routeChangeNotification` is registered but does not block recording; route changes do not independently interrupt a recording in progress.
+- **Partial-file recovery.** When recording is cancelled or interrupted, the recorder preserves the partial audio file and verifies it is readable before returning its path. Duration and file size are reported. If the partial file is not recoverable (size zero or unreadable), no file path is returned but the interruption reason is preserved.
+- **Permission handling.** On startup, the probe requests microphone permission using `AVAudioApplication.requestRecordPermission` (iOS 17+) or `AVAudioSession.requestRecordPermission` (iOS 16). Recording start fails gracefully with a permission-denied status if permission is not granted; the UI displays the permission state.
 - **Result tracking.** `AudioRecordingResult` distinguishes three outcomes:
-  - **Success:** Recording completed normally; file was fully saved with final duration and size.
-  - **Partial:** Recording was cancelled or interrupted; partial file exists and can be recovered; duration and interruption reason are reported.
-  - **Failure:** Recording never started or failed before writing a file; no file path is available; interruption reason explains the failure.
+  - **Success:** Recording completed normally and file was finalized and verified readable with final duration and size.
+  - **Partial:** Recording was cancelled or interrupted; partial file is recoverable and readable; duration and interruption reason are reported.
+  - **Failure:** Recording never started, failed before writing a file, or the partial file is not recoverable; no file path is available; interruption reason explains the failure.
 - **UI controls.** The probe provides three buttons:
   - **Start Recording:** Begins recording to a timestamped file in Documents.
-  - **Stop Recording:** Ends recording and returns a success result.
-  - **Cancel:** Interrupts recording, preserves the partial file, and returns a partial/failure result.
+  - **Stop Recording:** Ends recording and returns a success result if file finalization succeeds, or a failure result if interrupted.
+  - **Cancel:** Explicitly interrupts recording, preserves the partial file if recoverable, and returns a partial result with reason "Cancelled" or a failure result.
   - The screen displays real-time recording duration and the final result (success/partial/failure).
+- **Background constraints.** Recording is designed for foreground use. The app does not include `UIBackgroundModes: audio` in its entitlements, so recording will pause if the app is backgrounded and cannot resume automatically. Background audio recording on a real device must be tested separately.
 
 ## Audio format and constraints
 
@@ -38,22 +39,26 @@ This document reports what the probe implements and what the automated checks as
 - **Codec:** Linear PCM (WAV format), uncompressed.
 - **File location:** `{App Documents}/recording-{UUID}.wav`.
 - **File size:** Approximately 32 kB per second of audio (16 kHz × 1 channel × 2 bytes per sample).
-- **Maximum duration:** System-dependent; on iOS, foreground recording is limited by available storage and device power. No hard limit is enforced in the probe; interrupted recording before system limit preserves the partial file.
+- **Duration limits:** No hard limit is enforced in the probe. On the simulator, recording is limited by available storage. On a real device, foreground recording is limited by microphone availability and system resource constraints (battery, RAM, storage). The probe is tested with recordings up to 2 seconds on the simulator; real device limits should be measured independently.
+- **Partial file size bounds:** A partial file of 0.3 seconds is approximately 9.6 kB; 1.0 second is approximately 32 kB. These are representative sizes used in test assertions to verify that partial files accumulate audio data during active recording.
 
 ## What the automated checks assert
 
-Unit tests (`AudioProbeRecordingTests`, simulator, no host app):
+Unit tests (`AudioProbeRecordingTests`, simulator, hosted in app):
 
 - Recording starts successfully and records audio to the designated file.
-- Recording stops and returns a successful result with non-zero duration and file size.
-- Cancelling recording returns a partial result with file path, duration, and interruption reason preserved.
+- Recording stops and returns a successful result only after the file is finalized and verified readable with non-zero duration and file size.
+- Cancelling recording returns a partial result with recoverable file path, duration, and the interruption reason "Cancelled".
+- Recording interrupted by `AVAudioSession.interruptionNotification` (type: began) stops with a partial result; the interruption reason is "Audio interrupted".
+- Partial files are verified readable using `AVAudioFile` before being reported as recoverable.
 - Stopping without starting returns a failure result with no file path.
+- Calling stop twice does not report success twice; recorder and start-time state are cleared after the first stop.
 - Multiple sequential recording sessions can be performed; each session can start and stop independently.
 - Audio session is configured in the record category with appropriate options.
 - Recording file is created when recording starts and contains audio data when stopped.
 - Recorded duration matches the elapsed time (within 0.2 seconds tolerance for timing variance).
 
-The tests do not instantiate the scene delegate or view controller (the unit-test bundle has no host app); `AudioRecorder` is tested in isolation. Interruption and route-change notifications are observed but not simulated in the test bundle.
+The tests run in the hosted `OhAndTests` scheme with `TEST_HOST: AudioProbe.app`. `AudioRecorder` behavior is tested through unit tests with synthetic file I/O and simulated interruption notifications via `NotificationCenter.post()`.
 
 Simulator smoke test: The probe UI runs and allows the user to start, stop, and cancel recording. Recording files are created in the app's Documents directory with predictable names.
 
@@ -72,20 +77,22 @@ No phase may lose a recording file or fail to update the UI. After each phase, t
 ## Limits of the simulator evidence
 
 - The simulator has full microphone access and does not enforce iOS data-protection classes. Recording always succeeds in the simulator if permissions are granted (simulated).
-- Interruption notifications (phone calls, Bluetooth route changes, system audio alerts) are not simulated. The code to handle these notifications is present but not exercised in the simulator.
+- Interruption notifications (phone calls, Bluetooth route changes) are not automatically simulated. Synthetic interruption tests post `AVAudioSession.interruptionNotification` manually, but real system interruptions cannot be tested on the simulator.
 - Background recording is not tested; the simulator does not enforce background-execution time limits.
 - The simulator does not enforce API permissions at the OS level; permission denial must be tested on a real device.
 
-## Needs a physical device (not measured)
+## Measurement procedure on a real device
 
-- Whether microphone permission requests appear and can be granted/denied.
-- Whether recording succeeds when permissions are denied and fails with a permission-denied status.
-- Whether recording continues if the device is locked or the app is backgrounded (foreground-only behavior).
-- Whether a phone call, Bluetooth audio route change, or system audio alert interrupts recording, and whether partial audio is preserved.
-- Actual recording file size and duration accuracy on a real microphone and system audio stack.
-- Whether a killed app (force-quit or system termination) leaves a partial file in a recoverable state.
-- Audio quality and compression behavior with the chosen sample rate and bit depth.
-- Whether the document-directory file is persisted across app restarts and whether it survives a device reboot (backup and data-protection interaction).
+To verify the probe on a real device:
+
+1. **Permission flow:** Install the app, tap Start Recording, and verify that a system permission dialog appears (if permissions were not previously granted). Grant microphone permission and verify that recording starts. Deny permission and verify that the UI shows "Microphone permission denied" and recording fails.
+2. **Recording lifecycle:** Start recording, wait ~2 seconds, then tap Stop. Verify that the UI shows "Saved: 2.0s, ~64000 bytes" and a WAV file appears in the app's Documents directory (visible via Xcode's File Sharing, iTunes file sharing, or a file browser).
+3. **Partial file recovery:** Start recording, wait ~1 second, then tap Cancel. Verify that the UI shows "Partial: 1.0s, ~32000 bytes, Cancelled" and a recoverable WAV file is preserved in the Documents directory.
+4. **Interruption handling:** Start recording, then initiate a phone call or system alert (or toggle Bluetooth if a device is connected). Verify that the app reacts to the interruption (stops recording and shows an interruption result). After the interruption ends, verify that a partial file is preserved if one exists.
+5. **Background behavior:** Start recording, immediately background the app (home button or swipe), and wait ~2 seconds. Return to the app and tap Stop. On a device without `UIBackgroundModes: audio`, verify that recording paused and the final result shows a partial file with duration ~0.1 seconds or less.
+6. **File persistence:** After several recording sessions, use Xcode's File Sharing view to examine the app's Documents directory. Verify that each WAV file can be opened in a media player and plays the recorded audio.
+
+Record the results of each step (permission state, file creation, file size, duration, and audio playability) as evidence.
 
 ## Reuse notes
 

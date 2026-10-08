@@ -23,6 +23,8 @@ class AudioRecorder: NSObject, AVAudioRecorderDelegate {
     var recordingStartTime: Date?
     var recordingDestination: URL?
     var lastInterruptionReason: String?
+    private var recordingFinalized = false
+    private let recordingFinalizationLock = NSLock()
 
     override init() {
         super.init()
@@ -82,10 +84,13 @@ class AudioRecorder: NSObject, AVAudioRecorderDelegate {
             recordingStartTime = Date()
             recordingDestination = destination
             lastInterruptionReason = nil
+            recordingFinalized = false
 
             return recorder?.record() ?? false
         } catch {
             lastInterruptionReason = "Record start failed: \(error)"
+            recorder = nil
+            recordingStartTime = nil
             return false
         }
     }
@@ -104,15 +109,55 @@ class AudioRecorder: NSObject, AVAudioRecorderDelegate {
         recorder.stop()
 
         let duration = Date().timeIntervalSince(startTime)
-        let fileSize = (try? FileManager.default.attributesOfItem(atPath: recorder.url.path))?[.size] as? Int ?? 0
 
-        return AudioRecordingResult(
-            success: true,
-            durationSeconds: duration,
-            filePath: recorder.url.path,
-            fileSize: fileSize,
-            interruption: nil
-        )
+        if let interruptionReason = lastInterruptionReason {
+            defer {
+                self.recorder = nil
+                recordingStartTime = nil
+                recordingFinalized = true
+            }
+            return AudioRecordingResult(
+                success: false,
+                durationSeconds: duration,
+                filePath: recorder.url.path,
+                fileSize: getFileSize(at: recorder.url),
+                interruption: interruptionReason
+            )
+        }
+
+        let filePath = recorder.url.path
+        let fileSize = getFileSize(at: recorder.url)
+
+        var isRecoverable = false
+        if fileSize > 0 {
+            if let audioFile = try? AVAudioFile(forReading: recorder.url) {
+                isRecoverable = audioFile.length > 0
+            }
+        }
+
+        defer {
+            self.recorder = nil
+            recordingStartTime = nil
+            recordingFinalized = true
+        }
+
+        if isRecoverable {
+            return AudioRecordingResult(
+                success: true,
+                durationSeconds: duration,
+                filePath: filePath,
+                fileSize: fileSize,
+                interruption: nil
+            )
+        } else {
+            return AudioRecordingResult(
+                success: false,
+                durationSeconds: duration,
+                filePath: nil,
+                fileSize: 0,
+                interruption: "File not recoverable"
+            )
+        }
     }
 
     func cancelRecording() -> AudioRecordingResult {
@@ -126,25 +171,46 @@ class AudioRecorder: NSObject, AVAudioRecorderDelegate {
             )
         }
 
-        let duration = Date().timeIntervalSince(startTime)
-        let fileSize = (try? FileManager.default.attributesOfItem(atPath: recorder.url.path))?[.size] as? Int ?? 0
-
         recorder.stop()
 
-        // Keep the partial file for recovery
-        let result = AudioRecordingResult(
-            success: false,
-            durationSeconds: duration,
-            filePath: recorder.url.path,
-            fileSize: fileSize,
-            interruption: lastInterruptionReason ?? "Cancelled"
-        )
+        let duration = Date().timeIntervalSince(startTime)
+        let filePath = recorder.url.path
+        let fileSize = getFileSize(at: recorder.url)
 
-        // Clean up the recorder
-        self.recorder = nil
-        recordingStartTime = nil
+        var isRecoverable = false
+        if fileSize > 0 {
+            if let audioFile = try? AVAudioFile(forReading: recorder.url) {
+                isRecoverable = audioFile.length > 0
+            }
+        }
 
-        return result
+        defer {
+            self.recorder = nil
+            recordingStartTime = nil
+            recordingFinalized = true
+        }
+
+        if isRecoverable {
+            return AudioRecordingResult(
+                success: false,
+                durationSeconds: duration,
+                filePath: filePath,
+                fileSize: fileSize,
+                interruption: "Cancelled"
+            )
+        } else {
+            return AudioRecordingResult(
+                success: false,
+                durationSeconds: duration,
+                filePath: nil,
+                fileSize: 0,
+                interruption: "Cancelled"
+            )
+        }
+    }
+
+    private func getFileSize(at url: URL) -> Int {
+        return (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int ?? 0
     }
 
     @objc private func handleAudioInterruption(_ notification: Notification) {
@@ -157,7 +223,7 @@ class AudioRecorder: NSObject, AVAudioRecorderDelegate {
         if type == .began {
             if let optionsValue = userInfo[AVAudioSession.interruptionOptionKey] as? UInt {
                 let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
-                lastInterruptionReason = "Audio interrupted: \(options)"
+                lastInterruptionReason = "Audio interrupted"
             } else {
                 lastInterruptionReason = "Audio interrupted"
             }
@@ -165,6 +231,7 @@ class AudioRecorder: NSObject, AVAudioRecorderDelegate {
             if let optionsValue = userInfo[AVAudioSession.interruptionOptionKey] as? UInt {
                 let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
                 if options.contains(.shouldResume) {
+                    lastInterruptionReason = nil
                     _ = recorder?.record()
                 }
             }
@@ -172,32 +239,6 @@ class AudioRecorder: NSObject, AVAudioRecorderDelegate {
     }
 
     @objc private func handleRouteChange(_ notification: Notification) {
-        guard let userInfo = notification.userInfo,
-              let reasonValue = userInfo[AVAudioSession.routeChangeReasonKey] as? UInt,
-              let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue) else {
-            return
-        }
-
-        switch reason {
-        case .unknown:
-            lastInterruptionReason = "Route changed: unknown"
-        case .newDeviceAvailable:
-            lastInterruptionReason = "Route changed: new device"
-        case .oldDeviceUnavailable:
-            lastInterruptionReason = "Route changed: device unavailable"
-        case .categoryChange:
-            lastInterruptionReason = "Route changed: category"
-        case .override:
-            lastInterruptionReason = "Route changed: override"
-        case .wakeFromSleep:
-            lastInterruptionReason = "Route changed: wake from sleep"
-        case .noSuitableRouteForCategory:
-            lastInterruptionReason = "Route changed: no suitable route"
-        case .routeConfigurationChange:
-            lastInterruptionReason = "Route changed: configuration"
-        @unknown default:
-            lastInterruptionReason = "Route changed: unknown reason"
-        }
     }
 
     func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
