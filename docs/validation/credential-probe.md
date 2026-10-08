@@ -88,24 +88,38 @@ The probe provides:
 
 ## Lock/Relaunch Tests for P09
 
-Physical device testing must cover:
+The CredentialProbe provides a foreground UI for manual testing. Physical device testing must cover:
+
+### Probe Limitations with Lock State
+
+The probe is a foreground app, so it suspends when the device locks. Direct retrieval while the device is locked (with the app suspended) requires:
+- A background processing mechanism, system framework extension, or
+- A separate test harness that accesses the Keychain while the main app is suspended
+
+For the lock-state testing requirements, P09 may:
+1. Use the probe to store credentials, then manually verify retrieval access through alternative means (system frameworks in a debug tool, background task with deliberate timing constraints, etc.)
+2. Or document only the accessible states that can be observed through app relaunch and foreground UI interactions
+3. Or follow the procedures below using the probe to store/retrieve across lock/unlock cycles
 
 ### Lock Behavior
 
-1. **Store a credential** with `WhenUnlocked` accessibility.
-2. **Lock the device** (press power button or use Control Center).
-3. **Attempt to retrieve** the credential while locked (expect failure).
-4. **Unlock the device**.
-5. **Attempt to retrieve** the credential while unlocked (expect success).
+1. **Store a credential** with `WhenUnlocked` accessibility via the probe's "Store All Credentials" button.
+2. **Lock the device** (press power button or use Control Center); the app suspends.
+3. **Unlock the device**; the app may relaunch or remain suspended.
+4. **Return to the probe** and tap "Retrieve & Check" to verify the credential is accessible (or not) after unlock.
+
+Note: Testing actual retrieval *while locked* (before unlock) requires out-of-app verification.
 
 ### Relaunch After Lock
 
-1. **Store credentials** with `AfterFirstUnlock` and `WhenUnlocked` classes.
+1. **Store credentials** with `AfterFirstUnlock` and `WhenUnlocked` classes via "Store All Credentials".
 2. **Lock the device**.
-3. **Force quit the app** (or let it remain backgrounded).
-4. **Relaunch the app**.
-5. **Unlock the device**.
-6. **Attempt retrieval** of both credentials (expect both accessible; `AfterFirstUnlock` should succeed without additional unlock).
+3. **Force quit the app** via Settings or Xcode; alternatively let it remain backgrounded.
+4. **Unlock the device** and relaunch the app (or it may relaunch automatically).
+5. **Tap "Retrieve & Check"** and observe results.
+   - `AfterFirstUnlock` and `AfterFirstUnlockThisDeviceOnly` should remain accessible (until next device restart).
+   - `WhenUnlocked` and `WhenUnlockedThisDeviceOnly` become inaccessible if still locked; accessible after unlock.
+   - `WhenPasscodeSetThisDeviceOnly` follows passcode/unlock rules.
 
 ### Passcode Requirement (WhenPasscodeSetThisDeviceOnly)
 
