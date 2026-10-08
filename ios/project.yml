@@ -32,6 +32,9 @@ targets:
       - type: shell
         name: Build Rust Core
         script: exec "$(SRCROOT)/scripts/build-rust-core.sh"
+        basedOnDependencyAnalysis: false
+        inputFileListPaths: []
+        outputFileListPaths: []
 
   OhAndServices:
     type: framework

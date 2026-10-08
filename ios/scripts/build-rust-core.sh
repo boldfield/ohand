@@ -37,7 +37,10 @@ for target in "${TARGETS[@]}"; do
   # Ensure target is installed
   if ! rustup target list | grep -q "^${target} (installed)"; then
     echo "Installing Rust target ${target}..."
-    rustup target add "${target}"
+    rustup target add "${target}" || {
+      echo "Failed to install Rust target ${target}" >&2
+      exit 1
+    }
   fi
 
   # Build the library with locked dependencies

@@ -1,5 +1,5 @@
 import Foundation
-import OhAndCoreC
+@_implementationOnly import OhAndCoreC
 
 public struct OhAndCore {
     public init() {}

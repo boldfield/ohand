@@ -1,4 +1,0 @@
-module OhAndCoreC {
-    header "ohand_core.h"
-    export *
-}
