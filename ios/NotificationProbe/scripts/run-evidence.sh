@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Runs the NotificationProbe UI tests on a simulator, once per permission decision, from a freshly
-# uninstalled app so the system permission prompt appears. macOS with Xcode only.
+# Runs the NotificationProbe UI tests on a simulator, once per permission decision. The simulator is
+# erased before each run because uninstalling the app does not clear its recorded notification
+# permission, and the system prompt only appears while the decision is notDetermined. macOS with Xcode only.
 # Usage: run-evidence.sh <simulator-udid> <evidence-directory>
 set -euo pipefail
 
@@ -9,12 +10,14 @@ evidence_dir="${2:?evidence directory required}"
 bundle_id="com.boldfield.ohand.probes.notification"
 suites=(NotificationProbeAuthorizedUITests NotificationProbeDeniedUITests)
 
-cd "$(dirname "$0")/../.."
 mkdir -p "${evidence_dir}"
+evidence_dir="$(cd "${evidence_dir}" && pwd)"
+cd "$(dirname "$0")/../.."
 overall_status=0
 
 for suite in "${suites[@]}"; do
-  xcrun simctl uninstall "${udid}" "${bundle_id}" 2>/dev/null || true
+  xcrun simctl shutdown "${udid}" 2>/dev/null || true
+  xcrun simctl erase "${udid}"
   rm -rf "${evidence_dir}/${suite}.xcresult"
   suite_status=0
   xcodebuild test \

@@ -56,8 +56,11 @@ final class NotificationProbeAuthorizedUITests: NotificationProbeUITestCase {
             let capacity = run("capacity")
             XCTAssertEqual(capacity["requestsAdded"], "100")
             XCTAssertEqual(capacity["addErrorCount"], "0")
-            XCTAssertNotNil(capacity["pendingCount"])
-            XCTAssertNotNil(capacity["retainedAmongSoonest64"])
+            XCTAssertEqual(capacity["pendingCount"], "64", "the OS keeps at most 64 pending requests per app")
+            XCTAssertEqual(
+                capacity["retainedAmongLastAdded64"], "64",
+                "observed retention keeps the most recently added 64 (not the soonest-firing 64); see docs/validation/notification-probe.md"
+            )
         }
 
         XCTContext.runActivity(named: "foreground delivery reaches the delegate") { _ in

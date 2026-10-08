@@ -315,12 +315,14 @@ final class NotificationProbeScenarios {
         let retained = Set(pending.requests.map { $0.identifier })
         let soonest = Set((0..<total).filter { rank(of: $0) < 64 }.map(identifier(of:)))
         let firstAdded = Set((0..<64).map(identifier(of:)))
+        let lastAdded = Set((max(0, total - 64)..<total).map(identifier(of:)))
         let observations: [String: String] = [
             "requestsAdded": String(total),
             "addErrorCount": String(addErrorCount),
             "pendingCount": String(retained.count),
             "retainedAmongSoonest64": String(retained.intersection(soonest).count),
             "retainedAmongFirstAdded64": String(retained.intersection(firstAdded).count),
+            "retainedAmongLastAdded64": String(retained.intersection(lastAdded).count),
             "retainedIdentifiers": retained.sorted().joined(separator: ","),
         ]
         await clearPending()
