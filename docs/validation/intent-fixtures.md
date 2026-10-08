@@ -32,9 +32,9 @@ Each fixture contains:
 Expected/forbidden outcomes map to the [Proposal](../../core/src/interpretation/contracts/mod.rs) schema:
 
 - **item_type**: One of `note`, `action`, or `idea` (from `ItemType`)
-- **reminder**: Proposed reminder with quality (explicit/inferred/ambiguous), resolved instant, timezone
-- **session_topic**: Proposed session-topic string and source span
-- **abstention**: Reason for declining to propose (uncertain-target, negated, ambiguous, unsupported-operation, other)
+- **reminder_proposal**: Proposed reminder with quality (explicit/inferred/ambiguous), resolved instant, timezone
+- **session_topic_proposal**: Proposed session-topic string and source span
+- **abstention**: Reason for declining to propose (UncertainTarget, Negated, Ambiguous, UnsupportedOperation, or {"Other": "reason"})
 - **source_spans**: Character offsets of evidence for item type proposal
 
 ## Fixture Categories
@@ -75,9 +75,9 @@ User-corrected transcriptions:
 Scenarios where intent cannot be confidently recovered:
 
 - **date-ambiguous-maybe-friday**: "Maybe remind me Friday?" → reminder quality is `ambiguous`, not scheduled
-- **asr-dropped-word-remind-me**: "me tomorrow at 3" (missing "Remind") → abstain with `uncertain-target`
+- **asr-dropped-word-remind-me**: "me tomorrow at 3" (missing "Remind") → abstain with `UncertainTarget`
 - **asr-garbled-time**: "Remind me at fiveish on Tuesmorning" → reminder quality is `ambiguous`, not invented
-- **empty-or-noise**: "Um, uh, hmm" → abstain with `uncertain-target`
+- **empty-or-noise**: "Um, uh, hmm" → abstain with `UncertainTarget`
 
 **Key property**: Missing/garbled information must not trigger inference that invents missing words or times. Ambiguous quality is explicit (not absent). Source is always preserved.
 
@@ -95,9 +95,9 @@ Exploratory thoughts, reflections, and open questions:
 
 Scenarios testing negation, quotation, and reported speech:
 
-- **negation-do-not-remind**: "Don't remind me about this" → abstain with `negated`
-- **negation-do-not-remind-me-to-call**: "Don't remind me to call the dentist" → abstain with `negated`
-- **quoted-text**: "He said \"remind me later about the meeting\"" → abstain (reported speech is not direct instruction)
+- **negation-do-not-remind**: "Don't remind me about this" → abstain with `Negated`
+- **negation-do-not-remind-me-to-call**: "Don't remind me to call the dentist" → abstain with `Negated`
+- **quoted-text**: "He said \"remind me later about the meeting\"" → abstain with `Other("quoted speech")`
 - **hypothetical-question**: "What if I remind them tomorrow?" → idea (hypothetical)
 
 **Key property**: Negation, quotation, hypothetical phrasing prevent interpretation as direct instructions.
@@ -116,17 +116,17 @@ Adversarial attempts to embed instructions or exploit parsing:
 Time resolution scenarios with various levels of clarity and timezone context:
 
 - **date-explicit-today**: "Remind me today at 5 p.m." → explicit quality, same-day reminder
-- **date-relative-next-monday**: "Remind me next Monday" (with reference date 2026-10-08) → inferred quality, resolves to 2026-10-13
-- **date-ambiguous-friday**: "Remind me Friday" (no time) → inferred quality, day resolved but no time guessed
-- **timezone-explicit**: "Remind me tomorrow at 9 a.m. EST" → EST → America/New_York, explicit quality
+- **date-relative-next-monday**: "Remind me next Monday" (with reference date 2026-10-08) → ambiguous quality, date identified but no time provided
+- **date-ambiguous-friday**: "Remind me Friday" (no time) → ambiguous quality, date identified but no time provided
+- **timezone-explicit**: "Remind me tomorrow at 9 a.m. EST" → ambiguous quality (EST in October is ambiguous; EDT is in effect)
 - **timezone-implicit-local**: "Remind me tomorrow at 9 a.m." (device timezone: America/New_York) → inferred quality, uses device timezone
 - **timezone-conflicting**: "Remind me tomorrow at 9 a.m. Tokyo time" (device: America/New_York) → explicit quality, uses stated timezone
 
 **Key property**: 
-- Dates without explicit times are not ambiguous if the date itself is clear; quality is inferred.
-- Times without explicit timezone use device context; quality becomes inferred.
-- Explicit timezone in source overrides device context.
-- Ambiguous quality is reserved for truly uncertain times (e.g., "maybe Friday" or "fiveish").
+- **Date-only reminders (no explicit time)** are marked `ambiguous` per I02 MissingHour behavior. The date may be clear, but without a time, no instant should be guessed.
+- **Times without explicit timezone** use device context; quality becomes inferred.
+- **Explicit timezone in source** overrides device context.
+- **Ambiguous quality** applies when times are unclear (e.g., "maybe Friday", "fiveish") or when only a date is given without a time.
 
 ### 9. ASR Errors and Transcription Dropout (asr-*)
 
@@ -173,7 +173,7 @@ The following fixtures explicitly test that M1 does NOT perform these operations
 - **design-unsupported-spoken-update**: "Done with the roofer call"
   - FORBIDDEN: Mutate an existing item matching "roofer call"
   - FORBIDDEN: Create an implicit target item and update it
-  - EXPECTED: Abstain with `unsupported-operation` reason
+  - EXPECTED: Abstain with `UnsupportedOperation` reason
   - SOURCE: Preserved as-is
 
 Rationale from DESIGN.md: "M2 target: complete the clearly referenced item; clarify ambiguity. In M1 preserve this source without mutating another item."
@@ -199,11 +199,11 @@ Rationale: One capture → one item. Extraction uses source spans to identify ac
 
 - **asr-dropped-word-remind-me**: "me tomorrow at 3"
   - FORBIDDEN: Assume "Remind me" prefix
-  - EXPECTED: Abstain with `uncertain-target`
+  - EXPECTED: Abstain with `UncertainTarget`
 
 - **asr-garbled-time**: "at fiveish on Tuesmorning"
   - FORBIDDEN: Invent actual time (e.g., 5:00 AM or 5:00 PM)
-  - EXPECTED: Abstain or mark as `ambiguous`
+  - EXPECTED: Mark as `ambiguous` reminder
 
 Rationale: Source is authoritative. Missing audio cannot be reconstructed.
 

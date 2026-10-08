@@ -79,8 +79,8 @@
         "item_type": "action",
         "reminder_proposal": {
           "source_span": {
-            "start": 0,
-            "end": 27
+            "start": 10,
+            "end": 26
           },
           "quality": "explicit",
           "instant": "2026-10-09T15:00:00-04:00",
@@ -129,7 +129,7 @@
         "notes": "spoken update of existing item"
       },
       "expected": {
-        "abstention": "unsupported-operation"
+        "abstention": "UnsupportedOperation"
       },
       "forbidden": {
         "item_type": "any",
@@ -172,7 +172,7 @@
         "notes": "explicit negation of reminder"
       },
       "expected": {
-        "abstention": "negated"
+        "abstention": "Negated"
       },
       "forbidden": {
         "reminder_proposal": {
@@ -191,7 +191,7 @@
         "notes": "explicit negation of action/reminder"
       },
       "expected": {
-        "abstention": "negated"
+        "abstention": "Negated"
       },
       "forbidden": {
         "item_type": "action",
@@ -211,7 +211,9 @@
         "notes": "reminder instruction in quoted speech"
       },
       "expected": {
-        "abstention": "other"
+        "abstention": {
+          "Other": "quoted speech"
+        }
       },
       "forbidden": {
         "reminder_proposal": {
@@ -324,22 +326,16 @@
       },
       "expected": {
         "reminder_proposal": {
-          "quality": "inferred",
-          "instant": "2026-10-12T00:00:00Z",
-          "timezone_id": "America/New_York",
-          "source_span": {
-            "start": 10,
-            "end": 21
-          }
+          "quality": "ambiguous"
         }
       },
       "forbidden": {
         "reminder_proposal": {
-          "quality": "ambiguous"
+          "instant": "any"
         }
       },
       "recoverable": true,
-      "notes": "Reference date 2026-10-08 is Thursday; next Monday is 2026-10-12. Relative dates are inferred but resolvable. Quality is 'inferred', not 'ambiguous'."
+      "notes": "Date without explicit time is ambiguous per I02 MissingHour. 'Next Monday' is identified but no time is provided. Must abstain or mark as ambiguous. No instant should be inferred."
     },
     {
       "id": "date-ambiguous-friday",
@@ -353,22 +349,16 @@
       },
       "expected": {
         "reminder_proposal": {
-          "quality": "inferred",
-          "instant": "2026-10-09T00:00:00Z",
-          "timezone_id": "America/New_York",
-          "source_span": {
-            "start": 10,
-            "end": 16
-          }
+          "quality": "ambiguous"
         }
       },
       "forbidden": {
         "reminder_proposal": {
-          "quality": "ambiguous"
+          "instant": "any"
         }
       },
       "recoverable": true,
-      "notes": "A date without explicit time is resolvable by inferring a default time (00:00). The date 'Friday' is clear from context, so quality is 'inferred'. Time is inferred but represents a natural default, not an arbitrary guess. No ambiguity marker because the date itself is clear."
+      "notes": "Date without explicit time is ambiguous per I02 MissingHour. 'Friday' identifies a date but no time is provided. Must abstain or mark as ambiguous. No instant should be inferred."
     },
     {
       "id": "date-ambiguous-maybe-friday",
@@ -404,22 +394,17 @@
       },
       "expected": {
         "reminder_proposal": {
-          "timezone_id": "America/New_York",
-          "quality": "explicit",
-          "instant": "2026-10-09T13:00:00Z",
-          "source_span": {
-            "start": 0,
-            "end": 32
-          }
+          "quality": "ambiguous"
         }
       },
       "forbidden": {
         "reminder_proposal": {
-          "timezone_id": null
+          "instant": "any"
         }
       },
       "recoverable": true,
-      "notes": "Timezone abbreviations (EST, PST) resolve to IANA identifiers (America/New_York). EST is a historic winter abbreviation; in October daylight-savings applies (EDT, -04:00). The proposal resolves the intent to the correct timezone and instant."
+      "recovery_notes": "EST (UTC-5) is a winter-only offset. On 2026-10-09, daylight saving time means EDT (UTC-4) is in effect. The abbreviation EST in October is ambiguous and cannot be resolved without clarification.",
+      "notes": "Timezone abbreviations like EST are ambiguous when used outside their effective season. EST in October is nonsensical; must either resolve to EDT (current) or abstain as ambiguous."
     },
     {
       "id": "timezone-implicit-local",
@@ -435,7 +420,7 @@
         "reminder_proposal": {
           "timezone_id": "America/New_York",
           "quality": "inferred",
-          "instant": "2026-10-09T13:00:00-04:00",
+          "instant": "2026-10-09T09:00:00-04:00",
           "source_span": {
             "start": 0,
             "end": 28
@@ -448,7 +433,7 @@
         }
       },
       "recoverable": true,
-      "notes": "When timezone is absent, device/context timezone is used. Quality is 'inferred' because time was clear but timezone was inferred from context."
+      "notes": "When timezone is absent, device/context timezone is used. Quality is 'inferred' because time was clear but timezone was inferred from context. 9 a.m. EDT on 2026-10-09 is UTC 13:00."
     },
     {
       "id": "timezone-conflicting",
@@ -488,7 +473,7 @@
         "notes": "Simulates ASR dropping initial word(s)"
       },
       "expected": {
-        "abstention": "uncertain-target"
+        "abstention": "UncertainTarget"
       },
       "forbidden": {
         "reminder_proposal": {
@@ -502,18 +487,19 @@
     {
       "id": "asr-dropped-word-action",
       "input": "call the dentist about that",
-      "provenance": "synthetic, ASR error - dropped 'I need to'",
+      "provenance": "synthetic, ASR error - dropped subject",
       "capture_context": {
         "capture_type": "voice",
-        "notes": "Possible subject/verb dropout in ASR"
+        "notes": "Action verb present but with dangling reference"
       },
       "expected": {
         "item_type": "action",
         "abstention": null
       },
       "forbidden": {},
-      "recoverable": true,
-      "notes": "Even with grammatical incompleteness, clear action verbs (call, email, etc.) can be recognized as actions. The action is recoverable even though the subject is missing; 'call the dentist' is a clear action."
+      "recoverable": false,
+      "recovery_notes": "'About that' is a dangling reference without context. The subject and object of the action are ambiguous despite the presence of 'call the dentist'.",
+      "notes": "Even with action verbs, dangling references ('about that') create ambiguity about what is being discussed. Without context, the action target is unclear."
     },
     {
       "id": "asr-garbled-time",
@@ -549,8 +535,8 @@
         "item_type": "action",
         "source_spans": [
           {
-            "start": 29,
-            "end": 55
+            "start": 32,
+            "end": 58
           }
         ]
       },
@@ -575,7 +561,7 @@
         "item_type": "action",
         "source_spans": [
           {
-            "start": 39,
+            "start": 34,
             "end": 68
           }
         ],
@@ -601,7 +587,7 @@
         "device_timezone": "America/New_York",
         "user_correction": "Remind me Friday at 10 a.m.",
         "correction_spans": [{"original": "Frisday", "corrected": "Friday"}],
-        "notes": "User corrected ASR error (typo/slur)"
+        "notes": "User corrected ASR error (typo/slur); spans refer to corrected text"
       },
       "expected": {
         "reminder_proposal": {
@@ -616,7 +602,7 @@
       },
       "forbidden": {},
       "recoverable": true,
-      "notes": "User corrections are authoritative and take precedence over original transcription. The proposal uses corrected text ('Friday' not 'Frisday') for interpretation. Quality is 'explicit' because the corrected time is clear."
+      "notes": "User corrections are authoritative and take precedence over original transcription. The proposal uses corrected text ('Friday' not 'Frisday') for interpretation. Quality is 'explicit' because the corrected time is clear. Source spans refer to corrected text."
     },
     {
       "id": "abstract-broad-thought",
@@ -712,7 +698,7 @@
         "notes": "ASR of pure vocalization filler"
       },
       "expected": {
-        "abstention": "uncertain-target"
+        "abstention": "UncertainTarget"
       },
       "forbidden": {
         "item_type": "action",
@@ -738,12 +724,12 @@
         "item_type": "action",
         "source_spans": [
           {
-            "start": 326,
-            "end": 361
+            "start": 423,
+            "end": 506
           },
           {
-            "start": 382,
-            "end": 423
+            "start": 508,
+            "end": 598
           }
         ],
         "reminder_proposal": null

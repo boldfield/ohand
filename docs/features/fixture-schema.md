@@ -143,7 +143,7 @@ Fixtures are organized by testing category:
 - **abstract-*, question-*, comparison-***: Broad exploratory intent.
 - **already-completed-*, empty-or-noise***: Edge cases (past tense, filler).
 
-## Example: Fixed Date Fixture
+## Example: Date-Only Fixture
 
 ```json
 {
@@ -158,24 +158,25 @@ Fixtures are organized by testing category:
   },
   "expected": {
     "reminder_proposal": {
-      "quality": "inferred",
-      "instant": "2026-10-12T00:00:00Z",
-      "timezone_id": "America/New_York",
-      "source_span": {
-        "start": 10,
-        "end": 21
-      }
+      "quality": "ambiguous"
     }
   },
   "forbidden": {
     "reminder_proposal": {
-      "quality": "ambiguous"
+      "instant": "any"
     }
   },
   "recoverable": true,
-  "notes": "Reference date 2026-10-08 is Thursday; next Monday is 2026-10-12. Relative dates are inferred but resolvable. Quality is 'inferred', not 'ambiguous'."
+  "notes": "Date without explicit time is ambiguous per I02 MissingHour. 'Next Monday' is identified but no time is provided. Must abstain or mark as ambiguous. No instant should be inferred."
 }
 ```
+
+## Clarification: Date-Only vs Date+Time Reminders
+
+Per I02 specification, reminders fall into two categories:
+
+1. **With time (explicit/inferred)**: When the input specifies or clearly implies a time, quality is `explicit` or `inferred`, and `instant` is required (RFC 3339 format).
+2. **Date-only (ambiguous)**: When only a date is provided without a time, the reminder is marked `ambiguous` and no `instant` is included. I02 returns `MissingHour` for such cases, indicating the time cannot be resolved from the transcript.
 
 ## Fixture Maintenance
 

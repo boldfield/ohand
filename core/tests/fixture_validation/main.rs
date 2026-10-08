@@ -17,8 +17,8 @@ mod fixture_tests {
     /// Load fixtures from the JSON file.
     fn load_fixtures() -> Vec<Value> {
         let path = fixture_path();
-        let content =
-            fs::read_to_string(&path).unwrap_or_else(|e| panic!("Failed to load fixtures from {:?}: {}", path, e));
+        let content = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("Failed to load fixtures from {:?}: {}", path, e));
         let json: Value = serde_json::from_str(&content)
             .unwrap_or_else(|e| panic!("Failed to parse fixtures JSON: {}", e));
         json["fixtures"]
@@ -129,7 +129,8 @@ mod fixture_tests {
                 }
 
                 // For explicit/inferred, instant is required (but not in forbidden section)
-                if !context.ends_with("(forbidden)") && (q == "explicit" || q == "inferred")
+                if !context.ends_with("(forbidden)")
+                    && (q == "explicit" || q == "inferred")
                     && q != "any"
                 {
                     assert!(
@@ -159,14 +160,20 @@ mod fixture_tests {
         if !abstention.is_null() {
             if let Some(reason) = abstention.as_str() {
                 assert!(
-                    reason == "uncertain-target"
-                        || reason == "negated"
-                        || reason == "ambiguous"
-                        || reason == "unsupported-operation"
-                        || reason.starts_with("other"),
+                    reason == "UncertainTarget"
+                        || reason == "Negated"
+                        || reason == "Ambiguous"
+                        || reason == "UnsupportedOperation",
                     "{}: unknown abstention reason '{}'",
                     context,
                     reason
+                );
+            } else if let Some(obj) = abstention.as_object() {
+                // Handle Other(String) format: {"Other": "reason"}
+                assert!(
+                    obj.contains_key("Other"),
+                    "{}: abstention object must have 'Other' key",
+                    context
                 );
             }
         }
