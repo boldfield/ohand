@@ -358,7 +358,7 @@ fn test_user_corrections_separate_from_source() -> Result<()> {
         "item-1",
         0,
         CorrectionKind::Text,
-        Some("old text"),
+        Some("test"),
         "new text",
     );
     save_event(&mut db, &correction, 0)?;
@@ -377,7 +377,7 @@ fn test_user_corrections_separate_from_source() -> Result<()> {
     )?;
 
     assert_eq!(corrections_row.1, "text");
-    assert_eq!(corrections_row.2, Some("old text".to_string()));
+    assert_eq!(corrections_row.2, Some("test".to_string()));
     assert_eq!(corrections_row.3, "new text");
 
     // Verify original capture text is unchanged
@@ -393,8 +393,8 @@ fn test_user_corrections_separate_from_source() -> Result<()> {
 }
 
 #[test]
-fn test_correction_with_no_old_value() -> Result<()> {
-    let path = temp_db_path("correction_no_old");
+fn test_first_topic_assignment_has_no_old_value() -> Result<()> {
+    let path = temp_db_path("topic_no_old");
     let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
     let mut db = make_test_db(&path, instant)?;
 
@@ -406,9 +406,9 @@ fn test_correction_with_no_old_value() -> Result<()> {
         "evt-correct",
         "item-1",
         0,
-        CorrectionKind::Text,
+        CorrectionKind::SessionTopic,
         None,
-        "new text",
+        "new topic",
     );
     save_event(&mut db, &correction, 0)?;
 
@@ -419,9 +419,9 @@ fn test_correction_with_no_old_value() -> Result<()> {
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
 
-    assert_eq!(corrections_row.0, "text");
+    assert_eq!(corrections_row.0, "session_topic");
     assert_eq!(corrections_row.1, None);
-    assert_eq!(corrections_row.2, "new text");
+    assert_eq!(corrections_row.2, "new topic");
 
     let _ = std::fs::remove_file(&path);
     Ok(())
@@ -835,7 +835,7 @@ fn test_delete_events_for_item() -> Result<()> {
         "item-1",
         0,
         CorrectionKind::Text,
-        Some("old"),
+        Some("test"),
         "new",
     );
     let evt2 = make_completion_event("evt-2", "item-1", 1);
@@ -873,9 +873,23 @@ fn test_get_events_for_item_ordered() -> Result<()> {
     tx.commit()?;
 
     // Create three non-terminal events that preserve ordering
-    let evt0 = make_correction_event("evt-0", "item-1", 0, CorrectionKind::Text, None, "val0");
+    let evt0 = make_correction_event(
+        "evt-0",
+        "item-1",
+        0,
+        CorrectionKind::Text,
+        Some("test"),
+        "val0",
+    );
     let evt1 = make_correction_event("evt-1", "item-1", 1, CorrectionKind::Type, None, "idea");
-    let evt2 = make_correction_event("evt-2", "item-1", 2, CorrectionKind::Scope, None, "val2");
+    let evt2 = make_correction_event(
+        "evt-2",
+        "item-1",
+        2,
+        CorrectionKind::Scope,
+        Some("personal"),
+        "work",
+    );
 
     save_event(&mut db, &evt0, 0)?;
     save_event(&mut db, &evt1, 1)?;
@@ -934,7 +948,14 @@ fn test_save_event_in_transaction() -> Result<()> {
     insert_test_item(&tx, "item-1")?;
     tx.commit()?;
 
-    let event = make_correction_event("evt-tx", "item-1", 0, CorrectionKind::Text, None, "val");
+    let event = make_correction_event(
+        "evt-tx",
+        "item-1",
+        0,
+        CorrectionKind::Text,
+        Some("test"),
+        "val",
+    );
 
     {
         let tx = db.transaction()?;
@@ -1168,4 +1189,277 @@ fn test_event_revision_must_match_expected() -> Result<()> {
 
     let _ = std::fs::remove_file(&path);
     Ok(())
+}
+
+fn item_effective_columns(
+    tx: &rusqlite::Transaction<'_>,
+    item_id: &str,
+) -> Result<(Option<String>, Option<String>)> {
+    Ok(tx.query_row(
+        "SELECT current_scope, current_session_topic FROM items WHERE item_id = ?",
+        [item_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?)
+}
+
+#[test]
+fn test_scope_correction_validated_and_applied() -> Result<()> {
+    let path = temp_db_path("scope_correction");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let tx = db.transaction()?;
+    insert_test_item(&tx, "item-1")?;
+    tx.commit()?;
+
+    // Values outside personal/work are rejected, both at construction and at persistence.
+    let built = Event::new(
+        "evt-bad".to_string(),
+        "item-1".to_string(),
+        0,
+        EventType::Correction,
+        EventPayload::Correction(Correction {
+            kind: CorrectionKind::Scope,
+            old_value: Some("personal".to_string()),
+            new_value: "public_internet".to_string(),
+        }),
+        "2026-01-15T10:30:00Z".to_string(),
+    );
+    assert!(built.is_err());
+    let bypass = Event {
+        event_id: "evt-bad".to_string(),
+        item_id: "item-1".to_string(),
+        revision: 0,
+        event_type: EventType::Correction,
+        payload: EventPayload::Correction(Correction {
+            kind: CorrectionKind::Scope,
+            old_value: Some("galaxy".to_string()),
+            new_value: "work".to_string(),
+        }),
+        happened_at: "2026-01-15T10:30:00Z".to_string(),
+    };
+    assert!(matches!(
+        save_event(&mut db, &bypass, 0),
+        Err(EventError::Invalid(_))
+    ));
+
+    let tx = db.transaction()?;
+    assert_eq!(item_effective_columns(&tx, "item-1")?, (None, None));
+    assert!(get_events_for_item(&tx, "item-1")?.is_empty());
+    tx.commit()?;
+
+    // A valid scope correction sets the effective scope; the capture keeps its original scope.
+    let to_work = make_correction_event(
+        "evt-work",
+        "item-1",
+        0,
+        CorrectionKind::Scope,
+        Some("personal"),
+        "work",
+    );
+    save_event(&mut db, &to_work, 0)?;
+    let tx = db.transaction()?;
+    assert_eq!(
+        item_effective_columns(&tx, "item-1")?,
+        (Some("work".to_string()), None)
+    );
+    let capture_scope: String = tx.query_row(
+        "SELECT item_scope FROM captures WHERE capture_id = 'cap-item-1'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(capture_scope, "personal");
+    tx.commit()?;
+
+    // The next correction must state the real previous scope (work), not the capture's.
+    let stale_old = make_correction_event(
+        "evt-back-bad",
+        "item-1",
+        1,
+        CorrectionKind::Scope,
+        Some("personal"),
+        "personal",
+    );
+    assert!(matches!(
+        save_event(&mut db, &stale_old, 1),
+        Err(EventError::OldValueMismatch { .. })
+    ));
+    let back = make_correction_event(
+        "evt-back",
+        "item-1",
+        1,
+        CorrectionKind::Scope,
+        Some("work"),
+        "personal",
+    );
+    save_event(&mut db, &back, 1)?;
+    let tx = db.transaction()?;
+    assert_eq!(
+        item_effective_columns(&tx, "item-1")?.0,
+        Some("personal".to_string())
+    );
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn test_session_topic_correction_applied_without_changing_scope() -> Result<()> {
+    let path = temp_db_path("topic_correction");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let tx = db.transaction()?;
+    insert_test_item(&tx, "item-1")?;
+    tx.commit()?;
+
+    let blank = Event {
+        event_id: "evt-blank".to_string(),
+        item_id: "item-1".to_string(),
+        revision: 0,
+        event_type: EventType::Correction,
+        payload: EventPayload::Correction(Correction {
+            kind: CorrectionKind::SessionTopic,
+            old_value: None,
+            new_value: "  ".to_string(),
+        }),
+        happened_at: "2026-01-15T10:30:00Z".to_string(),
+    };
+    assert!(matches!(
+        save_event(&mut db, &blank, 0),
+        Err(EventError::Invalid(_))
+    ));
+
+    let assign = make_correction_event(
+        "evt-topic",
+        "item-1",
+        0,
+        CorrectionKind::SessionTopic,
+        None,
+        "synthetic-session",
+    );
+    save_event(&mut db, &assign, 0)?;
+    let tx = db.transaction()?;
+    assert_eq!(
+        item_effective_columns(&tx, "item-1")?,
+        (None, Some("synthetic-session".to_string()))
+    );
+    tx.commit()?;
+
+    let reassign = make_correction_event(
+        "evt-topic-2",
+        "item-1",
+        1,
+        CorrectionKind::SessionTopic,
+        Some("synthetic-session"),
+        "other-session",
+    );
+    save_event(&mut db, &reassign, 1)?;
+    let tx = db.transaction()?;
+    assert_eq!(
+        item_effective_columns(&tx, "item-1")?.1,
+        Some("other-session".to_string())
+    );
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn test_old_value_must_match_current_effective_value() -> Result<()> {
+    let path = temp_db_path("old_value_mismatch");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let tx = db.transaction()?;
+    insert_test_item(&tx, "item-1")?;
+    tx.commit()?;
+
+    // Item has no type yet: claiming a previous "note" type is rejected and writes nothing.
+    let fabricated = make_correction_event(
+        "evt-fake",
+        "item-1",
+        0,
+        CorrectionKind::Type,
+        Some("note"),
+        "action",
+    );
+    match save_event(&mut db, &fabricated, 0) {
+        Err(EventError::OldValueMismatch {
+            kind,
+            stated,
+            actual,
+            ..
+        }) => {
+            assert_eq!(kind, "type");
+            assert_eq!(stated, Some("note".to_string()));
+            assert_eq!(actual, None);
+        }
+        other => panic!("expected OldValueMismatch, got {other:?}"),
+    }
+    // Text previous value must be the capture text until a text correction exists.
+    let wrong_text = make_correction_event(
+        "evt-wrong-text",
+        "item-1",
+        0,
+        CorrectionKind::Text,
+        Some("not the capture"),
+        "edited",
+    );
+    assert!(matches!(
+        save_event(&mut db, &wrong_text, 0),
+        Err(EventError::OldValueMismatch { .. })
+    ));
+    let tx = db.transaction()?;
+    let snapshot = get_item_snapshot(&tx, "item-1")?.unwrap();
+    assert_eq!((snapshot.revision, snapshot.item_type), (0, None));
+    let history_rows: i64 =
+        tx.query_row("SELECT COUNT(*) FROM corrections", [], |row| row.get(0))?;
+    assert_eq!(history_rows, 0);
+    tx.commit()?;
+
+    // After a text correction the next one must state the corrected text as previous value.
+    let first = make_correction_event(
+        "evt-text-1",
+        "item-1",
+        0,
+        CorrectionKind::Text,
+        Some("test"),
+        "edited once",
+    );
+    save_event(&mut db, &first, 0)?;
+    let stale_previous = make_correction_event(
+        "evt-text-2-bad",
+        "item-1",
+        1,
+        CorrectionKind::Text,
+        Some("test"),
+        "edited twice",
+    );
+    assert!(matches!(
+        save_event(&mut db, &stale_previous, 1),
+        Err(EventError::OldValueMismatch { .. })
+    ));
+    let second = make_correction_event(
+        "evt-text-2",
+        "item-1",
+        1,
+        CorrectionKind::Text,
+        Some("edited once"),
+        "edited twice",
+    );
+    save_event(&mut db, &second, 1)?;
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
+
+#[test]
+fn test_suggestion_control_kinds_are_not_now_and_stop_only() {
+    assert_eq!(SuggestionControlKind::NotNow.as_str(), "not_now");
+    assert_eq!(
+        SuggestionControlKind::StopSuggesting.as_str(),
+        "stop_suggesting"
+    );
+    assert!("cooldown".parse::<SuggestionControlKind>().is_err());
 }

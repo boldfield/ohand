@@ -48,6 +48,34 @@ impl FromStr for ItemType {
     }
 }
 
+/// Item scope: the privacy classification. Only an explicit user correction changes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ItemScope {
+    Personal,
+    Work,
+}
+
+impl ItemScope {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ItemScope::Personal => "personal",
+            ItemScope::Work => "work",
+        }
+    }
+}
+
+impl FromStr for ItemScope {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "personal" => Ok(ItemScope::Personal),
+            "work" => Ok(ItemScope::Work),
+            _ => Err(anyhow!("Unknown item scope: {}", s)),
+        }
+    }
+}
+
 /// Authoritative item state returned with a stale-write rejection so callers can recover.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ItemSnapshot {
@@ -82,6 +110,15 @@ pub enum EventError {
         item_id: String,
         lifecycle_state: String,
         event_type: &'static str,
+    },
+    #[error(
+        "correction of {kind} on item {item_id} states previous value {stated:?} but the current value is {actual:?}"
+    )]
+    OldValueMismatch {
+        item_id: String,
+        kind: &'static str,
+        stated: Option<String>,
+        actual: Option<String>,
     },
     #[error("invalid event: {0}")]
     Invalid(String),
@@ -161,8 +198,9 @@ impl FromStr for CorrectionKind {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SuggestionControlKind {
+    /// "Not now": cooldown-gated snooze of suggestions for the item.
     NotNow,
-    Cooldown,
+    /// "Stop suggesting": pull-only; the item remains searchable.
     StopSuggesting,
 }
 
@@ -170,7 +208,6 @@ impl SuggestionControlKind {
     pub fn as_str(&self) -> &'static str {
         match self {
             SuggestionControlKind::NotNow => "not_now",
-            SuggestionControlKind::Cooldown => "cooldown",
             SuggestionControlKind::StopSuggesting => "stop_suggesting",
         }
     }
@@ -182,7 +219,6 @@ impl FromStr for SuggestionControlKind {
     fn from_str(s: &str) -> Result<Self> {
         match s {
             "not_now" => Ok(SuggestionControlKind::NotNow),
-            "cooldown" => Ok(SuggestionControlKind::Cooldown),
             "stop_suggesting" => Ok(SuggestionControlKind::StopSuggesting),
             _ => Err(anyhow!("Unknown suggestion control kind: {}", s)),
         }
@@ -254,16 +290,28 @@ impl Event {
     pub fn validate(&self) -> Result<(), EventError> {
         match (&self.event_type, &self.payload) {
             (EventType::Correction, EventPayload::Correction(correction)) => {
-                if correction.kind == CorrectionKind::Type {
-                    correction
-                        .new_value
-                        .parse::<ItemType>()
-                        .map_err(|e| EventError::Invalid(e.to_string()))?;
-                    if let Some(old_value) = &correction.old_value {
-                        old_value
-                            .parse::<ItemType>()
-                            .map_err(|e| EventError::Invalid(e.to_string()))?;
+                let invalid = |e: anyhow::Error| EventError::Invalid(e.to_string());
+                match correction.kind {
+                    CorrectionKind::Type => {
+                        correction.new_value.parse::<ItemType>().map_err(invalid)?;
+                        if let Some(old_value) = &correction.old_value {
+                            old_value.parse::<ItemType>().map_err(invalid)?;
+                        }
                     }
+                    CorrectionKind::Scope => {
+                        correction.new_value.parse::<ItemScope>().map_err(invalid)?;
+                        if let Some(old_value) = &correction.old_value {
+                            old_value.parse::<ItemScope>().map_err(invalid)?;
+                        }
+                    }
+                    CorrectionKind::SessionTopic => {
+                        if correction.new_value.trim().is_empty() {
+                            return Err(EventError::Invalid(
+                                "session topic must not be empty".to_string(),
+                            ));
+                        }
+                    }
+                    CorrectionKind::Text => {}
                 }
                 Ok(())
             }
@@ -420,6 +468,37 @@ pub fn item_can_carry_obligation(tx: &Transaction<'_>, item_id: &str) -> Result<
         .unwrap_or(false))
 }
 
+/// The current effective value a correction of `kind` replaces. Scope and session topic fall
+/// back to the value recorded on the capture until the first correction; text resolves to the
+/// latest text correction, else the original capture text.
+fn effective_value(
+    tx: &Transaction<'_>,
+    item_id: &str,
+    kind: &CorrectionKind,
+) -> Result<Option<String>, EventError> {
+    let sql = match kind {
+        CorrectionKind::Type => "SELECT item_type FROM items WHERE item_id = ?1",
+        CorrectionKind::Scope => {
+            "SELECT COALESCE(i.current_scope, c.item_scope) FROM items i
+             JOIN captures c ON c.capture_id = i.capture_id WHERE i.item_id = ?1"
+        }
+        CorrectionKind::SessionTopic => {
+            "SELECT COALESCE(i.current_session_topic, c.session_topic) FROM items i
+             JOIN captures c ON c.capture_id = i.capture_id WHERE i.item_id = ?1"
+        }
+        CorrectionKind::Text => {
+            "SELECT COALESCE(
+                 (SELECT new_value FROM corrections
+                  WHERE item_id = ?1 AND kind = 'text' ORDER BY revision DESC LIMIT 1),
+                 c.text)
+             FROM items i JOIN captures c ON c.capture_id = i.capture_id WHERE i.item_id = ?1"
+        }
+    };
+    let value: Option<Option<String>> =
+        tx.query_row(sql, [item_id], |row| row.get(0)).optional()?;
+    Ok(value.flatten())
+}
+
 /// Save an event within a caller-owned transaction.
 /// expected_item_revision: the item's revision at the time of the user's action.
 ///
@@ -493,6 +572,18 @@ pub fn save_event_in_tx(
         });
     }
 
+    if let EventPayload::Correction(corr) = &event.payload {
+        let actual = effective_value(tx, &event.item_id, &corr.kind)?;
+        if corr.old_value != actual {
+            return Err(EventError::OldValueMismatch {
+                item_id: event.item_id.clone(),
+                kind: corr.kind.as_str(),
+                stated: corr.old_value.clone(),
+                actual,
+            });
+        }
+    }
+
     let (correction_kind, correction_old_value, correction_new_value, suggestion_control_kind) =
         match &event.payload {
             EventPayload::Correction(c) => (
@@ -539,10 +630,17 @@ pub fn save_event_in_tx(
                 &event.happened_at,
             ],
         )?;
-        // A type correction defines the effective type; the captured source is untouched.
-        if corr.kind == CorrectionKind::Type {
+        // Type, scope and session-topic corrections define the effective value on the item;
+        // the captured source is untouched and text corrections live only in history.
+        let effective_column = match corr.kind {
+            CorrectionKind::Type => Some("item_type"),
+            CorrectionKind::Scope => Some("current_scope"),
+            CorrectionKind::SessionTopic => Some("current_session_topic"),
+            CorrectionKind::Text => None,
+        };
+        if let Some(column) = effective_column {
             tx.execute(
-                "UPDATE items SET item_type = ? WHERE item_id = ?",
+                &format!("UPDATE items SET {column} = ? WHERE item_id = ?"),
                 rusqlite::params![&corr.new_value, &event.item_id],
             )?;
         }
