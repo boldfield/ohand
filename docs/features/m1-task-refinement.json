@@ -197,6 +197,15 @@
         "L05b"
       ],
       "old_task_id": "57d434a4-5cea-41f2-9df1-ace5106b6cfe"
+    },
+    "V08": {
+      "reason": "The worker can only produce server-side protocol evidence; phone-context reachability over Tailscale is a maintainer input. Separate them so the probe can be reviewed and landed while the device evidence stays an honest block.",
+      "children": [
+        "V08a",
+        "V08b"
+      ],
+      "old_task_id": "939fe62e-5074-45e5-ad67-156834129c13",
+      "old_pr": "https://github.com/boldfield/ohand/pull/60"
     }
   },
   "tasks": [
@@ -1497,6 +1506,63 @@
         "docs/architecture/m1-contracts.md:260",
         "AGENTS.md:45"
       ]
+    },
+    {
+      "key": "V08a",
+      "parent": "V08",
+      "title": "Verify the Spark serving protocol from the worker context",
+      "file_scope": [
+        "tools/provider-probe/",
+        "docs/validation/spark-protocol.md",
+        "docs/validation/evidence/spark-probe/"
+      ],
+      "intent": "Build a fail-closed, tested probe that inspects the user-controlled endpoint with authorized synthetic requests from the Odonian worker, and record only values the probe actually observed.",
+      "acceptance": [
+        "The probe fails closed: unauthenticated success is reported as authentication-not-required, TLS is reported only when verified against the default trust store, OpenAI-compatible classification requires a parsed body with the expected structure, the structured-response probe requires JSON content matching the requested shape, any failed probe exits non-zero, provider key is explicit, empty base URL or credential is an explicit error, and chat probes use a model the endpoint listed.",
+        "Focused stub-server tests cover each classification, failure paths, exit codes and the sanitization guarantee that neither endpoint address nor credential appears in stdout, stderr or the sanitized artifact; the tests run under make test or a documented CI-executed Python test command.",
+        "The probe was run as submitted from the worker and its named sanitized evidence artifact is committed under docs/validation/evidence/spark-probe/ with evidence id, probe revision and dirty flag, collection time, per-request method/path/credential-sent/status, allowlisted headers, endpoint-returned model identifiers and structured-response result; address and credential are never written.",
+        "docs/validation/spark-protocol.md contains only observed values citing evidence id, revision and time, a matrix derived from the endpoint /models response, and an explicit statement that phone-context reachability is unverified and owned by V08b."
+      ],
+      "covers_parent_criteria": [
+        1,
+        3
+      ],
+      "depends_on": [
+        "V01",
+        "F07"
+      ],
+      "source_pointers": [
+        "docs/features/m1-external-prerequisites.md",
+        "docs/validation/m1-protocol.md:122",
+        "AGENTS.md:45",
+        "https://github.com/boldfield/ohand/pull/60"
+      ]
+    },
+    {
+      "key": "V08b",
+      "parent": "V08",
+      "title": "Record phone-context reachability of the Spark endpoint",
+      "file_scope": [
+        "docs/validation/spark-protocol.md",
+        "docs/validation/evidence/spark-phone/"
+      ],
+      "intent": "Fold the maintainer-collected iPhone-over-Tailscale evidence into the protocol document and set the final verified status.",
+      "acceptance": [
+        "docs/validation/spark-protocol.md gains a phone-context section whose every value cites the maintainer's named artifact, collection time and network context (Wi-Fi or cellular, Tailscale connected) for unauthenticated and authenticated requests, including HTTP status, scheme and certificate outcome.",
+        "Overall status becomes verified only if the V08a artifact and the phone-context artifact both exist and agree on protocol and authentication behavior; any disagreement is recorded as the exact verified compatibility boundary for V09."
+      ],
+      "covers_parent_criteria": [
+        2,
+        3
+      ],
+      "depends_on": [
+        "V08a"
+      ],
+      "source_pointers": [
+        "docs/features/m1-external-prerequisites.md",
+        "docs/validation/m1-protocol.md:122"
+      ],
+      "starts_blocked": "maintainer phone-context evidence"
     }
   ],
   "effective_dependencies": {
@@ -1559,10 +1625,6 @@
     ],
     "V02": [
       "V01"
-    ],
-    "V08": [
-      "V01",
-      "F07"
     ],
     "P11": [
       "F03",
@@ -1682,7 +1744,7 @@
     ],
     "V09": [
       "V05b",
-      "V08"
+      "V08b"
     ],
     "N03": [
       "N01",
@@ -2011,6 +2073,13 @@
       "T06",
       "T07",
       "F07"
+    ],
+    "V08a": [
+      "V01",
+      "F07"
+    ],
+    "V08b": [
+      "V08a"
     ]
   },
   "retained_dependency_overrides": {
@@ -2020,5 +2089,11 @@
     "V07": [
       "V01"
     ]
-  }
+  },
+  "addenda": [
+    {
+      "date": "2026-10-08",
+      "change": "Split V08 into V08a (worker-side probe) and V08b (maintainer phone-context evidence over Tailscale); V09 now depends on V08b. Original task 939fe62e-5074-45e5-ad67-156834129c13 retired after two rejected review rounds on PR #60."
+    }
+  ]
 }
