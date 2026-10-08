@@ -23,6 +23,20 @@ fn text_capability() -> CapabilityMetadata {
     .with_structured_output(StructuredOutputMode::JsonObject)
 }
 
+fn profile_with_different_origin() -> ProviderProfile {
+    ProviderProfileBuilder::new(
+        "anthropic-custom",
+        ProviderProtocol::Anthropic,
+        "claude-3-sonnet-20240229",
+    )
+    .credential_ref("anthropic-key-ref")
+    .timeout_seconds(30)
+    .authorized_destination("https://example.com")
+    .capability(text_capability())
+    .build()
+    .expect("valid profile")
+}
+
 fn profile() -> ProviderProfile {
     ProviderProfileBuilder::new(
         "anthropic-hosted",
@@ -542,4 +556,160 @@ fn endpoint_must_be_authorized() {
             .any(|dest| call.endpoint.starts_with(dest)),
         "Endpoint should be authorized by profile destinations"
     );
+}
+
+#[test]
+fn wrong_tool_name_is_rejected() {
+    let harness = Harness::new();
+    let anthropic_response = r#"{
+        "id": "msg_123",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+            {"type": "tool_use", "id": "tool_1", "name": "wrong_tool", "input": {"kind":"action"}}
+        ],
+        "stop_reason": "tool_use"
+    }"#;
+    let result = harness.run_anthropic(
+        vec![FakeAnthropicStep::respond(anthropic_response)],
+        DispatchLimits::default(),
+    );
+    let failure = result.expect_err("wrong tool name");
+    assert_eq!(failure.kind, FailureKind::Rejected);
+}
+
+#[test]
+fn tool_use_is_preferred_over_preceding_text() {
+    let harness = Harness::new();
+    let anthropic_response = r#"{
+        "id": "msg_123",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+            {"type": "text", "text": "{\"wrong\":true}"},
+            {"type": "tool_use", "id": "tool_1", "name": "interpret", "input": {"kind":"action","target":"mom"}}
+        ],
+        "stop_reason": "tool_use"
+    }"#;
+    let result = harness.run_anthropic(
+        vec![FakeAnthropicStep::respond(anthropic_response)],
+        DispatchLimits::default(),
+    );
+    let output = result.expect("success");
+    assert_eq!(output.proposal["kind"], "action");
+    assert_eq!(output.proposal["target"], "mom");
+}
+
+#[test]
+fn multiple_tool_use_blocks_uses_first_interpret() {
+    let harness = Harness::new();
+    let anthropic_response = r#"{
+        "id": "msg_123",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+            {"type": "tool_use", "id": "tool_1", "name": "other", "input": {"data":"wrong"}},
+            {"type": "tool_use", "id": "tool_2", "name": "interpret", "input": {"kind":"action","target":"dad"}}
+        ],
+        "stop_reason": "tool_use"
+    }"#;
+    let result = harness.run_anthropic(
+        vec![FakeAnthropicStep::respond(anthropic_response)],
+        DispatchLimits::default(),
+    );
+    let output = result.expect("success");
+    assert_eq!(output.proposal["kind"], "action");
+    assert_eq!(output.proposal["target"], "dad");
+}
+
+#[test]
+fn request_uses_profile_model() {
+    let harness = Harness::new();
+    let fake = FakeAnthropicTransport::new(vec![FakeAnthropicStep::respond(
+        r#"{"id":"msg_1","type":"message","content":[{"type":"tool_use","id":"t1","name":"interpret","input":{}}],"stop_reason":"tool_use"}"#,
+    )]);
+    let adapter = AnthropicAdapter::new(Box::new(fake.clone()));
+    let request = request_for(&harness.profile, "test");
+    dispatch(
+        &adapter,
+        &harness.profile,
+        &request,
+        harness.clock.as_ref(),
+        &harness.cancel,
+        &DispatchLimits::default(),
+    )
+    .expect("success");
+
+    let calls = fake.calls();
+    assert_eq!(calls.len(), 1);
+    let call = &calls[0];
+    let body_str = String::from_utf8_lossy(&call.body);
+    let body: serde_json::Value = serde_json::from_str(&body_str).expect("valid json");
+    assert_eq!(
+        body["model"],
+        harness.profile.model(),
+        "Request should use profile model"
+    );
+}
+
+#[test]
+fn request_body_structure_is_valid() {
+    let harness = Harness::new();
+    let fake = FakeAnthropicTransport::new(vec![FakeAnthropicStep::respond(
+        r#"{"id":"msg_1","type":"message","content":[{"type":"tool_use","id":"t1","name":"interpret","input":{}}],"stop_reason":"tool_use"}"#,
+    )]);
+    let adapter = AnthropicAdapter::new(Box::new(fake.clone()));
+    let request = request_for(&harness.profile, "test");
+    dispatch(
+        &adapter,
+        &harness.profile,
+        &request,
+        harness.clock.as_ref(),
+        &harness.cancel,
+        &DispatchLimits::default(),
+    )
+    .expect("success");
+
+    let calls = fake.calls();
+    let call = &calls[0];
+    let body_str = String::from_utf8_lossy(&call.body);
+    let body: serde_json::Value = serde_json::from_str(&body_str).expect("valid json");
+
+    assert!(body.is_object(), "Request body should be a JSON object");
+    assert!(body["model"].is_string(), "model should be a string");
+    assert!(
+        body["max_tokens"].is_number(),
+        "max_tokens should be a number"
+    );
+    assert!(body["system"].is_string(), "system should be a string");
+    assert!(body["messages"].is_array(), "messages should be an array");
+    assert_eq!(
+        body["messages"][0]["role"], "user",
+        "First message role should be user"
+    );
+}
+
+#[test]
+fn unauthorized_endpoint_is_rejected() {
+    let profile = profile_with_different_origin();
+    let clock = Arc::new(ManualClock::new());
+    let cancel = CancelToken::new();
+
+    let fake = FakeAnthropicTransport::new(vec![FakeAnthropicStep::respond(
+        r#"{"id":"msg_1","type":"message","content":[{"type":"tool_use","id":"t1","name":"interpret","input":{}}],"stop_reason":"tool_use"}"#,
+    )]);
+    let adapter = AnthropicAdapter::new(Box::new(fake));
+    let request = request_for(&profile, "test");
+
+    let result = dispatch(
+        &adapter,
+        &profile,
+        &request,
+        clock.as_ref(),
+        &cancel,
+        &DispatchLimits::default(),
+    );
+
+    let failure = result.expect_err("unauthorized endpoint");
+    assert_eq!(failure.kind, FailureKind::Rejected);
 }

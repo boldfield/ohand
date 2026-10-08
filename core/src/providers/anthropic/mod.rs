@@ -47,6 +47,7 @@ enum AnthropicContent {
         text: String,
     },
     ToolUse {
+        name: String,
         #[serde(default)]
         input: serde_json::Value,
     },
@@ -149,7 +150,9 @@ impl ProviderAdapter for AnthropicAdapter {
 
         let body = serde_json::to_vec(&anthropic_request).map_err(|_| TransportError::Rejected)?;
 
-        let endpoint = "https://api.anthropic.com/v1/messages";
+        let endpoint = profile
+            .endpoint()
+            .unwrap_or("https://api.anthropic.com/v1/messages");
         validate_endpoint_authorized(endpoint, profile.authorized_destinations())
             .map_err(|_| TransportError::Rejected)?;
 
@@ -171,11 +174,28 @@ impl ProviderAdapter for AnthropicAdapter {
 }
 
 fn validate_endpoint_authorized(endpoint: &str, authorized: &[String]) -> Result<(), ()> {
+    let endpoint_origin = extract_origin(endpoint).ok_or(())?;
     authorized
         .iter()
-        .any(|dest| endpoint.starts_with(dest))
+        .any(|dest| {
+            let dest_origin = extract_origin(dest).unwrap_or_default();
+            endpoint_origin.eq_ignore_ascii_case(&dest_origin)
+        })
         .then_some(())
         .ok_or(())
+}
+
+/// Extract https origin from a URL: `https://host[:port]` without path/query/fragment.
+fn extract_origin(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://")?;
+    if rest.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return None;
+    }
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() || authority.contains('@') {
+        return None;
+    }
+    Some(format!("https://{}", authority))
 }
 
 /// Decode the Anthropic Messages API response and extract the structured output.
@@ -193,15 +213,20 @@ fn decode_anthropic_response(response_bytes: &[u8]) -> Result<Vec<u8>, Transport
         return Err(TransportError::Rejected);
     }
 
-    for content in response.content {
-        match content {
-            AnthropicContent::ToolUse { input } => {
+    // Prefer tool_use block with the "interpret" tool name
+    for content in &response.content {
+        if let AnthropicContent::ToolUse { name, input } = content {
+            if name == "interpret" {
                 return serde_json::to_vec(&input).map_err(|_| TransportError::Rejected);
             }
-            AnthropicContent::Text { text } => {
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-                    return serde_json::to_vec(&json).map_err(|_| TransportError::Rejected);
-                }
+        }
+    }
+
+    // Fall back to text block with JSON (any valid JSON, even arrays)
+    for content in response.content {
+        if let AnthropicContent::Text { text } = content {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                return serde_json::to_vec(&json).map_err(|_| TransportError::Rejected);
             }
         }
     }
