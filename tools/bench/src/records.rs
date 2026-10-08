@@ -7,16 +7,54 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-fn is_secret_or_endpoint(value: &str) -> bool {
-    let value_lower = value.to_lowercase();
-    value.contains("://")
-        || value.contains(":") && value.contains("@")
-        || value_lower.contains("secret")
-        || value_lower.contains("password")
-        || value_lower.contains("token")
-        || value_lower.contains("key")
-        || value.contains("/var/")
-        || value.contains(".db") && value.contains("/")
+/// Check if a string contains credentials, private endpoints, or production database paths.
+/// Uses targeted patterns to avoid false positives on normal failure text.
+pub fn is_secret_or_endpoint(value: &str) -> bool {
+    // URL scheme + userinfo pattern: http://user:pass@host
+    if value.contains("://") && value.contains("@") {
+        return true;
+    }
+
+    // Bearer token pattern
+    if value.contains("Bearer ") {
+        return true;
+    }
+
+    // Secret key patterns (sk-* for OpenAI, etc.)
+    if value.contains("sk-") || value.contains("sk_") {
+        return true;
+    }
+
+    // API key patterns
+    if value.contains("api_key=") || value.contains("api-key=") || value.contains("apikey=") {
+        return true;
+    }
+
+    // Password pattern (password=)
+    if value.contains("password=") {
+        return true;
+    }
+
+    // Secret pattern
+    if value.to_lowercase().contains("secret=") || value.to_lowercase().contains("_secret") {
+        return true;
+    }
+
+    // Production database paths
+    if (value.contains("/var/") && (value.contains(".db") || value.contains(".sqlite")))
+        || (value.contains("/Users/") && (value.contains(".db") || value.contains(".sqlite")))
+        || (value.contains("/home/") && (value.contains(".db") || value.contains(".sqlite")))
+        || (value.contains("\\AppData\\") && (value.contains(".db") || value.contains(".sqlite")))
+    {
+        return true;
+    }
+
+    // Windows-style env var paths with db files
+    if value.contains(":\\") && (value.contains(".db") || value.contains(".sqlite")) {
+        return true;
+    }
+
+    false
 }
 
 /// Versioned benchmark experiment pinning corpus, instructions, and profile selections.
@@ -560,6 +598,63 @@ mod tests {
             attempt.failure_reason,
             Some("timeout after 30s".to_string())
         );
+    }
+
+    #[test]
+    fn test_attempt_accepts_token_count_failure() {
+        let mut attempt = Attempt::new("case-1", "a").unwrap();
+        let result = attempt.fail("max output tokens exceeded");
+        assert!(result.is_ok());
+        assert_eq!(
+            attempt.failure_reason,
+            Some("max output tokens exceeded".to_string())
+        );
+    }
+
+    #[test]
+    fn test_attempt_accepts_normal_api_mention() {
+        let mut attempt = Attempt::new("case-1", "a").unwrap();
+        let result = attempt.fail("failed to connect to remote API");
+        assert!(result.is_ok());
+        assert_eq!(
+            attempt.failure_reason,
+            Some("failed to connect to remote API".to_string())
+        );
+    }
+
+    #[test]
+    fn test_attempt_accepts_word_key_in_normal_context() {
+        let mut attempt = Attempt::new("case-1", "a").unwrap();
+        let result = attempt.fail("monkey keystone not found");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_secret_heuristic_rejects_bearer_token() {
+        let mut attempt = Attempt::new("case-1", "a").unwrap();
+        let result = attempt.fail("error: Bearer sk-secret-token");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_secret_heuristic_rejects_api_key_value() {
+        let mut attempt = Attempt::new("case-1", "a").unwrap();
+        let result = attempt.fail("config: api_key=sk-abc123");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_secret_heuristic_rejects_url_userinfo() {
+        let mut attempt = Attempt::new("case-1", "a").unwrap();
+        let result = attempt.fail("tried https://user:password@api.example.com");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_secret_heuristic_rejects_production_db() {
+        let mut attempt = Attempt::new("case-1", "a").unwrap();
+        let result = attempt.fail("backed up /var/mobile/ohand/production.sqlite");
+        assert!(result.is_err());
     }
 
     #[test]
