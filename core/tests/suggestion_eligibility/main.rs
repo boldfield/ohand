@@ -458,17 +458,17 @@ fn test_select_eligible_item_finds_unselected_action() -> anyhow::Result<()> {
     tx.commit()?;
 
     let tx = db.immediate_transaction()?;
-    let selected = eligibility::select_eligible_item(&tx, eval_time)?;
+    let selected = eligibility::select_eligible_item(&tx, eval_time, None)?;
 
     assert_eq!(selected, Some(item_id.to_string()));
 
-    // Verify selection was recorded with reason
+    // Verify selection was recorded with the actual eligibility reason
     let reason: String = tx.query_row(
         "SELECT selection_reason FROM suggestion_eligibility WHERE item_id = ?",
         [item_id],
         |row| row.get(0),
     )?;
-    assert_eq!(reason, "rotation");
+    assert_eq!(reason, "active_action");
     Ok(())
 }
 
@@ -505,19 +505,19 @@ fn test_select_eligible_item_rotation_order() -> anyhow::Result<()> {
 
     // First selection should get item-rot-1
     let tx = db.immediate_transaction()?;
-    let first = eligibility::select_eligible_item(&tx, eval_time)?;
+    let first = eligibility::select_eligible_item(&tx, eval_time, None)?;
     assert_eq!(first, Some("item-rot-1".to_string()));
     tx.commit()?;
 
     // Second selection should get item-rot-2 (rotation)
     let tx = db.immediate_transaction()?;
-    let second = eligibility::select_eligible_item(&tx, eval_time)?;
+    let second = eligibility::select_eligible_item(&tx, eval_time, None)?;
     assert_eq!(second, Some("item-rot-2".to_string()));
     tx.commit()?;
 
     // Third selection should cycle back to item-rot-1
     let tx = db.immediate_transaction()?;
-    let third = eligibility::select_eligible_item(&tx, eval_time)?;
+    let third = eligibility::select_eligible_item(&tx, eval_time, None)?;
     assert_eq!(third, Some("item-rot-1".to_string()));
     Ok(())
 }
@@ -558,7 +558,7 @@ fn test_deleted_item_not_selected() -> anyhow::Result<()> {
     tx.commit()?;
 
     let tx = db.immediate_transaction()?;
-    let selected = eligibility::select_eligible_item(&tx, eval_time)?;
+    let selected = eligibility::select_eligible_item(&tx, eval_time, None)?;
     assert_eq!(selected, None);
     Ok(())
 }
@@ -614,7 +614,7 @@ fn test_dated_action_with_reminder_not_selected() -> anyhow::Result<()> {
 
     // Should not be selected because it has a reminder (dated)
     let tx = db.immediate_transaction()?;
-    let selected = eligibility::select_eligible_item(&tx, eval_time)?;
+    let selected = eligibility::select_eligible_item(&tx, eval_time, None)?;
     assert_eq!(selected, None);
     Ok(())
 }
@@ -653,7 +653,7 @@ fn test_pull_only_not_selected() -> anyhow::Result<()> {
 
     // Should not be selected because it's marked pull-only
     let tx = db.immediate_transaction()?;
-    let selected = eligibility::select_eligible_item(&tx, eval_time)?;
+    let selected = eligibility::select_eligible_item(&tx, eval_time, None)?;
     assert_eq!(selected, None);
     Ok(())
 }
@@ -704,7 +704,7 @@ fn test_snoozed_item_not_selected() -> anyhow::Result<()> {
 
     // Should not be selected while snoozed
     let tx = db.immediate_transaction()?;
-    let selected = eligibility::select_eligible_item(&tx, eval_time)?;
+    let selected = eligibility::select_eligible_item(&tx, eval_time, None)?;
     assert_eq!(selected, None);
     Ok(())
 }
@@ -741,7 +741,7 @@ fn test_nonresponse_preserves_lifecycle() -> anyhow::Result<()> {
     // Select the item multiple times
     for _ in 0..3 {
         let tx = db.immediate_transaction()?;
-        let selected = eligibility::select_eligible_item(&tx, eval_time)?;
+        let selected = eligibility::select_eligible_item(&tx, eval_time, None)?;
         assert_eq!(selected, Some(item_id.to_string()));
         tx.commit()?;
     }
@@ -749,6 +749,222 @@ fn test_nonresponse_preserves_lifecycle() -> anyhow::Result<()> {
     // Verify item is still active with correct lifecycle
     let tx = db.transaction()?;
     let elig = eligibility::check_eligibility(&tx, item_id, eval_time)?;
+    assert!(elig.eligible);
+    assert_eq!(elig.reason, EligibilityReason::ActiveAction);
+    Ok(())
+}
+
+#[test]
+fn test_privacy_scope_filter_excludes_items() -> anyhow::Result<()> {
+    let mut db = test_db()?;
+    let eval_time = "2026-10-08T10:00:00Z".parse::<DateTime<Utc>>()?;
+
+    // Create a personal action
+    let capture_id = "capture-personal";
+    let item_id = "item-personal";
+    let capture = make_test_capture(capture_id, "Personal task")?;
+    captures::save_capture(&mut db, &capture)?;
+
+    let tx = db.immediate_transaction()?;
+    create_test_item(&tx, item_id, capture_id)?;
+
+    // Type as action
+    let event = Event::new(
+        "event-1".to_string(),
+        item_id.to_string(),
+        0,
+        events::EventType::Correction,
+        EventPayload::Correction(Correction {
+            kind: CorrectionKind::Type,
+            old_value: None,
+            new_value: "action".to_string(),
+        }),
+        "2026-10-08T10:00:00Z".to_string(),
+    )?;
+    events::save_event_in_tx(&tx, &event, 0)?;
+    tx.commit()?;
+
+    // Without scope filter, it should be eligible
+    let tx = db.transaction()?;
+    let elig = eligibility::check_eligibility(&tx, item_id, eval_time)?;
+    assert!(elig.eligible);
+    drop(tx);
+
+    // With work scope filter, it should be excluded
+    let tx = db.transaction()?;
+    let elig = eligibility::check_eligibility_with_scope(&tx, item_id, eval_time, Some("work"))?;
+    assert!(!elig.eligible);
+    assert_eq!(elig.reason, EligibilityReason::ScopeExcluded);
+    drop(tx);
+
+    // With personal scope filter, it should be eligible
+    let tx = db.transaction()?;
+    let elig =
+        eligibility::check_eligibility_with_scope(&tx, item_id, eval_time, Some("personal"))?;
+    assert!(elig.eligible);
+    assert_eq!(elig.reason, EligibilityReason::ActiveAction);
+    Ok(())
+}
+
+#[test]
+fn test_selection_records_correct_reason() -> anyhow::Result<()> {
+    let mut db = test_db()?;
+    let eval_time = "2026-10-08T10:00:00Z".parse::<DateTime<Utc>>()?;
+
+    let capture_id = "capture-reason";
+    let item_id = "item-reason";
+    let capture = make_test_capture(capture_id, "Action for reason test")?;
+    captures::save_capture(&mut db, &capture)?;
+
+    let tx = db.immediate_transaction()?;
+    create_test_item(&tx, item_id, capture_id)?;
+
+    // Type as action
+    let event = Event::new(
+        "event-1".to_string(),
+        item_id.to_string(),
+        0,
+        events::EventType::Correction,
+        EventPayload::Correction(Correction {
+            kind: CorrectionKind::Type,
+            old_value: None,
+            new_value: "action".to_string(),
+        }),
+        "2026-10-08T10:00:00Z".to_string(),
+    )?;
+    events::save_event_in_tx(&tx, &event, 0)?;
+    tx.commit()?;
+
+    // Select the item
+    let tx = db.immediate_transaction()?;
+    let selected = eligibility::select_eligible_item(&tx, eval_time, None)?;
+    assert_eq!(selected, Some(item_id.to_string()));
+    tx.commit()?;
+
+    // Verify the stored selection reason is the eligibility reason, not "rotation"
+    let tx = db.transaction()?;
+    let reason: String = tx.query_row(
+        "SELECT selection_reason FROM suggestion_eligibility WHERE item_id = ?",
+        [item_id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(reason, "active_action");
+    Ok(())
+}
+
+#[test]
+fn test_dated_action_reason_is_has_reminder() -> anyhow::Result<()> {
+    let mut db = test_db()?;
+    let capture_id = "capture-dated-reason";
+    let item_id = "item-dated-reason";
+    let reminder_id = "reminder-dated-reason";
+    let eval_time = "2026-10-08T10:00:00Z".parse::<DateTime<Utc>>()?;
+
+    let capture = make_test_capture(capture_id, "Task with reminder")?;
+    captures::save_capture(&mut db, &capture)?;
+
+    let tx = db.immediate_transaction()?;
+    create_test_item(&tx, item_id, capture_id)?;
+
+    // Type as action
+    let event = Event::new(
+        "event-1".to_string(),
+        item_id.to_string(),
+        0,
+        events::EventType::Correction,
+        EventPayload::Correction(Correction {
+            kind: CorrectionKind::Type,
+            old_value: None,
+            new_value: "action".to_string(),
+        }),
+        "2026-10-08T10:00:00Z".to_string(),
+    )?;
+    events::save_event_in_tx(&tx, &event, 0)?;
+
+    // Create a reminder (makes it dated)
+    tx.execute(
+        "INSERT INTO reminders (
+            reminder_id, item_id, request_state, schedule_state, delivery_state,
+            acknowledgment_state, resolved_instant, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rusqlite::params![
+            reminder_id,
+            item_id,
+            "configured",
+            "scheduled",
+            "pending",
+            "unacknowledged",
+            "2026-10-09T10:00:00Z",
+            "2026-10-08T10:00:00Z",
+            "2026-10-08T10:00:00Z",
+        ],
+    )?;
+    tx.commit()?;
+
+    // Check eligibility - should be ineligible with HasReminder reason
+    let tx = db.transaction()?;
+    let elig = eligibility::check_eligibility(&tx, item_id, eval_time)?;
+    assert!(!elig.eligible);
+    assert_eq!(elig.reason, EligibilityReason::HasReminder);
+    Ok(())
+}
+
+#[test]
+fn test_not_now_only_becomes_eligible_after_cooldown() -> anyhow::Result<()> {
+    let mut db = test_db()?;
+    let capture_id = "capture-not-now-only";
+    let item_id = "item-not-now-only";
+    let base_time = "2026-10-08T10:00:00Z".parse::<DateTime<Utc>>()?;
+    let during_cooldown = base_time + Duration::minutes(30);
+    let after_cooldown = base_time + Duration::hours(2);
+
+    let capture = make_test_capture(capture_id, "Not-now test action")?;
+    captures::save_capture(&mut db, &capture)?;
+
+    let tx = db.immediate_transaction()?;
+    create_test_item(&tx, item_id, capture_id)?;
+
+    // Type as action
+    let event = Event::new(
+        "event-1".to_string(),
+        item_id.to_string(),
+        0,
+        events::EventType::Correction,
+        EventPayload::Correction(Correction {
+            kind: CorrectionKind::Type,
+            old_value: None,
+            new_value: "action".to_string(),
+        }),
+        "2026-10-08T10:00:00Z".to_string(),
+    )?;
+    events::save_event_in_tx(&tx, &event, 0)?;
+
+    // Record NotNow event
+    let event = Event::new(
+        "event-2".to_string(),
+        item_id.to_string(),
+        1,
+        events::EventType::SuggestionControl,
+        EventPayload::SuggestionControl(events::SuggestionControlPayload {
+            kind: SuggestionControlKind::NotNow,
+        }),
+        "2026-10-08T11:00:00Z".to_string(),
+    )?;
+    events::save_event_in_tx(&tx, &event, 1)?;
+
+    // Apply cooldown atomically at base_time
+    eligibility::apply_not_now_cooldown(&tx, item_id, base_time)?;
+    tx.commit()?;
+
+    // During cooldown: not eligible
+    let tx = db.transaction()?;
+    let elig = eligibility::check_eligibility(&tx, item_id, during_cooldown)?;
+    assert!(!elig.eligible);
+    drop(tx);
+
+    // After cooldown: eligible again (no separate write needed)
+    let tx = db.transaction()?;
+    let elig = eligibility::check_eligibility(&tx, item_id, after_cooldown)?;
     assert!(elig.eligible);
     assert_eq!(elig.reason, EligibilityReason::ActiveAction);
     Ok(())

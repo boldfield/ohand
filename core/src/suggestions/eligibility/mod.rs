@@ -24,8 +24,12 @@ pub enum EligibilityReason {
     Deleted,
     /// Item was not typed as an action (not eligible)
     NotAnAction,
+    /// Item has a reminder/is dated (not eligible for undated suggestions)
+    HasReminder,
     /// Item has no clear interpretation (not eligible)
     Uninterpreted,
+    /// Item scope doesn't match query filter (not eligible)
+    ScopeExcluded,
     /// User marked as "not now"; cooldown active until snoozed_until
     SnoozedUntil(String),
     /// User marked "stop suggesting"; pull-only (not eligible)
@@ -40,7 +44,9 @@ impl EligibilityReason {
             EligibilityReason::Cancelled => "cancelled",
             EligibilityReason::Deleted => "deleted",
             EligibilityReason::NotAnAction => "not_an_action",
+            EligibilityReason::HasReminder => "has_reminder",
             EligibilityReason::Uninterpreted => "uninterpreted",
+            EligibilityReason::ScopeExcluded => "scope_excluded",
             EligibilityReason::SnoozedUntil(_) => "snoozed_until",
             EligibilityReason::StopSuggesting => "stop_suggesting",
         }
@@ -67,16 +73,30 @@ pub struct Eligibility {
 /// - Items with active "not now" cooldown
 /// - Items marked as pull-only (stop suggesting via durable state)
 /// - Items with reminders (dated/reminder-bearing actions)
+/// - Items whose scope doesn't match the optional filter
 ///
 /// `evaluation_instant` is used for deterministic cooldown evaluation (for testing).
-pub fn check_eligibility(
+/// `scope_filter` is an optional item scope filter (e.g., for privacy boundaries).
+pub fn check_eligibility_with_scope(
     tx: &Transaction<'_>,
     item_id: &str,
     evaluation_instant: DateTime<Utc>,
+    scope_filter: Option<&str>,
 ) -> Result<Eligibility> {
     // Load item state
     let item_state = crate::domain::items::load_item_state(tx, item_id)?
         .ok_or_else(|| anyhow!("Item {} not found", item_id))?;
+
+    // Check scope filter if provided (privacy eligibility)
+    if let Some(filter) = scope_filter {
+        let item_scope = item_state.scope.as_str();
+        if item_scope != filter {
+            return Ok(Eligibility {
+                eligible: false,
+                reason: EligibilityReason::ScopeExcluded,
+            });
+        }
+    }
 
     // Check lifecycle state
     match item_state.lifecycle_state {
@@ -129,7 +149,7 @@ pub fn check_eligibility(
     if has_reminder {
         return Ok(Eligibility {
             eligible: false,
-            reason: EligibilityReason::NotAnAction, // Dated actions can't carry obligations
+            reason: EligibilityReason::HasReminder,
         });
     }
 
@@ -188,9 +208,19 @@ pub fn check_eligibility(
     })
 }
 
+/// Check whether an item is eligible for proactive suggestions (public convenience wrapper).
+/// Equivalent to check_eligibility_with_scope with no scope filter.
+pub fn check_eligibility(
+    tx: &Transaction<'_>,
+    item_id: &str,
+    evaluation_instant: DateTime<Utc>,
+) -> Result<Eligibility> {
+    check_eligibility_with_scope(tx, item_id, evaluation_instant, None)
+}
+
 /// Get the snooze expiry time for an item, or None if not snoozed or expired.
 /// Evaluates snooze status at the provided evaluation instant (for deterministic testing).
-/// Returns the time when the item's snooze expires, or None if no active snooze.
+/// Returns the time when the item's snooze expires, or an error if the stored timestamp is malformed.
 fn get_snooze_expiry(
     tx: &Transaction<'_>,
     item_id: &str,
@@ -206,16 +236,12 @@ fn get_snooze_expiry(
         .optional()?;
 
     if let Some(Some(snoozed_until_str)) = snoozed_until {
-        match snoozed_until_str.parse::<DateTime<Utc>>() {
-            Ok(expires_at) => {
-                // Check if snooze is still active at evaluation instant
-                if expires_at > evaluation_instant {
-                    return Ok(Some(expires_at));
-                }
-            }
-            Err(_) => {
-                // Invalid timestamp, treat as no snooze
-            }
+        let expires_at = snoozed_until_str
+            .parse::<DateTime<Utc>>()
+            .map_err(|_| anyhow!("Invalid snoozed_until timestamp: {}", snoozed_until_str))?;
+        // Check if snooze is still active at evaluation instant
+        if expires_at > evaluation_instant {
+            return Ok(Some(expires_at));
         }
     }
     Ok(None)
@@ -251,9 +277,9 @@ pub fn record_selection(
     Ok(())
 }
 
-/// Set a snooze (not-now) for an item with the specified cooldown duration.
+/// Set a snooze (not-now) for an item with the specified cooldown duration (internal use).
 /// The snooze expires after the given duration from the provided instant.
-pub fn set_snooze(
+fn set_snooze(
     tx: &Transaction<'_>,
     item_id: &str,
     cooldown: Duration,
@@ -283,8 +309,12 @@ pub fn set_snooze(
     Ok(())
 }
 
-/// Apply the standard NOT_NOW_COOLDOWN to an item.
-/// Used when user marks an item as "not now".
+/// Apply the standard NOT_NOW_COOLDOWN to an item atomically.
+/// Records the SuggestionControl event and applies the cooldown in one operation.
+/// The cooldown is anchored at the provided evaluation instant.
+///
+/// This is the authoritative API for "not now" responses; it ensures the cooldown
+/// is applied immediately and durably, not as a separate step.
 pub fn apply_not_now_cooldown(
     tx: &Transaction<'_>,
     item_id: &str,
@@ -317,13 +347,15 @@ pub fn set_pull_only(tx: &Transaction<'_>, item_id: &str, now: DateTime<Utc>) ->
 /// This is the main entry point for suggestion rotation. It:
 /// - Enforces eligibility policy over current authoritative state
 /// - Performs deterministic rotation (oldest last_selected_at first)
-/// - Records the selection reason durably
+/// - Records the selection reason durably (the actual reason the item was eligible)
 /// - Takes evaluation time as a parameter for deterministic testing
+/// - Accepts an optional scope filter for privacy boundaries
 ///
 /// Returns None if no eligible items are available.
 pub fn select_eligible_item(
     tx: &Transaction<'_>,
     evaluation_instant: DateTime<Utc>,
+    scope_filter: Option<&str>,
 ) -> Result<Option<String>> {
     // Find all active items that are not deleted
     let mut stmt = tx.prepare(
@@ -337,10 +369,10 @@ pub fn select_eligible_item(
         .collect::<Result<Vec<_>, _>>()?;
 
     // Check each item for eligibility, tracking the best candidate
-    let mut eligible_items: Vec<(String, Option<DateTime<Utc>>)> = Vec::new();
+    let mut eligible_items: Vec<(String, Option<DateTime<Utc>>, String)> = Vec::new();
 
     for item_id in items {
-        match check_eligibility(tx, &item_id, evaluation_instant) {
+        match check_eligibility_with_scope(tx, &item_id, evaluation_instant, scope_filter) {
             Ok(eligibility) if eligibility.eligible => {
                 // Get the last selection time for rotation ordering
                 let last_selected_at: Option<Option<String>> = tx
@@ -351,14 +383,24 @@ pub fn select_eligible_item(
                     )
                     .optional()?;
 
-                let last_selected_dt = last_selected_at
-                    .and_then(|s| s)
-                    .and_then(|s| s.parse::<DateTime<Utc>>().ok());
+                let last_selected_dt = match last_selected_at.and_then(|s| s) {
+                    Some(s) => Some(
+                        s.parse::<DateTime<Utc>>()
+                            .map_err(|e| anyhow!("Invalid last_selected_at: {}", e))?,
+                    ),
+                    None => None,
+                };
 
-                eligible_items.push((item_id, last_selected_dt));
+                // Store the actual reason the item was eligible
+                let reason_str = eligibility.reason.as_str().to_string();
+                eligible_items.push((item_id, last_selected_dt, reason_str));
             }
-            _ => {
+            Ok(_) => {
                 // Item is not eligible, skip it
+            }
+            Err(e) => {
+                // Propagate store/parse errors; don't silently skip
+                return Err(e);
             }
         }
     }
@@ -379,30 +421,10 @@ pub fn select_eligible_item(
     });
 
     // Select the first item (oldest last_selected_at)
-    if let Some((item_id, _)) = eligible_items.first() {
-        record_selection(tx, item_id, "rotation", evaluation_instant)?;
+    if let Some((item_id, _, reason)) = eligible_items.first() {
+        record_selection(tx, item_id, reason, evaluation_instant)?;
         return Ok(Some(item_id.clone()));
     }
 
     Ok(None)
-}
-
-/// List all active eligible items ordered by rotation.
-/// Items are ordered by last_selected_at (oldest first) to rotate through them.
-#[deprecated(since = "0.1.0", note = "Use select_eligible_item instead")]
-pub fn list_eligible_items(tx: &Transaction<'_>) -> Result<Vec<String>> {
-    let mut stmt = tx.prepare(
-        "SELECT se.item_id FROM suggestion_eligibility se
-         JOIN items i ON i.item_id = se.item_id
-         WHERE se.eligible = 1
-           AND i.lifecycle_state = 'active'
-           AND i.item_type IS NOT NULL
-         ORDER BY se.last_selected_at ASC NULLS FIRST, se.item_id ASC",
-    )?;
-
-    let items = stmt
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(items)
 }
