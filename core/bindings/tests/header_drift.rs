@@ -113,7 +113,7 @@ fn header_is_c_not_cpp_and_exports_only_the_boundary() {
 fn module_local_exports_are_discovered() {
     let generated = generate_header_in_process();
     assert!(
-        generated.contains("ohand_probe_module_export_test_marker"),
-        "module-local export from probe module not discovered in header — crate-wide parsing must be enabled"
+        generated.contains("ohand_ffi_module_export_test_marker"),
+        "module-local export from ffi_exports module not discovered in header — new modules must be discoverable"
     );
 }

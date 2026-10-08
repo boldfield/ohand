@@ -280,11 +280,3 @@ pub fn get_capture_json(
     let capture = found.ok_or(Failure::NOT_FOUND)?;
     serde_json::to_vec(&CaptureWire::from(capture)).map_err(|_| Failure::INTERNAL)
 }
-
-/// Test marker: verifies that module-local exports in modules declared in lib.rs
-/// are discovered by cbindgen and included in the generated header.
-/// Removed once real production exports from later-owned modules appear in the ABI.
-#[no_mangle]
-pub extern "C" fn ohand_probe_module_export_test_marker() -> u32 {
-    42
-}

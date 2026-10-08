@@ -13,6 +13,7 @@
 //!   `probe::Checkpoint`. Nothing is mutated when a call reports `cancelled`.
 //! * Panics never cross the boundary; they are reported as the `internal` failure.
 
+pub mod ffi_exports;
 pub mod probe;
 
 use probe::{

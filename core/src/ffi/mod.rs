@@ -13,21 +13,29 @@
 //!
 //! # Module-Local Export Pattern
 //!
-//! FFI exports are declared within the `ohand-bindings` crate as `#[no_mangle] pub extern "C"`
-//! functions. To export a C function:
+//! To expose a function as part of the C ABI boundary, it must be declared as
+//! `#[no_mangle] pub extern "C"` in a module that cbindgen can discover.
 //!
-//! 1. Define the function in the `ohand-bindings` crate (e.g., in `core/bindings/src/lib.rs`
-//!    or a submodule like `core/bindings/src/probe.rs`)
-//! 2. The function is automatically discovered by cbindgen and included in the generated header
-//! 3. cbindgen parses all modules declared in `core/bindings/src/lib.rs`
+//! **For functions defined in `core/src/ffi/`:**
+//! Create a re-export wrapper in `core/bindings/src/lib.rs` or a new module there.
+//! cbindgen will discover the `#[no_mangle] pub extern "C"` function and include it
+//! in the generated header. This requires adding a single `mod` declaration in
+//! `core/bindings/src/lib.rs`, which is a "named module declaration" allowed per
+//! the refinement overlay.
 //!
-//! Later-owned modules (e.g., B01b, B01c) that need FFI exports should:
-//! - Define their exports in a module they own in the `ohand-bindings` crate (by adding a
-//!   `mod` declaration in `core/bindings/src/lib.rs`), OR
-//! - Define logic in `core/src/ffi/` and re-export from `ohand-bindings` via a wrapper function
+//! **Alternative (explicit registration):**
+//! Define the C function directly in a submodule of the binding crate
+//! (e.g., `core/bindings/src/ffi.rs`, with `mod ffi;` in `lib.rs`).
+//! This works for functions that naturally belong in the binding-crate's ABI layer.
 //!
-//! This pattern ensures:
+//! **Pattern for B01b/B01c:**
+//! Later-owned modules can add their FFI exports by:
+//! 1. Creating a new module in `core/bindings/src/` (e.g., `core/bindings/src/b01b.rs`)
+//! 2. Adding a `mod b01b;` declaration to `core/bindings/src/lib.rs`
+//! 3. Defining their C functions there, potentially wrapping logic from `core/src/ffi/`
+//!
+//! This serialized approach ensures:
 //! - Exports are discovered without scanning dependencies
 //! - Bindings remain reproducible and cacheable build artifacts
-//! - Serialized ownership: later tasks depend on this task and know how to extend
-//! - No concurrent edits to shared binding logic
+//! - Clear ownership chain: later tasks depend on this pattern and know how to extend
+//! - Ordered, non-concurrent edits to the binding crate
