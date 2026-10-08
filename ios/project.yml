@@ -161,10 +161,26 @@ targets:
         createIntermediateGroups: true
         excludes:
           - Info.plist
+          - "Tests/**"
+          - "scripts/**"
     settings:
       PRODUCT_NAME: NotificationProbe
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.notification
       INFOPLIST_FILE: NotificationProbe/Info.plist
+
+  NotificationProbeUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: NotificationProbe/Tests
+        createIntermediateGroups: true
+    settings:
+      PRODUCT_NAME: NotificationProbeUITests
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.notification.uitests
+      GENERATE_INFOPLIST_FILE: YES
+      TEST_TARGET_NAME: NotificationProbe
+    dependencies:
+      - target: NotificationProbe
 
   AudioProbe:
     type: application
@@ -268,6 +284,13 @@ schemes:
     build:
       targets:
         NotificationProbe: all
+  NotificationProbeUITests:
+    build:
+      targets:
+        NotificationProbeUITests: all
+    test:
+      targets:
+        - NotificationProbeUITests
   AudioProbe:
     build:
       targets:

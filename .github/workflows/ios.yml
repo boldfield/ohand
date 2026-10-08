@@ -75,6 +75,14 @@ jobs:
             -resultBundlePath .evidence/OhAndTests.xcresult \
             CODE_SIGNING_ALLOWED=NO 2>&1 | tee .evidence/OhAndTests.log
 
+      - name: Run NotificationProbe UI tests (allow and deny permission decisions)
+        shell: bash
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+        run: |
+          set -euo pipefail
+          ios/NotificationProbe/scripts/run-evidence.sh "${SIMULATOR_UDID}" ios/.evidence/notification-probe
+
       - name: Build BridgeProbe
         shell: bash
         run: |
