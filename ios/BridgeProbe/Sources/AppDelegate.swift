@@ -69,7 +69,14 @@ class BridgeProbeViewController: UIViewController {
         container.addArrangedSubview(descriptionLabel)
 
         let statusLabel = UILabel()
-        statusLabel.text = "Probe screen initialized"
+        statusLabel.accessibilityIdentifier = "boundary-status"
+        statusLabel.numberOfLines = 0
+        statusLabel.textAlignment = .center
+        do {
+            statusLabel.text = try BoundarySelfCheck.run()
+        } catch {
+            fatalError("Rust boundary self-check failed: \(error)")
+        }
         statusLabel.font = UIFont.systemFont(ofSize: 12, weight: .light)
         statusLabel.textColor = .tertiaryLabel
         container.addArrangedSubview(statusLabel)
