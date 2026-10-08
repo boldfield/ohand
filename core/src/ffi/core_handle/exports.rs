@@ -14,8 +14,10 @@
 //!   thread. UI-facing effects must be hopped to the UI thread by the receiver. After
 //!   `ohand_core_cancel`, `ohand_core_set_event_callback` or `ohand_core_close` returns, no
 //!   callback is running and none will start; `context` may then be released. From inside a
-//!   callback, `ohand_core_cancel` is allowed (the running callback is the last), while
-//!   `ohand_core_close` and `ohand_core_set_event_callback` are rejected as `reentrant_call`.
+//!   callback, `ohand_core_cancel` of that same core is allowed (the running callback is the
+//!   last); `ohand_core_close`, `ohand_core_set_event_callback` and cancelling any other core
+//!   are rejected as `reentrant_call`, because two callbacks waiting on each other's delivery
+//!   lock would deadlock.
 //! * Panics never cross the boundary; they become the `internal` failure.
 
 use super::failure::AbiFailure;
@@ -111,12 +113,10 @@ pub unsafe extern "C" fn ohand_core_open(
 
 /// Cancels the core: pending work is discarded, later work is refused with `cancelled`, and
 /// no callback runs after this returns. Idempotent. The handle stays valid until closed.
+/// From inside another core's callback it is rejected as `reentrant_call`.
 #[no_mangle]
 pub extern "C" fn ohand_core_cancel(handle: OhandCoreHandle) -> OhandCoreResult {
-    guarded(|| {
-        instance::lookup(handle)?.cancel();
-        Ok(())
-    })
+    guarded(|| instance::lookup(handle)?.cancel())
 }
 
 /// Cancels, waits for the worker to stop and releases the core. A handle that is not open

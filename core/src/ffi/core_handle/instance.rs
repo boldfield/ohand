@@ -9,6 +9,12 @@
 //! submission order. Delivery happens while holding the delivery lock, and cancellation,
 //! callback replacement and close take that lock too, so once `cancel`, `set_callback` or
 //! `close` returns, no callback invocation is running and none will start.
+//!
+//! A callback holds its core's delivery lock, so a lifecycle call that waits for another
+//! core's delivery lock from inside a callback could deadlock (two callbacks cancelling each
+//! other). From inside any callback, only `cancel` of that same core is allowed; every other
+//! lifecycle call is rejected as `reentrant_call`. A callback must also not block on another
+//! thread that cancels, replaces the callback of or closes its own core.
 
 use super::failure::{AbiFailure, OHAND_CORE_STATUS_OK};
 use crate::store::schema::{Database, SystemClock};
@@ -64,6 +70,11 @@ impl Drop for DeliveryScope {
     }
 }
 
+/// True while this thread is inside any open core's event callback.
+fn is_inside_any_callback() -> bool {
+    DELIVERING_FOR.with(|slot| slot.get()).is_some()
+}
+
 pub(super) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -117,11 +128,16 @@ impl Shared {
         }
     }
 
-    fn cancel(&self) {
-        self.cancelled.store(true, Ordering::SeqCst);
-        if !self.is_delivering_on_this_thread() {
+    fn cancel(&self) -> Result<(), AbiFailure> {
+        if self.is_delivering_on_this_thread() {
+            self.cancelled.store(true, Ordering::SeqCst);
+        } else if is_inside_any_callback() {
+            return Err(AbiFailure::REENTRANT_CALL);
+        } else {
+            self.cancelled.store(true, Ordering::SeqCst);
             drop(lock(&self.delivery));
         }
+        Ok(())
     }
 }
 
@@ -173,14 +189,15 @@ pub fn open(path: &str) -> Result<u64, AbiFailure> {
 /// Closes `handle`: no new work is accepted, delivery stops, and the worker has exited when
 /// this returns. A second close of the same handle is `invalid_handle`.
 pub fn close(handle: u64) -> Result<(), AbiFailure> {
-    let instance = lookup(handle)?;
-    if instance.shared.is_delivering_on_this_thread() {
+    lookup(handle)?;
+    if is_inside_any_callback() {
         return Err(AbiFailure::REENTRANT_CALL);
     }
     let removed = lock(&REGISTRY)
         .remove(&handle)
         .ok_or(AbiFailure::INVALID_HANDLE)?;
-    removed.shared.cancel();
+    // Cannot be rejected: callers inside a callback were refused above.
+    let _ = removed.shared.cancel();
     drop(lock(&removed.queue).take());
     if let Some(worker) = lock(&removed.worker).take() {
         let _ = worker.join();
@@ -190,10 +207,12 @@ pub fn close(handle: u64) -> Result<(), AbiFailure> {
 }
 
 impl CoreInstance {
-    /// Stops delivery. When this returns, no callback is running and none will start; it
-    /// may be called from inside a callback, where the running callback is the last one.
-    pub fn cancel(&self) {
-        self.shared.cancel();
+    /// Stops delivery. When this returns, no callback is running and none will start. It
+    /// may be called from inside that same core's callback, where the running callback is the
+    /// last one. From inside another core's callback it is rejected as `reentrant_call`,
+    /// because waiting for that core's delivery lock while holding our own can deadlock.
+    pub fn cancel(&self) -> Result<(), AbiFailure> {
+        self.shared.cancel()
     }
 
     pub fn set_callback(
@@ -201,7 +220,7 @@ impl CoreInstance {
         callback: Option<EventCallbackFn>,
         context: *mut c_void,
     ) -> Result<(), AbiFailure> {
-        if self.shared.is_delivering_on_this_thread() {
+        if is_inside_any_callback() {
             return Err(AbiFailure::REENTRANT_CALL);
         }
         let mut registration = lock(&self.shared.delivery);

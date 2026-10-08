@@ -708,3 +708,115 @@ fn store_failures_are_classified_by_sqlite_code_and_never_by_message_text() {
         AbiFailure::STORAGE_ERROR
     );
 }
+
+struct CrossCancel {
+    peer: OhandCoreHandle,
+    barrier: std::sync::Arc<std::sync::Barrier>,
+    outcome: Mutex<Option<(u32, String)>>,
+    finished: Sender<()>,
+}
+
+unsafe extern "C" fn cancel_the_peer(
+    context: *mut c_void,
+    _operation_id: u64,
+    _status: u32,
+    _data: *const u8,
+    _len: usize,
+) {
+    let cross = &*(context as *const CrossCancel);
+    cross.barrier.wait();
+    let cancelled = consume(ohand_core_cancel(cross.peer));
+    let code = if cancelled.status == OHAND_CORE_STATUS_OK {
+        String::new()
+    } else {
+        cancelled.code()
+    };
+    *cross.outcome.lock().unwrap() = Some((cancelled.status, code));
+    cross.finished.send(()).unwrap();
+}
+
+#[test]
+fn callbacks_on_two_handles_cannot_deadlock_by_cancelling_each_other() {
+    let _guard = serial();
+    let first = open_memory();
+    let second = open_memory();
+    let (finished_sender, finished) = channel();
+    // Both callbacks meet at this barrier, so each holds its delivery lock before either
+    // tries to cancel the other.
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let first_cross = Box::new(CrossCancel {
+        peer: second,
+        barrier: std::sync::Arc::clone(&barrier),
+        outcome: Mutex::new(None),
+        finished: finished_sender.clone(),
+    });
+    let second_cross = Box::new(CrossCancel {
+        peer: first,
+        barrier,
+        outcome: Mutex::new(None),
+        finished: finished_sender,
+    });
+    consume(ohand_core_set_event_callback(
+        first,
+        Some(cancel_the_peer),
+        &*first_cross as *const CrossCancel as *mut c_void,
+    ));
+    consume(ohand_core_set_event_callback(
+        second,
+        Some(cancel_the_peer),
+        &*second_cross as *const CrossCancel as *mut c_void,
+    ));
+    consume(ohand_core_start_store_check(first, 1));
+    consume(ohand_core_start_store_check(second, 1));
+    finished
+        .recv_timeout(WAIT)
+        .expect("cross-handle cancel deadlocked");
+    finished
+        .recv_timeout(WAIT)
+        .expect("cross-handle cancel deadlocked");
+    for cross in [&first_cross, &second_cross] {
+        assert_eq!(
+            *cross.outcome.lock().unwrap(),
+            Some((OHAND_CORE_STATUS_PERMANENT, "reentrant_call".to_string()))
+        );
+    }
+    assert_eq!(
+        consume(ohand_core_close(first)).status,
+        OHAND_CORE_STATUS_OK
+    );
+    assert_eq!(
+        consume(ohand_core_close(second)).status,
+        OHAND_CORE_STATUS_OK
+    );
+}
+
+#[test]
+fn a_provider_failure_with_inconsistent_or_arbitrary_fields_is_normalized_by_kind() {
+    let malformed = ProviderFailure {
+        kind: FailureKind::Timeout,
+        class: ErrorClass::Unauthorized,
+        retriable: false,
+        message: "synthetic-sensitive-marker".to_string(),
+    };
+    let abi_failure = AbiFailure::from_provider(&malformed);
+    assert_eq!(abi_failure.class, ErrorClass::Transient);
+    assert_eq!(abi_failure.status(), OHAND_CORE_STATUS_TRANSIENT);
+    assert_eq!(abi_failure.code, "timeout");
+    assert_eq!(
+        abi_failure.message,
+        ProviderFailure::new(FailureKind::Timeout).message
+    );
+    let json = String::from_utf8(abi_failure.to_json()).unwrap();
+    assert!(!json.contains("synthetic-sensitive-marker"));
+
+    let deserialized: ProviderFailure = serde_json::from_str(
+        r#"{"kind":"rejected","class":"transient","retriable":true,"message":"synthetic-sensitive-marker"}"#,
+    )
+    .unwrap();
+    let abi_failure = AbiFailure::from_provider(&deserialized);
+    assert_eq!(abi_failure.class, ErrorClass::Permanent);
+    assert_eq!(abi_failure.code, "rejected");
+    assert!(!String::from_utf8(abi_failure.to_json())
+        .unwrap()
+        .contains("synthetic-sensitive-marker"));
+}

@@ -116,12 +116,15 @@ impl AbiFailure {
         "unexpected internal failure",
     );
 
-    /// Converts a typed provider failure, keeping its class and its fixed per-kind message.
+    /// Converts a typed provider failure. Only `kind` is trusted: the class and the fixed
+    /// message are re-derived from it, because the other fields are public and deserializable
+    /// and could be inconsistent or carry arbitrary content.
     pub fn from_provider(failure: &ProviderFailure) -> AbiFailure {
+        let normalized = ProviderFailure::new(failure.kind);
         AbiFailure {
-            class: failure.class,
-            code: provider_code(failure.kind),
-            message: Cow::Owned(failure.message.clone()),
+            class: normalized.class,
+            code: provider_code(normalized.kind),
+            message: Cow::Owned(normalized.message),
         }
     }
 
