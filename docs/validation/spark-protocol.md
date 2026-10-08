@@ -1,6 +1,6 @@
-# Spark serving protocol: worker-context observations (V08a)
+# Spark serving protocol: worker and phone-context evidence (V08a and V08b)
 
-Every value below was observed by `tools/provider-probe/spark_probe.py` and is read from one committed, sanitized artifact. Nothing here is taken from configuration, documentation or assumption.
+Worker-context values below were observed by `tools/provider-probe/spark_probe.py`. Phone-context values were observed by the maintainer on iPhone with a-Shell curl (which exposes HTTP response status codes). Both are read from committed, sanitized artifacts. Nothing here is taken from configuration, documentation or assumption.
 
 | Field | Value |
 | --- | --- |
@@ -14,9 +14,6 @@ Every value below was observed by `tools/provider-probe/spark_probe.py` and is r
 
 The dirty-tree flag ignores `docs/validation/evidence/spark-probe/`, which is the probe's own output. The commits after `22c47772` only add the artifact and this document. The endpoint address and credential are in no artifact; the Kubernetes Secret `ohand-spark-provider` and its mount are the private reference.
 
-## Phone-context reachability recorded by V08b
-
-These worker-context observations come from the Odonian worker network only. Phone-context evidence (maintainer's iPhone over Tailscale, Wi-Fi and cellular) is recorded in the V08b section below.
 
 ## Transport
 
@@ -67,7 +64,7 @@ Source: same evidence, revision and collection time.
 
 The probe requested a JSON object through `response_format` of type `json_schema` (strict, no additional properties) with exactly two keys, `status` equal to `"ok"` and `count` equal to the integer 3. For `deepseek-flash-iq3:latest` the returned `message.content` parsed as a JSON object with exactly the keys `count` and `status`, and both values matched, so the structured-response probe passed. The probe records the verdict and the observed keys, not the model output.
 
-## What this does not establish
+## What this does not establish (worker-context V08a)
 
 - Behavior of the five models that were not sent a chat request.
 - Whether the credential is validated: the endpoint accepted requests with and without it.
@@ -81,74 +78,96 @@ Every value below was observed by the maintainer on the configured iPhone and is
 
 | Field | Value |
 | --- | --- |
-| Evidence identifier | `spark-phone-2026-10-08` |
+| Evidence identifier | `spark-phone-2026-10-08`, revision 2 |
 | Artifact | [`docs/validation/evidence/spark-phone/2026-10-08-phone-reachability.json`](evidence/spark-phone/2026-10-08-phone-reachability.json) |
 | Device | iPhone 16 Pro |
 | iOS version | 26.6.2 |
-| Client | Safari, plain navigation to the models path of the configured base URL |
+| Client | a-Shell curl (observes and records HTTP status code via `curl`'s `http_code` variable) |
 | Path to endpoint | Tailscale; endpoint is private-network only (not publicly resolvable) |
-| Credential sent | No (unauthenticated requests only; a browser cannot attach a bearer header) |
-| Collection clock accuracy | Coordinator session clock when results were reported; accurate to about one minute |
+| Collection clock accuracy | Coordinator session clock converted from UTC-7 timezone; accurate to about one minute |
 
 ## Phone-context: Wi-Fi (Tailscale connected)
 
-Source: evidence `spark-phone-2026-10-08`, Wi-Fi attempt, reported 2026-10-08T06:42:00Z (±~1 min).
+Source: evidence `spark-phone-2026-10-08`, Wi-Fi attempts, collected 2026-10-08T16:34:00Z.
 
-| Field | Value |
-| --- | --- |
-| Network | Wi-Fi |
-| Tailscale connected | Yes |
-| Request type | Unauthenticated GET `/models` |
-| HTTP status | 200 (inferred from rendered JSON response; Safari does not display numeric status) |
-| Scheme | https |
-| Certificate | Validated, no Safari warning |
-| Models list returned | 6 |
+| Request | Credential sent | HTTP status (curl observed) | Scheme | Certificate |
+| --- | --- | --- | --- | --- |
+| `GET /v1/models` | No | 200 | https | Verified |
+| `GET /v1/models` | Yes | 200 | https | Verified |
 
-## Phone-context: cellular (Tailscale connected)
+## Phone-context: cellular with configured hostname (Tailscale connected)
 
-Source: evidence `spark-phone-2026-10-08`, cellular attempt, reported 2026-10-08T06:44:30Z (±~1 min).
+Source: evidence `spark-phone-2026-10-08`, cellular attempts to configured hostname, collected 2026-10-08T16:35:00Z.
 
-| Field | Value |
-| --- | --- |
-| Network | cellular |
-| Tailscale connected | Yes |
-| Request type | Unauthenticated GET `/models` |
-| HTTP status | 200 (inferred from rendered JSON response; Safari does not display numeric status) |
-| Scheme | https |
-| Certificate | Validated, no Safari warning |
-| Models list returned | 6 |
+| Request | Credential sent | HTTP status (curl observed) | Scheme | Certificate | Note |
+| --- | --- | --- | --- | --- | --- |
+| `GET /v1/models` | No | 302 | https | Verified | Redirect to tailnet hostname |
+| `GET /v1/models` | Yes | 302 | https | Verified | Redirect to tailnet hostname; credential does not change response |
+
+## Phone-context: cellular with tailnet hostname (Tailscale connected)
+
+Source: evidence `spark-phone-2026-10-08`, cellular attempts to tailnet hostname, collected 2026-10-08T16:39:00Z.
+
+| Request | Credential sent | HTTP status (curl observed) | Scheme | Certificate |
+| --- | --- | --- | --- | --- |
+| `GET /v1/models` | No | 200 | https | Verified |
+| `GET /v1/models` | Yes | 200 | https | Verified |
+
+## Model list observed on phone
+
+Source: evidence `spark-phone-2026-10-08`, Safari rendering of `GET /v1/models` on Wi-Fi and cellular; identical in both contexts.
+
+| Model ID |
+| --- |
+| `deepseek-flash-iq3:latest` |
+| `qwen3.8:27b` |
+| `qwen3.5:122b` |
+| `gpt-oss:120b` |
+| `gpt-oss:20b` |
+| `glm-5.3-flash` |
 
 ## Compatibility: V08a (worker) and V08b (phone) observations
 
 ### Recorded observations
 
-**Transport**: Both worker-context (V08a) and phone-context (V08b) confirm HTTPS with certificate validation.
-- Worker: Probe classification `https-verified` (default trust store, verified certificates on all four requests).
-- Phone: Certificate validated on both Wi-Fi and cellular; no Safari warning.
+**Transport**: Both worker-context (V08a) and phone-context (V08b) confirm HTTPS with certificate validation on all observed requests.
+- Worker-context: Probe classification `https-verified` (default trust store, verified certificates on all four requests).
+- Phone-context: Certificate verified on Wi-Fi (both credentials), cellular configured hostname (both credentials), and cellular tailnet hostname (both credentials); all 8 HTTP exchanges show verified TLS.
 
-**Unauthenticated reachability**: Phone-context attempted unauthenticated `GET /models` on both Wi-Fi and cellular over Tailscale.
-- Result: Both attempts succeeded with rendered response containing six model identifiers.
-- Worker-context: Unauthenticated `GET /models` received HTTP 200 with six models listed in response body.
-- Phone-context: HTTP status inferred from rendered JSON (Safari does not expose numeric status); certificate chain validated.
+**Unauthenticated reachability**: Phone-context attempted unauthenticated `GET /v1/models` on Wi-Fi and cellular over Tailscale.
+- Wi-Fi with configured hostname: HTTP 200.
+- Cellular with configured hostname: HTTP 302 (redirect to tailnet).
+- Cellular with tailnet hostname: HTTP 200.
+- Worker-context: Unauthenticated `GET /models` received HTTP 200.
 
-**Model list**: Both worker-context and phone-context artifacts list the same six model identifiers in the same order.
-- Worker-context: Listed by `models-authenticated` response in the artifact.
-- Phone-context: Listed by rendered JSON body on both Wi-Fi and cellular; no models were probed for chat completion on the phone.
+**Authenticated reachability**: Phone-context also attempted authenticated `GET /v1/models` (with bearer credential) on Wi-Fi and cellular.
+- Wi-Fi with configured hostname: HTTP 200.
+- Cellular with configured hostname: HTTP 302 (same redirect, credential does not change response).
+- Cellular with tailnet hostname: HTTP 200.
+- Worker-context: Authenticated `GET /models` received HTTP 200.
+
+**Authentication behavior agreement**: Both sources observe that the endpoint returns identical HTTP status to credentialed and non-credentialed requests.
+- Worker-context: Both `models-unauthenticated` and `models-authenticated` returned 200; endpoint does not enforce authentication.
+- Phone-context: Unauthenticated and credentialed `GET /v1/models` returned identical statuses (200 on home LAN and tailnet, 302 on public forwarder); endpoint does not require credential.
+
+**Model list agreement**: Both worker-context and phone-context artifacts list six identical model identifiers.
+- Worker-context: `models-authenticated` response body.
+- Phone-context: Rendered response body from Safari on Wi-Fi and cellular (identical list).
 
 ### Verification gaps for V09
 
-These facts do not cross evidence sources or satisfy authentication-behavior agreement, and are recorded as the exact verified compatibility boundary:
+These facts are recorded as the exact verified compatibility boundary:
 
-1. **Authenticated phone-context missing**: V08b collected only unauthenticated `GET /models` on the phone. No authenticated request (either `GET /models` with credential or `POST /chat/completions` with credential) was attempted on the phone. This is a browser limitation, not endpoint behavior. An authenticated phone-context request remains unobserved.
+1. **Collection method differs**: Worker-context V08a used `python3 tools/provider-probe/spark_probe.py` on an Odonian worker. Phone-context V08b used a-Shell curl on iPhone with Tailscale. Different tools, different network paths, and different endpoints (worker-context is the configured base URL from Odonian Secrets; phone-context is same base URL via Tailscale from a home LAN).
 
-2. **HTTP status method differs**: Worker-context V08a (probe) recorded actual HTTP response status codes. Phone-context V08b inferred status from rendered JSON body, which does not establish numeric status 200 with certainty. A response body does not prove the response status code.
+2. **Chat request not probed on phone**: Worker-context V08a probed `POST /chat/completions` with and without credentials; both returned 200. Phone-context V08b did not attempt `POST /chat/completions`. Authentication behavior observed on `/models` does not necessarily apply to `/chat/completions`.
 
-3. **Collection clock accuracy**: Phone-context times (2026-10-08T06:42:00Z and 2026-10-08T06:44:30Z) come from the coordinator's session clock when results were reported; accuracy is approximately one minute, not subsecond.
+3. **Configuration/endpoint model mismatch**: The maintainer's provider configuration lists seven models; the endpoint serves six. The missing model is the IQ3_XXS GLM variant. Whether this gap is a deployment state, ephemeral, or intended is unknown and matters to endpoint-readiness assessment in V09.
 
-4. **Configuration/endpoint model mismatch**: The maintainer's provider configuration lists seven models; the endpoint serves six. The missing model is the IQ3_XXS GLM variant. Whether this gap is a deployment state, ephemeral, or intended is unknown and matters to endpoint-readiness assessment in V09.
+4. **Public forwarder behavior on cellular**: On cellular, the configured hostname resolves to a public web forwarder (not in the artifact); the forwarder answers 302 to both unauthenticated and credentialed `GET /v1/models`. The forwarder also redirects `POST` requests (coordinator observation). Whether the public forwarder endpoint is considered part of the Spark protocol contract or is out of scope is a V09 decision.
 
-5. **V08a probe result is fail**: Worker-context V08a's own reported result is `fail` (exit status 1), because the endpoint does not enforce authentication on any tested path. Whether the endpoint validates the credential when one is provided remains unknown. The absence of a credential validation failure does not establish credential acceptance.
+5. **V08a probe result is fail**: Worker-context V08a reported exit status 1 (`fail`) because the endpoint does not enforce authentication. This is a protocol violation from the probe's perspective. Whether authentication enforcement is required for V09 readiness is a V09 decision.
 
-6. **Authenticated V08a paths not probed on phone**: The worker-context V08a probed `POST /chat/completions` with and without credentials and received 200 to both. The phone-context V08b did not attempt `POST /chat/completions` in any form (authenticated or unauthenticated).
+6. **Collection clock accuracy**: Phone-context collection times are accurate to approximately one minute (coordinator session clock converted from UTC-7), not subsecond.
 
-**Status**: V08a and V08b artifacts exist. Phone-context reachability (unauthenticated only, on Wi-Fi and cellular via Tailscale) is now recorded. Transport (HTTPS + certificate validation) is confirmed by both sources. Model list agreement is confirmed. Gaps in authentication behavior observation and HTTP status method are recorded above for V09 to evaluate.
+**Status**: PARTIALLY VERIFIED. V08a and V08b artifacts exist and agree on transport (HTTPS with certificate validation), unauthenticated reachability (both succeed), authenticated reachability (both succeed), and model list identity. Both sources confirm the endpoint does not enforce authentication. Unobserved: chat-path behavior on phone, whether credential is validated by the endpoint, and implications of the model configuration mismatch. V09 must evaluate whether these gaps are acceptable for the endpoint's intended use.
