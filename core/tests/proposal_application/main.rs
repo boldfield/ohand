@@ -2,7 +2,9 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use ohand_core::domain::items::SUPPORTED_PROPOSAL_SCHEMA_VERSION;
 use ohand_core::interpretation::apply::apply_proposal;
-use ohand_core::interpretation::contracts::{Proposal, TimeResolutionQuality, ReminderProposal, SourceSpan};
+use ohand_core::interpretation::contracts::{
+    Proposal, ReminderProposal, SourceSpan, TimeResolutionQuality,
+};
 use ohand_core::providers::contracts::TextBasis;
 use ohand_core::store::events::ItemType;
 use ohand_core::store::schema::{Clock, Database};
@@ -58,8 +60,16 @@ fn create_fixtures(db: &mut Database) -> Result<()> {
          sync_state, processing_state, transcription_state, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         rusqlite::params![
-            ITEM_ID, CAPTURE_ID, 0, "active", "saved", "synced", "unprocessed",
-            "completed", now, now
+            ITEM_ID,
+            CAPTURE_ID,
+            0,
+            "active",
+            "saved",
+            "synced",
+            "unprocessed",
+            "completed",
+            now,
+            now
         ],
     )?;
 

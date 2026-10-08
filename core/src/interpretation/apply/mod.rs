@@ -9,10 +9,7 @@
 /// authoritative state on failure. Reminder candidates require explicit intent and
 /// deterministic resolution consistent with source/context; unsupported grammar stays
 /// unscheduled with original intention intact.
-use crate::domain::items::{
-    validate_state_transition, ItemState, LifecycleState, StateTransition, TextState,
-    TransitionValidity,
-};
+use crate::domain::items::{ItemState, LifecycleState, TextState};
 use crate::interpretation::contracts::{Proposal, TimeResolutionQuality};
 use crate::jobs::queue::complete_job_in_tx;
 use crate::providers::contracts::TextBasis;
@@ -61,8 +58,8 @@ pub enum ApplyOutcome {
 }
 
 /// Apply a proposal to item state with full validation and job completion.
-/// Loads current item state, validates the proposal, checks authorization and lifecycle,
-/// marks the proposal as applied, and completes the associated job atomically.
+/// Loads current item state and proposal row, validates using D04 guards,
+/// stores facets in proposals table, rebuilds state from events, and completes job atomically.
 ///
 /// Returns `ApplyOutcome::Applied` on success, or `ApplyOutcome::Rejected` if validation
 /// or authorization fails, or `ApplyError` on database/storage errors.
@@ -71,12 +68,13 @@ pub enum ApplyOutcome {
 /// - Proposal schema and semantic validation via Proposal::validate
 /// - Item freshness: source_revision matches current revision
 /// - Item exists and authorization: capture_id matches
-/// - Lifecycle validation: item is not deleted/terminal
+/// - Lifecycle validation: item is not deleted/terminal (only Active)
 /// - Text basis currency check
-/// - State transition validity for each proposed facet
 /// - Reminder constraints if present
+/// - D04 guards: schema version, applied_state, abstained flag, user corrections
+/// - State rebuild from events/proposals with projection consistency
+/// - Reminder persistence to reminders table
 /// - Job completion with lease verification
-/// - Event/proposal projection updates
 pub fn apply_proposal(
     tx: &Transaction,
     item_id: &str,
@@ -95,7 +93,7 @@ pub fn apply_proposal(
         .validate(&source_text)
         .map_err(|e| ApplyError::Validation(format!("{}", e)))?;
 
-    // 2. Verify item exists and is not deleted.
+    // 2. Verify item is not deleted.
     if item_state.lifecycle_state == LifecycleState::Deleted {
         return Err(ApplyError::DeletedItem {
             item_id: item_state.item_id.clone(),
@@ -115,18 +113,29 @@ pub fn apply_proposal(
         return Err(ApplyError::CaptureIdMismatch);
     }
 
-    // 5. Verify text basis is current at the proposed revision.
-    verify_text_basis_is_current(&item_state.current_text, &proposal.text_basis)?;
+    // 5. Load and validate stored proposal row (D04 guards).
+    load_proposal_row(tx, &proposal.proposal_id, item_id, &item_state.capture_id)?;
 
-    // 6. Validate reminder constraints if present.
+    // 6. Verify text basis is current at the proposed revision.
+    verify_text_basis_is_current(tx, item_id, &item_state.current_text, &proposal.text_basis)?;
+
+    // 7. Lifecycle guard: only Active items can be modified.
+    if item_state.lifecycle_state != LifecycleState::Active {
+        return Err(ApplyError::LifecycleViolation {
+            item_id: item_id.to_string(),
+            state: item_state.lifecycle_state.as_str().to_string(),
+        });
+    }
+
+    // 8. Validate reminder constraints if present.
     if let Some(reminder) = &proposal.reminder_proposal {
         validate_reminder_application(&item_state, proposal, reminder)?;
     }
 
-    // 7. Determine if this is a first interpretation by checking existing processing state.
+    // 9. Determine if this is a first interpretation by checking existing processing state.
     let is_first_interpretation = is_first_interpretation(tx, item_id)?;
 
-    // 8. If abstention, handle based on whether this is first interpretation.
+    // 10. If abstention, handle based on whether this is first interpretation.
     if proposal.abstention.is_some() {
         if is_first_interpretation {
             // First-pass abstention: mark as uninterpreted (searchable, suggestion-excluded).
@@ -143,35 +152,52 @@ pub fn apply_proposal(
         return Ok(ApplyOutcome::Applied);
     }
 
-    // 9. Validate all proposed facets against current state using D04 guards.
-    if proposal.item_type.is_some() {
-        let transition = StateTransition::TypeSet(proposal.item_type);
-        match validate_state_transition(&item_state, transition) {
-            TransitionValidity::Valid => {}
-            TransitionValidity::ForbiddenOverride => {
-                return Err(ApplyError::Validation(
-                    "cannot override user-corrected item type".to_string(),
-                ));
-            }
-            TransitionValidity::NotAllowed => {
-                return Err(ApplyError::LifecycleViolation {
-                    item_id: item_id.to_string(),
-                    state: item_state.lifecycle_state.as_str().to_string(),
-                });
-            }
-        }
+    // 11. Validate type proposal against user corrections (D04 guard).
+    if proposal.item_type.is_some() && item_state.provenance.type_corrected {
+        return Err(ApplyError::Validation(
+            "cannot override user-corrected item type".to_string(),
+        ));
     }
 
-    // 10. Apply the proposal facets transactionally (type, session_topic, reminder).
-    apply_facets(tx, &item_state, proposal)?;
+    // 12. Validate session topic proposal against user corrections (D04 guard).
+    if proposal.session_topic_proposal.is_some() && item_state.provenance.session_topic_corrected {
+        return Err(ApplyError::Validation(
+            "cannot override user-corrected session topic".to_string(),
+        ));
+    }
 
-    // 11. Update processing state to processed.
-    update_processing_state(tx, item_id, "processed")?;
+    // 13. Store facets in proposals table for rebuild consistency.
+    store_proposal_facets(tx, &proposal.proposal_id, item_id, proposal)?;
 
-    // 12. Mark proposal as applied in proposals table (event/projection model).
+    // 14. Supersede prior proposals and mark this one as applied.
+    mark_prior_proposals_superseded(tx, item_id, proposal.source_revision, &proposal.proposal_id)?;
     mark_proposal_applied(tx, &proposal.proposal_id, item_id)?;
 
-    // 13. Complete the job atomically (J01 integration).
+    // 15. Rebuild state from events/proposals to derive final state with user-correction overrides.
+    let rebuilt_state = crate::domain::items::rebuild_state_from_events(tx, item_id)
+        .map_err(|e| ApplyError::Storage(format!("Rebuild failed: {}", e)))?
+        .ok_or_else(|| ApplyError::Storage("Rebuild returned no state".to_string()))?;
+
+    // 16. Persist rebuilt state to items table.
+    tx.execute(
+        "UPDATE items SET item_type = ?, current_session_topic = ? WHERE item_id = ?",
+        rusqlite::params![
+            rebuilt_state.item_type.as_ref().map(|t| t.as_str()),
+            rebuilt_state.session_topic,
+            item_id
+        ],
+    )
+    .map_err(|e| ApplyError::Storage(e.to_string()))?;
+
+    // 17. Apply reminders to reminders table.
+    if let Some(reminder) = &proposal.reminder_proposal {
+        apply_reminder_proposal(tx, item_id, reminder)?;
+    }
+
+    // 18. Update processing state to processed.
+    update_processing_state(tx, item_id, "processed")?;
+
+    // 19. Complete the job atomically (J01 integration).
     complete_job_in_tx(tx, job_id, lease_attempt)
         .map_err(|e| ApplyError::Storage(format!("Job completion failed: {}", e)))?;
 
@@ -379,11 +405,13 @@ fn mark_proposal_applied(
 
 /// Verify that the text basis matches the current item text state.
 fn verify_text_basis_is_current(
+    tx: &Transaction,
+    item_id: &str,
     current_text: &TextState,
     text_basis: &TextBasis,
 ) -> Result<(), ApplyError> {
     match text_basis {
-        TextBasis::Original { .. } => {
+        TextBasis::Original { item_revision: _ } => {
             // Original basis is current only if the item hasn't been corrected.
             if matches!(current_text, TextState::Original { .. }) {
                 Ok(())
@@ -391,12 +419,29 @@ fn verify_text_basis_is_current(
                 Err(ApplyError::TextBasisNotCurrent)
             }
         }
-        TextBasis::Correction { .. } => {
-            // Correction basis is current if the item has been corrected.
-            if matches!(current_text, TextState::Corrected { .. }) {
-                Ok(())
-            } else {
-                Err(ApplyError::TextBasisNotCurrent)
+        TextBasis::Correction {
+            correction_record_id,
+            item_revision: _,
+        } => {
+            // Correction basis is current only if it matches the latest correction record.
+            if !matches!(current_text, TextState::Corrected { .. }) {
+                return Err(ApplyError::TextBasisNotCurrent);
+            }
+
+            // Verify correction record id and revision match the basis.
+            let stored_correction: Option<String> = tx
+                .query_row(
+                    "SELECT correction_id FROM corrections WHERE item_id = ? AND kind = 'text' ORDER BY revision DESC LIMIT 1",
+                    [item_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| ApplyError::Storage(e.to_string()))?
+                .flatten();
+
+            match stored_correction {
+                Some(stored_id) if stored_id == *correction_record_id => Ok(()),
+                _ => Err(ApplyError::TextBasisNotCurrent),
             }
         }
     }
@@ -445,44 +490,83 @@ fn validate_reminder_application(
     Ok(())
 }
 
-/// Apply the proposed facets (item_type, session_topic, reminder) to the item.
-/// This is a transactional operation that updates the item in the database.
-fn apply_facets(
+/// Load the proposal row and verify all D04 guards.
+fn load_proposal_row(
     tx: &Transaction,
-    item_state: &ItemState,
+    proposal_id: &str,
+    item_id: &str,
+    capture_id: &str,
+) -> Result<(), ApplyError> {
+    use crate::domain::items::SUPPORTED_PROPOSAL_SCHEMA_VERSION;
+
+    let row: Option<(i32, String)> = tx
+        .query_row(
+            "SELECT schema_version, applied_state FROM proposals
+             WHERE proposal_id = ? AND item_id = ? AND capture_id = ?",
+            rusqlite::params![proposal_id, item_id, capture_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| ApplyError::Storage(e.to_string()))?;
+
+    let (schema_version, applied_state) = row.ok_or_else(|| {
+        ApplyError::Storage("Proposal not found or belongs to another item".to_string())
+    })?;
+
+    // Schema version must be supported.
+    if schema_version != SUPPORTED_PROPOSAL_SCHEMA_VERSION {
+        return Err(ApplyError::Validation(format!(
+            "Unsupported proposal schema version: {}",
+            schema_version
+        )));
+    }
+
+    // Only unapplied proposals can be applied.
+    if applied_state != "unapplied" {
+        return Err(ApplyError::Validation(format!(
+            "Proposal is not applicable in state '{}'",
+            applied_state
+        )));
+    }
+
+    Ok(())
+}
+
+/// Store proposed facets in the proposals table for event/projection rebuild.
+fn store_proposal_facets(
+    tx: &Transaction,
+    proposal_id: &str,
+    item_id: &str,
     proposal: &Proposal,
 ) -> Result<(), ApplyError> {
-    // Update item type if proposed (and not already corrected by user).
-    if let Some(proposed_type) = proposal.item_type {
-        if !item_state.provenance.type_corrected {
-            tx.execute(
-                "UPDATE items SET item_type = ? WHERE item_id = ?",
-                rusqlite::params![proposed_type.as_str(), &item_state.item_id],
-            )
-            .map_err(|e| ApplyError::Storage(e.to_string()))?;
-        }
-    }
+    let proposal_type = proposal.item_type.as_ref().map(|t| t.as_str());
+    let session_topic_proposal = proposal
+        .session_topic_proposal
+        .as_ref()
+        .map(|stp| stp.topic.as_str());
 
-    // Update session topic if proposed (respecting user corrections).
-    if let Some(ref session_topic_prop) = proposal.session_topic_proposal {
-        if !item_state.provenance.session_topic_corrected {
-            let new_topic = if session_topic_prop.topic.is_empty() {
-                None
-            } else {
-                Some(session_topic_prop.topic.as_str())
-            };
-            tx.execute(
-                "UPDATE items SET current_session_topic = ? WHERE item_id = ?",
-                rusqlite::params![new_topic, &item_state.item_id],
-            )
-            .map_err(|e| ApplyError::Storage(e.to_string()))?;
-        }
-    }
+    tx.execute(
+        "UPDATE proposals SET proposal_type = ?, session_topic_proposal = ? WHERE proposal_id = ? AND item_id = ?",
+        rusqlite::params![proposal_type, session_topic_proposal, proposal_id, item_id],
+    )
+    .map_err(|e| ApplyError::Storage(e.to_string()))?;
 
-    // Update reminder state if proposed.
-    if let Some(reminder) = &proposal.reminder_proposal {
-        apply_reminder_proposal(tx, &item_state.item_id, reminder)?;
-    }
+    Ok(())
+}
+
+/// Mark all prior applied proposals as superseded for this revision.
+fn mark_prior_proposals_superseded(
+    tx: &Transaction,
+    item_id: &str,
+    source_revision: i32,
+    current_proposal_id: &str,
+) -> Result<(), ApplyError> {
+    tx.execute(
+        "UPDATE proposals SET applied_state = 'superseded'
+         WHERE item_id = ? AND source_revision = ? AND applied_state = 'applied' AND proposal_id != ?",
+        rusqlite::params![item_id, source_revision, current_proposal_id],
+    )
+    .map_err(|e| ApplyError::Storage(e.to_string()))?;
 
     Ok(())
 }
