@@ -9,6 +9,7 @@ Each fixture is a JSON object with the following fields:
 ```json
 {
   "id": "unique-fixture-identifier",
+  "category": "design|dates|mixed|corrections|ambiguity|broad-intention|negation|prompt-injection|dropped-asr-word",
   "input": "The text or voice capture to be interpreted",
   "provenance": "synthetic, [source description]",
   "capture_context": {
@@ -21,7 +22,8 @@ Each fixture is a JSON object with the following fields:
     "item_type": "action|note|idea|null",
     "abstention": "abstention-reason|null",
     "reminder_proposal": { ... },
-    "session_topic_proposal": { ... }
+    "session_topic_proposal": { ... },
+    "source_spans": [ ... ]
   },
   "forbidden": { ... },
   "recoverable": true|false,
@@ -35,6 +37,7 @@ Each fixture is a JSON object with the following fields:
 ### Top-Level Fields
 
 - **id** (string, required): Unique identifier for the fixture, used for test reporting. Format: `category-description` (e.g., `date-relative-next-monday`).
+- **category** (string, required): Categorization of the fixture for coverage validation. Valid values: `design` (DESIGN.md examples), `dates` (date/timezone cases), `mixed` (mixed note/action captures), `corrections` (user corrections), `ambiguity` (ambiguous cases), `broad-intention` (broad intentions), `negation` (negation/quoted cases), `prompt-injection` (adversarial inputs), `dropped-asr-word` (ASR dropout scenarios).
 - **input** (string, required): The source text or transcript to be interpreted. This is the untrusted data that the interpreter processes.
 - **provenance** (string, required): Metadata describing the origin. Must be `synthetic, [source]` for all fixtures in this file (e.g., `synthetic, from DESIGN.md intent examples`).
 - **capture_context** (object, required): Context metadata about the capture.
@@ -45,11 +48,11 @@ Each fixture is a JSON object with the following fields:
   - **correction_spans** (array, optional): Array of `{original: string, corrected: string}` objects marking which parts were corrected.
   - **notes** (string, optional): Free-form context about the capture.
 - **expected** (object, required): The outcome the interpreter SHOULD produce.
-  - **item_type** (`action|note|idea|null`, optional): The type of item proposed.
-  - **abstention** (string, optional): Abstention reason if proposal does not proceed. Valid values: `uncertain-target`, `negated`, `ambiguous`, `unsupported-operation`, `other`, or `null`.
-  - **reminder_proposal** (object, optional): Proposed reminder with I01 contract structure (see below).
-  - **session_topic_proposal** (object, optional): Proposed session topic with contract structure (see below).
-  - **source_spans** (array, optional): Array of `{start: number, end: number}` character offsets identifying evidence for the item_type.
+  - **item_type** (`action|note|idea|null`, optional): The type of item proposed. If set, **source_spans** is required.
+  - **abstention** (string, optional): Abstention reason if proposal does not proceed. Valid values: `UncertainTarget`, `Negated`, `Ambiguous`, `UnsupportedOperation`, or `{"Other": "reason"}`, or `null`.
+  - **reminder_proposal** (object, optional): Proposed reminder with I01 contract structure (see below). Always requires source_span.
+  - **session_topic_proposal** (object, optional): Proposed session topic with contract structure (see below). Always requires source_span.
+  - **source_spans** (array, optional): Array of source span objects identifying evidence for the item_type. Each span must have `{start, end, text}` where `text` is the actual Unicode slice `input[start..end]`.
 - **forbidden** (object, required): Outcomes the interpreter MUST NOT produce. Structure mirrors `expected` but lists what is prohibited.
 - **recoverable** (boolean, required): Whether the transcript contains enough information to confidently recover intent. Used to distinguish cases where transcript dropout or ambiguity makes intent unrecoverable.
 - **recovery_notes** (string, optional): Explanation of why `recoverable: false`. Present only when `recoverable` is false.
@@ -68,7 +71,8 @@ Maps to I01 `ReminderProposal`:
   "timezone_id": "IANA timezone ID",
   "source_span": {
     "start": 0,
-    "end": 27
+    "end": 27,
+    "text": "the time phrase text"
   }
 }
 ```
@@ -79,7 +83,7 @@ Maps to I01 `ReminderProposal`:
   - `ambiguous`: Too unclear to resolve (e.g., "maybe Friday" or "fiveish").
 - **instant** (string, optional): RFC 3339-formatted absolute instant. Required for `explicit` and `inferred` quality; must be absent for `ambiguous`.
 - **timezone_id** (string, optional): IANA timezone identifier. Optional only when quality is `ambiguous`.
-- **source_span** (object, optional): Character offset span in the input marking the time phrase. `{start: number, end: number}` in Unicode character positions.
+- **source_span** (object, required): Character offset span in the input marking the time phrase. Must have `start`, `end`, and `text` fields. Text must equal `input[start..end]` and should identify the time portion only (not "Remind me " prefix), except for correction fixtures where `text_basis` field specifies whether text is from `original` or `corrected` basis.
 
 #### session_topic_proposal
 
@@ -90,13 +94,14 @@ Maps to I01 `SessionTopicProposal`:
   "topic": "string",
   "source_span": {
     "start": 0,
-    "end": 7
+    "end": 7,
+    "text": "evidence"
   }
 }
 ```
 
 - **topic** (string, required): The proposed session topic string.
-- **source_span** (object, optional): Character offset span marking the evidence.
+- **source_span** (object, required): Character offset span marking the evidence. Must have `start`, `end`, and `text` fields. Text must equal `input[start..end]`.
 
 ## Testing and Validation
 

@@ -35,6 +35,12 @@ mod fixture_tests {
 
         // Required fields
         assert!(
+            fixture.get("category").is_some(),
+            "Fixture {} ({}) missing 'category'",
+            index,
+            fixture_id
+        );
+        assert!(
             fixture.get("input").is_some(),
             "Fixture {} ({}) missing 'input'",
             index,
@@ -103,7 +109,12 @@ mod fixture_tests {
     }
 
     /// Validate reminder_proposal structure.
-    fn validate_reminder_proposal(reminder: &Value, context: &str) {
+    fn validate_reminder_proposal(
+        reminder: &Value,
+        context: &str,
+        input: Option<&str>,
+        fixture: Option<&Value>,
+    ) {
         if !reminder.is_null() && !reminder.is_object() {
             panic!("{}: reminder_proposal must be an object or null", context);
         }
@@ -142,7 +153,16 @@ mod fixture_tests {
                 }
             }
 
-            // Validate source_span if present
+            // Validate source_span: required for expected, optional for forbidden
+            if !context.ends_with("(forbidden)") {
+                assert!(
+                    obj.get("source_span").is_some() && !obj.get("source_span").unwrap().is_null(),
+                    "{}: expected reminder_proposal requires source_span",
+                    context
+                );
+            }
+
+            // Validate source_span structure and text if present
             if let Some(span) = obj.get("source_span") {
                 if let Some(span_obj) = span.as_object() {
                     assert!(
@@ -150,6 +170,35 @@ mod fixture_tests {
                         "{}: source_span must have 'start' and 'end'",
                         context
                     );
+
+                    if let (Some(start), Some(end)) = (span_obj.get("start"), span_obj.get("end")) {
+                        let start_idx = start.as_u64().unwrap_or(0) as usize;
+                        let end_idx = end.as_u64().unwrap_or(0) as usize;
+
+                        // Validate text if present
+                        if let Some(expected_text) = span_obj.get("text") {
+                            if let Some(text_str) = expected_text.as_str() {
+                                // Check if this fixture has a user_correction; if so, use that text
+                                let text_basis = if let Some(fixture_obj) = fixture {
+                                    fixture_obj["capture_context"]["user_correction"].as_str()
+                                } else {
+                                    None
+                                };
+
+                                let actual_inp = text_basis.or(input).unwrap_or("");
+                                let actual_text: String = actual_inp
+                                    .chars()
+                                    .skip(start_idx)
+                                    .take(end_idx - start_idx)
+                                    .collect();
+                                assert_eq!(
+                                    &actual_text, text_str,
+                                    "{}: reminder source_span text mismatch",
+                                    context
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -204,6 +253,22 @@ mod fixture_tests {
                             end_idx,
                             input_chars
                         );
+
+                        // Validate text field if present
+                        if let Some(expected_text) = obj.get("text") {
+                            if let Some(text_str) = expected_text.as_str() {
+                                let actual_text: String = input
+                                    .chars()
+                                    .skip(start_idx)
+                                    .take(end_idx - start_idx)
+                                    .collect();
+                                assert_eq!(
+                                    &actual_text, text_str,
+                                    "{}: source_span [{}, {}) text mismatch. Expected '{}', got '{}'",
+                                    context, start_idx, end_idx, text_str, actual_text
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -242,20 +307,119 @@ mod fixture_tests {
         }
     }
 
+    /// Validate session_topic_proposal structure.
+    fn validate_session_topic_proposal(proposal: &Value, context: &str, input: Option<&str>) {
+        if !proposal.is_null() && !proposal.is_object() {
+            panic!(
+                "{}: session_topic_proposal must be an object or null",
+                context
+            );
+        }
+
+        if let Some(obj) = proposal.as_object() {
+            assert!(
+                obj.contains_key("topic"),
+                "{}: session_topic_proposal must have 'topic'",
+                context
+            );
+
+            // Require source_span for expected, optional for forbidden
+            if !context.ends_with("(forbidden)") {
+                assert!(
+                    obj.get("source_span").is_some() && !obj.get("source_span").unwrap().is_null(),
+                    "{}: expected session_topic_proposal requires source_span",
+                    context
+                );
+            }
+
+            // Validate source_span if present
+            if let Some(span) = obj.get("source_span") {
+                if let Some(span_obj) = span.as_object() {
+                    assert!(
+                        span_obj.contains_key("start") && span_obj.contains_key("end"),
+                        "{}: source_span must have 'start' and 'end'",
+                        context
+                    );
+
+                    if let (Some(start), Some(end), Some(inp)) =
+                        (span_obj.get("start"), span_obj.get("end"), input)
+                    {
+                        let start_idx = start.as_u64().unwrap_or(0) as usize;
+                        let end_idx = end.as_u64().unwrap_or(0) as usize;
+
+                        // Validate text if present
+                        if let Some(expected_text) = span_obj.get("text") {
+                            if let Some(text_str) = expected_text.as_str() {
+                                let actual_text: String = inp
+                                    .chars()
+                                    .skip(start_idx)
+                                    .take(end_idx - start_idx)
+                                    .collect();
+                                assert_eq!(
+                                    &actual_text, text_str,
+                                    "{}: session_topic source_span text mismatch",
+                                    context
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn test_reminder_proposal_structure() {
         let fixtures = load_fixtures();
         for fixture in fixtures.iter() {
             let fixture_id = fixture["id"].as_str().unwrap_or("unknown");
+            let input = fixture["input"].as_str();
 
             // Check expected reminder
             if let Some(reminder) = fixture["expected"].get("reminder_proposal") {
-                validate_reminder_proposal(reminder, &format!("{} (expected)", fixture_id));
+                validate_reminder_proposal(
+                    reminder,
+                    &format!("{} (expected)", fixture_id),
+                    input,
+                    Some(fixture),
+                );
             }
 
             // Check forbidden reminder
             if let Some(reminder) = fixture["forbidden"].get("reminder_proposal") {
-                validate_reminder_proposal(reminder, &format!("{} (forbidden)", fixture_id));
+                validate_reminder_proposal(
+                    reminder,
+                    &format!("{} (forbidden)", fixture_id),
+                    input,
+                    Some(fixture),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_session_topic_proposal_structure() {
+        let fixtures = load_fixtures();
+        for fixture in fixtures.iter() {
+            let fixture_id = fixture["id"].as_str().unwrap_or("unknown");
+            let input = fixture["input"].as_str();
+
+            // Check expected session_topic
+            if let Some(proposal) = fixture["expected"].get("session_topic_proposal") {
+                validate_session_topic_proposal(
+                    proposal,
+                    &format!("{} (expected)", fixture_id),
+                    input,
+                );
+            }
+
+            // Check forbidden session_topic
+            if let Some(proposal) = fixture["forbidden"].get("session_topic_proposal") {
+                validate_session_topic_proposal(
+                    proposal,
+                    &format!("{} (forbidden)", fixture_id),
+                    input,
+                );
             }
         }
     }
@@ -324,46 +488,46 @@ mod fixture_tests {
     #[test]
     fn test_all_required_categories_present() {
         let fixtures = load_fixtures();
-        let ids: Vec<&str> = fixtures.iter().filter_map(|f| f["id"].as_str()).collect();
 
-        // Check for representation of required categories
-        let categories = vec![
-            (
-                "design",
-                vec!["design-broad-intention", "design-dated-information"],
-            ),
-            (
-                "mixed",
-                vec!["mixed-idea-action-capture", "mixed-note-action-capture"],
-            ),
-            (
-                "date",
-                vec!["date-relative-next-monday", "date-explicit-today"],
-            ),
-            (
-                "timezone",
-                vec!["timezone-explicit", "timezone-implicit-local"],
-            ),
-            (
-                "asr",
-                vec!["asr-dropped-word-remind-me", "asr-garbled-time"],
-            ),
-            ("negation", vec!["negation-do-not-remind", "quoted-text"]),
-            (
-                "prompt-injection",
-                vec!["prompt-injection-attempt-1", "prompt-injection-attempt-2"],
-            ),
+        // Collect fixtures by category field
+        let mut categories_found: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+
+        for fixture in fixtures.iter() {
+            if let Some(cat) = fixture["category"].as_str() {
+                let id = fixture["id"].as_str().unwrap_or("unknown").to_string();
+                categories_found
+                    .entry(cat.to_string())
+                    .or_default()
+                    .push(id);
+            }
+        }
+
+        // Required categories per AC1
+        let required_categories = vec![
+            "design",
+            "dates",
+            "mixed",
+            "corrections",
+            "ambiguity",
+            "broad-intention",
+            "negation",
+            "prompt-injection",
+            "dropped-asr-word",
         ];
 
-        for (category, examples) in categories {
-            for example in examples {
-                assert!(
-                    ids.contains(&example),
-                    "Missing required fixture category '{}': {}",
-                    category,
-                    example
-                );
-            }
+        for cat in required_categories {
+            assert!(
+                categories_found.contains_key(cat),
+                "Missing required category '{}' from fixtures",
+                cat
+            );
+            let fixtures_in_cat = &categories_found[cat];
+            assert!(
+                !fixtures_in_cat.is_empty(),
+                "Category '{}' has no fixtures",
+                cat
+            );
         }
     }
 
@@ -463,6 +627,35 @@ mod fixture_tests {
                 "Fixture '{}' provenance must start with 'synthetic', got '{}'",
                 fixture_id,
                 provenance
+            );
+        }
+    }
+
+    #[test]
+    fn test_category_field_valid() {
+        let fixtures = load_fixtures();
+        let valid_categories = vec![
+            "design",
+            "dates",
+            "mixed",
+            "corrections",
+            "ambiguity",
+            "broad-intention",
+            "negation",
+            "prompt-injection",
+            "dropped-asr-word",
+        ];
+
+        for fixture in fixtures.iter() {
+            let fixture_id = fixture["id"].as_str().unwrap_or("unknown");
+            let category = fixture["category"].as_str().unwrap_or("");
+
+            assert!(
+                valid_categories.contains(&category),
+                "Fixture '{}' has invalid category '{}'. Valid: {:?}",
+                fixture_id,
+                category,
+                valid_categories
             );
         }
     }
