@@ -261,7 +261,7 @@ pub fn get_job(db: &Database, job_id: &str) -> Result<Option<Job>> {
         .map_err(|e| anyhow!(e))
 }
 
-fn get_job_internal(tx: &Transaction<'_>, job_id: &str) -> Result<Option<Job>> {
+pub(crate) fn get_job_internal(tx: &Transaction<'_>, job_id: &str) -> Result<Option<Job>> {
     tx.query_row(
         &format!("SELECT {} FROM jobs WHERE job_id = ?", JOB_COLUMNS),
         [job_id],
