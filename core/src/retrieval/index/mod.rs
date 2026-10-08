@@ -87,7 +87,7 @@ pub fn index_capture(tx: &Transaction<'_>, item_id: &str, capture_id: &str) -> R
 
 /// Index a text correction.
 /// Called transactionally when a user corrects an item's text.
-/// Idempotent: replaces the previous correction (for incremental and rebuild convergence).
+/// Idempotent: replaces the previous correction while keeping the original (for incremental and rebuild convergence).
 pub fn index_text_correction(tx: &Transaction<'_>, item_id: &str) -> Result<()> {
     // Fetch the latest user correction, if it exists.
     let new_text: Option<String> = tx
@@ -100,9 +100,12 @@ pub fn index_text_correction(tx: &Transaction<'_>, item_id: &str) -> Result<()> 
         )
         .optional()?;
 
-    // Remove all prior entries (both original and old corrected) for this item.
-    // Once corrected, only the latest correction should be indexed.
-    tx.execute("DELETE FROM search_index WHERE item_id = ?", [item_id])?;
+    // Delete only the previous corrected entry, keep the original.
+    // This ensures incremental and rebuild agree: both keep [original, latest_correction].
+    tx.execute(
+        "DELETE FROM search_index WHERE item_id = ? AND text_basis = 'corrected'",
+        [item_id],
+    )?;
 
     // Index the new corrected text if it's non-empty.
     if let Some(text) = new_text {
@@ -121,6 +124,8 @@ pub fn index_text_correction(tx: &Transaction<'_>, item_id: &str) -> Result<()> 
                  VALUES (?, ?, ?, ?, 'corrected')",
                 rusqlite::params![item_id, capture_id, item_scope, text],
             )?;
+        } else {
+            // Empty correction: keep only the original, don't add an empty corrected row.
         }
     }
 
@@ -193,8 +198,16 @@ impl SearchResult {
 
 /// Query the source (captures and corrections) directly, bypassing the FTS index.
 /// Provides an authoritative fallback for comparison with index results.
+/// Uses case-insensitive substring matching (LIKE) with proper escaping.
 /// Only returns accessible (non-deleted) items.
 pub fn search_source_direct(tx: &Transaction<'_>, query: &str) -> Result<Vec<SearchResult>> {
+    // Escape LIKE special characters (% and _) to ensure literal matching.
+    let escaped_query = query
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    let pattern = format!("%{}%", escaped_query);
+
     // Query captures for original text matching the query pattern.
     let mut stmt = tx.prepare(
         "SELECT DISTINCT i.item_id, i.capture_id, c.item_scope, c.text as text, NULL as corrected_text, 'original' as source_type
@@ -202,7 +215,7 @@ pub fn search_source_direct(tx: &Transaction<'_>, query: &str) -> Result<Vec<Sea
          JOIN captures c ON i.capture_id = c.capture_id
          WHERE i.lifecycle_state != 'deleted'
            AND c.text IS NOT NULL
-           AND c.text LIKE ?
+           AND c.text LIKE ? ESCAPE '\\'
          UNION
          SELECT DISTINCT i.item_id, i.capture_id, c.item_scope, NULL as text, corr.new_value as corrected_text, 'corrected' as source_type
          FROM items i
@@ -211,7 +224,7 @@ pub fn search_source_direct(tx: &Transaction<'_>, query: &str) -> Result<Vec<Sea
          WHERE i.lifecycle_state != 'deleted'
            AND corr.kind = 'text'
            AND corr.new_value IS NOT NULL
-           AND corr.new_value LIKE ?
+           AND corr.new_value LIKE ? ESCAPE '\\'
            AND corr.revision = (
                SELECT MAX(revision)
                FROM corrections cor2
@@ -220,7 +233,6 @@ pub fn search_source_direct(tx: &Transaction<'_>, query: &str) -> Result<Vec<Sea
          ORDER BY item_id, source_type DESC",
     )?;
 
-    let pattern = format!("%{}%", query);
     let results = stmt
         .query_map(rusqlite::params![&pattern, &pattern], |row| {
             Ok(SearchResult {

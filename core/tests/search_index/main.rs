@@ -495,18 +495,149 @@ fn test_search_index_with_correction() -> Result<()> {
     )?;
     ohand_core::retrieval::index::index_text_correction(&tx, "item1")?;
 
-    // Search should find the corrected text.
-    let results = ohand_core::retrieval::index::search_index(&tx, "goodbye")?;
-    assert_eq!(results.len(), 1, "Should find the corrected item");
-    assert_eq!(results[0].corrected_text, Some("goodbye world".to_string()));
-
-    // Search for original should not find it (superseded by correction).
-    let results_original = ohand_core::retrieval::index::search_index(&tx, "hello")?;
+    // Search should find both original and corrected text.
+    // Original text is preserved as authoritative capture, not superseded by correction.
+    let results_goodbye = ohand_core::retrieval::index::search_index(&tx, "goodbye")?;
+    assert_eq!(results_goodbye.len(), 1, "Should find the corrected item");
     assert_eq!(
-        results_original.len(),
-        0,
-        "Original text should be superseded by correction"
+        results_goodbye[0].corrected_text,
+        Some("goodbye world".to_string())
     );
+    assert_eq!(results_goodbye[0].source_type, "corrected");
+
+    // Original text is still searchable (represents original capture).
+    let results_hello = ohand_core::retrieval::index::search_index(&tx, "hello")?;
+    assert_eq!(
+        results_hello.len(),
+        1,
+        "Original text should remain searchable"
+    );
+    assert_eq!(
+        results_hello[0].original_text,
+        Some("hello world".to_string())
+    );
+    assert_eq!(results_hello[0].source_type, "original");
+
+    tx.commit()?;
+    Ok(())
+}
+
+#[test]
+fn test_insert_correct_delete_sequence_converges() -> Result<()> {
+    let mut db = ohand_core::store::schema::Database::open(":memory:", Arc::new(TestClock))?;
+    let tx = db.transaction()?;
+
+    // Create a single item.
+    tx.execute(
+        "INSERT INTO captures (capture_id, text, item_scope, route_id, capture_instant,
+         timezone_id, utc_offset_minutes, locale, calendar, entry_locked, created_at)
+         VALUES ('cap1', 'hello world', 'personal', 'route1', '2026-01-01T00:00:00Z',
+         'UTC', 0, 'en_US', 'gregorian', 0, '2026-01-01T00:00:00Z')",
+        [],
+    )?;
+    tx.execute(
+        "INSERT INTO items (item_id, capture_id, lifecycle_state, save_state, sync_state,
+         processing_state, transcription_state, created_at, updated_at)
+         VALUES ('item1', 'cap1', 'active', 'saved', 'not_configured',
+         'idle', 'no_audio', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        [],
+    )?;
+
+    // Index original.
+    ohand_core::retrieval::index::index_capture(&tx, "item1", "cap1")?;
+
+    // Get incremental count after insert.
+    let incremental_after_insert: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM search_index WHERE item_id = 'item1'",
+        [],
+        |row| row.get(0),
+    )?;
+
+    // First correction.
+    tx.execute(
+        "INSERT INTO corrections (correction_id, item_id, revision, kind, old_value, new_value, created_at)
+         VALUES ('corr1', 'item1', 0, 'text', 'hello world', 'goodbye world', '2026-01-01T00:00:00Z')",
+        [],
+    )?;
+    ohand_core::retrieval::index::index_text_correction(&tx, "item1")?;
+
+    let incremental_after_correct1: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM search_index WHERE item_id = 'item1'",
+        [],
+        |row| row.get(0),
+    )?;
+
+    // Second correction.
+    tx.execute(
+        "INSERT INTO corrections (correction_id, item_id, revision, kind, old_value, new_value, created_at)
+         VALUES ('corr2', 'item1', 1, 'text', 'goodbye world', 'farewell world', '2026-01-01T01:00:00Z')",
+        [],
+    )?;
+    ohand_core::retrieval::index::index_text_correction(&tx, "item1")?;
+
+    let incremental_after_correct2: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM search_index WHERE item_id = 'item1'",
+        [],
+        |row| row.get(0),
+    )?;
+
+    // Verify incremental state: should have 2 rows (original + latest correction).
+    assert_eq!(
+        incremental_after_insert, 1,
+        "After insert, should have 1 row (original)"
+    );
+    assert_eq!(
+        incremental_after_correct1, 2,
+        "After first correction, should have 2 rows (original + first correction)"
+    );
+    assert_eq!(
+        incremental_after_correct2, 2,
+        "After second correction, should have 2 rows (original + second correction, not first)"
+    );
+
+    // Verify the latest correction text.
+    let latest_text: String = tx.query_row(
+        "SELECT current_text FROM search_index WHERE item_id = 'item1' AND text_basis = 'corrected'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(
+        latest_text, "farewell world",
+        "Should have latest correction"
+    );
+
+    // Rebuild and verify it agrees.
+    ohand_core::retrieval::index::rebuild_index(&tx)?;
+
+    let rebuilt_count: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM search_index WHERE item_id = 'item1'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(
+        rebuilt_count, 2,
+        "Rebuilt index should have same 2 rows (original + latest correction)"
+    );
+
+    let rebuilt_text: String = tx.query_row(
+        "SELECT current_text FROM search_index WHERE item_id = 'item1' AND text_basis = 'corrected'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(
+        rebuilt_text, "farewell world",
+        "Rebuilt should have latest correction"
+    );
+
+    // Delete and verify both are removed.
+    ohand_core::retrieval::index::remove_item_from_index(&tx, "item1")?;
+
+    let after_delete: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM search_index WHERE item_id = 'item1'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(after_delete, 0, "After delete, should have 0 rows");
 
     tx.commit()?;
     Ok(())
@@ -598,6 +729,66 @@ fn test_idempotent_capture_indexing() -> Result<()> {
         |row| row.get(0),
     )?;
     assert_eq!(count, 1, "Idempotent indexing should not create duplicates");
+
+    tx.commit()?;
+    Ok(())
+}
+
+#[test]
+fn test_direct_fallback_with_special_characters() -> Result<()> {
+    let mut db = ohand_core::store::schema::Database::open(":memory:", Arc::new(TestClock))?;
+    let tx = db.transaction()?;
+
+    // Create captures with special characters in the text.
+    let test_cases = vec![
+        ("cap1", "test_underscore_here", "item1"),
+        ("cap2", "test%percent%here", "item2"),
+        ("cap3", "test normal text", "item3"),
+    ];
+
+    for (cap_id, text, item_id) in test_cases {
+        tx.execute(
+            "INSERT INTO captures (capture_id, text, item_scope, route_id, capture_instant,
+             timezone_id, utc_offset_minutes, locale, calendar, entry_locked, created_at)
+             VALUES (?, ?, 'personal', 'route1', '2026-01-01T00:00:00Z',
+             'UTC', 0, 'en_US', 'gregorian', 0, '2026-01-01T00:00:00Z')",
+            rusqlite::params![cap_id, text],
+        )?;
+        tx.execute(
+            "INSERT INTO items (item_id, capture_id, lifecycle_state, save_state, sync_state,
+             processing_state, transcription_state, created_at, updated_at)
+             VALUES (?, ?, 'active', 'saved', 'not_configured',
+             'idle', 'no_audio', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            rusqlite::params![item_id, cap_id],
+        )?;
+        ohand_core::retrieval::index::index_capture(&tx, item_id, cap_id)?;
+    }
+
+    // Search for underscore - should match only the one with literal underscore, not as wildcard.
+    let results = ohand_core::retrieval::index::search_source_direct(&tx, "_")?;
+    assert_eq!(
+        results.len(),
+        1,
+        "Searching for underscore should find only item with literal underscore"
+    );
+    assert_eq!(results[0].item_id, "item1");
+
+    // Search for percent - should match only the one with literal percent.
+    let results = ohand_core::retrieval::index::search_source_direct(&tx, "%")?;
+    assert_eq!(
+        results.len(),
+        1,
+        "Searching for percent should find only item with literal percent"
+    );
+    assert_eq!(results[0].item_id, "item2");
+
+    // Search for "test" - should match all three.
+    let results = ohand_core::retrieval::index::search_source_direct(&tx, "test")?;
+    assert_eq!(
+        results.len(),
+        3,
+        "Searching for 'test' should match all items with 'test'"
+    );
 
     tx.commit()?;
     Ok(())

@@ -461,12 +461,10 @@ fn create_tables_v1(tx: &Transaction<'_>) -> Result<()> {
     )?;
 
     // Search index table: full-text search on original and corrected text.
-    // Includes capture_id and item_scope for privacy scope and attribution.
+    // Note: capture_id and item_scope are added in v3 migration for backward compatibility.
     tx.execute(
         "CREATE VIRTUAL TABLE search_index USING fts5(
             item_id UNINDEXED,
-            capture_id UNINDEXED,
-            item_scope UNINDEXED,
             original_text,
             current_text,
             text_basis
