@@ -13,27 +13,28 @@ public enum CoreErrorClass: Int32 {
     case unsupported = 5
 }
 
-/// C bridge functions.
+/// C bridge functions (opaque handle interface).
 @_silgen_name("ohand_create_handle")
 private func _ohand_create_handle() -> CoreHandle
 
 @_silgen_name("ohand_destroy_handle")
-private func _ohand_destroy_handle(_ handle: UnsafeMutablePointer<CoreHandle>)
+private func _ohand_destroy_handle(_ handle: CoreHandle)
 
 @_silgen_name("ohand_is_handle_cancelled")
-private func _ohand_is_handle_cancelled(_ handle: UnsafePointer<CoreHandle>) -> Int32
+private func _ohand_is_handle_cancelled(_ handle: CoreHandle) -> Int32
 
 @_silgen_name("ohand_cancel_handle")
-private func _ohand_cancel_handle(_ handle: UnsafePointer<CoreHandle>) -> Int32
+private func _ohand_cancel_handle(_ handle: CoreHandle) -> Int32
 
 /// Safe Swift wrapper for core handles.
-/// Manages lifetime, provides cancellation, and prevents double-free.
+/// Manages lifetime and provides cancellation.
+/// Handles are single-owner; only one copy may exist at a time.
 public class OhAndCoreHandle {
-    private var cHandle: CoreHandle?
+    private var handle: CoreHandle?
     private let lock = NSLock()
 
     public init() {
-        self.cHandle = _ohand_create_handle()
+        self.handle = _ohand_create_handle()
     }
 
     deinit {
@@ -46,9 +47,9 @@ public class OhAndCoreHandle {
         lock.lock()
         defer { lock.unlock() }
 
-        guard var handle = cHandle else { return }
-        _ohand_destroy_handle(&handle)
-        cHandle = nil
+        guard let h = handle else { return }
+        _ohand_destroy_handle(h)
+        handle = nil
     }
 
     /// Check if this handle is cancelled.
@@ -57,10 +58,8 @@ public class OhAndCoreHandle {
         lock.lock()
         defer { lock.unlock() }
 
-        guard let handle = cHandle else { return nil }
-        let result = withUnsafePointer(to: handle) { ptr in
-            _ohand_is_handle_cancelled(ptr)
-        }
+        guard let h = handle else { return nil }
+        let result = _ohand_is_handle_cancelled(h)
         return result == 1 ? true : (result == 0 ? false : nil)
     }
 
@@ -71,10 +70,8 @@ public class OhAndCoreHandle {
         lock.lock()
         defer { lock.unlock() }
 
-        guard let handle = cHandle else { return false }
-        let result = withUnsafePointer(to: handle) { ptr in
-            _ohand_cancel_handle(ptr)
-        }
+        guard let h = handle else { return false }
+        let result = _ohand_cancel_handle(h)
         return result == 0
     }
 }
