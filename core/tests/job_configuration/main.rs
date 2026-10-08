@@ -5,7 +5,7 @@ use chrono::Duration;
 use chrono::Utc;
 use ohand_core::jobs::configuration::{
     get_item_jobs_for_profile, get_jobs_pinned_to_profile, is_job_profile_revoked,
-    is_profile_available, revoke_profile_and_retire_jobs_in_tx,
+    is_profile_available, requeue_job_to_new_profile_in_tx, revoke_profile_and_retire_jobs_in_tx,
 };
 use ohand_core::jobs::queue::{claim_job_with_lease, complete_job_in_tx, enqueue_job, JobStatus};
 use ohand_core::store::schema::{Clock, Database};
@@ -221,11 +221,24 @@ fn test_revocation_stops_future_dispatch() -> Result<()> {
     // Verify: profile is now revoked
     assert!(!is_profile_available(db.conn(), profile)?);
 
-    // Verify: jobs are marked as cancelled with reason
-    assert!(is_job_profile_revoked(db.conn(), "job-for-revoked-1")?);
-    assert!(is_job_profile_revoked(db.conn(), "job-for-revoked-2")?);
+    // Verify: jobs are marked as cancelled with reason 'profile_revoked'
+    let job1: (String, Option<String>) = db.conn().query_row(
+        "SELECT status, failure_reason FROM jobs WHERE job_id = ?",
+        ["job-for-revoked-1"],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    assert_eq!(job1.0, "cancelled");
+    assert_eq!(job1.1, Some("profile_revoked".to_string()));
 
-    // Verify: claim_job_with_lease skips revoked jobs
+    let job2: (String, Option<String>) = db.conn().query_row(
+        "SELECT status, failure_reason FROM jobs WHERE job_id = ?",
+        ["job-for-revoked-2"],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    assert_eq!(job2.0, "cancelled");
+    assert_eq!(job2.1, Some("profile_revoked".to_string()));
+
+    // Verify: claim_job_with_lease returns nothing (no claimable jobs)
     let claimed = claim_job_with_lease(&mut db, Duration::minutes(5), now)?;
     assert!(
         claimed.is_none(),
@@ -274,13 +287,12 @@ fn test_late_results_rejected_after_revocation() -> Result<()> {
     }
 
     // Attempt to complete the job: should fail because profile was revoked
+    // (complete_job_in_tx checks revocation status)
     let complete_result = {
         let tx = db.immediate_transaction()?;
-        let result = complete_job_in_tx(&tx, "job-late-result", lease_attempt)
+        complete_job_in_tx(&tx, "job-late-result", lease_attempt)
             .map(|_| "success")
-            .map_err(|e| e.to_string());
-        tx.rollback()?;
-        result
+            .map_err(|e| e.to_string())
     };
 
     assert!(
@@ -290,6 +302,30 @@ fn test_late_results_rejected_after_revocation() -> Result<()> {
     assert!(
         complete_result.unwrap_err().contains("profile"),
         "Error should mention profile revocation"
+    );
+
+    // Advance time past lease expiry to trigger the claim loop's revocation cancellation
+    let now_plus_10_min = now + Duration::minutes(10);
+    let claimed_after_expiry = claim_job_with_lease(&mut db, Duration::minutes(5), now_plus_10_min)?;
+    assert!(
+        claimed_after_expiry.is_none(),
+        "Claim should return none after revoked job's lease expires and is cancelled"
+    );
+
+    // Verify the job was cancelled by the claim loop
+    let job_status: (String, Option<String>) = db.conn().query_row(
+        "SELECT status, failure_reason FROM jobs WHERE job_id = ?",
+        ["job-late-result"],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    assert_eq!(
+        job_status.0, "cancelled",
+        "Running job with revoked profile should be marked cancelled after lease expiry"
+    );
+    assert_eq!(
+        job_status.1,
+        Some("profile_revoked".to_string()),
+        "Job should have profile_revoked failure reason"
     );
 
     Ok(())
@@ -458,7 +494,8 @@ fn test_credentials_not_persisted_in_job() -> Result<()> {
 }
 
 /// Behavioral Test 7: Explicit requeue is inspectable; profile change is not silent.
-/// When a profile configuration changes, explicit new jobs are enqueued, not silent redirects.
+/// When a profile configuration changes, the old job is cancelled with reason 'requeued'
+/// and a new job is created pinned to the new profile version.
 #[test]
 fn test_explicit_requeue_after_profile_change() -> Result<()> {
     let clock = Arc::new(MockClock::new(Utc::now()));
@@ -471,45 +508,79 @@ fn test_explicit_requeue_after_profile_change() -> Result<()> {
     create_profile(&mut db, "provider-old-config", old_profile)?;
 
     // Enqueue job with old profile
-    enqueue_job(
+    let enqueued = enqueue_job(
         &mut db,
         "job-on-old-profile".to_string(),
         item_id.clone(),
         "interpret".to_string(),
-        1,
+        0,
         Some(old_profile.to_string()),
         None,
         1,
         now,
     )?;
+    assert_eq!(enqueued.status, JobStatus::Queued);
+
+    // Claim the old job to verify it's the only claimable one before requeue
+    let claimed_before = claim_job_with_lease(&mut db, Duration::minutes(5), now)?
+        .expect("old job should be claimable");
+    assert_eq!(claimed_before.job_id, "job-on-old-profile");
+    assert_eq!(
+        claimed_before.profile_version,
+        Some(old_profile.to_string())
+    );
+
+    // Job is now running; we can test requeue with a running job
+    assert_eq!(claimed_before.status, JobStatus::Running);
 
     // Profile is updated (new version created)
     create_profile(&mut db, "provider-new-config", new_profile)?;
 
-    // Explicit requeue: create new job pinned to new profile
-    let new_job = enqueue_job(
-        &mut db,
-        "job-on-new-profile".to_string(),
-        item_id.clone(),
-        "interpret".to_string(),
-        1,
-        Some(new_profile.to_string()),
-        None,
-        1,
-        now,
+    // Explicit requeue: atomically retire old job and create new job pinned to new profile
+    {
+        let tx = db.immediate_transaction()?;
+        requeue_job_to_new_profile_in_tx(
+            &tx,
+            "job-on-old-profile",
+            "job-on-new-profile".to_string(),
+            item_id.clone(),
+            "interpret".to_string(),
+            0,
+            new_profile.to_string(),
+            None,
+            1,
+            now,
+        )?;
+        tx.commit()?;
+    }
+
+    // Verify: old job is now cancelled with reason 'requeued'
+    let old_status: (String, Option<String>) = db.conn().query_row(
+        "SELECT status, failure_reason FROM jobs WHERE job_id = ?",
+        ["job-on-old-profile"],
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
+    assert_eq!(old_status.0, "cancelled");
+    assert_eq!(old_status.1, Some("requeued".to_string()));
 
-    // Verify: old job is still pinned to old profile
-    let old_jobs = get_jobs_pinned_to_profile(db.conn(), old_profile)?;
-    assert!(old_jobs.contains(&"job-on-old-profile".to_string()));
+    // Verify: new job is pinned to new profile and is queued
+    let new_job_data: (String, Option<String>) = db.conn().query_row(
+        "SELECT status, profile_version FROM jobs WHERE job_id = ?",
+        ["job-on-new-profile"],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    assert_eq!(new_job_data.0, "queued");
+    assert_eq!(new_job_data.1, Some(new_profile.to_string()));
 
-    // Verify: new job is pinned to new profile
-    let new_jobs = get_jobs_pinned_to_profile(db.conn(), new_profile)?;
-    assert!(new_jobs.contains(&"job-on-new-profile".to_string()));
+    // Verify: claiming after requeue returns only the new job
+    let claimed_after = claim_job_with_lease(&mut db, Duration::minutes(5), now)?
+        .expect("new job should be claimable");
+    assert_eq!(claimed_after.job_id, "job-on-new-profile");
+    assert_eq!(claimed_after.profile_version, Some(new_profile.to_string()));
 
-    // Requeue is inspectable: both jobs exist and have explicit IDs
-    assert_ne!(new_job.job_id, "job-on-old-profile");
-    assert_eq!(new_job.profile_version, Some(new_profile.to_string()));
+    // Verify: the old job is not claimable again
+    let claimed_again = claim_job_with_lease(&mut db, Duration::minutes(5), now)?;
+    assert!(claimed_again.is_none(), "No more jobs should be claimable");
 
     Ok(())
 }
@@ -554,6 +625,68 @@ fn test_get_item_jobs_for_profile_supports_selective_requeue() -> Result<()> {
     assert_eq!(jobs.len(), 2);
     assert!(jobs.contains(&"job-item1-interpret".to_string()));
     assert!(jobs.contains(&"job-item1-transcribe".to_string()));
+
+    Ok(())
+}
+
+/// Behavioral Test 9: Revocation after lease expiry does not create infinite loop.
+/// When a running job's lease expires and the profile is revoked before the next claim,
+/// the claim loop must retire the job and not spin forever.
+#[test]
+fn test_revocation_after_lease_expiry_does_not_hang() -> Result<()> {
+    let clock = Arc::new(MockClock::new(Utc::now()));
+    let (mut db, item_id) = setup_test_db(&clock)?;
+    let now = clock.now();
+
+    let profile = "profile-lease-expiry-test-aaaa";
+    create_profile(&mut db, "provider-lease-expiry", profile)?;
+
+    // Enqueue a job
+    enqueue_job(
+        &mut db,
+        "job-running-revoked".to_string(),
+        item_id.clone(),
+        "interpret".to_string(),
+        0,
+        Some(profile.to_string()),
+        None,
+        1,
+        now,
+    )?;
+
+    // Claim the job with a 5-minute lease
+    let claimed =
+        claim_job_with_lease(&mut db, Duration::minutes(5), now)?.expect("job should be claimable");
+    assert_eq!(claimed.status, JobStatus::Running);
+
+    // Revoke the profile while the job is running
+    {
+        let tx = db.immediate_transaction()?;
+        revoke_profile_and_retire_jobs_in_tx(&tx, profile, now)?;
+        tx.commit()?;
+    }
+
+    // Advance time past the lease expiry
+    let now_plus_10_min = now + Duration::minutes(10);
+    *clock.current_time.write().unwrap() = now_plus_10_min;
+
+    // Attempt to claim the next job - this should NOT hang
+    // The expired running job should be selected by the query, found to have a revoked profile,
+    // cancelled immediately, and skipped. Then claim should return None.
+    let next_claimed = claim_job_with_lease(&mut db, Duration::minutes(5), now_plus_10_min)?;
+    assert!(
+        next_claimed.is_none(),
+        "No jobs should be claimable after revocation"
+    );
+
+    // Verify the running job is now cancelled
+    let job_status: (String, Option<String>) = db.conn().query_row(
+        "SELECT status, failure_reason FROM jobs WHERE job_id = ?",
+        ["job-running-revoked"],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    assert_eq!(job_status.0, "cancelled");
+    assert_eq!(job_status.1, Some("profile_revoked".to_string()));
 
     Ok(())
 }

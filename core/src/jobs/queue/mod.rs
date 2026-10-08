@@ -334,7 +334,7 @@ pub fn claim_job_with_lease_in_tx(
             continue;
         }
 
-        // Check if job's profile has been revoked. Skip this job without claiming it.
+        // Check if job's profile has been revoked. Retire this job without claiming it.
         if let Some(ref profile_version) = job.profile_version {
             let revoked_at: Option<Option<String>> = tx
                 .query_row(
@@ -345,18 +345,17 @@ pub fn claim_job_with_lease_in_tx(
                 .optional()?;
 
             if matches!(revoked_at, Some(Some(_))) {
-                // Profile is revoked: mark this queued job as cancelled and skip it
-                if job.status == JobStatus::Queued {
-                    tx.execute(
-                        "UPDATE jobs SET status = ?, failure_reason = ?, lease_expires_at = NULL WHERE job_id = ?",
-                        rusqlite::params![
-                            JobStatus::Cancelled.as_str(),
-                            "profile_revoked",
-                            &job.job_id
-                        ],
-                    )?;
-                }
-                // Skip to next job (whether queued or running)
+                // Profile is revoked: mark this job as cancelled and skip it
+                // This applies to both queued and running jobs; retiring prevents infinite loop
+                tx.execute(
+                    "UPDATE jobs SET status = ?, failure_reason = ?, lease_expires_at = NULL WHERE job_id = ?",
+                    rusqlite::params![
+                        JobStatus::Cancelled.as_str(),
+                        "profile_revoked",
+                        &job.job_id
+                    ],
+                )?;
+                // Skip to next job
                 continue;
             }
         }

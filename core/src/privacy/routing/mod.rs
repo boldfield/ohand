@@ -117,6 +117,7 @@ pub enum DenialReason {
     UnknownJobType,
     LocalOnlyJobHasProfile,
     ProfileUnavailable,
+    ProfileRevoked,
     UnknownProviderType,
     MalformedProfile,
     RouteNotConfigured,
@@ -135,6 +136,7 @@ impl fmt::Display for DenialReason {
                 "an on-device-only job must not be pinned to a provider profile"
             }
             DenialReason::ProfileUnavailable => "the job's pinned profile version is unavailable",
+            DenialReason::ProfileRevoked => "the job's pinned profile version has been revoked",
             DenialReason::UnknownProviderType => "the pinned profile has an unknown provider type",
             DenialReason::MalformedProfile => "the pinned profile has no valid destination",
             DenialReason::RouteNotConfigured => "the capture's route has no stored configuration",
@@ -212,6 +214,22 @@ pub fn authorize_job(conn: &Connection, job_id: &str) -> Result<AuthorizationDec
     let Some(profile_version) = profile_version else {
         return Ok(make(None, Disposition::Local));
     };
+
+    // Check if profile is revoked
+    let is_revoked: Option<Option<String>> = conn
+        .query_row(
+            "SELECT revoked_at FROM provider_profiles WHERE profile_version = ?",
+            [profile_version.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("checking profile revocation")?;
+
+    match is_revoked {
+        Some(Some(_)) => return Ok(Denied(DenialReason::ProfileRevoked)),
+        None => return Ok(Denied(DenialReason::ProfileUnavailable)),
+        Some(None) => {} // Profile exists and is not revoked, continue
+    }
 
     let Some(profile) = load_profile(conn, &profile_version)? else {
         return Ok(Denied(DenialReason::ProfileUnavailable));
