@@ -32,6 +32,8 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
 
 - B01b holds an ordered ownership allowance, granted by the coordinator on 2026-10-08 after PR #87 showed that criterion 2 cannot be met inside `core/src/ffi/` and `ios/OhAndCoreBridge/` alone: (1) in `ios/project.yml`, only the OhAndCoreBridge target's link, search-path, `SWIFT_INCLUDE_PATHS` and pre-build settings, and the OhAndTests target's `OHAND_RUST_OUTPUT_DIR`, `HEADER_SEARCH_PATHS` and `SWIFT_INCLUDE_PATHS`; (2) in `core/bindings/build-ios.sh`, a lock that serializes parallel Xcode invocations; (3) a handle/callback section in `docs/validation/core-binding.md`; (4) the new `ios/Tests/CoreBridge/` directory. Because P07 edits `ios/project.yml` concurrently, B01b now also waits for P07. The generator and `core/bindings/src/lib.rs` remain off-limits to B01b, and an allowance written inside an implementation PR is still not an allowance.
 
+- B01c holds an ordered ownership allowance, granted by the coordinator on 2026-10-08 after PR #110 showed that criterion 2 (restart, duplicate capture ID and normalized failure on simulator) needs a simulator test next to B01b's: it may add and later maintain the single file `ios/Tests/CoreBridge/CaptureStatusTests.swift`. B01b has landed (PR #108), so no ordering conflict remains in that directory. Nothing else under `ios/Tests/`, `ios/project.yml` or `core/bindings/` is granted, and an allowance written inside an implementation PR is still not an allowance.
+
 - P08 conflated signing automation, which the Linux fleet can build and test against stubbed `security`, `xcodebuild` and `devicectl`, with a signed build installed on a physical iPhone, which only the maintainer can produce on a Mac with Xcode, an Apple Development identity and a device profile. Apple Developer Program enrollment completed on 2026-10-08; this Mac still has no Xcode, identity or profile. P08a owns the tooling, its behaviour tests and the signing document's procedure sections; P08b owns the evidence record and the validity/renewal statement. P09, T05 and T10 depend on P08b, the last child.
 
 - The Xcode 16.4 pin in `ios/project.yml` and `.github/workflows/ios.yml` was the macos-15 runner image default when F03 and F05 ran; no rationale was recorded. It ships the iOS 18.5 SDK and cannot install on the maintainer's iPhone, which runs iOS 26.6.2, so it blocks P08b outright. New task F08 moves native CI to the `macos-26` image and Xcode 26.6, the newest version on GitHub-hosted runners as of 2026-10-08 (Xcode 27 is not yet on hosted images), and re-proves every probe under that SDK. F08 waits for P07, which edits `ios/project.yml`; B01b and P08a wait for F08. Bump again to Xcode 27 when the hosted image carries it.
@@ -194,6 +196,8 @@ Acceptance:
 Source pointers (baseline above): `docs/architecture/m1-contracts.md:211`, `AGENTS.md:45`, `core/src/store/captures/mod.rs:106`, `core/src/store/schema/mod.rs:165`.
 
 Contributes to original B01 criteria: 2, 3, 4.
+
+Recorded decision (coordinator, 2026-10-08, PR #110 round 2): the production export `ohand_core_start_save_capture` and its Swift acknowledgment are a pre-import durable capture write, not the Capture Ingestion Contract acknowledgment in `docs/architecture/m1-contracts.md` (capture ID, item ID, save timestamp). B01c accepts any non-empty `route_id` without validating it, because no route store exists before C02a. C02a owns unknown-route rejection, the import transaction and the contracted acknowledgment; native callers, including the C01b ingress path, must treat B01c's success as "the capture bytes are durable" and nothing more. The acknowledgment type must be named or documented so it cannot be mistaken for the ingestion acknowledgment.
 
 ### V05a
 
@@ -433,6 +437,8 @@ Acceptance:
 Source pointers (baseline above): `docs/architecture/m1-contracts.md:266`, `AGENTS.md:45`, `core/src/store/captures/mod.rs:106`, `core/src/store/schema/mod.rs:165`.
 
 Contributes to original C02 criteria: 1, 2, 3.
+
+Note (2026-10-08): B01c's `ohand_core_start_save_capture` is a pre-import capture write that accepts any non-empty route identifier. C02a owns unknown-route rejection and the contracted ingestion acknowledgment; see the recorded decision under B01c.
 
 ### C02b
 
