@@ -239,6 +239,73 @@ fn topic_matches_stored_capitalization() -> Result<()> {
 }
 
 #[test]
+fn topic_matches_any_stored_casing_and_surrounding_whitespace() -> Result<()> {
+    let (_directory, mut db) = new_db()?;
+    for (item_id, topic) in [
+        ("upper", "THERAPY"),
+        ("padded", " therapy "),
+        ("mixed", "tHeRaPy"),
+    ] {
+        seed(
+            &mut db,
+            SeedItem::personal(item_id, "Ask about boundaries", "2026-01-14T10:00:00Z")
+                .topic(topic),
+        )?;
+    }
+    seed(
+        &mut db,
+        SeedItem::personal("other", "Ask about boundaries", "2026-01-14T10:00:00Z").topic("work"),
+    )?;
+
+    for phrase in [
+        "private therapy notes",
+        "PRIVATE THERAPY NOTES since monday",
+        "private  therapy   session notes",
+    ] {
+        let hits = retrieved_ids(&db, phrase, &utc_context())?;
+        assert_eq!(ids(&hits), vec!["mixed", "padded", "upper"], "{phrase}");
+    }
+    Ok(())
+}
+
+#[test]
+fn spoken_broad_intentions_retrieve_only_that_type() -> Result<()> {
+    let (_directory, mut db) = new_db()?;
+    seed(
+        &mut db,
+        SeedItem::personal("broad-new", "Be more present", "2026-01-14T10:00:00Z")
+            .item_type("broad_intention"),
+    )?;
+    seed(
+        &mut db,
+        SeedItem::personal("broad-old", "Read more", "2026-01-05T10:00:00Z")
+            .item_type("broad_intention"),
+    )?;
+    seed(
+        &mut db,
+        SeedItem::personal("action-new", "Call the plumber", "2026-01-14T10:00:00Z")
+            .item_type("action"),
+    )?;
+    seed(
+        &mut db,
+        SeedItem::personal("note-new", "Plumber number", "2026-01-14T10:00:00Z").item_type("note"),
+    )?;
+
+    for phrase in [
+        "broad intentions since monday",
+        "broad intention notes since monday",
+        "Broad Intentions since monday",
+        "broad_intentions since monday",
+    ] {
+        let hits = retrieved_ids(&db, phrase, &utc_context())?;
+        assert_eq!(ids(&hits), vec!["broad-new"], "{phrase}");
+    }
+    let all = retrieved_ids(&db, "broad intentions", &utc_context())?;
+    assert_eq!(ids(&all), vec!["broad-new", "broad-old"]);
+    Ok(())
+}
+
+#[test]
 fn type_and_date_combine() -> Result<()> {
     let (_directory, mut db) = new_db()?;
     seed(

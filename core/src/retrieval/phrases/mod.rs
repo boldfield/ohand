@@ -5,8 +5,8 @@
 //   [private] [TOPIC...] [session] [TYPE] NOUN [since DATE]
 //   since DATE
 //
-// NOUN is `notes` or `items`, or a plural type (`actions`, `ideas`, `broad_intentions`).
-// TYPE is `action`, `note`, `idea` or `broad_intention`. TOPIC words are only read when the
+// NOUN is `notes` or `items`, or a plural type (`actions`, `ideas`, `broad intentions`).
+// TYPE is `action`, `note`, `idea` or `broad intention` (also `broad_intention`/`broad-intention`). TOPIC words are only read when the
 // phrase says `private` or `session`; `session` without a topic means "any session topic".
 // Retrieval is always personal-scope only; `private` never widens it.
 //
@@ -20,7 +20,7 @@
 // no clarification. Invalid time contexts are errors, never silently ignored.
 
 use crate::retrieval::query::{
-    scoped_list, scoped_query, QueryFilter, QueryPagination, QueryResult,
+    normalize_session_topic, scoped_list, scoped_query, QueryFilter, QueryPagination, QueryResult,
 };
 use crate::time::{TimeContext, TimeResolver};
 use anyhow::{anyhow, Result};
@@ -82,7 +82,7 @@ impl HeadFilter {
             filter.item_types = vec![item_type.clone()];
         }
         if !self.topic_tokens.is_empty() {
-            filter.session_topics = topic_variants(&self.topic_tokens);
+            filter.session_topics = vec![normalize_session_topic(&self.topic_tokens.join(" "))];
         }
         filter.require_session_topic = self.any_session_topic || !self.topic_tokens.is_empty();
     }
@@ -176,7 +176,41 @@ pub fn retrieve_phrase(
     }
 }
 
-fn parse_head(tokens: &[&str], lowered: &[String]) -> Option<HeadFilter> {
+/// Join the spoken "broad intention(s)" (and "broad-intention(s)") into the stored type name so
+/// every spelling reaches the same single-token type match.
+fn merge_broad_intention_tokens(tokens: &[&str], lowered: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut merged_tokens: Vec<String> = Vec::new();
+    let mut merged_lowered: Vec<String> = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        let is_broad_pair = lowered[index] == "broad"
+            && lowered
+                .get(index + 1)
+                .is_some_and(|next| next == "intention" || next == "intentions");
+        if is_broad_pair {
+            let joined = format!("broad_{}", lowered[index + 1]);
+            merged_tokens.push(joined.clone());
+            merged_lowered.push(joined);
+            index += 2;
+            continue;
+        }
+        let hyphen_form = lowered[index].replace("broad-intention", "broad_intention");
+        merged_tokens.push(if hyphen_form != lowered[index] {
+            hyphen_form.clone()
+        } else {
+            tokens[index].to_string()
+        });
+        merged_lowered.push(hyphen_form);
+        index += 1;
+    }
+    (merged_tokens, merged_lowered)
+}
+
+fn parse_head(raw_tokens: &[&str], raw_lowered: &[String]) -> Option<HeadFilter> {
+    let (owned_tokens, lowered) = merge_broad_intention_tokens(raw_tokens, raw_lowered);
+    let tokens: Vec<&str> = owned_tokens.iter().map(String::as_str).collect();
+    let tokens = tokens.as_slice();
+    let lowered = lowered.as_slice();
     let mut head = HeadFilter::default();
     if tokens.is_empty() {
         return Some(head);
@@ -227,32 +261,6 @@ fn parse_head(tokens: &[&str], lowered: &[String]) -> Option<HeadFilter> {
     }
     head.any_session_topic = session;
     Some(head)
-}
-
-/// Session topics are matched exactly and case-sensitively, so offer the spellings a user is
-/// likely to have stored: as typed, lowercase and title case.
-fn topic_variants(topic_tokens: &[String]) -> Vec<String> {
-    let as_typed = topic_tokens.join(" ");
-    let lowercase = as_typed.to_lowercase();
-    let title_case = topic_tokens
-        .iter()
-        .map(|token| {
-            let lower = token.to_lowercase();
-            let mut chars = lower.chars();
-            match chars.next() {
-                Some(first) => first.to_uppercase().chain(chars).collect::<String>(),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    let mut variants: Vec<String> = Vec::new();
-    for variant in [as_typed, lowercase, title_case] {
-        if !variants.contains(&variant) {
-            variants.push(variant);
-        }
-    }
-    variants
 }
 
 fn resolve_since(date_text: &str, context: &TimeContext) -> Result<SinceOutcome> {
@@ -487,12 +495,32 @@ mod tests {
     }
 
     #[test]
-    fn topic_words_become_case_variants() {
+    fn topic_words_are_normalized_for_matching() {
         let filter = parse_phrase("Private Therapy notes", &utc_context())
             .unwrap()
             .filter
             .unwrap();
-        assert_eq!(filter.session_topics, vec!["Therapy", "therapy"]);
+        assert_eq!(filter.session_topics, vec!["therapy"]);
+    }
+
+    #[test]
+    fn broad_intention_spellings_all_become_the_broad_intention_type() {
+        for phrase in [
+            "broad intentions since 2026-01-10",
+            "Broad Intention notes since 2026-01-10",
+            "broad_intentions since 2026-01-10",
+            "broad-intentions since 2026-01-10",
+        ] {
+            let filter = parse_phrase(phrase, &utc_context())
+                .unwrap()
+                .filter
+                .unwrap_or_else(|| panic!("{phrase} should resolve"));
+            assert_eq!(filter.item_types, vec!["broad_intention"], "{phrase}");
+        }
+        assert!(parse_phrase("broad notes", &utc_context())
+            .unwrap()
+            .filter
+            .is_none());
     }
 
     #[test]

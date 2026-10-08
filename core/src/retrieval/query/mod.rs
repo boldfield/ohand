@@ -279,31 +279,9 @@ fn query_candidate_batch(
         where_clauses.push(format!("i.item_type IN ({})", type_placeholders));
     }
 
-    if !filter.session_topics.is_empty() {
-        let topic_placeholders = vec!["?"; filter.session_topics.len()].join(", ");
-        if filter.include_no_session_topic {
-            where_clauses.push(format!(
-                "(COALESCE(i.current_session_topic, c.session_topic) IN ({}) OR (i.current_session_topic IS NULL AND c.session_topic IS NULL))",
-                topic_placeholders
-            ));
-        } else {
-            where_clauses.push(format!(
-                "COALESCE(i.current_session_topic, c.session_topic) IN ({})",
-                topic_placeholders
-            ));
-        }
-    } else if filter.include_no_session_topic {
-        where_clauses
-            .push("(i.current_session_topic IS NULL AND c.session_topic IS NULL)".to_string());
-    }
-
-    if filter.require_session_topic {
-        where_clauses
-            .push("COALESCE(i.current_session_topic, c.session_topic) IS NOT NULL".to_string());
-    }
-
     let sql = format!(
-        "SELECT i.item_id, c.capture_instant
+        "SELECT i.item_id, c.capture_instant,
+                COALESCE(i.current_session_topic, c.session_topic)
          FROM items i
          JOIN captures c ON c.capture_id = i.capture_id
          WHERE {}",
@@ -318,16 +296,49 @@ fn query_candidate_batch(
     for type_str in &filter.item_types {
         params.push(type_str);
     }
-    for topic in &filter.session_topics {
-        params.push(topic);
-    }
 
     let rows = stmt
         .query_map(rusqlite::params_from_iter(params), |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+
+    let wanted_topics: Vec<String> = filter
+        .session_topics
+        .iter()
+        .map(|topic| normalize_session_topic(topic))
+        .collect();
+    Ok(rows
+        .into_iter()
+        .filter(|(_, _, topic)| session_topic_allowed(topic.as_deref(), filter, &wanted_topics))
+        .map(|(item_id, captured_at, _)| (item_id, captured_at))
+        .collect())
+}
+
+fn session_topic_allowed(topic: Option<&str>, filter: &QueryFilter, wanted: &[String]) -> bool {
+    let topic = topic.filter(|topic| !topic.trim().is_empty());
+    if filter.require_session_topic && topic.is_none() {
+        return false;
+    }
+    match topic {
+        None => wanted.is_empty() || filter.include_no_session_topic,
+        Some(_) if wanted.is_empty() => !filter.include_no_session_topic,
+        Some(topic) => wanted.contains(&normalize_session_topic(topic)),
+    }
+}
+
+/// Session topics are free text that is stored as typed, so they are compared trimmed,
+/// whitespace-collapsed and case-insensitively.
+pub fn normalize_session_topic(topic: &str) -> String {
+    topic
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 /// Parse an RFC3339 datetime into a UTC instant, preserving full sub-second precision.
