@@ -7,7 +7,7 @@ containers and the HANDOFF-PHASE lines the UI test printed:
   HANDOFF-PHASE warm <id> background
   HANDOFF-PHASE rejected - <count>
   HANDOFF-PHASE large-text-capture <id> scrolls=<n>
-  HANDOFF-PHASE large-text-management - ok
+  HANDOFF-PHASE large-text-management <id> ok
 It never trusts that a process is alive.
 """
 import argparse
@@ -51,16 +51,19 @@ def check(handoff_dir, capture_root, log_text, require_cold_without_webview=True
     for label, capture_id in (("cold", cold_id), ("warm", warm_id), ("large-text-capture", phases["large-text-capture"][0])):
         if not capture_id or not CAPTURE_ID_PATTERN.match(capture_id):
             errors.append(f"{label} phase capture ID {capture_id!r} is not a canonical identifier")
-    if cold_id == warm_id:
-        errors.append("cold and warm handoffs carried the same identifier")
+    if len({cold_id, warm_id, phases["large-text-capture"][0]}) != 3:
+        errors.append("the handoffs did not carry three distinct identifiers")
+    if phases["large-text-management"] != (phases["large-text-capture"][0], "ok"):
+        errors.append(f"large-text management phase {phases['large-text-management']} does not repeat the large-text capture")
     if phases["rejected"][1] != "2":
         errors.append(f"expected 2 hostile URLs, phase reports {phases['rejected'][1]!r}")
     if errors:
         return errors
 
-    expected_ids = {cold_id, warm_id}
+    large_id = phases["large-text-capture"][0]
+    expected_ids = {cold_id, warm_id, large_id}
     inbox_files = {path.name for path in handoff_dir.iterdir()} if handoff_dir.is_dir() else set()
-    expected_files = {f"{cold_id}.json", f"{warm_id}.json", "rejections.json"}
+    expected_files = {f"{capture_id}.json" for capture_id in expected_ids} | {"rejections.json"}
     if inbox_files != expected_files:
         errors.append(f"shell inbox holds {sorted(inbox_files)}, expected exactly {sorted(expected_files)}")
         return errors
@@ -118,7 +121,7 @@ def main():
         for error in errors:
             print(f"ERROR: {error}", file=sys.stderr)
         return 1
-    print("Handoff evidence verified: the shell stored exactly the cold and warm identifiers CaptureProbe saved, and rejected 2 hostile URLs")
+    print("Handoff evidence verified: the shell stored exactly the cold, warm and large-text identifiers CaptureProbe saved, and rejected 2 hostile URLs")
     return 0
 
 

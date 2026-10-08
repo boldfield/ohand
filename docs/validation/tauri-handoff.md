@@ -54,15 +54,15 @@ both apps on one simulator. The test taps the real "Review in management app" bu
 
 | Phase | What the test does | What is asserted |
 | --- | --- | --- |
-| cold | Shell terminated; the native entry saves via its URL, button tapped. | Shell state was `notRunning` when the entry saved; shell comes to the foreground and lists the same identifier. |
+| cold | Native entry launched once (the runner installs it on first launch), then both terminated; the entry saves via its URL, button tapped. | Shell state was `notRunning` when the entry saved; shell comes to the foreground and lists the same identifier. |
 | warm | Shell left in the background; a second entry is saved and handed off. | Shell was backgrounded; lists both identifiers. |
 | rejected | Two hostile `ohand-tauri://` URLs are opened directly (bad identifier; path traversal). | The shell shows "Handoffs rejected: 1." then "2."; the list still has exactly two identifiers. |
-| large-text | Both apps launched at `AccessibilityXXXL`. | The handoff button exists, is enabled and becomes hittable by scrolling; the shell still lists the identifiers. |
+| large-text | Both apps launched at `AccessibilityXXXL`. | The handoff button exists, is enabled and becomes hittable by scrolling; tapping it opens the shell (also at largest text), which lists that entry's identifier. |
 
 Afterwards `ios/scripts/verify_handoff_evidence.py` (unit-tested in `ios/scripts/test_verify_handoff_evidence.py`,
 run by `make check`) reads the real files from both simulator data containers and requires that:
 
-- the shell inbox holds exactly the cold and warm identifiers plus `rejections.json`, and nothing else;
+- the shell inbox holds exactly the cold, warm and large-text identifiers plus `rejections.json`, and nothing else;
 - each shell record has only `captureId`, `receivedAtUnixMs`, `webviewReady`, and the same identifier exists as a saved
   CaptureProbe record, so identity is preserved end to end;
 - the cold record has `webviewReady == false` and the warm record `true`;

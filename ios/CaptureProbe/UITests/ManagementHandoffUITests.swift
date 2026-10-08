@@ -24,8 +24,10 @@ final class ManagementHandoffUITests: XCTestCase {
         }
 
         // Cold: the management shell is not running when the handoff arrives.
-        managementApp.terminate()
+        // The test runner installs the native entry only when it is first launched; a plain launch makes its URL scheme resolvable.
+        captureApp.launch()
         captureApp.terminate()
+        managementApp.terminate()
         openThroughSystem(shortcutURL)
         let coldId = expectSavedEntry(phase: "cold", previousIds: [])
         XCTAssertEqual(managementApp.state, .notRunning, "cold phase needs the management shell stopped")
@@ -88,13 +90,14 @@ final class ManagementHandoffUITests: XCTestCase {
         managementApp.launchArguments = largeTextArguments
         managementApp.launch()
         XCTAssertTrue(managementApp.wait(for: .runningForeground, timeout: 30))
+        captureApp.activate()
+        tapManagementButton()
         XCTAssertTrue(
-            managementApp.staticTexts.matching(NSPredicate(format: "label MATCHES %@", uuidPattern)).firstMatch
-                .waitForExistence(timeout: 30),
-            "received identifiers not shown at the largest text size"
+            managementApp.staticTexts[entryId].waitForExistence(timeout: 30),
+            "handed-off identifier not shown at the largest text size"
         )
         screenshot(managementApp, "management-large-text")
-        print("HANDOFF-PHASE large-text-management - ok")
+        print("HANDOFF-PHASE large-text-management \(entryId) ok")
     }
 
     @available(iOS 16.4, *)
