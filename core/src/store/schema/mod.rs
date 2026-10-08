@@ -51,6 +51,10 @@ pub const MIGRATIONS: &[MigrationStep] = &[
         target_version: 2,
         apply: add_event_payload_columns_v2,
     },
+    MigrationStep {
+        target_version: 3,
+        apply: fix_reminder_operations_uniqueness_v3,
+    },
 ];
 
 /// Database handle with schema validation.
@@ -661,5 +665,55 @@ fn add_event_payload_columns_v2(tx: &Transaction<'_>) -> Result<()> {
         "ALTER TABLE events ADD COLUMN suggestion_control_kind TEXT",
         [],
     )?;
+    Ok(())
+}
+
+fn fix_reminder_operations_uniqueness_v3(tx: &Transaction<'_>) -> Result<()> {
+    // SQLite doesn't support altering constraints, so we recreate the table.
+    // Rename the old table
+    tx.execute(
+        "ALTER TABLE reminder_operations RENAME TO reminder_operations_old",
+        [],
+    )?;
+
+    // Create new table with correct unique constraint including operation_type
+    tx.execute(
+        "CREATE TABLE reminder_operations (
+            operation_id TEXT PRIMARY KEY,
+            reminder_id TEXT NOT NULL,
+            operation_type TEXT NOT NULL,
+            operation_state TEXT NOT NULL,
+            effect_identity TEXT NOT NULL,
+            external_id TEXT,
+            scheduled_for TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (reminder_id) REFERENCES reminders(reminder_id),
+            UNIQUE (reminder_id, effect_identity, operation_type)
+        )",
+        [],
+    )?;
+
+    // Copy data from old table to new table
+    tx.execute(
+        "INSERT INTO reminder_operations
+         (operation_id, reminder_id, operation_type, operation_state, effect_identity, external_id, scheduled_for, created_at)
+         SELECT operation_id, reminder_id, operation_type, operation_state, effect_identity, external_id, scheduled_for, created_at
+         FROM reminder_operations_old",
+        [],
+    )?;
+
+    // Drop old table
+    tx.execute("DROP TABLE reminder_operations_old", [])?;
+
+    // Recreate indexes
+    tx.execute(
+        "CREATE INDEX idx_reminder_operations_reminder_id ON reminder_operations(reminder_id)",
+        [],
+    )?;
+    tx.execute(
+        "CREATE INDEX idx_reminder_operations_operation_state ON reminder_operations(operation_state)",
+        [],
+    )?;
+
     Ok(())
 }
