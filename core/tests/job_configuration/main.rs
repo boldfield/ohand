@@ -672,6 +672,39 @@ fn test_requeue_of_running_job_rejects_old_lease_result() -> Result<()> {
     Ok(())
 }
 
+/// A worker that claimed a job before it was requeued must not be able to dispatch it afterwards.
+#[test]
+fn test_requeued_running_job_cannot_resolve_execution_target() -> Result<()> {
+    let clock = Arc::new(MockClock::new(Utc::now()));
+    let (mut db, item_id) = setup_test_db(&clock)?;
+    let now = clock.now();
+
+    let old_profile = "profile-fence-old-1111";
+    let new_profile = "profile-fence-new-2222";
+    create_profile(&mut db, "provider-old", old_profile)?;
+    create_profile(&mut db, "provider-new", new_profile)?;
+    enqueue_interpret(&mut db, "job-fence-old", &item_id, old_profile, now)?;
+    claim_job_with_lease(&mut db, Duration::minutes(5), now)?.expect("claimable");
+
+    requeue_job_to_new_profile(
+        &mut db,
+        "job-fence-old",
+        "job-fence-new".to_string(),
+        new_profile.to_string(),
+        now,
+    )?;
+
+    assert_eq!(
+        resolve_execution_target(db.conn(), "job-fence-old")?,
+        ExecutionResolution::Denied(DenialReason::JobRetired)
+    );
+    assert!(matches!(
+        resolve_execution_target(db.conn(), "job-fence-new")?,
+        ExecutionResolution::Remote(target) if target.profile_version == new_profile
+    ));
+    Ok(())
+}
+
 /// Behavioral Test 8: get_item_jobs_for_profile supports selective requeue.
 /// When deciding which jobs to requeue after profile change, we can query per-item.
 #[test]
