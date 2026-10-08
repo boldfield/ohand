@@ -80,7 +80,14 @@ pub fn scoped_query(
     let date_bounds = parse_date_bounds(filter)?;
     let allowed_scopes = allowed_read_scopes(filter);
     let candidate_hits = search_index(conn, search_text, &allowed_scopes)?;
-    finish_query(conn, candidate_hits, filter, &date_bounds, pagination)
+    finish_query(
+        conn,
+        candidate_hits,
+        filter,
+        &date_bounds,
+        pagination,
+        CANDIDATE_ID_BATCH_SIZE,
+    )
 }
 
 /// Alternative query using direct source table (fallback when index is out of sync).
@@ -93,7 +100,14 @@ pub fn scoped_query_direct(
     let date_bounds = parse_date_bounds(filter)?;
     let allowed_scopes = allowed_read_scopes(filter);
     let candidate_hits = search_source_direct(conn, search_text, &allowed_scopes)?;
-    finish_query(conn, candidate_hits, filter, &date_bounds, pagination)
+    finish_query(
+        conn,
+        candidate_hits,
+        filter,
+        &date_bounds,
+        pagination,
+        CANDIDATE_ID_BATCH_SIZE,
+    )
 }
 
 /// Read scopes from the filter, defaulting to personal only when none are given.
@@ -112,6 +126,7 @@ fn finish_query(
     filter: &QueryFilter,
     date_bounds: &DateBounds,
     pagination: &QueryPagination,
+    batch_size: usize,
 ) -> Result<QueryResult> {
     hits.retain(|hit| {
         // Deleted items are never returned, regardless of the lifecycle filter.
@@ -129,7 +144,7 @@ fn finish_query(
         true
     });
 
-    let total_accessible = filter_hits_in_db(conn, &mut hits, filter, date_bounds)?;
+    let total_accessible = filter_hits_in_db(conn, &mut hits, filter, date_bounds, batch_size)?;
 
     let limit = if pagination.limit == 0 {
         hits.len()
@@ -176,8 +191,15 @@ fn parse_date_bounds(filter: &QueryFilter) -> Result<DateBounds> {
     })
 }
 
+/// Candidate ids bound per SQL statement; far below SQLite's bound-parameter limit (32,766 in
+/// the bundled build), leaving room for the item-type and session-topic parameters.
+const CANDIDATE_ID_BATCH_SIZE: usize = 500;
+
 /// Apply database-level filters to reduce hit set by item_type, dates, and session_topic.
 /// Modifies the hits vector in place and returns the total accessible count (after all filters, before pagination).
+///
+/// Candidate ids are looked up in batches so that broad queries matching more items than SQLite
+/// allows bound parameters still succeed.
 ///
 /// Date bounds are compared as parsed UTC instants in Rust to keep full sub-second precision.
 /// When a bound is set, items whose stored capture instant is not valid RFC3339 are excluded
@@ -187,12 +209,46 @@ fn filter_hits_in_db(
     hits: &mut Vec<SearchHit>,
     filter: &QueryFilter,
     date_bounds: &DateBounds,
+    batch_size: usize,
 ) -> Result<usize> {
     if hits.is_empty() {
         return Ok(0);
     }
 
-    let item_ids: Vec<&str> = hits.iter().map(|h| h.item_id.as_str()).collect();
+    let mut allowed_item_ids = std::collections::HashSet::new();
+    for batch in hits.chunks(batch_size.max(1)) {
+        let item_ids: Vec<&str> = batch.iter().map(|h| h.item_id.as_str()).collect();
+        let matching_rows = query_candidate_batch(conn, &item_ids, filter)?;
+        for (item_id, capture_instant) in matching_rows {
+            if date_bounds.is_set() {
+                let Ok(stored_instant) = parse_rfc3339_utc(&capture_instant) else {
+                    continue;
+                };
+                if date_bounds
+                    .captured_after
+                    .is_some_and(|after| stored_instant < after)
+                    || date_bounds
+                        .captured_before
+                        .is_some_and(|before| stored_instant > before)
+                {
+                    continue;
+                }
+            }
+            allowed_item_ids.insert(item_id);
+        }
+    }
+
+    hits.retain(|hit| allowed_item_ids.contains(&hit.item_id));
+    Ok(hits.len())
+}
+
+/// Return (item_id, capture_instant) for the candidate ids that satisfy the item-type and
+/// session-topic filters.
+fn query_candidate_batch(
+    conn: &Connection,
+    item_ids: &[&str],
+    filter: &QueryFilter,
+) -> Result<Vec<(String, String)>> {
     let placeholders = vec!["?"; item_ids.len()].join(", ");
     let mut where_clauses = vec![format!("i.item_id IN ({})", placeholders)];
 
@@ -229,7 +285,7 @@ fn filter_hits_in_db(
     let mut stmt = conn.prepare(&sql)?;
 
     let mut params: Vec<&dyn rusqlite::ToSql> = Vec::new();
-    for id in &item_ids {
+    for id in item_ids {
         params.push(id);
     }
     for type_str in &filter.item_types {
@@ -239,33 +295,12 @@ fn filter_hits_in_db(
         params.push(topic);
     }
 
-    let matching_rows: Vec<(String, String)> = stmt
+    let rows = stmt
         .query_map(rusqlite::params_from_iter(params), |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-
-    let mut allowed_item_ids = std::collections::HashSet::new();
-    for (item_id, capture_instant) in matching_rows {
-        if date_bounds.is_set() {
-            let Ok(stored_instant) = parse_rfc3339_utc(&capture_instant) else {
-                continue;
-            };
-            if date_bounds
-                .captured_after
-                .is_some_and(|after| stored_instant < after)
-                || date_bounds
-                    .captured_before
-                    .is_some_and(|before| stored_instant > before)
-            {
-                continue;
-            }
-        }
-        allowed_item_ids.insert(item_id);
-    }
-
-    hits.retain(|hit| allowed_item_ids.contains(&hit.item_id));
-    Ok(hits.len())
+    Ok(rows)
 }
 
 /// Parse an RFC3339 datetime into a UTC instant, preserving full sub-second precision.
@@ -1204,6 +1239,111 @@ mod tests {
         assert_eq!((indexed.hits.len(), indexed.total_accessible), (0, 0));
         assert_eq!((direct.hits.len(), direct.total_accessible), (0, 0));
 
+        Ok(())
+    }
+
+    #[test]
+    fn small_candidate_batches_match_unbatched_results_on_both_paths() -> Result<()> {
+        let mut db = new_db("batched")?;
+        for i in 0..7 {
+            let topic = if i % 2 == 0 { Some("therapy") } else { None };
+            let item_type = if i % 3 == 0 { "idea" } else { "note" };
+            add_item(
+                &mut db,
+                &format!("item-{i}"),
+                Some("shared batch term"),
+                "personal",
+                "route-1",
+                Some(item_type),
+                topic,
+            )?;
+        }
+
+        let mut filter = QueryFilter::personal_only();
+        filter.item_types = vec!["note".to_string()];
+        filter.session_topics = vec!["therapy".to_string()];
+        let date_bounds = parse_date_bounds(&filter)?;
+        let allowed = allowed_read_scopes(&filter);
+        let pagination = QueryPagination {
+            limit: 2,
+            offset: 1,
+        };
+
+        let expected = scoped_query(db.conn(), "batch", &filter, &pagination)?;
+        assert_eq!(expected.total_accessible, 2);
+        for batch_size in [1, 2, 3, 100] {
+            let indexed = finish_query(
+                db.conn(),
+                search_index(db.conn(), "batch", &allowed)?,
+                &filter,
+                &date_bounds,
+                &pagination,
+                batch_size,
+            )?;
+            let direct = finish_query(
+                db.conn(),
+                search_source_direct(db.conn(), "batch", &allowed)?,
+                &filter,
+                &date_bounds,
+                &pagination,
+                batch_size,
+            )?;
+            for result in [&indexed, &direct] {
+                assert_eq!(result.total_accessible, expected.total_accessible);
+                let ids: Vec<_> = result.hits.iter().map(|h| &h.item_id).collect();
+                let expected_ids: Vec<_> = expected.hits.iter().map(|h| &h.item_id).collect();
+                assert_eq!(ids, expected_ids, "batch_size {batch_size}");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn broad_query_exceeding_sqlite_parameter_limit_succeeds_on_both_paths() -> Result<()> {
+        let mut db = new_db("broad_query")?;
+        let total_items = 33_000;
+        let tx = db.immediate_transaction()?;
+        for i in 0..total_items {
+            let capture_id = format!("cap-{i:05}");
+            let item_id = format!("item-{i:05}");
+            let capture = Capture::new(
+                capture_id.clone(),
+                Some("common word".to_string()),
+                None,
+                "2026-01-15T10:30:00Z".to_string(),
+                "UTC".to_string(),
+                0,
+                "en".to_string(),
+                "gregorian".to_string(),
+                "personal".to_string(),
+                "route-1".to_string(),
+                false,
+                "2026-01-15T10:30:00Z".to_string(),
+                None,
+            )?;
+            crate::store::captures::save_capture_in_tx(&tx, &capture)?;
+            tx.execute(
+                "INSERT INTO items (item_id, capture_id, revision, item_type, lifecycle_state,
+                                   save_state, sync_state, processing_state, transcription_state, created_at, updated_at)
+                 VALUES (?, ?, 0, 'note', 'active', 'saved', 'not_synced', 'unprocessed', 'unprocessed', ?, ?)",
+                rusqlite::params![item_id, capture_id, "2026-01-15T10:30:00Z", "2026-01-15T10:30:00Z"],
+            )?;
+        }
+        crate::retrieval::index::rebuild_index(&tx)?;
+        tx.commit()?;
+
+        let filter = QueryFilter::personal_only();
+        let pagination = QueryPagination {
+            limit: 10,
+            offset: 0,
+        };
+        let indexed = scoped_query(db.conn(), "common", &filter, &pagination)?;
+        let direct = scoped_query_direct(db.conn(), "common", &filter, &pagination)?;
+        for result in [&indexed, &direct] {
+            assert_eq!(result.hits.len(), 10);
+            assert_eq!(result.total_accessible, total_items);
+            assert_eq!(result.hits[0].item_id, "item-00000");
+        }
         Ok(())
     }
 }
