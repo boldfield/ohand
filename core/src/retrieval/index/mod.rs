@@ -165,11 +165,23 @@ pub fn remove_item_from_index(tx: &Transaction<'_>, item_id: &str) -> Result<()>
     Ok(())
 }
 
+/// Normalize a query for FTS5 to perform literal substring matching (like LIKE does).
+/// This escapes FTS5 special characters and operators so the query is treated as a literal phrase.
+fn normalize_fts_query(query: &str) -> String {
+    // Wrap in double quotes to make it a phrase, which treats it as a literal substring match.
+    // This ensures FTS5 behavior matches LIKE behavior for the same input.
+    // FTS5 will search for the exact phrase, not interpreting OR, AND, NOT, etc.
+    format!("\"{}\"", query.replace('"', "\"\""))
+}
+
 /// Query the index for searchable items.
 /// Returns items matching the query text across both original and corrected text.
 /// Results explicitly identify whether text is original or corrected, and include
 /// capture_id and item_scope for source attribution and privacy filtering.
+/// Uses literal substring matching (like LIKE) rather than full-text boolean operators.
 pub fn search_index(tx: &Transaction<'_>, query: &str) -> Result<Vec<SearchResult>> {
+    let fts_query = normalize_fts_query(query);
+
     let mut stmt = tx.prepare(
         "SELECT item_id, capture_id, item_scope, original_text, current_text, text_basis
          FROM search_index
@@ -178,7 +190,7 @@ pub fn search_index(tx: &Transaction<'_>, query: &str) -> Result<Vec<SearchResul
     )?;
 
     let results = stmt
-        .query_map(rusqlite::params![query, query], |row| {
+        .query_map(rusqlite::params![&fts_query, &fts_query], |row| {
             Ok(SearchResult {
                 item_id: row.get(0)?,
                 capture_id: row.get(1)?,
