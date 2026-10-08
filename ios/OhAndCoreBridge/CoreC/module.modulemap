@@ -1,0 +1,4 @@
+module OhandCoreC {
+    header "OhandCoreC.h"
+    export *
+}
