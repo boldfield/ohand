@@ -190,6 +190,19 @@ final class CredentialServiceTests: XCTestCase {
         XCTAssertEqual(presentStatus, .present, "Added credential should be present")
     }
 
+    func testStatusDistinguishesInvalidatedFromPresent() throws {
+        let secret = "test-secret".data(using: .utf8)!
+        let reference = try credentialService.addCredential(secret)
+
+        let presentStatus = try credentialService.credentialStatus(reference: reference)
+        XCTAssertEqual(presentStatus, .present, "Fresh credential should be present")
+
+        fakeKeychain.markAsInvalidated(reference)
+
+        let invalidatedStatus = try credentialService.credentialStatus(reference: reference)
+        XCTAssertEqual(invalidatedStatus, .invalidated, "Invalidated credential should return invalidated status")
+    }
+
     func testStatusWithEmptyReferenceThrows() throws {
         XCTAssertThrowsError(try credentialService.credentialStatus(reference: "")) { error in
             if case let .invalidReference(msg) = error as? CredentialError {
@@ -326,8 +339,12 @@ final class CredentialServiceTests: XCTestCase {
         let secret = "secret".data(using: .utf8)!
         let reference = try credentialService.addCredential(secret)
 
-        let status = try credentialService.credentialStatus(reference: reference)
-        XCTAssertEqual(status, .present, "Credential with appropriate accessibility should be accessible")
+        let accessibility = fakeKeychain.getAccessibilityClass(for: reference)
+        XCTAssertEqual(
+            accessibility,
+            kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String,
+            "Credential should use AfterFirstUnlockThisDeviceOnly accessibility class"
+        )
     }
 
     // MARK: - Idempotency Tests
@@ -360,24 +377,12 @@ final class CredentialServiceTests: XCTestCase {
         let secret = "persistent-secret".data(using: .utf8)!
         let reference = try credentialService.addCredential(secret)
 
-        let freshService = CredentialService(keychainService: testKeychainService)
+        let freshService = CredentialService(keychainService: testKeychainService, keychain: fakeKeychain)
         let status = try freshService.credentialStatus(reference: reference)
         XCTAssertEqual(status, .present, "Credential should persist through fresh service instance")
 
         let retrieved = try freshService.retrieveCredential(reference: reference)
         XCTAssertEqual(retrieved, secret, "Credential value should be retrievable from fresh instance")
-    }
-
-    func testAccessibilityClassIsAfterFirstUnlock() throws {
-        let secret = "accessibility-test".data(using: .utf8)!
-        let reference = try credentialService.addCredential(secret)
-
-        let accessibility = fakeKeychain.getAccessibilityClass(for: reference)
-        XCTAssertEqual(
-            accessibility,
-            kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String,
-            "Credential should use AfterFirstUnlock accessibility class"
-        )
     }
 
     // MARK: - Lock and Error Handling Tests

@@ -123,13 +123,17 @@ public class CredentialService {
             throw CredentialError.invalidReference("Empty credential reference")
         }
 
-        let query = keychainQueryAttributes(for: reference)
+        var query = keychainQueryAttributes(for: reference)
+        query[kSecReturnData as String] = true
 
         var result: CFTypeRef?
         let status = keychain.copyMatching(query as CFDictionary, &result)
 
         switch status {
         case errSecSuccess:
+            if let data = result as? Data, data.isEmpty {
+                return .invalidated
+            }
             return .present
         case errSecItemNotFound:
             return .absent
