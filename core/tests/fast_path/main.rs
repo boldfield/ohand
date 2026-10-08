@@ -179,7 +179,7 @@ fn test_hypothetical_they_said() {
 #[test]
 fn test_hypothetical_she_thinks() {
     let context = test_time_context();
-    let text = "she thinks I should remind her";
+    let text = "she thinks I should remind me tomorrow";
     let proposal = recognize_reminder(
         text,
         "550e8400-e29b-41d4-a716-446655440000",
@@ -190,7 +190,7 @@ fn test_hypothetical_she_thinks() {
         &context,
     );
 
-    // This should abstain because it's not a direct instruction
+    // This should abstain because of the hypothetical context (she thinks)
     assert!(proposal.is_some());
     let p = proposal.unwrap();
     assert_eq!(p.abstention, Some(AbstentionReason::UncertainTarget));

@@ -7,66 +7,91 @@ use crate::providers::contracts::TextBasis;
 use crate::time::TimeContext;
 use crate::time::TimeResolver;
 
-fn char_index_of(text: &str, pattern: &str) -> Option<usize> {
-    text.find(pattern)
-        .map(|byte_pos| text[..byte_pos].chars().count())
-}
-
-fn word_contains(text: &str, word: &str) -> bool {
-    if let Some(mut start) = text.find(word) {
-        loop {
-            let end = start + word.len();
-            let before_ok = start == 0
-                || !text
+fn find_word_in_text(text: &str, word: &str) -> Option<usize> {
+    for (char_idx, _) in text.char_indices() {
+        let char_count = text[..char_idx].chars().count();
+        if text[char_idx..].starts_with(word) {
+            let before_ok = char_count == 0
+                || text[..char_idx]
                     .chars()
-                    .nth(start - 1)
-                    .is_some_and(|c| c.is_alphanumeric());
-            let after_ok =
-                end >= text.len() || !text.chars().nth(end).is_some_and(|c| c.is_alphanumeric());
+                    .last()
+                    .is_some_and(|c| !c.is_alphanumeric());
+            let after_char_count = char_count + word.chars().count();
+            let after_ok = after_char_count >= text.chars().count()
+                || text
+                    .chars()
+                    .nth(after_char_count)
+                    .is_some_and(|c| !c.is_alphanumeric());
             if before_ok && after_ok {
-                return true;
-            }
-            if let Some(next_offset) = text[end..].find(word) {
-                start = end + next_offset;
-            } else {
-                return false;
+                return Some(char_count);
             }
         }
     }
-    false
+    None
 }
 
-fn is_negated(text_lower: &str) -> bool {
-    let has_negation = text_lower.contains("don't")
-        || text_lower.contains("dont")
-        || text_lower.contains("do not")
-        || (text_lower.contains("never") && !text_lower.contains("whenever"));
-    let has_verb = text_lower.contains("remind") || text_lower.contains("tell");
-
-    has_negation && has_verb
+fn is_negated_around(text_lower: &str, cmd_pos: usize, _cmd_len: usize) -> bool {
+    let before = &text_lower[..text_lower
+        .char_indices()
+        .nth(cmd_pos)
+        .map(|(i, _)| i)
+        .unwrap_or(0)];
+    before.contains("don't")
+        || before.contains("dont")
+        || before.contains("do not")
+        || (before.contains("never") && !before.contains("whenever"))
 }
 
-fn is_quoted(text: &str) -> bool {
-    text.contains("\"") || text.contains("'")
+fn is_quoted_around(text: &str, cmd_pos: usize) -> bool {
+    let byte_pos = text
+        .char_indices()
+        .nth(cmd_pos)
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let before = &text[..byte_pos];
+    (before.matches("\"").count() + before.matches("'").count()) % 2 == 1
 }
 
-fn is_hypothetical(text_lower: &str) -> bool {
+fn is_hypothetical_around(text_lower: &str, cmd_pos: usize) -> bool {
+    let byte_pos = text_lower
+        .char_indices()
+        .nth(cmd_pos)
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let before = &text_lower[..byte_pos];
+
     let hypothetical_markers = [
         "what if", "maybe", "perhaps", "possibly", "might", "could", "would", "may",
     ];
-    let has_hypothetical_marker = hypothetical_markers
-        .iter()
-        .any(|marker| text_lower.contains(marker));
+    let has_hypothetical_marker = hypothetical_markers.iter().any(|marker| {
+        if let Some(pos) = before.rfind(marker) {
+            let before_marker = &before[..pos];
+            let end_byte = pos + marker.len();
+            let after_marker = &before[end_byte..];
+            (before_marker.chars().last().is_none()
+                || !before_marker.chars().last().unwrap().is_alphanumeric())
+                && (after_marker.chars().next().is_none()
+                    || !after_marker.chars().next().unwrap().is_alphanumeric())
+        } else {
+            false
+        }
+    });
+
+    if has_hypothetical_marker {
+        return true;
+    }
 
     let has_speaker = ["they", "he", "she", "it", "someone", "people"]
         .iter()
-        .any(|s| word_contains(text_lower, s));
-    let has_indirect = ["said", "think", "asked", "want", "told", "need"]
-        .iter()
-        .any(|v| text_lower.contains(v));
-    let has_remind = text_lower.contains("remind");
+        .any(|s| find_word_in_text(before, s).is_some());
+    let has_indirect = [
+        "said", "says", "say", "think", "thinks", "thought", "asked", "asks", "ask", "want",
+        "wants", "wanted", "told", "tells", "tell", "need", "needs", "needed",
+    ]
+    .iter()
+    .any(|v| find_word_in_text(before, v).is_some());
 
-    has_hypothetical_marker || (has_speaker && has_indirect && has_remind)
+    has_speaker && has_indirect
 }
 
 fn create_proposal(
@@ -87,6 +112,12 @@ fn create_proposal(
     )
 }
 
+fn find_command(text_lower: &str) -> Option<(usize, usize)> {
+    find_word_in_text(text_lower, "remind me")
+        .map(|pos| (pos, 9))
+        .or_else(|| find_word_in_text(text_lower, "tell me").map(|pos| (pos, 7)))
+}
+
 /// Attempt to recognize an explicit offline reminder command from captured text.
 ///
 /// Returns `Some(proposal)` if a supported reminder pattern is recognized with enough
@@ -104,64 +135,61 @@ pub fn recognize_reminder(
 ) -> Option<Proposal> {
     let text_lower = text.to_lowercase();
 
-    if is_negated(&text_lower) {
+    let (cmd_pos, cmd_len) = find_command(&text_lower)?;
+
+    if is_negated_around(&text_lower, cmd_pos, cmd_len) {
         return Some(
             create_proposal(
                 item_id,
                 capture_id,
                 source_revision,
-                text_basis.clone(),
+                text_basis,
                 request_version,
             )
             .with_abstention(Some(AbstentionReason::Negated)),
         );
     }
 
-    if is_quoted(text) {
+    if is_quoted_around(text, cmd_pos) {
         return Some(
             create_proposal(
                 item_id,
                 capture_id,
                 source_revision,
-                text_basis.clone(),
+                text_basis,
                 request_version,
             )
             .with_abstention(Some(AbstentionReason::UncertainTarget)),
         );
     }
 
-    if is_hypothetical(&text_lower) {
+    if is_hypothetical_around(&text_lower, cmd_pos) {
         return Some(
             create_proposal(
                 item_id,
                 capture_id,
                 source_revision,
-                text_basis.clone(),
+                text_basis,
                 request_version,
             )
             .with_abstention(Some(AbstentionReason::UncertainTarget)),
         );
     }
 
-    let (cmd, cmd_len, cmd_str) = if text_lower.find("remind me").is_some() {
-        let byte_pos = text_lower.find("remind me").unwrap();
-        (byte_pos, 9, "remind me")
-    } else if text_lower.find("tell me").is_some() {
-        let byte_pos = text_lower.find("tell me").unwrap();
-        (byte_pos, 7, "tell me")
-    } else {
-        return None;
-    };
+    let byte_after_cmd = text
+        .char_indices()
+        .nth(cmd_pos + cmd_len)
+        .map(|(i, _)| i)
+        .unwrap_or(text.len());
 
-    let time_phrase = text[cmd + cmd_len..].trim();
+    let time_phrase = text[byte_after_cmd..].trim();
 
     if time_phrase.is_empty() {
-        let char_cmd_pos = char_index_of(&text_lower, cmd_str).unwrap_or(0);
         let reminder = ReminderProposal {
             instant: None,
             timezone_id: None,
             quality: TimeResolutionQuality::Ambiguous,
-            source_span: Some(SourceSpan::new(char_cmd_pos, char_cmd_pos + cmd_len)),
+            source_span: Some(SourceSpan::new(cmd_pos, cmd_pos + cmd_len)),
         };
         return Some(
             create_proposal(
@@ -188,42 +216,22 @@ pub fn recognize_reminder(
         );
     }
 
-    let time_phrase_lower = time_phrase.to_lowercase();
-    let char_pos = char_index_of(&text_lower, &time_phrase_lower);
+    let time_phrase_char_start = cmd_pos + cmd_len;
 
     match TimeResolver::resolve(time_phrase, time_context) {
         Ok(result) => {
             if let Some(resolved_time) = result.resolved_time {
                 if result.is_ambiguous {
-                    if let Some(pos) = char_pos {
-                        let reminder = ReminderProposal {
-                            instant: None,
-                            timezone_id: None,
-                            quality: TimeResolutionQuality::Ambiguous,
-                            source_span: Some(SourceSpan::new(
-                                pos,
-                                pos + time_phrase.chars().count(),
-                            )),
-                        };
-                        return Some(
-                            create_proposal(
-                                item_id,
-                                capture_id,
-                                source_revision,
-                                text_basis,
-                                request_version,
-                            )
-                            .with_reminder_proposal(Some(reminder)),
-                        );
-                    }
-                } else if let Some(pos) = char_pos {
                     let reminder = ReminderProposal {
-                        instant: Some(resolved_time.to_rfc3339()),
-                        timezone_id: Some(time_context.timezone.clone()),
-                        quality: TimeResolutionQuality::Explicit,
-                        source_span: Some(SourceSpan::new(pos, pos + time_phrase.chars().count())),
+                        instant: None,
+                        timezone_id: None,
+                        quality: TimeResolutionQuality::Ambiguous,
+                        source_span: Some(SourceSpan::new(
+                            time_phrase_char_start,
+                            time_phrase_char_start + time_phrase.chars().count(),
+                        )),
                     };
-                    return Some(
+                    Some(
                         create_proposal(
                             item_id,
                             capture_id,
@@ -232,16 +240,39 @@ pub fn recognize_reminder(
                             request_version,
                         )
                         .with_reminder_proposal(Some(reminder)),
-                    );
+                    )
+                } else {
+                    let reminder = ReminderProposal {
+                        instant: Some(resolved_time.to_rfc3339()),
+                        timezone_id: Some(time_context.timezone.clone()),
+                        quality: TimeResolutionQuality::Explicit,
+                        source_span: Some(SourceSpan::new(
+                            time_phrase_char_start,
+                            time_phrase_char_start + time_phrase.chars().count(),
+                        )),
+                    };
+                    Some(
+                        create_proposal(
+                            item_id,
+                            capture_id,
+                            source_revision,
+                            text_basis,
+                            request_version,
+                        )
+                        .with_reminder_proposal(Some(reminder)),
+                    )
                 }
-            } else if let Some(pos) = char_pos {
+            } else {
                 let reminder = ReminderProposal {
                     instant: None,
                     timezone_id: None,
                     quality: TimeResolutionQuality::Ambiguous,
-                    source_span: Some(SourceSpan::new(pos, pos + time_phrase.chars().count())),
+                    source_span: Some(SourceSpan::new(
+                        time_phrase_char_start,
+                        time_phrase_char_start + time_phrase.chars().count(),
+                    )),
                 };
-                return Some(
+                Some(
                     create_proposal(
                         item_id,
                         capture_id,
@@ -250,33 +281,20 @@ pub fn recognize_reminder(
                         request_version,
                     )
                     .with_reminder_proposal(Some(reminder)),
-                );
+                )
             }
         }
-        Err(_) => {
-            return Some(
-                create_proposal(
-                    item_id,
-                    capture_id,
-                    source_revision,
-                    text_basis,
-                    request_version,
-                )
-                .with_abstention(Some(AbstentionReason::Ambiguous)),
-            );
-        }
+        Err(_) => Some(
+            create_proposal(
+                item_id,
+                capture_id,
+                source_revision,
+                text_basis,
+                request_version,
+            )
+            .with_abstention(Some(AbstentionReason::Ambiguous)),
+        ),
     }
-
-    Some(
-        create_proposal(
-            item_id,
-            capture_id,
-            source_revision,
-            text_basis,
-            request_version,
-        )
-        .with_abstention(Some(AbstentionReason::Ambiguous)),
-    )
 }
 
 fn is_unsupported_recurrence(phrase: &str) -> bool {
@@ -299,5 +317,5 @@ fn is_unsupported_recurrence(phrase: &str) -> bool {
             return true;
         }
     }
-    word_contains(&lower, "every")
+    find_word_in_text(&lower, "every").is_some()
 }
