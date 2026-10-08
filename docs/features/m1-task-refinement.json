@@ -259,6 +259,7 @@
       "depends_on": [
         "B01a",
         "D05",
+        "P07",
         "V01"
       ],
       "source_pointers": [
@@ -266,6 +267,12 @@
         "AGENTS.md:45",
         "core/src/store/captures/mod.rs:106",
         "core/src/store/schema/mod.rs:165"
+      ],
+      "ownership_allowances": [
+        "ios/project.yml (OhAndCoreBridge link/search-path/SWIFT_INCLUDE_PATHS/pre-build settings; OhAndTests OHAND_RUST_OUTPUT_DIR/HEADER_SEARCH_PATHS/SWIFT_INCLUDE_PATHS only)",
+        "core/bindings/build-ios.sh (Xcode invocation lock only)",
+        "docs/validation/core-binding.md (handle/callback section)",
+        "ios/Tests/CoreBridge/"
       ]
     },
     {
@@ -1700,6 +1707,7 @@
     "B01b": [
       "B01a",
       "D05",
+      "P07",
       "V01"
     ],
     "B01c": [
@@ -2094,6 +2102,10 @@
     {
       "date": "2026-10-08",
       "change": "Split V08 into V08a (worker-side probe) and V08b (maintainer phone-context evidence over Tailscale); V09 now depends on V08b. Original task 939fe62e-5074-45e5-ad67-156834129c13 retired after two rejected review rounds on PR #60."
+    },
+    {
+      "date": "2026-10-08",
+      "change": "B01b ordered ownership allowance for ios/project.yml (named settings), core/bindings/build-ios.sh lock, core-binding.md section and ios/Tests/CoreBridge/; B01b now depends on P07 to serialize ios/project.yml edits."
     }
   ]
 }
