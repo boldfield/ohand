@@ -191,10 +191,26 @@ targets:
         createIntermediateGroups: true
         excludes:
           - Info.plist
+          - "Tests/**"
     settings:
       PRODUCT_NAME: AudioProbe
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.audio
       INFOPLIST_FILE: AudioProbe/Info.plist
+
+  AudioProbeTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: AudioProbe/Tests
+        createIntermediateGroups: true
+    settings:
+      PRODUCT_NAME: AudioProbeTests
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.probes.audio.tests
+      GENERATE_INFOPLIST_FILE: YES
+      TEST_HOST: $(BUILT_PRODUCTS_DIR)/AudioProbe.app/AudioProbe
+      BUNDLE_LOADER: $(TEST_HOST)
+    dependencies:
+      - target: AudioProbe
 
   TranscriptionProbe:
     type: application
@@ -298,11 +314,13 @@ schemes:
         OhAndTests: all
         BridgeProbeTests: all
         CaptureProbeTests: all
+        AudioProbeTests: all
     test:
       targets:
         - OhAndTests
         - BridgeProbeTests
         - CaptureProbeTests
+        - AudioProbeTests
   CaptureProbeTests:
     build:
       targets:
