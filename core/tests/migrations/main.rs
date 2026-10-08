@@ -1036,3 +1036,63 @@ fn test_v1_to_v2_migration_preserves_data() -> Result<()> {
     let _ = std::fs::remove_file(&path);
     Ok(())
 }
+
+#[test]
+fn test_v3_migration_adds_search_index_columns() -> Result<()> {
+    // Verify that v3 migration correctly adds capture_id and item_scope to search_index
+    // for databases created with v1 and v2 DDL.
+    let path = temp_db_path("v3_search_index");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+
+    // Step 1: Create a v2 database with only v1 and v2 migrations applied
+    let v2_steps = &MIGRATIONS[0..2]; // Only v1 and v2
+
+    {
+        let db = Database::open_with_migrations(&path, Arc::new(TestClock { instant }), v2_steps)?;
+        assert_eq!(db.schema_version()?, 2);
+
+        // Create test data: a capture, item, and search_index entry
+        {
+            let conn = db.conn();
+            insert_source_capture(conn, "test-cap-1")?;
+            conn.execute(
+                "INSERT INTO items (item_id, capture_id, lifecycle_state, save_state, sync_state, processing_state, transcription_state, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                rusqlite::params!["test-item-1", "test-cap-1", "active", "saved", "not_configured", "idle", "no_audio", "2026-01-15T10:30:00Z", "2026-01-15T10:30:00Z"],
+            )?;
+            // Insert into search_index with only the v1 columns (no capture_id or item_scope in FTS5)
+            conn.execute(
+                "INSERT INTO search_index (item_id, original_text, text_basis)
+                 VALUES (?, ?, ?)",
+                rusqlite::params!["test-item-1", "test text", "original"],
+            )?;
+        }
+    }
+
+    // Step 2: Reopen with all migrations (including v3) - should upgrade cleanly
+    {
+        let db =
+            Database::open_with_migrations(&path, Arc::new(TestClock { instant }), MIGRATIONS)?;
+        assert_eq!(db.schema_version()?, 3);
+
+        // Verify v3 columns were added by checking if we can query them
+        let (capture_id, item_scope): (String, String) = db.conn().query_row(
+            "SELECT capture_id, item_scope FROM search_index WHERE item_id = 'test-item-1' LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(capture_id, "test-cap-1");
+        assert_eq!(item_scope, "personal");
+
+        // Verify original data is preserved
+        let text: String = db.conn().query_row(
+            "SELECT original_text FROM search_index WHERE item_id = 'test-item-1'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(text, "test text");
+    }
+
+    let _ = std::fs::remove_file(&path);
+    Ok(())
+}
