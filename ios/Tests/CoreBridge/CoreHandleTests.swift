@@ -260,8 +260,8 @@ final class CoreHandleTests: XCTestCase {
             cancelled.fulfill()
         }
         wait(for: [cancelled], timeout: 20)
-        // A handler that began before cancel returned has finished once this barrier runs.
-        DispatchQueue.main.sync {}
+        // Handlers run on the main queue, so any that began before cancel returned has finished
+        // by the time this test code runs on it again.
         flagLock.lock()
         settled = true
         flagLock.unlock()
