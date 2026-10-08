@@ -38,7 +38,7 @@ SHARED_INTENT_ROOTS = {"CaptureProbeControl": "CaptureProbe/Shared", "OhAndCaptu
 
 PROBE_USAGE_STRINGS = {
     "AudioProbe": ["NSMicrophoneUsageDescription"],
-    "TranscriptionProbe": ["NSMicrophoneUsageDescription", "NSSpeechRecognitionUsageDescription"],
+    "TranscriptionProbe": ["NSSpeechRecognitionUsageDescription"],
 }
 APP_USAGE_STRINGS = ["NSMicrophoneUsageDescription", "NSSpeechRecognitionUsageDescription"]
 

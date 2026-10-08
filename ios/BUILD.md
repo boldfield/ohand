@@ -70,7 +70,7 @@ Targets include whole directories, so owners add files under their F01 paths wit
 
 `Capture/` is app-side code and may import `OhAndServices`; `Services/` cannot import `Capture/`. B02's composition root in `Services/Assembly/` therefore wires service dependencies, and U01 in `AppAssembly/` composes `Capture/` views with it.
 
-Every target's usage strings live in its own `Info.plist`: the app has microphone and speech recognition; `AudioProbe` has microphone; `TranscriptionProbe` has microphone and speech recognition.
+Every target's usage strings live in its own `Info.plist`: the app has microphone and speech recognition; `AudioProbe` has microphone; `TranscriptionProbe` has speech recognition only (it transcribes files and never records).
 
 ## Targets
 
