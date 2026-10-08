@@ -955,3 +955,50 @@ fn markup_and_symbol_prefixes_are_not_the_grammar() {
         expect_unrecognized(&format!("{prefix}{command}"));
     }
 }
+
+#[test]
+fn only_neutral_reminder_pictographs_may_precede_the_command() {
+    let command = "remind me 2025-10-20 14:30:00 to call mom";
+    for pictograph in [
+        "\u{1F514}",         // bell
+        "\u{23F0}",          // alarm clock
+        "\u{1F4CC}",         // pushpin
+        "\u{1F4DD}",         // memo
+        "\u{1F5D3}",         // spiral calendar
+        "\u{1F5D3}\u{FE0F}", // spiral calendar, emoji presentation
+        "\u{1F514}\u{1F514}",
+        "\u{1F514} \u{23F0}",
+    ] {
+        expect_explicit(
+            &format!("{pictograph} {command}"),
+            FUTURE_INSTANT,
+            FUTURE_PHRASE,
+        );
+    }
+    for symbol in [
+        "\u{274C}",          // cross mark: negation
+        "\u{1F6AB}",         // prohibited: negation
+        "\u{26D4}",          // no entry: negation
+        "\u{1F645}",         // person gesturing no: negation
+        "\u{2705}",          // check mark: completed work
+        "\u{1F914}",         // thinking face: musing
+        "\u{1F4AD}",         // thought balloon: musing
+        "\u{1F5E3}\u{FE0F}", // speaking head: reported speech
+        "\u{1F4AC}",         // speech balloon: reported speech
+        "\u{1F602}",         // face with tears of joy: a joke
+        "\u{1F514}\u{274C}", // an allowed pictograph glued to a cross mark
+        "\u{FE0F}",          // a bare presentation selector with no pictograph
+        "\u{1F514} \u{274C}",
+        "\u{274C},",
+    ] {
+        expect_unrecognized(&format!("{symbol} {command}"));
+        expect_unrecognized(&format!("{symbol} remind me 2025-10-20 14:30:00"));
+    }
+    expect_unrecognized("\u{274C} \u{1F514} remind me 2025-10-20 14:30:00");
+    expect_unrecognized("Note to self: \u{274C} remind me 2025-10-20 14:30:00");
+    expect_explicit(
+        "\u{1F514} Note to self: remind me 2025-10-20 14:30:00",
+        FUTURE_INSTANT,
+        FUTURE_PHRASE,
+    );
+}

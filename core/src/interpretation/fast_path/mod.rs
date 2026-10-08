@@ -7,6 +7,8 @@
 //! ```text
 //! text     := prefix "remind" "me" ( timed | topic-first ) ["please" | "thanks"] ["," | "." | "!"]*
 //! prefix   := (filler | pictograph)* [ self-label ( "," | ":" | dash ) filler* ]
+//! pictograph := U+1F514 bell | U+23F0 alarm clock | U+1F4CC pushpin | U+1F4DD memo
+//!             | U+1F5D3 spiral calendar      (each optionally followed by U+FE0F)
 //! timed    := ["on"] time ["," ] [ "to" content ]
 //! topic-first := "to" content ["on"] time
 //! content  := verb particle? object*      (closed content lexicon, at most six words)
@@ -17,8 +19,11 @@
 //! ```
 //!
 //! Both open ends of the command are closed by allowlists, not by deny-lists. Nothing but
-//! fillers and a self-addressed label may come before the command, in any sentence, so a frame
-//! such as "In case it rains, ...", "When I land, ..." or "In the novel, ..." is not this grammar.
+//! fillers, the five neutral reminder pictographs named above and a self-addressed label may come
+//! before the command, in any sentence, so a frame such as "In case it rains, ...", "When I
+//! land, ..." or "In the novel, ..." is not this grammar. Any other emoji or symbol may negate
+//! ("\u{274C}"), complete ("\u{2705}"), muse ("\u{1F914}"), report ("\u{1F5E3}") or joke
+//! ("\u{1F602}") about the command, so it is not this grammar either.
 //! The content is built only from the closed content lexicon (action verbs, particles,
 //! determiners, object pronouns and a short noun list), which holds no negation, condition,
 //! frequency, zone, time, reporting, control word or preposition. Any unlisted word ("quarterly",
@@ -1032,23 +1037,47 @@ fn prefix_abstention(prefix: &[Token]) -> Option<AbstentionReason> {
     None
 }
 
-/// Decorative pictographs ("\u{1F514}") may stand before the command. Markup and other symbols
-/// (">", "`", "*", "#", "|") may quote or delimit it, so they are not allowed.
-fn is_decorative_symbol(ch: char) -> bool {
-    matches!(
-        u32::from(ch),
-        0x1F300..=0x1FAFF | 0x2600..=0x26FF | 0x2705..=0x2757 | 0xFE0F | 0x200D
-    )
+/// The closed set of neutral reminder pictographs that may stand before the command: bell,
+/// alarm clock, pushpin, memo and spiral calendar. Every other emoji is excluded because it can
+/// carry meaning about the command: a cross, prohibition sign or no-gesture negates it, a check
+/// mark marks it done, a thinking face or thought balloon makes it a musing, a speaking head or
+/// speech balloon reports it, and a laughing face makes it a joke. Markup and other symbols
+/// (">", "`", "*", "#", "|") may quote or delimit the command, so they are not allowed either.
+const REMINDER_PICTOGRAPHS: &[char] = &[
+    '\u{1F514}', // bell
+    '\u{23F0}',  // alarm clock
+    '\u{1F4CC}', // pushpin
+    '\u{1F4DD}', // memo
+    '\u{1F5D3}', // spiral calendar
+];
+
+/// The emoji presentation selector and the zero width joiner only change how an allowed
+/// pictograph is drawn; they never add a pictograph of their own.
+fn is_pictograph_modifier(ch: char) -> bool {
+    matches!(ch, '\u{FE0F}' | '\u{200D}')
 }
 
-/// Each token before the command must be a word (checked as a filler or self label below), a
-/// decorative pictograph, a sentence break or one of the comma, semicolon, colon or dash
-/// separators. Quotes, brackets, ellipses, question marks and other symbols are not allowed.
+/// A symbol token is allowed only when it is built from the allowlisted pictographs and their
+/// presentation modifiers, and holds at least one pictograph ("\u{1F514}", "\u{1F5D3}\u{FE0F}",
+/// "\u{1F514}\u{1F514}"). A token that mixes in any other symbol ("\u{1F514}\u{274C}") is not.
+fn is_reminder_pictograph_token(token: &Token) -> bool {
+    token
+        .lower
+        .chars()
+        .all(|ch| REMINDER_PICTOGRAPHS.contains(&ch) || is_pictograph_modifier(ch))
+        && token
+            .lower
+            .chars()
+            .any(|ch| REMINDER_PICTOGRAPHS.contains(&ch))
+}
+
+/// Each token before the command must be a word (checked as a filler or self label below), an
+/// allowlisted reminder pictograph, a sentence break or one of the comma, semicolon, colon or
+/// dash separators. Quotes, brackets, ellipses, question marks, markup and every other emoji or
+/// symbol are not allowed.
 fn is_allowed_prefix_token(token: &Token) -> bool {
     match token.kind {
-        TokenKind::Word => {
-            token.has_letters_or_digits() || token.lower.chars().all(is_decorative_symbol)
-        }
+        TokenKind::Word => token.has_letters_or_digits() || is_reminder_pictograph_token(token),
         TokenKind::ClauseBreak => matches!(token.ch, ',' | ';' | ':' | '\u{2014}' | '\u{2013}'),
         TokenKind::SentenceBreak => token.ch != '?',
         TokenKind::Quote => false,
