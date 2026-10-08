@@ -128,6 +128,16 @@ class TempRepoTestCase(unittest.TestCase):
         self.git("add", "-A")
         self.git("commit", "-q", "-m", "Merge side")
 
+    def commit_merge_removing(self, *relative_paths):
+        """Merge another side branch and remove relative_paths only while resolving the merge."""
+        self.git("checkout", "-q", "-b", "other", "main~1")
+        self.write("other.txt", "other\n")
+        self.commit_all()
+        self.git("checkout", "-q", "main")
+        self.git("merge", "-q", "--no-ff", "--no-commit", "other")
+        self.git("rm", "-q", *relative_paths)
+        self.git("commit", "-q", "-m", "Merge other")
+
     def replace_with_dangling_symlink(self, relative_path):
         full_path = os.path.join(self.repo_dir, relative_path)
         os.remove(full_path)
@@ -362,6 +372,22 @@ class MediaPolicyTests(TempRepoTestCase):
         self.commit_all()
         messages = [finding.message for finding in self.policy_findings()]
         self.assertTrue(any("invalid provenance record" in message and "reachable history" in message for message in messages))
+
+    def test_prohibited_paths_added_and_removed_only_in_merges_still_fail(self):
+        self.commit_side_branch_merge_with("recordings/call.m4a", b"private")
+        self.write("ios/dist.p12", b"x")
+        self.git("add", "-A")
+        self.git("commit", "-q", "--amend", "--no-edit")
+        self.commit_merge_removing("recordings/call.m4a", "ios/dist.p12")
+        findings = self.policy_findings()
+        self.assertEqual({finding.path for finding in findings}, {"recordings/call.m4a", "ios/dist.p12"})
+        self.assertTrue(all("reachable history" in finding.message for finding in findings))
+
+    def test_fixture_audio_added_and_removed_only_in_merges_without_provenance_still_fails(self):
+        self.commit_side_branch_merge_with("fixtures/audio/oops.wav", b"actually a private recording")
+        self.commit_merge_removing("fixtures/audio/oops.wav")
+        messages = [finding.message for finding in self.policy_findings()]
+        self.assertTrue(any("no provenance record" in message and "reachable history" in message for message in messages))
 
     def test_renamed_recording_outside_fixture_roots_fails_from_contents(self):
         for path in ["data/voice.bin", "notes.m4a.txt"]:
@@ -705,6 +731,14 @@ class RealGitleaksTests(TempRepoTestCase):
         self.assertEqual(completed.returncode, check_hygiene.EXIT_FINDINGS, completed.stderr)
         self.assertIn("cfg.txt", completed.stderr)
         self.assertNotIn(secret_value, completed.stdout + completed.stderr)
+
+    def test_recording_added_and_removed_only_in_merges_fails_through_cli(self):
+        self.commit_side_branch_merge_with("recordings/call.m4a", b"sixteen byte rec")
+        self.commit_merge_removing("recordings/call.m4a")
+        completed = self.run_cli()
+        self.assertEqual(completed.returncode, check_hygiene.EXIT_FINDINGS, completed.stderr)
+        self.assertIn("recordings/call.m4a", completed.stderr)
+        self.assertIn("reachable history", completed.stderr)
 
     def test_sidecar_deleted_before_media_fails_through_cli(self):
         self.write_media_with_provenance("fixtures/audio/tone.m4a")

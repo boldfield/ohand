@@ -244,8 +244,13 @@ def check_media_file(
 
 
 def list_historical_paths(repo_dir: str) -> List[str]:
+    """List every path changed by any commit reachable from HEAD.
+
+    git log names no files for a merge commit unless -m is given, so without it a path added and
+    removed only while resolving merges would never be checked.
+    """
     result = subprocess.run(
-        ["git", "log", "--format=", "--name-only", "--no-renames", "-z", "HEAD"],
+        ["git", "log", "-m", "--format=", "--name-only", "--no-renames", "-z", "HEAD"],
         capture_output=True, cwd=repo_dir, check=True,
     )
     names = (entry.decode("utf-8", "surrogateescape").strip("\n") for entry in result.stdout.split(b"\0"))
