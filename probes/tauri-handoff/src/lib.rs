@@ -1,4 +1,5 @@
 use std::fmt;
+use std::str::FromStr;
 use url::Url;
 use uuid::Uuid;
 
@@ -13,11 +14,15 @@ impl HandoffRoute {
             HandoffRoute::Capture => "capture",
         }
     }
+}
 
-    fn from_str(s: &str) -> Option<Self> {
+impl FromStr for HandoffRoute {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "capture" => Some(HandoffRoute::Capture),
-            _ => None,
+            "capture" => Ok(HandoffRoute::Capture),
+            _ => Err(()),
         }
     }
 }
@@ -70,7 +75,9 @@ impl HandoffValidator {
             return Err(HandoffError::MissingRoute);
         }
 
-        let route = HandoffRoute::from_str(route_component).ok_or(HandoffError::InvalidRoute)?;
+        let route = route_component
+            .parse::<HandoffRoute>()
+            .map_err(|_| HandoffError::InvalidRoute)?;
 
         let query_pairs: Vec<(String, String)> = parsed_url
             .query_pairs()

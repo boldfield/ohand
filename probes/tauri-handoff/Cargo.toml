@@ -7,7 +7,7 @@ publish = false
 [dependencies]
 url = "2.5"
 chrono = "0.4"
-uuid = { version = "1.0", features = ["v4"] }
+uuid = "1.0"
 
 [lib]
 name = "ohand_tauri_handoff"
