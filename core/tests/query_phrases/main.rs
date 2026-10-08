@@ -90,28 +90,31 @@ fn add_test_item(
 }
 
 #[test]
-fn test_since_tomorrow_sets_captured_after() -> Result<()> {
+fn test_since_tomorrow_gives_clarification() -> Result<()> {
     let context = make_context();
+    // "since tomorrow" is a future bound and should not be applied automatically
     let resolution = parse_phrase("notes since tomorrow", &context)?;
 
+    // Should not have a filter (or have a filter with no captured_after)
+    if let Some(filter) = resolution.filter {
+        assert!(
+            filter.captured_after.is_none(),
+            "Should not apply future captured_after filter"
+        );
+    }
+    // Should ask for clarification instead
     assert!(
-        resolution.filter.is_some(),
-        "Should have filter for 'notes since tomorrow'"
+        resolution.clarification_needed.is_some(),
+        "Should ask for clarification for future 'since' bound"
     );
-    let filter = resolution.filter.unwrap();
-    assert!(filter.captured_after.is_some(), "Should set captured_after");
-    assert!(filter
-        .captured_after
-        .as_ref()
-        .unwrap()
-        .contains("2026-01-16"));
     Ok(())
 }
 
 #[test]
 fn test_since_explicit_date_resolves() -> Result<()> {
     let context = make_context();
-    let resolution = parse_phrase("notes since 2026-01-16 09:00:00", &context)?;
+    // Use a past date: 2026-01-10 at 14:00 (before reference_time)
+    let resolution = parse_phrase("notes since 2026-01-10 14:00:00", &context)?;
 
     assert!(resolution.filter.is_some());
     let filter = resolution.filter.unwrap();
@@ -122,7 +125,7 @@ fn test_since_explicit_date_resolves() -> Result<()> {
 #[test]
 fn test_date_without_time_clarification() -> Result<()> {
     let context = make_context();
-    let resolution = parse_phrase("notes since 2026-01-20", &context)?;
+    let resolution = parse_phrase("notes since 2026-01-10", &context)?;
 
     assert!(
         resolution.clarification_needed.is_some(),
@@ -130,10 +133,12 @@ fn test_date_without_time_clarification() -> Result<()> {
     );
     match resolution.clarification_needed {
         Some(ClarificationKind::MissingTime { date_str }) => {
-            assert_eq!(date_str, "2026-01-20");
+            // When we detect MissingTime, we should not apply a filter
+            assert_eq!(date_str, "2026-01-10");
         }
         _ => panic!("Expected MissingTime clarification"),
     }
+    // The filter should still be applied for convenience, but clarification is requested
     Ok(())
 }
 
@@ -404,13 +409,14 @@ fn test_since_weekday_resolves_past_occurrence() -> Result<()> {
 #[test]
 fn test_explicit_iso_date_time() -> Result<()> {
     let context = make_context();
-    let resolution = parse_phrase("notes since 2026-01-16 14:30:00", &context)?;
+    // Use a past date/time: 2026-01-10 at 14:30
+    let resolution = parse_phrase("notes since 2026-01-10 14:30:00", &context)?;
 
     assert!(resolution.filter.is_some());
     let filter = resolution.filter.unwrap();
     assert!(filter.captured_after.is_some());
     let captured_after = filter.captured_after.unwrap();
-    assert!(captured_after.contains("2026-01-16"));
+    assert!(captured_after.contains("2026-01-10"));
     assert!(captured_after.contains("14:30"));
     Ok(())
 }
@@ -557,6 +563,219 @@ fn test_literal_fallback_for_unsupported_phrase() -> Result<()> {
     assert!(
         result.hits.iter().any(|h| h.item_id == "item-1"),
         "Should retrieve through literal fallback"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_private_notes_alone_does_not_panic() -> Result<()> {
+    let context = make_context();
+    // "private notes" by itself should not panic (regression test for slice bounds issue)
+    let resolution = parse_phrase("private notes", &context)?;
+
+    // It should fall back to literal search (no pattern match)
+    assert!(resolution.filter.is_none());
+    assert_eq!(resolution.fallback_search_text, "private notes");
+    Ok(())
+}
+
+#[test]
+fn test_private_notes_since_monday_parses_correctly() -> Result<()> {
+    let context = make_context();
+    // The headline phrase: "private session notes since monday"
+    let resolution = parse_phrase("private session notes since monday", &context)?;
+
+    assert!(resolution.filter.is_some());
+    let filter = resolution.filter.unwrap();
+    // Should recognize "session" as the topic, not "private"
+    assert_eq!(
+        filter.session_topics,
+        vec!["session"],
+        "Should extract 'session' as the topic"
+    );
+    assert!(filter.captured_after.is_some());
+    Ok(())
+}
+
+#[test]
+fn test_since_tomorrow_gives_clarification_not_filter() -> Result<()> {
+    let context = make_context();
+    // Tomorrow is 2026-01-16, which is after reference_time (2026-01-15)
+    let resolution = parse_phrase("notes since tomorrow", &context)?;
+
+    // Should not apply a future filter; ask for clarification instead
+    if let Some(filter) = resolution.filter {
+        assert!(
+            filter.captured_after.is_none(),
+            "Should not apply future captured_after filter"
+        );
+    }
+    assert!(
+        resolution.clarification_needed.is_some(),
+        "Should ask for clarification for future 'since' bound"
+    );
+    Ok(())
+}
+
+#[test]
+fn test_since_yesterday_resolves() -> Result<()> {
+    let context = make_context();
+    // Yesterday is 2026-01-14, which is before reference_time
+    let resolution = parse_phrase("notes since yesterday", &context)?;
+
+    assert!(resolution.filter.is_some());
+    let filter = resolution.filter.unwrap();
+    assert!(filter.captured_after.is_some());
+    let captured_after = filter.captured_after.unwrap();
+    assert!(
+        captured_after.contains("2026-01-14"),
+        "Expected 2026-01-14 but got {}",
+        captured_after
+    );
+    Ok(())
+}
+
+#[test]
+fn test_since_today_resolves() -> Result<()> {
+    let context = make_context();
+    // Today is 2026-01-15
+    let resolution = parse_phrase("notes since today", &context)?;
+
+    assert!(resolution.filter.is_some());
+    let filter = resolution.filter.unwrap();
+    assert!(filter.captured_after.is_some());
+    let captured_after = filter.captured_after.unwrap();
+    assert!(
+        captured_after.contains("2026-01-15"),
+        "Expected 2026-01-15 but got {}",
+        captured_after
+    );
+    Ok(())
+}
+
+#[test]
+fn test_retrieval_through_date_filter_excludes_older_items() -> Result<()> {
+    let mut db = new_db("retrieval_date_exclude")?;
+    let context = make_context();
+
+    // Add items at different dates
+    add_test_item(
+        &mut db,
+        "item-before-monday",
+        "therapy notes from wednesday of previous week",
+        None,
+        Some("therapy"),
+        "2026-01-08T10:00:00Z", // Before Monday 2026-01-12
+    )?;
+
+    add_test_item(
+        &mut db,
+        "item-on-monday",
+        "therapy notes from monday",
+        None,
+        Some("therapy"),
+        "2026-01-12T10:00:00Z", // On Monday 2026-01-12
+    )?;
+
+    add_test_item(
+        &mut db,
+        "item-after-monday",
+        "therapy notes from thursday",
+        None,
+        Some("therapy"),
+        "2026-01-15T10:00:00Z", // After Monday 2026-01-12
+    )?;
+
+    let resolution = parse_phrase("private therapy notes since monday", &context)?;
+    assert!(resolution.filter.is_some());
+
+    let filter = resolution.filter.unwrap();
+    let pagination = QueryPagination::default();
+
+    let result = scoped_query(db.conn(), "therapy", &filter, &pagination)?;
+
+    // Should include items from monday and after, but exclude before-monday
+    let found_before = result
+        .hits
+        .iter()
+        .any(|h| h.item_id == "item-before-monday");
+    let found_on = result.hits.iter().any(|h| h.item_id == "item-on-monday");
+    let found_after = result.hits.iter().any(|h| h.item_id == "item-after-monday");
+
+    assert!(
+        !found_before,
+        "Should exclude item from before Monday (2026-01-08)"
+    );
+    assert!(
+        found_on || found_after,
+        "Should include items from Monday onwards"
+    );
+    Ok(())
+}
+
+#[test]
+fn test_timezone_aware_date_conversion() -> Result<()> {
+    let context = TimeContext {
+        timezone: "America/Los_Angeles".to_string(),
+        locale: "en".to_string(),
+        reference_time: DateTime::parse_from_rfc3339("2026-01-15T10:30:00-08:00")
+            .unwrap()
+            .with_timezone(&chrono::Utc),
+        utc_offset_at_capture: -8 * 3600,
+        calendar: "gregorian".to_string(),
+    };
+
+    let resolution = parse_phrase("notes since 2026-01-10", &context)?;
+
+    assert!(resolution.filter.is_some());
+    let filter = resolution.filter.unwrap();
+    assert!(filter.captured_after.is_some());
+
+    let captured_after = filter.captured_after.unwrap();
+    // 2026-01-10 00:00:00 LA time should be 2026-01-10T08:00:00Z (8 hours ahead for PST)
+    // The RFC3339 format may include timezone offset, so just check the essential parts
+    assert!(
+        captured_after.contains("2026-01-10") && captured_after.contains("08:00:00"),
+        "Expected 2026-01-10T08:00:00 for LA timezone but got {}",
+        captured_after
+    );
+    Ok(())
+}
+
+#[test]
+fn test_fallback_search_uses_resolution_text() -> Result<()> {
+    let mut db = new_db("fallback_search")?;
+    let context = make_context();
+
+    add_test_item(
+        &mut db,
+        "item-1",
+        "notes since last week about the project",
+        None,
+        None,
+        "2026-01-15T10:00:00Z",
+    )?;
+
+    let resolution = parse_phrase("notes since last week", &context)?;
+
+    // Should have fallback_search_text
+    assert_eq!(resolution.fallback_search_text, "notes since last week");
+
+    // The fallback search should use the resolution's fallback_search_text
+    let filter = ohand_core::retrieval::query::QueryFilter::personal_only();
+    let pagination = QueryPagination::default();
+
+    let result = scoped_query(
+        db.conn(),
+        &resolution.fallback_search_text,
+        &filter,
+        &pagination,
+    )?;
+
+    assert!(
+        result.hits.iter().any(|h| h.item_id == "item-1"),
+        "Should retrieve through fallback search text"
     );
 
     Ok(())

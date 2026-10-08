@@ -140,50 +140,136 @@ fn extract_date_filter(
     };
 
     if let Some(date_part) = date_phrase {
-        // For weekday names, preserve "since" for correct past semantics
-        // For explicit dates/times, resolve without "since" prefix
+        // Handle special relative phrases that TimeResolver doesn't support
+        if date_part.trim() == "yesterday" {
+            // Calculate yesterday's date
+            let yesterday = (context.reference_time - chrono::Duration::days(1)).date_naive();
+            let mut filter = QueryFilter::personal_only();
+            // Apply midnight boundary in user's timezone
+            if let Ok(tz) = chrono_tz::Tz::from_str(&context.timezone) {
+                if let Some(naive_midnight) = yesterday.and_hms_opt(0, 0, 0) {
+                    match tz.from_local_datetime(&naive_midnight) {
+                        chrono::LocalResult::Single(local_dt) => {
+                            filter.captured_after =
+                                Some(local_dt.with_timezone(&chrono::Utc).to_rfc3339());
+                        }
+                        _ => {
+                            filter.captured_after = Some(format!("{}T00:00:00Z", yesterday));
+                        }
+                    }
+                } else {
+                    filter.captured_after = Some(format!("{}T00:00:00Z", yesterday));
+                }
+            } else {
+                filter.captured_after = Some(format!("{}T00:00:00Z", yesterday));
+            }
+            return Ok(Some((filter, None)));
+        } else if date_part.trim() == "today" {
+            // Use today's date
+            let today = context.reference_time.date_naive();
+            let mut filter = QueryFilter::personal_only();
+            // Apply midnight boundary in user's timezone
+            if let Ok(tz) = chrono_tz::Tz::from_str(&context.timezone) {
+                if let Some(naive_midnight) = today.and_hms_opt(0, 0, 0) {
+                    match tz.from_local_datetime(&naive_midnight) {
+                        chrono::LocalResult::Single(local_dt) => {
+                            filter.captured_after =
+                                Some(local_dt.with_timezone(&chrono::Utc).to_rfc3339());
+                        }
+                        _ => {
+                            filter.captured_after = Some(format!("{}T00:00:00Z", today));
+                        }
+                    }
+                } else {
+                    filter.captured_after = Some(format!("{}T00:00:00Z", today));
+                }
+            } else {
+                filter.captured_after = Some(format!("{}T00:00:00Z", today));
+            }
+            return Ok(Some((filter, None)));
+        }
+
+        // Determine how to phrase the date for resolution
+        // Relative phrases need "since" for proper semantics, explicit dates don't
         let phrase_to_resolve = if is_weekday(date_part) {
             format!("since {}", date_part)
         } else {
             date_part.to_string()
         };
+
         match TimeResolver::resolve(&phrase_to_resolve, context) {
             Ok(result) => {
                 let mut filter = QueryFilter::personal_only();
 
-                // If we have a resolved UTC time, use it as captured_after
-                if let Some(resolved_utc) = result.resolved_time {
-                    filter.captured_after = Some(resolved_utc.to_rfc3339());
+                // Check if the resolved date is in the future for "since" queries
+                // A "since" query should not have a future lower bound
+                let is_future = if let Some(resolved_utc) = result.resolved_time {
+                    resolved_utc > context.reference_time
                 } else if let Some(resolved_date) = result.resolved_date {
-                    // Date-only result: convert to start of day in the user's timezone, then to UTC
+                    // Convert resolved_date to UTC midnight and check against reference
                     if let Ok(tz) = chrono_tz::Tz::from_str(&context.timezone) {
                         if let Some(naive_midnight) = resolved_date.and_hms_opt(0, 0, 0) {
-                            // Convert naive datetime to the user's local timezone, then to UTC
-                            match tz.from_local_datetime(&naive_midnight) {
-                                chrono::LocalResult::Single(local_dt) => {
-                                    filter.captured_after =
-                                        Some(local_dt.with_timezone(&chrono::Utc).to_rfc3339());
-                                }
-                                _ => {
-                                    // Fallback if ambiguous or nonexistent
-                                    filter.captured_after =
-                                        Some(format!("{}T00:00:00Z", resolved_date));
-                                }
+                            if let chrono::LocalResult::Single(local_dt) =
+                                tz.from_local_datetime(&naive_midnight)
+                            {
+                                local_dt.with_timezone(&chrono::Utc) > context.reference_time
+                            } else {
+                                false
                             }
                         } else {
-                            filter.captured_after = Some(format!("{}T00:00:00Z", resolved_date));
+                            false
                         }
                     } else {
-                        // Fallback to UTC midnight if timezone conversion fails
-                        filter.captured_after = Some(format!("{}T00:00:00Z", resolved_date));
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                // Only apply the filter if it's not in the future
+                if !is_future {
+                    // If we have a resolved UTC time, use it as captured_after
+                    if let Some(resolved_utc) = result.resolved_time {
+                        filter.captured_after = Some(resolved_utc.to_rfc3339());
+                    } else if let Some(resolved_date) = result.resolved_date {
+                        // Date-only result: convert to start of day in the user's timezone, then to UTC
+                        if let Ok(tz) = chrono_tz::Tz::from_str(&context.timezone) {
+                            if let Some(naive_midnight) = resolved_date.and_hms_opt(0, 0, 0) {
+                                // Convert naive datetime to the user's local timezone, then to UTC
+                                match tz.from_local_datetime(&naive_midnight) {
+                                    chrono::LocalResult::Single(local_dt) => {
+                                        filter.captured_after =
+                                            Some(local_dt.with_timezone(&chrono::Utc).to_rfc3339());
+                                    }
+                                    _ => {
+                                        // Fallback if ambiguous or nonexistent
+                                        filter.captured_after =
+                                            Some(format!("{}T00:00:00Z", resolved_date));
+                                    }
+                                }
+                            } else {
+                                filter.captured_after =
+                                    Some(format!("{}T00:00:00Z", resolved_date));
+                            }
+                        } else {
+                            // Fallback to UTC midnight if timezone conversion fails
+                            filter.captured_after = Some(format!("{}T00:00:00Z", resolved_date));
+                        }
                     }
                 }
 
-                // If ambiguous due to missing time, expose clarification
-                let clarification = if result.is_ambiguous && result.ambiguity_kind.is_some() {
+                // Determine clarification needed
+                let clarification = if is_future {
+                    // Future "since" bounds are unsupported; ask for clarification
+                    Some(ClarificationKind::MissingTime {
+                        date_str: format!("since {}", date_part),
+                    })
+                } else if result.is_ambiguous && result.ambiguity_kind.is_some() {
                     if let Some(ambiguity) = result.ambiguity_kind {
                         match ambiguity {
                             crate::time::AmbiguityKind::MissingHour => {
+                                // For date-only "since" phrases, we apply the midnight boundary
+                                // but still ask for clarification in case the user wants a specific time
                                 Some(ClarificationKind::MissingTime {
                                     date_str: date_part.to_string(),
                                 })
@@ -241,44 +327,50 @@ fn extract_type_filter(normalized: &str) -> Option<QueryFilter> {
 fn extract_scope_filter(normalized: &str) -> Option<QueryFilter> {
     let nouns = ["notes", "items", "reminders"];
 
-    // Pattern 1: "WORD session notes/items/reminders" (e.g., "work session notes")
-    for noun in &nouns {
-        let pattern = format!(" session {}", noun);
-        if let Some(idx) = normalized.find(&pattern) {
-            let session_part = &normalized[..idx];
-            let parts: Vec<&str> = session_part.split_whitespace().collect();
-            if !parts.is_empty() {
-                let session_topic = parts.join(" ");
-                let mut filter = QueryFilter::personal_only();
-                filter.session_topics = vec![session_topic];
-                return Some(filter);
-            }
-        }
-    }
-
-    // Pattern 2: "private WORD notes/items/reminders" (e.g., "private therapy notes")
+    // Pattern 2 (checked first): "private WORD notes/items/reminders" (e.g., "private therapy notes")
     if normalized.starts_with("private ") {
         for noun in &nouns {
             let pattern = format!(" {}", noun);
             if let Some(idx) = normalized.rfind(&pattern) {
-                let middle_part = &normalized[8..idx]; // Skip "private " (8 chars)
-                let session_topic = middle_part.trim();
-                if !session_topic.is_empty()
-                    && session_topic
-                        .chars()
-                        .all(|c| c.is_alphabetic() || c == '_' || c == ' ')
-                {
-                    // Validate that this looks like a single word or phrase (no "since", "every", etc.)
-                    if !session_topic.contains("since")
-                        && !session_topic.contains("every")
+                // Only process if idx >= 8 (to avoid slice panic on "private notes" where idx=7)
+                if idx >= 8 {
+                    let middle_part = &normalized[8..idx]; // Skip "private " (8 chars)
+                    let session_topic = middle_part.trim();
+                    if !session_topic.is_empty()
                         && session_topic
                             .chars()
                             .all(|c| c.is_alphabetic() || c == '_' || c == ' ')
                     {
-                        let mut filter = QueryFilter::personal_only();
-                        filter.session_topics = vec![session_topic.to_string()];
-                        return Some(filter);
+                        // Validate that this looks like a single word or phrase (no "since", "every", etc.)
+                        if !session_topic.contains("since")
+                            && !session_topic.contains("every")
+                            && session_topic
+                                .chars()
+                                .all(|c| c.is_alphabetic() || c == '_' || c == ' ')
+                        {
+                            let mut filter = QueryFilter::personal_only();
+                            filter.session_topics = vec![session_topic.to_string()];
+                            return Some(filter);
+                        }
                     }
+                }
+            }
+        }
+    }
+
+    // Pattern 1: "WORD session notes/items/reminders" (e.g., "work session notes")
+    // Only try this if the phrase doesn't start with "private" (to avoid capturing "private" from "private session notes")
+    if !normalized.starts_with("private ") {
+        for noun in &nouns {
+            let pattern = format!(" session {}", noun);
+            if let Some(idx) = normalized.find(&pattern) {
+                let session_part = &normalized[..idx];
+                let parts: Vec<&str> = session_part.split_whitespace().collect();
+                if !parts.is_empty() {
+                    let session_topic = parts.join(" ");
+                    let mut filter = QueryFilter::personal_only();
+                    filter.session_topics = vec![session_topic];
+                    return Some(filter);
                 }
             }
         }
@@ -307,24 +399,25 @@ mod tests {
     #[test]
     fn since_date_resolves_to_captured_after() -> Result<()> {
         let context = make_context();
-        let resolution = parse_phrase("notes since tomorrow", &context)?;
+        // Use a past date instead of tomorrow (which is rejected as a future bound)
+        let resolution = parse_phrase("notes since 2026-01-10", &context)?;
 
         assert!(resolution.filter.is_some());
         let filter = resolution.filter.unwrap();
         assert!(filter.captured_after.is_some());
-        // Tomorrow is 2026-01-16
+        // Should contain 2026-01-10
         assert!(filter
             .captured_after
             .as_ref()
             .unwrap()
-            .contains("2026-01-16"));
+            .contains("2026-01-10"));
         Ok(())
     }
 
     #[test]
     fn since_weekday_resolves_past_occurrence() -> Result<()> {
         let context = make_context();
-        // Today is Wednesday 2026-01-15
+        // Today is Thursday 2026-01-15
         // "since monday" should resolve to the most recent monday (2026-01-12)
         let resolution = parse_phrase("notes since monday", &context)?;
 
@@ -337,12 +430,13 @@ mod tests {
     #[test]
     fn date_only_without_time_exposes_clarification() -> Result<()> {
         let context = make_context();
-        let resolution = parse_phrase("notes since 2026-01-20", &context)?;
+        // Use a past date (2026-01-10 is before reference_time 2026-01-15)
+        let resolution = parse_phrase("notes since 2026-01-10", &context)?;
 
         assert!(resolution.filter.is_some());
         assert!(resolution.clarification_needed.is_some());
         if let Some(ClarificationKind::MissingTime { date_str }) = resolution.clarification_needed {
-            assert_eq!(date_str, "2026-01-20");
+            assert_eq!(date_str, "2026-01-10");
         } else {
             panic!("Expected MissingTime clarification");
         }
