@@ -1360,3 +1360,65 @@ fn reconciliation_leaves_active_items_alone() -> Result<()> {
     assert_eq!(run(&mut db, desired_notifications)?.len(), 1);
     Ok(())
 }
+
+#[test]
+fn sub_second_user_time_replay_is_idempotent() -> Result<()> {
+    let mut db = open_db(&temp_db_path("sub_second"))?;
+    let revision = insert_item(&mut db, "item-1", ROOFER_TEXT, true)?;
+    let clock = clock_at(capture_instant());
+    let mut correction = user_time("item-1", revision, "2026-01-16T09:00:00Z");
+    correction.instant = instant("2026-01-16T09:00:00.500Z");
+
+    let first = run(&mut db, |tx| {
+        apply_user_time_correction(tx, &clock, &correction)
+    })?;
+    assert_eq!(first.schedule_generation, 1);
+    assert_eq!(
+        first.resolved_instant,
+        Some(instant("2026-01-16T09:00:00Z"))
+    );
+
+    let replay = run(&mut db, |tx| {
+        apply_user_time_correction(tx, &clock, &correction)
+    })?;
+    assert_eq!(replay, first);
+    assert_eq!(
+        operations(&mut db, "item-1")?,
+        vec![(OperationType::Schedule, OperationState::Pending)]
+    );
+    Ok(())
+}
+
+#[test]
+fn timezone_only_correction_updates_display_timezone_without_a_new_generation() -> Result<()> {
+    let mut db = open_db(&temp_db_path("timezone_only"))?;
+    let revision = insert_item(&mut db, "item-1", ROOFER_TEXT, true)?;
+    let clock = clock_at(capture_instant());
+    let utc = user_time("item-1", revision, "2026-01-16T14:00:00Z");
+    let first = run(&mut db, |tx| apply_user_time_correction(tx, &clock, &utc))?;
+    assert_eq!(first.timezone_id.as_deref(), Some("UTC"));
+
+    let mut new_york = utc.clone();
+    new_york.timezone_id = "America/New_York".to_string();
+    let second = run(&mut db, |tx| {
+        apply_user_time_correction(tx, &clock, &new_york)
+    })?;
+    assert_eq!(second.timezone_id.as_deref(), Some("America/New_York"));
+    assert_eq!(second.resolved_instant, first.resolved_instant);
+    assert_eq!(second.schedule_generation, first.schedule_generation);
+    assert_eq!(second.notification_id(), first.notification_id());
+    assert_eq!(
+        reminder(&mut db, "item-1")?.unwrap().timezone_id.as_deref(),
+        Some("America/New_York")
+    );
+    assert_eq!(
+        operations(&mut db, "item-1")?,
+        vec![(OperationType::Schedule, OperationState::Pending)]
+    );
+
+    let replay = run(&mut db, |tx| {
+        apply_user_time_correction(tx, &clock, &new_york)
+    })?;
+    assert_eq!(replay, second);
+    Ok(())
+}

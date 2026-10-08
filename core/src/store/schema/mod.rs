@@ -57,7 +57,11 @@ pub const MIGRATIONS: &[MigrationStep] = &[
     },
     MigrationStep {
         target_version: 4,
-        apply: add_reminder_source_phrase_v4,
+        apply: add_profile_revocation_and_requeue_v4,
+    },
+    MigrationStep {
+        target_version: 5,
+        apply: add_reminder_source_phrase_v5,
     },
 ];
 
@@ -681,9 +685,31 @@ fn add_unschedulable_reason_v3(tx: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Step 4: Add source_phrase column to reminders table for N01, so a requested phrase that is
+/// Step 4: explicit profile revocation (V03) and the durable job requeue link (V03).
+fn add_profile_revocation_and_requeue_v4(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute(
+        "ALTER TABLE provider_profiles ADD COLUMN revoked_at TEXT",
+        [],
+    )?;
+    // One row per explicit requeue: the retired job and the job that replaced it.
+    tx.execute(
+        "CREATE TABLE job_requeues (
+            new_job_id TEXT PRIMARY KEY,
+            old_job_id TEXT NOT NULL UNIQUE,
+            from_profile_version TEXT,
+            to_profile_version TEXT NOT NULL,
+            requeued_at TEXT NOT NULL,
+            FOREIGN KEY (new_job_id) REFERENCES jobs(job_id) ON DELETE CASCADE,
+            FOREIGN KEY (old_job_id) REFERENCES jobs(job_id) ON DELETE CASCADE
+        )",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Step 5: Add source_phrase column to reminders table for N01, so a requested phrase that is
 /// ambiguous or unscheduled stays inspectable after the item's text is corrected.
-fn add_reminder_source_phrase_v4(tx: &Transaction<'_>) -> Result<()> {
+fn add_reminder_source_phrase_v5(tx: &Transaction<'_>) -> Result<()> {
     tx.execute("ALTER TABLE reminders ADD COLUMN source_phrase TEXT", [])?;
     Ok(())
 }

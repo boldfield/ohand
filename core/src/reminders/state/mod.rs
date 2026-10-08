@@ -544,21 +544,31 @@ pub fn apply_user_time_correction(
         .parse::<Tz>()
         .map_err(|_| ReminderStateError::InvalidTimezone(correction.timezone_id.clone()))?;
 
+    // Persisted instants carry whole seconds, so compare and store the same precision.
+    let instant = parse_instant(&format_instant(correction.instant))?;
     let existing = load_reminder_by_item(tx, &correction.item_id)?;
     if let Some(record) = &existing {
         let committed = matches!(
             record.request_state,
             RequestState::Resolved | RequestState::Unschedulable(_)
         );
-        if committed && record.resolved_instant == Some(correction.instant) {
-            return Ok(record.clone());
+        if committed && record.resolved_instant == Some(instant) {
+            if record.timezone_id.as_deref() == Some(correction.timezone_id.as_str()) {
+                return Ok(record.clone());
+            }
+            tx.execute(
+                "UPDATE reminders SET timezone_id = ?, updated_at = ? WHERE reminder_id = ?",
+                rusqlite::params![
+                    &correction.timezone_id,
+                    format_instant(clock.now()),
+                    &record.reminder_id
+                ],
+            )?;
+            return load_reminder_by_item(tx, &correction.item_id)?
+                .ok_or_else(|| corrupt("reminder", &record.reminder_id));
         }
     }
-    let outcome = TimeOutcome::for_instant(
-        correction.instant,
-        correction.timezone_id.clone(),
-        clock.now(),
-    );
+    let outcome = TimeOutcome::for_instant(instant, correction.timezone_id.clone(), clock.now());
     commit_outcome(
         tx,
         clock.now(),
