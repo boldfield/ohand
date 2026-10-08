@@ -1,4 +1,5 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
+use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 
 use crate::retrieval::index::{search_index, search_source_direct, SearchHit};
@@ -76,6 +77,9 @@ pub fn scoped_query(
     filter: &QueryFilter,
     pagination: &QueryPagination,
 ) -> Result<QueryResult> {
+    // Validate date filters early (before searching).
+    validate_date_filters(filter)?;
+
     // Use read_scopes from filter, or default to personal only if empty.
     let allowed_scopes = if filter.read_scopes.is_empty() {
         vec![ItemScope::Personal]
@@ -88,9 +92,12 @@ pub fn scoped_query(
 
     // Apply additional filters to the hits.
     all_hits.retain(|hit| {
-        // Filter by lifecycle state (always exclude deleted).
-        if hit.lifecycle_state != "deleted"
-            && !filter.lifecycle_states.is_empty()
+        // Always exclude deleted items.
+        if hit.lifecycle_state == "deleted" {
+            return false;
+        }
+        // Filter by lifecycle state if specified.
+        if !filter.lifecycle_states.is_empty()
             && !filter.lifecycle_states.contains(&hit.lifecycle_state)
         {
             return false;
@@ -128,6 +135,9 @@ pub fn scoped_query_direct(
     filter: &QueryFilter,
     pagination: &QueryPagination,
 ) -> Result<QueryResult> {
+    // Validate date filters early (before searching).
+    validate_date_filters(filter)?;
+
     let allowed_scopes = if filter.read_scopes.is_empty() {
         vec![ItemScope::Personal]
     } else {
@@ -137,8 +147,12 @@ pub fn scoped_query_direct(
     let mut all_hits = search_source_direct(conn, search_text, &allowed_scopes)?;
 
     all_hits.retain(|hit| {
-        if hit.lifecycle_state != "deleted"
-            && !filter.lifecycle_states.is_empty()
+        // Always exclude deleted items.
+        if hit.lifecycle_state == "deleted" {
+            return false;
+        }
+        // Filter by lifecycle state if specified.
+        if !filter.lifecycle_states.is_empty()
             && !filter.lifecycle_states.contains(&hit.lifecycle_state)
         {
             return false;
@@ -166,8 +180,19 @@ pub fn scoped_query_direct(
     })
 }
 
+/// Validate date filters early to catch invalid RFC3339 before searching.
+fn validate_date_filters(filter: &QueryFilter) -> Result<()> {
+    if let Some(after_str) = &filter.captured_after {
+        parse_and_normalize_rfc3339(after_str)?;
+    }
+    if let Some(before_str) = &filter.captured_before {
+        parse_and_normalize_rfc3339(before_str)?;
+    }
+    Ok(())
+}
+
 /// Apply database-level filters to reduce hit set by item_type, dates, and session_topic.
-/// Modifies the hits vector in place and returns the total accessible count before pagination.
+/// Modifies the hits vector in place and returns the total accessible count (after all filters, before pagination).
 fn filter_hits_in_db(
     conn: &Connection,
     hits: &mut Vec<SearchHit>,
@@ -177,7 +202,18 @@ fn filter_hits_in_db(
         return Ok(0);
     }
 
-    let total_before_filter = hits.len();
+    // Parse and validate date bounds, converting to UTC.
+    let captured_after_utc = if let Some(after_str) = &filter.captured_after {
+        Some(parse_and_normalize_rfc3339(after_str)?)
+    } else {
+        None
+    };
+
+    let captured_before_utc = if let Some(before_str) = &filter.captured_before {
+        Some(parse_and_normalize_rfc3339(before_str)?)
+    } else {
+        None
+    };
 
     // Build a list of item_ids to join against.
     let item_ids: Vec<&str> = hits.iter().map(|h| h.item_id.as_str()).collect();
@@ -192,12 +228,12 @@ fn filter_hits_in_db(
         where_clauses.push(format!("i.item_type IN ({})", type_placeholders));
     }
 
-    // Add date range filters if specified.
-    if filter.captured_after.is_some() {
-        where_clauses.push("c.capture_instant >= ?".to_string());
+    // Add date range filters if specified (compare as UTC).
+    if captured_after_utc.is_some() {
+        where_clauses.push("datetime(c.capture_instant, 'auto') >= datetime(?)".to_string());
     }
-    if filter.captured_before.is_some() {
-        where_clauses.push("c.capture_instant <= ?".to_string());
+    if captured_before_utc.is_some() {
+        where_clauses.push("datetime(c.capture_instant, 'auto') <= datetime(?)".to_string());
     }
 
     // Add session_topic filter if specified.
@@ -239,11 +275,11 @@ fn filter_hits_in_db(
     for type_str in &filter.item_types {
         params.push(type_str);
     }
-    if let Some(after) = &filter.captured_after {
-        params.push(after);
+    if let Some(after_utc) = &captured_after_utc {
+        params.push(after_utc);
     }
-    if let Some(before) = &filter.captured_before {
-        params.push(before);
+    if let Some(before_utc) = &captured_before_utc {
+        params.push(before_utc);
     }
     for topic in &filter.session_topics {
         params.push(topic);
@@ -260,7 +296,17 @@ fn filter_hits_in_db(
     // Retain only hits that passed the database filters.
     hits.retain(|hit| allowed_item_ids.contains(&hit.item_id));
 
-    Ok(total_before_filter)
+    // Return the count AFTER all filters have been applied (before pagination).
+    Ok(hits.len())
+}
+
+/// Parse and normalize an RFC3339 datetime string to UTC.
+/// Returns an error if the string is not valid RFC3339.
+fn parse_and_normalize_rfc3339(rfc3339_str: &str) -> Result<String> {
+    let dt = DateTime::parse_from_rfc3339(rfc3339_str)
+        .map_err(|e| anyhow!("Invalid RFC3339 datetime '{}': {}", rfc3339_str, e))?
+        .with_timezone(&Utc);
+    Ok(dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
 }
 
 #[cfg(test)]
@@ -634,6 +680,253 @@ mod tests {
 
         assert_eq!(result.hits.len(), 1);
         assert_eq!(result.hits[0].item_id, "item-2");
+        Ok(())
+    }
+
+    #[test]
+    fn total_accessible_count_reflects_filters() -> Result<()> {
+        let mut db = new_db("total_accessible_with_filters")?;
+        // Create 3 items matching "note" but with different types.
+        add_item(
+            &mut db,
+            "action-1",
+            Some("action note"),
+            "personal",
+            "route-1",
+            Some("action"),
+            None,
+        )?;
+        add_item(
+            &mut db,
+            "note-1",
+            Some("plain note"),
+            "personal",
+            "route-1",
+            Some("note"),
+            None,
+        )?;
+        add_item(
+            &mut db,
+            "idea-1",
+            Some("note idea"),
+            "personal",
+            "route-1",
+            Some("idea"),
+            None,
+        )?;
+
+        // Without type filter: should see all 3.
+        let filter = QueryFilter::personal_only();
+        let pagination = QueryPagination::default();
+        let result = scoped_query(db.conn(), "note", &filter, &pagination)?;
+        assert_eq!(result.hits.len(), 3);
+        assert_eq!(result.total_accessible, 3);
+
+        // With type filter for "note" only: should see 1, not 3.
+        let mut filter = QueryFilter::personal_only();
+        filter.item_types = vec!["note".to_string()];
+        let result = scoped_query(db.conn(), "note", &filter, &pagination)?;
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(
+            result.total_accessible, 1,
+            "total_accessible should be 1 after type filter, not unfiltered count"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn total_accessible_count_reflects_topic_filter() -> Result<()> {
+        let mut db = new_db("total_accessible_with_topics")?;
+        // Create 3 items matching "note" with different topics.
+        add_item(
+            &mut db,
+            "therapy-1",
+            Some("therapy note"),
+            "personal",
+            "route-1",
+            Some("note"),
+            Some("therapy"),
+        )?;
+        add_item(
+            &mut db,
+            "groceries-1",
+            Some("groceries note"),
+            "personal",
+            "route-1",
+            Some("note"),
+            Some("groceries"),
+        )?;
+        add_item(
+            &mut db,
+            "general-1",
+            Some("general note"),
+            "personal",
+            "route-1",
+            Some("note"),
+            None,
+        )?;
+
+        // Query with nonexistent topic filter: should get 0 hits and 0 total_accessible.
+        let mut filter = QueryFilter::personal_only();
+        filter.session_topics = vec!["nonexistent-topic".to_string()];
+        let pagination = QueryPagination::default();
+        let result = scoped_query(db.conn(), "note", &filter, &pagination)?;
+        assert_eq!(
+            result.hits.len(),
+            0,
+            "Should have no hits for nonexistent topic"
+        );
+        assert_eq!(
+            result.total_accessible, 0,
+            "Should not leak count of matches outside requested topic"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn date_filter_with_mixed_timezone_offsets() -> Result<()> {
+        let mut db = new_db("date_filter_mixed_tz")?;
+
+        // Create helper to add item with custom capture instant.
+        let add_item_with_capture = |db: &mut Database, id: &str, instant: &str| -> Result<()> {
+            let capture_id = format!("cap-{id}");
+            let tx = db.immediate_transaction()?;
+            let capture = Capture::new(
+                capture_id.clone(),
+                Some("test".to_string()),
+                None,
+                instant.to_string(), // Custom instant
+                "UTC".to_string(),
+                0,
+                "en".to_string(),
+                "gregorian".to_string(),
+                "personal".to_string(),
+                "route-1".to_string(),
+                false,
+                instant.to_string(),
+                None,
+            )?;
+            crate::store::captures::save_capture_in_tx(&tx, &capture)?;
+            tx.execute(
+                "INSERT INTO items (item_id, capture_id, revision, item_type, lifecycle_state,
+                                   save_state, sync_state, processing_state, transcription_state, created_at, updated_at)
+                 VALUES (?, ?, 0, 'note', 'active', 'saved', 'not_synced', 'unprocessed', 'unprocessed', ?, ?)",
+                rusqlite::params![id, &capture_id, instant, instant],
+            )?;
+            sync_item_in_tx(&tx, id)?;
+            tx.commit()?;
+            Ok(())
+        };
+
+        // Add item at 2026-01-15T10:30:00+05:00 (which is 2026-01-15T05:30:00Z).
+        add_item_with_capture(&mut db, "item-plus5", "2026-01-15T10:30:00+05:00")?;
+        // Add item at 2026-01-15T12:00:00-03:00 (which is 2026-01-15T15:00:00Z).
+        add_item_with_capture(&mut db, "item-minus3", "2026-01-15T12:00:00-03:00")?;
+        // Add item at 2026-01-15T06:00:00Z (UTC).
+        add_item_with_capture(&mut db, "item-utc", "2026-01-15T06:00:00Z")?;
+
+        // Query with captured_after = 2026-01-15T06:00:00Z.
+        // Should include item-minus3 (15:00Z) and item-utc (06:00Z), but NOT item-plus5 (05:30Z).
+        let mut filter = QueryFilter::personal_only();
+        filter.captured_after = Some("2026-01-15T06:00:00Z".to_string());
+        let pagination = QueryPagination::default();
+        let result = scoped_query(db.conn(), "test", &filter, &pagination)?;
+
+        assert_eq!(
+            result.hits.len(),
+            2,
+            "Should match items at/after 06:00Z (UTC)"
+        );
+        let ids: Vec<String> = result.hits.iter().map(|h| h.item_id.clone()).collect();
+        assert!(ids.contains(&"item-utc".to_string()));
+        assert!(ids.contains(&"item-minus3".to_string()));
+        assert!(
+            !ids.contains(&"item-plus5".to_string()),
+            "item-plus5 at 05:30Z should be excluded"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_date_bounds_return_error() -> Result<()> {
+        let db = new_db("invalid_date")?;
+        let mut filter = QueryFilter::personal_only();
+        filter.captured_after = Some("not-a-valid-date".to_string());
+        let pagination = QueryPagination::default();
+        let result = scoped_query(db.conn(), "test", &filter, &pagination);
+        assert!(
+            result.is_err(),
+            "Invalid RFC3339 date should return an error"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn filter_removing_all_results_honest_count() -> Result<()> {
+        let mut db = new_db("filter_all_removed")?;
+        add_item(
+            &mut db,
+            "item-1",
+            Some("test note"),
+            "personal",
+            "route-1",
+            Some("note"),
+            Some("topic-a"),
+        )?;
+        add_item(
+            &mut db,
+            "item-2",
+            Some("test idea"),
+            "personal",
+            "route-1",
+            Some("idea"),
+            Some("topic-b"),
+        )?;
+
+        // Filter by topic that doesn't match anything.
+        let mut filter = QueryFilter::personal_only();
+        filter.session_topics = vec!["nonexistent".to_string()];
+        let pagination = QueryPagination::default();
+        let result = scoped_query(db.conn(), "test", &filter, &pagination)?;
+
+        assert_eq!(result.hits.len(), 0);
+        assert_eq!(
+            result.total_accessible, 0,
+            "Should report 0 accessible items, not total before filter"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn date_filter_with_before_bound() -> Result<()> {
+        let mut db = new_db("date_filter_before")?;
+        add_item(
+            &mut db,
+            "early",
+            Some("test"),
+            "personal",
+            "route-1",
+            Some("note"),
+            None,
+        )?;
+        add_item(
+            &mut db,
+            "late",
+            Some("test"),
+            "personal",
+            "route-1",
+            Some("note"),
+            None,
+        )?;
+
+        // Filter before 2026-01-15T10:30:00Z should exclude all items created at exactly that time.
+        let mut filter = QueryFilter::personal_only();
+        filter.captured_before = Some("2026-01-15T10:29:00Z".to_string());
+        let pagination = QueryPagination::default();
+        let result = scoped_query(db.conn(), "test", &filter, &pagination)?;
+
+        assert_eq!(result.hits.len(), 0);
+        assert_eq!(result.total_accessible, 0);
         Ok(())
     }
 }
