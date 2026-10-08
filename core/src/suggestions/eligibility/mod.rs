@@ -8,6 +8,9 @@ use anyhow::{anyhow, Result};
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::{OptionalExtension, Transaction};
 
+/// Named not-now cooldown policy: 1 hour by default
+pub const NOT_NOW_COOLDOWN: Duration = Duration::hours(1);
+
 /// Reason why an item is eligible or ineligible for suggestions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EligibilityReason {
@@ -62,7 +65,15 @@ pub struct Eligibility {
 /// - Items with uninterpreted intent
 /// - Items with "stop suggesting" control
 /// - Items with active "not now" cooldown
-pub fn check_eligibility(tx: &Transaction<'_>, item_id: &str) -> Result<Eligibility> {
+/// - Items marked as pull-only (stop suggesting via durable state)
+/// - Items with reminders (dated/reminder-bearing actions)
+///
+/// `evaluation_instant` is used for deterministic cooldown evaluation (for testing).
+pub fn check_eligibility(
+    tx: &Transaction<'_>,
+    item_id: &str,
+    evaluation_instant: DateTime<Utc>,
+) -> Result<Eligibility> {
     // Load item state
     let item_state = crate::domain::items::load_item_state(tx, item_id)?
         .ok_or_else(|| anyhow!("Item {} not found", item_id))?;
@@ -108,6 +119,36 @@ pub fn check_eligibility(tx: &Transaction<'_>, item_id: &str) -> Result<Eligibil
         }
     }
 
+    // Check for reminders (dated actions are not eligible for suggestions)
+    let has_reminder: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM reminders WHERE item_id = ?)",
+        [item_id],
+        |row| row.get(0),
+    )?;
+
+    if has_reminder {
+        return Ok(Eligibility {
+            eligible: false,
+            reason: EligibilityReason::NotAnAction, // Dated actions can't carry obligations
+        });
+    }
+
+    // Check durable pull_only state (stop suggesting recorded in suggestion_eligibility table)
+    let pull_only_state: Option<i32> = tx
+        .query_row(
+            "SELECT pull_only FROM suggestion_eligibility WHERE item_id = ?",
+            [item_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    if pull_only_state == Some(1) {
+        return Ok(Eligibility {
+            eligible: false,
+            reason: EligibilityReason::StopSuggesting,
+        });
+    }
+
     // Check suggestion control events for "stop suggesting"
     let events = events::get_events_for_item(tx, item_id)?;
     let mut last_suggestion_control: Option<(SuggestionControlKind, String)> = None;
@@ -131,7 +172,7 @@ pub fn check_eligibility(tx: &Transaction<'_>, item_id: &str) -> Result<Eligibil
             }
             SuggestionControlKind::NotNow => {
                 // Check if the snooze is still active
-                if let Some(snoozed_until) = get_snooze_expiry(tx, item_id)? {
+                if let Some(snoozed_until) = get_snooze_expiry(tx, item_id, evaluation_instant)? {
                     return Ok(Eligibility {
                         eligible: false,
                         reason: EligibilityReason::SnoozedUntil(snoozed_until.to_rfc3339()),
@@ -148,8 +189,13 @@ pub fn check_eligibility(tx: &Transaction<'_>, item_id: &str) -> Result<Eligibil
 }
 
 /// Get the snooze expiry time for an item, or None if not snoozed or expired.
+/// Evaluates snooze status at the provided evaluation instant (for deterministic testing).
 /// Returns the time when the item's snooze expires, or None if no active snooze.
-fn get_snooze_expiry(tx: &Transaction<'_>, item_id: &str) -> Result<Option<DateTime<Utc>>> {
+fn get_snooze_expiry(
+    tx: &Transaction<'_>,
+    item_id: &str,
+    evaluation_instant: DateTime<Utc>,
+) -> Result<Option<DateTime<Utc>>> {
     // Query the suggestion_eligibility table for snoozed_until
     let snoozed_until: Option<Option<String>> = tx
         .query_row(
@@ -162,8 +208,8 @@ fn get_snooze_expiry(tx: &Transaction<'_>, item_id: &str) -> Result<Option<DateT
     if let Some(Some(snoozed_until_str)) = snoozed_until {
         match snoozed_until_str.parse::<DateTime<Utc>>() {
             Ok(expires_at) => {
-                // Check if snooze is still active
-                if expires_at > Utc::now() {
+                // Check if snooze is still active at evaluation instant
+                if expires_at > evaluation_instant {
                     return Ok(Some(expires_at));
                 }
             }
@@ -206,16 +252,16 @@ pub fn record_selection(
 }
 
 /// Set a snooze (not-now) for an item with the specified cooldown duration.
-/// The snooze expires after the given duration.
+/// The snooze expires after the given duration from the provided instant.
 pub fn set_snooze(
     tx: &Transaction<'_>,
     item_id: &str,
     cooldown: Duration,
-    now: DateTime<Utc>,
+    evaluation_instant: DateTime<Utc>,
 ) -> Result<()> {
-    let expires_at = now + cooldown;
+    let expires_at = evaluation_instant + cooldown;
     let expires_at_str = expires_at.to_rfc3339();
-    let now_str = now.to_rfc3339();
+    let instant_str = evaluation_instant.to_rfc3339();
 
     tx.execute(
         "INSERT INTO suggestion_eligibility (item_id, eligible, snoozed, pull_only, snoozed_until, created_at, updated_at)
@@ -228,13 +274,23 @@ pub fn set_snooze(
         rusqlite::params![
             item_id,
             &expires_at_str,
-            &now_str,
-            &now_str,
+            &instant_str,
+            &instant_str,
             &expires_at_str,
-            &now_str,
+            &instant_str,
         ],
     )?;
     Ok(())
+}
+
+/// Apply the standard NOT_NOW_COOLDOWN to an item.
+/// Used when user marks an item as "not now".
+pub fn apply_not_now_cooldown(
+    tx: &Transaction<'_>,
+    item_id: &str,
+    evaluation_instant: DateTime<Utc>,
+) -> Result<()> {
+    set_snooze(tx, item_id, NOT_NOW_COOLDOWN, evaluation_instant)
 }
 
 /// Mark an item as pull-only (stop suggesting).
@@ -255,8 +311,85 @@ pub fn set_pull_only(tx: &Transaction<'_>, item_id: &str, now: DateTime<Utc>) ->
     Ok(())
 }
 
+/// Select an eligible item for suggestion using deterministic rotation.
+/// Returns the item_id of the selected item, if any are eligible.
+///
+/// This is the main entry point for suggestion rotation. It:
+/// - Enforces eligibility policy over current authoritative state
+/// - Performs deterministic rotation (oldest last_selected_at first)
+/// - Records the selection reason durably
+/// - Takes evaluation time as a parameter for deterministic testing
+///
+/// Returns None if no eligible items are available.
+pub fn select_eligible_item(
+    tx: &Transaction<'_>,
+    evaluation_instant: DateTime<Utc>,
+) -> Result<Option<String>> {
+    // Find all active items that are not deleted
+    let mut stmt = tx.prepare(
+        "SELECT item_id FROM items
+         WHERE lifecycle_state = 'active'
+         ORDER BY item_id",
+    )?;
+
+    let items: Vec<String> = stmt
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Check each item for eligibility, tracking the best candidate
+    let mut eligible_items: Vec<(String, Option<DateTime<Utc>>)> = Vec::new();
+
+    for item_id in items {
+        match check_eligibility(tx, &item_id, evaluation_instant) {
+            Ok(eligibility) if eligibility.eligible => {
+                // Get the last selection time for rotation ordering
+                let last_selected_at: Option<Option<String>> = tx
+                    .query_row(
+                        "SELECT last_selected_at FROM suggestion_eligibility WHERE item_id = ?",
+                        [&item_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+
+                let last_selected_dt = last_selected_at
+                    .and_then(|s| s)
+                    .and_then(|s| s.parse::<DateTime<Utc>>().ok());
+
+                eligible_items.push((item_id, last_selected_dt));
+            }
+            _ => {
+                // Item is not eligible, skip it
+            }
+        }
+    }
+
+    if eligible_items.is_empty() {
+        return Ok(None);
+    }
+
+    // Sort by last_selected_at (None values first = oldest), then by item_id for determinism
+    eligible_items.sort_by(|a, b| match (a.1, b.1) {
+        (None, None) => a.0.cmp(&b.0),
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (Some(ta), Some(tb)) => match ta.cmp(&tb) {
+            std::cmp::Ordering::Equal => a.0.cmp(&b.0),
+            other => other,
+        },
+    });
+
+    // Select the first item (oldest last_selected_at)
+    if let Some((item_id, _)) = eligible_items.first() {
+        record_selection(tx, item_id, "rotation", evaluation_instant)?;
+        return Ok(Some(item_id.clone()));
+    }
+
+    Ok(None)
+}
+
 /// List all active eligible items ordered by rotation.
 /// Items are ordered by last_selected_at (oldest first) to rotate through them.
+#[deprecated(since = "0.1.0", note = "Use select_eligible_item instead")]
 pub fn list_eligible_items(tx: &Transaction<'_>) -> Result<Vec<String>> {
     let mut stmt = tx.prepare(
         "SELECT se.item_id FROM suggestion_eligibility se
