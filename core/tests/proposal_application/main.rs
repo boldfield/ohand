@@ -360,8 +360,9 @@ struct Reminder {
 }
 
 fn span_of(text: &str, phrase: &str) -> SourceSpan {
-    let start = text.find(phrase).expect("phrase in text");
-    SourceSpan::new(start, start + phrase.len())
+    let byte_start = text.find(phrase).expect("phrase in text");
+    let start = text[..byte_start].chars().count();
+    SourceSpan::new(start, start + phrase.chars().count())
 }
 
 fn reminder_candidate(
@@ -1396,6 +1397,14 @@ fn a_dated_fact_that_does_not_ask_for_a_reminder_stays_unscheduled() {
         "remind me not on 2026-01-16 09:00:00",
         "remind me any day except 2026-01-16 09:00:00",
         "remind me to call Bob who called on 2026-01-16 09:00:00",
+        "remind me why the roof quote expires on 2026-01-16 09:00:00",
+        "remind me what the roofer said on 2026-01-16 09:00:00",
+        "remind me whether the roof quote expires 2026-01-16 09:00:00",
+        "remind me of the meeting on 2026-01-16 09:00:00",
+        "you remind me of the meeting on 2026-01-16 09:00:00",
+        "remind me about the call that ended 2026-01-16 09:00:00",
+        "Bob told me I need to set a reminder for 2026-01-16 09:00:00",
+        "Bob hopes I want to set a reminder for 2026-01-16 09:00:00",
     ] {
         let (fixture, disposition) = apply_reminder_candidate(
             text,
@@ -1426,6 +1435,7 @@ fn natural_first_person_reminder_requests_bind_to_the_quoted_time() {
         "I'm going to set a reminder for 2026-01-16 09:00:00",
         "need to set a reminder for 2026-01-16 09:00:00",
         "could you please remind me on 2026-01-16 09:00:00",
+        "remind me to call the café roofer 2026-01-16 09:00:00",
     ] {
         let (fixture, disposition) = apply_reminder_candidate(
             text,

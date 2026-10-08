@@ -790,7 +790,7 @@ const REMINDER_CUES: &[&[&str]] = &[
 const NEGATING_WORDS: &[&str] = &[
     "not", "no", "never", "dont", "don't", "doesnt", "doesn't", "didnt", "didn't", "wont", "won't",
     "cant", "can't", "cannot", "without", "if", "said", "says", "think", "thinks", "thought",
-    "believe", "believes", "believed",
+    "believe", "believes", "believed", "told", "tells", "hope", "hopes", "hoped",
 ];
 /// Words that, between a reminder cue and the quoted time, exclude that time from the request
 /// ("remind me except on ...") or attach it to something else ("remind me to call Bob who called
@@ -808,6 +808,13 @@ const EXCLUDING_WORDS: &[&str] = &[
     "whom",
     "whose",
     "which",
+    "that",
+];
+/// Words that, directly after a reminder cue, ask to recall or explain something ("remind me why
+/// the quote expires on ...", "you remind me of ...") rather than to be notified at a time. A
+/// date in such a request belongs to the referenced fact, not to a notification.
+const RECALL_WORDS: &[&str] = &[
+    "why", "what", "whether", "how", "where", "who", "which", "of", "about", "that", "if",
 ];
 const COMPLETED_WORDS: &[&str] = &[
     "already",
@@ -900,7 +907,8 @@ fn tokenize_intent_text(text: &str) -> Vec<IntentToken> {
 /// Whether `text` itself asks for a reminder: a documented cue ("remind me", "set a reminder",
 /// "alert/notify/ping me") outside quotation marks, as a present-tense first-person request (no
 /// negating, reported-speech or opinion word, no completed-work word such as "already", no
-/// third-party subject) anywhere earlier in the same clause.
+/// third-party subject) anywhere earlier in the same clause. A cue followed directly by a recall
+/// word ("remind me why/what/of/about ...") asks for information, not a notification.
 ///
 /// With a `time_span` (character offsets of the phrase the model quoted), the request must also
 /// govern that phrase: the span starts after the cue with no clause break in between, and no
@@ -922,6 +930,12 @@ fn states_reminder_intent(text: &str, time_span: Option<SourceSpan>) -> bool {
                 return false;
             }
             let cue_end = window[cue.len() - 1].end;
+            let recalls = tokens.get(start + cue.len()).is_some_and(|next| {
+                !next.clause_break && RECALL_WORDS.contains(&next.text.as_str())
+            });
+            if recalls {
+                return false;
+            }
             time_span.is_none_or(|span| {
                 span.start >= cue_end
                     && !tokens.iter().any(|token| {
