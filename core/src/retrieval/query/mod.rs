@@ -2,11 +2,11 @@ use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 
-use crate::retrieval::index::{search_index, search_source_direct, SearchHit};
+use crate::retrieval::index::{list_index, search_index, search_source_direct, SearchHit};
 use crate::store::events::ItemScope;
 
 /// Query filters for scoped text retrieval. All filters are optional (None = no filter).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct QueryFilter {
     /// Item types to include (e.g., "action", "note", "idea", "broad_intention").
     /// Empty vec means no filter.
@@ -17,11 +17,13 @@ pub struct QueryFilter {
     /// Route IDs to include (processing/privacy-route filters).
     /// Empty vec means no filter.
     pub route_ids: Vec<String>,
-    /// Session topics to include (exact match, case-sensitive).
+    /// Session topics to include (matched case-insensitively with whitespace normalized).
     /// Empty vec means no filter. If specified, includes items with matching session_topic.
     pub session_topics: Vec<String>,
     /// Include items with no session topic set.
     pub include_no_session_topic: bool,
+    /// Only include items that have some session topic (any value).
+    pub require_session_topic: bool,
     /// Date range filter: RFC3339 datetime strings.
     /// If specified, includes items captured within this range (inclusive).
     pub captured_after: Option<String>,
@@ -80,6 +82,26 @@ pub fn scoped_query(
     let date_bounds = parse_date_bounds(filter)?;
     let allowed_scopes = allowed_read_scopes(filter);
     let candidate_hits = search_index(conn, search_text, &allowed_scopes)?;
+    finish_query(
+        conn,
+        candidate_hits,
+        filter,
+        &date_bounds,
+        pagination,
+        CANDIDATE_ID_BATCH_SIZE,
+    )
+}
+
+/// Filter-only retrieval: every accessible item satisfying the filter, with no search terms.
+/// Scope, lifecycle, type, topic and date rules are identical to `scoped_query`.
+pub fn scoped_list(
+    conn: &Connection,
+    filter: &QueryFilter,
+    pagination: &QueryPagination,
+) -> Result<QueryResult> {
+    let date_bounds = parse_date_bounds(filter)?;
+    let allowed_scopes = allowed_read_scopes(filter);
+    let candidate_hits = list_index(conn, &allowed_scopes)?;
     finish_query(
         conn,
         candidate_hits,
@@ -257,26 +279,9 @@ fn query_candidate_batch(
         where_clauses.push(format!("i.item_type IN ({})", type_placeholders));
     }
 
-    if !filter.session_topics.is_empty() {
-        let topic_placeholders = vec!["?"; filter.session_topics.len()].join(", ");
-        if filter.include_no_session_topic {
-            where_clauses.push(format!(
-                "(COALESCE(i.current_session_topic, c.session_topic) IN ({}) OR (i.current_session_topic IS NULL AND c.session_topic IS NULL))",
-                topic_placeholders
-            ));
-        } else {
-            where_clauses.push(format!(
-                "COALESCE(i.current_session_topic, c.session_topic) IN ({})",
-                topic_placeholders
-            ));
-        }
-    } else if filter.include_no_session_topic {
-        where_clauses
-            .push("(i.current_session_topic IS NULL AND c.session_topic IS NULL)".to_string());
-    }
-
     let sql = format!(
-        "SELECT i.item_id, c.capture_instant
+        "SELECT i.item_id, c.capture_instant,
+                COALESCE(i.current_session_topic, c.session_topic)
          FROM items i
          JOIN captures c ON c.capture_id = i.capture_id
          WHERE {}",
@@ -291,16 +296,49 @@ fn query_candidate_batch(
     for type_str in &filter.item_types {
         params.push(type_str);
     }
-    for topic in &filter.session_topics {
-        params.push(topic);
-    }
 
     let rows = stmt
         .query_map(rusqlite::params_from_iter(params), |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+
+    let wanted_topics: Vec<String> = filter
+        .session_topics
+        .iter()
+        .map(|topic| normalize_session_topic(topic))
+        .collect();
+    Ok(rows
+        .into_iter()
+        .filter(|(_, _, topic)| session_topic_allowed(topic.as_deref(), filter, &wanted_topics))
+        .map(|(item_id, captured_at, _)| (item_id, captured_at))
+        .collect())
+}
+
+fn session_topic_allowed(topic: Option<&str>, filter: &QueryFilter, wanted: &[String]) -> bool {
+    let topic = topic.filter(|topic| !topic.trim().is_empty());
+    if filter.require_session_topic && topic.is_none() {
+        return false;
+    }
+    match topic {
+        None => wanted.is_empty() || filter.include_no_session_topic,
+        Some(_) if wanted.is_empty() => !filter.include_no_session_topic,
+        Some(topic) => wanted.contains(&normalize_session_topic(topic)),
+    }
+}
+
+/// Session topics are free text that is stored as typed, so they are compared trimmed,
+/// whitespace-collapsed and case-insensitively.
+pub fn normalize_session_topic(topic: &str) -> String {
+    topic
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 /// Parse an RFC3339 datetime into a UTC instant, preserving full sub-second precision.
