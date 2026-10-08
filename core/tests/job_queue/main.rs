@@ -37,7 +37,11 @@ impl Clock for MockClock {
 }
 
 fn setup_db_with_item(mock_clock: &Arc<MockClock>) -> Result<(Database, String)> {
-    let db = Database::open(":memory:", mock_clock.clone() as Arc<dyn Clock>)?;
+    setup_db_with_item_at(":memory:", mock_clock)
+}
+
+fn setup_db_with_item_at(path: &str, mock_clock: &Arc<MockClock>) -> Result<(Database, String)> {
+    let db = Database::open(path, mock_clock.clone() as Arc<dyn Clock>)?;
 
     // Create an item in the database
     let item_id = "item-test-1";
@@ -1238,5 +1242,164 @@ fn test_malformed_backoff_timestamp_is_a_read_error() -> Result<()> {
         [],
     )?;
     assert!(get_job(&db, "job-1").is_err());
+    Ok(())
+}
+
+#[test]
+fn test_queue_state_survives_file_backed_restart() -> Result<()> {
+    // AC1: jobs survive crash and retry; interrupted leases recover; cancellation and backoff are durable.
+    let path = format!(
+        "{}/test_job_queue_restart_{}.db",
+        std::env::temp_dir().display(),
+        uuid::Uuid::new_v4()
+    );
+    let _ = std::fs::remove_file(&path);
+    let mock_clock = Arc::new(MockClock::new(Utc::now()));
+    let start = mock_clock.now();
+    let lease_duration = Duration::seconds(30);
+
+    // Process 1: enqueue four jobs and leave each in a different durable state.
+    let first_attempt_of_leased;
+    {
+        let (mut db, item_id) = setup_db_with_item_at(&path, &mock_clock)?;
+        for (job_id, request_version) in [("job-leased", "req-1"), ("job-backoff", "req-2")] {
+            enqueue_job(
+                &mut db,
+                job_id.to_string(),
+                item_id.clone(),
+                "interpretation".to_string(),
+                0,
+                None,
+                Some(request_version.to_string()),
+                1,
+                start,
+            )?;
+        }
+        enqueue_job(
+            &mut db,
+            "job-cancelled".to_string(),
+            item_id.clone(),
+            "interpretation".to_string(),
+            0,
+            None,
+            Some("req-3".to_string()),
+            1,
+            start + Duration::seconds(1),
+        )?;
+        enqueue_job(
+            &mut db,
+            "job-queued".to_string(),
+            item_id.clone(),
+            "interpretation".to_string(),
+            0,
+            None,
+            Some("req-4".to_string()),
+            1,
+            start + Duration::seconds(2),
+        )?;
+
+        let leased = claim_job_with_lease(&mut db, lease_duration, start)?.expect("claim leased");
+        assert_eq!(leased.job_id, "job-leased");
+        first_attempt_of_leased = leased.attempt_count;
+
+        let backoff = claim_job_with_lease(&mut db, lease_duration, start)?.expect("claim backoff");
+        assert_eq!(backoff.job_id, "job-backoff");
+        fail_job_with_backoff(
+            &mut db,
+            "job-backoff",
+            "provider_offline".to_string(),
+            100,
+            1000,
+            start,
+            backoff.attempt_count,
+        )?;
+
+        cancel_job(&mut db, "job-cancelled")?;
+        // Simulated crash: the connection is dropped without any graceful shutdown step.
+    }
+
+    // Process 2: reopen the same file.
+    {
+        let mut db = Database::open(&path, mock_clock.clone() as Arc<dyn Clock>)?;
+
+        let backoff_job = get_job(&db, "job-backoff")?.expect("backoff job persisted");
+        assert_eq!(backoff_job.status, JobStatus::Queued);
+        assert_eq!(
+            backoff_job.failure_reason.as_deref(),
+            Some("provider_offline")
+        );
+        let backoff_until = backoff_job.next_attempt_at.expect("backoff persisted");
+        assert!(backoff_until > start);
+
+        let cancelled_job = get_job(&db, "job-cancelled")?.expect("cancelled job persisted");
+        assert_eq!(cancelled_job.status, JobStatus::Cancelled);
+
+        // The committed queued job is claimable; the leased and backed-off jobs are not.
+        let queued = claim_job_with_lease(&mut db, lease_duration, start)?.expect("queued claim");
+        assert_eq!(queued.job_id, "job-queued");
+        assert!(claim_job_with_lease(&mut db, lease_duration, start)?.is_none());
+        let leased_before_expiry = get_job(&db, "job-leased")?.expect("leased job persisted");
+        assert_eq!(leased_before_expiry.status, JobStatus::Running);
+        assert_eq!(leased_before_expiry.attempt_count, first_attempt_of_leased);
+    }
+
+    // Process 3: after the stored lease expires the interrupted job is reclaimed with a new fence.
+    {
+        let mut db = Database::open(&path, mock_clock.clone() as Arc<dyn Clock>)?;
+        let after_lease = start + lease_duration + Duration::seconds(1);
+        assert!(
+            after_lease
+                < get_job(&db, "job-backoff")?
+                    .unwrap()
+                    .next_attempt_at
+                    .unwrap()
+        );
+
+        let reclaimed = claim_job_with_lease(&mut db, lease_duration, after_lease)?
+            .expect("expired lease must be reclaimed");
+        assert_eq!(reclaimed.job_id, "job-leased");
+        assert_eq!(reclaimed.attempt_count, first_attempt_of_leased + 1);
+
+        // The previous holder's token is rejected; the new holder completes exactly once.
+        assert!(complete_job(&mut db, "job-leased", first_attempt_of_leased).is_err());
+        complete_job(&mut db, "job-leased", reclaimed.attempt_count)?;
+        assert!(complete_job(&mut db, "job-leased", reclaimed.attempt_count).is_err());
+
+        // The other expired lease is reclaimed next; the backed-off and cancelled jobs are skipped.
+        let next = claim_job_with_lease(&mut db, lease_duration, after_lease)?
+            .expect("second expired lease must be reclaimed");
+        assert_eq!(next.job_id, "job-queued");
+        assert!(claim_job_with_lease(&mut db, lease_duration, after_lease)?.is_none());
+
+        // Cancellation stays terminal across repeated cancel calls.
+        cancel_job(&mut db, "job-cancelled")?;
+        assert_eq!(
+            get_job(&db, "job-cancelled")?.unwrap().status,
+            JobStatus::Cancelled
+        );
+    }
+
+    // Process 4: once the backoff has elapsed the job becomes claimable again; cancelled never is.
+    {
+        let mut db = Database::open(&path, mock_clock.clone() as Arc<dyn Clock>)?;
+        let backoff_until = get_job(&db, "job-backoff")?
+            .unwrap()
+            .next_attempt_at
+            .unwrap();
+        let retried =
+            claim_job_with_lease(&mut db, lease_duration, backoff_until)?.expect("backoff elapsed");
+        assert_eq!(retried.job_id, "job-backoff");
+        assert_eq!(retried.attempt_count, 2);
+        assert_eq!(
+            get_job(&db, "job-cancelled")?.unwrap().status,
+            JobStatus::Cancelled
+        );
+        assert_eq!(
+            get_job(&db, "job-leased")?.unwrap().status,
+            JobStatus::Completed
+        );
+    }
+
+    let _ = std::fs::remove_file(&path);
     Ok(())
 }
