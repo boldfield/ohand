@@ -835,7 +835,7 @@ const RETRACTION_IDIOMS: &[&[&str]] = &[
     &["second", "thoughts"],
 ];
 /// Verbs that withdraw an earlier request whatever their object is ("forget it", "forget about
-/// it", "skip the reminder", a bare "cancel", "delete that"). Listing exact verb-object pairs
+/// it", "skip the reminder", a bare "cancel" or "stop", "delete that"). Listing exact verb-object pairs
 /// would let every small rewording through, so the verb alone decides. The only exceptions are a
 /// negated verb ("don't forget the ladder" keeps the request) and an infinitive ("to cancel the
 /// subscription" is what the reminder is for).
@@ -849,6 +849,7 @@ const RETRACTION_VERBS: &[&str] = &[
     "canceling",
     "skip",
     "skipping",
+    "stop",
     "scratch",
     "strike",
     "ignore",
@@ -904,6 +905,24 @@ const RETRACTION_FILLERS: &[&str] = &[
     "actually", "really", "please", "pls", "kindly", "ever", "even", "just", "then", "now",
     "after", "all", "you", "ok", "okay", "wait", "um", "uh", "hmm",
 ];
+/// Adjectives that say the reminder is unnecessary. A retracting negation governing one of them
+/// withdraws the request ("not needed", "no longer necessary", "it's not required").
+const NEEDLESS_WORDS: &[&str] = &[
+    "needed",
+    "necessary",
+    "required",
+    "relevant",
+    "applicable",
+    "wanted",
+];
+/// Verbs of wanting or needing. A retracting negation governing one of them withdraws the request
+/// only when the same clause says the wish has ended ("I no longer want that reminder", "I don't
+/// need it anymore"); "I don't want to miss it" keeps the request. "need" itself is also a
+/// [`RETRACTION_TARGETS`] entry, so "don't need" withdraws without an ended marker.
+const DESIRE_WORDS: &[&str] = &["want", "wants", "need", "needs", "care", "interested"];
+/// Words that say a wish or need has ended when they follow a retracting negation ("no longer",
+/// "not anymore", "don't want it any more").
+const ENDED_WORDS: &[&str] = &["longer", "anymore"];
 const COMPLETED_WORDS: &[&str] = &[
     "already",
     "had",
@@ -1044,7 +1063,9 @@ fn states_reminder_intent(text: &str, time_span: Option<SourceSpan>) -> bool {
 /// ("don't forget the ladder") or an infinitive naming what the reminder is for ("to cancel the
 /// subscription"); a two-part construction within one clause ("I take that back", "I changed my
 /// mind", "I'll remember on my own"); or a plain negation that governs a reminder word ("actually
-/// don't remind me", "no reminder", "don't bother"), possibly through a filler ("don't actually
+/// don't remind me", "no reminder", "don't bother"), a needless adjective ("not needed", "no
+/// longer necessary") or, when the clause says the wish has ended, a wanting verb ("I no longer
+/// want that reminder", "I don't need it anymore"), possibly through a filler ("don't actually
 /// remind me"), or that closes its clause ("..., actually don't"). A negation governing anything
 /// else ("I don't want to miss it", "it's not urgent") keeps the request. Rejecting too much is
 /// safe: the reminder stays unscheduled and the original intention is kept with the item.
@@ -1078,12 +1099,36 @@ fn retracted_after(tokens: &[IntentToken], after: usize) -> bool {
         if !RETRACTING_NEGATIONS.contains(&word) {
             return false;
         }
-        let governed = later[index + 1..]
+        let same_clause: Vec<&IntentToken> = later[index + 1..]
             .iter()
-            .find(|next| next.clause_break || !RETRACTION_FILLERS.contains(&next.text.as_str()));
+            .copied()
+            .take_while(|next| !next.clause_break)
+            .collect();
+        let governed = same_clause.iter().find(|next| {
+            let text = next.text.as_str();
+            !RETRACTION_FILLERS.contains(&text) && !ENDED_WORDS.contains(&text)
+        });
         governed.is_none_or(|next| {
-            next.clause_break || (!next.quoted && RETRACTION_TARGETS.contains(&next.text.as_str()))
+            let text = next.text.as_str();
+            !next.quoted
+                && (RETRACTION_TARGETS.contains(&text)
+                    || NEEDLESS_WORDS.contains(&text)
+                    || (DESIRE_WORDS.contains(&text) && wish_has_ended(&same_clause)))
         })
+    })
+}
+
+/// Whether a clause after a retracting negation says the wish or need has ended: "no longer",
+/// "anymore", or the two words "any more".
+fn wish_has_ended(clause: &[&IntentToken]) -> bool {
+    clause.iter().enumerate().any(|(index, token)| {
+        let text = token.text.as_str();
+        !token.quoted
+            && (ENDED_WORDS.contains(&text)
+                || (text == "any"
+                    && clause
+                        .get(index + 1)
+                        .is_some_and(|next| !next.quoted && next.text == "more")))
     })
 }
 

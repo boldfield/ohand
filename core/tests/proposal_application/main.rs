@@ -1432,6 +1432,15 @@ fn a_dated_fact_that_does_not_ask_for_a_reminder_stays_unscheduled() {
         "remind me to call the roofer 2026-01-16 09:00:00, actually I'll remember on my own",
         "remind me to call the roofer 2026-01-16 09:00:00, just ignore this one",
         "remind me to call the roofer 2026-01-16 09:00:00, on second thought drop it",
+        "remind me to call the roofer 2026-01-16 09:00:00, actually I no longer want that reminder",
+        "remind me to call the roofer 2026-01-16 09:00:00, I no longer need it",
+        "remind me to call the roofer 2026-01-16 09:00:00, it's no longer necessary",
+        "remind me to call the roofer 2026-01-16 09:00:00, no longer",
+        "remind me to call the roofer 2026-01-16 09:00:00, I don't need it anymore",
+        "remind me to call the roofer 2026-01-16 09:00:00, I don't want it any more",
+        "remind me to call the roofer 2026-01-16 09:00:00, not needed",
+        "remind me to call the roofer 2026-01-16 09:00:00, it's not required",
+        "remind me to call the roofer 2026-01-16 09:00:00, stop",
     ] {
         let (fixture, disposition) = apply_reminder_candidate(
             text,
@@ -1469,6 +1478,9 @@ fn natural_first_person_reminder_requests_bind_to_the_quoted_time() {
         "remind me to call the roofer 2026-01-16 09:00:00, he said \"never mind\" last time",
         "set a reminder for 2026-01-16 09:00:00 to cancel the old subscription",
         "remind me to call the roofer 2026-01-16 09:00:00, don't cancel the ladder order",
+        "remind me to call the roofer 2026-01-16 09:00:00 to stop the leak",
+        "remind me to call the roofer 2026-01-16 09:00:00, I want it fixed",
+        "remind me to call the roofer 2026-01-16 09:00:00, don't stop looking for quotes",
     ] {
         let (fixture, disposition) = apply_reminder_candidate(
             text,
