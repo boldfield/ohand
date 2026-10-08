@@ -709,7 +709,8 @@ pub fn save_event_in_tx(
 /// This is an internal-only function used by mark_deletion_intent and is not exposed through
 /// the public save_event API to prevent callers from bypassing deletion cleanup logic.
 /// expected_item_revision: the item's revision at the time of the deletion.
-pub fn save_deletion_event_in_tx(
+/// This is crate-private to enforce deletion through the complete fenced operation in L01.
+pub(crate) fn save_deletion_event_in_tx(
     tx: &Transaction<'_>,
     event: &Event,
     expected_item_revision: i32,
@@ -763,9 +764,9 @@ pub fn save_deletion_event_in_tx(
         });
     }
 
-    // Only allow deletion if item is active (or already deleted for idempotent retry).
-    // Completed and cancelled items cannot be deleted.
-    let allowed = matches!(current.lifecycle_state.as_str(), "active" | "deleted");
+    // Allow deletion from any lifecycle state per the deletion contract in DESIGN.md.
+    // User-requested deletion must work for any item's records, including completed/cancelled items.
+    let allowed = !matches!(current.lifecycle_state.as_str(), "deleted");
     if !allowed {
         return Err(EventError::NotAllowedInState {
             item_id: event.item_id.clone(),

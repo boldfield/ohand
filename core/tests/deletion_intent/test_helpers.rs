@@ -105,3 +105,13 @@ pub fn create_test_job(
 
     job_id
 }
+
+pub fn set_item_lifecycle_state(db: &mut Database, item_id: &str, lifecycle_state: &str) {
+    let tx = db.transaction().expect("Transaction should succeed");
+    tx.execute(
+        "UPDATE items SET lifecycle_state = ? WHERE item_id = ?",
+        rusqlite::params![lifecycle_state, item_id],
+    )
+    .expect("Update should succeed");
+    tx.commit().expect("Commit should succeed");
+}

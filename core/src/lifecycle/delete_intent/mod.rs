@@ -282,7 +282,8 @@ pub fn mark_deletion_intent(
 }
 
 /// Mark a deletion work task as completed.
-/// Only updates if the current status is Pending; rejects other states.
+/// Idempotent: if already completed with an identical call, returns the completed record.
+/// If the work is in a different terminal state (failed), returns an error.
 /// Uses an immediate transaction to prevent check-then-update races.
 pub fn mark_deletion_work_completed(
     db: &mut Database,
@@ -295,11 +296,16 @@ pub fn mark_deletion_work_completed(
         .map_err(|e| anyhow!("Failed to load deletion work: {}", e))?
         .ok_or_else(|| anyhow!("Deletion work {} not found", deletion_work_id))?;
 
-    // Only allow transition from Pending to Completed
-    if work.status != DeletionWorkStatus::Pending {
+    // Idempotent: if already completed, return the existing record
+    if work.status == DeletionWorkStatus::Completed {
+        tx.commit()?;
+        return Ok(work);
+    }
+
+    // If failed terminal state, reject the completion
+    if work.status == DeletionWorkStatus::FailedNoRetry {
         return Err(anyhow!(
-            "Cannot complete deletion work with status {:?}",
-            work.status
+            "Cannot complete deletion work with terminal failure status"
         ));
     }
 
@@ -318,6 +324,25 @@ pub fn mark_deletion_work_completed(
     .map_err(|e| anyhow!("Failed to update deletion work status: {}", e))?;
 
     if rows_changed == 0 {
+        // Another writer may have changed the status; reload and check
+        let reloaded = get_deletion_work_in_tx(&tx, deletion_work_id)
+            .map_err(|e| anyhow!("Failed to reload deletion work: {}", e))?
+            .ok_or_else(|| anyhow!("Deletion work {} disappeared", deletion_work_id))?;
+
+        tx.commit()?;
+
+        // Idempotent: if now completed, return the result
+        if reloaded.status == DeletionWorkStatus::Completed {
+            return Ok(reloaded);
+        }
+
+        // If failed, reject
+        if reloaded.status == DeletionWorkStatus::FailedNoRetry {
+            return Err(anyhow!(
+                "Cannot complete deletion work in terminal failure state"
+            ));
+        }
+
         return Err(anyhow!(
             "Deletion work {} is no longer Pending",
             deletion_work_id
@@ -379,10 +404,16 @@ fn remove_readable_content_in_tx(tx: &Transaction<'_>, item_id: &str) -> Result<
         rusqlite::params![item_id],
     )?;
 
-    // Clear correction values and proposal content from events
+    // Clear correction values and proposal content from events table
     tx.execute(
         "UPDATE events SET correction_new_value = NULL, correction_old_value = NULL
          WHERE item_id = ?",
+        rusqlite::params![item_id],
+    )?;
+
+    // Delete the authoritative corrections table rows
+    tx.execute(
+        "DELETE FROM corrections WHERE item_id = ?",
         rusqlite::params![item_id],
     )?;
 
@@ -395,6 +426,12 @@ fn remove_readable_content_in_tx(tx: &Transaction<'_>, item_id: &str) -> Result<
     // Clear reminder source phrase (readable content in reminders)
     tx.execute(
         "UPDATE reminders SET source_phrase = NULL WHERE item_id = ?",
+        rusqlite::params![item_id],
+    )?;
+
+    // Delete reminder_commands rows (contains serialized ReminderRecord with source_phrase)
+    tx.execute(
+        "DELETE FROM reminder_commands WHERE item_id = ?",
         rusqlite::params![item_id],
     )?;
 

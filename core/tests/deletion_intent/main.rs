@@ -9,9 +9,13 @@ use ohand_core::lifecycle::delete_intent::{
     mark_deletion_work_completed, DeletionWorkStatus, DeletionWorkType,
 };
 use ohand_core::retrieval::index;
+use ohand_core::store::events::{Event, EventPayload, EventType};
 
 mod test_helpers;
-use test_helpers::{create_test_capture, create_test_db, create_test_item, create_test_job};
+use test_helpers::{
+    create_test_capture, create_test_db, create_test_item, create_test_job,
+    set_item_lifecycle_state,
+};
 
 #[test]
 fn test_mark_deletion_intent() {
@@ -389,12 +393,257 @@ fn test_completion_idempotency() {
     let work = mark_deletion_intent(&mut db, item_id, 0, now).expect("Deletion should succeed");
 
     // Mark the work as completed
-    let completed = mark_deletion_work_completed(&mut db, &work.deletion_work_id, now)
+    let completed1 = mark_deletion_work_completed(&mut db, &work.deletion_work_id, now)
         .expect("Mark completed should succeed");
-    assert_eq!(completed.status, DeletionWorkStatus::Completed);
+    assert_eq!(completed1.status, DeletionWorkStatus::Completed);
 
-    // Try to mark as completed again with same work_id
-    let result = mark_deletion_work_completed(&mut db, &work.deletion_work_id, now);
-    // Should fail because it's no longer Pending
+    // Mark as completed again with same work_id (idempotent)
+    let completed2 = mark_deletion_work_completed(&mut db, &work.deletion_work_id, now)
+        .expect("Mark completed again should be idempotent");
+    assert_eq!(completed2.status, DeletionWorkStatus::Completed);
+    assert_eq!(completed1.deletion_work_id, completed2.deletion_work_id);
+}
+
+#[test]
+fn test_deletion_clears_corrections() {
+    let mut db = create_test_db();
+    let now = Utc::now();
+
+    let capture_id = "cap-corr-001";
+    let item_id = "item-corr-001";
+
+    create_test_capture(&mut db, capture_id, "Original text", None);
+    create_test_item(&mut db, item_id, capture_id);
+
+    // Create a correction in the corrections table
+    {
+        let tx = db.transaction().expect("Transaction should succeed");
+        tx.execute(
+            "INSERT INTO corrections (correction_id, item_id, revision, kind, old_value, new_value, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            rusqlite::params![
+                "corr-001",
+                item_id,
+                0,
+                "text",
+                Some("Original text"),
+                "CORRECTED SECRET",
+                now.to_rfc3339()
+            ],
+        ).expect("Insert should succeed");
+        tx.commit().expect("Commit should succeed");
+    }
+
+    // Verify correction exists
+    {
+        let conn = db.conn();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM corrections WHERE item_id = ?",
+                [item_id],
+                |row| row.get(0),
+            )
+            .expect("Query should succeed");
+        assert_eq!(count, 1);
+    }
+
+    // Mark deletion
+    mark_deletion_intent(&mut db, item_id, 0, now).expect("Deletion should succeed");
+
+    // Verify correction has been deleted
+    {
+        let conn = db.conn();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM corrections WHERE item_id = ?",
+                [item_id],
+                |row| row.get(0),
+            )
+            .expect("Query should succeed");
+        assert_eq!(count, 0);
+    }
+}
+
+#[test]
+fn test_deletion_clears_reminder_commands_result() {
+    let mut db = create_test_db();
+    let now = Utc::now();
+
+    let capture_id = "cap-reminder-001";
+    let item_id = "item-reminder-001";
+
+    create_test_capture(&mut db, capture_id, "Test", None);
+    create_test_item(&mut db, item_id, capture_id);
+
+    // Create a reminder_command with result_json containing readable content
+    {
+        let tx = db.transaction().expect("Transaction should succeed");
+
+        // Insert reminder_command with result_json
+        let result_json = r#"{"reminder_record":{"source_phrase":"SENSITIVE RESULT"}}"#;
+        tx.execute(
+            "INSERT INTO reminder_commands (command_id, item_id, command_fingerprint, result_json, created_at)
+             VALUES (?, ?, ?, ?, ?)",
+            rusqlite::params!["cmd-001", item_id, "fingerprint-001", result_json, now.to_rfc3339()],
+        ).expect("Insert command should succeed");
+
+        tx.commit().expect("Commit should succeed");
+    }
+
+    // Verify reminder_command exists
+    {
+        let conn = db.conn();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM reminder_commands WHERE item_id = ?",
+                [item_id],
+                |row| row.get(0),
+            )
+            .expect("Query should succeed");
+        assert_eq!(count, 1);
+    }
+
+    // Mark deletion
+    mark_deletion_intent(&mut db, item_id, 0, now).expect("Deletion should succeed");
+
+    // Verify reminder_commands have been deleted
+    {
+        let conn = db.conn();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM reminder_commands WHERE item_id = ?",
+                [item_id],
+                |row| row.get(0),
+            )
+            .expect("Query should succeed");
+        assert_eq!(count, 0);
+    }
+}
+
+#[test]
+fn test_deletion_blocks_racing_correction() {
+    use ohand_core::store::events::Correction;
+
+    let mut db = create_test_db();
+    let now = Utc::now();
+
+    let capture_id = "cap-race-corr-001";
+    let item_id = "item-race-corr-001";
+
+    create_test_capture(&mut db, capture_id, "Test capture", None);
+    create_test_item(&mut db, item_id, capture_id);
+
+    // Mark deletion
+    mark_deletion_intent(&mut db, item_id, 0, now).expect("Deletion should succeed");
+
+    // Try to apply a correction event after deletion
+    let correction_payload = EventPayload::Correction(Correction {
+        kind: ohand_core::store::events::CorrectionKind::Text,
+        old_value: Some("Test capture".to_string()),
+        new_value: "CORRECTED TEXT".to_string(),
+    });
+
+    let correction_event = Event::new(
+        "correction-event-001".to_string(),
+        item_id.to_string(),
+        1, // The revision has incremented during deletion
+        EventType::Correction,
+        correction_payload,
+        now.to_rfc3339(),
+    )
+    .expect("Event creation should succeed");
+
+    let tx = db.transaction().expect("Transaction should succeed");
+
+    // Attempting to save a correction event on a deleted item should fail
+    // because the lifecycle state is locked to deleted and cannot accept further mutations
+    let result = ohand_core::store::events::save_event_in_tx(&tx, &correction_event, 1);
+    tx.commit().expect("Commit should succeed");
+
+    // The event should be rejected because the item is deleted
     assert!(result.is_err());
+}
+
+#[test]
+fn test_deletion_from_completed_state() {
+    let mut db = create_test_db();
+    let now = Utc::now();
+
+    let capture_id = "cap-comp-delete-001";
+    let item_id = "item-comp-delete-001";
+
+    create_test_capture(&mut db, capture_id, "Test capture", None);
+    create_test_item(&mut db, item_id, capture_id);
+
+    // Mark item as completed
+    set_item_lifecycle_state(&mut db, item_id, "completed");
+
+    // Verify item is completed
+    {
+        let tx = db.transaction().expect("Transaction should succeed");
+        let item_state = load_item_state(&tx, item_id)
+            .expect("Load should succeed")
+            .expect("Item should exist");
+        assert_eq!(
+            item_state.lifecycle_state,
+            ohand_core::domain::items::LifecycleState::Completed
+        );
+    }
+
+    // Delete the completed item - should succeed per DESIGN.md deletion contract
+    let deletion_work = mark_deletion_intent(&mut db, item_id, 0, now)
+        .expect("Deletion of completed item should succeed");
+    assert_eq!(deletion_work.item_id, item_id);
+
+    // Verify item is now deleted
+    let tx = db.transaction().expect("Transaction should succeed");
+    let item_state = load_item_state(&tx, item_id)
+        .expect("Load should succeed")
+        .expect("Item should exist");
+    assert_eq!(
+        item_state.lifecycle_state,
+        ohand_core::domain::items::LifecycleState::Deleted
+    );
+}
+
+#[test]
+fn test_deletion_from_cancelled_state() {
+    let mut db = create_test_db();
+    let now = Utc::now();
+
+    let capture_id = "cap-cancel-delete-001";
+    let item_id = "item-cancel-delete-001";
+
+    create_test_capture(&mut db, capture_id, "Test capture", None);
+    create_test_item(&mut db, item_id, capture_id);
+
+    // Mark item as cancelled
+    set_item_lifecycle_state(&mut db, item_id, "cancelled");
+
+    // Verify item is cancelled
+    {
+        let tx = db.transaction().expect("Transaction should succeed");
+        let item_state = load_item_state(&tx, item_id)
+            .expect("Load should succeed")
+            .expect("Item should exist");
+        assert_eq!(
+            item_state.lifecycle_state,
+            ohand_core::domain::items::LifecycleState::Cancelled
+        );
+    }
+
+    // Delete the cancelled item - should succeed per DESIGN.md deletion contract
+    let deletion_work = mark_deletion_intent(&mut db, item_id, 0, now)
+        .expect("Deletion of cancelled item should succeed");
+    assert_eq!(deletion_work.item_id, item_id);
+
+    // Verify item is now deleted
+    let tx = db.transaction().expect("Transaction should succeed");
+    let item_state = load_item_state(&tx, item_id)
+        .expect("Load should succeed")
+        .expect("Item should exist");
+    assert_eq!(
+        item_state.lifecycle_state,
+        ohand_core::domain::items::LifecycleState::Deleted
+    );
 }
