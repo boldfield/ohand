@@ -3,9 +3,10 @@
 //! Every job that could send payload off the device is authorized here before dispatch. The
 //! decision is derived entirely from durable state: the job's stored profile pin, the capture's
 //! immutable `route_id`, the stored `routes` ceiling and the per-capability `route_authorizations`
-//! grants. Callers supply only a job id and the capability they intend to exercise; route,
-//! destinations and profile are never accepted from the caller, and nothing a model, classifier or
-//! capture text produced (item scope, item type, proposals, capture text) is ever read.
+//! grants. Callers supply only a job id; the capability is derived from the job's immutable stored
+//! `job_type`, and route, destinations and profile are never accepted from the caller. Nothing a
+//! model, classifier or capture text produced (item scope, item type, proposals, capture text) is
+//! ever read.
 //!
 //! A fresh install has no routes or grants, so every job pinned to a remote profile is denied.
 //! Only a job with no profile pin (on-device processing) is authorized without a grant.
@@ -15,14 +16,20 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension};
 use std::fmt;
 
-/// What a job asks a destination to do. Each capability needs its own stored grant; `Review`
-/// (an independent reviewer pass) is deliberately not implied by any interpretation grant.
+/// Stored `jobs.job_type` of a job that interprets capture text.
+pub const JOB_TYPE_INTERPRET: &str = "interpret";
+/// Stored `jobs.job_type` of an on-device transcription attachment job.
+pub const JOB_TYPE_TRANSCRIPTION_ATTACHMENT: &str = "transcription_attachment";
+/// Stored `jobs.job_type` of an independent reviewer pass.
+pub const JOB_TYPE_SHADOW_REVIEW: &str = "shadow_review";
+
+/// What a job asks a destination to do, derived from its stored job type. Each capability needs
+/// its own stored grant; `Review` (an independent reviewer pass) is deliberately not implied by
+/// any interpretation grant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProcessingCapability {
     TextInterpretation,
     Transcription,
-    Embeddings,
-    SpeechGeneration,
     Review,
 }
 
@@ -32,8 +39,6 @@ impl ProcessingCapability {
         match self {
             ProcessingCapability::TextInterpretation => "text_interpretation",
             ProcessingCapability::Transcription => "transcription",
-            ProcessingCapability::Embeddings => "embeddings",
-            ProcessingCapability::SpeechGeneration => "speech_generation",
             ProcessingCapability::Review => "review",
         }
     }
@@ -109,6 +114,8 @@ impl Authorization {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DenialReason {
     JobNotFound,
+    UnknownJobType,
+    LocalOnlyJobHasProfile,
     ProfileUnavailable,
     UnknownProviderType,
     MalformedProfile,
@@ -123,6 +130,10 @@ impl fmt::Display for DenialReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let text = match self {
             DenialReason::JobNotFound => "job, its item or its capture does not exist",
+            DenialReason::UnknownJobType => "the job has an unrecognized job type",
+            DenialReason::LocalOnlyJobHasProfile => {
+                "an on-device-only job must not be pinned to a provider profile"
+            }
             DenialReason::ProfileUnavailable => "the job's pinned profile version is unavailable",
             DenialReason::UnknownProviderType => "the pinned profile has an unknown provider type",
             DenialReason::MalformedProfile => "the pinned profile has no valid destination",
@@ -162,18 +173,22 @@ impl AuthorizationDecision {
     }
 }
 
-/// Authorize `job_id` to exercise `capability`. Denials are returned as
-/// [`AuthorizationDecision::Denied`]; `Err` means storage could not be read, which callers must
-/// also treat as "do not dispatch".
-pub fn authorize_job(
-    conn: &Connection,
-    job_id: &str,
-    capability: ProcessingCapability,
-) -> Result<AuthorizationDecision> {
+/// Authorize `job_id` to exercise the capability implied by its stored job type. Denials are
+/// returned as [`AuthorizationDecision::Denied`]; `Err` means storage could not be read, which
+/// callers must also treat as "do not dispatch".
+pub fn authorize_job(conn: &Connection, job_id: &str) -> Result<AuthorizationDecision> {
     use AuthorizationDecision::Denied;
 
-    let Some((route_id, profile_version)) = load_job_binding(conn, job_id)? else {
+    let Some(JobBinding {
+        job_type,
+        route_id,
+        profile_version,
+    }) = load_job_binding(conn, job_id)?
+    else {
         return Ok(Denied(DenialReason::JobNotFound));
+    };
+    let Some(capability) = capability_for_job_type(&job_type) else {
+        return Ok(Denied(DenialReason::UnknownJobType));
     };
 
     let make = |profile_version: Option<String>, disposition: Disposition| {
@@ -185,6 +200,14 @@ pub fn authorize_job(
             disposition,
         })
     };
+
+    if capability == ProcessingCapability::Transcription {
+        // Transcription runs on device only; a provider pin on such a job is a corrupt record.
+        return Ok(match profile_version {
+            None => make(None, Disposition::Local),
+            Some(_) => Denied(DenialReason::LocalOnlyJobHasProfile),
+        });
+    }
 
     let Some(profile_version) = profile_version else {
         return Ok(make(None, Disposition::Local));
@@ -254,16 +277,37 @@ pub fn authorize_job(
     ))
 }
 
-/// The capture's immutable route and the job's profile pin, joined through the item.
-fn load_job_binding(conn: &Connection, job_id: &str) -> Result<Option<(String, Option<String>)>> {
+fn capability_for_job_type(job_type: &str) -> Option<ProcessingCapability> {
+    match job_type {
+        JOB_TYPE_INTERPRET => Some(ProcessingCapability::TextInterpretation),
+        JOB_TYPE_TRANSCRIPTION_ATTACHMENT => Some(ProcessingCapability::Transcription),
+        JOB_TYPE_SHADOW_REVIEW => Some(ProcessingCapability::Review),
+        _ => None,
+    }
+}
+
+struct JobBinding {
+    job_type: String,
+    route_id: String,
+    profile_version: Option<String>,
+}
+
+/// The job's type and profile pin plus the capture's immutable route, joined through the item.
+fn load_job_binding(conn: &Connection, job_id: &str) -> Result<Option<JobBinding>> {
     conn.query_row(
-        "SELECT captures.route_id, jobs.profile_version \
+        "SELECT jobs.job_type, captures.route_id, jobs.profile_version \
          FROM jobs \
          JOIN items ON items.item_id = jobs.item_id \
          JOIN captures ON captures.capture_id = items.capture_id \
          WHERE jobs.job_id = ?",
         [job_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| {
+            Ok(JobBinding {
+                job_type: row.get(0)?,
+                route_id: row.get(1)?,
+                profile_version: row.get(2)?,
+            })
+        },
     )
     .optional()
     .context("reading job binding")

@@ -2,6 +2,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use ohand_core::privacy::routing::{
     authorize_job, AuthorizationDecision, DenialReason, DestinationClass, ProcessingCapability,
+    JOB_TYPE_INTERPRET, JOB_TYPE_SHADOW_REVIEW, JOB_TYPE_TRANSCRIPTION_ATTACHMENT,
 };
 use ohand_core::store::schema::{Clock, Database};
 use std::sync::Arc;
@@ -98,6 +99,23 @@ impl Fixture {
         capture_text: &str,
         profile_version: Option<&str>,
     ) {
+        self.add_typed_job(
+            job_id,
+            JOB_TYPE_INTERPRET,
+            route_id,
+            capture_text,
+            profile_version,
+        );
+    }
+
+    fn add_typed_job(
+        &self,
+        job_id: &str,
+        job_type: &str,
+        route_id: &str,
+        capture_text: &str,
+        profile_version: Option<&str>,
+    ) {
         let capture_id = format!("capture-{job_id}");
         let item_id = format!("item-{job_id}");
         self.exec(
@@ -117,27 +135,19 @@ impl Fixture {
         self.exec(
             "INSERT INTO jobs (job_id, job_schema_version, item_id, job_type, source_revision, \
              profile_version, status, created_at) \
-             VALUES (?, 1, ?, 'interpret', 0, ?, 'queued', '2026-01-15T10:30:00Z')",
-            rusqlite::params![job_id, item_id, profile_version],
+             VALUES (?, 1, ?, ?, 0, ?, 'queued', '2026-01-15T10:30:00Z')",
+            rusqlite::params![job_id, item_id, job_type, profile_version],
         );
     }
 
-    fn decide(&self, job_id: &str, capability: ProcessingCapability) -> AuthorizationDecision {
-        authorize_job(self.db.conn(), job_id, capability).unwrap()
+    fn decide(&self, job_id: &str) -> AuthorizationDecision {
+        authorize_job(self.db.conn(), job_id).unwrap()
     }
 
-    fn denial(&self, job_id: &str, capability: ProcessingCapability) -> Option<DenialReason> {
-        self.decide(job_id, capability).denial()
+    fn denial(&self, job_id: &str) -> Option<DenialReason> {
+        self.decide(job_id).denial()
     }
 }
-
-const ALL_CAPABILITIES: [ProcessingCapability; 5] = [
-    ProcessingCapability::TextInterpretation,
-    ProcessingCapability::Transcription,
-    ProcessingCapability::Embeddings,
-    ProcessingCapability::SpeechGeneration,
-    ProcessingCapability::Review,
-];
 
 fn add_standard_profiles(fixture: &Fixture) {
     fixture.add_profile("cloud-openai", "open_ai", None, &format!("[\"{OPENAI}\"]"));
@@ -165,33 +175,38 @@ fn add_standard_profiles(fixture: &Fixture) {
 fn fresh_install_is_local_only() -> Result<()> {
     let fixture = fresh_install();
     add_standard_profiles(&fixture);
-    fixture.add_job("on-device", "default", "buy milk", None);
-    for (job_id, profile) in [
-        ("cloud-openai-job", "cloud-openai"),
-        ("cloud-anthropic-job", "cloud-anthropic"),
-        ("private-job", "private-spark"),
-        ("reviewer-job", "reviewer"),
+    for job_type in [
+        JOB_TYPE_INTERPRET,
+        JOB_TYPE_TRANSCRIPTION_ATTACHMENT,
+        JOB_TYPE_SHADOW_REVIEW,
     ] {
-        fixture.add_job(job_id, "default", "buy milk", Some(profile));
-    }
-
-    for capability in ALL_CAPABILITIES {
-        let local = fixture.decide("on-device", capability);
+        fixture.add_typed_job(
+            &format!("on-device-{job_type}"),
+            job_type,
+            "default",
+            "buy milk",
+            None,
+        );
+        let local = fixture.decide(&format!("on-device-{job_type}"));
         let local = local.authorization().expect("local processing is allowed");
         assert!(local.is_local());
         assert!(local.destinations().is_empty());
         assert_eq!(local.destination_class(), None);
+    }
 
-        for job_id in [
-            "cloud-openai-job",
-            "cloud-anthropic-job",
-            "private-job",
-            "reviewer-job",
+    for job_type in [JOB_TYPE_INTERPRET, JOB_TYPE_SHADOW_REVIEW] {
+        for profile in [
+            "cloud-openai",
+            "cloud-anthropic",
+            "private-spark",
+            "reviewer",
         ] {
+            let job_id = format!("{job_type}-{profile}");
+            fixture.add_typed_job(&job_id, job_type, "default", "buy milk", Some(profile));
             assert_eq!(
-                fixture.denial(job_id, capability),
+                fixture.denial(&job_id),
                 Some(DenialReason::RouteNotConfigured),
-                "{job_id} {capability:?}"
+                "{job_id}"
             );
         }
     }
@@ -206,7 +221,7 @@ fn configured_route_without_destinations_or_grants_stays_denied() {
 
     fixture.add_route("general", "General", "[]");
     assert_eq!(
-        fixture.denial("job", ProcessingCapability::TextInterpretation),
+        fixture.denial("job"),
         Some(DenialReason::DestinationNotInRoute)
     );
     fixture.exec(
@@ -214,7 +229,7 @@ fn configured_route_without_destinations_or_grants_stays_denied() {
         [format!("[\"{OPENAI}\"]")],
     );
     assert_eq!(
-        fixture.denial("job", ProcessingCapability::TextInterpretation),
+        fixture.denial("job"),
         Some(DenialReason::CapabilityNotAuthorized)
     );
 }
@@ -230,7 +245,13 @@ fn cloud_private_server_and_reviewer_each_need_their_own_capability_grant() {
     );
     fixture.add_job("cloud", "general", "text", Some("cloud-openai"));
     fixture.add_job("private", "general", "text", Some("private-spark"));
-    fixture.add_job("review", "general", "text", Some("reviewer"));
+    fixture.add_typed_job(
+        "review",
+        JOB_TYPE_SHADOW_REVIEW,
+        "general",
+        "text",
+        Some("reviewer"),
+    );
 
     fixture.grant(
         "general",
@@ -238,7 +259,7 @@ fn cloud_private_server_and_reviewer_each_need_their_own_capability_grant() {
         &format!("[\"{OPENAI}\",\"{SPARK}\"]"),
     );
 
-    let cloud = fixture.decide("cloud", ProcessingCapability::TextInterpretation);
+    let cloud = fixture.decide("cloud");
     let cloud = cloud.authorization().expect("granted");
     assert_eq!(cloud.destination_class(), Some(DestinationClass::Cloud));
     assert_eq!(cloud.destinations(), [OPENAI]);
@@ -246,7 +267,7 @@ fn cloud_private_server_and_reviewer_each_need_their_own_capability_grant() {
     assert_eq!(cloud.route_id(), "general");
     assert!(!cloud.is_local());
 
-    let private = fixture.decide("private", ProcessingCapability::TextInterpretation);
+    let private = fixture.decide("private");
     let private = private.authorization().expect("granted");
     assert_eq!(
         private.destination_class(),
@@ -254,41 +275,134 @@ fn cloud_private_server_and_reviewer_each_need_their_own_capability_grant() {
     );
     assert_eq!(private.destinations(), [SPARK]);
 
-    // An interpretation grant never implies other capabilities, nor reviewer access.
-    for capability in [
-        ProcessingCapability::Transcription,
-        ProcessingCapability::Embeddings,
-        ProcessingCapability::SpeechGeneration,
-        ProcessingCapability::Review,
-    ] {
-        assert_eq!(
-            fixture.denial("cloud", capability),
-            Some(DenialReason::CapabilityNotAuthorized)
-        );
-        assert_eq!(
-            fixture.denial("private", capability),
-            Some(DenialReason::CapabilityNotAuthorized)
-        );
-    }
+    // An interpretation grant never implies reviewer access.
     assert_eq!(
-        fixture.denial("review", ProcessingCapability::TextInterpretation),
-        Some(DenialReason::DestinationNotAuthorizedForCapability)
-    );
-    assert_eq!(
-        fixture.denial("review", ProcessingCapability::Review),
+        fixture.denial("review"),
         Some(DenialReason::CapabilityNotAuthorized)
     );
 
     fixture.grant("general", "review", &format!("[\"{REVIEWER}\"]"));
-    let review = fixture.decide("review", ProcessingCapability::Review);
+    let review = fixture.decide("review");
     let review = review.authorization().expect("reviewer explicitly granted");
     assert_eq!(review.destinations(), [REVIEWER]);
     assert_eq!(review.capability(), ProcessingCapability::Review);
     assert_eq!(review.job_id(), "review");
-    // The reviewer grant does not widen what interpretation may reach.
     assert_eq!(
-        fixture.denial("cloud", ProcessingCapability::Review),
-        Some(DenialReason::DestinationNotAuthorizedForCapability)
+        fixture
+            .decide("cloud")
+            .authorization()
+            .unwrap()
+            .capability(),
+        ProcessingCapability::TextInterpretation
+    );
+}
+
+#[test]
+fn a_job_cannot_borrow_another_capabilitys_grant() {
+    let fixture = fresh_install();
+    add_standard_profiles(&fixture);
+    fixture.add_route(
+        "general",
+        "General",
+        &format!("[\"{OPENAI}\",\"{SPARK}\",\"{REVIEWER}\"]"),
+    );
+    fixture.add_job("interpret-reviewer", "general", "text", Some("reviewer"));
+    fixture.add_job("interpret-openai", "general", "text", Some("cloud-openai"));
+    fixture.add_typed_job(
+        "review-openai",
+        JOB_TYPE_SHADOW_REVIEW,
+        "general",
+        "text",
+        Some("cloud-openai"),
+    );
+    fixture.add_typed_job(
+        "review-reviewer",
+        JOB_TYPE_SHADOW_REVIEW,
+        "general",
+        "text",
+        Some("reviewer"),
+    );
+
+    // Only a reviewer grant exists: interpretation jobs must not use it, even toward the
+    // reviewer destination or the cloud destination the grant also lists.
+    fixture.grant(
+        "general",
+        "review",
+        &format!("[\"{REVIEWER}\",\"{OPENAI}\"]"),
+    );
+    for job_id in ["interpret-reviewer", "interpret-openai"] {
+        assert_eq!(
+            fixture.denial(job_id),
+            Some(DenialReason::CapabilityNotAuthorized),
+            "{job_id}"
+        );
+    }
+    let review = fixture.decide("review-reviewer");
+    assert_eq!(
+        review.authorization().unwrap().capability(),
+        ProcessingCapability::Review
+    );
+
+    // Only an interpretation grant exists: review jobs must not use it.
+    fixture.exec("DELETE FROM route_authorizations", []);
+    fixture.grant(
+        "general",
+        "text_interpretation",
+        &format!("[\"{REVIEWER}\",\"{OPENAI}\"]"),
+    );
+    for job_id in ["review-reviewer", "review-openai"] {
+        assert_eq!(
+            fixture.denial(job_id),
+            Some(DenialReason::CapabilityNotAuthorized),
+            "{job_id}"
+        );
+    }
+    assert!(fixture
+        .decide("interpret-reviewer")
+        .authorization()
+        .is_some());
+
+    // Rewriting the stored job type is the only way to change the capability; an unknown type
+    // is refused rather than guessed.
+    fixture.exec(
+        "UPDATE jobs SET job_type = 'something_new' WHERE job_id = 'interpret-openai'",
+        [],
+    );
+    assert_eq!(
+        fixture.denial("interpret-openai"),
+        Some(DenialReason::UnknownJobType)
+    );
+}
+
+#[test]
+fn transcription_attachment_jobs_are_on_device_and_cannot_use_remote_grants() {
+    let fixture = fresh_install();
+    add_standard_profiles(&fixture);
+    fixture.add_route("general", "General", &format!("[\"{OPENAI}\"]"));
+    fixture.grant("general", "text_interpretation", &format!("[\"{OPENAI}\"]"));
+    fixture.grant("general", "transcription", &format!("[\"{OPENAI}\"]"));
+    fixture.add_typed_job(
+        "local",
+        JOB_TYPE_TRANSCRIPTION_ATTACHMENT,
+        "general",
+        "",
+        None,
+    );
+    fixture.add_typed_job(
+        "pinned",
+        JOB_TYPE_TRANSCRIPTION_ATTACHMENT,
+        "general",
+        "",
+        Some("cloud-openai"),
+    );
+
+    let local = fixture.decide("local");
+    let local = local.authorization().unwrap();
+    assert!(local.is_local());
+    assert_eq!(local.capability(), ProcessingCapability::Transcription);
+    assert_eq!(
+        fixture.denial("pinned"),
+        Some(DenialReason::LocalOnlyJobHasProfile)
     );
 }
 
@@ -300,7 +414,7 @@ fn grant_for_one_destination_does_not_cover_another_destination() {
     fixture.grant("general", "text_interpretation", &format!("[\"{SPARK}\"]"));
     fixture.add_job("cloud", "general", "text", Some("cloud-openai"));
     assert_eq!(
-        fixture.denial("cloud", ProcessingCapability::TextInterpretation),
+        fixture.denial("cloud"),
         Some(DenialReason::DestinationNotAuthorizedForCapability)
     );
 
@@ -314,7 +428,7 @@ fn grant_for_one_destination_does_not_cover_another_destination() {
         [format!("[\"{OPENAI}\",\"{SPARK}\"]")],
     );
     assert_eq!(
-        fixture.denial("cloud", ProcessingCapability::TextInterpretation),
+        fixture.denial("cloud"),
         Some(DenialReason::DestinationNotInRoute)
     );
 }
@@ -329,12 +443,9 @@ fn capture_route_cannot_be_substituted_by_another_routes_grants() {
     fixture.add_job("general-job", "general", "groceries", Some("cloud-openai"));
     fixture.add_job("private-job", "private", "groceries", Some("cloud-openai"));
 
-    assert!(fixture
-        .decide("general-job", ProcessingCapability::TextInterpretation)
-        .authorization()
-        .is_some());
+    assert!(fixture.decide("general-job").authorization().is_some());
     assert_eq!(
-        fixture.denial("private-job", ProcessingCapability::TextInterpretation),
+        fixture.denial("private-job"),
         Some(DenialReason::DestinationNotInRoute)
     );
 }
@@ -353,7 +464,7 @@ fn classifier_output_cannot_upgrade_disclosure_permission() {
         Some("cloud-openai"),
     );
 
-    let before = fixture.decide("job", ProcessingCapability::TextInterpretation);
+    let before = fixture.decide("job");
     assert_eq!(before.denial(), Some(DenialReason::DestinationNotInRoute));
 
     // A (possibly malicious or mistaken) classifier result is persisted: it relabels the item's
@@ -374,7 +485,7 @@ fn classifier_output_cannot_upgrade_disclosure_permission() {
         [],
     );
 
-    let after = fixture.decide("job", ProcessingCapability::TextInterpretation);
+    let after = fixture.decide("job");
     assert_eq!(after, before);
     assert!(after.authorization().is_none());
 }
@@ -398,8 +509,8 @@ fn malicious_stored_instructions_cannot_change_routing_policy() {
     );
     fixture.add_job("clean", "private", "buy milk", Some("cloud-openai"));
 
-    let hostile = fixture.decide("job", ProcessingCapability::TextInterpretation);
-    let clean = fixture.decide("clean", ProcessingCapability::TextInterpretation);
+    let hostile = fixture.decide("job");
+    let clean = fixture.decide("clean");
     assert_eq!(hostile.denial(), Some(DenialReason::DestinationNotInRoute));
     assert_eq!(
         hostile.denial(),
@@ -436,7 +547,7 @@ fn wildcard_and_malformed_policy_entries_fail_closed() {
         fixture.exec("DELETE FROM routes", []);
         fixture.add_route("general", "General", malformed);
         assert_eq!(
-            fixture.denial("job", ProcessingCapability::TextInterpretation),
+            fixture.denial("job"),
             Some(DenialReason::MalformedPolicy),
             "route policy {malformed:?}"
         );
@@ -448,7 +559,7 @@ fn wildcard_and_malformed_policy_entries_fail_closed() {
         fixture.exec("DELETE FROM route_authorizations", []);
         fixture.grant("general", "text_interpretation", malformed);
         assert_eq!(
-            fixture.denial("job", ProcessingCapability::TextInterpretation),
+            fixture.denial("job"),
             Some(DenialReason::MalformedPolicy),
             "grant {malformed:?}"
         );
@@ -463,7 +574,7 @@ fn provider_outage_cannot_reroute_payload_to_another_destination() {
     fixture.grant("general", "text_interpretation", &format!("[\"{OPENAI}\"]"));
     fixture.add_job("job", "general", "text", Some("cloud-openai"));
 
-    let before = fixture.decide("job", ProcessingCapability::TextInterpretation);
+    let before = fixture.decide("job");
     let before_authorization = before.authorization().expect("granted").clone();
     assert_eq!(before_authorization.destinations(), [OPENAI]);
 
@@ -473,7 +584,7 @@ fn provider_outage_cannot_reroute_payload_to_another_destination() {
          attempt_count = attempt_count + 1 WHERE job_id = 'job'",
         [],
     );
-    let after_outage = fixture.decide("job", ProcessingCapability::TextInterpretation);
+    let after_outage = fixture.decide("job");
     assert_eq!(
         after_outage, before,
         "retry stays on the approved destination"
@@ -485,7 +596,7 @@ fn provider_outage_cannot_reroute_payload_to_another_destination() {
         [],
     );
     assert_eq!(
-        fixture.denial("job", ProcessingCapability::TextInterpretation),
+        fixture.denial("job"),
         Some(DenialReason::DestinationNotInRoute)
     );
 
@@ -495,7 +606,7 @@ fn provider_outage_cannot_reroute_payload_to_another_destination() {
         [],
     );
     assert_eq!(
-        fixture.denial("job", ProcessingCapability::TextInterpretation),
+        fixture.denial("job"),
         Some(DenialReason::DestinationNotInRoute)
     );
 
@@ -508,7 +619,7 @@ fn provider_outage_cannot_reroute_payload_to_another_destination() {
         "UPDATE route_authorizations SET authorized_destinations = ?",
         [format!("[\"{OPENAI}\",\"{SPARK}\"]")],
     );
-    let approved = fixture.decide("job", ProcessingCapability::TextInterpretation);
+    let approved = fixture.decide("job");
     assert_eq!(approved.authorization().unwrap().destinations(), [SPARK]);
 }
 
@@ -541,24 +652,23 @@ fn unavailable_or_unrecognized_profile_and_unknown_job_are_denied() {
     ] {
         fixture.add_job(job_id, "general", "text", Some(profile));
     }
-    let capability = ProcessingCapability::TextInterpretation;
     assert_eq!(
-        fixture.denial("deleted", capability),
+        fixture.denial("deleted"),
         Some(DenialReason::ProfileUnavailable)
     );
     assert_eq!(
-        fixture.denial("mystery", capability),
+        fixture.denial("mystery"),
         Some(DenialReason::UnknownProviderType)
     );
     for job_id in ["hosted-no-origin", "no-endpoint", "http"] {
         assert_eq!(
-            fixture.denial(job_id, capability),
+            fixture.denial(job_id),
             Some(DenialReason::MalformedProfile),
             "{job_id}"
         );
     }
     assert_eq!(
-        fixture.denial("no-such-job", capability),
+        fixture.denial("no-such-job"),
         Some(DenialReason::JobNotFound)
     );
 }
@@ -577,7 +687,7 @@ fn self_hosted_destination_is_the_endpoint_origin_not_the_profile_claim() {
     fixture.grant("general", "text_interpretation", &format!("[\"{SPARK}\"]"));
     fixture.add_job("job", "general", "text", Some("sneaky"));
     assert_eq!(
-        fixture.denial("job", ProcessingCapability::TextInterpretation),
+        fixture.denial("job"),
         Some(DenialReason::DestinationNotInRoute)
     );
 
@@ -589,7 +699,7 @@ fn self_hosted_destination_is_the_endpoint_origin_not_the_profile_claim() {
         "UPDATE route_authorizations SET authorized_destinations = '[\"https://evil.example.test:9000\"]'",
         [],
     );
-    let decision = fixture.decide("job", ProcessingCapability::TextInterpretation);
+    let decision = fixture.decide("job");
     assert_eq!(
         decision.authorization().unwrap().destinations(),
         ["https://evil.example.test:9000"]
