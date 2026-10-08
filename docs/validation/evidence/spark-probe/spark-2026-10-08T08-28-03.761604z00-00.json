@@ -1,0 +1,54 @@
+{
+  "evidence_id": "spark-2026-10-08T08-28-03.761604z00-00",
+  "probe_revision": "a136f4ae4d3bdd4f301f036b8402d85bf7161761+dirty",
+  "collection_time": "2026-10-08T08:28:03.761604+00:00",
+  "scheme": "https",
+  "probes": {
+    "unauthenticated_models": {
+      "method": "GET",
+      "path": "/models",
+      "credential_sent": false,
+      "status": 200,
+      "headers": {
+        "content-type": "application/json",
+        "date": "Thu, 08 Oct 2026 08:28:03 GMT"
+      },
+      "authentication_requirement": "no_authentication_required",
+      "tls_verified": true
+    },
+    "authenticated_models": {
+      "method": "GET",
+      "path": "/models",
+      "credential_sent": true,
+      "status": 200,
+      "headers": {
+        "content-type": "application/json",
+        "date": "Thu, 08 Oct 2026 08:28:03 GMT"
+      },
+      "models": [
+        "deepseek-flash-iq3:latest",
+        "qwen3.8:27b",
+        "qwen3.5:122b",
+        "gpt-oss:120b",
+        "gpt-oss:20b",
+        "glm-5.3-flash"
+      ],
+      "tls_verified": true
+    },
+    "structured_response": {
+      "method": "POST",
+      "path": "/chat/completions",
+      "credential_sent": true,
+      "status": 200,
+      "headers": {
+        "content-type": "application/json",
+        "date": "Thu, 08 Oct 2026 08:28:08 GMT",
+        "server": "nginx/1.27.5"
+      },
+      "model_requested": "deepseek-flash-iq3:latest",
+      "content_valid": false,
+      "tls_verified": true,
+      "sample_content": "Hello! How can I help you today?"
+    }
+  }
+}

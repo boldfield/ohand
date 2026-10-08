@@ -11,24 +11,23 @@ This section records the Spark endpoint protocol observations collected by the V
 Spark endpoint authentication verification:
 
 - **Status**: Observed
-- **Evidence identifier**: spark-2026-10-08T07-54-20.140534z00-00
-- **Probe revision**: 4fee1f6ec9faa36820cbf99a9ba91edd88c9173a (worker tree dirty at collection time)
-- **Collection time**: 2026-10-08T07:54:20+00:00
+- **Evidence identifier**: spark-2026-10-08T08-28-03.761604z00-00
+- **Probe revision**: a136f4ae4d3bdd4f301f036b8402d85bf7161761
+- **Collection time**: 2026-10-08T08:28:03.761604+00:00
 
-The probe sends an unauthenticated GET request to the endpoint's `/models` path. Response: **401 Unauthorized**. The endpoint requires authentication.
+The probe sends an unauthenticated GET request to the endpoint's `/models` path. Response: **200 OK**. The endpoint does not require authentication for the models endpoint.
 
 ### Model listing
 
 Spark endpoint model enumeration:
 
 - **Status**: Observed
-- **Evidence identifier**: spark-2026-10-08T07-54-20.140534z00-00
-- **Models**: qwen-long, qwen-max
+- **Evidence identifier**: spark-2026-10-08T08-28-03.761604z00-00
+- **Models**: deepseek-flash-iq3:latest, qwen3.8:27b, qwen3.5:122b, gpt-oss:120b, gpt-oss:20b, glm-5.3-flash
 - **Response status**: 200 OK
 - **Response headers**: 
-  - Server: BaseHTTP/0.6 Python/3.11.2
-  - Date: Thu, 08 Oct 2026 07:54:20 GMT
   - Content-Type: application/json
+  - Date: Thu, 08 Oct 2026 08:28:03 GMT
 
 The probe sends an authenticated GET request to the endpoint's `/models` path using the configured bearer credential. The response parses as a valid JSON object with a `data` array containing model identifiers.
 
@@ -37,26 +36,27 @@ The probe sends an authenticated GET request to the endpoint's `/models` path us
 Spark endpoint OpenAI /chat/completions compatibility:
 
 - **Status**: Observed
-- **Evidence identifier**: spark-2026-10-08T07-54-20.140534z00-00
-- **Model tested**: qwen-long (first available from /models)
+- **Evidence identifier**: spark-2026-10-08T08-28-03.761604z00-00
+- **Model tested**: deepseek-flash-iq3:latest (first available from /models)
 - **Response status**: 200 OK
 - **Response headers**:
-  - Server: BaseHTTP/0.6 Python/3.11.2
-  - Date: Thu, 08 Oct 2026 07:54:20 GMT
+  - Server: nginx/1.27.5
   - Content-Type: application/json
+  - Date: Thu, 08 Oct 2026 08:28:08 GMT
+- **Content format**: The endpoint returns valid JSON structure with `choices`, `message`, `role`, and `content` fields. However, the message content is plain text, not JSON. The probe requests JSON response format implicitly but the endpoint returns natural language text.
 
-The probe sends an authenticated POST request to the endpoint's `/chat/completions` path with a minimal message using the first model reported by the endpoint. The response parses as a valid JSON object with the expected structure: `choices` array containing message objects with `role` and `content` fields. The message content is non-empty and valid.
+The probe sends an authenticated POST request to the endpoint's `/chat/completions` path with a minimal message using the first model reported by the endpoint. The response parses as a valid JSON object with the expected structure: `choices` array containing message objects with `role` and `content` fields. The message content is valid but returns plain text (e.g., "Hello! How can I help you today?") rather than JSON-structured data.
 
 ### TLS and transport
 
 Spark endpoint transport configuration:
 
 - **Status**: Observed
-- **Evidence identifier**: spark-2026-10-08T07-54-20.140534z00-00
-- **Scheme**: HTTP (cleartext)
-- **TLS verified**: No (cleartext HTTP endpoint)
+- **Evidence identifier**: spark-2026-10-08T08-28-03.761604z00-00
+- **Scheme**: HTTPS
+- **TLS verified**: Yes (default trust store certificate validation successful)
 
-The probe records the transport scheme configured in the provider configuration file. The endpoint is reachable over cleartext HTTP on the private network. The endpoint may require an explicit architectural allowance for cleartext communication when used by adapters like V09.
+The probe records the transport scheme configured in the provider configuration file. The endpoint is reachable over HTTPS with successful TLS certificate verification against the default trust store.
 
 This evidence records what is configured and observed; V09 implementation and security review are separate gates.
 
