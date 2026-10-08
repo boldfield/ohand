@@ -310,6 +310,12 @@
         "AGENTS.md:45",
         "core/src/store/captures/mod.rs:106",
         "core/src/store/schema/mod.rs:165"
+      ],
+      "ownership_allowances": [
+        "ios/Tests/CoreBridge/CaptureStatusTests.swift (single file; granted 2026-10-08 after PR #110; ordered after B01b, which has landed)"
+      ],
+      "recorded_decisions": [
+        "ohand_core_start_save_capture is a pre-import durable capture write, not the Capture Ingestion Contract acknowledgment; it accepts any non-empty route_id. C02a owns unknown-route rejection, the import transaction and the contracted acknowledgment (capture ID, item ID, save timestamp)."
       ]
     },
     {
@@ -2218,6 +2224,10 @@
     {
       "date": "2026-10-08",
       "change": "Added F08: move native CI to macos-26 and Xcode 26.6 (the 16.4 pin cannot install on the iOS 26.6.2 trial iPhone). F08 depends on P07; B01b and P08a depend on F08."
+    },
+    {
+      "date": "2026-10-08",
+      "change": "B01c: ownership allowance for ios/Tests/CoreBridge/CaptureStatusTests.swift and a recorded decision that ohand_core_start_save_capture is a pre-import capture write; C02a owns route validation and the ingestion acknowledgment."
     }
   ]
 }
