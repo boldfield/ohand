@@ -24,9 +24,10 @@ xcrun simctl bootstatus "${udid}" -b
 xcrun simctl install "${udid}" "${app_path}"
 
 echo "=== Launching ${bundle_id} -runKeychainSelfTest ==="
-xcrun simctl launch --console --terminate-running-process "${udid}" "${bundle_id}" -runKeychainSelfTest \
-  > "${console_log}" 2>&1 &
-launch_pid=$!
+: > "${console_log}"
+xcrun simctl launch --terminate-running-process \
+  --stdout="${console_log}" --stderr="${console_log}" \
+  "${udid}" "${bundle_id}" -runKeychainSelfTest
 
 for _ in $(seq 1 60); do
   if grep -q '^KEYCHAIN_SELFTEST_RESULT' "${console_log}"; then
@@ -34,7 +35,6 @@ for _ in $(seq 1 60); do
   fi
   sleep 1
 done
-kill "${launch_pid}" 2>/dev/null || true
 xcrun simctl terminate "${udid}" "${bundle_id}" 2>/dev/null || true
 
 echo "=== Console output ==="
@@ -46,6 +46,8 @@ if [ -f "${container}/Documents/keychain-selftest.log" ]; then
 fi
 
 if ! grep -q '^KEYCHAIN_SELFTEST_RESULT PASS' "${console_log}"; then
+  echo "=== Recent simulator log for CredentialProbe ===" >&2
+  xcrun simctl spawn "${udid}" log show --last 3m --predicate 'process == "CredentialProbe"' --style compact 2>&1 | tail -80 >&2 || true
   echo "ERROR: Keychain self-test did not report PASS" >&2
   exit 1
 fi

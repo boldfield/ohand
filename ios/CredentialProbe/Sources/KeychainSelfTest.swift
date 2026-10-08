@@ -101,6 +101,8 @@ enum KeychainSelfTest {
     }
 
     static func runAndExit() {
+        print("KEYCHAIN_SELFTEST_START")
+        fflush(stdout)
         let steps = run()
         let lines = reportLines(for: steps, protectedDataAvailable: UIApplication.shared.isProtectedDataAvailable)
         for line in lines {
