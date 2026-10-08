@@ -8,7 +8,8 @@ use ohand_core::domain::items::{
     StateTransition, TextState, TransitionValidity,
 };
 use ohand_core::store::events::{
-    save_event, Correction, CorrectionKind, Event, EventPayload, EventType,
+    get_item_snapshot, item_can_carry_obligation, save_event, Correction, CorrectionKind, Event,
+    EventPayload, EventType,
 };
 use ohand_core::store::schema::{Clock, Database};
 
@@ -1172,5 +1173,76 @@ fn test_rebuild_equals_projection_after_model_apply() -> Result<()> {
     assert_eq!(stored.item_type, Some(ItemType::Action));
     assert_eq!(rebuilt.item_type, Some(ItemType::Action));
     assert_eq!(stored, rebuilt);
+    Ok(())
+}
+
+#[test]
+fn test_obligation_gating_after_model_apply() -> Result<()> {
+    let path = temp_db_path("obligation_after_apply");
+    let instant = DateTime::parse_from_rfc3339("2026-01-15T10:30:00+00:00")?.with_timezone(&Utc);
+    let mut db = make_test_db(&path, instant)?;
+
+    let tx = db.transaction()?;
+    insert_test_item(&tx, "item-1", "call the roofer")?;
+    tx.commit()?;
+
+    // Initially, the item is untyped and cannot carry obligation.
+    let tx = db.transaction()?;
+    let can_carry_before = item_can_carry_obligation(&tx, "item-1")?;
+    tx.commit()?;
+    assert!(
+        !can_carry_before,
+        "Untyped item should not carry obligation"
+    );
+
+    // Add a proposal to set type to action at revision 0.
+    let tx = db.transaction()?;
+    tx.execute(
+        "INSERT INTO proposals (proposal_id, item_id, capture_id, source_revision, schema_version, text_basis_kind, text_basis_id, applied_state, proposal_type, reminder_proposal, session_topic_proposal, source_spans, abstained, request_version, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rusqlite::params![
+            "prop-action",
+            "item-1",
+            "cap-item-1",
+            0,
+            1,
+            "capture",
+            None::<String>,
+            "unapplied",
+            "action",
+            None::<String>,
+            None::<String>,
+            None::<String>,
+            0,
+            None::<String>,
+            "2026-01-15T10:30:00Z",
+        ],
+    )?;
+    tx.commit()?;
+
+    // Apply the proposal.
+    let tx = db.transaction()?;
+    apply_proposal(&tx, "item-1", "prop-action")?;
+    tx.commit()?;
+
+    // After applying, the item should be typed as action in the authoritative store.
+    let tx = db.transaction()?;
+    let snapshot = get_item_snapshot(&tx, "item-1")?.expect("snapshot should exist");
+    let can_carry_after = item_can_carry_obligation(&tx, "item-1")?;
+    tx.commit()?;
+
+    // The snapshot should show item_type = action.
+    assert_eq!(
+        snapshot.item_type,
+        Some(ItemType::Action),
+        "After model apply, item_type should be Action in the snapshot"
+    );
+
+    // Obligation gating should now return true.
+    assert!(
+        can_carry_after,
+        "After model apply to action, item should carry obligation"
+    );
+
     Ok(())
 }
