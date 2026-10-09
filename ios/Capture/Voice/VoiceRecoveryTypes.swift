@@ -65,7 +65,7 @@ struct VoiceRecoveryListing: Equatable {
     var confirmedCaptureIDs: [String] = []
 }
 
-enum VoiceRecoveryFailure: Equatable {
+enum VoiceRecoveryFailure: Error, Equatable {
     case recordingNotFound
     case alreadyInProgress
     case recordingActive
