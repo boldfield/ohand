@@ -785,10 +785,12 @@ fn start_exchange_job(
         std::thread::Builder::new()
             .name("ohand-provider-exchange".to_string())
             .spawn(move || {
-                let _slot = slot;
                 let outcome =
                     catch_unwind(AssertUnwindSafe(|| run_exchange(&prepared, end, &cancel)))
                         .unwrap_or(Err(AbiFailure::INTERNAL));
+                // Release the slot before the final event, so an observer of that event never
+                // sees the exchange as still running.
+                drop(slot);
                 deliver_final(handle, operation_id, outcome);
             })
             .map_err(|_| AbiFailure::INTERNAL)?;
