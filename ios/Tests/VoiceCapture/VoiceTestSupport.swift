@@ -35,7 +35,7 @@ final class SyntheticVoiceEngine: VoiceCaptureEngine {
             throw startError
         }
         let audioFile = try Self.makeWriter(at: destination)
-        if framesWritten > 0 { try Self.write(frames: framesWritten, to: audioFile) }
+        if framesWritten > 0 { try Self.write(frames: framesWritten, to: audioFile, seed: (startCount + 1) * 37) }
         startCount += 1
         lastMaxDuration = maxDuration
         self.destination = destination
@@ -54,18 +54,19 @@ final class SyntheticVoiceEngine: VoiceCaptureEngine {
         return try AVAudioFile(forWriting: destination, settings: settings, commonFormat: .pcmFormatInt16, interleaved: true)
     }
 
-    static func write(frames: AVAudioFrameCount, to audioFile: AVAudioFile) throws {
+    /// `seed` shifts the repeating sample pattern, so two recordings only share audio when a test makes them.
+    static func write(frames: AVAudioFrameCount, to audioFile: AVAudioFile, seed: Int = 0) throws {
         let buffer = AVAudioPCMBuffer(pcmFormat: audioFile.processingFormat, frameCapacity: frames)!
         buffer.frameLength = frames
         let samples = buffer.int16ChannelData![0]
-        for index in 0..<Int(frames) { samples[index] = Int16(truncatingIfNeeded: index % 100) }
+        for index in 0..<Int(frames) { samples[index] = Int16(truncatingIfNeeded: (index + seed) % 100) }
         try audioFile.write(from: buffer)
     }
 
     /// A closed recording file as a killed or cancelled session leaves it, with no controller or engine involved.
-    static func writeClosedRecording(at destination: URL, frames: AVAudioFrameCount) throws {
+    static func writeClosedRecording(at destination: URL, frames: AVAudioFrameCount, seed: Int = 0) throws {
         let audioFile = try makeWriter(at: destination)
-        if frames > 0 { try write(frames: frames, to: audioFile) }
+        if frames > 0 { try write(frames: frames, to: audioFile, seed: seed) }
     }
 
     func stopAndClose() -> Bool {
@@ -321,9 +322,11 @@ class VoiceCaptureTestCase: IngressStorageTestCase {
 
     /// Leaves a closed recording in the in-progress store the way a cancelled or killed session does.
     @discardableResult
-    func leaveRecording(_ captureID: String, frames: AVAudioFrameCount = 8000, modifiedAt: Date? = nil) throws -> URL {
+    func leaveRecording(
+        _ captureID: String, frames: AVAudioFrameCount = 8000, seed: Int = 0, modifiedAt: Date? = nil
+    ) throws -> URL {
         let url = recordingFile(captureID)
-        try SyntheticVoiceEngine.writeClosedRecording(at: url, frames: frames)
+        try SyntheticVoiceEngine.writeClosedRecording(at: url, frames: frames, seed: seed)
         if let modifiedAt = modifiedAt {
             try FileManager.default.setAttributes([.modificationDate: modifiedAt], ofItemAtPath: url.path)
         }

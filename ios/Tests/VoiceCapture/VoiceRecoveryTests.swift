@@ -564,7 +564,7 @@ final class VoiceRecoveryTests: VoiceCaptureTestCase {
 
     func testAJoinedCopyLeftByAProcessDeathIsNeverListedAndCannotBeSubmittedTwice() throws {
         try leaveRecording("voice-left-1", frames: 8000)
-        try leaveRecording("voice-left-1-continued", frames: 4000)
+        try leaveRecording("voice-left-1-continued", frames: 4000, seed: 7)
         try leaveRecording("voice-left-1-joined", frames: 2000)
         restart()
 
@@ -609,7 +609,7 @@ final class VoiceRecoveryTests: VoiceCaptureTestCase {
 
     func testASegmentThatIsNotTheTailOfTheRecordingIsKeptAsItsOwnRecording() throws {
         try leaveRecording("voice-left-1", frames: 8050)
-        try leaveRecording("voice-left-1-continued", frames: 4000)
+        try leaveRecording("voice-left-1-continued", frames: 4000, seed: 7)
         restart()
 
         let listing = try refreshListing()
@@ -631,14 +631,18 @@ final class VoiceRecoveryTests: VoiceCaptureTestCase {
     }
 
     func testFinishRefusesWhenIngressOwnershipIsUnknown() throws {
+        _ = try startRecording()
+        controller.stop()
         try leaveRecording("voice-left-1")
-        let recording = try XCTUnwrap(try refreshListing().recordings.first)
+        restart()
+        let recording = try XCTUnwrap(try refreshListing().recordings.first { $0.captureID == "voice-left-1" })
         failingFileSystem.failing = [.read]
+        let importsBefore = importer.importedRecords.count
 
         XCTAssertEqual(failure(try finishResult(recording)), .ingressStateUnknown)
 
         XCTAssertTrue(exists(recordingFile("voice-left-1")))
-        XCTAssertTrue(importer.importedRecords.isEmpty)
+        XCTAssertEqual(importer.importedRecords.count, importsBefore, "nothing was submitted")
     }
 
     // MARK: Messages

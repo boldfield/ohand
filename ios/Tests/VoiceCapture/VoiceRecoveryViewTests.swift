@@ -75,6 +75,13 @@ final class VoiceRecoveryViewTests: VoiceCaptureTestCase {
         guard case .retainedUnsubmitted = try lastOutcome() else { return XCTFail("expected a retained recording") }
     }
 
+    /// A stop whose import is not confirmed leaves a staged record, which is what makes a read failure matter.
+    private func cancelledRecordingLeftBehindStaged() throws {
+        _ = try startRecording()
+        controller.stop()
+        guard case .keptForRetry = try lastOutcome() else { return XCTFail("expected a staged capture") }
+    }
+
     // MARK: Re-entry
 
     func testReentryAfterACancellationShowsTheRecordingWithFinishAddAndDeleteControls() throws {
@@ -123,6 +130,7 @@ final class VoiceRecoveryViewTests: VoiceCaptureTestCase {
     }
 
     func testUnknownIngressStateShowsAnExplanationInsteadOfAList() throws {
+        try cancelledRecordingLeftBehindStaged()
         try leaveRecording("voice-left-1")
         failingFileSystem.failing = [.read]
 
