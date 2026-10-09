@@ -49,6 +49,8 @@ use thiserror::Error;
 
 /// Failure reason recorded on a job whose output failed semantic validation.
 pub const INVALID_OUTPUT_REASON: &str = "invalid_output";
+/// Job failure reason recorded when transient failures used up the pinned retry policy.
+pub const RETRIES_EXHAUSTED_REASON: &str = "retries_exhausted";
 
 /// Why a result was rejected. A rejection leaves every durable record unchanged.
 #[derive(Debug, Error)]
@@ -142,6 +144,68 @@ pub fn apply_interpretation_proposal(
     Ok(outcome)
 }
 
+/// Apply a proposal produced by the offline fast path and complete its job in one transaction.
+///
+/// Identical to [`apply_interpretation_proposal`] except that route and provider-profile
+/// authorization is not consulted: nothing left the device, so a missing grant or a revoked
+/// profile cannot affect a local result. The job must still be running under `lease_attempt`.
+pub fn apply_local_interpretation_proposal(
+    db: &mut Database,
+    job_id: &str,
+    lease_attempt: i32,
+    proposal: &Proposal,
+    now: DateTime<Utc>,
+) -> Result<ApplyOutcome, ApplyError> {
+    let tx = db.immediate_transaction()?;
+    let outcome = apply_proposal_in_scope(
+        &tx,
+        job_id,
+        lease_attempt,
+        proposal,
+        now,
+        AuthorizationScope::LocalOnly,
+    )?;
+    tx.commit().map_err(anyhow::Error::from)?;
+    Ok(outcome)
+}
+
+/// End a job whose transient failures used up the pinned retry policy. The job becomes `failed`
+/// with reason [`RETRIES_EXHAUSTED_REASON`]; a first interpretation leaves the item
+/// `uninterpreted` and a prior result and all applied facets are kept. Atomic.
+pub fn record_interpretation_retries_exhausted(
+    db: &mut Database,
+    job_id: &str,
+    lease_attempt: i32,
+    now: DateTime<Utc>,
+) -> Result<ApplyOutcome, ApplyError> {
+    let tx = db.immediate_transaction()?;
+    let outcome = within_savepoint(&tx, || {
+        let job = match gate_job(
+            &tx,
+            job_id,
+            lease_attempt,
+            AuthorizationScope::LocalOnly,
+            |finished| {
+                Ok(finished.status == JobStatus::Failed
+                    && finished.failure_reason.as_deref() == Some(RETRIES_EXHAUSTED_REASON))
+            },
+        )? {
+            JobGate::AlreadyRecorded => return Ok(ApplyOutcome::Duplicate),
+            JobGate::Proceed(job) => job,
+        };
+        let source = load_source_context(&tx, &job)?;
+        fail_job(
+            &tx,
+            &job,
+            &source,
+            FailureDisposition::Permanent(RETRIES_EXHAUSTED_REASON.to_string()),
+            now,
+        )
+    })?;
+    tx.commit().map_err(anyhow::Error::from)?;
+    Ok(outcome)
+}
+
 /// Record a provider failure for an interpretation job in one transaction.
 pub fn record_interpretation_failure(
     db: &mut Database,
@@ -186,6 +250,15 @@ struct SourceContext {
     time_context: TimeContext,
 }
 
+/// Which authorization an applied result needs. A result produced on the device by the offline
+/// grammar contacted no destination, so it needs no route grant or provider profile; the job
+/// must still be the running, leased interpretation job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthorizationScope {
+    Dispatch,
+    LocalOnly,
+}
+
 enum JobGate {
     Proceed(Job),
     AlreadyRecorded,
@@ -198,6 +271,7 @@ fn gate_job(
     tx: &Transaction<'_>,
     job_id: &str,
     lease_attempt: i32,
+    scope: AuthorizationScope,
     already_recorded: impl FnOnce(&Job) -> Result<bool, ApplyError>,
 ) -> Result<JobGate, ApplyError> {
     let job =
@@ -221,8 +295,10 @@ fn gate_job(
             current: job.attempt_count,
         });
     }
-    if let Some(denial) = authorize_job(tx, job_id)?.denial() {
-        return Err(ApplyError::Unauthorized(denial));
+    if scope == AuthorizationScope::Dispatch {
+        if let Some(denial) = authorize_job(tx, job_id)?.denial() {
+            return Err(ApplyError::Unauthorized(denial));
+        }
     }
     Ok(JobGate::Proceed(job))
 }
@@ -335,8 +411,26 @@ pub fn apply_interpretation_proposal_in_tx(
     proposal: &Proposal,
     now: DateTime<Utc>,
 ) -> Result<ApplyOutcome, ApplyError> {
+    apply_proposal_in_scope(
+        tx,
+        job_id,
+        lease_attempt,
+        proposal,
+        now,
+        AuthorizationScope::Dispatch,
+    )
+}
+
+fn apply_proposal_in_scope(
+    tx: &Transaction<'_>,
+    job_id: &str,
+    lease_attempt: i32,
+    proposal: &Proposal,
+    now: DateTime<Utc>,
+    scope: AuthorizationScope,
+) -> Result<ApplyOutcome, ApplyError> {
     within_savepoint(tx, || {
-        let job = match gate_job(tx, job_id, lease_attempt, |finished| {
+        let job = match gate_job(tx, job_id, lease_attempt, scope, |finished| {
             Ok(finished.status == JobStatus::Completed
                 && proposal_recorded_for(tx, proposal, finished)?)
         })? {
@@ -633,18 +727,24 @@ pub fn record_interpretation_failure_in_tx(
 ) -> Result<ApplyOutcome, ApplyError> {
     within_savepoint(tx, || {
         let disposition = failure_reason(failure);
-        let job = match gate_job(tx, job_id, lease_attempt, |finished| {
-            Ok(finished.status == JobStatus::Failed
-                && match &disposition {
-                    Some(FailureDisposition::Permanent(reason)) => {
-                        finished.failure_reason.as_deref() == Some(reason.as_str())
-                    }
-                    Some(FailureDisposition::ConfigurationWait(reason)) => {
-                        finished.failure_reason.as_deref() == Some(*reason)
-                    }
-                    None => false,
-                })
-        })? {
+        let job = match gate_job(
+            tx,
+            job_id,
+            lease_attempt,
+            AuthorizationScope::Dispatch,
+            |finished| {
+                Ok(finished.status == JobStatus::Failed
+                    && match &disposition {
+                        Some(FailureDisposition::Permanent(reason)) => {
+                            finished.failure_reason.as_deref() == Some(reason.as_str())
+                        }
+                        Some(FailureDisposition::ConfigurationWait(reason)) => {
+                            finished.failure_reason.as_deref() == Some(*reason)
+                        }
+                        None => false,
+                    })
+            },
+        )? {
             JobGate::AlreadyRecorded => return Ok(ApplyOutcome::Duplicate),
             JobGate::Proceed(job) => job,
         };

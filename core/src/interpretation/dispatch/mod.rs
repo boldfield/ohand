@@ -6,11 +6,13 @@
 //! 1. The source is read from durable state (current effective text, capture time context,
 //!    immutable route). A job whose item is gone, inactive or revised is retired; an item with no
 //!    text yet backs off.
-//! 2. The job is authorized (V02/V03) before anything else runs. A denial backs the job off with
-//!    reason `unauthorized` so the item reports that it awaits configuration; nothing is sent and
-//!    nothing is applied.
-//! 3. The offline fast path (F03) runs first and needs no provider. A recognized command is
-//!    applied directly. A fast-path abstention or non-match never suppresses the provider.
+//! 2. The offline fast path (F03) runs first. It needs no provider and no remote authorization,
+//!    because nothing leaves the device. A recognized command is applied directly through the
+//!    local apply path, even while the job's route grant is missing. A
+//!    fast-path abstention or non-match never suppresses the provider.
+//! 3. Otherwise the job is authorized (V02/V03) before any provider is chosen. A denial backs the
+//!    job off with reason `unauthorized` so the item reports that it awaits configuration;
+//!    nothing is sent and nothing is applied.
 //! 4. For a job pinned to a stored profile, the adapter registered for the profile's protocol is
 //!    selected and called through the shared `dispatch` harness with a request built only from the
 //!    trusted source. The reply is mapped through the checked proposal boundary and applied.
@@ -21,9 +23,12 @@
 //! reason) rather than as an interpretation result. Capture saving never waits on this module: it
 //! runs only for an already-saved item and only for a job someone has claimed.
 //!
-//! Retry policy for transient failures comes from the pinned profile's retry policy. Attempts are
-//! not capped: the capture stays safe and the item reports `retrying_after_transient` until the
-//! provider recovers, the profile is revoked or the item changes.
+//! Retry policy for transient failures comes from the pinned profile's retry policy. While the
+//! job has attempts left the capture stays safe and the item reports `retrying_after_transient`.
+//! When a transient failure happens on the last allowed attempt (`max_attempts` claims, counted by
+//! the job's `attempt_count`) the job ends `failed` with reason `retries_exhausted` through the
+//! I05 rules: the source and any prior result are kept and a first interpretation stays
+//! `uninterpreted`.
 
 mod registry;
 mod source;
@@ -31,7 +36,9 @@ mod source;
 pub use registry::AdapterRegistry;
 
 use crate::interpretation::apply::{
-    apply_interpretation_proposal, record_interpretation_failure, ApplyError, ApplyOutcome,
+    apply_interpretation_proposal, apply_local_interpretation_proposal,
+    record_interpretation_failure, record_interpretation_retries_exhausted, ApplyError,
+    ApplyOutcome,
 };
 use crate::interpretation::contracts::Proposal;
 use crate::interpretation::fast_path::recognize_with_session_topic;
@@ -196,15 +203,6 @@ impl<'a> InterpretationDispatcher<'a> {
             }
         };
 
-        let authorization = match authorize_job(db.conn(), &job.job_id)? {
-            crate::privacy::routing::AuthorizationDecision::Authorized(authorization) => {
-                authorization
-            }
-            crate::privacy::routing::AuthorizationDecision::Denied(denial) => {
-                return self.denied(db, job, denial, now)
-            }
-        };
-
         let proposal_id = proposal_id_for_job(job, request_version);
         let mut fast_path_abstention = None;
         if let Some(mut proposal) = recognize_with_session_topic(
@@ -222,6 +220,15 @@ impl<'a> InterpretationDispatcher<'a> {
             }
             fast_path_abstention = Some(proposal);
         }
+
+        let authorization = match authorize_job(db.conn(), &job.job_id)? {
+            crate::privacy::routing::AuthorizationDecision::Authorized(authorization) => {
+                authorization
+            }
+            crate::privacy::routing::AuthorizationDecision::Denied(denial) => {
+                return self.denied(db, job, denial, now)
+            }
+        };
 
         let unavailable = || ProviderFailure::new(FailureKind::CapabilityUnavailable);
         let Some(profile_version) = authorization.profile_version() else {
@@ -276,6 +283,9 @@ impl<'a> InterpretationDispatcher<'a> {
             },
             Err(failure) => match failure.class {
                 ErrorClass::Transient => {
+                    if retries_exhausted(job, profile.retry_policy()) {
+                        return self.exhausted(db, job, failure, now);
+                    }
                     let backoff = transient_backoff(profile.retry_policy());
                     self.back_off(
                         db,
@@ -310,7 +320,19 @@ impl<'a> InterpretationDispatcher<'a> {
         route: InterpretationRoute,
         now: DateTime<Utc>,
     ) -> Result<DispatchOutcome, DispatchError> {
-        match apply_interpretation_proposal(db, &job.job_id, job.attempt_count, proposal, now) {
+        let applied = match route {
+            InterpretationRoute::FastPath => apply_local_interpretation_proposal(
+                db,
+                &job.job_id,
+                job.attempt_count,
+                proposal,
+                now,
+            ),
+            InterpretationRoute::Provider => {
+                apply_interpretation_proposal(db, &job.job_id, job.attempt_count, proposal, now)
+            }
+        };
+        match applied {
             Ok(outcome) => Ok(DispatchOutcome::Interpreted { route, outcome }),
             Err(error) => self.settle_apply_error(db, job, error, now),
         }
@@ -324,6 +346,19 @@ impl<'a> InterpretationDispatcher<'a> {
         now: DateTime<Utc>,
     ) -> Result<DispatchOutcome, DispatchError> {
         match record_interpretation_failure(db, &job.job_id, job.attempt_count, &failure, now) {
+            Ok(outcome) => Ok(DispatchOutcome::Failed { failure, outcome }),
+            Err(error) => self.settle_apply_error(db, job, error, now),
+        }
+    }
+
+    fn exhausted(
+        &self,
+        db: &mut Database,
+        job: &Job,
+        failure: ProviderFailure,
+        now: DateTime<Utc>,
+    ) -> Result<DispatchOutcome, DispatchError> {
+        match record_interpretation_retries_exhausted(db, &job.job_id, job.attempt_count, now) {
             Ok(outcome) => Ok(DispatchOutcome::Failed { failure, outcome }),
             Err(error) => self.settle_apply_error(db, job, error, now),
         }
@@ -431,6 +466,12 @@ fn configuration_backoff() -> Backoff {
         base_seconds: CONFIGURATION_BACKOFF_BASE_SECONDS,
         max_seconds: CONFIGURATION_BACKOFF_MAX_SECONDS,
     }
+}
+
+/// Every claim increments the job's `attempt_count`, so the claim being run is attempt number
+/// `attempt_count`; the pinned policy allows `max_attempts` of them.
+fn retries_exhausted(job: &Job, policy: &RetryPolicy) -> bool {
+    u32::try_from(job.attempt_count).unwrap_or(0) >= policy.max_attempts
 }
 
 fn transient_backoff(policy: &RetryPolicy) -> Backoff {

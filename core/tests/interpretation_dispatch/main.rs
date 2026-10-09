@@ -866,6 +866,112 @@ fn a_transient_outage_backs_off_visibly_and_the_retry_succeeds() {
 }
 
 #[test]
+fn transient_failures_stop_at_the_pinned_attempt_limit_and_keep_the_source() {
+    let mut fixture = Fixture::new(FREE_FORM);
+    let profile = anthropic_profile();
+    fixture.set_up_provider(&profile, ANTHROPIC_ORIGIN);
+    let max_attempts = profile.retry_policy().max_attempts;
+    assert_eq!(max_attempts, 3);
+    let providers = Providers::anthropic(
+        (0..max_attempts)
+            .map(|_| FakeAnthropicStep::fail(TransportError::Unavailable))
+            .collect(),
+    );
+    let mut job = fixture.enqueue_and_claim(Some(&profile));
+    let before = fixture.durable();
+    let mut at = now();
+
+    for attempt in 1..max_attempts {
+        assert_eq!(job.attempt_count, attempt as i32);
+        let outcome = providers.run(&mut fixture, &job, at);
+        let retry_at = match outcome {
+            DispatchOutcome::BackedOff {
+                reason: WaitReason::Transient(FailureKind::Unavailable),
+                retry_at,
+            } => retry_at,
+            other => panic!("attempt {attempt}: {other:?}"),
+        };
+        assert_eq!(fixture.job_row(&job.job_id).status, "queued");
+        at = retry_at + Duration::seconds(1);
+        job = fixture.claim(at);
+    }
+
+    assert_eq!(job.attempt_count, max_attempts as i32);
+    let outcome = providers.run(&mut fixture, &job, at);
+
+    match outcome {
+        DispatchOutcome::Failed { failure, outcome } => {
+            assert_eq!(failure.kind, FailureKind::Unavailable);
+            assert!(matches!(
+                outcome,
+                ApplyOutcome::Failed {
+                    processing_state: ProcessingState::Uninterpreted
+                }
+            ));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(providers.calls_to_anthropic().len(), max_attempts as usize);
+    let row = fixture.job_row(&job.job_id);
+    assert_eq!(row.status, "failed");
+    assert_eq!(row.failure_reason.as_deref(), Some("retries_exhausted"));
+    let after = fixture.durable();
+    assert_eq!(after.capture_text, before.capture_text);
+    assert_eq!(after.item_type, None);
+    assert_eq!(after.proposals, 0);
+    assert_eq!(after.processing_state, "uninterpreted");
+    assert_eq!(fixture.status().processing_job_status, None);
+}
+
+#[test]
+fn exhausted_retries_preserve_an_earlier_result() {
+    let mut fixture = Fixture::new(FREE_FORM);
+    let profile = anthropic_profile();
+    fixture.set_up_provider(&profile, ANTHROPIC_ORIGIN);
+    let mut steps = vec![anthropic_reply(annotate_action(
+        FREE_FORM,
+        "call the roofer",
+    ))];
+    steps.extend((0..3).map(|_| FakeAnthropicStep::fail(TransportError::Unavailable)));
+    let providers = Providers::anthropic(steps);
+    let first = fixture.enqueue_and_claim(Some(&profile));
+    providers.run(&mut fixture, &first, now());
+    let after_first = fixture.durable();
+    assert_eq!(after_first.processing_state, "processed");
+
+    fixture.enqueue(Some(&profile), 0, now());
+    let mut job = fixture.claim(now());
+    let mut at = now();
+    let outcome = loop {
+        match providers.run(&mut fixture, &job, at) {
+            DispatchOutcome::BackedOff { retry_at, .. } => {
+                at = retry_at + Duration::seconds(1);
+                job = fixture.claim(at);
+            }
+            other => break other,
+        }
+    };
+
+    assert!(
+        matches!(
+            outcome,
+            DispatchOutcome::Failed {
+                outcome: ApplyOutcome::Failed {
+                    processing_state: ProcessingState::Processed
+                },
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
+    assert_eq!(fixture.durable(), after_first);
+    assert_eq!(
+        fixture.job_row(&job.job_id).failure_reason.as_deref(),
+        Some("retries_exhausted")
+    );
+}
+
+#[test]
 fn a_cancelled_call_requeues_immediately_without_touching_the_item() {
     let mut fixture = Fixture::new(FREE_FORM);
     let profile = anthropic_profile();
@@ -1121,7 +1227,7 @@ fn an_unauthorized_route_is_never_sent_to_a_provider() {
 }
 
 #[test]
-fn a_denied_job_does_not_even_use_the_fast_path() {
+fn a_supported_command_applies_locally_while_the_remote_grant_is_missing() {
     let text = "Remind me 2026-02-20 14:30:00 to call mom";
     let mut fixture = Fixture::new(text);
     let profile = anthropic_profile();
@@ -1132,11 +1238,48 @@ fn a_denied_job_does_not_even_use_the_fast_path() {
     let outcome = providers.run(&mut fixture, &job, now());
 
     assert!(
-        matches!(outcome, DispatchOutcome::BackedOff { .. }),
+        matches!(
+            outcome,
+            DispatchOutcome::Interpreted {
+                route: InterpretationRoute::FastPath,
+                outcome: ApplyOutcome::Applied { .. },
+            }
+        ),
         "{outcome:?}"
     );
-    assert!(fixture.reminder().is_none());
-    assert_eq!(fixture.durable().processing_state, "unprocessed");
+    assert!(providers.calls_to_anthropic().is_empty());
+    let durable = fixture.durable();
+    assert_eq!(durable.item_type.as_deref(), Some("action"));
+    assert_eq!(durable.processing_state, "processed");
+    assert_eq!(durable.capture_text, text);
+    let reminder = fixture.reminder().expect("reminder recorded");
+    assert_eq!(reminder.2.as_deref(), Some("2026-02-20T14:30:00Z"));
+    assert_eq!(fixture.job_row(&job.job_id).status, "completed");
+}
+
+#[test]
+fn free_text_still_waits_when_the_remote_grant_is_missing() {
+    let mut fixture = Fixture::new(FREE_FORM);
+    let profile = anthropic_profile();
+    fixture.install(&profile);
+    let providers = Providers::anthropic(vec![]);
+    let job = fixture.enqueue_and_claim(Some(&profile));
+    let before = fixture.durable();
+
+    let outcome = providers.run(&mut fixture, &job, now());
+
+    assert!(
+        matches!(
+            outcome,
+            DispatchOutcome::BackedOff {
+                reason: WaitReason::Denied(_),
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
+    assert!(providers.calls_to_anthropic().is_empty());
+    assert_eq!(fixture.durable(), before);
 }
 
 // ---- Stale work and identity ----
