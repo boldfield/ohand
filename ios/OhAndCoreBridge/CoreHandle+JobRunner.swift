@@ -168,7 +168,8 @@ extension CoreHandle {
     }
 
     /// Starts one drain of the ready jobs on the core's own thread and returns at once. `storePath` is the path
-    /// this core was opened with: the drain uses its own connection, so capture saves are never blocked. The final
+    /// this core was opened with (the core does not verify it): the drain uses its own connection, so capture
+    /// saves are never blocked. The final
     /// event for `operationID` decodes as `JobDrainSummary`. Refused with `drain_in_progress` while a drain of
     /// this handle runs, and with `host_not_registered` before `registerJobHost`.
     public func startJobDrain(operationID: UInt64, storePath: String) throws {
@@ -177,6 +178,14 @@ extension CoreHandle {
             ohand_core_start_job_drain(handleIdentifier, operationID, buffer.baseAddress, buffer.count)
         }
         _ = try consumeCoreResult(rawResult)
+    }
+
+    /// Tells the core whether provider requests can reach the network. While they cannot, the core defers jobs
+    /// that would call a provider, without spending retry budget and without ending the drain, so on-device
+    /// capabilities and local jobs keep running. A drain that starts with a network releases the deferred jobs.
+    /// Applies to the current registration (`host_not_registered` without one), which starts out reachable.
+    public func setJobNetworkReachable(_ reachable: Bool) throws {
+        _ = try consumeCoreResult(ohand_core_set_job_network_reachable(handleIdentifier, reachable ? 1 : 0))
     }
 
     /// Stops the running drain at a checkpoint: a request in flight is abandoned and its job put back without

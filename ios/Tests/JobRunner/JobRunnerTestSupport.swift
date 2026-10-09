@@ -33,6 +33,16 @@ enum JobStoreInspector {
             failureReason: reason)
     }
 
+    /// Settles a running job as completed, the way a native handler does through the core's own operations.
+    static func complete(at path: String, id: String) {
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(path, &database), SQLITE_OK)
+        defer { sqlite3_close(database) }
+        sqlite3_busy_timeout(database, 2000)
+        let statement = "UPDATE jobs SET status = 'completed', lease_expires_at = NULL WHERE job_id = '\(id)'"
+        XCTAssertEqual(sqlite3_exec(database, statement, nil, nil, nil), SQLITE_OK)
+    }
+
     /// Adds a queued job of a type that runs on the device, the way a foreground import would.
     static func insertQueuedJob(at path: String, id: String, jobType: String) throws {
         var database: OpaquePointer?
@@ -165,6 +175,64 @@ final class ScriptedCapability: JobCapabilityHandler, @unchecked Sendable {
         runs.append(job)
         lock.unlock()
         return result
+    }
+}
+
+/// A native job capability that settles its job as completed, optionally only after the test lets it go. It
+/// reports whether its task was ever cancelled while it waited.
+final class SettlingCapability: JobCapabilityHandler, @unchecked Sendable {
+    let jobType: String
+    private let storePath: String
+    private let lock = NSLock()
+    private var runs: [JobCapabilityRun] = []
+    private var isReleased: Bool
+    private var cancelledWhileWaiting = false
+
+    init(jobType: String, storePath: String, released: Bool = true) {
+        self.jobType = jobType
+        self.storePath = storePath
+        self.isReleased = released
+    }
+
+    var receivedRuns: [JobCapabilityRun] {
+        lock.lock()
+        defer { lock.unlock() }
+        return runs
+    }
+
+    var wasCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelledWhileWaiting
+    }
+
+    func release() {
+        lock.lock()
+        isReleased = true
+        lock.unlock()
+    }
+
+    func run(_ job: JobCapabilityRun) async -> JobCapabilityResult {
+        lock.lock()
+        runs.append(job)
+        lock.unlock()
+        while !currentlyReleased {
+            if Task.isCancelled {
+                lock.lock()
+                cancelledWhileWaiting = true
+                lock.unlock()
+                return .interrupted
+            }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        JobStoreInspector.complete(at: storePath, id: job.jobID)
+        return .settled
+    }
+
+    private var currentlyReleased: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return isReleased
     }
 }
 

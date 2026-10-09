@@ -842,3 +842,113 @@ fn labels_helpers_and_names_are_conservative() {
     assert!(parse_transport_error("rate_limited").is_some());
     assert!(parse_transport_error("RateLimited").is_none());
 }
+
+fn set_reachable(session: &Session, reachable: bool) -> Outcome {
+    consume(ohand_core_set_job_network_reachable(
+        session.handle,
+        u32::from(reachable),
+    ))
+}
+
+#[test]
+fn offline_a_provider_job_is_deferred_without_cost_and_native_jobs_still_run() {
+    let _guard = serial();
+    let session = Session::open("offline-native", true);
+    session.register_host(&[NATIVE_JOB_TYPE]);
+    assert_eq!(set_reachable(&session, false).status, OHAND_CORE_STATUS_OK);
+
+    session.start(121);
+    let run = session.command();
+    assert_eq!(run.command, OHAND_JOB_HOST_COMMAND_RUN_CAPABILITY);
+    let body: Value = serde_json::from_slice(&run.data).unwrap();
+    assert_eq!(body["job_id"], NATIVE_JOB_ID);
+    let attempt = body["attempt"].as_i64().unwrap() as i32;
+    complete_job(&mut session.database(), NATIVE_JOB_ID, attempt).unwrap();
+    session.finish(run.request_id, OHAND_JOB_CAPABILITY_SETTLED, "");
+    let summary = payload_of(&session.event(121));
+    assert_eq!(summary["stop"], "idle", "{summary}");
+    let provider = summary["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|job| job["job_id"] == JOB_ID)
+        .expect("the provider job is reported");
+    assert_eq!(provider["settlement"], "backed_off");
+    session.assert_no_command();
+
+    let deferred = session.job(JOB_ID);
+    assert_eq!(deferred.status, JobStatus::Queued);
+    assert_eq!(deferred.attempt_count, 1, "only the claim, no failure");
+    assert_eq!(
+        deferred.failure_reason.as_deref(),
+        Some(OFFLINE_DEFERRED_REASON)
+    );
+    assert_eq!(session.job(NATIVE_JOB_ID).status, JobStatus::Completed);
+
+    set_reachable(&session, true);
+    wait_for_drain_to_end(session.handle);
+    session.start(122);
+    let send = session.command();
+    assert_eq!(send.command, OHAND_JOB_HOST_COMMAND_SEND);
+    session.complete(send.request_id, 200, &anthropic_reply());
+    let summary = payload_of(&session.event(122));
+    assert_eq!(only_job(&summary)["settlement"], "completed", "{summary}");
+    assert_eq!(session.job(JOB_ID).status, JobStatus::Completed);
+    session.close();
+}
+
+#[test]
+fn the_reachability_flag_needs_a_registered_host() {
+    let _guard = serial();
+    let session = Session::open("offline-no-host", false);
+    assert_eq!(
+        set_reachable(&session, false).status,
+        failures::HOST_NOT_REGISTERED.status()
+    );
+    session.close();
+}
+
+#[test]
+fn a_host_that_settled_the_job_as_failed_is_reported_as_failed() {
+    let _guard = serial();
+    let session = Session::open("settled-failed", true);
+    set_reachable_after_register(&session);
+
+    session.start(131);
+    loop {
+        let command = session.command();
+        match command.command {
+            OHAND_JOB_HOST_COMMAND_SEND => {
+                session.complete(command.request_id, 200, &anthropic_reply());
+            }
+            OHAND_JOB_HOST_COMMAND_RUN_CAPABILITY => {
+                session
+                    .database()
+                    .conn()
+                    .execute(
+                        "UPDATE jobs SET status = 'failed', lease_expires_at = NULL \
+                         WHERE job_id = ?",
+                        [NATIVE_JOB_ID],
+                    )
+                    .unwrap();
+                session.finish(command.request_id, OHAND_JOB_CAPABILITY_SETTLED, "");
+                break;
+            }
+            other => panic!("unexpected command {other}"),
+        }
+    }
+    let summary = payload_of(&session.event(131));
+    let native = summary["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|job| job["job_id"] == NATIVE_JOB_ID)
+        .unwrap();
+    assert_eq!(native["settlement"], "failed", "{summary}");
+    session.close();
+}
+
+fn set_reachable_after_register(session: &Session) {
+    session.register_host(&[NATIVE_JOB_TYPE]);
+    assert_eq!(set_reachable(session, true).status, OHAND_CORE_STATUS_OK);
+}

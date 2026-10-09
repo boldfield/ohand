@@ -12,6 +12,9 @@
 //! * **One drain per handle.** A second start while one runs is refused (`drain_in_progress`), so
 //!   repeated or overlapping activation cannot create competing drainers. The refusal changes
 //!   nothing; the caller decides whether to run again after the final event.
+//! * **Offline is not a drain stopper.** `ohand_core_set_job_network_reachable` tells the core
+//!   whether provider calls can succeed. While they cannot, jobs that would call a provider are
+//!   deferred without cost and the drain moves on to on-device and local jobs.
 //! * **Cancellation is a checkpoint.** `ohand_core_cancel_job_drain` fires the runner's
 //!   `CancelToken`. A provider call in flight is abandoned and its job is re-queued at once
 //!   without spending retry budget; the drain ends with `stop: "cancelled"` (or `"interrupted"`).
@@ -41,7 +44,7 @@ use super::core_handle::failure::AbiFailure;
 use super::core_handle::instance::{self, lock, JobFn};
 use crate::interpretation::dispatch::{AdapterRegistry, InterpretationDispatcher};
 use crate::jobs::configuration::{resolve_execution_target, ExecutionResolution};
-use crate::jobs::queue::Job;
+use crate::jobs::queue::{get_job, Job, JobStatus};
 use crate::jobs::runner::{
     CapabilityError, CapabilityOutcome, DrainReport, InterpretationCapability, JobCapabilities,
     JobCapability, JobResult, JobRunner, RunnerConfig, Settlement, StopReason,
@@ -61,7 +64,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -108,6 +111,11 @@ const QUEUE_RETRY_PAUSE: Duration = Duration::from_millis(10);
 const QUEUE_RETRY_LIMIT: u32 = 500;
 /// A native capability run is abandoned before the runner's lease would lapse.
 const CAPABILITY_DEADLINE: Duration = Duration::from_secs(240);
+/// Recorded on a provider job put back because the host reported no network.
+const OFFLINE_DEFERRED_REASON: &str = "offline_deferred";
+/// How long an offline-deferred job waits; the next drain that starts with a network releases it
+/// at once, so this only bounds the wait if that release could not be written.
+const OFFLINE_DEFERRAL: chrono::Duration = chrono::Duration::seconds(30);
 const MAX_REASON_BYTES: usize = 64;
 const FALLBACK_REASON: &str = "native_failure";
 
@@ -116,6 +124,8 @@ struct Registration {
     context: usize,
     native_job_types: Vec<String>,
     active: Mutex<bool>,
+    /// Whether provider work can reach the network. Only the host knows; it starts `true`.
+    network_available: AtomicBool,
 }
 
 impl Registration {
@@ -458,6 +468,7 @@ impl HttpTransport for HostTransport {
 /// transport, so they leave the set unused.
 struct ScopedInterpretation<'a> {
     handle: u64,
+    host: Arc<Registration>,
     inner: InterpretationCapability<'a>,
     authorized_origins: Arc<Mutex<Vec<String>>>,
 }
@@ -482,9 +493,59 @@ impl JobCapability for ScopedInterpretation<'_> {
             Ok(ExecutionResolution::Remote(target)) => target.destinations,
             _ => Vec::new(),
         };
+        if !destinations.is_empty() && !self.host.network_available.load(Ordering::SeqCst) {
+            return defer_until_network(db, claimed, now);
+        }
         *lock(&self.authorized_origins) = destinations;
         self.inner.run(db, claimed, cancel, now)
     }
+}
+
+/// Puts a job that needs the network back for a while without spending retry budget. Unlike an
+/// interrupted job it does not end the drain, so on-device and local jobs queued behind it still
+/// run while the device is offline.
+fn defer_until_network(
+    db: &mut Database,
+    claimed: &Job,
+    now: DateTime<Utc>,
+) -> Result<CapabilityOutcome, CapabilityError> {
+    let retry_at = now + OFFLINE_DEFERRAL;
+    let affected = db
+        .conn()
+        .execute(
+            "UPDATE jobs SET status = ?, failure_reason = ?, next_attempt_at = ?, lease_expires_at = NULL
+              WHERE job_id = ? AND status = ? AND attempt_count = ?",
+            rusqlite::params![
+                JobStatus::Queued.as_str(),
+                OFFLINE_DEFERRED_REASON,
+                retry_at.to_rfc3339(),
+                claimed.job_id,
+                JobStatus::Running.as_str(),
+                claimed.attempt_count
+            ],
+        )
+        .map_err(|error| CapabilityError::Internal(error.to_string()))?;
+    if affected != 1 {
+        return Err(CapabilityError::LeaseLost(format!(
+            "job {} lease is no longer held",
+            claimed.job_id
+        )));
+    }
+    Ok(CapabilityOutcome::Settled(Settlement::BackedOff {
+        retry_at,
+    }))
+}
+
+/// Makes the jobs an offline drain deferred ready again; called when a drain starts with a network.
+fn release_offline_deferred(db: &Database, now: DateTime<Utc>) {
+    let _ = db.conn().execute(
+        "UPDATE jobs SET next_attempt_at = ? WHERE status = ? AND failure_reason = ?",
+        rusqlite::params![
+            now.to_rfc3339(),
+            JobStatus::Queued.as_str(),
+            OFFLINE_DEFERRED_REASON
+        ],
+    );
 }
 
 /// A job type the host declared it can run. The host applies its own result through the core's
@@ -509,10 +570,10 @@ impl JobCapability for HostCapability {
 
     fn run(
         &self,
-        _db: &mut Database,
+        db: &mut Database,
         claimed: &Job,
         cancel: &CancelToken,
-        _now: DateTime<Utc>,
+        now: DateTime<Utc>,
     ) -> Result<CapabilityOutcome, CapabilityError> {
         if instance::lookup(self.handle).is_err() {
             cancel.cancel();
@@ -543,7 +604,7 @@ impl JobCapability for HostCapability {
         let deadline = Instant::now() + CAPABILITY_DEADLINE;
         loop {
             match receiver.recv_timeout(WAIT_SLICE) {
-                Ok(answer) => return Ok(capability_outcome(answer)),
+                Ok(answer) => return Ok(capability_outcome(answer, db, claimed, now)),
                 Err(RecvTimeoutError::Disconnected) => return Ok(CapabilityOutcome::Interrupted),
                 Err(RecvTimeoutError::Timeout) => {}
             }
@@ -565,9 +626,32 @@ impl JobCapability for HostCapability {
     }
 }
 
-fn capability_outcome(answer: CapabilityAnswer) -> CapabilityOutcome {
+/// What the host's settlement did to the job, read back from the store so the report says
+/// `failed` or `retired` rather than `completed` when that is what the host recorded.
+fn settlement_of_host_answer(db: &Database, claimed: &Job, now: DateTime<Utc>) -> Settlement {
+    match get_job(db, &claimed.job_id) {
+        Ok(Some(job)) => match job.status {
+            JobStatus::Failed => Settlement::Failed,
+            JobStatus::Cancelled => Settlement::Retired,
+            JobStatus::Queued => Settlement::BackedOff {
+                retry_at: job.next_attempt_at.unwrap_or(now),
+            },
+            JobStatus::Completed | JobStatus::Running => Settlement::Completed,
+        },
+        _ => Settlement::Completed,
+    }
+}
+
+fn capability_outcome(
+    answer: CapabilityAnswer,
+    db: &Database,
+    claimed: &Job,
+    now: DateTime<Utc>,
+) -> CapabilityOutcome {
     match answer.outcome {
-        OHAND_JOB_CAPABILITY_SETTLED => CapabilityOutcome::Settled(Settlement::Completed),
+        OHAND_JOB_CAPABILITY_SETTLED => {
+            CapabilityOutcome::Settled(settlement_of_host_answer(db, claimed, now))
+        }
         OHAND_JOB_CAPABILITY_TRANSIENT => CapabilityOutcome::TransientFailure {
             reason: answer.reason,
         },
@@ -657,6 +741,9 @@ fn run_drain(
     let store_clock = Arc::new(StoreClock);
     let mut database = Database::open(path, store_clock.clone())
         .map_err(|error| AbiFailure::from_store(&error, AbiFailure::STORE_UNAVAILABLE))?;
+    if host.network_available.load(Ordering::SeqCst) {
+        release_offline_deferred(&database, Utc::now());
+    }
 
     let authorized_origins = Arc::new(Mutex::new(Vec::new()));
     let transport = HostTransport {
@@ -673,6 +760,7 @@ fn run_drain(
     let provider_clock = SystemClock::new();
     let mut capabilities = JobCapabilities::new().with(ScopedInterpretation {
         handle,
+        host: Arc::clone(&host),
         inner: InterpretationCapability::new(InterpretationDispatcher::new(
             &registry,
             &provider_clock,
@@ -762,6 +850,7 @@ pub unsafe extern "C" fn ohand_core_set_job_host(
                     context: context as usize,
                     native_job_types,
                     active: Mutex::new(true),
+                    network_available: AtomicBool::new(true),
                 });
                 lock(&HOSTS).insert(handle, registration)
             }
@@ -788,9 +877,31 @@ pub unsafe extern "C" fn ohand_core_set_job_host(
     })
 }
 
+/// Tells the core whether the host can reach the network. While it cannot, a job that would call
+/// a provider is put back for a while without spending retry budget and without ending the drain,
+/// so on-device and local jobs keep running; a drain that starts with a network releases those
+/// jobs at once. A registration starts out reachable. Refused with `host_not_registered` when no
+/// host is registered; the flag belongs to the registration, so re-register, then set it again.
+#[no_mangle]
+pub extern "C" fn ohand_core_set_job_network_reachable(
+    handle: OhandCoreHandle,
+    reachable: u32,
+) -> OhandCoreResult {
+    guarded(|| {
+        let host = lock(&HOSTS)
+            .get(&handle)
+            .cloned()
+            .ok_or(failures::HOST_NOT_REGISTERED)?;
+        host.network_available
+            .store(reachable != 0, Ordering::SeqCst);
+        Ok(())
+    })
+}
+
 /// Starts one drain of the ready jobs for `handle` on its own thread and returns at once; the
 /// outcome arrives as an event for `operation_id` (see the module documentation).
-/// `store_path` is the path the handle was opened with: the drain opens its own connection to it.
+/// `store_path` must be the path the handle was opened with: the drain opens its own connection to
+/// it, and the core does not verify the caller's claim.
 /// Refused with `host_not_registered` when no host is registered, `drain_in_progress` when a drain
 /// of this handle is already running, and `store_not_shareable` for an in-memory store.
 ///

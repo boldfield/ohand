@@ -22,9 +22,12 @@ public enum JobDrainOutcome: Equatable, Sendable {
 ///   request in flight is abandoned and its job is put back without spending retry budget, so the next launch
 ///   resumes it. A job whose lease is simply abandoned (the process was killed) is recovered by the core when the
 ///   lease expires.
-/// * **Offline does not spend retries.** While the network is unreachable no drain starts, a drain in flight is
-///   cancelled, and a request that still reaches the host is answered `cancelled`, which the core puts back
-///   without counting a failure. Network return starts a drain.
+/// * **Offline does not spend retries, and does not stop on-device work.** Reachability gates only provider
+///   (network) work. The service tells the core when the network goes away; the core then puts jobs that would
+///   call a provider back without counting a failure and carries on with on-device capabilities and local jobs.
+///   A provider request already in flight is cancelled, and one that still reaches the host is answered
+///   `cancelled`, which the core also puts back at no cost. Network return starts a drain, which releases the
+///   deferred jobs. A native capability running when the network drops is not cancelled.
 ///
 /// The owner of the core's single event handler must forward every event to `handle(_:)`; it returns `true` when
 /// the event ended one of this service's drains.
@@ -89,9 +92,17 @@ public final class JobRunnerService: @unchecked Sendable {
         let service = JobRunnerService(
             core: core, storePath: storePath, sender: sender, capabilityHandlers: handlers,
             isReachable: isReachable, retryDelay: retryDelay)
-        service.registration = try core.registerJobHost(nativeJobTypes: handlers.keys.sorted()) {
+        let registration = try core.registerJobHost(nativeJobTypes: handlers.keys.sorted()) {
             [weak service] requestID, command in
             service?.handleHost(requestID: requestID, command: command)
+        }
+        service.registration = registration
+        do {
+            try core.setJobNetworkReachable(isReachable)
+        } catch {
+            registration.invalidate()
+            service.registration = nil
+            throw error
         }
         return service
     }
@@ -147,21 +158,22 @@ public final class JobRunnerService: @unchecked Sendable {
         requestDrain()
     }
 
-    /// The network changed. Becoming reachable starts a drain; becoming unreachable stops the one in flight at a
-    /// checkpoint without spending retry budget.
+    /// The network changed. Becoming reachable starts a drain. Becoming unreachable abandons the provider requests
+    /// in flight without spending retry budget; the drain carries on with on-device capabilities and local jobs.
     public func reachabilityChanged(_ reachable: Bool) {
         stateLock.lock()
-        isReachable = reachable
-        if !reachable {
-            rerunRequested = false
-            retryTask?.cancel()
-            retryTask = nil
+        guard !isShutDown else {
+            stateLock.unlock()
+            return
         }
+        isReachable = reachable
+        let sends = reachable ? [] : Array(runningSends.values)
         stateLock.unlock()
+        try? core.setJobNetworkReachable(reachable)
         if reachable {
             requestDrain()
         } else {
-            cancelRunningDrain()
+            sends.forEach { $0.cancel() }
         }
     }
 
@@ -249,25 +261,38 @@ public final class JobRunnerService: @unchecked Sendable {
         }
     }
 
-    /// A trigger arrived during the drain, or the drain stopped only because it reached its bounds.
+    /// A trigger arrived during the drain, the drain stopped only because it reached its bounds, or a provider
+    /// request was abandoned because the network dropped (the core ends the drain at that job; the jobs queued
+    /// behind it, such as on-device ones, still need their turn and no longer wait for the network).
     private func wantsAnotherDrain(after outcome: JobDrainOutcome) -> Bool {
         if rerunRequested { return true }
         guard case .finished(let summary) = outcome else { return false }
+        if summary.stop == "interrupted" {
+            return !isReachable && summary.jobs.last?.jobType == Self.providerJobType
+        }
         return summary.stop == "job_limit" || summary.stop == "time_budget"
     }
 
+    /// Whether the drain left work that a timer should retry. A job the core deferred as
+    /// `capability_unavailable` is left out: the core already holds it back for a long while, and nothing changes
+    /// until a handler is registered. While offline, provider jobs are left out too: they wait for the network, and
+    /// network return starts a drain.
     private func hasRetryableWork(_ outcome: JobDrainOutcome) -> Bool {
         guard case .finished(let summary) = outcome else { return false }
         if summary.stop == "claim_failed" { return true }
-        return summary.jobs.contains {
-            $0.result == "retry_scheduled" || $0.result == "capability_unavailable" || $0.settlement == "backed_off"
+        return summary.jobs.contains { job in
+            if !isReachable && job.jobType == Self.providerJobType { return false }
+            return job.result == "retry_scheduled" || job.settlement == "backed_off"
         }
     }
 
     // MARK: draining
 
+    /// The core's own job type for provider interpretation, the only work that needs the network.
+    private static let providerJobType = "interpret"
+
     private var canDrainLocked: Bool {
-        isForeground && isReachable && !isShutDown
+        isForeground && !isShutDown
     }
 
     private func requestDrain() {

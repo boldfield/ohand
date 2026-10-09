@@ -216,13 +216,16 @@ final class JobRunnerBoundaryTests: ProviderTransportTestCase {
             try makeStore(), sender: FixtureRoutingSender(underlying: transport, fixtureServer: server), isReachable: false)
 
         session.service.activate()
-        session.pumpFor(0.5)
-        XCTAssertEqual(session.service.startedDrainCount, 0, "no provider work starts while offline")
+        XCTAssertTrue(session.waitForFinishedDrains(1))
+        XCTAssertEqual(session.summary()?.jobs.first?.settlement, "backed_off", "the provider job was deferred")
         XCTAssertEqual(job(session)?.status, "queued")
-        XCTAssertEqual(job(session)?.attemptCount, 0, "nothing was claimed while offline")
+        XCTAssertEqual(job(session)?.failureReason, "offline_deferred")
+        XCTAssertTrue(server.requests.isEmpty, "no provider request is made while offline")
+        session.pumpFor(0.3)
+        XCTAssertEqual(session.service.startedDrainCount, 1, "offline deferral schedules no retry loop")
 
         session.service.reachabilityChanged(true)
-        XCTAssertTrue(session.waitForFinishedDrains(1))
+        XCTAssertTrue(session.waitForFinishedDrains(2))
         XCTAssertEqual(job(session)?.status, "completed")
         XCTAssertEqual(server.requests.count, 1)
     }
@@ -234,19 +237,18 @@ final class JobRunnerBoundaryTests: ProviderTransportTestCase {
 
         session.service.activate()
         XCTAssertTrue(session.pump(until: { gated.requestCount == 1 }))
-        let attemptsWhileRunning = try XCTUnwrap(job(session)).attemptCount
 
         session.service.reachabilityChanged(false)
-        XCTAssertTrue(session.waitForFinishedDrains(1))
+        XCTAssertTrue(
+            session.pump(until: { self.job(session)?.failureReason == "offline_deferred" && !session.service.isDraining }),
+            "the abandoned request's job waits for the network")
         let stored = try XCTUnwrap(job(session))
         XCTAssertEqual(stored.status, "queued")
-        XCTAssertLessThanOrEqual(stored.attemptCount, attemptsWhileRunning)
         XCTAssertTrue(server.requests.isEmpty)
 
         gated.open()
         session.service.reachabilityChanged(true)
-        XCTAssertTrue(session.waitForFinishedDrains(2))
-        XCTAssertEqual(job(session)?.status, "completed")
+        XCTAssertTrue(session.pump(until: { self.job(session)?.status == "completed" }))
         XCTAssertEqual(server.requests.count, 1)
     }
 
@@ -351,5 +353,53 @@ final class JobRunnerBoundaryTests: ProviderTransportTestCase {
         let deferred = try XCTUnwrap(summary.jobs.first { $0.jobType == "transcribe" })
         XCTAssertEqual(deferred.result, "capability_unavailable")
         XCTAssertEqual(job(session, "job-native-3")?.status, "queued")
+    }
+
+    // MARK: offline on-device work
+
+    func testOfflineAnOnDeviceCapabilityRunsAndSettlesWhileTheProviderJobWaits() throws {
+        let server = try makeServer()
+        let storePath = try makeStore()
+        try JobStoreInspector.insertQueuedJob(at: storePath, id: "job-native-4", jobType: "transcribe")
+        let capability = SettlingCapability(jobType: "transcribe", storePath: storePath)
+        let session = try open(
+            storePath, sender: FixtureRoutingSender(underlying: transport, fixtureServer: server),
+            capabilities: [capability], isReachable: false)
+
+        session.service.activate()
+        XCTAssertTrue(session.waitForFinishedDrains(1))
+
+        XCTAssertEqual(capability.receivedRuns.map(\.jobID), ["job-native-4"], "the capability ran offline")
+        XCTAssertEqual(job(session, "job-native-4")?.status, "completed")
+        let summary = try XCTUnwrap(session.summary())
+        XCTAssertEqual(summary.stop, "idle", "the deferred provider job did not end the drain")
+        XCTAssertEqual(summary.jobs.first { $0.jobType == "transcribe" }?.settlement, "completed")
+        XCTAssertEqual(job(session)?.status, "queued")
+        XCTAssertEqual(job(session)?.failureReason, "offline_deferred")
+        XCTAssertTrue(server.requests.isEmpty)
+    }
+
+    func testGoingOfflineDoesNotCancelARunningOnDeviceCapability() throws {
+        let server = try makeServer()
+        let storePath = try makeStore()
+        try JobStoreInspector.insertQueuedJob(at: storePath, id: "job-native-5", jobType: "transcribe")
+        let capability = SettlingCapability(jobType: "transcribe", storePath: storePath, released: false)
+        let session = try open(
+            storePath, sender: FixtureRoutingSender(underlying: transport, fixtureServer: server),
+            capabilities: [capability])
+
+        session.service.activate()
+        XCTAssertTrue(session.pump(until: { !capability.receivedRuns.isEmpty }))
+
+        session.service.reachabilityChanged(false)
+        session.pumpFor(0.5)
+        XCTAssertTrue(session.service.isDraining, "the drain keeps waiting for the capability")
+        XCTAssertFalse(capability.wasCancelled)
+
+        capability.release()
+        XCTAssertTrue(session.waitForFinishedDrains(1))
+        XCTAssertFalse(capability.wasCancelled)
+        XCTAssertEqual(job(session, "job-native-5")?.status, "completed")
+        XCTAssertEqual(try XCTUnwrap(session.summary()).stop, "idle")
     }
 }

@@ -1,8 +1,8 @@
 import Foundation
 import Network
 
-/// Whether the device can currently reach the network at all. The job loop uses it only to avoid starting provider
-/// work that is certain to fail and burn a job's retry budget.
+/// Whether the device can currently reach the network at all. The job loop uses it only to hold back provider
+/// work that is certain to fail and burn a job's retry budget; on-device work never waits for it.
 public protocol NetworkReachability: AnyObject {
     var isReachable: Bool { get }
     /// Starts reporting. `onChange` runs on an unspecified queue for every change, and once for the current state.
