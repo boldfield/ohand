@@ -916,10 +916,37 @@ const NEEDLESS_WORDS: &[&str] = &[
     "wanted",
 ];
 /// Verbs of wanting or needing. A retracting negation governing one of them withdraws the request
-/// only when the same clause says the wish has ended ("I no longer want that reminder", "I don't
-/// need it anymore"); "I don't want to miss it" keeps the request. "need" itself is also a
-/// [`RETRACTION_TARGETS`] entry, so "don't need" withdraws without an ended marker.
+/// when the same clause says the wish has ended ("I no longer want that reminder", "I don't need
+/// it anymore") or when the verb's own object is the reminder ("I don't want that reminder", "I
+/// don't want to be reminded"); "I don't want to miss it" keeps the request. "need" itself is
+/// also a [`RETRACTION_TARGETS`] entry, so "don't need" withdraws without either.
 const DESIRE_WORDS: &[&str] = &["want", "wants", "need", "needs", "care", "interested"];
+/// Nouns and verb forms naming the reminder or the act of being reminded. A negated desire verb
+/// whose object (after any [`OBJECT_LEAD_INS`]) is one of these withdraws the request.
+const REMINDER_OBJECT_WORDS: &[&str] = &[
+    "reminder",
+    "reminders",
+    "remind",
+    "reminded",
+    "reminding",
+    "alert",
+    "alerts",
+    "alerted",
+    "notification",
+    "notifications",
+    "notified",
+    "ping",
+    "pinged",
+    "nudge",
+];
+/// Words that may stand between a desire verb and the object it governs: determiners ("that
+/// reminder", "the reminder", "any reminders") and the links of a passive or delegated infinitive
+/// ("to be reminded", "you to remind me"). A content word such as "miss" in "to miss it" is the
+/// object itself and is not skipped.
+const OBJECT_LEAD_INS: &[&str] = &[
+    "that", "this", "the", "a", "an", "any", "my", "our", "such", "another", "those", "these",
+    "you", "to", "be", "get",
+];
 /// Words that say a wish or need has ended when they follow a retracting negation ("no longer",
 /// "not anymore", "don't want it any more").
 const ENDED_WORDS: &[&str] = &["longer", "anymore"];
@@ -1063,12 +1090,15 @@ fn states_reminder_intent(text: &str, time_span: Option<SourceSpan>) -> bool {
 /// ("don't forget the ladder") or an infinitive naming what the reminder is for ("to cancel the
 /// subscription"); a two-part construction within one clause ("I take that back", "I changed my
 /// mind", "I'll remember on my own"); or a plain negation that governs a reminder word ("actually
-/// don't remind me", "no reminder", "don't bother"), a needless adjective ("not needed", "no
-/// longer necessary") or, when the clause says the wish has ended, a wanting verb ("I no longer
-/// want that reminder", "I don't need it anymore"), possibly through a filler ("don't actually
-/// remind me"), or that closes its clause ("..., actually don't"). A negation governing anything
-/// else ("I don't want to miss it", "it's not urgent") keeps the request. Rejecting too much is
-/// safe: the reminder stays unscheduled and the original intention is kept with the item.
+/// don't remind me", "no reminder", "don't bother"), a needless adjective ("not needed", "not
+/// necessary", "no longer necessary") or a wanting verb that either has the reminder as its object
+/// ("I don't want that reminder", "I don't need the reminder") or whose clause says the wish has
+/// ended ("I no longer want that reminder", "I don't need it anymore"), possibly through a filler
+/// ("don't actually remind me"), or that closes its clause ("..., actually don't"). A negation
+/// governing anything else ("I don't want to miss it", "it's not urgent") keeps the request.
+/// This is the bounded withdrawal grammar recorded for I05 in
+/// `docs/features/m1-task-refinement.md`; phrasings outside it belong to I05b. Rejecting too much
+/// is safe: the reminder stays unscheduled and the original intention is kept with the item.
 fn retracted_after(tokens: &[IntentToken], after: usize) -> bool {
     let later: Vec<&IntentToken> = tokens.iter().filter(|token| token.start >= after).collect();
     (0..later.len()).any(|index| {
@@ -1104,18 +1134,34 @@ fn retracted_after(tokens: &[IntentToken], after: usize) -> bool {
             .copied()
             .take_while(|next| !next.clause_break)
             .collect();
-        let governed = same_clause.iter().find(|next| {
+        let governed = same_clause.iter().position(|next| {
             let text = next.text.as_str();
             !RETRACTION_FILLERS.contains(&text) && !ENDED_WORDS.contains(&text)
         });
-        governed.is_none_or(|next| {
+        governed.is_none_or(|position| {
+            let next = same_clause[position];
             let text = next.text.as_str();
             !next.quoted
                 && (RETRACTION_TARGETS.contains(&text)
                     || NEEDLESS_WORDS.contains(&text)
-                    || (DESIRE_WORDS.contains(&text) && wish_has_ended(&same_clause)))
+                    || (DESIRE_WORDS.contains(&text)
+                        && (wish_has_ended(&same_clause)
+                            || desire_governs_reminder(&same_clause[position + 1..]))))
         })
     })
+}
+
+/// Whether the words after a desire verb name the reminder as its object: the first word that is
+/// not an [`OBJECT_LEAD_INS`] entry is a [`REMINDER_OBJECT_WORDS`] entry ("that reminder", "the
+/// reminder", "to be reminded", "you to remind me"). "to miss it" names something else, and a
+/// quoted word is reported speech rather than the user's object.
+fn desire_governs_reminder(rest_of_clause: &[&IntentToken]) -> bool {
+    rest_of_clause
+        .iter()
+        .find(|token| !OBJECT_LEAD_INS.contains(&token.text.as_str()))
+        .is_some_and(|object| {
+            !object.quoted && REMINDER_OBJECT_WORDS.contains(&object.text.as_str())
+        })
 }
 
 /// Whether a clause after a retracting negation says the wish or need has ended: "no longer",
