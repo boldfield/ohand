@@ -124,6 +124,8 @@ final class TextCaptureModelTests: XCTestCase {
         XCTAssertFalse(message.hasPrefix("Saved"), message)
         XCTAssertTrue(message.contains("not confirmed saved"), message)
         XCTAssertTrue(message.contains("No reminder has been set"), message)
+        XCTAssertFalse(message.contains("later"), "no promise of eventual success: \(message)")
+        XCTAssertFalse(message.contains("will finish"), "no promise of eventual success: \(message)")
     }
 
     func testSavedMessageDoesNotImplyAReminderExists() {

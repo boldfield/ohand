@@ -149,6 +149,17 @@ final class TextCaptureIngressIntegrationTests: IngressStorageTestCase {
 
         XCTAssertEqual(adapter(.saved(acknowledgment)), .saved(captureID: "c", itemID: "i", alreadySaved: true))
         XCTAssertEqual(adapter(.keptForRetry(captureID: "c", problem: .commitUnknown)), .keptOnDevice(captureID: "c"))
+        let permanentProblems: [IngressPendingProblem] = [
+            .rejected(code: "invalid_request"), .conflictingReuse, .sourceUnavailable(.conflictingStagingRecord),
+            .recordUnreadable(.corruptRecord), .coreUnavailable, .notCommitted,
+        ]
+        for problem in permanentProblems {
+            let outcome = adapter(.keptForRetry(captureID: "c", problem: problem))
+            XCTAssertEqual(outcome, .keptOnDevice(captureID: "c"), "\(problem)")
+        }
+        let message = TextCaptureModel.Status.keptOnDevice.message ?? ""
+        XCTAssertTrue(message.contains("not confirmed saved"), message)
+        XCTAssertFalse(message.contains("later") || message.contains("will finish"), message)
         XCTAssertEqual(adapter(.notStaged(captureID: "c", failure: .corruptRecord)), .notStaged(captureID: "c"))
         XCTAssertEqual(adapter(.itemDeleted(captureID: "c")), .itemDeleted(captureID: "c"))
     }

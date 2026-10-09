@@ -10,7 +10,8 @@ final class TextCaptureModel: ObservableObject {
         case saving
         /// Confirmed by the core. Nothing has been interpreted yet.
         case saved(alreadySaved: Bool)
-        /// Durable on this device but not confirmed saved.
+        /// Durable on this device but not confirmed saved. Says nothing about whether it will be: some causes (a rejected
+        /// import, a conflicting reuse) never resolve by waiting.
         case keptOnDevice
         /// Nothing durable was written; the text is still in the field.
         case notSaved
@@ -26,7 +27,7 @@ final class TextCaptureModel: ObservableObject {
             case .saved:
                 return "Saved. It has not been processed yet, so no reminder has been set."
             case .keptOnDevice:
-                return "Kept on this device. It is not confirmed saved yet and will finish saving later. No reminder has been set."
+                return "Kept on this device. It is not confirmed saved. No reminder has been set."
             case .notSaved:
                 return "Not saved. Your text is still here."
             case .itemDeleted:
