@@ -82,6 +82,16 @@ final class FakeNotificationCenter: NotificationCenterProviding, @unchecked Send
         return delivered
     }
 
+    /// The OS delivered the request: it leaves the pending list and is listed as delivered.
+    func deliver(identifier: String, at deliveredAt: Date) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let request = pending.removeValue(forKey: identifier) else { return }
+        removalCountdown[identifier] = nil
+        delivered.append(NotificationCenterDeliveredNotification(
+            identifier: identifier, deliveredAt: deliveredAt, userInfo: request.content.userInfo))
+    }
+
     func installForeignRequest(identifier: String, dueInstant: Date) {
         lock.lock()
         defer { lock.unlock() }

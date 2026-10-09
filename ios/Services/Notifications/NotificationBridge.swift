@@ -22,6 +22,13 @@ import Foundation
 /// under the same lock, so a late write is overwritten rather than trusted, and a check made
 /// earlier is never acted on after a newer operation has started. Re-applying is itself bounded
 /// and tracked; one that cannot finish is remembered and retried by `reconcile()`.
+///
+/// The state an operation puts back when it fails is the state the bridge last recorded for the
+/// identifier, not what the OS listed when the operation began: the list can still show an
+/// abandoned write whose undo has not landed, and a failed operation must not adopt that write as
+/// the earlier state. The OS list decides only for an identifier the bridge has no record of. A
+/// recorded request whose due instant has passed is never installed again; re-applying it only
+/// removes whatever else was written under its identifier.
 public final class NotificationBridge: Sendable {
     private let center: NotificationCenterProviding
     private let now: @Sendable () -> Date
@@ -70,7 +77,7 @@ public final class NotificationBridge: Sendable {
             return try await exclusively(identifier) {
                 let priorRequest = try await self.bounded { try await center.pendingRequests() }
                     .first(where: { $0.identifier == identifier })
-                let stateBeforeAttempt = Self.restorableState(of: priorRequest, identifier: identifier)
+                let stateBeforeAttempt = self.restorePoint(for: identifier, observed: priorRequest)
                 // Claim the identifier for this attempt before writing. An older abandoned call
                 // (such as an undo removal that timed out) may complete while this add or its
                 // confirming read is in flight; because the desired state has already moved on,
@@ -122,7 +129,7 @@ public final class NotificationBridge: Sendable {
             try await exclusively(rawIdentifier) {
                 let priorRequest = try await self.bounded { try await center.pendingRequests() }
                     .first(where: { $0.identifier == rawIdentifier })
-                let stateBeforeAttempt = Self.restorableState(of: priorRequest, identifier: rawIdentifier)
+                let stateBeforeAttempt = self.restorePoint(for: rawIdentifier, observed: priorRequest)
                 let generation = self.ledger.setDesired(rawIdentifier, .absent)
                 do {
                     try await self.mutate(rawIdentifier, toward: generation) {
@@ -315,6 +322,16 @@ public final class NotificationBridge: Sendable {
                     let current = try await self.bounded { try await center.pendingRequests() }
                         .first(where: { $0.identifier == identifier })
                     if let current, Self.matches(current, request) { break }
+                    if self.hasPassed(request) {
+                        // The request is not installed again once its due instant has passed: the
+                        // OS has delivered or dropped it, and a late copy would be a stale reminder.
+                        // A different request written under its identifier still goes.
+                        guard current != nil else { break }
+                        try await self.mutate(identifier, toward: generation) {
+                            await center.removePending(identifiers: [identifier])
+                        }
+                        break
+                    }
                     try await self.mutate(identifier, toward: generation) { try await center.add(request) }
                 }
                 self.ledger.markSettled(identifier)
@@ -334,9 +351,27 @@ public final class NotificationBridge: Sendable {
         pending.dueInstant == request.dueInstant && pending.userInfo == request.content.userInfo
     }
 
-    /// What to put back if a schedule or cancel is abandoned: nothing when nothing was pending, the earlier
-    /// generic request when one was, or nil (leave alone) when the earlier request cannot be
-    /// rebuilt from fixed wording.
+    /// What a schedule or cancel puts back if it fails: the state the bridge last recorded for the
+    /// identifier, when it has one, because the OS list may still show an abandoned write whose
+    /// undo is pending. Only an identifier without a record is read from the list.
+    private func restorePoint(
+        for identifier: String,
+        observed prior: NotificationCenterPendingRequest?
+    ) -> DesiredNotificationState? {
+        let (recorded, generation) = ledger.desired(of: identifier)
+        if generation != nil { return recorded }
+        return Self.restorableState(of: prior, identifier: identifier)
+    }
+
+    /// Whether `request` could no longer be scheduled: its due instant is not ahead of the clock
+    /// by the margin `schedule` requires.
+    private func hasPassed(_ request: NotificationCenterRequest) -> Bool {
+        request.dueInstant.timeIntervalSince(now()) < 1
+    }
+
+    /// What to put back for an identifier the bridge has no record of: nothing when nothing was
+    /// pending, the earlier generic request when one was, or nil (leave alone) when the earlier
+    /// request cannot be rebuilt from fixed wording.
     private static func restorableState(
         of prior: NotificationCenterPendingRequest?,
         identifier: String

@@ -23,12 +23,12 @@ final class NotificationBridgeBoundednessTests: XCTestCase {
         super.tearDown()
     }
 
-    private func makeBridge(effectTimeout: TimeInterval) -> NotificationBridge {
+    private func makeBridge(effectTimeout: TimeInterval, clock: AdjustableClock? = nil) -> NotificationBridge {
         let now = currentTime
         return NotificationBridge(
             center: center,
             ingestor: NotificationEventIngestor(now: { now }, handler: { _ in }),
-            now: { now },
+            now: { clock?.now ?? now },
             removalPollInterval: 0,
             maximumRemovalPolls: 5,
             effectTimeout: effectTimeout
@@ -393,6 +393,121 @@ final class NotificationBridgeBoundednessTests: XCTestCase {
         XCTAssertTrue(quick.unreconciledIdentifiers.isEmpty)
     }
 
+    /// An abandoned schedule's write is still listed while the restore of the earlier request is
+    /// suspended. A schedule that then fails for good must put back the request the bridge last
+    /// recorded, not adopt the abandoned write the OS list showed when it began.
+    func testAScheduleThatFailsWhileAnEarlierRestoreIsSuspendedKeepsTheRecordedRequest() async throws {
+        let quick = makeBridge(effectTimeout: 0.05)
+        let original = try request()
+        _ = try await quick.schedule(original)
+
+        let abandoned = NotificationScheduleRequest.generic(
+            identifier: original.identifier,
+            dueInstant: original.dueInstant.addingTimeInterval(600),
+            opaqueTargetID: original.opaqueTargetID
+        )
+        let abandonedAddGate = newGate()
+        center.addGate = abandonedAddGate
+        let failure = await failureOfHungCall { _ = try await quick.schedule(abandoned) }
+        XCTAssertEqual(failure, .timedOut)
+
+        let restoreGate = newGate()
+        center.addGate = restoreGate
+        abandonedAddGate.release()
+        await eventually("the restore of the earlier request to block in add") { restoreGate.arrivals >= 1 }
+        await quick.settleAbandonedWork()
+        XCTAssertEqual(quick.unreconciledIdentifiers, ["reminder-1#1"], "the restore timed out and is remembered")
+        let dueWhileUnsettled = try await pendingDueInstant()
+        XCTAssertEqual(dueWhileUnsettled, abandoned.dueInstant, "the OS still lists the abandoned write")
+
+        center.addGate = nil
+        inner.addError = NotificationBridgeError.centerFailed
+        let newer = NotificationScheduleRequest.generic(
+            identifier: original.identifier,
+            dueInstant: original.dueInstant.addingTimeInterval(1200),
+            opaqueTargetID: original.opaqueTargetID
+        )
+        let definiteFailure = await failureOfHungCall { _ = try await quick.schedule(newer) }
+        XCTAssertEqual(definiteFailure, .centerFailed)
+        inner.addError = nil
+
+        restoreGate.release()
+        // Adds so far: the original, the abandoned one landing late and the suspended restore.
+        await eventually("the suspended restore to land late") { self.inner.addedRequests.count >= 3 }
+        await letLateWorkRun(quick)
+        let finalDue = try await pendingDueInstant()
+        XCTAssertEqual(finalDue, original.dueInstant, "the failed schedule put back the recorded request")
+        XCTAssertEqual(inner.addedRequests.count, 3, "the abandoned write is not adopted and written again")
+        XCTAssertTrue(inner.removedIdentifiers.isEmpty)
+        XCTAssertTrue(quick.unreconciledIdentifiers.isEmpty)
+    }
+
+    /// The restore of an earlier request is suspended and that request's due instant passes.
+    /// Re-applying at the next launch removes the abandoned write still listed under the
+    /// identifier but does not install the passed request again.
+    func testReconcileRemovesAnAbandonedWriteButDoesNotReinstallARequestWhoseDueInstantPassed() async throws {
+        let clock = AdjustableClock(now: currentTime)
+        let quick = makeBridge(effectTimeout: 0.05, clock: clock)
+        let original = try request()
+        _ = try await quick.schedule(original)
+
+        let abandoned = NotificationScheduleRequest.generic(
+            identifier: original.identifier,
+            dueInstant: original.dueInstant.addingTimeInterval(600),
+            opaqueTargetID: original.opaqueTargetID
+        )
+        let abandonedAddGate = newGate()
+        center.addGate = abandonedAddGate
+        let failure = await failureOfHungCall { _ = try await quick.schedule(abandoned) }
+        XCTAssertEqual(failure, .timedOut)
+
+        let restoreGate = newGate()
+        center.addGate = restoreGate
+        abandonedAddGate.release()
+        await eventually("the restore of the earlier request to block in add") { restoreGate.arrivals >= 1 }
+        await quick.settleAbandonedWork()
+        XCTAssertEqual(quick.unreconciledIdentifiers, ["reminder-1#1"])
+        let dueWhileUnsettled = try await pendingDueInstant()
+        XCTAssertEqual(dueWhileUnsettled, abandoned.dueInstant, "the OS still lists the abandoned write")
+
+        clock.now = original.dueInstant.addingTimeInterval(1)
+        center.addGate = nil
+        try await quick.reconcile()
+        XCTAssertTrue(inner.pendingIdentifiers.isEmpty, "the abandoned write goes; the passed request is not installed again")
+        XCTAssertEqual(inner.removedIdentifiers, ["reminder-1#1"])
+        XCTAssertEqual(inner.addedRequests.count, 2, "no late copy of the passed request is written")
+        XCTAssertTrue(quick.unreconciledIdentifiers.isEmpty)
+    }
+
+    /// A delivered request is no longer listed by the OS. A cancel of it that is abandoned has
+    /// nothing to put back, because the recorded request has passed its due instant.
+    func testAnAbandonedCancelOfADeliveredRequestDoesNotInstallItAgain() async throws {
+        let clock = AdjustableClock(now: currentTime)
+        let bridge = makeBridge(effectTimeout: 30, clock: clock)
+        let original = try request()
+        _ = try await bridge.schedule(original)
+
+        inner.deliver(identifier: "reminder-1#1", at: original.dueInstant)
+        clock.now = original.dueInstant.addingTimeInterval(60)
+        XCTAssertTrue(inner.pendingIdentifiers.isEmpty)
+
+        let removeGate = newGate()
+        center.removeGate = removeGate
+        let target = try identifier()
+        let failure = await failureAfterCancellingWhileSuspended(in: removeGate) {
+            try await bridge.cancel(target)
+        }
+        XCTAssertEqual(failure, .cancelled)
+
+        center.removeGate = nil
+        removeGate.release()
+        await eventually("the suspended removal to land late") { !self.inner.removedIdentifiers.isEmpty }
+        await letLateWorkRun(bridge)
+        XCTAssertTrue(inner.pendingIdentifiers.isEmpty)
+        XCTAssertEqual(inner.addedRequests.count, 1, "a delivered reminder is not installed again")
+        XCTAssertTrue(bridge.unreconciledIdentifiers.isEmpty)
+    }
+
     func testACancelCancelledWhileRemovalIsSuspendedLeavesTheRequestPending() async throws {
         let original = try request()
         _ = try await bridge.schedule(original)
@@ -567,5 +682,28 @@ final class NotificationBridgeBoundednessTests: XCTestCase {
         XCTAssertEqual(installed.identifier, try identifier())
         try await bridge.cancel(try identifier())
         XCTAssertTrue(inner.pendingIdentifiers.isEmpty)
+    }
+}
+
+/// A clock a test moves forward between calls.
+private final class AdjustableClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var instant: Date
+
+    init(now: Date) {
+        instant = now
+    }
+
+    var now: Date {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return instant
+        }
+        set {
+            lock.lock()
+            defer { lock.unlock() }
+            instant = newValue
+        }
     }
 }
