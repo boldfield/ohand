@@ -1,0 +1,32 @@
+{
+  "build_identifier": "6ac3d1f8-c2cb6485",
+  "build_revision": "6ac3d1f8d20dde731434d609120ad9cf77ac5956",
+  "bundle_identifier": "com.boldfield.ohand.probes.bridge",
+  "collected_at": "2026-10-09T00:10:14Z",
+  "device": {
+    "label": "trial-phone"
+  },
+  "export_method": "debugging",
+  "failed_stage": null,
+  "identity_class": "Apple Development",
+  "install": {
+    "performed": true,
+    "requested": true,
+    "succeeded": true
+  },
+  "private_evidence_reference": "c2cb6485",
+  "profile": {
+    "device_scoped": true,
+    "expires_at": "2027-10-09T00:08:01Z"
+  },
+  "route": "development",
+  "schema": "ohand.apple-signing-evidence.v1",
+  "scheme": "BridgeProbe",
+  "signing_style": "manual",
+  "status": "succeeded",
+  "toolchain": {
+    "xcode_build": "17F113",
+    "xcode_version": "Xcode 26.6"
+  },
+  "working_tree_clean": true
+}
