@@ -144,6 +144,9 @@ pub struct FacetView {
     /// The evidence the candidate cites for its session topic; the store keeps none.
     pub session_topic_span: Option<(usize, usize)>,
     pub requested_operation: Option<RequestedOperation>,
+    /// The lifecycle durable state holds when the item left the active state; a candidate
+    /// carries none (its change requests are `requested_operation`).
+    pub left_active_as: Option<String>,
 }
 
 impl FacetView {
@@ -191,6 +194,7 @@ impl FacetView {
                 .and_then(|topic| topic.source_span)
                 .map(|span| (span.start, span.end)),
             requested_operation,
+            left_active_as: None,
         }
     }
 
@@ -209,6 +213,7 @@ impl FacetView {
             session_topic: state.session_topic.clone(),
             session_topic_span: None,
             requested_operation: None,
+            left_active_as: (!state.is_active()).then(|| state.lifecycle.clone()),
         }
     }
 
@@ -374,7 +379,13 @@ pub fn defects_against(
                             );
                         }
                     }
-                    if wanted.timezone_id.is_some() && found.timezone_id != wanted.timezone_id {
+                    // A stored reminder without an instant schedules nothing; its zone is
+                    // only the capture's display zone, so it makes no zone claim.
+                    let claims_zone = stage == Stage::Candidate || found.instant.is_some();
+                    if claims_zone
+                        && wanted.timezone_id.is_some()
+                        && found.timezone_id != wanted.timezone_id
+                    {
                         push(
                             DefectKind::UnsupportedClaim,
                             "reminder timezone differs from the oracle's".to_string(),
@@ -435,6 +446,12 @@ pub fn defects_against(
             "asked to create another item".to_string(),
         ),
         None => {}
+    }
+    if let Some(lifecycle) = &view.left_active_as {
+        push(
+            DefectKind::FalseCompletion,
+            format!("the stored item left the active state ({lifecycle})"),
+        );
     }
     defects
 }

@@ -451,7 +451,7 @@ fn finish_case(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::score::MutationClass;
+    use crate::score::{DefectKind, MutationClass};
     use std::path::PathBuf;
 
     fn corpus() -> Corpus {
@@ -485,12 +485,17 @@ mod tests {
             .expect("plant item");
     }
 
-    fn run_with(fixture: &Fixture, plant: bool) -> (CaseReport, Totals) {
+    fn complete_evaluated_item(scratch: &ScratchCase) {
+        scratch
+            .connection_for_negative_control()
+            .execute("UPDATE items SET lifecycle_state = 'completed'", [])
+            .expect("complete the evaluated item");
+    }
+
+    fn run_with(fixture: &Fixture, plant: impl FnOnce(&ScratchCase)) -> (CaseReport, Totals) {
         let context = fixture.case_context().expect("context");
         let mut scratch = ScratchCase::open("negative-control", &context).expect("scratch");
-        if plant {
-            plant_second_item(&scratch, "stray");
-        }
+        plant(&scratch);
         let case = finish_case(
             fixture,
             "control".into(),
@@ -510,11 +515,11 @@ mod tests {
         let corpus = corpus();
         let fixture = corpus.fixture("already-completed-action").expect("fixture");
 
-        let (clean, clean_totals) = run_with(fixture, false);
+        let (clean, clean_totals) = run_with(fixture, |_| {});
         assert!(clean.authoritative_state.foreign_records.is_empty());
         assert_eq!(clean_totals.authoritative_forbidden_total(), 0);
 
-        let (planted, totals) = run_with(fixture, true);
+        let (planted, totals) = run_with(fixture, |scratch| plant_second_item(scratch, "stray"));
         assert_eq!(planted.authoritative_state.foreign_records["items"], 1);
         assert_eq!(planted.authoritative_state.foreign_records["captures"], 1);
         assert!(planted
@@ -529,6 +534,48 @@ mod tests {
             totals,
             by_category: BTreeMap::new(),
             cases: vec![planted],
+        }]);
+        assert!(!gate.passed);
+        assert_eq!(gate.forbidden_authoritative_mutations, 1);
+    }
+
+    #[test]
+    fn a_completed_item_in_durable_state_is_an_authoritative_false_completion_that_fails_the_gate()
+    {
+        let corpus = corpus();
+        let fixture = corpus.fixture("already-completed-action").expect("fixture");
+
+        let (clean, clean_totals) = run_with(fixture, |_| {});
+        assert!(clean.authoritative_state.is_active());
+        assert_eq!(
+            clean_totals.authoritative_defects[&DefectKind::FalseCompletion],
+            0
+        );
+
+        let (completed, totals) = run_with(fixture, complete_evaluated_item);
+        assert!(!completed.authoritative_state.is_active());
+        assert!(completed
+            .authoritative_defects
+            .iter()
+            .any(|defect| defect.kind == DefectKind::FalseCompletion
+                && defect.detail.contains("completed")));
+        assert!(completed
+            .candidate_defects
+            .iter()
+            .all(|defect| defect.kind != DefectKind::FalseCompletion));
+        assert_eq!(
+            totals.authoritative_defects[&DefectKind::FalseCompletion],
+            1
+        );
+        assert_eq!(totals.candidate_defects[&DefectKind::FalseCompletion], 0);
+        assert_eq!(totals.authoritative_forbidden[&MutationClass::Lifecycle], 1);
+
+        let gate = gate_for(&[RunReport {
+            execution: ExecutionKind::Deterministic,
+            status: RunStatus::Executed,
+            totals,
+            by_category: BTreeMap::new(),
+            cases: vec![completed],
         }]);
         assert!(!gate.passed);
         assert_eq!(gate.forbidden_authoritative_mutations, 1);

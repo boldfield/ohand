@@ -49,7 +49,7 @@ Separate counts, each at two stages, `candidate` (what the interpreter proposed)
 | --- | --- |
 | `false_action` | `action` where the oracle has another type or none |
 | `false_deadline` | a resolved reminder instant the oracle does not support |
-| `false_completion` | a request to change an existing item, including one the mapping rejected (see below) |
+| `false_completion` | a request to change an existing item, including one the mapping rejected (see below); at the authoritative stage, a stored item that left the active state (completed, cancelled or deleted), which is also a `lifecycle` forbidden hit |
 | `wrong_item_type` | an item type other than the oracle's, or one where the oracle has none (`action` is `false_action` instead) |
 | `unsupported_claim` | any other topic, quality, zone, reminder or request to create another item the oracle lacks, each item-type evidence span that overlaps none of the oracle's spans, and reminder or session-topic evidence that overlaps none of the oracle's corresponding span |
 | `missed_intent` | a facet the oracle has that is absent |

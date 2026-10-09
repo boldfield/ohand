@@ -839,3 +839,42 @@ fn a_wrong_session_topic_does_not_hide_unrelated_topic_evidence() {
         .iter()
         .any(|detail| detail.contains("session-topic evidence")));
 }
+
+#[test]
+fn a_stored_reminder_without_an_instant_makes_no_timezone_claim() {
+    let corpus = corpus();
+    let responses = repository_responses(&corpus);
+    let report = evaluate(&corpus, Some(&responses)).expect("report");
+    let fake = report.run(ExecutionKind::Fake).expect("fake");
+    let case = fake
+        .cases
+        .iter()
+        .find(|case| case.case_id == "adversarial/wrong-timezone")
+        .expect("the wrong-timezone scenario runs");
+    assert_eq!(case.fixture_id, "timezone-conflicting");
+    let is_zone_defect = |defect: &&evaluation::score::Defect| {
+        defect.kind == DefectKind::UnsupportedClaim && defect.detail.contains("timezone")
+    };
+
+    assert_eq!(
+        case.candidate_defects.iter().filter(is_zone_defect).count(),
+        1
+    );
+    let stored = case
+        .authoritative_state
+        .reminder
+        .as_ref()
+        .expect("the guard keeps a not-scheduled reminder");
+    assert!(stored.resolved_instant.is_none());
+    assert_eq!(
+        case.authoritative_defects
+            .iter()
+            .filter(is_zone_defect)
+            .count(),
+        0
+    );
+    assert!(case
+        .authoritative_defects
+        .iter()
+        .any(|defect| defect.kind == DefectKind::MissedIntent));
+}
