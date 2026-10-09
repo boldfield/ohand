@@ -16,4 +16,5 @@ pub mod core_handle;
 pub mod ingress_import;
 pub mod provider_transport;
 
+pub mod job_health;
 pub mod job_runner;
