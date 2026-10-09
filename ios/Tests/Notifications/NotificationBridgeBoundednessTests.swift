@@ -118,6 +118,7 @@ final class NotificationBridgeBoundednessTests: XCTestCase {
     func testCancellationWhileReadBackIsSuspendedRemovesTheInstalledRequest() async throws {
         let gate = newGate()
         center.pendingGate = gate
+        center.pendingCallsBeforeGate = 1
         let scheduleRequest = try request()
         let bridge = self.bridge!
 
@@ -162,6 +163,120 @@ final class NotificationBridgeBoundednessTests: XCTestCase {
             _ = try await bridge.ingestDeliveredNotifications()
         }
         XCTAssertEqual(whileReadingDelivered, .cancelled)
+    }
+
+    // MARK: Abandoned work must not disturb newer or earlier state
+
+    private func pendingDueInstant() async throws -> Date? {
+        try await inner.pendingRequests().first(where: { $0.identifier == "reminder-1#1" })?.dueInstant
+    }
+
+    /// Lets a late completion's follow-up work, if any wrongly starts, run before asserting.
+    private func letLateWorkRun(_ bridge: NotificationBridge) async {
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        await bridge.settleAbandonedWork()
+    }
+
+    func testALateInstallFromATimedOutScheduleDoesNotRemoveTheRetrysInstall() async throws {
+        let gate = newGate()
+        center.addGate = gate
+        let quick = makeBridge(effectTimeout: 0.05)
+        let scheduleRequest = try request()
+
+        let firstFailure = await failureOfHungCall { _ = try await quick.schedule(scheduleRequest) }
+        XCTAssertEqual(firstFailure, .timedOut)
+
+        center.addGate = nil
+        let retried = try await quick.schedule(scheduleRequest)
+        XCTAssertEqual(retried.identifier, try identifier())
+
+        gate.release()
+        await eventually("the first add to finish late") { self.inner.addedRequests.count == 2 }
+        await letLateWorkRun(quick)
+        XCTAssertEqual(inner.pendingIdentifiers, ["reminder-1#1"], "the retry's confirmed install survives")
+        XCTAssertTrue(inner.removedIdentifiers.isEmpty)
+    }
+
+    func testAnAbandonedRetryOfAnAlreadyPendingIdentifierLeavesTheRequestPending() async throws {
+        let quick = makeBridge(effectTimeout: 0.05)
+        let scheduleRequest = try request()
+        _ = try await quick.schedule(scheduleRequest)
+
+        let gate = newGate()
+        center.addGate = gate
+        let bridge = self.bridge!
+        let failure = await failureAfterCancellingWhileSuspended(in: gate) {
+            _ = try await bridge.schedule(scheduleRequest)
+        }
+        XCTAssertEqual(failure, .cancelled)
+
+        gate.release()
+        await eventually("the abandoned retry to finish late") { self.inner.addedRequests.count == 2 }
+        await letLateWorkRun(bridge)
+        XCTAssertEqual(inner.pendingIdentifiers, ["reminder-1#1"])
+        XCTAssertTrue(inner.removedIdentifiers.isEmpty, "the earlier desired request is never deleted")
+    }
+
+    func testAnAbandonedRetryThatReplacedAPendingRequestRestoresTheEarlierOne() async throws {
+        let quick = makeBridge(effectTimeout: 0.05)
+        let original = try request()
+        _ = try await quick.schedule(original)
+
+        let changed = NotificationScheduleRequest.generic(
+            identifier: original.identifier,
+            dueInstant: original.dueInstant.addingTimeInterval(600),
+            opaqueTargetID: original.opaqueTargetID
+        )
+        let gate = newGate()
+        center.addGate = gate
+        let failure = await failureOfHungCall { _ = try await quick.schedule(changed) }
+        XCTAssertEqual(failure, .timedOut)
+
+        gate.release()
+        await eventually("the abandoned retry to finish late") { self.inner.addedRequests.count == 2 }
+        await eventually("the earlier request to be restored") { self.inner.addedRequests.count == 3 }
+        await quick.settleAbandonedWork()
+        let restoredDue = try await pendingDueInstant()
+        XCTAssertEqual(restoredDue, original.dueInstant)
+        XCTAssertTrue(inner.removedIdentifiers.isEmpty)
+    }
+
+    func testALateInstallAfterANewerCancelIsRemoved() async throws {
+        let gate = newGate()
+        center.addGate = gate
+        let quick = makeBridge(effectTimeout: 0.05)
+        let scheduleRequest = try request()
+
+        let failure = await failureOfHungCall { _ = try await quick.schedule(scheduleRequest) }
+        XCTAssertEqual(failure, .timedOut)
+        try await quick.cancel(try identifier())
+
+        gate.release()
+        await eventually("the late install to be added") { !self.inner.addedRequests.isEmpty }
+        await eventually("the cancelled identifier to be removed again") { self.inner.pendingIdentifiers.isEmpty }
+    }
+
+    func testAStuckUndoIsBoundedTrackedAndRetriedByReconcile() async throws {
+        let addGate = newGate()
+        center.addGate = addGate
+        let quick = makeBridge(effectTimeout: 0.05)
+        let scheduleRequest = try request()
+
+        let failure = await failureOfHungCall { _ = try await quick.schedule(scheduleRequest) }
+        XCTAssertEqual(failure, .timedOut)
+
+        let removeGate = newGate()
+        center.removeGate = removeGate
+        addGate.release()
+        await eventually("the undo to reach the provider") { removeGate.arrivals >= 1 }
+        await quick.settleAbandonedWork()
+        XCTAssertEqual(quick.unreconciledIdentifiers, ["reminder-1#1"], "the undo timed out and is remembered")
+        XCTAssertEqual(inner.pendingIdentifiers, ["reminder-1#1"])
+
+        center.removeGate = nil
+        try await quick.reconcile()
+        XCTAssertTrue(inner.pendingIdentifiers.isEmpty)
+        XCTAssertTrue(quick.unreconciledIdentifiers.isEmpty)
     }
 
     // MARK: Deadlines

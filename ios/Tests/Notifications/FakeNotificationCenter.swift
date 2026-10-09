@@ -154,9 +154,14 @@ final class SuspensionGate: @unchecked Sendable {
 /// runs after release, which is how a late OS completion is reproduced.
 final class SuspendingNotificationCenter: NotificationCenterProviding, @unchecked Sendable {
     let inner: FakeNotificationCenter
+    private let gateLock = NSLock()
+    private var pendingCallCount = 0
     var authorizationGate: SuspensionGate?
     var addGate: SuspensionGate?
     var pendingGate: SuspensionGate?
+    /// Pending-list calls that pass the gate before it starts suspending callers. Scheduling
+    /// reads the list once before `add` and once after it.
+    var pendingCallsBeforeGate = 0
     var removeGate: SuspensionGate?
     var deliveredGate: SuspensionGate?
 
@@ -175,7 +180,11 @@ final class SuspendingNotificationCenter: NotificationCenterProviding, @unchecke
     }
 
     func pendingRequests() async throws -> [NotificationCenterPendingRequest] {
-        await pendingGate?.wait()
+        gateLock.lock()
+        pendingCallCount += 1
+        let isGated = pendingCallCount > pendingCallsBeforeGate
+        gateLock.unlock()
+        if isGated { await pendingGate?.wait() }
         return try await inner.pendingRequests()
     }
 

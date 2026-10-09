@@ -11,7 +11,10 @@ import Foundation
 /// Every OS call is cancellable and time-bounded: it runs as its own task and races a deadline and
 /// the caller's cancellation, so a provider that ignores cancellation or never answers still
 /// yields a normalized `cancelled` or `timed_out` result. A schedule that the OS completes after
-/// the caller has stopped waiting is removed again, so cancelled work leaves no pending request.
+/// the caller has stopped waiting is undone again: the request is removed, or the request that was
+/// pending before the attempt is restored, unless a newer schedule of the same identifier has since
+/// started (which then owns the state). Undoing is itself bounded and tracked; an undo that cannot
+/// finish is remembered and retried by `reconcile()`.
 public final class NotificationBridge: Sendable {
     private let center: NotificationCenterProviding
     private let now: @Sendable () -> Date
@@ -19,6 +22,7 @@ public final class NotificationBridge: Sendable {
     private let removalPollInterval: TimeInterval
     private let maximumRemovalPolls: Int
     private let effectTimeout: TimeInterval
+    private let reconciliation = AbandonedWorkLedger()
 
     public init(
         center: NotificationCenterProviding,
@@ -53,18 +57,24 @@ public final class NotificationBridge: Sendable {
             }
 
             let identifier = request.identifier.rawValue
+            let attempt = reconciliation.begin(identifier, kind: .schedule)
             let centerRequest = NotificationCenterRequest(
                 identifier: identifier, dueInstant: request.dueInstant, content: content)
+            let priorRequest = try await bounded { try await center.pendingRequests() }
+                .first(where: { $0.identifier == identifier })
+            let abandon: @Sendable () -> Void = { [self] in
+                self.undoAbandonedSchedule(centerRequest, attempt: attempt, prior: priorRequest)
+            }
             try await bounded(
                 { try await center.add(centerRequest) },
-                onAbandonedSuccess: { _ in await center.removePending(identifiers: [identifier]) }
+                onAbandonedSuccess: { _ in abandon() }
             )
 
             let pending: [NotificationCenterPendingRequest]
             do {
                 pending = try await bounded { try await center.pendingRequests() }
             } catch {
-                Task.detached { await center.removePending(identifiers: [identifier]) }
+                abandon()
                 throw error
             }
             guard let installed = pending.first(where: { $0.identifier == identifier }) else {
@@ -85,6 +95,7 @@ public final class NotificationBridge: Sendable {
         do {
             let center = self.center
             let rawIdentifier = identifier.rawValue
+            reconciliation.begin(rawIdentifier, kind: .cancel)
             try await bounded { await center.removePending(identifiers: [rawIdentifier]) }
             for attempt in 0..<maximumRemovalPolls {
                 let pending = try await bounded { try await center.pendingRequests() }
@@ -135,6 +146,7 @@ public final class NotificationBridge: Sendable {
     /// requests that fired while the app was not running. Returns how many events were forwarded.
     @discardableResult
     public func ingestDeliveredNotifications() async throws -> Int {
+        try? await reconcile()
         let deliveredNotifications: [NotificationCenterDeliveredNotification]
         do {
             let center = self.center
@@ -153,6 +165,70 @@ public final class NotificationBridge: Sendable {
             if accepted { forwarded += 1 }
         }
         return forwarded
+    }
+
+    /// Retries every undo of abandoned work that could not finish earlier. Succeeds when nothing
+    /// is left to undo.
+    public func reconcile() async throws {
+        do {
+            for (identifier, undo) in reconciliation.unfinishedUndos() {
+                try Task.checkCancellation()
+                try await perform(undo, for: identifier)
+                reconciliation.finish(identifier, undo: undo)
+            }
+        } catch {
+            throw NotificationBridgeError.normalized(error)
+        }
+    }
+
+    /// Waits for the undo of every abandoned schedule started so far. Each is bounded, so this
+    /// returns within the effect timeout of the slowest one.
+    public func settleAbandonedWork() async {
+        while true {
+            let running = reconciliation.trackedUndos()
+            if running.isEmpty { return }
+            for (key, task) in running {
+                await task.value
+                reconciliation.untrack(key)
+            }
+        }
+    }
+
+    /// Identifiers whose abandoned work could not be undone yet.
+    public var unreconciledIdentifiers: [String] {
+        reconciliation.unfinishedUndos().map { $0.0 }.sorted()
+    }
+
+    private func undoAbandonedSchedule(
+        _ attempted: NotificationCenterRequest,
+        attempt: Int,
+        prior: NotificationCenterPendingRequest?
+    ) {
+        let identifier = attempted.identifier
+        guard let undo = reconciliation.undoForAbandonedSchedule(
+            identifier, attempt: attempt, attempted: attempted, prior: prior)
+        else { return }
+        let key = UUID()
+        let task = Task { [self] in
+            do {
+                try await perform(undo, for: identifier)
+                reconciliation.finish(identifier, undo: undo)
+            } catch {
+                reconciliation.remember(identifier, undo: undo, attempt: attempt)
+            }
+            reconciliation.untrack(key)
+        }
+        reconciliation.track(key, task)
+    }
+
+    private func perform(_ undo: AbandonedUndo, for identifier: String) async throws {
+        let center = self.center
+        switch undo {
+        case .remove:
+            try await bounded { await center.removePending(identifiers: [identifier]) }
+        case let .restore(request):
+            try await bounded { try await center.add(request) }
+        }
     }
 
     /// Runs one OS call as its own task and returns whichever happens first: the call's result, its
@@ -257,5 +333,103 @@ private final class EffectRace<Value: Sendable>: @unchecked Sendable {
                 lock.unlock()
             }
         }
+    }
+}
+
+/// How an abandoned schedule is undone.
+private enum AbandonedUndo: Equatable, Sendable {
+    case remove
+    case restore(NotificationCenterRequest)
+}
+
+private enum BridgeOperationKind: Sendable {
+    case schedule
+    case cancel
+}
+
+/// Per-identifier record of the newest operation, of undo work in flight and of undo work that
+/// has not finished. Lets a late OS completion tell whether it is still the latest word on its
+/// identifier before it removes or restores anything.
+private final class AbandonedWorkLedger: @unchecked Sendable {
+    private let lock = NSLock()
+    private var counter = 0
+    private var newest: [String: (attempt: Int, kind: BridgeOperationKind)] = [:]
+    private var tracked: [UUID: Task<Void, Never>] = [:]
+    private var unfinished: [String: AbandonedUndo] = [:]
+
+    /// Registers a new operation on `identifier`; it now owns the identifier's state, so older
+    /// unfinished undos are dropped.
+    @discardableResult
+    func begin(_ identifier: String, kind: BridgeOperationKind) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        counter += 1
+        newest[identifier] = (counter, kind)
+        unfinished[identifier] = nil
+        return counter
+    }
+
+    /// The undo an abandoned schedule owes, or nil when a newer schedule owns the identifier or
+    /// the pending request is already equivalent to what was there before.
+    func undoForAbandonedSchedule(
+        _ identifier: String,
+        attempt: Int,
+        attempted: NotificationCenterRequest,
+        prior: NotificationCenterPendingRequest?
+    ) -> AbandonedUndo? {
+        lock.lock()
+        let latest = newest[identifier]
+        lock.unlock()
+        guard let latest else { return nil }
+        if latest.attempt != attempt {
+            return latest.kind == .cancel ? .remove : nil
+        }
+        guard let prior else { return .remove }
+        if prior.dueInstant == attempted.dueInstant && prior.userInfo == attempted.content.userInfo {
+            return nil
+        }
+        guard let due = prior.dueInstant,
+              prior.userInfo[NotificationContent.kindKey] == NotificationPayloadKind.generic.rawValue,
+              let target = prior.userInfo[NotificationContent.targetKey].flatMap({ OpaqueIdentifier($0) })
+        else { return nil }
+        return .restore(NotificationCenterRequest(
+            identifier: identifier, dueInstant: due, content: .generic(opaqueTargetID: target)))
+    }
+
+    func remember(_ identifier: String, undo: AbandonedUndo, attempt: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard newest[identifier]?.attempt == attempt || newest[identifier]?.kind == .cancel else { return }
+        unfinished[identifier] = undo
+    }
+
+    func finish(_ identifier: String, undo: AbandonedUndo) {
+        lock.lock()
+        defer { lock.unlock() }
+        if unfinished[identifier] == undo { unfinished[identifier] = nil }
+    }
+
+    func unfinishedUndos() -> [(String, AbandonedUndo)] {
+        lock.lock()
+        defer { lock.unlock() }
+        return unfinished.map { ($0.key, $0.value) }
+    }
+
+    func track(_ key: UUID, _ task: Task<Void, Never>) {
+        lock.lock()
+        defer { lock.unlock() }
+        tracked[key] = task
+    }
+
+    func untrack(_ key: UUID) {
+        lock.lock()
+        defer { lock.unlock() }
+        tracked[key] = nil
+    }
+
+    func trackedUndos() -> [(UUID, Task<Void, Never>)] {
+        lock.lock()
+        defer { lock.unlock() }
+        return tracked.map { ($0.key, $0.value) }
     }
 }
