@@ -13,3 +13,5 @@
 
 pub mod capture;
 pub mod core_handle;
+
+pub mod provider_transport;
