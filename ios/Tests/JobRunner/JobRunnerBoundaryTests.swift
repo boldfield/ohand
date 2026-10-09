@@ -258,9 +258,11 @@ final class JobRunnerBoundaryTests: ProviderTransportTestCase {
         session.service.activate()
         XCTAssertTrue(session.pump(until: { gated.requestCount >= 2 }, timeout: 20), "the timer drained again")
 
+        XCTAssertTrue(
+            session.pump(until: { ["queued", "failed"].contains(self.job(session)?.status ?? "") }),
+            "the retried attempt settles back to a non-running state")
         let stored = try XCTUnwrap(job(session))
         XCTAssertGreaterThanOrEqual(stored.attemptCount, 2)
-        XCTAssertTrue(["queued", "failed"].contains(stored.status), stored.status)
     }
 
     // MARK: capture stays responsive
