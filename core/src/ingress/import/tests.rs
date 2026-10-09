@@ -298,6 +298,27 @@ fn malformed_records_get_specific_rejections_and_write_nothing() {
         ),
         (
             Capture {
+                calendar: "hebrew".to_string(),
+                ..base.clone()
+            },
+            IngressRejection::MalformedTimeContext("calendar"),
+        ),
+        (
+            Capture {
+                locale: "   ".to_string(),
+                ..base.clone()
+            },
+            IngressRejection::MalformedTimeContext("locale"),
+        ),
+        (
+            Capture {
+                utc_offset_minutes: 0,
+                ..base.clone()
+            },
+            IngressRejection::MalformedTimeContext("utc_offset_minutes"),
+        ),
+        (
+            Capture {
                 audio_reference: Some("../outside/clip.m4a".to_string()),
                 ..base.clone()
             },
@@ -476,14 +497,13 @@ fn a_deleted_item_is_not_recreated_by_redelivery() {
     let store = Store::new();
     let capture = text_capture("to be deleted");
     let acknowledgment = import_foreground_ingress(&mut store.open(), &capture).unwrap();
-    store
-        .open()
-        .conn()
-        .execute(
-            "UPDATE items SET lifecycle_state = 'deleted' WHERE item_id = ?",
-            [&acknowledgment.item_id],
-        )
-        .unwrap();
+    crate::lifecycle::delete_intent::mark_deletion_intent(
+        &mut store.open(),
+        &acknowledgment.item_id,
+        0,
+        chrono::Utc::now(),
+    )
+    .unwrap();
 
     let error = import_foreground_ingress(&mut store.open(), &capture).unwrap_err();
     assert!(matches!(
@@ -491,4 +511,7 @@ fn a_deleted_item_is_not_recreated_by_redelivery() {
         IngressErrorKind::ItemDeleted { item_id } if item_id == &acknowledgment.item_id
     ));
     assert_eq!(count(&store.open(), "items"), 1);
+    let stored = get_capture(&store.open().immediate_transaction().unwrap(), CAPTURE_ID).unwrap();
+    assert_eq!(stored.unwrap().text.as_deref(), Some(""));
+    assert_eq!(count(&store.open(), "search_index"), 0);
 }

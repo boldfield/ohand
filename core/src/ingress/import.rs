@@ -4,7 +4,9 @@
 //! with its initial independent states, and writes the search-index row (`retrieval::index`).
 //! The acknowledgment is returned only after that transaction has committed; every error
 //! reports whether the commit happened, so the native side removes its staging record only on
-//! `Ok` and keeps it (and retries with the same capture ID) otherwise.
+//! `Ok` and keeps it (and retries with the same capture ID) otherwise. The one exception is
+//! `ItemDeleted`, which is terminal: the user deleted the item, so the staging record may be
+//! discarded rather than retried forever.
 //!
 //! This is the Capture Ingestion Contract acknowledgment, not the pre-import capture write that
 //! the `ohand_core_start_save_capture` export performs. Nothing in this module deletes a
@@ -14,8 +16,8 @@ use crate::retrieval::index::sync_item_in_tx;
 use crate::store::captures::{get_capture, save_capture_in_tx, Capture};
 use crate::store::events::ItemScope;
 use crate::store::schema::Database;
-use chrono::DateTime;
-use chrono_tz::Tz;
+use crate::time::{ResolutionError, TimeContext, TimeResolver};
+use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, Transaction};
 use std::fmt;
 
@@ -57,7 +59,9 @@ pub enum IngressErrorKind {
     Validation(IngressRejection),
     /// The capture ID already holds different source content. The original is untouched.
     ConflictingReuse { capture_id: String },
-    /// The capture was imported and later deleted; it is never recreated.
+    /// The capture was imported and later deleted; it is never recreated. This outcome is
+    /// terminal: a retry can never succeed, so the native side may discard its staging record
+    /// (the user deleted this content) instead of keeping it for another attempt.
     ItemDeleted { item_id: String },
     /// A storage failure; the transaction is rolled back (or the commit outcome is unknown).
     Storage(anyhow::Error),
@@ -229,19 +233,40 @@ fn validate_record(capture: &Capture) -> Result<(), IngressRejection> {
         .parse::<ItemScope>()
         .map_err(|_| IngressRejection::UnsupportedScope(capture.item_scope.clone()))?;
 
-    if DateTime::parse_from_rfc3339(&capture.capture_instant).is_err() {
-        return Err(IngressRejection::MalformedTimeContext("capture_instant"));
-    }
+    let capture_instant = DateTime::parse_from_rfc3339(&capture.capture_instant)
+        .map_err(|_| IngressRejection::MalformedTimeContext("capture_instant"))?;
     if DateTime::parse_from_rfc3339(&capture.created_at).is_err() {
         return Err(IngressRejection::MalformedTimeContext("created_at"));
     }
-    if capture.timezone_id.parse::<Tz>().is_err() {
-        return Err(IngressRejection::MalformedTimeContext("timezone_id"));
+    if capture.locale.trim().is_empty() {
+        return Err(IngressRejection::MalformedTimeContext("locale"));
     }
     if capture.utc_offset_minutes.abs() > MAX_UTC_OFFSET_MINUTES {
         return Err(IngressRejection::MalformedTimeContext("utc_offset_minutes"));
     }
-    Ok(())
+    validate_time_context(capture, capture_instant)
+}
+
+/// Applies the canonical M1 time-context rules (`TimeResolver::validate_context`) so ingress
+/// never acknowledges a record that later time resolution would refuse.
+fn validate_time_context(
+    capture: &Capture,
+    capture_instant: DateTime<chrono::FixedOffset>,
+) -> Result<(), IngressRejection> {
+    let context = TimeContext {
+        timezone: capture.timezone_id.clone(),
+        locale: capture.locale.clone(),
+        reference_time: capture_instant.with_timezone(&Utc),
+        utc_offset_at_capture: capture.utc_offset_minutes * 60,
+        calendar: capture.calendar.clone(),
+    };
+    TimeResolver::validate_context(&context).map_err(|error| {
+        IngressRejection::MalformedTimeContext(match error {
+            ResolutionError::InvalidCalendar(_) => "calendar",
+            ResolutionError::InvalidTimezone(_) => "timezone_id",
+            _ => "utc_offset_minutes",
+        })
+    })
 }
 
 /// Resolves a previously committed import of this capture ID, rejecting changed content.
