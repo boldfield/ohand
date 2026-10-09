@@ -34,6 +34,15 @@ final class SyntheticVoiceEngine: VoiceCaptureEngine {
             if createsEmptyFileBeforeFailingToStart { FileManager.default.createFile(atPath: destination.path, contents: nil) }
             throw startError
         }
+        let audioFile = try Self.makeWriter(at: destination)
+        if framesWritten > 0 { try Self.write(frames: framesWritten, to: audioFile) }
+        startCount += 1
+        lastMaxDuration = maxDuration
+        self.destination = destination
+        openFile = audioFile
+    }
+
+    static func makeWriter(at destination: URL) throws -> AVAudioFile {
         let settings: [String: Any] = [
             AVFormatIDKey: Int(kAudioFormatLinearPCM),
             AVSampleRateKey: 16000.0,
@@ -42,19 +51,21 @@ final class SyntheticVoiceEngine: VoiceCaptureEngine {
             AVLinearPCMIsBigEndianKey: false,
             AVLinearPCMIsFloatKey: false,
         ]
-        let audioFile = try AVAudioFile(
-            forWriting: destination, settings: settings, commonFormat: .pcmFormatInt16, interleaved: true)
-        if framesWritten > 0 {
-            let buffer = AVAudioPCMBuffer(pcmFormat: audioFile.processingFormat, frameCapacity: framesWritten)!
-            buffer.frameLength = framesWritten
-            let samples = buffer.int16ChannelData![0]
-            for index in 0..<Int(framesWritten) { samples[index] = Int16(truncatingIfNeeded: index % 100) }
-            try audioFile.write(from: buffer)
-        }
-        startCount += 1
-        lastMaxDuration = maxDuration
-        self.destination = destination
-        openFile = audioFile
+        return try AVAudioFile(forWriting: destination, settings: settings, commonFormat: .pcmFormatInt16, interleaved: true)
+    }
+
+    static func write(frames: AVAudioFrameCount, to audioFile: AVAudioFile) throws {
+        let buffer = AVAudioPCMBuffer(pcmFormat: audioFile.processingFormat, frameCapacity: frames)!
+        buffer.frameLength = frames
+        let samples = buffer.int16ChannelData![0]
+        for index in 0..<Int(frames) { samples[index] = Int16(truncatingIfNeeded: index % 100) }
+        try audioFile.write(from: buffer)
+    }
+
+    /// A closed recording file as a killed or cancelled session leaves it, with no controller or engine involved.
+    static func writeClosedRecording(at destination: URL, frames: AVAudioFrameCount) throws {
+        let audioFile = try makeWriter(at: destination)
+        if frames > 0 { try write(frames: frames, to: audioFile) }
     }
 
     func stopAndClose() -> Bool {
@@ -168,6 +179,51 @@ final class IngressVoiceHandoff: VoiceRecordingHandoffReceiving {
     }
 }
 
+/// What the app assembly does for restart recovery: run the ingress writer's recovery pass and report it in the
+/// recorder's terms. Ownership of the in-progress files is reported as unknown whenever ingress could not establish it.
+final class IngressVoiceRecovery: VoiceRecoveryIngress {
+    private let service: ForegroundIngressService
+    private(set) var recoveryPasses = 0
+
+    init(service: ForegroundIngressService) {
+        self.service = service
+    }
+
+    func recoverStagedCaptures(completion: @escaping (VoiceIngressRecoveryReport) -> Void) {
+        recoveryPasses += 1
+        service.recover { completion(Self.report(from: $0)) }
+    }
+
+    static func report(from ingress: IngressRecoveryReport) -> VoiceIngressRecoveryReport {
+        var report = VoiceIngressRecoveryReport()
+        for entry in ingress.entries {
+            switch entry.outcome {
+            case .saved:
+                report.confirmedCaptureIDs.append(entry.captureID)
+            case .itemDeleted:
+                report.deletedItemCaptureIDs.append(entry.captureID)
+            case .keptForRetry(_, let problem):
+                report.pending.append(VoicePendingCapture(captureID: entry.captureID, reason: reason(for: problem)))
+            case .notStaged:
+                report.pending.append(VoicePendingCapture(captureID: entry.captureID, reason: .audioUnavailable))
+            }
+        }
+        let ownershipKnown = ingress.listingFailure == nil && ingress.unclaimedAudioListingFailure == nil
+            && !ingress.unclaimedAudioNotEvaluated
+        report.unclaimedInProgressFileNames = ownershipKnown ? ingress.unclaimedInProgressAudio : nil
+        return report
+    }
+
+    private static func reason(for problem: IngressPendingProblem) -> VoicePendingReason {
+        switch problem {
+        case .notCommitted, .commitUnknown, .coreUnavailable, .conflictingReuse: return .importUnconfirmed
+        case .rejected(let code): return .coreRejected(code: code)
+        case .sourceUnavailable: return .audioUnavailable
+        case .recordUnreadable: return .stagingRecordUnreadable
+        }
+    }
+}
+
 enum UnexpectedOutcomeError: Error { case startSucceeded, notSaved }
 
 /// A protected storage tree, a scripted ingress importer behind the real ingress service, and a recording controller
@@ -184,6 +240,8 @@ class VoiceCaptureTestCase: IngressStorageTestCase {
     var isForeground = true
     var freeSpace: Int64? = 1_000_000_000
     var protectionError: Error?
+    var joinShouldFail = false
+    var replaceShouldFail = false
     private(set) var protectedURLs: [URL] = []
     private(set) var outcomes: [VoiceCaptureOutcome] = []
     private(set) var states: [VoiceRecorderState] = []
@@ -192,15 +250,21 @@ class VoiceCaptureTestCase: IngressStorageTestCase {
     var service: ForegroundIngressService!
     var handoff: IngressVoiceHandoff!
     var controller: VoiceRecordingController!
+    var recovery: IngressVoiceRecovery!
+    var coordinator: VoiceRecoveryCoordinator!
 
     override func setUpWithError() throws {
         try super.setUpWithError()
         service = try makeService(importer: importer, fileSystem: failingFileSystem)
         handoff = IngressVoiceHandoff(service: service, context: context)
         controller = makeController()
+        recovery = IngressVoiceRecovery(service: service)
+        coordinator = makeCoordinator()
     }
 
     override func tearDown() {
+        coordinator = nil
+        recovery = nil
         controller = nil
         handoff = nil
         service = nil
@@ -225,7 +289,54 @@ class VoiceCaptureTestCase: IngressStorageTestCase {
                 if let protectionError = protectionError { throw protectionError }
             },
             schedulePoll: { [unowned self] interval, handler in poller.schedule(interval: interval, handler: handler) },
-            removeFile: { try? FileManager.default.removeItem(at: $0) })
+            removeFile: { try? FileManager.default.removeItem(at: $0) },
+            modificationDate: { url in
+                let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+                return attributes?[.modificationDate] as? Date
+            },
+            joinAudio: { [unowned self] first, second, destination in
+                if joinShouldFail { return false }
+                return VoiceRecordingEnvironment.joinAudioFiles(first, second, to: destination)
+            },
+            replaceFile: { [unowned self] original, replacement in
+                if replaceShouldFail { return false }
+                return VoiceRecordingEnvironment.replaceFileAtomically(original, with: replacement)
+            })
+    }
+
+    func makeCoordinator(
+        limits: VoiceRecordingLimits = VoiceRecordingLimits(),
+        maxListedRecordings: Int = 20
+    ) -> VoiceRecoveryCoordinator {
+        VoiceRecoveryCoordinator(
+            inProgressDirectory: layout.directory(for: .ingressInProgressAudio),
+            ingress: recovery,
+            handoff: handoff,
+            controller: controller,
+            environment: testEnvironment,
+            limits: limits,
+            maxListedRecordings: maxListedRecordings)
+    }
+
+    /// Leaves a closed recording in the in-progress store the way a cancelled or killed session does.
+    @discardableResult
+    func leaveRecording(_ captureID: String, frames: AVAudioFrameCount = 8000, modifiedAt: Date? = nil) throws -> URL {
+        let url = recordingFile(captureID)
+        try SyntheticVoiceEngine.writeClosedRecording(at: url, frames: frames)
+        if let modifiedAt = modifiedAt {
+            try FileManager.default.setAttributes([.modificationDate: modifiedAt], ofItemAtPath: url.path)
+        }
+        return url
+    }
+
+    func refreshListing() throws -> VoiceRecoveryListing {
+        var listing: VoiceRecoveryListing?
+        coordinator.refresh { listing = $0 }
+        return try XCTUnwrap(listing, "refresh did not complete")
+    }
+
+    func audioFrames(_ url: URL) throws -> Int64 {
+        try AVAudioFile(forReading: url).length
     }
 
     func makeController(limits: VoiceRecordingLimits = VoiceRecordingLimits()) -> VoiceRecordingController {
