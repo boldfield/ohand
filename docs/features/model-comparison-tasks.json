@@ -693,6 +693,10 @@
     {
       "date": "2026-10-09",
       "change": "XL01 now also depends on T08 (two-week trial evaluation). Every M2 comparison task chains to XL01, so all M2 work waits for the trial verdict per DESIGN.md: revise the loop before adding features."
+    },
+    {
+      "date": "2026-10-09",
+      "change": "XB04 allowance (one-time, recorded after PR #144 round 1): the XB02 diagnostic contract cannot carry provider-reported usage alongside a transport error (invoke_diagnostic returns Result<DiagnosticResponse, TransportError> and dispatch_diagnostic drops observations on Err), so refusal/content_filter usage is lost. XB04 may extend core/src/providers/contracts/ additively so a rejected diagnostic transport result carries CallObservations into DiagnosticFailure.usage while keeping the Rejected class; existing adapters, fakes and callers must compile unchanged (XB02 acceptance 2). XB04 may also update the Anthropic refusal path under core/src/providers/anthropic/ and core/tests/providers_anthropic/ to use the same carrier, since XB03 has landed. No other XB02 or XB03 ownership transfers."
     }
   ]
 }
