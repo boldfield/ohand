@@ -42,10 +42,14 @@ public final class JobRunnerService: @unchecked Sendable {
     private let retryDelay: TimeInterval
 
     private let stateLock = NSLock()
+    /// Serialises reachability changes so the flag here and the core's flag always end on the same, latest value.
+    /// Taken before `stateLock`, never the other way round.
+    private let reachabilityLock = NSLock()
     private var registration: JobHostRegistration?
     private var nextOperationID = JobRunnerService.firstOperationID
     private var activeOperationID: UInt64?
     private var rerunRequested = false
+    private var interruptedReruns = 0
     private var isForeground = false
     private var isReachable: Bool
     private var isShutDown = false
@@ -129,6 +133,13 @@ public final class JobRunnerService: @unchecked Sendable {
         return finishedCount
     }
 
+    /// What the service currently believes about the network; the core is told the same value.
+    public var isNetworkReachable: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return isReachable
+    }
+
     public var lastOutcome: JobDrainOutcome? {
         stateLock.lock()
         defer { stateLock.unlock() }
@@ -154,6 +165,7 @@ public final class JobRunnerService: @unchecked Sendable {
     public func activate() {
         stateLock.lock()
         isForeground = true
+        interruptedReruns = 0
         stateLock.unlock()
         requestDrain()
     }
@@ -161,15 +173,22 @@ public final class JobRunnerService: @unchecked Sendable {
     /// The network changed. Becoming reachable starts a drain. Becoming unreachable abandons the provider requests
     /// in flight without spending retry budget; the drain carries on with on-device capabilities and local jobs.
     public func reachabilityChanged(_ reachable: Bool) {
+        // The core's flag is written inside the same critical section as ours, so concurrent changes cannot leave
+        // the two disagreeing: a send would be cancelled here while the core keeps offering them, or provider jobs
+        // would stay deferred while online.
+        reachabilityLock.lock()
         stateLock.lock()
         guard !isShutDown else {
             stateLock.unlock()
+            reachabilityLock.unlock()
             return
         }
         isReachable = reachable
+        interruptedReruns = 0
         let sends = reachable ? [] : Array(runningSends.values)
         stateLock.unlock()
         try? core.setJobNetworkReachable(reachable)
+        reachabilityLock.unlock()
         if reachable {
             requestDrain()
         } else {
@@ -263,15 +282,27 @@ public final class JobRunnerService: @unchecked Sendable {
 
     /// A trigger arrived during the drain, the drain stopped only because it reached its bounds, or a provider
     /// request was abandoned because the network dropped (the core ends the drain at that job; the jobs queued
-    /// behind it, such as on-device ones, still need their turn and no longer wait for the network).
+    /// behind it, such as on-device ones, still need their turn). The last case runs at most
+    /// `maxInterruptedReruns` times in a row, so a request that keeps being cancelled cannot spin drains; a
+    /// reachability change or an activation starts the count again. Call with `stateLock` held.
     private func wantsAnotherDrain(after outcome: JobDrainOutcome) -> Bool {
-        if rerunRequested { return true }
+        if rerunRequested {
+            interruptedReruns = 0
+            return true
+        }
         guard case .finished(let summary) = outcome else { return false }
         if summary.stop == "interrupted" {
-            return !isReachable && summary.jobs.last?.jobType == Self.providerJobType
+            guard !isReachable, summary.jobs.last?.jobType == Self.providerJobType,
+                interruptedReruns < Self.maxInterruptedReruns
+            else { return false }
+            interruptedReruns += 1
+            return true
         }
+        interruptedReruns = 0
         return summary.stop == "job_limit" || summary.stop == "time_budget"
     }
+
+    private static let maxInterruptedReruns = 1
 
     /// Whether the drain left work that a timer should retry. A job the core deferred as
     /// `capability_unavailable` is left out: the core already holds it back for a long while, and nothing changes

@@ -103,6 +103,18 @@ final class FakeReachability: NetworkReachability, @unchecked Sendable {
     }
 }
 
+/// A monitor whose `isReachable` snapshot is stale (still `false`) when it reports the current state as reachable,
+/// as `NWPathMonitor` does before its first callback has been recorded.
+final class StaleSnapshotReachability: NetworkReachability, @unchecked Sendable {
+    var isReachable: Bool { false }
+
+    func startMonitoring(_ onChange: @escaping @Sendable (Bool) -> Void) {
+        onChange(true)
+    }
+
+    func stopMonitoring() {}
+}
+
 /// Holds every request until opened, then forwards it. A request whose task is cancelled ends as `cancelled`,
 /// which is what the real transport does.
 final class GatedSender: ProviderRequestSender, @unchecked Sendable {

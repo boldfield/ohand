@@ -402,4 +402,67 @@ final class JobRunnerBoundaryTests: ProviderTransportTestCase {
         XCTAssertEqual(job(session, "job-native-5")?.status, "completed")
         XCTAssertEqual(try XCTUnwrap(session.summary()).stop, "idle")
     }
+
+    // MARK: reachability consistency
+
+    func testConcurrentOppositeReachabilityChangesLeaveTheServiceAndCoreAgreeing() throws {
+        let server = try makeServer()
+        let session = try open(
+            try makeStore(), sender: FixtureRoutingSender(underlying: transport, fixtureServer: server),
+            isReachable: false)
+
+        DispatchQueue.concurrentPerform(iterations: 400) { index in
+            session.service.reachabilityChanged(index % 2 == 0)
+        }
+        let reachable = session.service.isNetworkReachable
+
+        session.service.activate()
+        if reachable {
+            XCTAssertTrue(
+                session.pump(until: { self.job(session)?.status == "completed" }),
+                "the core agrees the network is back, so the provider job is sent")
+            XCTAssertEqual(server.requests.count, 1)
+        } else {
+            XCTAssertTrue(session.waitForFinishedDrains(1))
+            session.pumpFor(0.5)
+            XCTAssertEqual(job(session)?.status, "queued")
+            XCTAssertEqual(
+                job(session)?.failureReason, "offline_deferred", "the core agrees the network is gone, so nothing is sent")
+            XCTAssertTrue(server.requests.isEmpty)
+            XCTAssertLessThanOrEqual(session.service.startedDrainCount, 2)
+        }
+    }
+
+    func testACancelledSendWhileTheServiceThinksItIsOfflineDoesNotSpinDrains() throws {
+        let server = try makeServer()
+        let session = try open(
+            try makeStore(), sender: FixtureRoutingSender(underlying: transport, fixtureServer: server),
+            isReachable: false)
+        // Force the disagreement the serialised updates rule out: the core offers sends the service refuses.
+        try session.core.setJobNetworkReachable(true)
+
+        session.service.activate()
+        XCTAssertTrue(session.waitForFinishedDrains(1))
+        session.pumpFor(1.0)
+
+        XCTAssertLessThanOrEqual(session.service.startedDrainCount, 2, "an interrupted drain reruns at most once")
+        XCTAssertFalse(session.service.isDraining)
+        XCTAssertTrue(server.requests.isEmpty)
+        XCTAssertEqual(job(session)?.status, "queued")
+    }
+
+    func testTheLifecycleObserverTakesReachabilityOnlyFromTheMonitor() throws {
+        let server = try makeServer()
+        let session = try open(
+            try makeStore(), sender: FixtureRoutingSender(underlying: transport, fixtureServer: server),
+            isReachable: false)
+        let monitor = StaleSnapshotReachability()
+        let observer = JobRunnerLifecycleObserver(
+            service: session.service, notificationCenter: NotificationCenter(), reachability: monitor)
+
+        observer.start(isActive: false)
+        defer { observer.stop() }
+
+        XCTAssertTrue(session.service.isNetworkReachable, "the monitor's report stands; no stale snapshot overrides it")
+    }
 }

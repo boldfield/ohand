@@ -88,7 +88,7 @@ fn anthropic_profile() -> ProviderProfile {
 }
 
 /// Stands in for the import and profile installation, which create these rows in production.
-fn seed(path: &str, with_native_job: bool) {
+fn seed(path: &str, with_native_job: bool, note_text: &str) {
     let profile = anthropic_profile();
     let mut database =
         Database::open(path, std::sync::Arc::new(crate::store::schema::SystemClock)).unwrap();
@@ -121,7 +121,7 @@ fn seed(path: &str, with_native_job: bool) {
              entry_locked, created_at) VALUES (?, ?, NULL, '2026-10-08T09:30:00Z', \
              'America/Chicago', -300, 'en_US', 'gregorian', 'personal', ?, 0, \
              '2026-10-08T09:30:01Z')",
-            rusqlite::params![CAPTURE_ID, NOTE_TEXT, ROUTE_ID],
+            rusqlite::params![CAPTURE_ID, note_text, ROUTE_ID],
         )
         .unwrap();
     transaction
@@ -181,8 +181,12 @@ struct Session {
 
 impl Session {
     fn open(name: &str, with_native_job: bool) -> Session {
+        Session::open_with_text(name, with_native_job, NOTE_TEXT)
+    }
+
+    fn open_with_text(name: &str, with_native_job: bool, note_text: &str) -> Session {
         let (directory, path) = temporary_store(name);
-        seed(&path, with_native_job);
+        seed(&path, with_native_job, note_text);
         let mut handle = 0;
         let outcome = consume(unsafe { ohand_core_open(path.as_ptr(), path.len(), &mut handle) });
         assert_eq!(outcome.status, OHAND_CORE_STATUS_OK);
@@ -894,6 +898,50 @@ fn offline_a_provider_job_is_deferred_without_cost_and_native_jobs_still_run() {
     let summary = payload_of(&session.event(122));
     assert_eq!(only_job(&summary)["settlement"], "completed", "{summary}");
     assert_eq!(session.job(JOB_ID).status, JobStatus::Completed);
+    session.close();
+}
+
+#[test]
+fn offline_a_remote_routed_fast_path_capture_completes_locally_without_a_send() {
+    let _guard = serial();
+    let session = Session::open_with_text(
+        "offline-fast-path",
+        false,
+        "Remind me 2026-02-20 14:30:00 to call mom",
+    );
+    session.register_host(&[]);
+    assert_eq!(set_reachable(&session, false).status, OHAND_CORE_STATUS_OK);
+
+    session.start(141);
+    let summary = payload_of(&session.event(141));
+    assert_eq!(summary["stop"], "idle", "{summary}");
+    assert_eq!(only_job(&summary)["settlement"], "completed", "{summary}");
+    session.assert_no_command();
+    let job = session.job(JOB_ID);
+    assert_eq!(job.status, JobStatus::Completed);
+    assert_ne!(job.failure_reason.as_deref(), Some(OFFLINE_DEFERRED_REASON));
+    session.close();
+}
+
+#[test]
+fn offline_a_provider_job_deferred_at_the_transport_does_not_end_the_drain() {
+    let _guard = serial();
+    let session = Session::open("offline-transport-gate", false);
+    session.register_host(&[]);
+    assert_eq!(set_reachable(&session, false).status, OHAND_CORE_STATUS_OK);
+
+    session.start(142);
+    let summary = payload_of(&session.event(142));
+    assert_eq!(summary["stop"], "idle", "{summary}");
+    assert_eq!(only_job(&summary)["settlement"], "backed_off", "{summary}");
+    session.assert_no_command();
+    let job = session.job(JOB_ID);
+    assert_eq!(job.status, JobStatus::Queued);
+    assert_eq!(job.attempt_count, 1, "only the claim, no failure");
+    assert_eq!(job.failure_reason.as_deref(), Some(OFFLINE_DEFERRED_REASON));
+    assert!(job
+        .next_attempt_at
+        .is_some_and(|at| at > chrono::Utc::now() + chrono::Duration::seconds(10)));
     session.close();
 }
 

@@ -50,7 +50,8 @@ public final class JobRunnerLifecycleObserver {
     }
 
     /// Registers the hooks and, when `isActive`, runs the launch drain at once. Notifications are expected on the
-    /// main queue.
+    /// main queue. Reachability comes only from the monitor's callbacks, the first of which reports the current state;
+    /// reading its snapshot here could race the monitor and land a stale value after a newer one.
     public func start(isActive: Bool) {
         guard !isStarted else { return }
         isStarted = true
@@ -69,9 +70,6 @@ public final class JobRunnerLifecycleObserver {
             })
         reachability?.startMonitoring { [service] reachable in
             service.reachabilityChanged(reachable)
-        }
-        if let reachability {
-            service.reachabilityChanged(reachability.isReachable)
         }
         if isActive {
             service.activate()

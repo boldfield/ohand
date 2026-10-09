@@ -13,8 +13,11 @@
 //!   repeated or overlapping activation cannot create competing drainers. The refusal changes
 //!   nothing; the caller decides whether to run again after the final event.
 //! * **Offline is not a drain stopper.** `ohand_core_set_job_network_reachable` tells the core
-//!   whether provider calls can succeed. While they cannot, jobs that would call a provider are
-//!   deferred without cost and the drain moves on to on-device and local jobs.
+//!   whether provider calls can succeed. The gate sits at the provider-send boundary: a request
+//!   that would leave the device while the host has no network is refused there, and its job is
+//!   deferred without cost while the drain moves on to on-device and local jobs. Work that never
+//!   reaches the transport, such as a fast-path interpretation of a remotely routed capture,
+//!   completes offline.
 //! * **Cancellation is a checkpoint.** `ohand_core_cancel_job_drain` fires the runner's
 //!   `CancelToken`. A provider call in flight is abandoned and its job is re-queued at once
 //!   without spending retry budget; the drain ends with `stop: "cancelled"` (or `"interrupted"`).
@@ -113,6 +116,8 @@ const QUEUE_RETRY_LIMIT: u32 = 500;
 const CAPABILITY_DEADLINE: Duration = Duration::from_secs(240);
 /// Recorded on a provider job put back because the host reported no network.
 const OFFLINE_DEFERRED_REASON: &str = "offline_deferred";
+/// What the dispatcher records on a job whose provider request was cancelled.
+const CANCELLED_REASON: &str = "cancelled";
 /// How long an offline-deferred job waits; the next drain that starts with a network releases it
 /// at once, so this only bounds the wait if that release could not be written.
 const OFFLINE_DEFERRAL: chrono::Duration = chrono::Duration::seconds(30);
@@ -314,6 +319,9 @@ struct HostTransport {
     handle: u64,
     host: Arc<Registration>,
     authorized_origins: Arc<Mutex<Vec<String>>>,
+    /// Set when a request was refused because the host has no network, so the job that made it
+    /// can be deferred instead of ending the drain.
+    refused_offline: Arc<AtomicBool>,
 }
 
 impl HostTransport {
@@ -331,6 +339,10 @@ impl HostTransport {
             max_response_bytes,
         } = outgoing;
         if cancel.is_cancelled() {
+            return Err(TransportError::Cancelled);
+        }
+        if !self.host.network_available.load(Ordering::SeqCst) {
+            self.refused_offline.store(true, Ordering::SeqCst);
             return Err(TransportError::Cancelled);
         }
         let authorized_origins = lock(&self.authorized_origins).clone();
@@ -465,12 +477,13 @@ impl HttpTransport for HostTransport {
 
 /// Interpretation jobs, with the origins the provider may be sent to taken from the job's stored
 /// route authorization immediately before it runs. Fast-path and local jobs never reach the
-/// transport, so they leave the set unused.
+/// transport, so they leave the set unused and run whether or not the device is online. Only a
+/// request that actually reaches the transport while the host has no network is refused there.
 struct ScopedInterpretation<'a> {
     handle: u64,
-    host: Arc<Registration>,
     inner: InterpretationCapability<'a>,
     authorized_origins: Arc<Mutex<Vec<String>>>,
+    refused_offline: Arc<AtomicBool>,
 }
 
 impl JobCapability for ScopedInterpretation<'_> {
@@ -493,47 +506,50 @@ impl JobCapability for ScopedInterpretation<'_> {
             Ok(ExecutionResolution::Remote(target)) => target.destinations,
             _ => Vec::new(),
         };
-        if !destinations.is_empty() && !self.host.network_available.load(Ordering::SeqCst) {
-            return defer_until_network(db, claimed, now);
-        }
         *lock(&self.authorized_origins) = destinations;
-        self.inner.run(db, claimed, cancel, now)
+        self.refused_offline.store(false, Ordering::SeqCst);
+        let outcome = self.inner.run(db, claimed, cancel, now)?;
+        if self.refused_offline.swap(false, Ordering::SeqCst)
+            && matches!(outcome, CapabilityOutcome::Settled(Settlement::Interrupted))
+        {
+            return defer_until_network(db, claimed, now)
+                .map(|deferred| deferred.unwrap_or(outcome));
+        }
+        Ok(outcome)
     }
 }
 
-/// Puts a job that needs the network back for a while without spending retry budget. Unlike an
-/// interrupted job it does not end the drain, so on-device and local jobs queued behind it still
-/// run while the device is offline.
+/// The dispatcher put a job back at once after its provider request was refused for lack of a
+/// network (a cancelled request costs nothing but would end the drain). Move that job to a short
+/// wait instead, so on-device and local jobs queued behind it still run while the device is
+/// offline. `None` when the job is no longer in that state, which leaves the dispatcher's result
+/// to stand.
 fn defer_until_network(
     db: &mut Database,
     claimed: &Job,
     now: DateTime<Utc>,
-) -> Result<CapabilityOutcome, CapabilityError> {
+) -> Result<Option<CapabilityOutcome>, CapabilityError> {
     let retry_at = now + OFFLINE_DEFERRAL;
     let affected = db
         .conn()
         .execute(
-            "UPDATE jobs SET status = ?, failure_reason = ?, next_attempt_at = ?, lease_expires_at = NULL
-              WHERE job_id = ? AND status = ? AND attempt_count = ?",
+            "UPDATE jobs SET failure_reason = ?, next_attempt_at = ?
+              WHERE job_id = ? AND status = ? AND failure_reason = ? AND attempt_count = ?",
             rusqlite::params![
-                JobStatus::Queued.as_str(),
                 OFFLINE_DEFERRED_REASON,
                 retry_at.to_rfc3339(),
                 claimed.job_id,
-                JobStatus::Running.as_str(),
+                JobStatus::Queued.as_str(),
+                CANCELLED_REASON,
                 claimed.attempt_count
             ],
         )
         .map_err(|error| CapabilityError::Internal(error.to_string()))?;
-    if affected != 1 {
-        return Err(CapabilityError::LeaseLost(format!(
-            "job {} lease is no longer held",
-            claimed.job_id
-        )));
-    }
-    Ok(CapabilityOutcome::Settled(Settlement::BackedOff {
-        retry_at,
-    }))
+    Ok(
+        (affected == 1).then_some(CapabilityOutcome::Settled(Settlement::BackedOff {
+            retry_at,
+        })),
+    )
 }
 
 /// Makes the jobs an offline drain deferred ready again; called when a drain starts with a network.
@@ -746,10 +762,12 @@ fn run_drain(
     }
 
     let authorized_origins = Arc::new(Mutex::new(Vec::new()));
+    let refused_offline = Arc::new(AtomicBool::new(false));
     let transport = HostTransport {
         handle,
         host: Arc::clone(&host),
         authorized_origins: Arc::clone(&authorized_origins),
+        refused_offline: Arc::clone(&refused_offline),
     };
     let registry = AdapterRegistry::new()
         .with_adapter(
@@ -760,12 +778,12 @@ fn run_drain(
     let provider_clock = SystemClock::new();
     let mut capabilities = JobCapabilities::new().with(ScopedInterpretation {
         handle,
-        host: Arc::clone(&host),
         inner: InterpretationCapability::new(InterpretationDispatcher::new(
             &registry,
             &provider_clock,
         )),
         authorized_origins,
+        refused_offline,
     });
     for job_type in &host.native_job_types {
         capabilities = capabilities.with(HostCapability {
