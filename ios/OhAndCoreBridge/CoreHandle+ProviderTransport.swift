@@ -46,6 +46,8 @@ public struct ProviderSendCommand: Decodable, Equatable, Sendable {
     public let maxResponseBytes: Int
     public let credential: Credential?
     public let authorizedOrigins: [String]
+    /// The capability the core authorized this request under (`text_interpretation` or `review`).
+    public let capability: String
 
     enum CodingKeys: String, CodingKey {
         case operationID = "operation_id"
@@ -57,6 +59,7 @@ public struct ProviderSendCommand: Decodable, Equatable, Sendable {
         case maxResponseBytes = "max_response_bytes"
         case credential
         case authorizedOrigins = "authorized_origins"
+        case capability
     }
 }
 
