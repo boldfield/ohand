@@ -206,6 +206,15 @@
       ],
       "old_task_id": "939fe62e-5074-45e5-ad67-156834129c13",
       "old_pr": "https://github.com/boldfield/ohand/pull/60"
+    },
+    "P08": {
+      "reason": "Signing automation is Linux-testable with stubbed Apple tools; a signed device install is a maintainer input on a Mac with Xcode. Separate them so the tooling can land while the device evidence stays an honest block.",
+      "children": [
+        "P08a",
+        "P08b"
+      ],
+      "old_task_id": "7d4836ee-0236-4f17-9f21-bc3ec1d3d7e0",
+      "old_pr": "https://github.com/boldfield/ohand/pull/27"
     }
   },
   "tasks": [
@@ -301,6 +310,12 @@
         "AGENTS.md:45",
         "core/src/store/captures/mod.rs:106",
         "core/src/store/schema/mod.rs:165"
+      ],
+      "ownership_allowances": [
+        "ios/Tests/CoreBridge/CaptureStatusTests.swift (single file; granted 2026-10-08 after PR #110; ordered after B01b, which has landed)"
+      ],
+      "recorded_decisions": [
+        "ohand_core_start_save_capture is a pre-import durable capture write, not the Capture Ingestion Contract acknowledgment; it accepts any non-empty route_id. C02a owns unknown-route rejection, the import transaction and the contracted acknowledgment (capture ID, item ID, save timestamp)."
       ]
     },
     {
@@ -1570,6 +1585,116 @@
         "docs/validation/m1-protocol.md:122"
       ],
       "starts_blocked": "maintainer phone-context evidence"
+    },
+    {
+      "key": "P08a",
+      "parent": "P08",
+      "title": "Build and test the signing and device-build tooling",
+      "file_scope": [
+        "tools/apple-build/",
+        "docs/validation/signing.md"
+      ],
+      "intent": "Make the signing automation correct and provably safe on Linux with stubbed Apple tools, so that a maintainer can run it unchanged on a Mac.",
+      "acceptance": [
+        "Unsigned simulator path stays credential-free; signing inputs only from environment or injected files; no secret, raw device identifier or profile content reaches stdout, logs or evidence.",
+        "Each route uses the correct identity class and, where required, archive/export with an explicit export options file; profile referenced by name or UUID; failed or device-less install exits non-zero; per-run temporary keychains cleaned on every exit path.",
+        "Behaviour tests against stub security/xcodebuild/devicectl assert exit codes, messages, cleanup, redaction and evidence schema; wired into make test; no vacuous assertions.",
+        "signing.md documents the P08b maintainer procedure and makes no unobserved validity claim."
+      ],
+      "covers_parent_criteria": [
+        1,
+        3
+      ],
+      "depends_on": [
+        "F03",
+        "F05"
+      ],
+      "source_pointers": [
+        "AGENTS.md:45",
+        "ios/project.yml:6",
+        "docs/validation/m1-protocol.md:122",
+        "https://github.com/boldfield/ohand/pull/27"
+      ]
+    },
+    {
+      "key": "P08b",
+      "parent": "P08",
+      "title": "Record the signed build and device-install evidence",
+      "file_scope": [
+        "docs/validation/signing.md",
+        "docs/validation/evidence/apple-signing/"
+      ],
+      "intent": "Fold the maintainer-produced signed-build and device-install evidence into the signing document and state the verified install validity for the trial.",
+      "acceptance": [
+        "signing.md cites the maintainer's named artifact with build revision, collection time, content-free build and device identifiers and the observed profile expiry.",
+        "Install validity for the two-week trial derives from the observed profile expiry; the renewal plan is tested and recorded or explicitly marked untested."
+      ],
+      "covers_parent_criteria": [
+        2,
+        4,
+        5
+      ],
+      "depends_on": [
+        "P08a"
+      ],
+      "source_pointers": [
+        "docs/features/m1-external-prerequisites.md",
+        "docs/validation/m1-protocol.md:122"
+      ],
+      "starts_blocked": "maintainer signed-build and device-install evidence"
+    },
+    {
+      "key": "F08",
+      "parent": null,
+      "title": "Move native CI to macOS 26 and Xcode 26.6",
+      "file_scope": [
+        "ios/project.yml",
+        ".github/workflows/ios.yml",
+        "ios/scripts/select_simulator.py",
+        "ios/scripts/test_select_simulator.py",
+        "ios/scripts/check_project_config.py",
+        "AGENTS.md"
+      ],
+      "intent": "Replace the unexplained Xcode 16.4 pin with the newest toolchain on GitHub-hosted runners so that simulator evidence and device signing use the same SDK generation as the trial iPhone.",
+      "acceptance": [
+        "Both ios.yml jobs run on macos-26 with Xcode 26.6; simulator ceiling follows the selected SDK; config check enforces workflow pin equals options.xcodeVersion.",
+        "Exact-head ios.yml run green on the submitted commit: OhAndTests, every probe build, launch smoke, Tauri round-trip; out-of-scope iOS 26 breakage recorded and blocked rather than fixed outside owned paths.",
+        "AGENTS.md names the new runner, Xcode and SDK with evidence requirements unchanged."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "P07"
+      ],
+      "source_pointers": [
+        ".github/workflows/ios.yml:18",
+        ".github/workflows/ios.yml:26",
+        "ios/project.yml:6",
+        "ios/scripts/select_simulator.py:71",
+        "AGENTS.md:65"
+      ]
+    },
+    {
+      "key": "I05b",
+      "parent": null,
+      "title": "Extend reminder-withdrawal grammar coverage",
+      "file_scope": [
+        "core/src/interpretation/apply/",
+        "core/tests/proposal_application/"
+      ],
+      "intent": "Add withdrawal phrasings and over-rejection fixes outside the bounded I05 grammar, driven by a synthetic fixture corpus.",
+      "acceptance": [
+        "Fixture corpus under core/tests/proposal_application/ drives the withdrawal/control behavior test; every I05 construction carried over unchanged.",
+        "Known over-rejections schedule again: 'about <verb>-ing' task objects, coordinated verbs inside the requested task, 'need to <verb>' complements.",
+        "Withdrawals produce no reminder rows/operations with source and non-reminder facets intact; controls produce exactly one scheduled reminder."
+      ],
+      "depends_on": [
+        "I05"
+      ],
+      "source_pointers": [
+        "core/src/interpretation/apply/mod.rs",
+        "core/tests/proposal_application/main.rs"
+      ],
+      "covers_parent_criteria": []
     }
   ],
   "effective_dependencies": {
@@ -1617,10 +1742,6 @@
     ],
     "P06": [
       "F02",
-      "F03",
-      "F05"
-    ],
-    "P08": [
       "F03",
       "F05"
     ],
@@ -1707,6 +1828,7 @@
     "B01b": [
       "B01a",
       "D05",
+      "F08",
       "P07",
       "V01"
     ],
@@ -1724,12 +1846,12 @@
       "V01"
     ],
     "P09": [
+      "F07",
       "P03",
       "P04",
       "P05",
       "P07",
-      "P08",
-      "F07",
+      "P08b",
       "P11"
     ],
     "I07": [
@@ -2031,8 +2153,8 @@
       "N07"
     ],
     "T10": [
-      "T09",
-      "P08"
+      "P08b",
+      "T09"
     ],
     "T02a": [
       "C05b",
@@ -2059,17 +2181,17 @@
       "T12a"
     ],
     "T05": [
-      "U10",
+      "B05",
+      "E02",
+      "P08b",
       "T01",
       "T02b",
       "T03",
       "T04b",
-      "E02",
-      "P08",
       "T09",
       "T10",
       "T12b",
-      "B05"
+      "U10"
     ],
     "T06": [
       "T05"
@@ -2088,6 +2210,20 @@
     ],
     "V08b": [
       "V08a"
+    ],
+    "P08a": [
+      "F03",
+      "F05",
+      "F08"
+    ],
+    "P08b": [
+      "P08a"
+    ],
+    "F08": [
+      "P07"
+    ],
+    "I05b": [
+      "I05"
     ]
   },
   "retained_dependency_overrides": {
@@ -2106,6 +2242,22 @@
     {
       "date": "2026-10-08",
       "change": "B01b ordered ownership allowance for ios/project.yml (named settings), core/bindings/build-ios.sh lock, core-binding.md section and ios/Tests/CoreBridge/; B01b now depends on P07 to serialize ios/project.yml edits."
+    },
+    {
+      "date": "2026-10-08",
+      "change": "Split P08 into P08a (Linux-testable signing tooling) and P08b (maintainer signed-build and device-install evidence); P09, T05 and T10 now depend on P08b. Original task 7d4836ee-0236-4f17-9f21-bc3ec1d3d7e0 retired after two rejected review rounds on PR #27."
+    },
+    {
+      "date": "2026-10-08",
+      "change": "Added F08: move native CI to macos-26 and Xcode 26.6 (the 16.4 pin cannot install on the iOS 26.6.2 trial iPhone). F08 depends on P07; B01b and P08a depend on F08."
+    },
+    {
+      "date": "2026-10-08",
+      "change": "B01c: ownership allowance for ios/Tests/CoreBridge/CaptureStatusTests.swift and a recorded decision that ohand_core_start_save_capture is a pre-import capture write; C02a owns route validation and the ingestion acknowledgment."
+    },
+    {
+      "date": "2026-10-08",
+      "change": "Bounded the withdrawal grammar I05 criterion 2 requires (PR #96 breaker after four rounds); added I05b for phrasings and over-rejections outside that list, depending on I05."
     }
   ]
 }

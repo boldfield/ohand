@@ -46,6 +46,17 @@ class SelectSimulatorTests(unittest.TestCase):
         self.assertEqual(selected["udid"], "SDK")
         self.assertEqual(selected["runtime"], "18.5")
 
+    def test_ceiling_follows_the_reported_sdk_generation(self):
+        data = simctl(**{
+            "18_5": [device("iPhone 16", "OLD")],
+            "26_5": [device("iPhone 17", "BELOW")],
+            "26_6": [device("iPhone 17", "SDK")],
+            "27_0": [device("iPhone 18", "TOONEW")],
+        })
+        self.assertEqual(selector.select_simulator(data, "26.6")["udid"], "SDK")
+        self.assertEqual(selector.select_simulator(data, "26.5")["udid"], "BELOW")
+        self.assertEqual(selector.select_simulator(data, "26.6")["runtime"], "26.6")
+
     def test_unavailable_and_non_iphone_devices_are_skipped(self):
         data = simctl(**{"18_5": [
             device("iPhone 15", "DEAD", available=False),

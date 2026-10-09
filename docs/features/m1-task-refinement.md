@@ -1,8 +1,8 @@
 # M1 task refinement — 2026-10-07
 
-This execution overlay replaces 24 task groups with 50 smaller implementation tasks. The other 55 never-started tasks retain their scope. Nineteen already completed, attempted, active or externally blocked groups were excluded. The effective M1 graph contains 124 tasks. This changes implementation granularity, not product scope or milestone exit criteria.
+This execution overlay replaces 25 task groups with 53 smaller implementation tasks. The other 55 never-started tasks retain their scope. Eighteen already completed, attempted, active or externally blocked groups were excluded. The effective M1 graph contains 126 tasks. This changes implementation granularity, not product scope or milestone exit criteria.
 
-Addendum 2026-10-08: V08 was originally excluded as an externally blocked evidence task. After two rejected review rounds on its PR #60, it is now split into V08a (worker-executable server-side probe) and V08b (maintainer-supplied phone-context evidence). The original task `939fe62e` is retired; see the replacement map and the V08a/V08b slices below.
+Addendum 2026-10-08: V08 was originally excluded as an externally blocked evidence task. After two rejected review rounds on its PR #60, it is now split into V08a (worker-executable server-side probe) and V08b (maintainer-supplied phone-context evidence). The original task `939fe62e` is retired; see the replacement map and the V08a/V08b slices below. Addendum 2026-10-08, later: P08 is split the same way into P08a (signing tooling, Linux-testable with stubbed Apple tools) and P08b (maintainer-produced signed build and device-install evidence on a Mac with Xcode). The original task `7d4836ee` is retired; P09, T05 and T10 now depend on P08b.
 
 ## Execution authority
 
@@ -31,6 +31,14 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
 - V08 conflated two evidence sources with different owners. Its server-side probe runs from the Odonian worker, which now has verified read access to the provider configuration file. Its phone-context reachability evidence can only come from the maintainer's iPhone, which reaches the Spark endpoint over Tailscale rather than a public address or the worker's network. V08a owns the probe tool, its tests and the Linux-context findings; V08b owns the phone-context section and the final verified status. V09 now depends on V08b, the last child, so the adapter still cannot start before both evidence sources exist. V08a must not be approved on the strength of a prose status: every published value comes from a committed sanitized artifact produced by the probe as submitted.
 
 - B01b holds an ordered ownership allowance, granted by the coordinator on 2026-10-08 after PR #87 showed that criterion 2 cannot be met inside `core/src/ffi/` and `ios/OhAndCoreBridge/` alone: (1) in `ios/project.yml`, only the OhAndCoreBridge target's link, search-path, `SWIFT_INCLUDE_PATHS` and pre-build settings, and the OhAndTests target's `OHAND_RUST_OUTPUT_DIR`, `HEADER_SEARCH_PATHS` and `SWIFT_INCLUDE_PATHS`; (2) in `core/bindings/build-ios.sh`, a lock that serializes parallel Xcode invocations; (3) a handle/callback section in `docs/validation/core-binding.md`; (4) the new `ios/Tests/CoreBridge/` directory. Because P07 edits `ios/project.yml` concurrently, B01b now also waits for P07. The generator and `core/bindings/src/lib.rs` remain off-limits to B01b, and an allowance written inside an implementation PR is still not an allowance.
+
+- B01c holds an ordered ownership allowance, granted by the coordinator on 2026-10-08 after PR #110 showed that criterion 2 (restart, duplicate capture ID and normalized failure on simulator) needs a simulator test next to B01b's: it may add and later maintain the single file `ios/Tests/CoreBridge/CaptureStatusTests.swift`. B01b has landed (PR #108), so no ordering conflict remains in that directory. Nothing else under `ios/Tests/`, `ios/project.yml` or `core/bindings/` is granted, and an allowance written inside an implementation PR is still not an allowance.
+
+- I05's criterion 2 ("reminder candidates require explicit intent") was reviewed on PR #96 by probing one new withdrawal phrasing per round. After four rounds the breaker blocked the task with Opus approving and Codex producing a further phrasing each time. On 2026-10-08 the coordinator bounded the withdrawal grammar I05 must recognize, without weakening the criterion: a reminder request followed in the same capture by an unquoted, non-negated, non-infinitive withdrawal stays unscheduled, with the source record and non-reminder facets intact. Required constructions: (a) retraction verbs and idioms: forget, skip, cancel, delete, stop, never mind, scratch that, take back, change mind, remember on my own, don't bother, and bare "actually no" / "actually don't"; (b) negated want, need or desire that either governs the reminder itself ("I don't want that reminder", "I don't need the reminder") or carries a wish-ended marker (no longer, anymore, any more); (c) needless predicates: not needed, not necessary, not required. Positive controls that must still schedule: complement infinitives ("don't want to miss it"), negated verbs governing a task object ("don't cancel the ladder order"), and unrelated negations ("it's not urgent"). The PR carries every listed construction as a durable regression. Reviewers verify criterion 2 against this list. A phrasing outside it, and the known over-rejections ("about cancelling the gym", "call the roofer and cancel the order", "take the ladder back", "so I don't need to worry"), are findings for I05b, not blockers for I05.
+
+- P08 conflated signing automation, which the Linux fleet can build and test against stubbed `security`, `xcodebuild` and `devicectl`, with a signed build installed on a physical iPhone, which only the maintainer can produce on a Mac with Xcode, an Apple Development identity and a device profile. Apple Developer Program enrollment completed on 2026-10-08; this Mac still has no Xcode, identity or profile. P08a owns the tooling, its behaviour tests and the signing document's procedure sections; P08b owns the evidence record and the validity/renewal statement. P09, T05 and T10 depend on P08b, the last child.
+
+- The Xcode 16.4 pin in `ios/project.yml` and `.github/workflows/ios.yml` was the macos-15 runner image default when F03 and F05 ran; no rationale was recorded. It ships the iOS 18.5 SDK and cannot install on the maintainer's iPhone, which runs iOS 26.6.2, so it blocks P08b outright. New task F08 moves native CI to the `macos-26` image and Xcode 26.6, the newest version on GitHub-hosted runners as of 2026-10-08 (Xcode 27 is not yet on hosted images), and re-proves every probe under that SDK. F08 waits for P07, which edits `ios/project.yml`; B01b and P08a wait for F08. Bump again to Xcode 27 when the hosted image carries it.
 
 - V06 and V07 now depend on V01 alone: they implement Rust adapters against its transport interface using fixtures. V05 is the native effect implementation and remains required by app composition/integration, not by independent protocol adapter implementation. This is an explicit dependency override for those retained tasks.
 
@@ -68,6 +76,7 @@ Smaller changes reduce the amount of code and context per review/repair cycle. T
 | T12 | T12a, T12b | Provider/permission failures and destructive lifecycle races form two bounded UI journeys. |
 | L05 | L05a, L05b | The original Swift-only scope omitted Rust-owned reset fencing. Separate the atomic core reset operation from native cleanup orchestration. |
 | V08 | V08a, V08b | The worker can only produce server-side protocol evidence; phone-context reachability over Tailscale is a maintainer input. Separate them so the probe can be reviewed and landed while the device evidence stays an honest block. |
+| P08 | P08a, P08b | Signing automation is Linux-testable with stubbed Apple tools; a signed device install is a maintainer input on a Mac with Xcode. Separate them so the tooling can land while the device evidence stays an honest block. |
 
 ## Retained unstarted tasks
 
@@ -190,6 +199,8 @@ Source pointers (baseline above): `docs/architecture/m1-contracts.md:211`, `AGEN
 
 Contributes to original B01 criteria: 2, 3, 4.
 
+Recorded decision (coordinator, 2026-10-08, PR #110 round 2): the production export `ohand_core_start_save_capture` and its Swift acknowledgment are a pre-import durable capture write, not the Capture Ingestion Contract acknowledgment in `docs/architecture/m1-contracts.md` (capture ID, item ID, save timestamp). B01c accepts any non-empty `route_id` without validating it, because no route store exists before C02a. C02a owns unknown-route rejection, the import transaction and the contracted acknowledgment; native callers, including the C01b ingress path, must treat B01c's success as "the capture bytes are durable" and nothing more. The acknowledgment type must be named or documented so it cannot be mistaken for the ingestion acknowledgment.
+
 ### V05a
 
 Implement secure bounded native provider transport
@@ -271,6 +282,86 @@ Acceptance:
 Source pointers (baseline above): `docs/features/m1-external-prerequisites.md`, `docs/validation/m1-protocol.md:122`.
 
 Contributes to original V08 criteria: 2, 3.
+
+### P08a
+
+Build and test the signing and device-build tooling
+
+Make the signing automation correct and provably safe on Linux with stubbed Apple tools, so that a maintainer can run it unchanged on a Mac.
+
+Owned paths: `tools/apple-build/`, `docs/validation/signing.md` (procedure sections only; the evidence and validity sections belong to P08b).
+
+Dependencies: F03, F05.
+
+Context: PR #27 on branch `mr/7d4836ee` holds the retired P08 attempt. Its code may be reused, but every finding from both review rounds recorded on task `7d4836ee` must be resolved; those findings are the defect list for this slice. The target toolchain is the Xcode version pinned in `ios/project.yml`, which F08 moves to 26.6; P08a waits for F08. The intended route for the two-week trial is Development signing with the paid account's one-year profile; keep ad-hoc and App Store routes only if they are implemented correctly or remove them.
+
+Acceptance:
+
+1. The unsigned simulator path stays credential-free. Signing inputs come only from environment or injected files, never from the repository or command output, and no secret, raw device identifier or profile content reaches stdout, logs or evidence.
+2. Each supported route uses the correct identity class and, where distribution requires it, an archive and export step with an explicit export options file; the provisioning profile is referenced by its name or UUID read from the profile, not by its file name. A requested install that fails or has no device identifier exits non-zero. Keychains are per-run temporary files and are cleaned up on every exit path.
+3. Behaviour tests run the scripts against stub `security`, `xcodebuild` and `devicectl` on PATH and assert exit codes, messages, keychain cleanup on failure, redaction and the evidence schema; they are wired into `make test` and have no vacuous assertions.
+4. `docs/validation/signing.md` documents the maintainer procedure for P08b and makes no validity or expiry claim that was not observed.
+
+Source pointers (baseline above): `AGENTS.md:45`, `ios/project.yml:6`, `docs/validation/m1-protocol.md:122`, PR #27 files `tools/apple-build/sign-probe.sh`, `tools/apple-build/manage-keychain.sh`, `tools/apple-build/test_signing.py`.
+
+Contributes to original P08 criteria: 1, 3, and the automation part of 2.
+
+### P08b
+
+Record the signed build and device-install evidence
+
+Fold the maintainer-produced signed-build and device-install evidence into the signing document and state the verified install validity for the trial.
+
+Owned paths: `docs/validation/signing.md` (evidence and validity sections), `docs/validation/evidence/apple-signing/`.
+
+Dependencies: P08a.
+
+Context: this task starts blocked. The maintainer runs the P08a tooling on a Mac with Xcode 16.4, an Apple Development identity and a profile covering the registered iPhone, following `docs/features/m1-external-prerequisites.md`, commits the sanitized record under `docs/validation/evidence/apple-signing/`, and unblocks this task naming that file. A worker claimed without such a file must re-block naming that exact missing prerequisite and must not substitute simulator results.
+
+Acceptance:
+
+1. `docs/validation/signing.md` cites the maintainer's named artifact with build revision, collection time, the content-free build and device identifiers the tooling emits, and the observed profile expiry.
+2. The install validity statement for the two-week trial derives from the observed profile expiry, and the renewal-without-data-loss plan is either tested and recorded or explicitly marked untested.
+
+Source pointers (baseline above): `docs/features/m1-external-prerequisites.md`, `docs/validation/m1-protocol.md:122`.
+
+Contributes to original P08 criteria: 2, 4, 5.
+
+### F08
+
+Move native CI to macOS 26 and Xcode 26.6
+
+Replace the unexplained Xcode 16.4 pin with the newest toolchain on GitHub-hosted runners so that simulator evidence and the maintainer's device signing use the same SDK generation as the trial iPhone.
+
+Owned paths: `ios/project.yml` (`options.xcodeVersion` only), `.github/workflows/ios.yml`, `ios/scripts/select_simulator.py`, `ios/scripts/test_select_simulator.py`, `ios/scripts/check_project_config.py`, the "Required checks for macOS workers" section of `AGENTS.md`.
+
+Dependencies: P07.
+
+Acceptance:
+
+1. Both jobs in `ios.yml` run on `macos-26` with Xcode 26.6 selected, the simulator ceiling follows the selected SDK, and the config check enforces that the workflow pin and `options.xcodeVersion` agree.
+2. An exact-head `ios.yml` run on the submitted commit is green: OhAndTests pass, every probe app builds, the launch smoke test passes, and the Tauri probe round-trip passes under the new SDK. Any probe that breaks under iOS 26 is fixed in this task only if the fix is confined to the owned paths; otherwise record the exact failure and block.
+3. `AGENTS.md` names the new runner, Xcode and SDK, and the evidence requirements are unchanged.
+
+Source pointers (baseline above): `.github/workflows/ios.yml:18`, `.github/workflows/ios.yml:26`, `ios/project.yml:6`, `ios/scripts/select_simulator.py:71`, `AGENTS.md:65`.
+
+### I05b
+
+Extend reminder-withdrawal grammar coverage
+
+Add the withdrawal phrasings and over-rejection fixes that fall outside the bounded grammar recorded for I05, driven by a fixture corpus so future phrasings are added as data.
+
+Owned paths: `core/src/interpretation/apply/`, `core/tests/proposal_application/`.
+
+Dependencies: I05.
+
+Acceptance:
+
+1. A synthetic fixture corpus under `core/tests/proposal_application/` lists withdrawal phrasings that must stay unscheduled and controls that must schedule; the behavior test is driven by that corpus, and every I05 construction is carried over unchanged.
+2. The known over-rejections are scheduled again without reopening withdrawals: a gerund or infinitive task object after "about" ("about cancelling the gym"), coordinated verbs inside the requested task ("call the roofer and cancel the order", "take the ladder back"), and "need to <verb>" complements ("so I don't need to worry").
+3. Each withdrawal still produces an uninterpreted-for-reminder result with source and non-reminder facets intact, and no reminder rows or operations; each control still produces exactly one scheduled reminder.
+
+Source pointers: `core/src/interpretation/apply/mod.rs` (`retracted_after`, `wish_has_ended`, `verb_is_negated_or_infinitive` on PR #96), `core/tests/proposal_application/main.rs`.
 
 ### I03a
 
@@ -366,6 +457,8 @@ Acceptance:
 Source pointers (baseline above): `docs/architecture/m1-contracts.md:266`, `AGENTS.md:45`, `core/src/store/captures/mod.rs:106`, `core/src/store/schema/mod.rs:165`.
 
 Contributes to original C02 criteria: 1, 2, 3.
+
+Note (2026-10-08): B01c's `ohand_core_start_save_capture` is a pre-import capture write that accepts any non-empty route identifier. C02a owns unknown-route rejection and the contracted ingestion acknowledgment; see the recorded decision under B01c.
 
 ### C02b
 

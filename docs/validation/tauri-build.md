@@ -69,3 +69,7 @@ The Echo button repeats the call.
 - Builds are unsigned debug simulator builds. Device builds, signing and provisioning are P08/P09 and are not claimed here.
 - The icon set is generated from a synthetic placeholder image (`npx tauri icon`); no brand assets.
 - This proves a launch and one IPC round-trip on iOS 18.5 only. It says nothing about capture, background behavior, memory, or App Store acceptance.
+
+## Handoff probe
+
+The same shell receives capture identifiers from the native entry; see `tauri-handoff.md` (P07).

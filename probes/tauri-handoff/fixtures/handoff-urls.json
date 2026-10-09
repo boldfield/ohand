@@ -1,0 +1,217 @@
+{
+  "description": "Synthetic handoff URL vectors shared by the Rust receiver tests and the Swift sender/validator tests. expect is ok or a rejection code.",
+  "cases": [
+    {
+      "description": "canonical handoff URL",
+      "url": "ohand-tauri://capture?captureId=0F8FAD5B-D9CB-469F-A165-70867728950E",
+      "expect": "ok",
+      "captureId": "0F8FAD5B-D9CB-469F-A165-70867728950E"
+    },
+    {
+      "description": "all-zero identifier is still a canonical shape",
+      "url": "ohand-tauri://capture?captureId=00000000-0000-0000-0000-000000000000",
+      "expect": "ok",
+      "captureId": "00000000-0000-0000-0000-000000000000"
+    },
+    {
+      "description": "empty string",
+      "url": "",
+      "expect": "bad_scheme"
+    },
+    {
+      "description": "script URL",
+      "url": "javascript:alert(1)",
+      "expect": "bad_scheme"
+    },
+    {
+      "description": "web scheme",
+      "url": "https://capture?captureId=0F8FAD5B-D9CB-469F-A165-70867728950E",
+      "expect": "bad_scheme"
+    },
+    {
+      "description": "the native entry's own shortcut scheme is not a handoff",
+      "url": "ohand-captureprobe://capture",
+      "expect": "bad_scheme"
+    },
+    {
+      "description": "scheme casing is not normalised",
+      "url": "OHAND-TAURI://capture?captureId=0F8FAD5B-D9CB-469F-A165-70867728950E",
+      "expect": "bad_scheme"
+    },
+    {
+      "description": "missing authority slashes",
+      "url": "ohand-tauri:capture?captureId=0F8FAD5B-D9CB-469F-A165-70867728950E",
+      "expect": "bad_scheme"
+    },
+    {
+      "description": "unknown route",
+      "url": "ohand-tauri://settings?captureId=0F8FAD5B-D9CB-469F-A165-70867728950E",
+      "expect": "unknown_route"
+    },
+    {
+      "description": "no route",
+      "url": "ohand-tauri://",
+      "expect": "unknown_route"
+    },
+    {
+      "description": "route casing is not normalised",
+      "url": "ohand-tauri://CAPTURE?captureId=0F8FAD5B-D9CB-469F-A165-70867728950E",
+      "expect": "unknown_route"
+    },
+    {
+      "description": "trailing slash",
+      "url": "ohand-tauri://capture/?captureId=0F8FAD5B-D9CB-469F-A165-70867728950E",
+      "expect": "unknown_route"
+    },
+    {
+      "description": "extra path segment",
+      "url": "ohand-tauri://capture/settings?captureId=0F8FAD5B-D9CB-469F-A165-70867728950E",
+      "expect": "unknown_route"
+    },
+    {
+      "description": "path traversal",
+      "url": "ohand-tauri://capture/../../admin?captureId=0F8FAD5B-D9CB-469F-A165-70867728950E",
+      "expect": "unknown_route"
+    },
+    {
+      "description": "user info in the authority",
+      "url": "ohand-tauri://user@capture?captureId=0F8FAD5B-D9CB-469F-A165-70867728950E",
+      "expect": "unknown_route"
+    },
+    {
+      "description": "port",
+      "url": "ohand-tauri://capture:8080?captureId=0F8FAD5B-D9CB-469F-A165-70867728950E",
+      "expect": "unknown_route"
+    },
+    {
+      "description": "fragment before any query",
+      "url": "ohand-tauri://capture#fragment",
+      "expect": "unknown_route"
+    },
+    {
+      "description": "no query",
+      "url": "ohand-tauri://capture",
+      "expect": "missing_capture_id"
+    },
+    {
+      "description": "empty query",
+      "url": "ohand-tauri://capture?",
+      "expect": "missing_capture_id"
+    },
+    {
+      "description": "undeclared parameter first",
+      "url": "ohand-tauri://capture?private=true&captureId=0F8FAD5B-D9CB-469F-A165-70867728950E",
+      "expect": "unexpected_component"
+    },
+    {
+      "description": "parameter name casing",
+      "url": "ohand-tauri://capture?captureid=0F8FAD5B-D9CB-469F-A165-70867728950E",
+      "expect": "unexpected_component"
+    },
+    {
+      "description": "different parameter name",
+      "url": "ohand-tauri://capture?captureId2=0F8FAD5B-D9CB-469F-A165-70867728950E",
+      "expect": "unexpected_component"
+    },
+    {
+      "description": "value without a key",
+      "url": "ohand-tauri://capture?0F8FAD5B-D9CB-469F-A165-70867728950E",
+      "expect": "unexpected_component"
+    },
+    {
+      "description": "undeclared parameter after the identifier",
+      "url": "ohand-tauri://capture?captureId=0F8FAD5B-D9CB-469F-A165-70867728950E&private=true",
+      "expect": "invalid_capture_id"
+    },
+    {
+      "description": "repeated identifier is ambiguous",
+      "url": "ohand-tauri://capture?captureId=0F8FAD5B-D9CB-469F-A165-70867728950E&captureId=0F8FAD5B-D9CB-469F-A165-70867728950E",
+      "expect": "invalid_capture_id"
+    },
+    {
+      "description": "fragment",
+      "url": "ohand-tauri://capture?captureId=0F8FAD5B-D9CB-469F-A165-70867728950E#fragment",
+      "expect": "invalid_capture_id"
+    },
+    {
+      "description": "lower-case identifier",
+      "url": "ohand-tauri://capture?captureId=0f8fad5b-d9cb-469f-a165-70867728950e",
+      "expect": "invalid_capture_id"
+    },
+    {
+      "description": "identifier without hyphens",
+      "url": "ohand-tauri://capture?captureId=0F8FAD5BD9CB469FA16570867728950E",
+      "expect": "invalid_capture_id"
+    },
+    {
+      "description": "braced identifier",
+      "url": "ohand-tauri://capture?captureId={0F8FAD5B-D9CB-469F-A165-70867728950E}",
+      "expect": "invalid_capture_id"
+    },
+    {
+      "description": "urn form",
+      "url": "ohand-tauri://capture?captureId=urn:uuid:0F8FAD5B-D9CB-469F-A165-70867728950E",
+      "expect": "invalid_capture_id"
+    },
+    {
+      "description": "not an identifier",
+      "url": "ohand-tauri://capture?captureId=evil",
+      "expect": "invalid_capture_id"
+    },
+    {
+      "description": "markup",
+      "url": "ohand-tauri://capture?captureId=<script>",
+      "expect": "invalid_capture_id"
+    },
+    {
+      "description": "empty identifier",
+      "url": "ohand-tauri://capture?captureId=",
+      "expect": "invalid_capture_id"
+    },
+    {
+      "description": "trailing space",
+      "url": "ohand-tauri://capture?captureId=0F8FAD5B-D9CB-469F-A165-70867728950E ",
+      "expect": "invalid_capture_id"
+    },
+    {
+      "description": "leading space",
+      "url": "ohand-tauri://capture?captureId= 0F8FAD5B-D9CB-469F-A165-70867728950E",
+      "expect": "invalid_capture_id"
+    },
+    {
+      "description": "non-hex digit",
+      "url": "ohand-tauri://capture?captureId=0F8GAD5B-D9CB-469F-A165-70867728950E",
+      "expect": "invalid_capture_id"
+    },
+    {
+      "description": "too short",
+      "url": "ohand-tauri://capture?captureId=0F8FAD5B-D9CB-469F-A165-70867728950",
+      "expect": "invalid_capture_id"
+    },
+    {
+      "description": "too long",
+      "url": "ohand-tauri://capture?captureId=0F8FAD5B-D9CB-469F-A165-70867728950E0",
+      "expect": "invalid_capture_id"
+    },
+    {
+      "description": "wrong separators",
+      "url": "ohand-tauri://capture?captureId=0F8FAD5B_D9CB_469F_A165_70867728950E",
+      "expect": "invalid_capture_id"
+    },
+    {
+      "description": "percent-encoded digit",
+      "url": "ohand-tauri://capture?captureId=%30F8FAD5B-D9CB-469F-A165-70867728950E",
+      "expect": "invalid_capture_id"
+    },
+    {
+      "description": "non-ASCII digit",
+      "url": "ohand-tauri://capture?captureId=٠F8FAD5B-D9CB-469F-A165-70867728950E",
+      "expect": "invalid_capture_id"
+    },
+    {
+      "description": "trailing newline",
+      "url": "ohand-tauri://capture?captureId=0F8FAD5B-D9CB-469F-A165-70867728950E\n",
+      "expect": "invalid_capture_id"
+    }
+  ]
+}
