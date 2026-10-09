@@ -106,9 +106,6 @@ scheduled | remind me to take the rented ladder back {time}
 scheduled | remind me to call the roofer {time}, so I don't need to worry
 scheduled | remind me to call the roofer {time} so I do not need to worry
 scheduled | remind me to call the roofer {time}, then there is no need to worry
-scheduled | remind me to call the roofer {time} so I don't need to check the quote twice
-scheduled | remind me to call the roofer {time} so you don't need to explain the leak
-scheduled | remind me to call the roofer {time} so I won't need to chase the quote
 
 # --- I05b: the same constructions as withdrawals, which must stay unscheduled ---
 unscheduled | remind me {time}, forget about cancelling
@@ -191,13 +188,12 @@ unscheduled | remind me to call the hotel {time}, so I don't need to cancel at a
 unscheduled | remind me to call the hotel {time}, so I don't need to cancel anymore
 unscheduled | remind me to call the hotel {time}, so I don't need to cancel the reminder
 scheduled | remind me to call the hotel {time} so I don't need to cancel at the last minute
-scheduled | remind me to call the hotel {time}, so I don't need to cancel the booking
-scheduled | remind me to call the hotel {time}, so I won't need to skip the dinner
 
 # --- I05b round 4: clause objects, "or"-coordination, open-ended nouns, reason-clause objects ---
 # "or" never coordinates a retraction into the task; only "and" with a task verb and its own object
 unscheduled | remind me {time} to call the roofer or skip the quote
 unscheduled | remind me to call the roofer {time} and forget i asked
+unscheduled | remind me {time} to call the roofer and forget i asked
 unscheduled | remind me to call the roofer {time} or just forget i asked
 unscheduled | remind me {time} to call the roofer and forget we talked
 unscheduled | remind me {time} to call the roofer or forget the whole business
@@ -220,3 +216,85 @@ scheduled | remind me {time} about taking the ladder back
 scheduled | remind me {time} to call the shop and take back the ladder
 unscheduled | remind me {time} to call the roofer and take back what I said
 unscheduled | remind me {time} to call the roofer, I take back the call
+
+# --- I05b round 5 (PR #122): positive task-object shape and structural attachment ---
+# a coordinated task object must be a determiner and a noun phrase naming something new;
+# anaphora, deictics, adverbs, the stored request and its time all withdraw
+unscheduled | remind me {time} to call the roofer and cancel that too
+unscheduled | remind me {time} to call the roofer and cancel that immediately
+unscheduled | remind me {time} to call the roofer and skip that altogether
+unscheduled | remind me {time} to call the roofer and remove that again
+unscheduled | remind me {time} to call the roofer and cancel the above
+unscheduled | remind me {time} to call the roofer and stop this nonsense
+unscheduled | remind me {time} to call the roofer and cancel the order too
+unscheduled | remind me {time} to call the roofer and cancel those
+unscheduled | remind me {time} to call the roofer and cancel the callout
+unscheduled | remind me {time} to call the roofer and cancel the roofing job
+unscheduled | remind me {time} to call the roofer and take the same back
+unscheduled | remind me {time} to call the roofer and cancel the last
+unscheduled | remind me {time} to call the roofer and cancel the first
+unscheduled | remind me {time} to call the roofer and cancel the instruction
+unscheduled | remind me {time} to call the roofer and cancel the command
+unscheduled | remind me {time} to call the roofer and cancel the text
+unscheduled | remind me {time} to call the roofer and cancel the setting
+unscheduled | remind me {time} to call the roofer and cancel the event
+unscheduled | remind me {time} to call the roofer and cancel the calendar event
+unscheduled | remind me {time} to call the roofer and cancel the shebang
+unscheduled | remind me {time} to call the roofer and stop the madness
+unscheduled | remind me {time} to call the roofer and cancel the 9am
+unscheduled | remind me {time} to call the roofer and cancel the remainder
+unscheduled | remind me {time} to call the roofer and cancel the job
+unscheduled | remind me {time} to call the roofer and delete the voice memo
+unscheduled | remind me {time} to call the roofer and delete the capture
+unscheduled | remind me {time} to call the roofer and delete the recording
+unscheduled | remind me {time} to call the roofer and delete the transcript
+unscheduled | remind me {time} to call the roofer and cancel the action
+unscheduled | remind me {time} to call the roofer and cancel the todo
+unscheduled | remind me {time} to call the roofer and cancel the date
+unscheduled | remind me {time} to call the roofer and cancel the time
+unscheduled | remind me {time} to call the roofer and cancel the morning
+unscheduled | remind me {time} to call the roofer and cancel the hour
+unscheduled | remind me {time} to call the roofer and cancel the plans
+unscheduled | remind me {time} to call the roofer and cancel the arrangement
+# an "and" after a time that closes the request is an afterthought and withdraws whatever its object
+unscheduled | remind me to call the roofer {time} and cancel the order
+unscheduled | remind me to call the roofer {time} and cancel that too
+unscheduled | remind me to call the roofer {time} and cancel that immediately
+unscheduled | remind me to call the roofer {time} and skip that altogether
+unscheduled | remind me to call the roofer {time} and remove that again
+unscheduled | remind me to call the roofer {time} and cancel the above
+unscheduled | remind me to call the roofer {time} and stop this nonsense
+unscheduled | remind me to call the roofer {time} and cancel the callout
+unscheduled | remind me to call the roofer {time} and cancel the roofing job
+unscheduled | remind me to call the roofer {time} and cancel the chat
+unscheduled | remind me to call the roofer {time} and cancel the contractor
+unscheduled | remind me to call the roofer {time} and take the ladder back
+scheduled | remind me {time} to call the roofer and cancel the order at the shop
+scheduled | remind me {time} to call the dentist and cancel the appointment
+scheduled | remind me {time} to call the hotel and cancel the reservation
+# a reason clause takes only an intransitive complement, optionally saying when; "then again" is
+# concessive; an object could name the task's person or thing under any name, so it withdraws
+unscheduled | remind me to call the roofer {time}, then again I don't need to phone anyone
+unscheduled | remind me to call the roofer {time}, then again I don't need to contact anybody
+unscheduled | remind me to call the roofer {time}, then again there's no need to phone anyone
+unscheduled | remind me to call the roofer {time}, so actually I don't need to ring anyone
+unscheduled | remind me to call the roofer {time}, then again I don't need to phone the guy
+unscheduled | remind me to call the roofer {time}, so I don't need to check anything
+unscheduled | remind me to call the roofer {time}, so I don't need to ring the man
+unscheduled | remind me to call the roofer {time}, so I don't need to contact the company
+unscheduled | remind me to call the roofer {time}, so I don't need to remember the man
+unscheduled | remind me to call the roofer {time}, so I don't need to see the guy
+unscheduled | remind me to call the roofer {time}, so I don't need to visit the man
+unscheduled | remind me to call the roofer {time}, so i don't need to talk to the guy
+unscheduled | remind me to call the roofer {time} so I don't need to check the quote twice
+unscheduled | remind me to call the roofer {time} so you don't need to explain the leak
+unscheduled | remind me to call the roofer {time} so I won't need to chase the quote
+unscheduled | remind me to call the hotel {time}, so I don't need to cancel the booking
+unscheduled | remind me to call the hotel {time}, so I won't need to skip the dinner
+unscheduled | remind me to call the roofer {time}, then I don't need to chase the quote
+unscheduled | remind me to call the roofer {time}, so I don't need to chase the contractor
+unscheduled | remind me to call the roofer {time}, so I don't need to bug the contractor
+unscheduled | remind me to call the roofer {time}, so I don't need to worry about him
+scheduled | remind me to call the roofer {time}, so I don't need to remember
+scheduled | remind me to call the roofer {time}, so I don't need to rush at the last minute
+scheduled | remind me to call the hotel {time}, then I won't need to cancel by the weekend

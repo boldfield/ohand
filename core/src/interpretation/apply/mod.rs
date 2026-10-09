@@ -1010,7 +1010,10 @@ const OBJECT_DETERMINERS: &[&str] = &[
 ];
 /// Words that, in the object of a retraction verb, stand for the request itself, for the person
 /// or thing the task is about, or for "everything" ("cancel it", "ring him", "delete the whole
-/// thing", "forget the entire plan", "drop the subject", "take back what I said", "after all").
+/// thing", "forget the entire plan", "drop the subject", "take back what I said", "after all"),
+/// for the request as something the assistant was told or stored ("cancel the instruction",
+/// "delete the event", "delete the voice memo", "cancel the time"), or for whoever the task is
+/// about ("ring the man", "talk to the guy").
 /// They keep a coordinated or "about"-governed retraction verb a withdrawal; the reminder words of
 /// [`REMINDER_OBJECT_WORDS`] do too.
 const WITHDRAWN_REQUEST_WORDS: &[&str] = &[
@@ -1057,6 +1060,64 @@ const WITHDRAWN_REQUEST_WORDS: &[&str] = &[
     "matter",
     "business",
     "stuff",
+    "instruction",
+    "instructions",
+    "command",
+    "commands",
+    "text",
+    "setting",
+    "settings",
+    "event",
+    "events",
+    "shebang",
+    "madness",
+    "nonsense",
+    "remainder",
+    "plans",
+    "arrangement",
+    "arrangements",
+    "action",
+    "actions",
+    "todo",
+    "todos",
+    "memo",
+    "memos",
+    "capture",
+    "captures",
+    "recording",
+    "recordings",
+    "transcript",
+    "transcripts",
+    "record",
+    "records",
+    "list",
+    "log",
+    "date",
+    "dates",
+    "time",
+    "times",
+    "morning",
+    "afternoon",
+    "evening",
+    "night",
+    "day",
+    "hour",
+    "hours",
+    "slot",
+    "job",
+    "guy",
+    "guys",
+    "man",
+    "woman",
+    "lady",
+    "person",
+    "people",
+    "fellow",
+    "chap",
+    "bloke",
+    "folks",
+    "company",
+    "firm",
 ];
 /// Retraction verbs that also name ordinary tasks ("cancel the order", "delete the old photos",
 /// "stop the leak"). Only these may be coordinated inside the requested task; a coordinated
@@ -1074,10 +1135,76 @@ const TASK_RETRACTION_VERBS: &[&str] = &[
     "remove",
     "stop",
 ];
-/// Prepositions and conjunctions that carry no content of an object span ("cancel the order at
-/// the last minute"), so they are neither compared against the request nor taken as its head.
-const OBJECT_FUNCTION_WORDS: &[&str] = &[
-    "to", "of", "at", "in", "on", "for", "by", "with", "from", "and", "or", "into",
+/// Articles and possessives that open a concrete noun phrase ("cancel the order", "take my
+/// library books back"). Demonstratives and quantifiers are left out: "cancel that too", "stop
+/// this nonsense" and "skip any of it" point back at the request instead of naming a task object.
+const NOUN_PHRASE_DETERMINERS: &[&str] =
+    &["the", "a", "an", "my", "our", "your", "his", "her", "their"];
+/// Prepositions that attach a further noun phrase to a task object ("take the ladder back to the
+/// shop", "cancel at the last minute").
+const OBJECT_PREPOSITIONS: &[&str] = &[
+    "to", "of", "at", "in", "on", "for", "by", "with", "from", "into",
+];
+/// Prepositions that open a phrase saying when ("cancel at the last minute", "pay by the
+/// weekend").
+const TIME_PREPOSITIONS: &[&str] = &["at", "on", "by", "before", "until", "in"];
+/// Adverbs of repetition that may close a task object ("check the quote twice").
+const REPEAT_ADVERBS: &[&str] = &["twice", "again"];
+/// Modifiers that cannot end a noun phrase: "cancel the last" and "cancel the first" point back at
+/// a request, while "cancel at the last minute" names a time.
+const NON_HEAD_WORDS: &[&str] = &["last", "first", "latest", "next", "final", "new", "old"];
+/// Words that can follow a determiner without being a noun: deictic and anaphoric heads ("the
+/// above", "the same", "the rest") and adverbs ("too", "altogether", "instead"). Together with
+/// the "-ly" adverbs they never make a task object, so "cancel the above" and "cancel the order
+/// too" stay withdrawals.
+const NON_NOUN_WORDS: &[&str] = &[
+    "above",
+    "below",
+    "following",
+    "same",
+    "rest",
+    "former",
+    "latter",
+    "aforementioned",
+    "previous",
+    "earlier",
+    "other",
+    "others",
+    "lot",
+    "said",
+    "prior",
+    "too",
+    "also",
+    "altogether",
+    "anyway",
+    "anyways",
+    "instead",
+    "either",
+    "else",
+    "more",
+    "already",
+    "still",
+    "though",
+    "as",
+    "well",
+    "here",
+    "there",
+    "back",
+    "away",
+    "off",
+    "out",
+    "up",
+    "down",
+    "over",
+    "once",
+    "not",
+    "no",
+    "never",
+    "later",
+    "soon",
+    "today",
+    "tonight",
+    "tomorrow",
 ];
 /// Words that, directly before "to" or "about", show the phrase belongs to the reminder request
 /// itself ("remind me to take ...", "a reminder to take ...", "remind me about cancelling ...")
@@ -1318,17 +1445,20 @@ fn retracted_after(tokens: &[IntentToken], after: usize) -> bool {
     })
 }
 
-/// Whether a negated "need" gives the reason for the request: "so" or "then" opens its clause
-/// ("so I don't need to worry", "then there is no need to worry") and an infinitive follows whose
-/// verb is neither one of the requested task's words nor a pronoun-like word. Any object the
-/// infinitive has must name something other than the request ([`names_task_object`]): "so I
-/// don't need to check the quote twice" and "so I don't need to cancel at the last minute" give a
-/// reason, while "so I don't need to phone him", "so I don't need to contact the roofer after
-/// all" and "so I don't need to cancel it" withdraw. A retraction verb without an object ("so I
-/// don't need to cancel") withdraws too. "I don't need to call the roofer", "I don't need to
-/// after all", "no need to do that", "I don't need to be told" and "no need to bother" still
-/// withdraw, as does a need that has ended ("so I don't need to worry anymore").
-/// `before_negation` is what precedes the negation.
+/// Whether a negated "need" gives the reason for the request: "so" or "then" (but not the
+/// concessive "then again") opens its clause ("so I don't need to worry", "then there is no need
+/// to worry") and an infinitive follows whose verb is neither one of the requested task's words,
+/// a way of contacting someone ([`CONTACT_VERBS`]) nor a pronoun-like word. The complement must
+/// be intransitive: nothing may follow the verb but a phrase saying when ([`names_time_phrase`]).
+/// An object could be the person or thing the task is about under any name ("the man", "the
+/// contractor", "anyone"), so "so I don't need to worry" and "so I don't need to cancel at the
+/// last minute" give a reason, while "so I don't need to phone him", "so I don't need to chase the
+/// contractor", "so I don't need to cancel the booking", "so I don't need to contact the roofer
+/// after all", "so I don't need to cancel it" and "then again I don't need to phone the guy"
+/// withdraw. A retraction verb without anything after it ("so I don't need to cancel") withdraws
+/// too. "I don't need to call the roofer", "I don't need to after all", "no need to do that", "I
+/// don't need to be told" and "no need to bother" still withdraw, as does a need that has ended
+/// ("so I don't need to worry anymore"). `before_negation` is what precedes the negation.
 fn need_gives_reason(
     word: &str,
     before_negation: &[&IntentToken],
@@ -1338,11 +1468,21 @@ fn need_gives_reason(
     if word != "need" || wish_has_ended(after_need) {
         return false;
     }
-    let reason_marker = before_negation
+    let clause_start = before_negation
         .iter()
-        .rev()
-        .take_while(|previous| !previous.clause_break)
-        .any(|previous| !previous.quoted && matches!(previous.text.as_str(), "so" | "then"));
+        .rposition(|previous| previous.clause_break)
+        .map_or(0, |position| position + 1);
+    let clause = &before_negation[clause_start..];
+    let reason_marker = clause.iter().enumerate().any(|(position, previous)| {
+        !previous.quoted
+            && match previous.text.as_str() {
+                "so" => true,
+                "then" => clause
+                    .get(position + 1)
+                    .is_none_or(|next| next.quoted || next.text != "again"),
+                _ => false,
+            }
+    });
     let [infinitive_marker, verb, rest @ ..] = after_need else {
         return false;
     };
@@ -1361,13 +1501,20 @@ fn need_gives_reason(
         && (if object.is_empty() {
             !RETRACTION_VERBS.contains(&verb_text)
         } else {
-            names_task_object(&object, request_words)
+            names_time_phrase(&object, request_words)
         })
         && !RETRACTION_FILLERS.contains(&verb_text)
         && !REASON_EXCLUDED_VERBS.contains(&verb_text)
         && !request_words.contains(&verb_text)
+        && !CONTACT_VERBS.contains(&verb_text)
         && (verb_text == "worry" || !RETRACTION_TARGETS.contains(&verb_text))
 }
+
+/// Ways of getting in touch with someone. They stand for "call the roofer" whichever of them the
+/// task used, so "so I don't need to ring the man" withdraws like "I don't need to call him".
+const CONTACT_VERBS: &[&str] = &[
+    "call", "phone", "ring", "contact", "text", "email", "message", "dial", "reach",
+];
 
 /// Complement words that never give a reason: "I don't need to be told", "no need to do that".
 const REASON_EXCLUDED_VERBS: &[&str] = &["be", "do", "get", "have", "go", "that", "it", "this"];
@@ -1455,12 +1602,16 @@ fn follows_request_lead(
 }
 
 /// The word that attaches `verb` to the reminder request, if any, skipping fillers in between:
-/// "and" when the verb is coordinated with the requested task inside one clause ("call the shop
-/// and take the ladder back", "call the roofer and then cancel the order"), or "to" or "about"
+/// "and" when the verb is coordinated with the requested task inside the infinitive phrase that
+/// follows the time, with no clause break ("remind me {time} to call the shop and take the ladder
+/// back", "remind me {time} to call the roofer and then cancel the order"), or "to" or "about"
 /// when it directly continues the request ([`follows_request_lead`]: "remind me {time} to please
 /// take the ladder back", "remind me about cancelling the gym"). A coordination that opens after
 /// a clause break (", and forget the plan"), "or" ("or forget the idea") and a new clause of the
-/// speaker ("I take that back", "I want to take my word back") attach nothing.
+/// speaker ("I take that back", "I want to take my word back") attach nothing. Nor does an "and"
+/// after a time that closes the request ("remind me to call the roofer {time} and cancel the
+/// chat"): what follows the time is an afterthought, and an afterthought retraction withdraws
+/// whatever its object.
 fn request_attachment<'tokens>(
     tokens: &'tokens [IntentToken],
     time_end: usize,
@@ -1480,9 +1631,21 @@ fn request_attachment<'tokens>(
         return None;
     }
     let attached = match governing.text.as_str() {
-        "and" => nearest_first
-            .next()
-            .is_some_and(|previous| !previous.quoted && !previous.clause_break),
+        "and" => {
+            let task_phrase: Vec<&IntentToken> = tokens
+                .iter()
+                .filter(|token| token.start >= time_end && token.start < governing.start)
+                .collect();
+            nearest_first
+                .next()
+                .is_some_and(|previous| !previous.quoted && !previous.clause_break)
+                && !task_phrase.iter().any(|token| token.clause_break)
+                && task_phrase.iter().any(|token| {
+                    !token.quoted
+                        && token.text == "to"
+                        && follows_request_lead(tokens, time_end, token.start + 1, "to")
+                })
+        }
         joiner @ ("to" | "about") => {
             follows_request_lead(tokens, time_end, governing.start + 1, joiner)
         }
@@ -1496,8 +1659,9 @@ fn request_attachment<'tokens>(
 /// gym"), or a [`TASK_RETRACTION_VERBS`] entry coordinated with that task by "and" ("call the
 /// roofer and cancel the order"), and `object` (the rest of its clause) names something of its
 /// own ([`names_task_object`]). "and cancel it", "and cancel the reminder", "and forget I asked",
-/// "and drop the subject", "or forget the idea", ", and forget the plan" and a bare "and cancel"
-/// still withdraw.
+/// "and drop the subject", "or forget the idea", ", and forget the plan",
+/// "and cancel that too", "and cancel the above", "and stop this nonsense" and a bare "and
+/// cancel" still withdraw.
 fn verb_is_part_of_requested_task(
     tokens: &[IntentToken],
     time_end: usize,
@@ -1513,34 +1677,121 @@ fn verb_is_part_of_requested_task(
     attached && names_task_object(object, request_words)
 }
 
-/// Whether `words` (unquoted, one clause) name a concrete task object: after any determiners,
-/// fillers and prepositions there is at least one content word, nothing in the span refers to the
-/// request itself, the reminder or "everything" ([`WITHDRAWN_REQUEST_WORDS`],
-/// [`REMINDER_OBJECT_WORDS`]), no word is a subject pronoun opening a clause of the speaker
-/// ("forget I asked"), and no content word repeats a word already used by the request
-/// (`request_words`, the capture before the retraction verb). "the order", "the gym" and "the
-/// ladder" qualify; "it", "him", "that", "the reminder", "the alarm", "my note", "the whole
-/// business", "I asked" and, after "call the roofer", "the call" and "the phone call" do not.
+/// Whether `words` (unquoted, one clause) are a concrete task object, accepted only in a positive
+/// shape: a noun phrase (a [`NOUN_PHRASE_DETERMINERS`] entry followed by noun candidates), then
+/// any prepositional phrases each made of an [`OBJECT_PREPOSITIONS`] entry and such a noun
+/// phrase, then at most [`REPEAT_ADVERBS`]; politeness fillers ("please") are skipped. Anything
+/// else, including a bare pronoun or demonstrative ("it", "him", "that", "anyone", "I asked") or a
+/// trailing adverb ("the order too"), is not a task object: when the grammar is unsure the
+/// request stays withdrawn. "the order", "the gym" and "my library books" qualify; "that too",
+/// "this nonsense", "the above", "the reminder", "the whole business" and, after "call the
+/// roofer", "the phone call", "the callout" and "the roofing job" do not ([`is_noun_candidate`]).
 fn names_task_object(words: &[&IntentToken], request_words: &[&str]) -> bool {
-    let mut content_words = words
+    let texts = object_texts(words);
+    noun_phrase_end(&texts, 0, request_words).is_some_and(|end| {
+        prepositional_phrases_end(&texts, end, OBJECT_PREPOSITIONS, request_words)
+            == Some(texts.len())
+    })
+}
+
+/// Whether `words` (unquoted, one clause) only say when: one or more prepositional phrases, each
+/// a [`TIME_PREPOSITIONS`] entry and a noun phrase ("at the last minute", "by the weekend"), then
+/// at most [`REPEAT_ADVERBS`]. A complement object ("the booking", "the contractor", "him") or a
+/// phrase about a person or thing ("to the guy", "about it") is not one.
+fn names_time_phrase(words: &[&IntentToken], request_words: &[&str]) -> bool {
+    let texts = object_texts(words);
+    prepositional_phrases_end(&texts, 0, TIME_PREPOSITIONS, request_words)
+        .is_some_and(|end| end > 0 && end == texts.len())
+}
+
+/// The words of an object span without politeness fillers ("please").
+fn object_texts<'words>(words: &[&'words IntentToken]) -> Vec<&'words str> {
+    words
         .iter()
         .map(|word| word.text.as_str())
-        .filter(|word| {
-            !OBJECT_DETERMINERS.contains(word)
-                && !RETRACTION_FILLERS.contains(word)
-                && !OBJECT_FUNCTION_WORDS.contains(word)
+        .filter(|word| !matches!(*word, "please" | "pls" | "kindly"))
+        .collect()
+}
+
+/// Where the run of prepositional phrases starting at `start` ends, each phrase a `prepositions`
+/// entry followed by a noun phrase ([`noun_phrase_end`]), including any [`REPEAT_ADVERBS`] after
+/// them. `None` when a preposition is not followed by a noun phrase.
+fn prepositional_phrases_end(
+    texts: &[&str],
+    start: usize,
+    prepositions: &[&str],
+    request_words: &[&str],
+) -> Option<usize> {
+    let mut position = start;
+    while position < texts.len() && prepositions.contains(&texts[position]) {
+        position = noun_phrase_end(texts, position + 1, request_words)?;
+    }
+    while position < texts.len() && REPEAT_ADVERBS.contains(&texts[position]) {
+        position += 1;
+    }
+    Some(position)
+}
+
+/// Where the noun phrase starting at `start` ends: a [`NOUN_PHRASE_DETERMINERS`] entry and then
+/// one or more words up to the next preposition, repeat adverb or end, every one of them a noun
+/// candidate ([`is_noun_candidate`]) and the last not a [`NON_HEAD_WORDS`] entry ("the last"). `None` when there is no such phrase or any of its words
+/// disqualifies it.
+fn noun_phrase_end(texts: &[&str], start: usize, request_words: &[&str]) -> Option<usize> {
+    if !NOUN_PHRASE_DETERMINERS.contains(texts.get(start)?) {
+        return None;
+    }
+    let end = texts[start + 1..]
+        .iter()
+        .position(|word| {
+            OBJECT_PREPOSITIONS.contains(word)
+                || TIME_PREPOSITIONS.contains(word)
+                || REPEAT_ADVERBS.contains(word)
         })
-        .peekable();
-    content_words.peek().is_some()
-        && content_words.all(|word| !request_words.contains(&word))
-        && !words.iter().any(|word| {
-            let text = word.text.as_str();
-            WITHDRAWN_REQUEST_WORDS.contains(&text)
-                || REMINDER_OBJECT_WORDS.contains(&text)
-                || SUBJECT_PRONOUNS.contains(&text)
-                || FIRST_PERSON_SUBJECTS.contains(&text)
-                || FIRST_PERSON_PROGRESSIVE.contains(&text)
-        })
+        .map_or(texts.len(), |offset| start + 1 + offset);
+    let phrase = &texts[start + 1..end];
+    (phrase
+        .last()
+        .is_some_and(|head| !NON_HEAD_WORDS.contains(head))
+        && phrase
+            .iter()
+            .all(|word| is_noun_candidate(word, request_words)))
+    .then_some(end)
+}
+
+/// Whether `word` may be part of a concrete task object: it is not a determiner, pronoun, filler,
+/// deictic word or adverb ([`OBJECT_DETERMINERS`], [`RETRACTION_FILLERS`], [`NON_NOUN_WORDS`],
+/// "-ly"), contains no digit (so "the 9am" cannot point at the reminder's own time), does not stand for the request, the reminder or "everything"
+/// ([`WITHDRAWN_REQUEST_WORDS`], [`REMINDER_OBJECT_WORDS`]), and does not share a stem with a
+/// word the request already used ([`shares_stem`]: "callout" after "call", "roofing" after
+/// "roofer").
+fn is_noun_candidate(word: &str, request_words: &[&str]) -> bool {
+    !OBJECT_DETERMINERS.contains(&word)
+        && !NOUN_PHRASE_DETERMINERS.contains(&word)
+        && !RETRACTION_FILLERS.contains(&word)
+        && !NON_NOUN_WORDS.contains(&word)
+        && !(word.len() > 4 && word.ends_with("ly"))
+        && !word.chars().any(|character| character.is_ascii_digit())
+        && !WITHDRAWN_REQUEST_WORDS.contains(&word)
+        && !REMINDER_OBJECT_WORDS.contains(&word)
+        && !SUBJECT_PRONOUNS.contains(&word)
+        && !FIRST_PERSON_SUBJECTS.contains(&word)
+        && !FIRST_PERSON_PROGRESSIVE.contains(&word)
+        && !request_words
+            .iter()
+            .any(|request_word| shares_stem(word, request_word))
+}
+
+/// Whether two words are the same or share their first four letters, so a different form of a
+/// word the request used ("roofing", "roofer"; "callout", "call") counts as repeating it.
+fn shares_stem(word: &str, request_word: &str) -> bool {
+    const STEM_LENGTH: usize = 4;
+    word == request_word
+        || (word.chars().count() >= STEM_LENGTH
+            && request_word.chars().count() >= STEM_LENGTH
+            && word
+                .chars()
+                .take(STEM_LENGTH)
+                .eq(request_word.chars().take(STEM_LENGTH)))
 }
 
 /// Whether a reminder request whose cue ends at `cue_end` governs the quoted time `span`: the
