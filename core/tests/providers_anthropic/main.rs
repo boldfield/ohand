@@ -22,6 +22,8 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use uuid::Uuid;
 
+mod diagnostic;
+
 const ORIGIN: &str = "https://api.anthropic.com";
 const CREDENTIAL_REF: &str = "credential-ref/anthropic-primary";
 const MODEL: &str = "synthetic-model-one";
