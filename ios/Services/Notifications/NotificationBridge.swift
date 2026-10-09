@@ -16,7 +16,7 @@ import Foundation
 /// disturbing newer state, every mutation of one identifier runs exclusively (behind a bounded
 /// per-identifier lock), and the bridge remembers the state the newest confirmed or abandoned
 /// operation wants for that identifier: installed as confirmed, absent after a cancel, or what was
-/// pending before an abandoned schedule. Whenever an abandoned mutation completes late, the bridge
+/// pending before an abandoned schedule or cancel. Whenever an abandoned mutation completes late, the bridge
 /// re-applies that desired state under the same lock, so a late write is overwritten rather than
 /// trusted, and a check made earlier is never acted on after a newer operation has started.
 /// Re-applying is itself bounded and tracked; one that cannot finish is remembered and retried by
@@ -103,27 +103,45 @@ public final class NotificationBridge: Sendable {
     }
 
     /// Removes the pending request and waits until the OS no longer lists it, because removal is
-    /// asynchronous. Idempotent: cancelling an identifier that is not pending succeeds.
+    /// asynchronous. Idempotent: cancelling an identifier that is not pending succeeds. A cancel
+    /// that does not succeed puts back the request that was pending before it.
     public func cancel(_ identifier: NotificationIdentifier) async throws {
         do {
             let center = self.center
             let rawIdentifier = identifier.rawValue
             try await exclusively(rawIdentifier) {
+                let priorRequest = try await self.bounded { try await center.pendingRequests() }
+                    .first(where: { $0.identifier == rawIdentifier })
+                let stateBeforeAttempt = Self.restorableState(of: priorRequest, identifier: rawIdentifier)
                 let generation = self.ledger.setDesired(rawIdentifier, .absent)
-                try await self.mutate(rawIdentifier, toward: generation) {
-                    await center.removePending(identifiers: [rawIdentifier])
-                }
-                for attempt in 0..<self.maximumRemovalPolls {
-                    let pending = try await self.bounded { try await center.pendingRequests() }
-                    if !pending.contains(where: { $0.identifier == rawIdentifier }) {
-                        self.ledger.markSettled(rawIdentifier)
-                        return
+                do {
+                    try await self.mutate(rawIdentifier, toward: generation) {
+                        await center.removePending(identifiers: [rawIdentifier])
                     }
-                    if attempt + 1 < self.maximumRemovalPolls {
-                        try await Task.sleep(nanoseconds: UInt64(self.removalPollInterval * 1_000_000_000))
-                    }
+                } catch let error where Self.isUncertain(error) {
+                    // The removal may still land; its late completion re-applies the earlier state.
+                    self.ledger.setDesired(rawIdentifier, stateBeforeAttempt)
+                    throw error
                 }
-                throw NotificationBridgeError.cancelNotConfirmed
+
+                do {
+                    for attempt in 0..<self.maximumRemovalPolls {
+                        let pending = try await self.bounded { try await center.pendingRequests() }
+                        if !pending.contains(where: { $0.identifier == rawIdentifier }) {
+                            self.ledger.markSettled(rawIdentifier)
+                            return
+                        }
+                        if attempt + 1 < self.maximumRemovalPolls {
+                            try await Task.sleep(nanoseconds: UInt64(self.removalPollInterval * 1_000_000_000))
+                        }
+                    }
+                    throw NotificationBridgeError.cancelNotConfirmed
+                } catch {
+                    // The caller is told this cancel failed, so the earlier request is put back.
+                    self.ledger.setDesired(rawIdentifier, stateBeforeAttempt)
+                    self.enforceInBackground(rawIdentifier)
+                    throw error
+                }
             }
         } catch {
             throw NotificationBridgeError.normalized(error)
@@ -300,7 +318,7 @@ public final class NotificationBridge: Sendable {
         pending.dueInstant == request.dueInstant && pending.userInfo == request.content.userInfo
     }
 
-    /// What to put back if a schedule is abandoned: nothing when nothing was pending, the earlier
+    /// What to put back if a schedule or cancel is abandoned: nothing when nothing was pending, the earlier
     /// generic request when one was, or nil (leave alone) when the earlier request cannot be
     /// rebuilt from fixed wording.
     private static func restorableState(
