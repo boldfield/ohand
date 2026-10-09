@@ -15,12 +15,17 @@ final class FixtureTLSIdentity {
     let certificate: SecCertificate
     let identity: SecIdentity
     private let privateKey: SecKey
+    private let label: String
 
     init() throws {
+        let label = "ohand.fixture.\(UUID().uuidString)"
         var keyError: Unmanaged<CFError>?
         let keyAttributes: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
             kSecAttrKeySizeInBits as String: 256,
+            kSecAttrIsPermanent as String: true,
+            kSecAttrLabel as String: label,
+            kSecAttrApplicationTag as String: Data(label.utf8),
         ]
         guard let privateKey = SecKeyCreateRandomKey(keyAttributes as CFDictionary, &keyError),
             let publicKey = SecKeyCopyPublicKey(privateKey),
@@ -43,11 +48,12 @@ final class FixtureTLSIdentity {
         }
 
         // On iOS an identity only exists once its key and certificate are in the Keychain.
-        let keyStatus = SecItemAdd(
-            [kSecClass as String: kSecClassKey, kSecValueRef as String: privateKey] as CFDictionary, nil)
-        guard keyStatus == errSecSuccess || keyStatus == errSecDuplicateItem else { throw Failure.keychain(keyStatus) }
         let certificateStatus = SecItemAdd(
-            [kSecClass as String: kSecClassCertificate, kSecValueRef as String: certificate] as CFDictionary, nil)
+            [
+                kSecClass as String: kSecClassCertificate,
+                kSecValueRef as String: certificate,
+                kSecAttrLabel as String: label,
+            ] as CFDictionary, nil)
         guard certificateStatus == errSecSuccess || certificateStatus == errSecDuplicateItem else {
             throw Failure.keychain(certificateStatus)
         }
@@ -55,20 +61,21 @@ final class FixtureTLSIdentity {
         let identityStatus = SecItemCopyMatching(
             [
                 kSecClass as String: kSecClassIdentity,
-                kSecValueRef as String: certificate,
+                kSecAttrLabel as String: label,
                 kSecReturnRef as String: true,
                 kSecMatchLimit as String: kSecMatchLimitOne,
             ] as CFDictionary, &identityRef)
         guard identityStatus == errSecSuccess, let identityRef else { throw Failure.keychain(identityStatus) }
 
         self.privateKey = privateKey
+        self.label = label
         self.certificate = certificate
         self.identity = identityRef as! SecIdentity
     }
 
     func remove() {
-        SecItemDelete([kSecClass as String: kSecClassCertificate, kSecValueRef as String: certificate] as CFDictionary)
-        SecItemDelete([kSecClass as String: kSecClassKey, kSecValueRef as String: privateKey] as CFDictionary)
+        SecItemDelete([kSecClass as String: kSecClassCertificate, kSecAttrLabel as String: label] as CFDictionary)
+        SecItemDelete([kSecClass as String: kSecClassKey, kSecAttrLabel as String: label] as CFDictionary)
     }
 
     private static func toBeSignedCertificate(publicKeyPoint: [UInt8]) -> [UInt8] {
