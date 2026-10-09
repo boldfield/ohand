@@ -106,6 +106,7 @@ public final class ProviderExchangeCoordinator: @unchecked Sendable {
     private static func makeRequest(_ description: ProviderSendCommand) -> ProviderHTTPRequest? {
         guard let url = URL(string: description.url),
             let method = ProviderHTTPMethod(rawValue: description.method),
+            let capability = ProviderTransportCapability(rawValue: description.capability),
             description.timeoutMilliseconds > 0
         else { return nil }
         var headers: [String: String] = [:]
@@ -126,7 +127,7 @@ public final class ProviderExchangeCoordinator: @unchecked Sendable {
             credential: credential,
             authorization: ProviderTransportAuthorization(
                 jobID: String(description.operationID),
-                capability: .textInterpretation,
+                capability: capability,
                 authorizedOrigins: description.authorizedOrigins))
     }
 }

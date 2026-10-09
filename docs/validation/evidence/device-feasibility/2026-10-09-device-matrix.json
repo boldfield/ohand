@@ -1,0 +1,107 @@
+{
+  "evidence_id": "device-feasibility-2026-10-09",
+  "revision": 1,
+  "task": "P09",
+  "collector": "maintainer on the trial phone; coordinator pulled app containers with xcrun devicectl and recorded values from maintainer screenshots",
+  "collected_at": "2026-10-09T17:30:00Z to 2026-10-09T19:12:00Z",
+  "device": "iPhone 16 Pro (label trial-phone)",
+  "ios_version": "26.6.2 (23G90), read via devicectl",
+  "device_time_zone": "America/Los_Angeles",
+  "builds": {
+    "BridgeProbe": "6ac3d1f8 (signed, apple-signing-20261009T000932Z-c2cb6485.json)",
+    "AudioProbe": "257343f3 (apple-signing-20261009T164701Z-5b3f5c34.json)",
+    "TranscriptionProbe": "257343f3 (apple-signing-20261009T164718Z-e2dc1dae.json)",
+    "NotificationProbe": "257343f3 (apple-signing-20261009T164732Z-b11e7a0d.json)",
+    "CredentialProbe": "257343f3 (manual archive + export with the development profile; no tooling record)",
+    "CaptureProbe": "257343f3 (manual archive + export; app + control extension; no tooling record)",
+    "TauriProbe": "257343f3 (tauri ios build --debug, development route; no tooling record)"
+  },
+  "private_evidence_reference": "~/.ohand-private-evidence/p09/ on the maintainer's Mac: screenshots named below, pulled WAV files, app-container files and logs. Not committed. Files suffixed PERSONAL show the home or lock screen and are never to be published.",
+  "sections": {
+    "P03_audio": {
+      "doc": "docs/validation/audio-probe.md, 'Needs a physical device'",
+      "artifacts": "audio-probe/recording-*.wav (8 files, 16 kHz mono Int16), inspected with afinfo and a header/RMS script",
+      "results": {
+        "1_permission": "Granted: 'Recording...'; recording saved (3.33 s file). Revoked in Settings then Start: 'Failed to start recording: Microphone permission denied'.",
+        "2_normal_stop": "Saved; 6.92 s file, size consistent with 32000 B/s; plays.",
+        "3_cancel": "'Partial: 3.86s, 127732 bytes, Cancelled', protection class shown; file matches exactly and plays.",
+        "4_interruption": "'Partial: 5.86s, 191764 bytes, Audio interrupted', protection class shown; file matches exactly and plays.",
+        "5_background_10s": "'Recording was not interrupted. Saved: 9.71s, 314676 bytes'; file matches; signal present across the whole span (no UIBackgroundModes: audio needed for a 10 s background).",
+        "6_lock_10s": "'Recording was not interrupted. Saved: 8.19s, 266100 bytes', protection class shown; file matches; signal continuous, quieter mid-file.",
+        "7_bounds": "UI timer kept running past 500 s; Stop reported 'Saved: 300.00s, 9604096 bytes'; header consistent. Low-free-space refusal: not tested.",
+        "8_process_death": "Force-quit while recording: a WAV exists (54594 bytes) with an unfinalized header (data length 0; 1.58 s of PCM present); afinfo duration 0.000; not playable as-is, as the doc predicted."
+      }
+    },
+    "P04_transcription": {
+      "doc": "docs/validation/transcription-probe.md, 'Needs a physical device'",
+      "artifacts": "transcription-probe/p04-01..10.png",
+      "results": {
+        "1_snapshot": "Before request: 'Pending: speech recognition permission not requested yet.' After grant: en-US 'Ready: on-device recognition is available'; fr-FR 'Pending: on-device recognition unavailable for fr-FR (model not installed or device unsupported...)'; zz-ZZ 'Pending: language zz-ZZ is not supported by the speech framework'. Settings shows no Speech Recognition toggle until first request.",
+        "2_offline": "Airplane mode, all radios off: 'Transcribed on device in 0.32s, mean confidence 0.98: \"Remind me to call the dentist tomorrow at nine\"'. Network on: same transcript in 0.15 s. Offline on-device recognition confirmed.",
+        "3_fail_closed": "fr-FR with network on: Pending, no transcript. On-device-only flag honoured.",
+        "4_permission_revoked": "Revoked while backgrounded: iOS relaunched the app ('No audio loaded'); after Generate: 'Pending: speech recognition permission denied or revoked. Audio kept; no transcription was attempted.' Survival of the previous fixture file not checked.",
+        "5_timing_seconds": [0.32, 0.15, 0.28, 0.15, 0.15, 0.15, 0.15],
+        "6_interruption": "Not observable: the fixture completes in 0.15-0.32 s, faster than a lock or app switch.",
+        "7_cancel": "Not observable for the same reason."
+      }
+    },
+    "P05_notifications": {
+      "doc": "docs/validation/notification-probe.md ('Not tested' list)",
+      "artifacts": "notification-probe/p05-01..09.png (04 and 06 PERSONAL)",
+      "results": {
+        "authorization": "granted true; alert, badge, sound, lock screen, notification center enabled; alertStyle banner; second request granted in 2 ms.",
+        "foreground_delivery": "banner shown while foregrounded; willPresentCalled true; deliveredContainsRequest true.",
+        "closed_app_delivery": "Scheduled 5 s out, app force-quit, screen on: banner appeared; after relaunch reportDelivered: closedAppDeliveredDateUTC 2026-10-09T18:20:47Z, closedAppDeliveredPresent true, stillPending false, willPresentCallbackCountSinceLaunch 0.",
+        "locked_delivery": "Scheduled then locked at once: notification shown on the lock screen; reportDelivered: delivered 2026-10-09T18:21:50Z, present true.",
+        "capacity": "requestsAdded 100, addErrorCount 0, pendingCount 64; retainedAmongFirstAdded64 28, retainedAmongLastAdded64 64, retainedAmongSoonest64 41; retained identifiers begin at probe.cap.036. The OS keeps the 64 most recently added requests and drops the oldest silently.",
+        "calendar_trigger": "Pacific/Auckland target 2026-10-13 09:30: expected, nextTrigger and pendingNextTrigger all 2026-10-12T20:30:00Z; delta 0 s; add error none.",
+        "not_tested": "Focus and summaries, Low Power Mode, reboot, time-zone change after scheduling, provisional and ephemeral authorization, reinstall or OS-upgrade survival."
+      }
+    },
+    "P07_handoff": {
+      "doc": "docs/validation/tauri-handoff.md, 'Device procedure'",
+      "artifacts": "tauri-handoff/p07-01..08.png, container-tauri-probe/, container-capture/, run-events.log",
+      "results": {
+        "1_cold": "Tauri probe force-quit; handoff listed the identifier (prefix CB02991B); handoff file webviewReady false (URL arrived at scene-connect before the webview was ready) and still listed. CaptureProbe committed 18:38:51.727Z; Tauri received 18:38:56.688Z.",
+        "2_warm": "Second handoff listed both identifiers; webviewReady true.",
+        "3_hostile": "ohand-tauri://capture?captureId=not-a-uuid: 'Handoffs rejected: 1', list unchanged at four.",
+        "4_keyboard": "Not tested (skipped).",
+        "5_voiceover": "Not tested (skipped).",
+        "6_large_text": "Tauri probe scales, nothing clipped. CaptureProbe's 'Review in management app' label overflows its button (defect). Also at this setting: AudioProbe Start/Stop labels truncate, CredentialProbe 'Arm Locked Retrieval' label truncates; BridgeProbe and NotificationProbe fine; TranscriptionProbe Cancel below the fold but reachable.",
+        "7_secret_isolation": "Each handoffs/<id>.json contains exactly captureId, receivedAtUnixMs, webviewReady; the capture text appears nowhere in the Tauri container. Every listed identifier exists in both containers; an entry not handed off exists only in CaptureProbe.",
+        "side_observation": "Opening the CaptureProbe scheme with a bogus captureId query minted a fresh valid entry; the query is ignored."
+      }
+    },
+    "P11_credentials": {
+      "doc": "docs/validation/credential-probe.md, 'Lock/Relaunch Protocol for P09'",
+      "artifacts": "credential-probe/p11-01..04.png, container/locked-retrieval.log",
+      "results": {
+        "1_locked_retrieval": "Armed 18:56:18Z, background 18:56:22Z. Offsets 1, 3, 6 s (protectedData true): all five classes status 0. Offsets 10, 15, 20 s (protectedData false, locked): WhenUnlocked, WhenUnlockedThisDeviceOnly, WhenPasscodeSetThisDeviceOnly -25308 errSecInteractionNotAllowed; AfterFirstUnlock and AfterFirstUnlockThisDeviceOnly status 0 with matching values. Background task expired 25 s after backgrounding.",
+        "2_unlocked": "All five classes status 0, protectedDataAvailable true.",
+        "3_relaunch": "Force-quit, relaunch, retrieve without storing: all five status 0.",
+        "4_reboot": "Store, reboot, first unlock, retrieve: all five status 0.",
+        "5_passcode_removal": "Not tested."
+      }
+    },
+    "P02_capture_entry": {
+      "doc": "docs/validation/capture-entry.md, 'Needs a physical device'",
+      "artifacts": "capture-probe/p02-01-control-from-lock-screen-entry.png, container/CaptureProbe/records/",
+      "results": {
+        "control_unlocked": "Control Center press to entry on screen: about 2 s (maintainer estimate).",
+        "control_from_lock_screen": "No Face ID prompt observed; the app opened showing only the new entry; the entry reported protected data available, so the device was unlocked by the time the app foregrounded (passive unlock not instrumented).",
+        "entry": "Entry: controlIntent, warm launch; Protected data: available; Result: Saved.",
+        "records": "Four control presses produced four distinct records (two cold, two warm), all protectedDataAvailable true; no duplicate perform() observed.",
+        "not_measured": "Before first unlock after reboot; system termination between handoff and commit."
+      }
+    }
+  },
+  "headline_findings": [
+    "Offline on-device transcription works on this device and OS with all radios off (0.32 s cold, 0.15 s warm for the fixture).",
+    "Local notifications deliver with the app force-quit and with the phone locked.",
+    "Keychain: only the AfterFirstUnlock classes are readable while locked; background window about 25 s.",
+    "Recording survives 10 s of background and 10 s of lock without a background audio mode; process death leaves an unfinalized WAV header.",
+    "Pending-notification limit is 64 with oldest-added eviction.",
+    "Handoff carries only the identifier; hostile URLs are rejected; cold-launch URL arrives before the webview is ready.",
+    "Large text at maximum clips labels in CaptureProbe, AudioProbe and CredentialProbe."
+  ]
+}

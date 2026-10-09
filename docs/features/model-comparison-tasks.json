@@ -290,7 +290,8 @@
       "title": "Add protected comparison configuration and record storage",
       "depends_on": [
         "T06",
-        "XB05"
+        "XB05",
+        "T08"
       ],
       "file_scope": [
         "core/src/review/compare/store/",
@@ -687,5 +688,11 @@
     "overlapping_paths_serialized": true,
     "base_m1_has_no_feature_dependency": true,
     "effective_task_count": 151
-  }
+  },
+  "addenda": [
+    {
+      "date": "2026-10-09",
+      "change": "XL01 now also depends on T08 (two-week trial evaluation). Every M2 comparison task chains to XL01, so all M2 work waits for the trial verdict per DESIGN.md: revise the loop before adding features."
+    }
+  ]
 }
