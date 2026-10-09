@@ -133,8 +133,39 @@ final class NotificationCoreIntegrationTests: XCTestCase {
         ])
     }
 
-    @MainActor
-    func testBridgeSchedulesTheCoreItemWithoutCaptureTextAndEvidenceChangesNoCoreState() async throws {
+    private final class AsyncResultBox<Value>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: Result<Value, Error>?
+
+        var result: Result<Value, Error>? {
+            lock.lock()
+            defer { lock.unlock() }
+            return stored
+        }
+
+        func set(_ outcome: Result<Value, Error>) {
+            lock.lock()
+            defer { lock.unlock() }
+            stored = outcome
+        }
+    }
+
+    /// Runs async bridge work while the main thread keeps servicing its run loop, which is where
+    /// the core delivers events, so core reads and bridge calls can share one test.
+    private func runAsync<Value>(timeout: TimeInterval = 20, _ body: @escaping () async throws -> Value) throws -> Value {
+        let box = AsyncResultBox<Value>()
+        Task {
+            do { box.set(.success(try await body())) } catch { box.set(.failure(error)) }
+        }
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let outcome = box.result { return try outcome.get() }
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+        throw CoreFailure(errorClass: .transient, code: "test_timeout", message: "async work did not finish")
+    }
+
+    func testBridgeSchedulesTheCoreItemWithoutCaptureTextAndEvidenceChangesNoCoreState() throws {
         try prepareStore()
         let session = try Session(path: storePath)
         defer { session.close() }
@@ -161,7 +192,9 @@ final class NotificationCoreIntegrationTests: XCTestCase {
         )
 
         let due = try XCTUnwrap(ISO8601DateFormatter().date(from: "2027-01-15T08:00:00Z"))
-        let installed = try await bridge.schedule(.generic(identifier: notificationID, dueInstant: due, opaqueTargetID: coreItemID))
+        let scheduleRequest = NotificationScheduleRequest.generic(
+            identifier: notificationID, dueInstant: due, opaqueTargetID: coreItemID)
+        let installed = try runAsync { try await bridge.schedule(scheduleRequest) }
         XCTAssertEqual(installed.identifier, notificationID)
 
         let sent = try XCTUnwrap(center.addedRequests.first)
@@ -174,13 +207,13 @@ final class NotificationCoreIntegrationTests: XCTestCase {
         ]))
         XCTAssertFalse(everyString.contains { $0.contains("canary") || $0.contains("roof") })
 
-        let pending = try await bridge.pendingNotifications()
+        let pending = try runAsync { try await bridge.pendingNotifications() }
         XCTAssertEqual(pending.map(\.identifier), [notificationID])
         XCTAssertEqual(pending.first?.opaqueTargetID?.rawValue, before.itemID)
 
         center.delivered = [NotificationCenterDeliveredNotification(
             identifier: sent.identifier, deliveredAt: due, userInfo: sent.content.userInfo)]
-        let forwarded = await bridge.ingestDeliveredNotifications()
+        let forwarded = try runAsync { await bridge.ingestDeliveredNotifications() }
         XCTAssertEqual(forwarded, 1)
         XCTAssertEqual(recorder.events.first?.identifier, notificationID)
         XCTAssertEqual(recorder.events.first?.kind, .delivered)
@@ -190,7 +223,7 @@ final class NotificationCoreIntegrationTests: XCTestCase {
         XCTAssertEqual(Self.facts(of: after), Self.facts(of: before),
                        "evidence handed to the receiver changes nothing in the core by itself")
 
-        try await bridge.cancel(notificationID)
+        try runAsync { try await bridge.cancel(notificationID) }
         XCTAssertTrue(center.pendingIdentifiers.isEmpty)
     }
 
