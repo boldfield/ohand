@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-synthetic-0001",
+  "object": "chat.completion",
+  "created": 1790000000,
+  "model": "deepseek-flash-iq3:latest",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "{\"operation\":{\"kind\":\"annotate\"},\"item_type\":\"action\",\"source_spans\":[{\"start\":0,\"end\":15}]}"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 120,
+    "completion_tokens": 14,
+    "total_tokens": 134
+  }
+}
