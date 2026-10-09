@@ -76,7 +76,7 @@ class ProviderTransportTestCase: XCTestCase {
         }
     }
 
-    func waitUntil(timeout: TimeInterval = 5, _ condition: () -> Bool) async -> Bool {
+    func waitUntil(timeout: TimeInterval = 5, _ condition: @escaping () -> Bool) async -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if condition() { return true }
