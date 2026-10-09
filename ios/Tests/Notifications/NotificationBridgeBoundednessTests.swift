@@ -233,8 +233,7 @@ final class NotificationBridgeBoundednessTests: XCTestCase {
         XCTAssertEqual(failure, .timedOut)
 
         gate.release()
-        await eventually("the abandoned retry to finish late") { self.inner.addedRequests.count == 2 }
-        await eventually("the earlier request to be restored") { self.inner.addedRequests.count == 3 }
+        await eventually("the abandoned retry to finish late and be undone") { self.inner.addedRequests.count == 3 }
         await quick.settleAbandonedWork()
         let restoredDue = try await pendingDueInstant()
         XCTAssertEqual(restoredDue, original.dueInstant)
