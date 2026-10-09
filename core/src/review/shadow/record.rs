@@ -7,6 +7,40 @@ use crate::privacy::routing::JOB_TYPE_SHADOW_REVIEW;
 
 pub(super) const UNREVIEWED_PREFIX: &str = "shadow_unreviewed:";
 pub(super) const ERROR_PREFIX: &str = "shadow_error:";
+/// Marks, while a case is running, the lease attempt whose provider request has been authorized:
+/// `shadow_dispatched:<attempt>`, followed by `|<previous failure>` when an earlier attempt
+/// failed. Every outcome write replaces it.
+pub(super) const DISPATCHED_PREFIX: &str = "shadow_dispatched:";
+const DISPATCHED_SEPARATOR: char = '|';
+
+/// The lease attempt a dispatch marker names, if `failure_reason` is one.
+pub(super) fn dispatched_attempt(failure_reason: Option<&str>) -> Option<i32> {
+    let marker = failure_reason?.strip_prefix(DISPATCHED_PREFIX)?;
+    let attempt = marker
+        .split_once(DISPATCHED_SEPARATOR)
+        .map_or(marker, |(attempt, _)| attempt);
+    attempt.parse().ok()
+}
+
+/// A dispatch marker for `lease_attempt` that keeps the previous failure code readable.
+pub(super) fn dispatch_marker(lease_attempt: i32, failure_reason: Option<&str>) -> String {
+    match failure_reason.map(previous_failure) {
+        Some(Some(previous)) => {
+            format!("{DISPATCHED_PREFIX}{lease_attempt}{DISPATCHED_SEPARATOR}{previous}")
+        }
+        _ => format!("{DISPATCHED_PREFIX}{lease_attempt}"),
+    }
+}
+
+/// The failure code of an earlier attempt, with any dispatch marker removed.
+fn previous_failure(failure_reason: &str) -> Option<&str> {
+    match failure_reason.strip_prefix(DISPATCHED_PREFIX) {
+        Some(marker) => marker
+            .split_once(DISPATCHED_SEPARATOR)
+            .map(|(_, previous)| previous),
+        None => Some(failure_reason),
+    }
+}
 
 /// Why a sampled case ended without a review verdict. Every variant means "unreviewed": the
 /// reviewer's silence is never read as agreement.
@@ -114,12 +148,9 @@ fn record_from_row(row: &rusqlite::Row<'_>) -> Result<ShadowRecord> {
     let failure_reason: Option<String> = row.get(9)?;
     let outcome = outcome_for(&status, failure_reason.as_deref());
     let last_failure = match (&outcome, &failure_reason) {
-        (ShadowOutcome::Pending, Some(reason)) => Some(
-            reason
-                .strip_prefix(ERROR_PREFIX)
-                .unwrap_or(reason)
-                .to_string(),
-        ),
+        (ShadowOutcome::Pending, Some(reason)) => previous_failure(reason)
+            .map(|previous| previous.strip_prefix(ERROR_PREFIX).unwrap_or(previous))
+            .map(str::to_string),
         _ => None,
     };
     Ok(ShadowRecord {

@@ -1,8 +1,14 @@
+use anyhow::{anyhow, Result};
+use chrono::{DateTime, Duration, Utc};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 /// Sampling resolution: `sample_per_mille` is a share out of this many.
 pub const SAMPLE_SCALE: u16 = 1000;
+
+/// Longest budget window a policy may use: one leap year. It keeps window arithmetic far inside
+/// the representable date range, so no valid policy can overflow it.
+pub const MAX_WINDOW_SECONDS: i64 = 366 * 24 * 60 * 60;
 
 const SAMPLING_DOMAIN: &[u8] = b"ohand-shadow-sample-v1";
 
@@ -44,6 +50,8 @@ pub enum PolicyError {
     SampleShareTooLarge,
     #[error("budget window must be positive")]
     NonPositiveWindow,
+    #[error("budget window exceeds {MAX_WINDOW_SECONDS} seconds")]
+    WindowTooLong,
     #[error("a sampled case must be allowed at least one attempt")]
     NoAttemptsPerSample,
 }
@@ -56,10 +64,29 @@ impl ShadowPolicy {
         if self.window_seconds <= 0 {
             return Err(PolicyError::NonPositiveWindow);
         }
+        if self.window_seconds > MAX_WINDOW_SECONDS {
+            return Err(PolicyError::WindowTooLong);
+        }
         if self.max_attempts_per_sample == 0 {
             return Err(PolicyError::NoAttemptsPerSample);
         }
         Ok(())
+    }
+
+    /// Start of the budget window ending at `now`. A window outside `1..=MAX_WINDOW_SECONDS` is an
+    /// error, never a panic or an empty window, even for a policy that was not validated.
+    pub(super) fn window_start(&self, now: DateTime<Utc>) -> Result<DateTime<Utc>> {
+        (1..=MAX_WINDOW_SECONDS)
+            .contains(&self.window_seconds)
+            .then(|| Duration::try_seconds(self.window_seconds))
+            .flatten()
+            .and_then(|window| now.checked_sub_signed(window))
+            .ok_or_else(|| {
+                anyhow!(
+                    "shadow budget window of {} seconds is out of range",
+                    self.window_seconds
+                )
+            })
     }
 
     /// Deterministic sampling decision for one case. It depends only on the case identity, so

@@ -1,10 +1,11 @@
 use anyhow::{anyhow, Context, Result};
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
 use super::policy::ShadowPolicy;
 use super::record::{
-    load_shadow_record, ShadowRecord, UnreviewedReason, ERROR_PREFIX, UNREVIEWED_PREFIX,
+    dispatch_marker, dispatched_attempt, load_shadow_record, ShadowRecord, UnreviewedReason,
+    ERROR_PREFIX, UNREVIEWED_PREFIX,
 };
 use super::selection::parse_instant;
 use crate::jobs::queue::{fail_job_with_backoff_in_tx, JobStatus};
@@ -28,6 +29,8 @@ pub enum ShadowDispatchDenial {
     NotLeased,
     /// The case already used its per-sample request allowance.
     AttemptsExhausted,
+    /// This lease attempt was already authorized; one attempt permits one provider request.
+    AlreadyDispatched,
     /// Sending would put more provider requests inside the budget window than the policy allows.
     BudgetExhausted {
         requests_spent: u32,
@@ -82,6 +85,12 @@ fn read_gate_row(conn: &Connection, job_id: &str) -> Result<Option<JobGateRow>> 
 /// transaction, so the request is accounted to the window it is actually sent in even when the
 /// case was selected, or last retried, in an earlier window. A denial writes nothing.
 ///
+/// `Allowed` is consumed: the same transaction marks the lease attempt as dispatched, and asking
+/// again for that attempt is denied with [`ShadowDispatchDenial::AlreadyDispatched`]. Each charged
+/// attempt therefore permits exactly one provider request; another request needs a new lease,
+/// which the queue grants only after a recorded retry or an expired lease, and which is charged
+/// as a further attempt.
+///
 /// The window budget is also enforced here, against requests actually spent: the case's own
 /// attempts plus every other case's attempts whose latest activity is inside the window must not
 /// exceed `max_requests_per_window`. Reservations made at selection already guarantee this under
@@ -98,6 +107,11 @@ pub fn authorize_shadow_dispatch(
     let tx = db.immediate_transaction()?;
     let decision = decide_dispatch(&tx, job_id, lease_attempt, policy)?;
     if matches!(decision, ShadowDispatchDecision::Allowed(_)) {
+        if dispatched_attempt(read_failure_reason(&tx, job_id)?.as_deref()) == Some(lease_attempt) {
+            return Ok(ShadowDispatchDecision::Denied(
+                ShadowDispatchDenial::AlreadyDispatched,
+            ));
+        }
         let requests_spent = requests_spent_with(&tx, policy, now, job_id, lease_attempt)?;
         if requests_spent > policy.max_requests_per_window {
             return Ok(ShadowDispatchDecision::Denied(
@@ -123,7 +137,7 @@ fn requests_spent_with(
     job_id: &str,
     lease_attempt: i32,
 ) -> Result<u32> {
-    let window_start = now - Duration::seconds(policy.window_seconds);
+    let window_start = policy.window_start(now)?;
     let mut statement = conn
         .prepare(
             "SELECT job_id, attempt_count, created_at, next_attempt_at \
@@ -150,17 +164,18 @@ fn requests_spent_with(
 
 /// The dispatch time lives in `next_attempt_at`, which the queue ignores while a job is running
 /// and which a later retry or terminal write leaves intact or replaces with a later instant.
-/// The stamp never moves backwards.
+/// The stamp never moves backwards. The dispatched-attempt marker lives in `failure_reason`,
+/// which the queue's claim leaves intact and every outcome write replaces.
 fn stamp_dispatch(
     tx: &Transaction<'_>,
     job_id: &str,
     lease_attempt: i32,
     now: DateTime<Utc>,
 ) -> Result<()> {
-    let existing: Option<String> = tx.query_row(
-        "SELECT next_attempt_at FROM jobs WHERE job_id = ?",
+    let (existing, failure_reason): (Option<String>, Option<String>) = tx.query_row(
+        "SELECT next_attempt_at, failure_reason FROM jobs WHERE job_id = ?",
         [job_id],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     let stamp = match existing {
         Some(text) => {
@@ -172,10 +187,11 @@ fn stamp_dispatch(
         None => now,
     };
     let updated = tx.execute(
-        "UPDATE jobs SET next_attempt_at = ? \
+        "UPDATE jobs SET next_attempt_at = ?, failure_reason = ? \
          WHERE job_id = ? AND job_type = ? AND status = ? AND attempt_count = ?",
         rusqlite::params![
             stamp.to_rfc3339(),
+            dispatch_marker(lease_attempt, failure_reason.as_deref()),
             job_id,
             JOB_TYPE_SHADOW_REVIEW,
             JobStatus::Running.as_str(),
@@ -188,6 +204,15 @@ fn stamp_dispatch(
         ));
     }
     Ok(())
+}
+
+fn read_failure_reason(conn: &Connection, job_id: &str) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT failure_reason FROM jobs WHERE job_id = ?",
+        [job_id],
+        |row| row.get(0),
+    )
+    .context("reading shadow dispatch marker")
 }
 
 fn decide_dispatch(

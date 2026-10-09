@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension};
 use uuid::Uuid;
 
@@ -63,7 +63,7 @@ pub fn requests_in_use(
     policy: &ShadowPolicy,
     now: DateTime<Utc>,
 ) -> Result<u32> {
-    let window_start = now - Duration::seconds(policy.window_seconds);
+    let window_start = policy.window_start(now)?;
     let mut statement = conn
         .prepare(
             "SELECT job_id, status, attempt_count, created_at, next_attempt_at \

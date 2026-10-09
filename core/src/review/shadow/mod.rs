@@ -25,7 +25,7 @@ pub use dispatch::{
     authorize_shadow_dispatch, record_shadow_failure, record_shadow_unreviewed,
     ShadowDispatchDecision, ShadowDispatchDenial,
 };
-pub use policy::{PolicyError, ShadowPolicy, SAMPLE_SCALE};
+pub use policy::{PolicyError, ShadowPolicy, MAX_WINDOW_SECONDS, SAMPLE_SCALE};
 pub use record::{
     list_shadow_records, load_shadow_record, ShadowOutcome, ShadowRecord, UnreviewedReason,
 };

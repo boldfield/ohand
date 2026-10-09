@@ -638,7 +638,7 @@ fn lowering_the_window_limit_after_selection_denies_unsent_reserved_cases() {
 }
 
 #[test]
-fn a_denied_gate_stamps_nothing_and_an_allowed_gate_never_moves_the_stamp_back() {
+fn a_denied_gate_stamps_nothing_and_a_replayed_gate_moves_nothing() {
     let mut fixture = Fixture::new(true);
     let policy = enabled_policy(5, 2);
     let record = fixture.select_record(&policy, t0());
@@ -665,11 +665,149 @@ fn a_denied_gate_stamps_nothing_and_an_allowed_gate_never_moves_the_stamp_back()
         fixture.gate_at(&job_id, attempt, &policy, later),
         ShadowDispatchDecision::Allowed(_)
     ));
-    assert!(matches!(
+    assert_eq!(
         fixture.gate_at(&job_id, attempt, &policy, t0()),
+        ShadowDispatchDecision::Denied(ShadowDispatchDenial::AlreadyDispatched)
+    );
+    assert_eq!(stamp(&fixture), Some(later.to_rfc3339()));
+}
+
+#[test]
+fn a_replayed_gate_under_a_limit_of_one_permits_exactly_one_request() {
+    let mut fixture = Fixture::new(true);
+    let policy = enabled_policy(1, 1);
+    fixture.select_record(&policy, t0());
+    let (job_id, attempt) = fixture.claim(t0());
+    let mut sent = Vec::new();
+    for step in 0..5 {
+        let now = t0() + Duration::seconds(step);
+        match fixture.gate_at(&job_id, attempt, &policy, now) {
+            ShadowDispatchDecision::Allowed(_) => sent.push(now),
+            ShadowDispatchDecision::Denied(denial) => {
+                assert_eq!(denial, ShadowDispatchDenial::AlreadyDispatched)
+            }
+        }
+    }
+    assert_eq!(sent, vec![t0()]);
+    assert_never_more_than_limit_in_any_window(&sent, &policy);
+    // The marker does not leak into the record of the open case.
+    let record = fixture.record(&job_id);
+    assert_eq!(record.outcome, ShadowOutcome::Pending);
+    assert_eq!(record.last_failure, None);
+}
+
+#[test]
+fn each_retry_lease_permits_one_request_and_keeps_the_previous_failure_visible() {
+    let mut fixture = Fixture::new(true);
+    let policy = enabled_policy(2, 2);
+    fixture.select_record(&policy, t0());
+    let transient = ProviderFailure::new(FailureKind::Unavailable);
+    let mut now = t0();
+    let mut sent = Vec::new();
+    for _ in 0..2 {
+        let (job_id, attempt) = fixture.claim(now);
+        for _ in 0..3 {
+            if let ShadowDispatchDecision::Allowed(_) =
+                fixture.gate_at(&job_id, attempt, &policy, now)
+            {
+                sent.push(now);
+            }
+        }
+        if attempt == 2 {
+            assert_eq!(
+                fixture.record(&job_id).last_failure.as_deref(),
+                Some("unavailable")
+            );
+        }
+        record_shadow_failure(&mut fixture.db, &job_id, attempt, &transient, &policy, now).unwrap();
+        now += Duration::seconds(3600);
+    }
+    assert_eq!(sent.len(), 2);
+    assert_never_more_than_limit_in_any_window(&sent, &policy);
+}
+
+#[test]
+fn an_expired_lease_is_charged_as_a_further_attempt() {
+    let mut fixture = Fixture::new(true);
+    let policy = enabled_policy(1, 1);
+    fixture.select_record(&policy, t0());
+    let (job_id, attempt) = fixture.claim(t0());
+    assert!(matches!(
+        fixture.gate(&job_id, attempt, &policy),
         ShadowDispatchDecision::Allowed(_)
     ));
-    assert_eq!(stamp(&fixture), Some(later.to_rfc3339()));
+    // The worker stalls; its lease expires and the queue hands the case out again.
+    let reclaimed_at = t0() + Duration::seconds(LEASE_SECONDS + 1);
+    let (reclaimed_id, reclaimed_attempt) = fixture.claim(reclaimed_at);
+    assert_eq!(
+        (reclaimed_id.as_str(), reclaimed_attempt),
+        (job_id.as_str(), attempt + 1)
+    );
+    assert_eq!(
+        fixture.gate_at(&job_id, reclaimed_attempt, &policy, reclaimed_at),
+        ShadowDispatchDecision::Denied(ShadowDispatchDenial::AttemptsExhausted)
+    );
+}
+
+#[test]
+fn extreme_windows_fail_closed_without_panicking() {
+    let mut fixture = Fixture::new(true);
+    let valid = enabled_policy(5, 1);
+    let record = fixture.select_record(&valid, t0());
+    let (job_id, attempt) = fixture.claim(t0());
+    for window_seconds in [MAX_WINDOW_SECONDS + 1, i64::MAX / 1000, i64::MAX] {
+        let extreme = ShadowPolicy {
+            window_seconds,
+            ..valid
+        };
+        assert_eq!(extreme.validate(), Err(PolicyError::WindowTooLong));
+        assert_eq!(
+            fixture.select_new(&extreme, t0()),
+            ShadowSelection::Skipped(ShadowSkip::InvalidPolicy)
+        );
+        assert_eq!(
+            fixture.gate(&job_id, attempt, &extreme),
+            ShadowDispatchDecision::Denied(ShadowDispatchDenial::InvalidPolicy)
+        );
+        // The budget read is public and may see an unvalidated policy: it errors, never panics.
+        assert!(requests_in_use(fixture.db.conn(), &extreme, t0()).is_err());
+    }
+    for window_seconds in [i64::MIN, -1, 0] {
+        let extreme = ShadowPolicy {
+            window_seconds,
+            ..valid
+        };
+        assert_eq!(extreme.validate(), Err(PolicyError::NonPositiveWindow));
+        assert_eq!(
+            fixture.gate(&job_id, attempt, &extreme),
+            ShadowDispatchDecision::Denied(ShadowDispatchDenial::InvalidPolicy)
+        );
+        assert!(requests_in_use(fixture.db.conn(), &extreme, t0()).is_err());
+    }
+    assert_eq!(fixture.shadow_job_count(), 1);
+
+    // The longest allowed window works on both paths.
+    let longest = ShadowPolicy {
+        window_seconds: MAX_WINDOW_SECONDS,
+        ..valid
+    };
+    assert_eq!(longest.validate(), Ok(()));
+    assert!(matches!(
+        fixture.gate(&job_id, attempt, &longest),
+        ShadowDispatchDecision::Allowed(_)
+    ));
+    assert_eq!(
+        requests_in_use(fixture.db.conn(), &longest, t0()).unwrap(),
+        1
+    );
+    assert!(matches!(
+        fixture.select_new(&longest, t0()),
+        ShadowSelection::Selected(_)
+    ));
+    assert_eq!(
+        fixture.record(&record.job_id).outcome,
+        ShadowOutcome::Pending
+    );
 }
 
 #[test]
