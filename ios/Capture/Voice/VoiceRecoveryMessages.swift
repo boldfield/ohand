@@ -50,11 +50,18 @@ enum VoiceRecoveryMessages {
             var actions: [VoiceRecoveryAction] = [.finish]
             if recording.canContinue { actions.append(.continueRecording) }
             actions.append(.delete)
+            var detail = "\(duration(durationSeconds)), \(size(recording.fileSizeBytes)). Kept on this device. "
+                + "It is not saved until you finish it."
+            if recording.isUnjoinedAddedAudio {
+                detail += " This is audio added to another recording that was not joined to it."
+            } else if recording.hasUnjoinedAddedAudio {
+                detail += " Audio added to it earlier is kept as a separate recording, so more cannot be added until "
+                    + "that one is finished or deleted."
+            }
             return VoiceRecoveryRow(
                 fileName: recording.fileName,
-                title: "Recording not saved yet",
-                detail: "\(duration(durationSeconds)), \(size(recording.fileSizeBytes)). Kept on this device. "
-                    + "It is not saved until you finish it.",
+                title: recording.isUnjoinedAddedAudio ? "Added audio not joined" : "Recording not saved yet",
+                detail: detail,
                 actions: actions)
         }
     }
@@ -139,6 +146,9 @@ enum VoiceRecoveryMessages {
         case .insufficientStorage: return "Not enough free space to record. Nothing was recorded."
         case .recorderUnavailable: return "The recorder could not start. Nothing was recorded."
         case .recordingNotContinuable: return "That recording cannot be added to. It was left as it is."
+        case .continuationLeftoverPresent:
+            return "Audio added to that recording earlier is still kept as a separate recording. "
+                + "Finish or delete it first. Nothing was recorded."
         case .nothingLeftToRecord: return "That recording is already as long as a recording can be. It was left as it is."
         }
     }

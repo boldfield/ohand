@@ -42,13 +42,18 @@ struct RecoverableVoiceRecording: Equatable {
     /// nil when bytes exist but cannot be read back as audio.
     var durationSeconds: Double?
     var modifiedAt: Date?
-    /// True when audio can still be added within the duration and size bounds.
+    /// True when audio can still be added within the duration and size bounds and no earlier added audio is waiting.
     var canContinue: Bool
+    /// True when this file is audio added to another recording that was never joined onto it; it is its own recording
+    /// until the user finishes or deletes it.
+    var isUnjoinedAddedAudio = false
+    /// True when audio added to this recording earlier is still kept as a separate file, so more cannot be added yet.
+    var hasUnjoinedAddedAudio = false
 
     var canFinish: Bool { durationSeconds != nil }
 }
 
-enum VoiceRecoveryAction: Equatable {
+enum VoiceRecoveryAction: Hashable {
     case finish
     case continueRecording
     case delete

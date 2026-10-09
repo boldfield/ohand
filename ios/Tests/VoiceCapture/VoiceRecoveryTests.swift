@@ -520,6 +520,127 @@ final class VoiceRecoveryTests: VoiceCaptureTestCase {
         XCTAssertEqual(engine.startCount, 0)
     }
 
+    // MARK: Continuation leftovers
+
+    func testAfterAFailedJoinContinueIsNotOfferedSaysWhyAndWorksOnceTheAddedAudioIsHandled() throws {
+        try leaveRecording("voice-left-1", frames: 8000)
+        let recording = try XCTUnwrap(try refreshListing().recordings.first)
+        engine.framesWritten = 4000
+        _ = try continueResult(recording).get()
+        joinShouldFail = true
+        controller.stop()
+        joinShouldFail = false
+
+        restart()
+        let listing = try refreshListing()
+
+        let base = try XCTUnwrap(listing.recordings.first { $0.captureID == "voice-left-1" })
+        let segment = try XCTUnwrap(listing.recordings.first { $0.captureID == "voice-left-1-continued" })
+        XCTAssertFalse(base.canContinue, "continue is not offered while the earlier added audio is waiting")
+        XCTAssertTrue(base.hasUnjoinedAddedAudio)
+        XCTAssertTrue(segment.isUnjoinedAddedAudio)
+        let rows = VoiceRecoveryMessages.rows(for: listing)
+        let baseRow = try XCTUnwrap(rows.first { $0.fileName == base.fileName })
+        XCTAssertEqual(baseRow.actions, [.finish, .delete])
+        XCTAssertTrue(baseRow.detail.contains("separate recording"), "the row says why more cannot be added")
+        XCTAssertEqual(try XCTUnwrap(rows.first { $0.fileName == segment.fileName }).title, "Added audio not joined")
+
+        var forced = base
+        forced.canContinue = true
+        let refusal = failure(try continueResult(forced))
+        XCTAssertEqual(refusal, .recorderRefused(.continuationLeftoverPresent))
+        let message = VoiceRecoveryMessages.message(for: try XCTUnwrap(refusal))
+        XCTAssertFalse(message.contains("storage is unavailable"), "storage is fine; the leftover is the cause")
+        XCTAssertTrue(message.contains("separate recording"))
+        XCTAssertEqual(engine.startCount, 1, "the refused continue never started the recorder")
+
+        _ = try deleteResult(segment).get()
+        let afterDeleting = try XCTUnwrap(try refreshListing().recordings.first)
+        XCTAssertTrue(afterDeleting.canContinue)
+        _ = try continueResult(afterDeleting).get()
+        controller.cancel()
+        XCTAssertEqual(try audioFrames(recordingFile("voice-left-1")), 12000)
+    }
+
+    func testAJoinedCopyLeftByAProcessDeathIsNeverListedAndCannotBeSubmittedTwice() throws {
+        try leaveRecording("voice-left-1", frames: 8000)
+        try leaveRecording("voice-left-1-continued", frames: 4000)
+        try leaveRecording("voice-left-1-joined", frames: 2000)
+        restart()
+
+        let listing = try refreshListing()
+
+        XCTAssertEqual(Set(listing.recordings.map { $0.fileName }), ["voice-left-1.wav", "voice-left-1-continued.wav"])
+        XCTAssertFalse(exists(inProgressAudioURL("voice-left-1-joined.wav")), "the copy was made from files that still exist")
+        XCTAssertEqual(try audioFrames(recordingFile("voice-left-1")), 8000)
+        XCTAssertEqual(try audioFrames(inProgressAudioURL("voice-left-1-continued.wav")), 4000)
+        confirmNextImport("voice-left-1")
+        let base = try XCTUnwrap(listing.recordings.first { $0.captureID == "voice-left-1" })
+        _ = try finishResult(base).get()
+        XCTAssertEqual(importer.importedRecords.count, 1)
+        XCTAssertFalse(importer.importedRecords.contains { $0.captureID.contains("joined") })
+    }
+
+    func testAJoinedFileWithoutBothSourcesIsKeptAndListedBecauseItMayBeTheOnlyCopy() throws {
+        try leaveRecording("voice-left-1-joined", frames: 12000)
+        try leaveRecording("voice-left-2", frames: 8000)
+        try leaveRecording("voice-left-2-joined", frames: 12000)
+        restart()
+
+        let names = Set(try refreshListing().recordings.map { $0.fileName })
+
+        XCTAssertEqual(names, ["voice-left-1-joined.wav", "voice-left-2.wav", "voice-left-2-joined.wav"])
+        XCTAssertTrue(exists(inProgressAudioURL("voice-left-1-joined.wav")))
+        XCTAssertTrue(exists(inProgressAudioURL("voice-left-2-joined.wav")))
+    }
+
+    func testASegmentAlreadyJoinedBeforeAProcessDeathIsSettledAndOnlyTheJoinedRecordingRemains() throws {
+        try leaveRecording("voice-left-1", frames: 12000)
+        try leaveRecording("voice-left-1-continued", frames: 4000)
+        restart()
+
+        let listing = try refreshListing()
+
+        XCTAssertEqual(listing.recordings.map { $0.fileName }, ["voice-left-1.wav"])
+        XCTAssertFalse(exists(inProgressAudioURL("voice-left-1-continued.wav")))
+        XCTAssertEqual(try audioFrames(recordingFile("voice-left-1")), 12000, "the recording keeps all its audio")
+        XCTAssertTrue(try XCTUnwrap(listing.recordings.first).canContinue, "no leftover blocks more audio")
+    }
+
+    func testASegmentThatIsNotTheTailOfTheRecordingIsKeptAsItsOwnRecording() throws {
+        try leaveRecording("voice-left-1", frames: 8050)
+        try leaveRecording("voice-left-1-continued", frames: 4000)
+        restart()
+
+        let listing = try refreshListing()
+
+        XCTAssertEqual(Set(listing.recordings.map { $0.fileName }), ["voice-left-1.wav", "voice-left-1-continued.wav"])
+        XCTAssertTrue(exists(inProgressAudioURL("voice-left-1-continued.wav")), "nothing is discarded on a guess")
+    }
+
+    func testFinishChecksOwnershipLikeContinueAndDelete() throws {
+        failingFileSystem.failing = [.move]
+        _ = try startRecording()
+        controller.stop()
+        guard case .keptForRetry(_, .importUnconfirmed) = try lastOutcome() else { return XCTFail("expected keptForRetry") }
+        restart()
+
+        XCTAssertEqual(failure(try finishResult(staleRecording("voice-test-1"))), .ownedByStagedCapture)
+
+        XCTAssertTrue(exists(recordingFile("voice-test-1")))
+    }
+
+    func testFinishRefusesWhenIngressOwnershipIsUnknown() throws {
+        try leaveRecording("voice-left-1")
+        let recording = try XCTUnwrap(try refreshListing().recordings.first)
+        failingFileSystem.failing = [.read]
+
+        XCTAssertEqual(failure(try finishResult(recording)), .ingressStateUnknown)
+
+        XCTAssertTrue(exists(recordingFile("voice-left-1")))
+        XCTAssertTrue(importer.importedRecords.isEmpty)
+    }
+
     // MARK: Messages
 
     func testMessagesStateOnlyVerifiedFacts() throws {
@@ -557,6 +678,7 @@ final class VoiceRecoveryTests: VoiceCaptureTestCase {
         let failures: [VoiceRecoveryFailure] = [
             .recordingNotFound, .alreadyInProgress, .recordingActive, .ingressStateUnknown, .ownedByStagedCapture,
             .notReadable, .removalFailed, .recorderRefused(.microphoneDenied), .recorderRefused(.nothingLeftToRecord),
+            .recorderRefused(.continuationLeftoverPresent),
         ]
         for failure in failures {
             XCTAssertFalse(VoiceRecoveryMessages.message(for: failure).isEmpty)

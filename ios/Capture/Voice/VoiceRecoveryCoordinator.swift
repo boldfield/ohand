@@ -3,10 +3,11 @@ import Foundation
 /// Finds recordings that were never handed to ingress (cancelled, or cut off before handoff) and carries out the
 /// user's explicit choice for exactly one of them: finish it, add more audio to it, or delete it.
 ///
-/// Nothing here runs by itself: discovery only reads, there is no cleanup queue, and nothing is deleted or submitted
-/// without a call for that one recording. Discovery goes through the ingress writer's own recovery pass, so captures
-/// already staged are retried there and are never offered here, and a pass that cannot tell who owns a file offers
-/// nothing and says so. Normal capture never waits on this type.
+/// Nothing here runs by itself: there is no cleanup queue, and nothing is deleted or submitted without a call for that
+/// one recording. The one thing discovery removes is a leftover continuation file whose audio is provably still held
+/// by the recording it was added to (see `settleContinuationLeftovers`). Discovery goes through the ingress writer's
+/// own recovery pass, so captures already staged are retried there and are never offered here, and a pass that cannot
+/// tell who owns a file offers nothing and says so. Normal capture never waits on this type.
 ///
 /// Confined to the main queue. Callbacks arrive there.
 final class VoiceRecoveryCoordinator {
@@ -63,7 +64,8 @@ final class VoiceRecoveryCoordinator {
 
         let hiddenNames = controller.activeFileNames.union(busyFileNames)
         var candidates: [Candidate] = []
-        for name in unclaimedNames where name.hasSuffix(".wav") && !hiddenNames.contains(name) {
+        let visibleNames = settleContinuationLeftovers(in: unclaimedNames, hidden: hiddenNames)
+        for name in visibleNames where name.hasSuffix(".wav") && !hiddenNames.contains(name) {
             guard VoiceRecordingController.isSafeCaptureID(String(name.dropLast(4))) else { continue }
             let url = inProgressDirectory.appendingPathComponent(name)
             guard (environment.fileSizeBytes(url) ?? 0) > 0 else { continue }
@@ -74,6 +76,49 @@ final class VoiceRecoveryCoordinator {
         listing.notShownCount = max(0, candidates.count - maxListedRecordings)
         listing.recordings = candidates.prefix(maxListedRecordings).compactMap { describe(fileName: $0.fileName) }
         return listing
+    }
+
+    private static let segmentSuffix = "-continued.wav"
+    private static let joinedSuffix = "-joined.wav"
+
+    /// A continuation writes the added audio to `<id>-continued.wav`, joins it with `<id>.wav` through
+    /// `<id>-joined.wav`, replaces `<id>.wav` and then removes the segment. A process that died inside that sequence
+    /// leaves helper files next to the recording, and listing them as recordings of their own could submit the same
+    /// audio twice. Only these two cases are provable and are removed:
+    /// - a joined file while both `<id>.wav` and `<id>-continued.wav` exist: the joined file is a copy made from them
+    ///   and the replacement that would consume it never happened;
+    /// - a segment whose frames are exactly the tail of `<id>.wav`: the replacement happened and only the removal of
+    ///   the segment did not.
+    /// Anything else is kept and listed, so audio is never discarded on a guess.
+    private func settleContinuationLeftovers(in names: [String], hidden: Set<String>) -> [String] {
+        let present = Set(names)
+        var removed = Set<String>()
+        for name in names where !hidden.contains(name) {
+            let captureID: String
+            let isJoinedCopy: Bool
+            if name.hasSuffix(Self.joinedSuffix) {
+                captureID = String(name.dropLast(Self.joinedSuffix.count))
+                isJoinedCopy = true
+            } else if name.hasSuffix(Self.segmentSuffix) {
+                captureID = String(name.dropLast(Self.segmentSuffix.count))
+                isJoinedCopy = false
+            } else {
+                continue
+            }
+            let baseName = captureID + ".wav"
+            let segmentName = captureID + Self.segmentSuffix
+            guard !captureID.isEmpty, present.contains(baseName), !hidden.contains(baseName),
+                  !hidden.contains(segmentName) else { continue }
+            let url = inProgressDirectory.appendingPathComponent(name)
+            if isJoinedCopy {
+                guard present.contains(segmentName) else { continue }
+            } else {
+                guard environment.endsWithAudio(inProgressDirectory.appendingPathComponent(baseName), url) else { continue }
+            }
+            environment.removeFile(url)
+            if environment.fileSizeBytes(url) == nil { removed.insert(name) }
+        }
+        return names.filter { !removed.contains($0) }
     }
 
     private static func isNewer(_ lhs: Candidate, _ rhs: Candidate) -> Bool {
@@ -92,18 +137,27 @@ final class VoiceRecoveryCoordinator {
         if let inspection = environment.inspectAudio(url), inspection.sampleRate > 0 {
             durationSeconds = Double(inspection.frames) / inspection.sampleRate
         }
+        let captureID = String(fileName.dropLast(4))
+        let hasLeftoverFile = [Self.segmentSuffix, Self.joinedSuffix].contains { suffix in
+            environment.fileSizeBytes(inProgressDirectory.appendingPathComponent(captureID + suffix)) != nil
+        }
+        let isAddedAudio = captureID.hasSuffix("-continued")
+            && environment.fileSizeBytes(inProgressDirectory.appendingPathComponent(
+                String(captureID.dropLast("-continued".count)) + ".wav")) != nil
         let minimumBytes = Int64(limits.minimumContinuationSeconds) * limits.bytesPerSecond
-        let canContinue = durationSeconds.map { duration in
+        let hasRoom = durationSeconds.map { duration in
             limits.maxDurationSeconds - duration >= limits.minimumContinuationSeconds
                 && sizeBytes + minimumBytes <= limits.maxFileBytes
         } ?? false
         return RecoverableVoiceRecording(
-            captureID: String(fileName.dropLast(4)),
+            captureID: captureID,
             fileName: fileName,
             fileSizeBytes: sizeBytes,
             durationSeconds: durationSeconds,
             modifiedAt: environment.modificationDate(url),
-            canContinue: canContinue)
+            canContinue: hasRoom && !hasLeftoverFile,
+            isUnjoinedAddedAudio: isAddedAudio,
+            hasUnjoinedAddedAudio: hasLeftoverFile)
     }
 
     // MARK: Finish
@@ -119,6 +173,20 @@ final class VoiceRecoveryCoordinator {
             completion(.failure(refusal))
             return
         }
+        verifyUnowned(fileName) { [self] verification in
+            if case .failure(let failure) = verification {
+                busyFileNames.remove(fileName)
+                completion(.failure(failure))
+                return
+            }
+            handOffVerifiedRecording(fileName: fileName, completion: completion)
+        }
+    }
+
+    private func handOffVerifiedRecording(
+        fileName: String,
+        completion: @escaping (Result<VoiceCaptureOutcome, VoiceRecoveryFailure>) -> Void
+    ) {
         guard let current = describe(fileName: fileName) else {
             busyFileNames.remove(fileName)
             completion(.failure(.recordingNotFound))

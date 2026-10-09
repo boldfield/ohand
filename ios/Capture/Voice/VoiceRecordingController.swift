@@ -209,7 +209,7 @@ final class VoiceRecordingController {
             url = inProgressDirectory.appendingPathComponent(segmentName)
             guard !FileManager.default.fileExists(atPath: url.path),
                   !FileManager.default.fileExists(atPath: inProgressDirectory.appendingPathComponent(joinedName).path) else {
-                return .failure(.storageUnavailable)
+                return .failure(.continuationLeftoverPresent)
             }
             base = existing
         } else {

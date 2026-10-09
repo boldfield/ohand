@@ -62,6 +62,9 @@ enum VoiceStartFailure: Error, Equatable {
     case recordingNotContinuable
     /// The recording already uses the duration or size bound, so nothing more can be added.
     case nothingLeftToRecord
+    /// Audio added to this recording earlier was never joined and is still on disk. Another continuation would collide
+    /// with it, so it is refused until that audio is finished or deleted.
+    case continuationLeftoverPresent
 }
 
 struct VoiceRecordingStarted: Equatable {
