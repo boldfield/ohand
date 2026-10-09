@@ -171,3 +171,26 @@ unscheduled | remind me to call the roofer {time}, I'd rather you didn't remind 
 scheduled | remind me to call the roofer {time}, don't forget to bring the ladder
 scheduled | remind me to call the roofer {time}, I don't want to forget the ladder
 scheduled | remind me to call the roofer {time}, it's not a big deal
+
+# --- I05b round 3: boundaries of the task-object, take-back and reason-clause exemptions ---
+unscheduled | remind me to call the roofer {time}, I take that last part back
+unscheduled | remind me to call the roofer {time}, I take that last bit back
+unscheduled | remind me to call the roofer {time}, I take my word back
+unscheduled | remind me to call the roofer {time}, I take the message back
+unscheduled | remind me to call the roofer {time}, I take this note back
+unscheduled | remind me to call the roofer {time}, I take my earlier message back
+unscheduled | remind me to call the roofer {time}, I want to take my word back
+unscheduled | remind me {time} to call the roofer, or forget the idea
+unscheduled | remind me to call the roofer {time}, and forget the entire plan
+unscheduled | remind me {time} to call the roofer, and then delete this entry
+unscheduled | remind me {time} to call the roofer and cancel my note
+unscheduled | remind me {time} to call the roofer and cancel the phone call
+unscheduled | remind me {time}, I'm thinking about cancelling the gym
+unscheduled | remind me to call the hotel {time}, so I don't need to cancel
+unscheduled | remind me to call the hotel {time}, so I don't need to cancel it
+unscheduled | remind me to call the hotel {time}, so I don't need to cancel at all
+unscheduled | remind me to call the hotel {time}, so I don't need to cancel anymore
+unscheduled | remind me to call the hotel {time}, so I don't need to cancel the reminder
+scheduled | remind me to call the hotel {time} so I don't need to cancel at the last minute
+scheduled | remind me to call the hotel {time}, so I don't need to cancel the booking
+scheduled | remind me to call the hotel {time}, so I won't need to skip the dinner
