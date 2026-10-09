@@ -9,8 +9,8 @@ use ohand_core::providers::contracts::{
     DiagnosticFailureKind, DiagnosticMetadata, DiagnosticOutput, DiagnosticRequest,
     DiagnosticRequestError, DiagnosticSetting, DiagnosticSupport, DispatchLimits, EffectiveSetting,
     ErrorClass, FailureKind, InterpretationRequest, ManualClock, ProviderProfile,
-    ProviderProfileBuilder, ProviderProtocol, RequestedSettings, SettingValue, TextBasis,
-    TokenUsage, TransportError, UsageAvailability, MAX_DIAGNOSTIC_CONTEXT_BYTES,
+    ProviderProfileBuilder, ProviderProtocol, ReportedModel, RequestedSettings, SettingValue,
+    TextBasis, TokenUsage, TransportError, UsageAvailability, MAX_DIAGNOSTIC_CONTEXT_BYTES,
     MAX_TEMPERATURE_MILLI,
 };
 use std::sync::Arc;
@@ -186,16 +186,12 @@ fn metadata_distinguishes_requested_effective_and_unknown_settings() {
         }
     );
     assert_eq!(
-        metadata.provenance.reported_model.as_deref(),
-        Some("model-a-2026-01-05")
+        metadata.provenance.reported_model,
+        ReportedModel::PinnedRevision
     );
     assert_eq!(
-        metadata.provenance.requested_model.as_deref(),
-        Some("model-a")
-    );
-    assert_eq!(
-        metadata.provenance.profile_id.as_deref(),
-        Some("synthetic-self-hosted")
+        metadata.provenance.profile_version,
+        run.profile.profile_version()
     );
     assert_eq!(outcome.output.proposal["operation"]["kind"], "annotate");
 }
@@ -210,7 +206,10 @@ fn absent_provider_metadata_stays_unknown_and_never_becomes_zero_usage() {
         .metadata;
 
     assert_eq!(metadata.usage, UsageAvailability::Unavailable);
-    assert_eq!(metadata.provenance.reported_model, None);
+    assert_eq!(
+        metadata.provenance.reported_model,
+        ReportedModel::NotReported
+    );
     assert_eq!(metadata.settings.len(), 2);
     assert!(metadata
         .settings
@@ -248,7 +247,7 @@ fn public_metadata_carries_no_credentials_endpoints_or_unsafe_model_names() {
         FakeStep::respond(PROVIDER_BODY).with_observations(observations)
     ]);
     let metadata = run.call(&fake, requested()).unwrap().metadata;
-    assert_eq!(metadata.provenance.reported_model, None);
+    assert_eq!(metadata.provenance.reported_model, ReportedModel::Different);
 
     let rendered = serde_json::to_string(&metadata).unwrap();
     for forbidden in [
@@ -267,7 +266,7 @@ fn public_metadata_carries_no_credentials_endpoints_or_unsafe_model_names() {
         FakeStep::respond(PROVIDER_BODY).with_observations(too_long)
     ]);
     let metadata = run.call(&fake, requested()).unwrap().metadata;
-    assert_eq!(metadata.provenance.reported_model, None);
+    assert_eq!(metadata.provenance.reported_model, ReportedModel::Different);
 }
 
 fn reported_model_metadata(run: &Run, reported_model: &str) -> DiagnosticMetadata {
@@ -311,11 +310,8 @@ fn reported_models_unrelated_to_the_pinned_model_are_withheld() {
     for unsafe_name in unsafe_names {
         let metadata = reported_model_metadata(&run, unsafe_name);
         assert_eq!(
-            metadata.provenance.reported_model, None,
-            "{unsafe_name} must not be published"
-        );
-        assert!(
-            metadata.provenance.reported_model_differs,
+            metadata.provenance.reported_model,
+            ReportedModel::Different,
             "{unsafe_name} must be recorded as a different model"
         );
         assert!(
@@ -328,21 +324,23 @@ fn reported_models_unrelated_to_the_pinned_model_are_withheld() {
 }
 
 #[test]
-fn pinned_model_extended_only_by_date_or_short_revision_suffixes_is_published() {
+fn pinned_model_extended_only_by_date_or_short_revision_suffixes_is_recognized() {
     let run = Run::new();
-    for plain_name in [
-        "model-a",
+    let metadata = reported_model_metadata(&run, "model-a");
+    assert_eq!(metadata.provenance.reported_model, ReportedModel::Pinned);
+    for revision in [
         "model-a-20250929",
         "model-a-2026-01-05",
         "model-a-0125",
         "model-a-1",
     ] {
-        let metadata = reported_model_metadata(&run, plain_name);
+        let metadata = reported_model_metadata(&run, revision);
         assert_eq!(
-            metadata.provenance.reported_model.as_deref(),
-            Some(plain_name)
+            metadata.provenance.reported_model,
+            ReportedModel::PinnedRevision,
+            "{revision}"
         );
-        assert!(!metadata.provenance.reported_model_differs);
+        assert!(!serde_json::to_string(&metadata).unwrap().contains(revision));
     }
     for suffix_shaped_identifier in [
         "model-a-0123456789abcdef",
@@ -355,10 +353,10 @@ fn pinned_model_extended_only_by_date_or_short_revision_suffixes_is_published() 
     ] {
         let metadata = reported_model_metadata(&run, suffix_shaped_identifier);
         assert_eq!(
-            metadata.provenance.reported_model, None,
-            "{suffix_shaped_identifier} must not be published"
+            metadata.provenance.reported_model,
+            ReportedModel::Different,
+            "{suffix_shaped_identifier} must not count as the pinned model"
         );
-        assert!(metadata.provenance.reported_model_differs);
     }
 }
 
@@ -377,79 +375,62 @@ fn configured_metadata(profile_id: &str, model: &str, reported_model: &str) -> D
     reported_model_metadata(&run, reported_model)
 }
 
-/// Endpoint-, credential- and request-identifier-shaped configured values, built at runtime
-/// so no scanner-matching literal is committed.
-fn unsafe_configured_identifiers() -> Vec<String> {
+/// Configured values a shape or vocabulary filter could mistake for plain model names, plus
+/// endpoint-, credential- and request-identifier-shaped ones. Built at runtime so no
+/// scanner-matching literal is committed.
+fn configured_identifiers() -> Vec<String> {
     vec![
-        "req_raw-provider-request-id".to_string(),
+        "secretvalue".to_string(),
+        "apikeyvalue".to_string(),
+        "requestid".to_string(),
+        "internalhost".to_string(),
+        "prodserver".to_string(),
+        "hunter".to_string() + "two",
+        ["xoxb", "1234", "5678", "abcd"].join("-"),
         "req-raw-provider-request-id".to_string(),
         "https://llm.internal.test/private-model".to_string(),
         "llm-proxy.corp.example.com".to_string(),
-        "api2.internal.test".to_string(),
         "10.0.0.1".to_string(),
-        "/private-model".to_string(),
-        "org/model".to_string(),
         "123e4567-e89b-12d3-a456-426614174000".to_string(),
         format!("{}-{}", "sk", "fixture0123456789"),
-        format!("{}-{}", "sk", "abc123secret"),
         format!("{}_{}", "sess", "abcdef0123456789"),
-        format!("{}-{}", "apikey", "0123abcd"),
-        format!("{}-{}", "x-request", "0123456789abcdef"),
-        format!("{}-{}", "model", "token"),
         format!("{}{}", "AKIA", "FIXTURE"),
-        "Model-A".to_string(),
-        "m".repeat(129),
+        "claude-sonnet-4-5".to_string(),
+        "llama-3.1-70b-instruct".to_string(),
     ]
 }
 
-#[test]
-fn unsafe_configured_profile_ids_and_models_are_withheld_from_public_metadata() {
-    for unsafe_value in unsafe_configured_identifiers() {
-        let metadata = configured_metadata(&unsafe_value, "model-a", "model-a");
-        assert_eq!(
-            metadata.provenance.profile_id, None,
-            "profile id {unsafe_value} must be withheld"
-        );
-        assert_eq!(
-            metadata.provenance.requested_model.as_deref(),
-            Some("model-a")
-        );
-
-        // An unsafe pinned model is withheld, and so is a reported echo or revision of it.
-        for reported in [unsafe_value.clone(), format!("{unsafe_value}-20250929")] {
-            let metadata = configured_metadata("synthetic-self-hosted", &unsafe_value, &reported);
-            assert_eq!(
-                metadata.provenance.requested_model, None,
-                "model {unsafe_value} must be withheld"
-            );
-            assert_eq!(
-                metadata.provenance.reported_model, None,
-                "reported {reported} must be withheld"
-            );
-            assert_eq!(
-                metadata.provenance.profile_id.as_deref(),
-                Some("synthetic-self-hosted")
-            );
-            let rendered = serde_json::to_string(&metadata).unwrap();
-            assert!(!rendered.contains(&unsafe_value), "{unsafe_value} leaked");
-        }
-    }
+fn assert_only_core_assigned_provenance(metadata: &DiagnosticMetadata, configured: &str) {
+    let rendered = serde_json::to_value(metadata).unwrap();
+    let provenance = rendered["provenance"].as_object().unwrap();
+    let mut fields: Vec<&str> = provenance.keys().map(String::as_str).collect();
+    fields.sort_unstable();
+    assert_eq!(fields, ["profile_version", "protocol", "reported_model"]);
+    Uuid::parse_str(provenance["profile_version"].as_str().unwrap())
+        .expect("profile_version is a UUID");
+    assert!(
+        !rendered.to_string().contains(configured),
+        "{configured} leaked"
+    );
 }
 
 #[test]
-fn plain_configured_model_names_are_published() {
-    for model in [
-        "claude-sonnet-4-5",
-        "gpt-4o-mini",
-        "gpt-4.1",
-        "o3-mini",
-        "llama-3.1-70b-instruct",
-        "synthetic-model-two",
-    ] {
-        let metadata = configured_metadata("synthetic-self-hosted", model, model);
-        assert_eq!(metadata.provenance.requested_model.as_deref(), Some(model));
-        assert_eq!(metadata.provenance.reported_model.as_deref(), Some(model));
-        assert!(!metadata.provenance.reported_model_differs);
+fn configured_profile_ids_and_models_never_enter_public_metadata() {
+    for configured in configured_identifiers() {
+        let metadata = configured_metadata(&configured, "model-a", "model-a");
+        assert_only_core_assigned_provenance(&metadata, &configured);
+
+        let metadata = configured_metadata("synthetic-self-hosted", &configured, &configured);
+        assert_eq!(metadata.provenance.reported_model, ReportedModel::Pinned);
+        assert_only_core_assigned_provenance(&metadata, &configured);
+
+        let revision = format!("{configured}-20250929");
+        let metadata = configured_metadata("synthetic-self-hosted", &configured, &revision);
+        assert_eq!(
+            metadata.provenance.reported_model,
+            ReportedModel::PinnedRevision
+        );
+        assert_only_core_assigned_provenance(&metadata, &configured);
     }
 }
 

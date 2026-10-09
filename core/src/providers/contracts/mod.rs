@@ -16,9 +16,9 @@ pub use diagnostic::{
     dispatch_diagnostic, CallObservations, DiagnosticAdapterCall, DiagnosticFailure,
     DiagnosticFailureKind, DiagnosticMetadata, DiagnosticOutput, DiagnosticRequest,
     DiagnosticRequestError, DiagnosticResponse, DiagnosticSetting, DiagnosticSupport,
-    EffectiveSetting, ProviderProvenance, RequestedSettings, SettingOutcome, SettingValue,
-    TokenUsage, UsageAvailability, MAX_DIAGNOSTIC_CONTEXT_BYTES, MAX_DIAGNOSTIC_INSTRUCTION_BYTES,
-    MAX_TEMPERATURE_MILLI,
+    EffectiveSetting, ProviderProvenance, ReportedModel, RequestedSettings, SettingOutcome,
+    SettingValue, TokenUsage, UsageAvailability, MAX_DIAGNOSTIC_CONTEXT_BYTES,
+    MAX_DIAGNOSTIC_INSTRUCTION_BYTES, MAX_TEMPERATURE_MILLI,
 };
 pub use dispatch::{
     dispatch, AdapterCall, CancelToken, Clock, DispatchLimits, InterpretationOutput, ManualClock,

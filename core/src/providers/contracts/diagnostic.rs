@@ -8,13 +8,16 @@
 //!
 //! Metadata never invents facts. A setting the provider did not confirm is `Unknown`, usage the
 //! provider did not report is `Unavailable` (never zero), and provenance carries only values
-//! that are safe to publish: no credential reference, endpoint or provider request identifier.
+//! the core assigned or derived: never a configured free-form string (profile id, model name,
+//! credential reference, endpoint) nor a provider-controlled one (reported model name, request
+//! identifier).
 //! A diagnostic outcome is evidence only; it has no field that could confer authority.
 
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use uuid::Uuid;
 
 use super::dispatch::{
     complete_call, preflight, CancelToken, Clock, DispatchLimits, InterpretationOutput,
@@ -28,8 +31,7 @@ use crate::interpretation::instructions::content_version;
 pub const MAX_DIAGNOSTIC_INSTRUCTION_BYTES: usize = 64 * 1024;
 pub const MAX_DIAGNOSTIC_CONTEXT_BYTES: usize = 256 * 1024;
 pub const MAX_TEMPERATURE_MILLI: u32 = 2000;
-const MAX_PUBLIC_IDENTIFIER_CHARS: usize = 128;
-const MAX_PUBLIC_IDENTIFIER_GROUPS: usize = 12;
+const MAX_REPORTED_MODEL_CHARS: usize = 128;
 
 /// A model setting an experiment may request explicitly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -292,20 +294,30 @@ pub struct SettingOutcome {
     pub effective: EffectiveSetting,
 }
 
-/// Publishable provenance: profile identity and model names only. Configured identifiers are
-/// published only when they have a plain model-name shape (see [`is_publishable_identifier`]);
-/// `None` means the configured value was withheld, never that it was absent.
+/// How the model a provider named relates to the pinned model. The name itself is never
+/// published: it is provider-controlled and could carry an endpoint, credential or request id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportedModel {
+    /// The provider did not name a model.
+    NotReported,
+    /// The provider named exactly the pinned model.
+    Pinned,
+    /// The provider named the pinned model extended by a date or short numeric revision.
+    PinnedRevision,
+    /// The provider named some other model.
+    Different,
+}
+
+/// Publishable provenance. Configured profile ids and model names are free-form strings that
+/// no validator can prove secret-free, so they are never published; a report that needs a
+/// human-readable label resolves `profile_version` through its own private configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderProvenance {
     pub protocol: ProviderProtocol,
-    pub profile_id: Option<String>,
-    /// Core-assigned UUID of the pinned profile revision.
+    /// Core-assigned UUID of the pinned profile revision, in canonical hyphenated form.
     pub profile_version: String,
-    pub requested_model: Option<String>,
-    pub reported_model: Option<String>,
-    /// The provider named a model that is not the pinned model or a dated revision of it;
-    /// the name itself is withheld.
-    pub reported_model_differs: bool,
+    pub reported_model: ReportedModel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -377,106 +389,40 @@ impl std::fmt::Display for DiagnosticFailure {
 
 impl std::error::Error for DiagnosticFailure {}
 
-/// Hyphen groups that mark credential, request-identifier or endpoint vocabulary. A value
-/// containing one is withheld even when its shape is otherwise plain.
-const UNPUBLISHABLE_GROUPS: &[&str] = &[
-    "akia",
-    "apikey",
-    "auth",
-    "bearer",
-    "chatcmpl",
-    "cred",
-    "credential",
-    "ghp",
-    "gho",
-    "http",
-    "https",
-    "id",
-    "key",
-    "localhost",
-    "msg",
-    "pass",
-    "password",
-    "pat",
-    "pk",
-    "req",
-    "request",
-    "rk",
-    "secret",
-    "sess",
-    "session",
-    "sk",
-    "token",
-    "trace",
-    "www",
-];
-
-fn is_publishable_group(group: &str) -> bool {
-    let letters = group.bytes().filter(u8::is_ascii_lowercase).count();
-    let digits = group.bytes().filter(u8::is_ascii_digit).count();
-    if group.is_empty() || UNPUBLISHABLE_GROUPS.contains(&group) {
-        return false;
-    }
-    if let Some((major, minor)) = group.split_once('.') {
-        // A dotted version such as `4.5`; dotted words are host names.
-        return [major, minor].iter().all(|part| {
-            (1..=4).contains(&part.len()) && part.bytes().all(|byte| byte.is_ascii_digit())
-        });
-    }
-    if letters + digits != group.len() {
-        return false;
-    }
-    match (letters, digits) {
-        (_, 0) => letters <= 12,
-        (0, _) => digits <= 8,
-        // Short mixed groups such as `4o`, `72b` or `v2`; longer ones are opaque tokens.
-        _ => group.len() <= 4,
-    }
-}
-
-/// Fail-closed check for configured or reported identifiers entering public metadata. Only
-/// lowercase hyphenated model-name shapes that start with a letter pass: endpoints, host
-/// names, IP addresses, paths, UUIDs, uppercase or underscored identifiers, opaque tokens and
-/// credential or request-identifier vocabulary are all withheld.
-fn is_publishable_identifier(value: &str) -> bool {
-    if value.len() > MAX_PUBLIC_IDENTIFIER_CHARS
-        || !value.starts_with(|first: char| first.is_ascii_lowercase())
-    {
-        return false;
-    }
-    let groups: Vec<&str> = value.split('-').collect();
-    groups.len() <= MAX_PUBLIC_IDENTIFIER_GROUPS && groups.into_iter().all(is_publishable_group)
-}
-
-/// Reported model names are provider-controlled, so a name is published only when it is
-/// the pinned model or extends it with a date or short numeric revision suffix. Anything
-/// else (an endpoint, credential, request id or different model) is never echoed.
-fn reported_model_extends_pinned(pinned_model: &str, reported_model: &str) -> bool {
-    if reported_model.len() > MAX_PUBLIC_IDENTIFIER_CHARS {
-        return false;
+fn classify_reported_model(pinned_model: &str, reported_model: Option<&str>) -> ReportedModel {
+    let Some(reported_model) = reported_model else {
+        return ReportedModel::NotReported;
+    };
+    if reported_model.len() > MAX_REPORTED_MODEL_CHARS {
+        return ReportedModel::Different;
     }
     if reported_model == pinned_model {
-        return true;
+        return ReportedModel::Pinned;
     }
     let Some(suffix) = reported_model
         .strip_prefix(pinned_model)
         .and_then(|rest| rest.strip_prefix('-'))
     else {
-        return false;
+        return ReportedModel::Different;
     };
     let digit_groups: Vec<&str> = suffix.split('-').collect();
     let all_digits = digit_groups
         .iter()
         .all(|group| !group.is_empty() && group.bytes().all(|byte| byte.is_ascii_digit()));
-    if !all_digits {
-        return false;
-    }
     let group_lengths: Vec<usize> = digit_groups.iter().map(|group| group.len()).collect();
-    matches!(group_lengths.as_slice(), [1..=4] | [8] | [4, 2, 2])
+    if all_digits && matches!(group_lengths.as_slice(), [1..=4] | [8] | [4, 2, 2]) {
+        ReportedModel::PinnedRevision
+    } else {
+        ReportedModel::Different
+    }
 }
 
-fn publishable(value: &str) -> Option<String> {
-    is_publishable_identifier(value).then(|| value.to_string())
+/// Profile versions are core-assigned UUIDs; publishing the parsed canonical form means no
+/// other string shape can pass through this field.
+fn canonical_profile_version(profile: &ProviderProfile) -> String {
+    Uuid::parse_str(profile.profile_version())
+        .map(|version| version.hyphenated().to_string())
+        .unwrap_or_default()
 }
 
 fn build_metadata(
@@ -485,7 +431,6 @@ fn build_metadata(
     observations: Option<&CallObservations>,
     elapsed_ms: u64,
 ) -> DiagnosticMetadata {
-    let reported_model = observations.and_then(|observed| observed.reported_model.as_deref());
     let reported_values: &[SettingValue] = observations
         .map(|observed| observed.effective_settings.as_slice())
         .unwrap_or(&[]);
@@ -517,14 +462,11 @@ fn build_metadata(
         usage: UsageAvailability::from_reported(observations.and_then(|observed| observed.usage)),
         provenance: ProviderProvenance {
             protocol: profile.protocol(),
-            profile_id: publishable(profile.profile_id()),
-            profile_version: profile.profile_version().to_string(),
-            requested_model: publishable(profile.model()),
-            reported_model: reported_model
-                .filter(|name| reported_model_extends_pinned(profile.model(), name))
-                .and_then(publishable),
-            reported_model_differs: reported_model
-                .is_some_and(|name| !reported_model_extends_pinned(profile.model(), name)),
+            profile_version: canonical_profile_version(profile),
+            reported_model: classify_reported_model(
+                profile.model(),
+                observations.and_then(|observed| observed.reported_model.as_deref()),
+            ),
         },
         elapsed_ms,
     }
