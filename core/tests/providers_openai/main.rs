@@ -930,3 +930,513 @@ fn each_call_is_self_contained() {
         2
     );
 }
+
+// ---- Diagnostic calls ----
+
+mod diagnostic {
+    use super::*;
+    use ohand_core::interpretation::instructions::{content_version, render_prompt};
+    use ohand_core::providers::contracts::{
+        dispatch_diagnostic, DiagnosticFailure, DiagnosticFailureKind, DiagnosticOutput,
+        DiagnosticRequest, DiagnosticRequestError, DiagnosticSetting, EffectiveSetting,
+        ProviderAdapter, ReportedModel, RequestedSettings, SettingValue, TokenUsage,
+        UsageAvailability,
+    };
+
+    const PROVIDER_JSON: &str = r#"{"operation":{"kind":"annotate"}}"#;
+
+    fn envelope(
+        content: &str,
+        finish_reason: Value,
+        model: Option<Value>,
+        usage: Option<Value>,
+    ) -> Vec<u8> {
+        let mut body = json!({
+            "id": "chatcmpl-synthetic",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": content, "refusal": null},
+                "finish_reason": finish_reason
+            }]
+        });
+        if let Some(model) = model {
+            body["model"] = model;
+        }
+        if let Some(usage) = usage {
+            body["usage"] = usage;
+        }
+        serde_json::to_vec(&body).unwrap()
+    }
+
+    fn reply_with(model: Option<Value>, usage: Option<Value>) -> Step {
+        Step::http(200, envelope(PROVIDER_JSON, json!("stop"), model, usage))
+    }
+
+    fn diagnostic_request(harness: &Harness, settings: RequestedSettings) -> DiagnosticRequest {
+        let prompt = render_prompt(&request_for(&harness.profile, "call mom tomorrow"))
+            .expect("published instructions render");
+        DiagnosticRequest::new(
+            request_for(&harness.profile, "call mom tomorrow"),
+            prompt.system,
+            prompt.user,
+            settings,
+        )
+        .expect("valid diagnostic request")
+    }
+
+    fn run_with(
+        harness: &Harness,
+        settings: RequestedSettings,
+    ) -> Result<DiagnosticOutput, DiagnosticFailure> {
+        run_request(harness, &diagnostic_request(harness, settings))
+    }
+
+    fn run_request(
+        harness: &Harness,
+        request: &DiagnosticRequest,
+    ) -> Result<DiagnosticOutput, DiagnosticFailure> {
+        dispatch_diagnostic(
+            &harness.adapter,
+            &harness.profile,
+            request,
+            harness.clock.as_ref(),
+            &harness.cancel,
+            &DispatchLimits::default(),
+        )
+    }
+
+    fn run(harness: &Harness) -> Result<DiagnosticOutput, DiagnosticFailure> {
+        run_with(harness, RequestedSettings::new())
+    }
+
+    fn provider_failure(failure: &DiagnosticFailure) -> &ProviderFailure {
+        match &failure.kind {
+            DiagnosticFailureKind::Provider { failure } => failure,
+            other => panic!("expected a provider failure, got {other:?}"),
+        }
+    }
+
+    fn all_requested() -> RequestedSettings {
+        RequestedSettings::new()
+            .with_temperature_milli(700)
+            .unwrap()
+            .with_max_output_tokens(512)
+            .unwrap()
+            .with_seed(42)
+    }
+
+    #[test]
+    fn rendered_instructions_and_context_reach_the_provider_not_a_version_label() {
+        let harness = Harness::new(vec![reply_with(None, None)]);
+        let request = diagnostic_request(&harness, RequestedSettings::new());
+        run_request(&harness, &request).expect("diagnostic succeeds");
+
+        let call = harness.only_call();
+        let system = call.message(0);
+        assert_eq!(system["role"], "system");
+        assert_eq!(system["content"], M1_INSTRUCTION_TEXT);
+        assert_ne!(system["content"], M1_INSTRUCTION_VERSION);
+        assert_eq!(
+            content_version(system["content"].as_str().unwrap()),
+            M1_INSTRUCTION_VERSION
+        );
+
+        let user = call.message(1);
+        assert_eq!(user["role"], "user");
+        assert_eq!(user["content"], request.context());
+        let document = call.user_document();
+        assert_eq!(document["source"]["text"], "call mom tomorrow");
+        assert_eq!(document["time_context"]["timezone"], "America/Chicago");
+        assert_eq!(call.body_json()["messages"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn instructions_and_context_are_sent_verbatim_without_re_rendering() {
+        let harness = Harness::new(vec![reply_with(None, None)]);
+        let instructions = "Synthetic experiment instructions: reply with one JSON object.";
+        let context = r#"{"synthetic":"context","note":"not the production document"}"#;
+        let request = DiagnosticRequest::new(
+            InterpretationRequest::new(
+                Uuid::new_v4().to_string(),
+                0,
+                TextBasis::Original { item_revision: 0 },
+                "call mom tomorrow",
+                Uuid::new_v4().to_string(),
+                content_version(instructions),
+                &harness.profile,
+                "route-secret-name",
+                time_context(),
+            )
+            .unwrap(),
+            instructions,
+            context,
+            RequestedSettings::new(),
+        )
+        .unwrap();
+        run_request(&harness, &request).expect("diagnostic succeeds");
+
+        let call = harness.only_call();
+        assert_eq!(call.message(0)["content"], instructions);
+        assert_eq!(call.message(1)["content"], context);
+    }
+
+    #[test]
+    fn instruction_text_that_does_not_match_the_pinned_version_cannot_be_built() {
+        let harness = Harness::new(vec![reply_with(None, None)]);
+        let error = DiagnosticRequest::new(
+            request_for(&harness.profile, "call mom tomorrow"),
+            "Different instructions than the pinned version names.",
+            "{}",
+            RequestedSettings::new(),
+        )
+        .expect_err("label must not stand in for different text");
+        assert_eq!(error, DiagnosticRequestError::InstructionVersionMismatch);
+        assert!(harness.calls().is_empty());
+    }
+
+    #[test]
+    fn explicit_settings_are_sent_on_the_wire() {
+        let harness = Harness::new(vec![reply_with(None, None)]);
+        run_with(&harness, all_requested()).expect("diagnostic succeeds");
+
+        let body = harness.only_call().body_json();
+        assert_eq!(body["temperature"], json!(0.7));
+        assert_eq!(body["max_completion_tokens"], json!(512));
+        assert_eq!(body["seed"], json!(42));
+        assert_eq!(body["model"], "gpt-4o");
+        assert_eq!(body["response_format"], json!({"type": "json_object"}));
+    }
+
+    #[test]
+    fn unrequested_settings_are_omitted_not_defaulted() {
+        let harness = Harness::new(vec![reply_with(None, None)]);
+        run(&harness).expect("diagnostic succeeds");
+
+        let body = harness.only_call().body_json();
+        for key in ["temperature", "max_completion_tokens", "max_tokens", "seed"] {
+            assert!(body.get(key).is_none(), "{key} must not be invented");
+        }
+    }
+
+    #[test]
+    fn zero_temperature_is_sent_when_explicitly_requested() {
+        let harness = Harness::new(vec![reply_with(None, None)]);
+        let settings = RequestedSettings::new().with_temperature_milli(0).unwrap();
+        run_with(&harness, settings).expect("diagnostic succeeds");
+        assert_eq!(harness.only_call().body_json()["temperature"], json!(0.0));
+    }
+
+    #[test]
+    fn the_adapter_declares_exactly_the_settings_it_sends() {
+        let harness = Harness::new(vec![]);
+        let support = harness.adapter.diagnostic_support();
+        assert!(support.is_supported());
+        for setting in [
+            DiagnosticSetting::Temperature,
+            DiagnosticSetting::MaxOutputTokens,
+            DiagnosticSetting::Seed,
+        ] {
+            assert!(support.supports(setting), "{setting:?}");
+        }
+    }
+
+    #[test]
+    fn production_dispatch_still_uses_its_own_prompt_and_pinned_temperature() {
+        let harness = Harness::new(vec![Step::ok(PROVIDER_JSON)]);
+        harness.run().expect("production dispatch succeeds");
+        let body = harness.only_call().body_json();
+        assert_eq!(body["temperature"], json!(0.0));
+        assert!(body.get("seed").is_none());
+        assert!(body.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
+    fn reported_usage_model_and_unknown_settings_are_attached_to_the_attempt() {
+        let harness = Harness::new(vec![reply_with(
+            Some(json!("gpt-4o-2024-08-06")),
+            Some(json!({"prompt_tokens": 120, "completion_tokens": 34, "total_tokens": 154})),
+        )]);
+        let output = run_with(&harness, all_requested()).expect("diagnostic succeeds");
+
+        assert_eq!(
+            output.metadata.usage,
+            UsageAvailability::Reported {
+                usage: TokenUsage {
+                    input_tokens: Some(120),
+                    output_tokens: Some(34),
+                }
+            }
+        );
+        assert_eq!(
+            output.metadata.provenance.reported_model,
+            ReportedModel::PinnedRevision
+        );
+        assert_eq!(
+            output.metadata.provenance.profile_version,
+            harness.profile.profile_version()
+        );
+        // The provider never confirms temperature, token limit or seed, so none is claimed.
+        assert_eq!(output.metadata.settings.len(), 3);
+        for outcome in &output.metadata.settings {
+            assert!(outcome.requested.is_some());
+            assert_eq!(outcome.effective, EffectiveSetting::Unknown);
+        }
+        assert_eq!(
+            output.metadata.settings[0].requested,
+            Some(SettingValue::TemperatureMilli(700))
+        );
+        assert_eq!(output.metadata.elapsed_ms, output.output.elapsed_ms);
+    }
+
+    #[test]
+    fn exact_model_echo_is_pinned_and_other_models_are_different() {
+        let pinned = Harness::new(vec![reply_with(Some(json!("gpt-4o")), None)]);
+        assert_eq!(
+            run(&pinned).unwrap().metadata.provenance.reported_model,
+            ReportedModel::Pinned
+        );
+        let different = Harness::new(vec![reply_with(Some(json!("gpt-4o-mini")), None)]);
+        assert_eq!(
+            run(&different).unwrap().metadata.provenance.reported_model,
+            ReportedModel::Different
+        );
+    }
+
+    #[test]
+    fn missing_usage_and_model_remain_unknown_not_zero() {
+        let harness = Harness::new(vec![reply_with(None, None)]);
+        let output = run(&harness).expect("diagnostic succeeds");
+        assert_eq!(output.metadata.usage, UsageAvailability::Unavailable);
+        assert_eq!(
+            output.metadata.provenance.reported_model,
+            ReportedModel::NotReported
+        );
+        assert!(output.metadata.settings.is_empty());
+    }
+
+    #[test]
+    fn partially_reported_usage_keeps_the_missing_count_unknown() {
+        let harness = Harness::new(vec![reply_with(None, Some(json!({"prompt_tokens": 9})))]);
+        let output = run(&harness).expect("diagnostic succeeds");
+        assert_eq!(
+            output.metadata.usage,
+            UsageAvailability::Reported {
+                usage: TokenUsage {
+                    input_tokens: Some(9),
+                    output_tokens: None,
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn malformed_usage_and_model_do_not_fail_the_call_or_invent_values() {
+        let harness = Harness::new(vec![reply_with(
+            Some(json!({"unexpected": true})),
+            Some(json!({"prompt_tokens": "many", "completion_tokens": -3})),
+        )]);
+        let output = run(&harness).expect("observations are best-effort");
+        assert_eq!(output.metadata.usage, UsageAvailability::Unavailable);
+        assert_eq!(
+            output.metadata.provenance.reported_model,
+            ReportedModel::NotReported
+        );
+    }
+
+    #[test]
+    fn provider_text_is_never_copied_into_published_metadata() {
+        let harness = Harness::new(vec![reply_with(
+            Some(json!("https://internal.example/secret-token")),
+            None,
+        )]);
+        let output = run(&harness).expect("diagnostic succeeds");
+        let published = serde_json::to_string(&output.metadata).unwrap();
+        assert!(!published.contains("internal.example"));
+        assert!(!published.contains("secret-token"));
+        assert!(!published.contains(CREDENTIAL_REF));
+        assert_eq!(
+            output.metadata.provenance.reported_model,
+            ReportedModel::Different
+        );
+    }
+
+    #[test]
+    fn credential_stays_an_opaque_reference_for_diagnostic_calls() {
+        let harness = Harness::new(vec![reply_with(None, None)]);
+        run_with(&harness, all_requested()).expect("diagnostic succeeds");
+        let call = harness.only_call();
+        assert_eq!(call.endpoint, OPENAI_CHAT_COMPLETIONS_ENDPOINT);
+        assert_eq!(call.credential_ref, CREDENTIAL_REF);
+        assert_eq!(
+            call.headers,
+            vec![("Content-Type".to_string(), "application/json".to_string())]
+        );
+        assert!(!String::from_utf8_lossy(&call.body).contains(CREDENTIAL_REF));
+    }
+
+    #[test]
+    fn deadline_limit_and_cancel_token_are_forwarded() {
+        let harness = Harness::new(vec![reply_with(None, None)]);
+        run(&harness).expect("diagnostic succeeds");
+        let call = harness.only_call();
+        assert_eq!(call.deadline_ms, TIMEOUT_MS);
+        assert_eq!(
+            call.max_response_bytes,
+            DispatchLimits::default().max_response_bytes as u64
+        );
+        assert!(!call.cancelled_on_entry);
+    }
+
+    #[test]
+    fn provider_refusal_is_a_permanent_rejection_with_unknown_usage() {
+        let body = serde_json::to_vec(&json!({
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": null, "refusal": "synthetic refusal"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 2}
+        }))
+        .unwrap();
+        let harness = Harness::new(vec![Step::http(200, body)]);
+        let failure = run(&harness).expect_err("refusal is not an answer");
+        assert_eq!(provider_failure(&failure).kind, FailureKind::Rejected);
+        assert_eq!(failure.class(), ErrorClass::Permanent);
+        assert_eq!(failure.usage, UsageAvailability::Unavailable);
+    }
+
+    #[test]
+    fn content_filter_truncation_and_missing_content_are_not_answers() {
+        for (finish_reason, expected) in [
+            (json!("content_filter"), FailureKind::Rejected),
+            (json!("length"), FailureKind::InvalidOutput),
+            (json!("tool_calls"), FailureKind::InvalidOutput),
+            (Value::Null, FailureKind::InvalidOutput),
+        ] {
+            let harness = Harness::new(vec![Step::http(
+                200,
+                envelope(PROVIDER_JSON, finish_reason.clone(), None, None),
+            )]);
+            let failure = run(&harness).expect_err("not a completed answer");
+            assert_eq!(provider_failure(&failure).kind, expected, "{finish_reason}");
+        }
+        let harness = Harness::new(vec![Step::http(
+            200,
+            serde_json::to_vec(&json!({
+                "choices": [{"message": {"content": null}, "finish_reason": "stop"}]
+            }))
+            .unwrap(),
+        )]);
+        let failure = run(&harness).expect_err("null content");
+        assert_eq!(provider_failure(&failure).kind, FailureKind::InvalidOutput);
+    }
+
+    #[test]
+    fn malformed_provider_content_is_invalid_output() {
+        let harness = Harness::new(vec![Step::ok("not json at all")]);
+        let failure = run(&harness).expect_err("not a JSON object");
+        assert_eq!(provider_failure(&failure).kind, FailureKind::InvalidOutput);
+    }
+
+    #[test]
+    fn http_and_transport_errors_map_like_production_calls() {
+        let cases = [
+            (Step::http(401, error_body(None)), FailureKind::Unauthorized),
+            (Step::http(429, error_body(None)), FailureKind::RateLimited),
+            (Step::http(503, "unavailable"), FailureKind::Unavailable),
+            (
+                Step::http(429, error_body(Some("insufficient_quota"))),
+                FailureKind::Rejected,
+            ),
+            (Step::http(400, error_body(None)), FailureKind::Rejected),
+            (Step::fail(TransportError::Timeout), FailureKind::Timeout),
+            (
+                Step::fail(TransportError::Cancelled),
+                FailureKind::Cancelled,
+            ),
+        ];
+        for (step, expected) in cases {
+            let harness = Harness::new(vec![step]);
+            let failure = run(&harness).expect_err("failure expected");
+            assert_eq!(provider_failure(&failure).kind, expected);
+            assert_eq!(failure.usage, UsageAvailability::Unavailable);
+        }
+    }
+
+    #[test]
+    fn deadline_expiry_during_the_call_is_a_timeout() {
+        let harness = Harness::new(vec![reply_with(None, None).after_ms(TIMEOUT_MS + 1)]);
+        let failure = run(&harness).expect_err("late response");
+        assert_eq!(provider_failure(&failure).kind, FailureKind::Timeout);
+        assert_eq!(failure.class(), ErrorClass::Transient);
+    }
+
+    #[test]
+    fn pre_cancelled_token_never_reaches_the_transport() {
+        let harness = Harness::new(vec![reply_with(None, None)]);
+        harness.cancel.cancel();
+        let failure = run(&harness).expect_err("cancelled");
+        assert_eq!(provider_failure(&failure).kind, FailureKind::Cancelled);
+        assert!(harness.calls().is_empty());
+    }
+
+    #[test]
+    fn cancellation_during_the_call_discards_the_response_and_its_usage() {
+        let harness = Harness::new(vec![reply_with(
+            Some(json!("gpt-4o")),
+            Some(json!({"prompt_tokens": 1, "completion_tokens": 1})),
+        )
+        .cancelling_mid_call()]);
+        let failure = run(&harness).expect_err("cancelled mid-call");
+        assert_eq!(provider_failure(&failure).kind, FailureKind::Cancelled);
+        assert!(harness.only_call().cancelled_after_script);
+    }
+
+    #[test]
+    fn oversized_response_is_rejected_as_output_too_large() {
+        let limit = 400;
+        let huge = envelope(
+            &format!(r#"{{"p":"{}"}}"#, "a".repeat(1_000_000)),
+            json!("stop"),
+            None,
+            Some(json!({"prompt_tokens": 1, "completion_tokens": 1})),
+        );
+        let harness = Harness::new(vec![Step::http(200, huge)]);
+        let request = diagnostic_request(&harness, RequestedSettings::new());
+        let failure = dispatch_diagnostic(
+            &harness.adapter,
+            &harness.profile,
+            &request,
+            harness.clock.as_ref(),
+            &harness.cancel,
+            &DispatchLimits {
+                max_response_bytes: limit,
+            },
+        )
+        .expect_err("over the bound");
+        assert_eq!(provider_failure(&failure).kind, FailureKind::OutputTooLarge);
+        assert_eq!(harness.only_call().max_response_bytes, limit as u64);
+    }
+
+    #[test]
+    fn profile_mismatch_prevents_any_transport_call() {
+        let harness = Harness::new(vec![reply_with(None, None)]);
+        let request = diagnostic_request(&harness, RequestedSettings::new());
+        let other_version = valid_builder().build().expect("valid profile");
+        let failure = dispatch_diagnostic(
+            &harness.adapter,
+            &other_version,
+            &request,
+            harness.clock.as_ref(),
+            &harness.cancel,
+            &DispatchLimits::default(),
+        )
+        .expect_err("profile mismatch should fail");
+        assert_eq!(
+            provider_failure(&failure).kind,
+            FailureKind::ProfileMismatch
+        );
+        assert!(harness.calls().is_empty());
+    }
+}
