@@ -272,8 +272,9 @@ unscheduled | remind me to call the roofer {time} and take the ladder back
 scheduled | remind me {time} to call the roofer and cancel the order at the shop
 scheduled | remind me {time} to call the dentist and cancel the appointment
 scheduled | remind me {time} to call the hotel and cancel the reservation
-# a reason clause takes only an intransitive complement, optionally saying when; "then again" is
-# concessive; an object could name the task's person or thing under any name, so it withdraws
+# a reason clause's complement may say when or name a concrete thing of its own (the quote, the
+# booking); "then again" is concessive; a pronoun, an indefinite, the task's own words or a generic
+# name for the task's person ("the man", "the contractor") refers back to the request and withdraws
 unscheduled | remind me to call the roofer {time}, then again I don't need to phone anyone
 unscheduled | remind me to call the roofer {time}, then again I don't need to contact anybody
 unscheduled | remind me to call the roofer {time}, then again there's no need to phone anyone
@@ -286,15 +287,23 @@ unscheduled | remind me to call the roofer {time}, so I don't need to remember t
 unscheduled | remind me to call the roofer {time}, so I don't need to see the guy
 unscheduled | remind me to call the roofer {time}, so I don't need to visit the man
 unscheduled | remind me to call the roofer {time}, so i don't need to talk to the guy
-unscheduled | remind me to call the roofer {time} so I don't need to check the quote twice
-unscheduled | remind me to call the roofer {time} so you don't need to explain the leak
-unscheduled | remind me to call the roofer {time} so I won't need to chase the quote
-unscheduled | remind me to call the hotel {time}, so I don't need to cancel the booking
-unscheduled | remind me to call the hotel {time}, so I won't need to skip the dinner
-unscheduled | remind me to call the roofer {time}, then I don't need to chase the quote
+scheduled | remind me to call the roofer {time} so I don't need to check the quote twice
+scheduled | remind me to call the roofer {time} so you don't need to explain the leak
+scheduled | remind me to call the roofer {time} so I won't need to chase the quote
+scheduled | remind me to call the hotel {time}, so I don't need to cancel the booking
+scheduled | remind me to call the hotel {time}, so I won't need to skip the dinner
+scheduled | remind me to call the roofer {time}, then I don't need to chase the quote
 unscheduled | remind me to call the roofer {time}, so I don't need to chase the contractor
 unscheduled | remind me to call the roofer {time}, so I don't need to bug the contractor
 unscheduled | remind me to call the roofer {time}, so I don't need to worry about him
 scheduled | remind me to call the roofer {time}, so I don't need to remember
 scheduled | remind me to call the roofer {time}, so I don't need to rush at the last minute
 scheduled | remind me to call the hotel {time}, then I won't need to cancel by the weekend
+scheduled | remind me to call the hotel {time} so I don't need to cancel the booking at the last minute
+scheduled | remind me to call the roofer {time} so I don't need to repaint the ceiling
+unscheduled | remind me to call the roofer {time}, so I don't need to chase the builder
+unscheduled | remind me to call the roofer {time}, so I don't need to chase anyone
+unscheduled | remind me to call the roofer {time}, so I don't need to chase someone
+unscheduled | remind me to call the roofer {time}, so I don't need to cancel the reminder anymore
+unscheduled | remind me to call the roofer {time}, so I don't need to chase the roofer
+unscheduled | remind me to call the roofer {time}, then again I don't need to check the quote

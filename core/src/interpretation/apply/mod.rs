@@ -1118,6 +1118,25 @@ const WITHDRAWN_REQUEST_WORDS: &[&str] = &[
     "folks",
     "company",
     "firm",
+    "men",
+    "women",
+    "ladies",
+    "contractor",
+    "contractors",
+    "builder",
+    "builders",
+    "tradesman",
+    "tradesmen",
+    "worker",
+    "workers",
+    "crew",
+    "team",
+    "someone",
+    "somebody",
+    "anyone",
+    "anybody",
+    "everyone",
+    "everybody",
 ];
 /// Retraction verbs that also name ordinary tasks ("cancel the order", "delete the old photos",
 /// "stop the leak"). Only these may be coordinated inside the requested task; a coordinated
@@ -1448,14 +1467,16 @@ fn retracted_after(tokens: &[IntentToken], after: usize) -> bool {
 /// Whether a negated "need" gives the reason for the request: "so" or "then" (but not the
 /// concessive "then again") opens its clause ("so I don't need to worry", "then there is no need
 /// to worry") and an infinitive follows whose verb is neither one of the requested task's words,
-/// a way of contacting someone ([`CONTACT_VERBS`]) nor a pronoun-like word. The complement must
-/// be intransitive: nothing may follow the verb but a phrase saying when ([`names_time_phrase`]).
-/// An object could be the person or thing the task is about under any name ("the man", "the
-/// contractor", "anyone"), so "so I don't need to worry" and "so I don't need to cancel at the
-/// last minute" give a reason, while "so I don't need to phone him", "so I don't need to chase the
-/// contractor", "so I don't need to cancel the booking", "so I don't need to contact the roofer
-/// after all", "so I don't need to cancel it" and "then again I don't need to phone the guy"
-/// withdraw. A retraction verb without anything after it ("so I don't need to cancel") withdraws
+/// a way of contacting someone ([`CONTACT_VERBS`]) nor a pronoun-like word. Anything after the
+/// verb must be a phrase saying when ([`names_time_phrase`]) or a concrete object of its own
+/// ([`names_task_object`]), which rules out pronouns, indefinites ("anyone"), the task's own words
+/// and the generic names for whoever the task is about ("the man", "the guy", "the contractor",
+/// [`WITHDRAWN_REQUEST_WORDS`]). So "so I don't need to worry", "so I don't need to cancel at the
+/// last minute", "so I don't need to check the quote twice" and "so I don't need to cancel the
+/// booking" give a reason, while "so I don't need to phone him", "so I don't need to chase the
+/// contractor", "so I don't need to see the guy", "so I don't need to check anything", "so I
+/// don't need to contact the roofer after all", "so I don't need to cancel it" and "then again I
+/// don't need to phone the guy" withdraw. A retraction verb without anything after it ("so I don't need to cancel") withdraws
 /// too. "I don't need to call the roofer", "I don't need to after all", "no need to do that", "I
 /// don't need to be told" and "no need to bother" still withdraw, as does a need that has ended
 /// ("so I don't need to worry anymore"). `before_negation` is what precedes the negation.
@@ -1501,7 +1522,7 @@ fn need_gives_reason(
         && (if object.is_empty() {
             !RETRACTION_VERBS.contains(&verb_text)
         } else {
-            names_time_phrase(&object, request_words)
+            names_time_phrase(&object, request_words) || names_task_object(&object, request_words)
         })
         && !RETRACTION_FILLERS.contains(&verb_text)
         && !REASON_EXCLUDED_VERBS.contains(&verb_text)
