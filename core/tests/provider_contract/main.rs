@@ -10,6 +10,8 @@ use ohand_core::time::TimeContext;
 use std::sync::Arc;
 use uuid::Uuid;
 
+mod diagnostic;
+
 const ENDPOINT: &str = "https://llm.example.test:8443/v1/interpret";
 const ORIGIN: &str = "https://llm.example.test:8443";
 
