@@ -66,6 +66,11 @@ public struct CaptureRecord: Codable, Equatable, Sendable {
 
 /// Delivered only after the core committed the save. `alreadySaved` is true when the identical
 /// capture was stored before, so a retry converges instead of duplicating.
+///
+/// This is a pre-import durable capture write, NOT the Capture Ingestion Contract acknowledgment
+/// (capture ID, item ID, save timestamp): it means the capture bytes are durable and nothing more.
+/// The route is not validated here; C02a owns unknown-route rejection and the contracted
+/// acknowledgment, and ingress callers must not treat this success as completed ingestion.
 public struct SaveCaptureAcknowledgment: Decodable, Equatable, Sendable {
     public let operationID: UInt64
     public let alreadySaved: Bool
