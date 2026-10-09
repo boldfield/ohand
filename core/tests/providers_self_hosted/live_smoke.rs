@@ -10,6 +10,11 @@
 //! certificate validation on, redirects not followed). The credential is passed to curl on
 //! stdin, never on the command line. The written artifact carries no endpoint, credential,
 //! captured text or model output text: only status, finish reason, sizes and validation results.
+//!
+//! The raw exchange (request bodies and response bodies, never the endpoint or credential) is kept
+//! outside Git in the private evidence directory (`OHAND_PRIVATE_EVIDENCE_DIR`, default
+//! `~/.ohand-private-evidence`, mode 0700 with a 0600 file). The sanitized artifact names that
+//! file, its size and its SHA-256 so the private evidence can be audited against the record.
 
 use super::{request_for, time_context};
 use ohand_core::interpretation::instructions::{output_schema, InterpretationMapping};
@@ -22,8 +27,9 @@ use ohand_core::providers::self_hosted::{
     declared_capabilities, SelfHostedAdapter, CHAT_VERIFIED_MODEL, MAX_COMPLETION_TOKENS,
 };
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
@@ -31,6 +37,8 @@ const CONFIG_PATH_ENV_VAR: &str = "OHAND_PROVIDER_CONFIG_PATH";
 const DEFAULT_CONFIG_PATH: &str = "/etc/ohand-provider/models.json";
 const PROVIDER_KEY: &str = "ollama";
 const EVIDENCE_DIR_ENV_VAR: &str = "OHAND_SMOKE_EVIDENCE_DIR";
+const PRIVATE_EVIDENCE_DIR_ENV_VAR: &str = "OHAND_PRIVATE_EVIDENCE_DIR";
+const DEFAULT_PRIVATE_EVIDENCE_DIRECTORY: &str = ".ohand-private-evidence";
 const CREDENTIAL_REF: &str = "credential-ref/spark-endpoint";
 const TIMEOUT_SECONDS: u32 = 120;
 const SYNTHETIC_CAPTURES: [(&str, &str); 3] = [
@@ -56,6 +64,8 @@ struct ObservedExchange {
     message_role: Option<String>,
     content_bytes: Option<usize>,
     curl_failure: Option<String>,
+    raw_request: Vec<u8>,
+    raw_response: Vec<u8>,
 }
 
 struct CurlTransport {
@@ -126,7 +136,10 @@ impl HttpTransport for CurlTransport {
             .expect("pass configuration to curl on stdin");
         let output = child.wait_with_output().expect("curl finishes");
 
-        let mut exchange = ObservedExchange::default();
+        let mut exchange = ObservedExchange {
+            raw_request: body.clone(),
+            ..ObservedExchange::default()
+        };
         if !output.status.success() {
             exchange.curl_failure =
                 Some(format!("curl-exit-{}", output.status.code().unwrap_or(-1)));
@@ -151,6 +164,7 @@ impl HttpTransport for CurlTransport {
 
         exchange.http_status = Some(status);
         exchange.response_bytes = response.len();
+        exchange.raw_response = response.clone();
         if let Ok(envelope) = serde_json::from_slice::<Value>(&response) {
             let choice = &envelope["choices"][0];
             exchange.finish_reason = choice["finish_reason"].as_str().map(str::to_string);
@@ -223,6 +237,37 @@ fn conforms_at_top_level(proposal: &serde_json::Map<String, Value>) -> bool {
         && proposal.keys().all(|key| properties.contains_key(key))
 }
 
+fn private_evidence_directory(repository_root: &Path) -> PathBuf {
+    let directory = match std::env::var(PRIVATE_EVIDENCE_DIR_ENV_VAR) {
+        Ok(configured) => PathBuf::from(configured),
+        Err(_) => PathBuf::from(std::env::var("HOME").expect("HOME locates the private directory"))
+            .join(DEFAULT_PRIVATE_EVIDENCE_DIRECTORY),
+    };
+    std::fs::create_dir_all(&directory).expect("private evidence directory");
+    std::fs::set_permissions(
+        &directory,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .expect("restrict private evidence directory");
+    let resolved = directory.canonicalize().expect("resolve private directory");
+    assert!(
+        !resolved.starts_with(repository_root),
+        "private evidence must stay outside the repository"
+    );
+    resolved
+}
+
+fn write_private_file(path: &Path, bytes: &[u8]) {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .expect("create private evidence file");
+    file.write_all(bytes).expect("write private evidence file");
+}
+
 fn git_output(arguments: &[&str]) -> String {
     let output = Command::new("git")
         .args(arguments)
@@ -262,6 +307,7 @@ fn live_endpoint_smoke_records_sanitized_evidence() {
     let cancel = CancelToken::new();
 
     let mut request_records = Vec::new();
+    let mut raw_records = Vec::new();
     let mut failures = Vec::new();
     for (name, text) in SYNTHETIC_CAPTURES {
         let request = request_for(&profile, text);
@@ -277,6 +323,13 @@ fn live_endpoint_smoke_records_sanitized_evidence() {
         let elapsed_ms = clock.now_ms().saturating_sub(started_ms);
         let exchange: ObservedExchange = observed.lock().unwrap().pop().unwrap_or_default();
 
+        raw_records.push(json!({
+            "name": name,
+            "http_status": exchange.http_status,
+            "curl_failure": exchange.curl_failure,
+            "request_body": String::from_utf8_lossy(&exchange.raw_request),
+            "response_body": String::from_utf8_lossy(&exchange.raw_response),
+        }));
         let mut record = json!({
             "name": name,
             "http_status": exchange.http_status,
@@ -336,6 +389,33 @@ fn live_endpoint_smoke_records_sanitized_evidence() {
         collected_at.format("%Y%m%dT%H%M%SZ"),
         &commit[..8]
     );
+    let repository_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .canonicalize()
+        .expect("repository root");
+    let private_directory = private_evidence_directory(&repository_root);
+    let raw_file_name = format!("{evidence_id}.raw.json");
+    let mut raw_text = serde_json::to_string_pretty(&json!({
+        "evidence_id": evidence_id,
+        "collected_at": collected_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "adapter_revision": {"commit": commit, "dirty": dirty},
+        "exchanges": raw_records,
+    }))
+    .unwrap();
+    raw_text.push('\n');
+    for secret in [
+        &configuration.credential,
+        &configuration.base_url,
+        &origin_of(&configuration.base_url),
+    ] {
+        assert!(
+            !raw_text.contains(secret.as_str()),
+            "raw evidence must not carry endpoint or credential"
+        );
+    }
+    write_private_file(&private_directory.join(&raw_file_name), raw_text.as_bytes());
+    let raw_sha256 = format!("{:x}", Sha256::digest(raw_text.as_bytes()));
+
     let artifact = json!({
         "schema_version": 1,
         "evidence_id": evidence_id,
@@ -349,6 +429,14 @@ fn live_endpoint_smoke_records_sanitized_evidence() {
         "request_shape": "adapter-built: interpretation prompt, strict json_schema response_format carrying output_schema()",
         "synthetic_context_time": time_context().reference_time.to_rfc3339(),
         "requests": request_records,
+        "private_raw_evidence": {
+            "run_id": evidence_id,
+            "file_name": raw_file_name,
+            "location": "private evidence directory of the collecting Odonian worker (OHAND_PRIVATE_EVIDENCE_DIR, default ~/.ohand-private-evidence), outside Git; mode 0600 in a 0700 directory",
+            "bytes": raw_text.len(),
+            "sha256": raw_sha256,
+            "contents": "request and response bodies of every exchange; no endpoint address or credential",
+        },
         "result": if failures.is_empty() { "pass" } else { "fail" },
         "failures": failures,
         "unverified": [
