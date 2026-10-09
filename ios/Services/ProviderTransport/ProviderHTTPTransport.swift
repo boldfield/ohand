@@ -14,19 +14,24 @@ import Security
 /// - Cookies, URL caches and stored URL credentials are not used.
 public final class ProviderHTTPTransport {
     private let credentials: CredentialService
-    private let trustAnchors: [SecCertificate]
+    #if DEBUG
+    private var fixtureTrustAnchors: [SecCertificate] = []
+    #endif
 
-    /// The production initializer. Certificates are validated by the system trust store only.
-    public convenience init(credentials: CredentialService) {
-        self.init(credentials: credentials, trustAnchors: [])
-    }
-
-    /// Internal so only tests (via `@testable`) can substitute trust anchors, which they need to trust a fixture
-    /// server's ephemeral certificate. Validation, including hostname checks, still runs against those anchors.
-    init(credentials: CredentialService, trustAnchors: [SecCertificate]) {
+    /// Certificates are validated by the system trust store only.
+    public init(credentials: CredentialService) {
         self.credentials = credentials
-        self.trustAnchors = trustAnchors
     }
+
+    #if DEBUG
+    /// Debug builds only: substitutes trust anchors so tests can trust a fixture server's ephemeral certificate.
+    /// Validation, including hostname checks, still runs against those anchors. Compiled out of release builds, so
+    /// no production code path can replace the system roots.
+    convenience init(credentials: CredentialService, trustAnchors: [SecCertificate]) {
+        self.init(credentials: credentials)
+        self.fixtureTrustAnchors = trustAnchors
+    }
+    #endif
 
     /// Sends one request. Cancelling the calling task cancels the exchange and throws `.cancelled`. Every failure is
     /// a `ProviderTransportError`.
@@ -40,8 +45,10 @@ public final class ProviderHTTPTransport {
             urlRequest: urlRequest,
             origin: plan.origin,
             timeout: plan.timeout,
-            maxResponseBytes: plan.maxResponseBytes,
-            trustAnchors: trustAnchors)
+            maxResponseBytes: plan.maxResponseBytes)
+        #if DEBUG
+        operation.fixtureTrustAnchors = fixtureTrustAnchors
+        #endif
         return try await operation.run()
     }
 

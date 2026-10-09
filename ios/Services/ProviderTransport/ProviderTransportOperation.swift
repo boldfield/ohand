@@ -13,7 +13,10 @@ final class ProviderTransportOperation: NSObject, URLSessionDataDelegate {
     private let origin: ProviderOrigin
     private let timeout: TimeInterval
     private let maxResponseBytes: Int
-    private let trustAnchors: [SecCertificate]
+    #if DEBUG
+    /// Fixture-only trust roots, compiled out of release builds so no production path can replace the system roots.
+    var fixtureTrustAnchors: [SecCertificate] = []
+    #endif
 
     private let lock = NSLock()
     private var continuation: CheckedContinuation<ProviderHTTPResponse, Error>?
@@ -24,18 +27,15 @@ final class ProviderTransportOperation: NSObject, URLSessionDataDelegate {
 
     // Touched only on the delegate queue.
     private var receivedResponse: HTTPURLResponse?
-    private var receivedBody = Data()
+    private var receivedBody: BoundedResponseBuffer
     private var redirectCount = 0
 
-    init(
-        urlRequest: URLRequest, origin: ProviderOrigin, timeout: TimeInterval, maxResponseBytes: Int,
-        trustAnchors: [SecCertificate]
-    ) {
+    init(urlRequest: URLRequest, origin: ProviderOrigin, timeout: TimeInterval, maxResponseBytes: Int) {
         self.urlRequest = urlRequest
         self.origin = origin
         self.timeout = timeout
         self.maxResponseBytes = maxResponseBytes
-        self.trustAnchors = trustAnchors
+        self.receivedBody = BoundedResponseBuffer(limit: maxResponseBytes)
     }
 
     func run() async throws -> ProviderHTTPResponse {
@@ -136,35 +136,36 @@ final class ProviderTransportOperation: NSObject, URLSessionDataDelegate {
         answer(challenge, completionHandler)
     }
 
-    /// Server trust is evaluated by the system, hostname included. Test anchors replace the system roots but are
-    /// evaluated by the same policy. No other challenge is answered with a credential, so a Basic or client
-    /// certificate request falls through and the server's own 401 reaches the caller as a response.
+    /// Server trust is evaluated by the system, hostname included. No other challenge is answered with a credential,
+    /// so a Basic or client certificate request falls through and the server's own 401 reaches the caller as a
+    /// response. Debug builds (the only ones that run tests) may substitute fixture roots, still evaluated by the
+    /// same policy; release builds contain no such path.
     private func answer(
         _ challenge: URLAuthenticationChallenge,
         _ completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
-        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust else {
-            completionHandler(.performDefaultHandling, nil)
+        #if DEBUG
+        if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+            !fixtureTrustAnchors.isEmpty
+        {
+            guard let trust = challenge.protectionSpace.serverTrust else {
+                finish(.failure(.tlsValidationFailed))
+                completionHandler(.cancelAuthenticationChallenge, nil)
+                return
+            }
+            SecTrustSetAnchorCertificates(trust, fixtureTrustAnchors as CFArray)
+            SecTrustSetAnchorCertificatesOnly(trust, true)
+            var evaluationError: CFError?
+            if SecTrustEvaluateWithError(trust, &evaluationError) {
+                completionHandler(.useCredential, URLCredential(trust: trust))
+            } else {
+                finish(.failure(.tlsValidationFailed))
+                completionHandler(.cancelAuthenticationChallenge, nil)
+            }
             return
         }
-        guard !trustAnchors.isEmpty else {
-            completionHandler(.performDefaultHandling, nil)
-            return
-        }
-        guard let trust = challenge.protectionSpace.serverTrust else {
-            finish(.failure(.tlsValidationFailed))
-            completionHandler(.cancelAuthenticationChallenge, nil)
-            return
-        }
-        SecTrustSetAnchorCertificates(trust, trustAnchors as CFArray)
-        SecTrustSetAnchorCertificatesOnly(trust, true)
-        var evaluationError: CFError?
-        if SecTrustEvaluateWithError(trust, &evaluationError) {
-            completionHandler(.useCredential, URLCredential(trust: trust))
-        } else {
-            finish(.failure(.tlsValidationFailed))
-            completionHandler(.cancelAuthenticationChallenge, nil)
-        }
+        #endif
+        completionHandler(.performDefaultHandling, nil)
     }
 
     // MARK: Redirects
@@ -210,9 +211,8 @@ final class ProviderTransportOperation: NSObject, URLSessionDataDelegate {
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        receivedBody.append(data)
-        if receivedBody.count > maxResponseBytes {
-            receivedBody = Data()
+        if !receivedBody.append(data) {
+            receivedBody.discard()
             finish(.failure(.responseTooLarge))
             dataTask.cancel()
         }
@@ -227,7 +227,7 @@ final class ProviderTransportOperation: NSObject, URLSessionDataDelegate {
             finish(.failure(.invalidResponse))
             return
         }
-        finish(.success(ProviderHTTPResponse(status: http.statusCode, headers: Self.headers(of: http), body: receivedBody)))
+        finish(.success(ProviderHTTPResponse(status: http.statusCode, headers: Self.headers(of: http), body: receivedBody.contents)))
     }
 
     private static func headers(of response: HTTPURLResponse) -> [String: String] {
