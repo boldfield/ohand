@@ -7,4 +7,4 @@ pub mod instance;
 pub mod store_check;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

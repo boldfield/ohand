@@ -220,10 +220,46 @@ public final class CoreHandle: @unchecked Sendable {
     }
 
     public func startStoreCheck(operationID: UInt64) throws {
+        try queueOperation { ohand_core_start_store_check(handleIdentifier, operationID) }
+    }
+
+    /// Queues a durable save. The outcome event decodes as `SaveCaptureAcknowledgment` and
+    /// arrives only after the core committed; a failure event means nothing was stored.
+    public func startSaveCapture(operationID: UInt64, capture: CaptureRecord) throws {
+        let requestBytes = Array(try JSONEncoder().encode(capture))
+        try queueOperation {
+            requestBytes.withUnsafeBufferPointer { buffer in
+                ohand_core_start_save_capture(handleIdentifier, operationID, buffer.baseAddress, buffer.count)
+            }
+        }
+    }
+
+    /// Queues a read of a stored capture. The outcome event decodes as `CaptureReadout`.
+    public func startGetCapture(operationID: UInt64, captureID: String) throws {
+        let identifierBytes = Array(captureID.utf8)
+        try queueOperation {
+            identifierBytes.withUnsafeBufferPointer { buffer in
+                ohand_core_start_get_capture(handleIdentifier, operationID, buffer.baseAddress, buffer.count)
+            }
+        }
+    }
+
+    /// Queues a read of an item's independent statuses. The outcome event decodes as
+    /// `ItemStatusReport`.
+    public func startItemStatus(operationID: UInt64, itemID: String) throws {
+        let identifierBytes = Array(itemID.utf8)
+        try queueOperation {
+            identifierBytes.withUnsafeBufferPointer { buffer in
+                ohand_core_start_item_status(handleIdentifier, operationID, buffer.baseAddress, buffer.count)
+            }
+        }
+    }
+
+    private func queueOperation(_ call: () -> OhandCoreResult) throws {
         stateLock.lock()
         defer { stateLock.unlock() }
         guard !isClosed else { throw CoreFailure.handleClosed }
-        _ = try consumeCoreResult(ohand_core_start_store_check(handleIdentifier, operationID))
+        _ = try consumeCoreResult(call())
     }
 
     /// Discards pending work and refuses later work. Idempotent; the handle stays open until
