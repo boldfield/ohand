@@ -375,6 +375,12 @@
         "core/src/providers/contracts/mod.rs:1",
         "core/src/providers/contracts/dispatch.rs:154",
         "core/src/providers/contracts/request.rs:197"
+      ],
+      "ownership_allowances": [
+        "core/src/ffi/provider_transport.rs (+ tests) and its pub mod line in core/src/ffi/mod.rs",
+        "ios/OhAndCoreBridge/CoreHandle+ProviderTransport.swift",
+        "ios/project.yml: OhAndServices target core search-path/link settings and OhAndCoreBridge dependency (one-time)",
+        "ios/Tests/ProviderTransport/: SQL seeding helper for real-core tests (fixture only)"
       ]
     },
     {
@@ -2258,6 +2264,10 @@
     {
       "date": "2026-10-08",
       "change": "Bounded the withdrawal grammar I05 criterion 2 requires (PR #96 breaker after four rounds); added I05b for phrasings and over-rejections outside that list, depending on I05."
+    },
+    {
+      "date": "2026-10-09",
+      "change": "Standing native-boundary allowance: a task whose acceptance needs an unexported core operation may add one task-named module under core/src/ffi/ (+ pub mod line) and one extension file under ios/OhAndCoreBridge/. V05b may also give OhAndServices the core search-path/link settings once. Real-core simulator tests may seed routes/profiles/jobs by SQL until U05 exposes creation."
     }
   ]
 }
