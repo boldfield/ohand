@@ -1332,9 +1332,14 @@ const TIME_OBJECT_WORDS: &[&str] = &[
 ];
 /// Adverbs of repetition that may close a task object ("check the quote twice").
 const REPEAT_ADVERBS: &[&str] = &["twice", "again"];
-/// Modifiers that cannot end a noun phrase: "cancel the last" and "cancel the first" point back at
-/// a request, while "cancel at the last minute" names a time.
-const NON_HEAD_WORDS: &[&str] = &["last", "first", "latest", "next", "final", "new", "old"];
+/// Modifiers that cannot end a noun phrase but may describe its head: "cancel the last" and
+/// "cancel the first" point back at a request, while "cancel at the last minute" names a time and
+/// "take the rented ladder back" a thing. With the known-thing lists these are the only words a
+/// noun phrase may put before its head ([`noun_phrase_end`]).
+const NON_HEAD_WORDS: &[&str] = &[
+    "last", "first", "latest", "next", "final", "new", "old", "rented", "hired", "borrowed",
+    "spare", "broken", "extra", "second",
+];
 /// Words that can follow a determiner without being a noun: deictic and anaphoric heads ("the
 /// above", "the same", "the rest") and adverbs ("too", "altogether", "instead"). Together with
 /// the "-ly" adverbs they never make a task object, so "cancel the above" and "cancel the order
@@ -1776,6 +1781,7 @@ const THING_OBJECT_WORDS: &[&str] = &[
     "invoices",
     "bill",
     "bills",
+    "gas",
     "receipt",
     "receipts",
     "statement",
@@ -2110,11 +2116,14 @@ fn verb_is_part_of_requested_task(
 /// allow-list, so a noun that names the reminder, its time, the capture or the request in words
 /// the grammar has not met ("the nudges", "the prompt", "the nine o'clock", "the audio", "the
 /// ask") never reopens a withdrawal, wherever in the object it sits ("the delivery of the
-/// prompt", "the order for the nudges"). "the order", "the gym", "the gas bill", "my library
-/// books", "the delivery of the parcel" and "the order at the shop" qualify; "that too", "this
-/// nonsense", "the above", "the reminder", "the whole business", "the query", "the beeping" and,
-/// after "call the roofer", "the phone call", "the callout" and "the roofing job" do not
-/// ([`is_noun_candidate`]).
+/// prompt", "the order for the nudges"), and in whatever form: a modifier before the head must be
+/// a known thing or a [`NON_HEAD_WORDS`] entry too, and a possessive or plural is checked by its
+/// base ([`word_bases`]), so "the prompt's delivery", "the nudges' delivery", "the prompt
+/// delivery" and "the reminder's delivery" withdraw. "the order", "the gym", "the gas bill", "my
+/// library books", "the rented ladder", "the delivery of the parcel" and "the order at the shop"
+/// qualify; "that too", "this nonsense", "the above", "the reminder", "the whole business", "the
+/// query", "the beeping" and, after "call the roofer", "the phone call", "the callout", "the
+/// roofing job" and "the roofer's order" do not ([`is_noun_candidate`]).
 fn names_task_object(words: &[&IntentToken], request_words: &[&str]) -> bool {
     let texts = object_texts(words);
     noun_phrase_end(&texts, 0, request_words, &[THING_OBJECT_WORDS]).is_some_and(|end| {
@@ -2177,9 +2186,13 @@ fn prepositional_phrases_end(
 
 /// Where the noun phrase starting at `start` ends: a [`NOUN_PHRASE_DETERMINERS`] entry and then
 /// one or more words up to the next preposition, repeat adverb or end, every one of them a noun
-/// candidate ([`is_noun_candidate`]) and the last an entry of one of the `head_words` allow-lists
+/// candidate ([`is_noun_candidate`]), the last an entry of one of the `head_words` allow-lists
 /// (so neither a [`NON_HEAD_WORDS`] modifier, "the last", nor a word the grammar does not know,
-/// "the prompt"). `None` when there is no such phrase or any of its words disqualifies it.
+/// "the prompt") and every earlier one a `head_words` entry or a [`NON_HEAD_WORDS`] modifier
+/// ("the gas bill", "the old photos", "the rented ladder"). The modifier rule is the same
+/// allow-list as the head's, so an unknown word, a possessive or a plural naming the reminder
+/// cannot hide before a known head ("the prompt delivery", "the prompt's delivery", "the nudges'
+/// delivery"). `None` when there is no such phrase or any of its words disqualifies it.
 fn noun_phrase_end(
     texts: &[&str],
     start: usize,
@@ -2197,36 +2210,71 @@ fn noun_phrase_end(
                 || REPEAT_ADVERBS.contains(word)
         })
         .map_or(texts.len(), |offset| start + 1 + offset);
-    let phrase = &texts[start + 1..end];
-    (phrase.last().is_some_and(|head| {
-        !NON_HEAD_WORDS.contains(head) && head_words.iter().any(|known| known.contains(head))
-    }) && phrase
-        .iter()
-        .all(|word| is_noun_candidate(word, request_words)))
+    let (head, modifiers) = texts[start + 1..end].split_last()?;
+    let is_known = |word: &&str| head_words.iter().any(|known| known.contains(word));
+    (!NON_HEAD_WORDS.contains(head)
+        && is_known(head)
+        && modifiers
+            .iter()
+            .all(|modifier| NON_HEAD_WORDS.contains(modifier) || is_known(modifier))
+        && texts[start + 1..end]
+            .iter()
+            .all(|word| is_noun_candidate(word, request_words)))
     .then_some(end)
 }
 
 /// Whether `word` may be part of a concrete task object: it is not a determiner, pronoun, filler,
 /// deictic word or adverb ([`OBJECT_DETERMINERS`], [`RETRACTION_FILLERS`], [`NON_NOUN_WORDS`],
-/// "-ly"), contains no digit (so "the 9am" cannot point at the reminder's own time), does not
-/// stand for the request, the reminder or "everything" ([`WITHDRAWN_REQUEST_WORDS`],
-/// [`REMINDER_OBJECT_WORDS`]), and does not share a stem with a word the request already used
-/// ([`shares_stem`]: "callout" after "call", "roofing" after "roofer").
+/// "-ly"), contains no digit (so "the 9am" cannot point at the reminder's own time), and none of
+/// its base forms ([`word_bases`]: the word, its possessive base and their singulars) stands for
+/// the request, the reminder or "everything" ([`WITHDRAWN_REQUEST_WORDS`],
+/// [`REMINDER_OBJECT_WORDS`]) or shares a stem with a word the request already used
+/// ([`shares_stem`]: "callout" after "call", "roofing" and "roofer's" after "roofer"). So
+/// "prompt's", "nudges'", "nudges" and "alarm's" are no more a task object than "prompt",
+/// "nudge" and "alarm".
 fn is_noun_candidate(word: &str, request_words: &[&str]) -> bool {
+    let names_request = |base: &str| {
+        WITHDRAWN_REQUEST_WORDS.contains(&base)
+            || REMINDER_OBJECT_WORDS.contains(&base)
+            || request_words
+                .iter()
+                .any(|request_word| shares_stem(base, request_word))
+    };
     !OBJECT_DETERMINERS.contains(&word)
         && !NOUN_PHRASE_DETERMINERS.contains(&word)
         && !RETRACTION_FILLERS.contains(&word)
         && !NON_NOUN_WORDS.contains(&word)
         && !(word.len() > 4 && word.ends_with("ly"))
         && !word.chars().any(|character| character.is_ascii_digit())
-        && !WITHDRAWN_REQUEST_WORDS.contains(&word)
-        && !REMINDER_OBJECT_WORDS.contains(&word)
         && !SUBJECT_PRONOUNS.contains(&word)
         && !FIRST_PERSON_SUBJECTS.contains(&word)
         && !FIRST_PERSON_PROGRESSIVE.contains(&word)
-        && !request_words
-            .iter()
-            .any(|request_word| shares_stem(word, request_word))
+        && !word_bases(word).iter().any(|base| names_request(base))
+}
+
+/// The forms of `word` that are checked against the request and reminder word lists: the word
+/// itself, its possessive base ("prompt's" and "prompts'" give "prompt" and "prompts") and the
+/// singular of each ("nudges" gives "nudge", "entries" gives "entry"). The tokenizer keeps an
+/// apostrophe inside a word, so without this a possessive or plural of a reminder or request word
+/// ("the prompt's delivery", "the nudges' delivery") would match no list. The extra forms are
+/// only ever compared with deny-lists, so a spurious singular ("gas" gives "ga") changes nothing.
+fn word_bases(word: &str) -> Vec<String> {
+    let mut bases = vec![word.to_string()];
+    if let Some(base) = word.strip_suffix("'s").or_else(|| word.strip_suffix('\'')) {
+        bases.push(base.to_string());
+    }
+    for base in bases.clone() {
+        if let Some(stem) = base.strip_suffix("ies") {
+            bases.push(format!("{stem}y"));
+        }
+        if let Some(stem) = base.strip_suffix("es") {
+            bases.push(stem.to_string());
+        }
+        if let Some(stem) = base.strip_suffix('s') {
+            bases.push(stem.to_string());
+        }
+    }
+    bases
 }
 
 /// Whether two words are the same or share their first four letters, so a different form of a
