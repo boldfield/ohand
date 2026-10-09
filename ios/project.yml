@@ -51,6 +51,9 @@ targets:
       PRODUCT_NAME: OhAndServices
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.services
       GENERATE_INFOPLIST_FILE: YES
+      OHAND_RUST_OUTPUT_DIR: $(PROJECT_TEMP_DIR)/ohand-rust-core/$(PLATFORM_NAME)
+      HEADER_SEARCH_PATHS: $(OHAND_RUST_OUTPUT_DIR)
+      SWIFT_INCLUDE_PATHS: $(SRCROOT)/OhAndCoreBridge/CoreC
     dependencies:
       - target: OhAndCoreBridge
 
