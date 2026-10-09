@@ -167,6 +167,11 @@ final class SuspendingNotificationCenter: NotificationCenterProviding, @unchecke
     /// Pending-list calls that pass the gate before it starts suspending callers. Scheduling
     /// reads the list once before `add` and once after it.
     var pendingCallsBeforeGate = 0
+    /// Runs once, on the first pending-list call past `pendingCallsBeforeGate`, after that call
+    /// has taken its snapshot and before it returns it. Whatever the hook changes lands between
+    /// the read and its use, like a removal that completes while the OS is answering from an
+    /// already-taken list.
+    var afterStaleSnapshot: (@Sendable () async -> Void)?
     var removeGate: SuspensionGate?
     /// A removal suspended on `removeGate` completes as soon as its task is cancelled: the OS
     /// state changes inside the cancellation handler, before the cancelling caller resumes.
@@ -191,9 +196,13 @@ final class SuspendingNotificationCenter: NotificationCenterProviding, @unchecke
         gateLock.lock()
         pendingCallCount += 1
         let isGated = pendingCallCount > pendingCallsBeforeGate
+        let staleHook = isGated ? afterStaleSnapshot : nil
+        if staleHook != nil { afterStaleSnapshot = nil }
         gateLock.unlock()
         if isGated { await pendingGate?.wait() }
-        return try await inner.pendingRequests()
+        let snapshot = try await inner.pendingRequests()
+        if let staleHook { await staleHook() }
+        return snapshot
     }
 
     func removePending(identifiers: [String]) async {

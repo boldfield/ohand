@@ -14,13 +14,14 @@ import Foundation
 ///
 /// A call the bridge stopped waiting for can still complete later. To keep such late work from
 /// disturbing newer state, every mutation of one identifier runs exclusively (behind a bounded
-/// per-identifier lock), and the bridge remembers the state the newest confirmed or abandoned
-/// operation wants for that identifier: installed as confirmed, absent after a cancel, or what was
-/// pending before an abandoned schedule or cancel. Whenever an abandoned mutation completes late, the bridge
-/// re-applies that desired state under the same lock, so a late write is overwritten rather than
-/// trusted, and a check made earlier is never acted on after a newer operation has started.
-/// Re-applying is itself bounded and tracked; one that cannot finish is remembered and retried by
-/// `reconcile()`.
+/// per-identifier lock), and the bridge remembers the state the newest operation wants for that
+/// identifier: installed for a schedule, absent for a cancel, or what was pending before an
+/// operation that failed or was abandoned. An operation records its wanted state before its first
+/// OS write, so that an older abandoned call completing late while it runs is never mistaken for
+/// current. Whenever an abandoned mutation completes late, the bridge re-applies the desired state
+/// under the same lock, so a late write is overwritten rather than trusted, and a check made
+/// earlier is never acted on after a newer operation has started. Re-applying is itself bounded
+/// and tracked; one that cannot finish is remembered and retried by `reconcile()`.
 public final class NotificationBridge: Sendable {
     private let center: NotificationCenterProviding
     private let now: @Sendable () -> Date
@@ -70,10 +71,16 @@ public final class NotificationBridge: Sendable {
                 let priorRequest = try await self.bounded { try await center.pendingRequests() }
                     .first(where: { $0.identifier == identifier })
                 let stateBeforeAttempt = Self.restorableState(of: priorRequest, identifier: identifier)
+                // Claim the identifier for this attempt before writing. An older abandoned call
+                // (such as an undo removal that timed out) may complete while this add or its
+                // confirming read is in flight; because the desired state has already moved on,
+                // that late completion re-applies this install instead of being taken as current.
+                self.ledger.setDesired(identifier, .installed(centerRequest))
                 do {
                     try await self.mutate(identifier, toward: nil) { try await center.add(centerRequest) }
-                } catch let error where Self.isUncertain(error) {
-                    // The add may still land; its late completion re-applies the earlier state.
+                } catch {
+                    // A definite failure changed nothing. An abandoned add may still land, and its
+                    // late completion then re-applies the earlier state recorded here.
                     self.ledger.setDesired(identifier, stateBeforeAttempt)
                     throw error
                 }
@@ -88,9 +95,12 @@ public final class NotificationBridge: Sendable {
                     throw error
                 }
                 guard let installed = pending.first(where: { $0.identifier == identifier }) else {
+                    // The OS accepted the add without keeping it. The caller is told this
+                    // schedule failed, so the earlier state is wanted again.
+                    self.ledger.setDesired(identifier, stateBeforeAttempt)
+                    self.enforceInBackground(identifier)
                     throw NotificationBridgeError.installNotConfirmed
                 }
-                self.ledger.setDesired(identifier, .installed(centerRequest))
                 self.ledger.markSettled(identifier)
                 return InstalledNotification(
                     identifier: request.identifier,

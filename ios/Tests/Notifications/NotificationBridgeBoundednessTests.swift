@@ -311,6 +311,49 @@ final class NotificationBridgeBoundednessTests: XCTestCase {
         XCTAssertTrue(quick.unreconciledIdentifiers.isEmpty)
     }
 
+    /// An abandoned schedule's undo removal times out and stays suspended. A retry then installs
+    /// the identifier and reads the list back; the suspended removal lands after that read took
+    /// its snapshot but before the retry uses it. The retry reports success, so the request must
+    /// end up pending, not removed by work the retry had already superseded.
+    func testALateRemovalLandingDuringTheRetrysConfirmingReadDoesNotLeaveTheRequestAbsent() async throws {
+        let addGate = newGate()
+        center.addGate = addGate
+        let quick = makeBridge(effectTimeout: 0.05)
+        let scheduleRequest = try request()
+
+        let failure = await failureOfHungCall { _ = try await quick.schedule(scheduleRequest) }
+        XCTAssertEqual(failure, .timedOut)
+
+        let removeGate = newGate()
+        center.removeGate = removeGate
+        center.addGate = nil
+        addGate.release()
+        await eventually("the undo to block in removal") { removeGate.arrivals >= 1 }
+        await quick.settleAbandonedWork()
+        XCTAssertEqual(quick.unreconciledIdentifiers, ["reminder-1#1"], "the undo timed out and is remembered")
+
+        // The first schedule read the list once; the retry reads it before its add and again to
+        // confirm. The confirming read answers from a snapshot taken before the removal lands.
+        let inner = self.inner
+        center.pendingCallsBeforeGate = 2
+        center.afterStaleSnapshot = {
+            removeGate.release()
+            while inner.removedIdentifiers.isEmpty {
+                try? await Task.sleep(nanoseconds: 1_000_000)
+            }
+        }
+        let retried = try await quick.schedule(scheduleRequest)
+        XCTAssertEqual(retried.identifier, try identifier())
+        XCTAssertEqual(inner.removedIdentifiers, ["reminder-1#1"], "the removal landed during the confirming read")
+        XCTAssertNil(center.afterStaleSnapshot, "the stale read happened")
+
+        await letLateWorkRun(quick)
+        XCTAssertEqual(inner.pendingIdentifiers, ["reminder-1#1"], "a reported install is pending")
+        let survivingDue = try await pendingDueInstant()
+        XCTAssertEqual(survivingDue, scheduleRequest.dueInstant)
+        XCTAssertTrue(quick.unreconciledIdentifiers.isEmpty)
+    }
+
     func testANewerScheduleThatSucceedsWhileARestoreUndoIsSuspendedSurvivesTheLateRestore() async throws {
         let quick = makeBridge(effectTimeout: 0.05)
         let original = try request()
