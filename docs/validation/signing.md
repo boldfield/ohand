@@ -1,6 +1,6 @@
 # Signed device build procedure
 
-This document covers the maintainer procedure for P08b. The tooling in [`tools/apple-build/`](../../tools/apple-build/) was written and tested on Linux against synthetic `security`, `xcodebuild`, `xcrun`/`devicectl` and `mint` stand-ins (`make apple-build-test`, part of `make test`). **No real signed build, device install or Apple tool run has been observed.** Treat every statement about real Xcode behaviour below as unverified until P08b records an actual run.
+This document covers the maintainer procedure for P08b. The tooling in [`tools/apple-build/`](../../tools/apple-build/) was written and tested on Linux against synthetic `security`, `xcodebuild`, `xcrun`/`devicectl` and `mint` stand-ins (`make apple-build-test`, part of `make test`). **P08b has recorded a real signed build and device install on a maintainer Mac.** See the [Evidence and validity](#evidence-and-validity) section for the observed run; statements about Xcode behaviour that section verifies are confirmed by that run, and the subsection notes which assumptions remain untested.
 
 ## Route
 
@@ -78,24 +78,29 @@ The `.p12` password and the temporary keychain password are passed to `security`
 
 ## Assumptions P08b must confirm on a real Mac
 
-These could not be tested here and are expected to be corrected by the first real run if wrong:
+These could not be tested on Linux. The October 2026 run confirmed the following:
 
-- `xcodebuild -exportArchive` accepts an unsigned archive with `method` `debugging` and the manual options above under the pinned Xcode.
-- A profile placed in `~/Library/Developer/Xcode/UserData/Provisioning Profiles` is found by name-independent UUID lookup during export, including on a Mac where Xcode has not yet stored a profile.
-- A manually created Development profile satisfies the manual export options, and an Xcode-managed profile really is rejected (which is why the tool refuses it up front).
-- `security list-keychains -d user` prints each keychain as a quoted path on its own line, which the tool parses to restore the search list.
-- `devicectl device install app` accepts the extracted `.app` and the identifier format of `OHAND_DEVICE_ID`.
+- ✓ `xcodebuild -exportArchive` accepts an unsigned archive with `method` `debugging` and the manual options above under Xcode 26.6.
+- ✓ A profile placed in `~/Library/Developer/Xcode/UserData/Provisioning Profiles` is found by name-independent UUID lookup during export.
+- ✓ A manually created Development profile satisfies the manual export options.
+- ⚠️ `security list-keychains -d user` parsing: confirmed if a `.p12` was imported, untested if keychain search-list modification was bypassed. The October 2026 record does not indicate whether `OHAND_SIGNING_CERT_PATH` was set, so this remains unconfirmed for now.
+- ✓ `devicectl device install app` accepts the extracted `.app` with the `OHAND_DEVICE_ID` format.
 
 ## Evidence and validity
 
-On 2026-10-09, the maintainer successfully built and installed BridgeProbe on a trial device. The signed build evidence is recorded in [`apple-signing-20261009T000932Z-c2cb6485.json`](./evidence/apple-signing/apple-signing-20261009T000932Z-c2cb6485.json):
+On 2026-10-09, the maintainer successfully built and installed BridgeProbe on a trial device using Xcode 26.6 (build 17F113) with a clean working tree. The signed build evidence is recorded in [`apple-signing-20261009T000932Z-c2cb6485.json`](./evidence/apple-signing/apple-signing-20261009T000932Z-c2cb6485.json):
 
 | Attribute | Value |
 | --- | --- |
 | Collection time | 2026-10-09T00:10:14Z |
 | Build revision | `6ac3d1f8d20dde731434d609120ad9cf77ac5956` |
 | Build identifier | `6ac3d1f8-c2cb6485` |
+| Scheme | BridgeProbe |
 | Device label | `trial-phone` |
 | Profile expiry | 2027-10-09T00:08:01Z |
 
-The install on the trial device succeeded on the collected profile. The provisioning profile is valid until 2027-10-09, providing profile coverage through the two-week trial period and beyond. Renewal-without-data-loss procedures have not yet been tested; this section will be updated when trial renewal is executed.
+**Verified assumptions:** The run confirmed that `xcodebuild -exportArchive` accepts an unsigned archive with `debugging` method and manual signing options, UUID-based profile lookup works, the manually created Development profile is accepted, and `devicectl device install` succeeds with the OHAND_DEVICE_ID format.
+
+**Install validity:** The BridgeProbe install is signed with a Development provisioning profile valid until 2027-10-09T00:08:01Z. A two-week trial must begin by 2027-09-25 to complete before profile expiry. The trial build (T10) is covered only if signed with this same profile; per [m1-external-prerequisites.md](../features/m1-external-prerequisites.md#signed-build-evidence-for-p08b), that profile is a wildcard App ID with the same certificate and device.
+
+**Renewal:** The profile expires 2027-10-09. With an expiry over a year away, renewal is not planned within the trial window and remains untested.
