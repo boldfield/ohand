@@ -1447,6 +1447,15 @@ fn a_dated_fact_that_does_not_ask_for_a_reminder_stays_unscheduled() {
         "remind me to call the roofer 2026-01-16 09:00:00, I don't want any reminders",
         "remind me to call the roofer 2026-01-16 09:00:00, I don't want to be reminded",
         "remind me to call the roofer 2026-01-16 09:00:00, I don't want you to remind me",
+        "remind me to call the roofer 2026-01-16 09:00:00, I don't desire that reminder",
+        "remind me to call the roofer 2026-01-16 09:00:00, I do not desire that reminder",
+        "remind me to call the roofer 2026-01-16 09:00:00, I no longer desire it",
+        "remind me to call the roofer 2026-01-16 09:00:00, I don't desire it anymore",
+        "remind me to call the roofer 2026-01-16 09:00:00, I don't wish to be reminded",
+        "remind me to call the roofer 2026-01-16 09:00:00, I don't wish for that reminder",
+        "remind me to call the roofer 2026-01-16 09:00:00, I no longer wish for it",
+        "remind me to call the roofer 2026-01-16 09:00:00, I never wanted that reminder",
+        "remind me to call the roofer 2026-01-16 09:00:00, I don't need any reminding",
     ] {
         let (fixture, disposition) = apply_reminder_candidate(
             text,
@@ -1489,6 +1498,10 @@ fn natural_first_person_reminder_requests_bind_to_the_quoted_time() {
         "remind me to call the roofer 2026-01-16 09:00:00, don't stop looking for quotes",
         "remind me to call the roofer 2026-01-16 09:00:00, I don't want the quote to expire",
         "remind me to call the roofer 2026-01-16 09:00:00, I don't want to miss the call",
+        "remind me to call the roofer 2026-01-16 09:00:00, I don't wish to miss it",
+        "remind me to call the roofer 2026-01-16 09:00:00, I don't desire to be late",
+        "remind me to call the roofer 2026-01-16 09:00:00, I wish it were fixed",
+        "remind me to call the roofer 2026-01-16 09:00:00, I desire a quick quote",
     ] {
         let (fixture, disposition) = apply_reminder_candidate(
             text,

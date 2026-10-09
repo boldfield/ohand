@@ -915,12 +915,33 @@ const NEEDLESS_WORDS: &[&str] = &[
     "applicable",
     "wanted",
 ];
-/// Verbs of wanting or needing. A retracting negation governing one of them withdraws the request
-/// when the same clause says the wish has ended ("I no longer want that reminder", "I don't need
-/// it anymore") or when the verb's own object is the reminder ("I don't want that reminder", "I
-/// don't want to be reminded"); "I don't want to miss it" keeps the request. "need" itself is
-/// also a [`RETRACTION_TARGETS`] entry, so "don't need" withdraws without either.
-const DESIRE_WORDS: &[&str] = &["want", "wants", "need", "needs", "care", "interested"];
+/// Verbs of wanting or needing: every inflection of want, need, desire and wish, the exact verbs
+/// the bounded I05 grammar lists, plus care and interested. A retracting negation governing one
+/// of them withdraws the request when the same clause says the wish has ended ("I no longer want
+/// that reminder", "I don't need it anymore") or when the verb's own object is the reminder ("I
+/// don't want that reminder", "I don't desire that reminder", "I don't wish to be reminded");
+/// "I don't want to miss it" keeps the request. "need" itself is also a [`RETRACTION_TARGETS`]
+/// entry, so "don't need" withdraws without either.
+const DESIRE_WORDS: &[&str] = &[
+    "want",
+    "wants",
+    "wanted",
+    "wanting",
+    "need",
+    "needs",
+    "needed",
+    "needing",
+    "desire",
+    "desires",
+    "desired",
+    "desiring",
+    "wish",
+    "wishes",
+    "wished",
+    "wishing",
+    "care",
+    "interested",
+];
 /// Nouns and verb forms naming the reminder or the act of being reminded. A negated desire verb
 /// whose object (after any [`OBJECT_LEAD_INS`]) is one of these withdraws the request.
 const REMINDER_OBJECT_WORDS: &[&str] = &[
@@ -940,12 +961,13 @@ const REMINDER_OBJECT_WORDS: &[&str] = &[
     "nudge",
 ];
 /// Words that may stand between a desire verb and the object it governs: determiners ("that
-/// reminder", "the reminder", "any reminders") and the links of a passive or delegated infinitive
-/// ("to be reminded", "you to remind me"). A content word such as "miss" in "to miss it" is the
-/// object itself and is not skipped.
+/// reminder", "the reminder", "any reminders"), the preposition of "wish for" and "care for"
+/// ("don't wish for that reminder"), and the links of a passive or delegated infinitive ("to be
+/// reminded", "you to remind me"). A content word such as "miss" in "to miss it" is the object
+/// itself and is not skipped.
 const OBJECT_LEAD_INS: &[&str] = &[
     "that", "this", "the", "a", "an", "any", "my", "our", "such", "another", "those", "these",
-    "you", "to", "be", "get",
+    "you", "to", "be", "get", "for",
 ];
 /// Words that say a wish or need has ended when they follow a retracting negation ("no longer",
 /// "not anymore", "don't want it any more").
