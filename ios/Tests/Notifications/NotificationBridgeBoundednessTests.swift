@@ -71,6 +71,8 @@ final class NotificationBridgeBoundednessTests: XCTestCase {
     /// the normalized failure it reports while the provider is still suspended.
     private func failureAfterCancellingWhileSuspended(
         in gate: SuspensionGate,
+        file: StaticString = #filePath,
+        line: UInt = #line,
         _ operation: @escaping @Sendable () async throws -> Void
     ) async -> NotificationBridgeError? {
         let task = Task { () -> NotificationBridgeError? in
@@ -81,7 +83,7 @@ final class NotificationBridgeBoundednessTests: XCTestCase {
                 return error as? NotificationBridgeError
             }
         }
-        await eventually("the call to reach the provider") { gate.arrivals >= 1 }
+        await eventually("the call to reach the provider", file: file, line: line) { gate.arrivals >= 1 }
         task.cancel()
         return await task.value
     }
@@ -150,6 +152,8 @@ final class NotificationBridgeBoundednessTests: XCTestCase {
         }
         XCTAssertEqual(whileListing, .cancelled)
 
+        // Cancel reads the pending list before removing, so only the removal may stay suspended.
+        center.pendingGate = nil
         let removeGate = newGate()
         center.removeGate = removeGate
         let whileRemoving = await failureAfterCancellingWhileSuspended(in: removeGate) {
