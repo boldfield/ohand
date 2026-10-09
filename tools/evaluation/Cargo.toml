@@ -1,0 +1,27 @@
+[package]
+name = "evaluation"
+version = "0.1.0"
+edition = "2021"
+description = "Semantic evaluation reports for the Oh And interpretation pipeline"
+publish = false
+
+[lib]
+name = "evaluation"
+path = "src/lib.rs"
+
+[[bin]]
+name = "evaluate"
+path = "src/main.rs"
+
+[dependencies]
+ohand-core = { path = "../../core" }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tempfile = { workspace = true }
+rusqlite = { workspace = true }

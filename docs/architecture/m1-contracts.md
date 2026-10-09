@@ -513,6 +513,7 @@ Every owned path in the map belongs to exactly one task except the shared files 
 - ios/project.yml: F03 creates it, F05 later edits it. Edge: F03, then F05.
 - tools/apple-build/: P08 owns the directory; T06 owns only its trial/ subdirectory. P08 is an ancestor of T06 in the dependency graph, so T06 starts after P08 lands.
 - Cargo.toml and Cargo.lock: F02 only. F02 reserves workspace and module registration so feature tasks add files inside their own directories without editing the manifest.
+- Workspace members: a task that owns a new crate directory (for example `tools/evaluation/` for E01) may add exactly that one path to `members` in `Cargo.toml`, with the matching `Cargo.lock` entries, because `cargo test --all` cannot gate the crate otherwise. It edits nothing else in either file, and such additions touch disjoint lines of one array, so they do not need an ordering edge beyond ordinary merge resolution.
 - core/bindings/: P01 only; B01 depends on P01 and uses the generated output without editing it.
 
 Native target inclusion is reserved by F03 in the same way. Production service registration is B02's, lifecycle order is B03's, and shell wiring is U01's.
