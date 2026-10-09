@@ -892,13 +892,16 @@ const RETRACTION_VERBS: &[&str] = &[
     "rescind",
 ];
 /// Two-part withdrawals whose parts may be separated by other words of the same clause: "I take
-/// that back", "I changed my mind", "I'll remember on my own / by myself".
-const RETRACTION_PAIRS: &[(&[&str], &[&str])] = &[
-    (&["take", "took", "taking"], &["back"]),
-    (&["change", "changed", "changing"], &["mind"]),
+/// that back", "I changed my mind", "I'll remember on my own / by myself". When the flag is set,
+/// words that name something other than the request ("take the ladder back") between the parts
+/// are the requested task, not a withdrawal ([`names_task_object`]).
+const RETRACTION_PAIRS: &[(&[&str], &[&str], bool)] = &[
+    (&["take", "took", "taking"], &["back"], true),
+    (&["change", "changed", "changing"], &["mind"], false),
     (
         &["remember", "handle", "manage"],
         &["own", "myself", "ourselves"],
+        false,
     ),
 ];
 /// Plain negations (not reporting or opinion words) that withdraw an earlier request when they
@@ -996,6 +999,31 @@ const REMINDER_OBJECT_WORDS: &[&str] = &[
 const OBJECT_LEAD_INS: &[&str] = &[
     "that", "this", "the", "a", "an", "any", "my", "our", "such", "another", "those", "these",
     "you", "to", "be", "get", "for",
+];
+/// Articles, demonstratives and possessives that introduce an object without naming it ("cancel
+/// the order", "take that back", "delete this one"), so the word after them decides.
+const OBJECT_DETERMINERS: &[&str] = &[
+    "the", "a", "an", "this", "that", "these", "those", "my", "our", "your", "his", "her", "their",
+    "any", "some", "such", "another", "whole", "entire",
+];
+/// Words that, in the object of a retraction verb, stand for the request itself or for "everything"
+/// ("cancel it", "delete the whole thing", "take back what I said"). They keep a coordinated or
+/// "about"-governed retraction verb a withdrawal; the reminder words of [`REMINDER_OBJECT_WORDS`]
+/// do too.
+const WITHDRAWN_REQUEST_WORDS: &[&str] = &[
+    "it",
+    "them",
+    "one",
+    "ones",
+    "all",
+    "everything",
+    "anything",
+    "thing",
+    "things",
+    "request",
+    "requests",
+    "what",
+    "words",
 ];
 /// Words that say a wish or need has ended when they follow a retracting negation ("no longer",
 /// "not anymore", "don't want it any more").
@@ -1161,19 +1189,28 @@ fn retracted_after(tokens: &[IntentToken], after: usize) -> bool {
             return true;
         }
         if RETRACTION_VERBS.contains(&word) {
-            return !verb_is_negated_or_infinitive(&later[..index]);
+            return !verb_is_negated_or_infinitive(&later[..index])
+                && !verb_is_part_of_requested_task(&later[..index], &later[index + 1..]);
         }
-        let rest_of_clause = later[index + 1..]
+        let rest_of_clause: Vec<&IntentToken> = later[index + 1..]
             .iter()
+            .copied()
             .take_while(|next| !next.clause_break)
             .filter(|next| !next.quoted)
-            .map(|next| next.text.as_str());
-        if RETRACTION_PAIRS.iter().any(|(first_words, second_words)| {
-            first_words.contains(&word)
-                && rest_of_clause
-                    .clone()
-                    .any(|next| second_words.contains(&next))
-        }) {
+            .collect();
+        if RETRACTION_PAIRS
+            .iter()
+            .any(|(first_words, second_words, task_object_may_intervene)| {
+                first_words.contains(&word)
+                    && rest_of_clause
+                        .iter()
+                        .position(|next| second_words.contains(&next.text.as_str()))
+                        .is_some_and(|second_position| {
+                            !(*task_object_may_intervene
+                                && names_task_object(&rest_of_clause[..second_position]))
+                        })
+            })
+        {
             return true;
         }
         if !is_retracting_negation(word) {
@@ -1192,13 +1229,34 @@ fn retracted_after(tokens: &[IntentToken], after: usize) -> bool {
             let next = same_clause[position];
             let text = next.text.as_str();
             !next.quoted
-                && (RETRACTION_TARGETS.contains(&text)
+                && ((RETRACTION_TARGETS.contains(&text)
+                    && !need_takes_task_complement(text, &same_clause[position + 1..]))
                     || NEEDLESS_WORDS.contains(&text)
                     || (DESIRE_WORDS.contains(&text)
                         && (wish_has_ended(&same_clause)
                             || desire_governs_reminder(&same_clause[position + 1..]))))
         })
     })
+}
+
+/// Whether a negated "need" is followed by an infinitive for something other than the reminder
+/// ("so I don't need to worry", "no need to double-check"), which gives the reason for the request
+/// and keeps it. "no need", "don't need to be reminded" and "no need to bother" still withdraw, as
+/// does a need that has ended ("I don't need to worry anymore").
+fn need_takes_task_complement(word: &str, after_need: &[&IntentToken]) -> bool {
+    if word != "need" || wish_has_ended(after_need) {
+        return false;
+    }
+    let [infinitive_marker, verb, ..] = after_need else {
+        return false;
+    };
+    let verb_text = verb.text.as_str();
+    !infinitive_marker.quoted
+        && infinitive_marker.text == "to"
+        && !verb.quoted
+        && !desire_governs_reminder(after_need)
+        && !RETRACTION_VERBS.contains(&verb_text)
+        && (verb_text == "worry" || !RETRACTION_TARGETS.contains(&verb_text))
 }
 
 /// Whether the words after a desire verb name the reminder as its object: the first word that is
@@ -1249,6 +1307,47 @@ fn verb_is_negated_or_infinitive(before: &[&IntentToken]) -> bool {
         .map(|previous| previous.text.as_str())
         .find(|previous| !RETRACTION_FILLERS.contains(previous))
         .is_some_and(|previous| previous == "to" || is_retracting_negation(previous))
+}
+
+/// Whether a retraction verb belongs to the task the reminder is for rather than withdrawing the
+/// request: it is coordinated with that task ("call the roofer and cancel the order") or is the
+/// gerund after "about" ("remind me about cancelling the gym"), and it has an object of its own
+/// ([`names_task_object`]). "and cancel it", "and cancel the reminder" and a bare "and cancel"
+/// still withdraw. `before` and `after` are the tokens around the verb, after the quoted time.
+fn verb_is_part_of_requested_task(before: &[&IntentToken], after: &[&IntentToken]) -> bool {
+    let governing = before
+        .iter()
+        .rev()
+        .take_while(|previous| !previous.clause_break)
+        .map(|previous| previous.text.as_str())
+        .find(|previous| !RETRACTION_FILLERS.contains(previous));
+    if !matches!(governing, Some("and" | "or" | "about")) {
+        return false;
+    }
+    let object: Vec<&IntentToken> = after
+        .iter()
+        .copied()
+        .take_while(|next| !next.clause_break)
+        .filter(|next| !next.quoted)
+        .collect();
+    names_task_object(&object)
+}
+
+/// Whether `words` (unquoted, one clause) name a concrete task object: after any determiners and
+/// fillers the first word is not an empty reference, and nothing in the span refers to the
+/// request itself, the reminder or "everything" ([`WITHDRAWN_REQUEST_WORDS`],
+/// [`REMINDER_OBJECT_WORDS`]). "the order", "the gym" and "the ladder" qualify; "it", "that", "the
+/// reminder" and "the whole thing" do not.
+fn names_task_object(words: &[&IntentToken]) -> bool {
+    let mut content = words.iter().skip_while(|word| {
+        OBJECT_DETERMINERS.contains(&word.text.as_str())
+            || RETRACTION_FILLERS.contains(&word.text.as_str())
+    });
+    content.next().is_some()
+        && !words.iter().any(|word| {
+            WITHDRAWN_REQUEST_WORDS.contains(&word.text.as_str())
+                || REMINDER_OBJECT_WORDS.contains(&word.text.as_str())
+        })
 }
 
 /// Whether a reminder request whose cue ends at `cue_end` governs the quoted time `span`: the
