@@ -179,9 +179,23 @@ pub fn record_interpretation_retries_exhausted(
     now: DateTime<Utc>,
 ) -> Result<ApplyOutcome, ApplyError> {
     let tx = db.immediate_transaction()?;
-    let outcome = within_savepoint(&tx, || {
+    let outcome = record_interpretation_retries_exhausted_in_tx(&tx, job_id, lease_attempt, now)?;
+    tx.commit().map_err(anyhow::Error::from)?;
+    Ok(outcome)
+}
+
+/// [`record_interpretation_retries_exhausted`] inside the caller's transaction, so the failure
+/// that spent the last attempt and the terminal settlement commit together. On `Err` nothing in
+/// this call is changed.
+pub fn record_interpretation_retries_exhausted_in_tx(
+    tx: &Transaction<'_>,
+    job_id: &str,
+    lease_attempt: i32,
+    now: DateTime<Utc>,
+) -> Result<ApplyOutcome, ApplyError> {
+    within_savepoint(tx, || {
         let job = match gate_job(
-            &tx,
+            tx,
             job_id,
             lease_attempt,
             AuthorizationScope::LocalOnly,
@@ -193,17 +207,15 @@ pub fn record_interpretation_retries_exhausted(
             JobGate::AlreadyRecorded => return Ok(ApplyOutcome::Duplicate),
             JobGate::Proceed(job) => job,
         };
-        let source = load_source_context(&tx, &job)?;
+        let source = load_source_context(tx, &job)?;
         fail_job(
-            &tx,
+            tx,
             &job,
             &source,
             FailureDisposition::Permanent(RETRIES_EXHAUSTED_REASON.to_string()),
             now,
         )
-    })?;
-    tx.commit().map_err(anyhow::Error::from)?;
-    Ok(outcome)
+    })
 }
 
 /// Record a provider failure for an interpretation job in one transaction.

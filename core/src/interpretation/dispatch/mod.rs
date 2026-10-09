@@ -29,7 +29,10 @@
 //! is the `max_attempts`-th ends the job `failed` with reason `retries_exhausted` through the I05
 //! rules: the source and any prior result are kept and a first interpretation stays
 //! `uninterpreted`. Cancellations, lease reclaims and configuration or source waits do not spend
-//! the budget.
+//! the budget, and the backoff delay grows with the same counter, so they do not lengthen it
+//! either. Counting the failure and either re-queueing or ending the job commit together; a job
+//! found already at its limit (for example a row written before that was so) is ended before any
+//! further provider call.
 //!
 //! The caller's `Job` is a claim receipt only. Before the source is read or anything is sent the
 //! dispatcher reloads the durable row and requires the live lease (same attempt, running, not
@@ -43,15 +46,13 @@ pub use registry::AdapterRegistry;
 
 use crate::interpretation::apply::{
     apply_interpretation_proposal, apply_local_interpretation_proposal,
-    record_interpretation_failure, record_interpretation_retries_exhausted, ApplyError,
-    ApplyOutcome,
+    record_interpretation_failure, record_interpretation_retries_exhausted,
+    record_interpretation_retries_exhausted_in_tx, ApplyError, ApplyOutcome,
 };
 use crate::interpretation::contracts::Proposal;
 use crate::interpretation::fast_path::recognize_with_session_topic;
 use crate::interpretation::instructions::{InterpretationMapping, M1_INSTRUCTION_VERSION};
-use crate::jobs::queue::{
-    fail_job_with_backoff, fail_job_with_backoff_in_tx, get_job, Job, JobStatus,
-};
+use crate::jobs::queue::{fail_job_with_backoff, get_job, Job, JobStatus};
 use crate::privacy::routing::{authorize_job, Authorization, DenialReason, JOB_TYPE_INTERPRET};
 use crate::providers::contracts::{
     dispatch, CancelToken, Clock as ProviderClock, DispatchLimits, ErrorClass, FailureKind,
@@ -124,6 +125,9 @@ pub enum DispatchOutcome {
         failure: ProviderFailure,
         outcome: ApplyOutcome,
     },
+    /// The job had already used every attempt of its pinned retry policy when it was run, so it
+    /// was ended under the I05 failure rules without another provider call.
+    RetriesExhausted { outcome: ApplyOutcome },
     /// The job was re-queued; nothing about the item changed.
     BackedOff {
         reason: WaitReason,
@@ -255,6 +259,17 @@ impl<'a> InterpretationDispatcher<'a> {
         if !authorization_matches(&authorization, &profile) {
             return self.record_failure(db, job, unavailable(), now);
         }
+        if transient_failures(db, job)? >= u64::from(profile.retry_policy().max_attempts) {
+            return match record_interpretation_retries_exhausted(
+                db,
+                &job.job_id,
+                job.attempt_count,
+                now,
+            ) {
+                Ok(outcome) => Ok(DispatchOutcome::RetriesExhausted { outcome }),
+                Err(error) => self.settle_apply_error(db, job, error, now),
+            };
+        }
         let Some(adapter) = self.registry.adapter_for(profile.protocol()) else {
             return self.record_failure(db, job, unavailable(), now);
         };
@@ -293,17 +308,21 @@ impl<'a> InterpretationDispatcher<'a> {
             },
             Err(failure) => match failure.class {
                 ErrorClass::Transient => {
-                    let policy = profile.retry_policy();
-                    if !record_transient_failure(db, job, policy, now, &failure)? {
-                        return self.exhausted(db, job, failure, now);
+                    match record_transient_failure(db, job, profile.retry_policy(), now, &failure) {
+                        Ok(TransientSettlement::Requeued { retry_at }) => {
+                            Ok(DispatchOutcome::BackedOff {
+                                reason: WaitReason::Transient(failure.kind),
+                                retry_at,
+                            })
+                        }
+                        Ok(TransientSettlement::Exhausted(outcome)) => {
+                            Ok(DispatchOutcome::Failed { failure, outcome })
+                        }
+                        Err(DispatchError::Apply(error)) => {
+                            self.settle_apply_error(db, job, error, now)
+                        }
+                        Err(error) => Err(error),
                     }
-                    let retry_at = get_job(db, &job.job_id)?
-                        .and_then(|stored| stored.next_attempt_at)
-                        .unwrap_or(now);
-                    Ok(DispatchOutcome::BackedOff {
-                        reason: WaitReason::Transient(failure.kind),
-                        retry_at,
-                    })
                 }
                 ErrorClass::Cancelled => self.back_off(
                     db,
@@ -355,19 +374,6 @@ impl<'a> InterpretationDispatcher<'a> {
         now: DateTime<Utc>,
     ) -> Result<DispatchOutcome, DispatchError> {
         match record_interpretation_failure(db, &job.job_id, job.attempt_count, &failure, now) {
-            Ok(outcome) => Ok(DispatchOutcome::Failed { failure, outcome }),
-            Err(error) => self.settle_apply_error(db, job, error, now),
-        }
-    }
-
-    fn exhausted(
-        &self,
-        db: &mut Database,
-        job: &Job,
-        failure: ProviderFailure,
-        now: DateTime<Utc>,
-    ) -> Result<DispatchOutcome, DispatchError> {
-        match record_interpretation_retries_exhausted(db, &job.job_id, job.attempt_count, now) {
             Ok(outcome) => Ok(DispatchOutcome::Failed { failure, outcome }),
             Err(error) => self.settle_apply_error(db, job, error, now),
         }
@@ -534,20 +540,30 @@ fn bind_running_job(
     Ok(stored)
 }
 
-/// Count one transient provider failure against the job's retry budget and, while attempts
-/// remain, re-queue it with the profile's backoff, in one transaction fenced by the lease. Returns
-/// `false` when this failure used the last allowed attempt; nothing is re-queued then and the
-/// caller ends the job through the I05 failure rules.
+/// What counting one transient provider failure did to the job.
+enum TransientSettlement {
+    /// Attempts remain; the job is queued again until `retry_at`.
+    Requeued { retry_at: DateTime<Utc> },
+    /// This failure used the last allowed attempt; the job ended under the I05 failure rules.
+    Exhausted(ApplyOutcome),
+}
+
+/// Count one transient provider failure against the job's retry budget and settle the job in the
+/// same transaction, fenced by the lease: while attempts remain it is re-queued with the profile's
+/// backoff, and the failure that uses the last attempt ends it `failed` with reason
+/// `retries_exhausted`. A crash can therefore never leave a counted failure without its
+/// settlement. On `Err` nothing is changed.
 ///
-/// Only failed provider calls are counted: cancellations, lease reclaims and configuration or
-/// source waits all raise the job's `attempt_count` but never spend the budget.
+/// Only failed provider calls are counted, and the backoff exponent is that count rather than the
+/// lease's `attempt_count`: cancellations, lease reclaims and configuration or source waits raise
+/// `attempt_count` but neither spend the budget nor lengthen the delay.
 fn record_transient_failure(
     db: &mut Database,
     job: &Job,
     policy: &RetryPolicy,
     now: DateTime<Utc>,
     failure: &ProviderFailure,
-) -> Result<bool, DispatchError> {
+) -> Result<TransientSettlement, DispatchError> {
     let tx = db.immediate_transaction()?;
     let affected = tx
         .execute(
@@ -575,22 +591,59 @@ fn record_transient_failure(
             |row| row.get(0),
         )
         .map_err(anyhow::Error::from)?;
-    if u64::try_from(failures).unwrap_or(0) >= u64::from(policy.max_attempts) {
+    let failures = u64::try_from(failures).unwrap_or(0);
+    if failures >= u64::from(policy.max_attempts) {
+        let outcome = record_interpretation_retries_exhausted_in_tx(
+            &tx,
+            &job.job_id,
+            job.attempt_count,
+            now,
+        )?;
         tx.commit().map_err(anyhow::Error::from)?;
-        return Ok(false);
+        return Ok(TransientSettlement::Exhausted(outcome));
     }
-    let backoff = transient_backoff(policy);
-    fail_job_with_backoff_in_tx(
-        &tx,
-        &job.job_id,
-        failure_kind_name(failure.kind).to_string(),
-        backoff.base_seconds,
-        backoff.max_seconds,
-        now,
-        job.attempt_count,
-    )?;
+    let retry_at = now + chrono::Duration::seconds(transient_delay_seconds(policy, failures));
+    tx.execute(
+        "UPDATE jobs SET status = ?, failure_reason = ?, next_attempt_at = ?, lease_expires_at = NULL
+          WHERE job_id = ? AND status = ? AND attempt_count = ?",
+        rusqlite::params![
+            JobStatus::Queued.as_str(),
+            failure_kind_name(failure.kind),
+            retry_at.to_rfc3339(),
+            &job.job_id,
+            JobStatus::Running.as_str(),
+            job.attempt_count
+        ],
+    )
+    .map_err(anyhow::Error::from)?;
     tx.commit().map_err(anyhow::Error::from)?;
-    Ok(true)
+    Ok(TransientSettlement::Requeued { retry_at })
+}
+
+/// Transient provider failures already counted against the job's retry budget.
+fn transient_failures(db: &Database, job: &Job) -> Result<u64, DispatchError> {
+    let failures: i64 = db
+        .conn()
+        .query_row(
+            "SELECT transient_failure_count FROM jobs WHERE job_id = ?",
+            [&job.job_id],
+            |row| row.get(0),
+        )
+        .map_err(anyhow::Error::from)?;
+    Ok(u64::try_from(failures).unwrap_or(0))
+}
+
+/// Delay after the `failures`-th transient provider failure: the queue's exponential formula,
+/// `min(max, base * 2^failures)`, with the profile's backoff bounds.
+fn transient_delay_seconds(policy: &RetryPolicy, failures: u64) -> i64 {
+    let backoff = transient_backoff(policy);
+    let exponent = u32::try_from(failures).unwrap_or(u32::MAX);
+    std::cmp::min(
+        backoff.max_seconds,
+        backoff
+            .base_seconds
+            .saturating_mul(2i64.saturating_pow(exponent)),
+    )
 }
 
 fn transient_backoff(policy: &RetryPolicy) -> Backoff {

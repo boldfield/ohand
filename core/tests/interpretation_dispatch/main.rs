@@ -527,6 +527,12 @@ impl Fixture {
     }
 }
 
+/// The backoff after the `failures`-th transient failure under `anthropic_profile`'s default
+/// retry policy (1 s base after rounding 500 ms up, 30 s cap): `min(30, 1 * 2^failures)` seconds.
+fn transient_delay(failures: u32) -> Duration {
+    Duration::seconds(std::cmp::min(30, 1i64 << failures))
+}
+
 fn span_of(text: &str, needle: &str) -> Value {
     let byte_start = text.find(needle).expect("needle in text");
     let start = text[..byte_start].chars().count();
@@ -941,6 +947,7 @@ fn transient_failures_stop_at_the_pinned_attempt_limit_and_keep_the_source() {
             } => retry_at,
             other => panic!("attempt {attempt}: {other:?}"),
         };
+        assert_eq!(retry_at, at + transient_delay(attempt));
         assert_eq!(fixture.job_row(&job.job_id).status, "queued");
         at = retry_at + Duration::seconds(1);
         job = fixture.claim(at);
@@ -1083,6 +1090,8 @@ fn cancellations_do_not_spend_the_transient_retry_budget() {
                 } => retry_at,
                 other => panic!("attempt {attempt}: {other:?}"),
             };
+            // The delay is the one a job with no earlier waits gets for this failure.
+            assert_eq!(retry_at, at + transient_delay(attempt));
             at = retry_at + Duration::seconds(1);
             job = fixture.claim(at);
         } else {
@@ -1151,6 +1160,8 @@ fn configuration_waits_do_not_spend_the_transient_retry_budget() {
                 } => retry_at,
                 other => panic!("attempt {attempt}: {other:?}"),
             };
+            // The delay is the one a job with no earlier waits gets for this failure.
+            assert_eq!(retry_at, at + transient_delay(attempt));
             at = retry_at + Duration::seconds(1);
             job = fixture.claim(at);
         } else {
@@ -1165,6 +1176,92 @@ fn configuration_waits_do_not_spend_the_transient_retry_budget() {
     let row = fixture.job_row(&job.job_id);
     assert_eq!(row.status, "failed");
     assert_eq!(row.failure_reason.as_deref(), Some("retries_exhausted"));
+}
+
+#[test]
+fn a_job_found_at_its_attempt_limit_is_ended_without_another_provider_call() {
+    let mut fixture = Fixture::new(FREE_FORM);
+    let profile = anthropic_profile();
+    fixture.set_up_provider(&profile, ANTHROPIC_ORIGIN);
+    let max_attempts = profile.retry_policy().max_attempts;
+    let providers = Providers::anthropic(vec![anthropic_reply(annotate_action(
+        FREE_FORM,
+        "call the roofer",
+    ))]);
+    let abandoned = fixture.enqueue_and_claim(Some(&profile));
+    let before = fixture.durable();
+    // The state a restart finds if the last attempt was counted but its holder never settled
+    // the job: budget spent, lease still out.
+    fixture
+        .db
+        .conn()
+        .execute(
+            "UPDATE jobs SET transient_failure_count = ? WHERE job_id = ?",
+            rusqlite::params![i64::from(max_attempts), &abandoned.job_id],
+        )
+        .unwrap();
+    let later = now() + Duration::seconds(LEASE_SECONDS + 1);
+    let job = fixture.claim(later);
+    assert_eq!(job.job_id, abandoned.job_id);
+
+    let outcome = providers.run(&mut fixture, &job, later);
+
+    assert!(
+        matches!(
+            outcome,
+            DispatchOutcome::RetriesExhausted {
+                outcome: ApplyOutcome::Failed {
+                    processing_state: ProcessingState::Uninterpreted
+                }
+            }
+        ),
+        "{outcome:?}"
+    );
+    assert!(providers.calls_to_anthropic().is_empty());
+    let row = fixture.job_row(&job.job_id);
+    assert_eq!(row.status, "failed");
+    assert_eq!(row.failure_reason.as_deref(), Some("retries_exhausted"));
+    let after = fixture.durable();
+    assert_eq!(after.capture_text, before.capture_text);
+    assert_eq!(after.item_type, None);
+    assert_eq!(after.proposals, 0);
+    assert_eq!(after.processing_state, "uninterpreted");
+}
+
+#[test]
+fn the_failure_that_spends_the_last_attempt_ends_the_job_in_the_same_step() {
+    let mut fixture = Fixture::new(FREE_FORM);
+    let profile = anthropic_profile();
+    fixture.set_up_provider(&profile, ANTHROPIC_ORIGIN);
+    let max_attempts = profile.retry_policy().max_attempts;
+    let providers =
+        Providers::anthropic(vec![FakeAnthropicStep::fail(TransportError::Unavailable)]);
+    let job = fixture.enqueue_and_claim(Some(&profile));
+    fixture
+        .db
+        .conn()
+        .execute(
+            "UPDATE jobs SET transient_failure_count = ? WHERE job_id = ?",
+            rusqlite::params![i64::from(max_attempts) - 1, &job.job_id],
+        )
+        .unwrap();
+
+    let outcome = providers.run(&mut fixture, &job, now());
+
+    assert!(
+        matches!(outcome, DispatchOutcome::Failed { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(providers.calls_to_anthropic().len(), 1);
+    // A fresh connection sees the counted failure and the terminal job together.
+    assert_eq!(
+        fixture.transient_failures(&job.job_id),
+        i64::from(max_attempts)
+    );
+    let row = fixture.job_row(&job.job_id);
+    assert_eq!(row.status, "failed");
+    assert_eq!(row.failure_reason.as_deref(), Some("retries_exhausted"));
+    assert_eq!(row.attempt_count, job.attempt_count);
 }
 
 #[test]
