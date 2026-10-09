@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+use super::diagnostic::{DiagnosticAdapterCall, DiagnosticResponse, DiagnosticSupport};
 use super::failure::{FailureKind, ProviderFailure};
 use super::profile::{CapabilitySupport, ProviderCapability, ProviderProfile};
 use super::request::InterpretationRequest;
@@ -125,6 +126,22 @@ pub struct AdapterCall<'a> {
 /// deadline, cancellation, size and output validation are applied by [`dispatch`].
 pub trait ProviderAdapter {
     fn invoke(&self, call: &AdapterCall<'_>) -> Result<Vec<u8>, TransportError>;
+
+    /// Diagnostic calls this adapter can honor. Adapters that predate diagnostics keep the
+    /// default (none), so a diagnostic request is refused rather than answered with whatever
+    /// prompt and settings the adapter would use for production traffic.
+    fn diagnostic_support(&self) -> DiagnosticSupport {
+        DiagnosticSupport::unsupported()
+    }
+
+    /// Send the explicit instructions, context and settings of a diagnostic request.
+    /// `dispatch_diagnostic` only calls this after `diagnostic_support` accepted the request.
+    fn invoke_diagnostic(
+        &self,
+        _call: &DiagnosticAdapterCall<'_>,
+    ) -> Result<DiagnosticResponse, TransportError> {
+        Err(TransportError::Rejected)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,19 +178,7 @@ pub fn dispatch(
     cancel: &CancelToken,
     limits: &DispatchLimits,
 ) -> Result<InterpretationOutput, ProviderFailure> {
-    if !request.is_pinned_to(profile) {
-        return Err(fail(FailureKind::ProfileMismatch));
-    }
-    let text_capability = profile
-        .capability(ProviderCapability::TextInterpretation)
-        .filter(|metadata| metadata.support == CapabilitySupport::Supported)
-        .ok_or_else(|| fail(FailureKind::CapabilityUnavailable))?;
-    if text_capability
-        .input_size_limit
-        .is_some_and(|limit| request.text().len() > limit)
-    {
-        return Err(fail(FailureKind::InputTooLarge));
-    }
+    preflight(profile, request)?;
     if cancel.is_cancelled() {
         return Err(fail(FailureKind::Cancelled));
     }
@@ -190,6 +195,44 @@ pub fn dispatch(
     };
     let result = adapter.invoke(&call);
 
+    complete_call(
+        request, result, started_ms, timeout_ms, clock, cancel, limits,
+    )
+}
+
+/// Checks shared by every call kind that need no transport: profile pinning, text
+/// interpretation capability and the input size bound.
+pub(super) fn preflight(
+    profile: &ProviderProfile,
+    request: &InterpretationRequest,
+) -> Result<(), ProviderFailure> {
+    if !request.is_pinned_to(profile) {
+        return Err(fail(FailureKind::ProfileMismatch));
+    }
+    let text_capability = profile
+        .capability(ProviderCapability::TextInterpretation)
+        .filter(|metadata| metadata.support == CapabilitySupport::Supported)
+        .ok_or_else(|| fail(FailureKind::CapabilityUnavailable))?;
+    if text_capability
+        .input_size_limit
+        .is_some_and(|limit| request.text().len() > limit)
+    {
+        return Err(fail(FailureKind::InputTooLarge));
+    }
+    Ok(())
+}
+
+/// Turn the raw result of one adapter call into the validated output, applying cancellation,
+/// deadline, size and JSON-object checks.
+pub(super) fn complete_call(
+    request: &InterpretationRequest,
+    result: Result<Vec<u8>, TransportError>,
+    started_ms: u64,
+    timeout_ms: u64,
+    clock: &dyn Clock,
+    cancel: &CancelToken,
+    limits: &DispatchLimits,
+) -> Result<InterpretationOutput, ProviderFailure> {
     // A late or cancelled result is discarded even if the adapter produced output.
     if cancel.is_cancelled() {
         return Err(fail(FailureKind::Cancelled));
