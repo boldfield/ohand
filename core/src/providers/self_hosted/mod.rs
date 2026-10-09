@@ -23,8 +23,8 @@
 //!   the endpoint is not reachable from this network, so it is reported as unavailable and the
 //!   capture stays queued.
 //!
-//! Model support is per model: only the model the probe actually sent a structured chat
-//! request to is `Supported`; see [`text_interpretation_capability`].
+//! Model support is per model: only the model that answered this adapter's own request in the
+//! smoke run [`SMOKE_EVIDENCE_ID`] is `Supported`; see [`text_interpretation_capability`].
 
 use crate::interpretation::instructions::{output_schema, render_prompt};
 use crate::providers::contracts::{
@@ -44,6 +44,17 @@ pub const WORKER_EVIDENCE_ARTIFACT: &str =
 pub const WORKER_PROBE_REVISION: &str = "22c47772849c77b3d3a5e2b03be87098690e738e";
 /// Collection time recorded by the V08a artifact.
 pub const WORKER_EVIDENCE_COLLECTED_AT: &str = "2026-10-08T09:39:09Z";
+
+/// Evidence identifier of the adapter smoke run: this adapter's own request, built from the real
+/// interpretation prompt and `output_schema()`, sent to the configured endpoint.
+pub const SMOKE_EVIDENCE_ID: &str = "self-hosted-adapter-smoke-20261009T111140Z-7be0c91a";
+/// Repository path of the sanitized smoke artifact.
+pub const SMOKE_EVIDENCE_ARTIFACT: &str =
+    "docs/validation/evidence/spark-adapter-smoke/self-hosted-adapter-smoke-20261009T111140Z-7be0c91a.json";
+/// Adapter build revision recorded by the smoke artifact.
+pub const SMOKE_ADAPTER_REVISION: &str = "7be0c91a34616ac1b4caa434d2ba4fe0aa77f057";
+/// Collection time recorded by the smoke artifact.
+pub const SMOKE_EVIDENCE_COLLECTED_AT: &str = "2026-10-09T11:11:40Z";
 
 /// Evidence identifier of the V08b phone-context artifact (revision 2).
 pub const PHONE_EVIDENCE_ID: &str = "spark-phone-2026-10-08";
@@ -75,8 +86,9 @@ const RESPONSE_SCHEMA_NAME: &str = "interpretation_output";
 pub fn compatibility_boundary() -> &'static [&'static str] {
     &[
         "Verified: https with certificate validation; GET /models and POST /chat/completions answer 200 in OpenAI-compatible form (worker context).",
-        "Verified: a strict json_schema response_format returned content matching a two-key schema for deepseek-flash-iq3:latest only.",
-        "Not verified: the interpretation output schema itself, finish_reason values, streaming, latency, rate limits.",
+        "Verified (probe): a strict json_schema response_format returned content matching a two-key schema for deepseek-flash-iq3:latest only.",
+        "Verified (adapter smoke, worker context): the adapter's own request, carrying the interpretation output schema (optional properties included) as a strict json_schema, was answered 200 with an assistant message and finish_reason stop for three synthetic captures, and each reply mapped to a validated proposal. Calls took up to about 69 seconds against the profile's 120-second timeout.",
+        "Not verified: reminder_proposal and session_topic_proposal output (no smoke capture produced them), other finish_reason values, streaming, rate limits.",
         "Not verified: the credential is validated; the endpoint answered requests with and without it.",
         "Not verified: chat requests from the phone context, and for the five other listed models.",
         "Off the home network the configured hostname answers 302 (POST included) toward the tailnet name; the phone base URL must be the tailnet hostname with Tailscale connected.",
@@ -86,15 +98,17 @@ pub fn compatibility_boundary() -> &'static [&'static str] {
 
 /// Capability a profile may declare for text interpretation with `model`.
 ///
-/// Only [`CHAT_VERIFIED_MODEL`] is `Supported`, citing the V08a artifact, its probe revision and
-/// collection time. Other listed models and unlisted models are `Unverified` with a reason, so
+/// Only [`CHAT_VERIFIED_MODEL`] is `Supported`, citing the adapter smoke artifact (revision and
+/// collection time) and the V08a probe artifact. Other listed models and unlisted models are `Unverified` with a reason, so
 /// the dispatcher refuses to use them until evidence exists.
 pub fn text_interpretation_capability(model: &str, input_size_limit: usize) -> CapabilityMetadata {
     let capability = if model == CHAT_VERIFIED_MODEL {
         CapabilityMetadata::supported(
             ProviderCapability::TextInterpretation,
             format!(
-                "{WORKER_EVIDENCE_ID} ({WORKER_EVIDENCE_ARTIFACT}), probe revision \
+                "{SMOKE_EVIDENCE_ID} ({SMOKE_EVIDENCE_ARTIFACT}), adapter revision \
+                 {SMOKE_ADAPTER_REVISION}, collected {SMOKE_EVIDENCE_COLLECTED_AT}; \
+                 {WORKER_EVIDENCE_ID} ({WORKER_EVIDENCE_ARTIFACT}), probe revision \
                  {WORKER_PROBE_REVISION}, collected {WORKER_EVIDENCE_COLLECTED_AT}"
             ),
         )

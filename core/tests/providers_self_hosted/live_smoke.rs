@@ -237,10 +237,13 @@ fn git_output(arguments: &[&str]) -> String {
 #[test]
 #[ignore = "needs the worker-mounted provider configuration and network access"]
 fn live_endpoint_smoke_records_sanitized_evidence() {
-    let evidence_dir = PathBuf::from(
+    let requested_dir = PathBuf::from(
         std::env::var(EVIDENCE_DIR_ENV_VAR)
             .unwrap_or_else(|_| panic!("{EVIDENCE_DIR_ENV_VAR} must name the evidence directory")),
     );
+    let evidence_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join(requested_dir);
     let configuration = load_configuration();
     let scheme = configuration
         .base_url
