@@ -902,6 +902,72 @@ fn cancelling_mid_job_checkpoints_it_for_free_and_a_later_drain_resumes_it() {
 }
 
 #[test]
+fn an_interrupted_job_ends_the_drain_even_when_the_token_never_fires() {
+    let mut fixture = Fixture::new();
+    let first_item = fixture.add_item(FREE_FORM);
+    let second_item = fixture.add_item("pick up the parcel");
+    let first = fixture.enqueue(&first_item, OTHER_JOB_TYPE, None, 1);
+    let second = fixture.enqueue(&second_item, OTHER_JOB_TYPE, None, 1);
+    let (capability, calls) = Scripted::new(OTHER_JOB_TYPE, |_, _, _, _| {
+        Ok(CapabilityOutcome::Interrupted)
+    });
+    let cancel = CancelToken::new();
+    let mut limits = config();
+    limits.max_jobs_per_drain = 3;
+
+    let report = fixture.run(JobCapabilities::new().with(capability), limits, &cancel);
+
+    assert!(!cancel.is_cancelled());
+    assert_eq!(results(&report), vec![&JobResult::Interrupted]);
+    assert_eq!(report.stop, StopReason::Interrupted);
+    assert_eq!(calls.borrow().len(), 1);
+    let interrupted = fixture.job(&first);
+    assert_eq!(interrupted.status, "queued");
+    assert_eq!(interrupted.attempt_count, 1);
+    assert_eq!(interrupted.transient_failure_count, 0);
+    let waiting = fixture.job(&second);
+    assert_eq!(waiting.status, "queued");
+    assert_eq!(waiting.attempt_count, 0);
+}
+
+#[test]
+fn a_self_settled_interruption_also_ends_the_drain() {
+    let mut fixture = Fixture::new();
+    let first_item = fixture.add_item(FREE_FORM);
+    let second_item = fixture.add_item("pick up the parcel");
+    let first = fixture.enqueue(&first_item, OTHER_JOB_TYPE, None, 1);
+    let second = fixture.enqueue(&second_item, OTHER_JOB_TYPE, None, 1);
+    let (capability, calls) = Scripted::new(OTHER_JOB_TYPE, |db, job, _, now| {
+        // Put the job back under its own lease, as the interpretation dispatcher does on cancel.
+        db.conn()
+            .execute(
+                "UPDATE jobs SET status = 'queued', next_attempt_at = ?, lease_expires_at = NULL \
+                 WHERE job_id = ? AND status = 'running' AND attempt_count = ?",
+                rusqlite::params![now.to_rfc3339(), job.job_id, job.attempt_count],
+            )
+            .expect("requeue under lease");
+        Ok(CapabilityOutcome::Settled(Settlement::Interrupted))
+    });
+    let mut limits = config();
+    limits.max_jobs_per_drain = 3;
+
+    let report = fixture.run(
+        JobCapabilities::new().with(capability),
+        limits,
+        &CancelToken::new(),
+    );
+
+    assert_eq!(
+        results(&report),
+        vec![&JobResult::Settled(Settlement::Interrupted)]
+    );
+    assert_eq!(report.stop, StopReason::Interrupted);
+    assert_eq!(calls.borrow().len(), 1);
+    assert_eq!(fixture.job(&first).attempt_count, 1);
+    assert_eq!(fixture.job(&second).attempt_count, 0);
+}
+
+#[test]
 fn cancellation_during_a_job_stops_the_drain_before_the_next_claim() {
     let mut fixture = Fixture::new();
     let first_item = fixture.add_item(FREE_FORM);
@@ -970,8 +1036,10 @@ fn a_cancelled_provider_call_requeues_at_once_and_leaves_the_item_alone() {
         results(&report),
         vec![&JobResult::Settled(Settlement::Interrupted)]
     );
-    // The call began; the cancellation that arrived during it is what ended it.
-    assert!(!cancel.is_cancelled() || report.stop == StopReason::Cancelled);
+    // The fake transport fires the shared token mid-call, which is what ended the call.
+    assert!(cancel.is_cancelled());
+    assert_eq!(report.stop, StopReason::Cancelled);
+    assert_eq!(fixture.job(&job_id).attempt_count, 1);
     let row = fixture.job(&job_id);
     assert_eq!(row.status, "queued");
     assert_eq!(row.transient_failure_count, 0);

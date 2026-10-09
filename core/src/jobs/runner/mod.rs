@@ -15,7 +15,8 @@
 //! - transient failures spend a durable per-job budget ([`RunnerConfig::max_attempts`]) with
 //!   exponential backoff, and the failure that spends the last attempt ends the job `failed`;
 //! - permanent failures end the job `failed` immediately;
-//! - interruption (cancellation, checkpoint) re-queues the job at once and spends nothing.
+//! - interruption (cancellation, checkpoint) re-queues the job at once, spends nothing, and ends
+//!   the drain so the job is not reclaimed within it.
 //!
 //! A result presented for a lease the job no longer holds (a duplicate or late delivery after
 //! lease recovery) is rejected by the queue/apply fencing, recorded nothing, and reported as
@@ -207,6 +208,9 @@ pub enum StopReason {
     JobLimit,
     TimeBudget,
     Cancelled,
+    /// A job was put back at a checkpoint. It is ready again at once, so the drain yields instead
+    /// of reclaiming it (and starving later jobs); the next drain resumes it.
+    Interrupted,
     /// The queue could not be read; nothing further was claimed.
     ClaimFailed(String),
 }
@@ -259,7 +263,21 @@ impl<'a> JobRunner<'a> {
                 break StopReason::TimeBudget;
             }
             match claim_job_with_lease(db, self.config.lease_duration, claim_time) {
-                Ok(Some(claimed)) => jobs.push(self.run_claimed(db, &claimed, cancel)),
+                Ok(Some(claimed)) => {
+                    let report = self.run_claimed(db, &claimed, cancel);
+                    let yielded = matches!(
+                        report.result,
+                        JobResult::Interrupted | JobResult::Settled(Settlement::Interrupted)
+                    );
+                    jobs.push(report);
+                    if yielded {
+                        break if cancel.is_cancelled() {
+                            StopReason::Cancelled
+                        } else {
+                            StopReason::Interrupted
+                        };
+                    }
+                }
                 Ok(None) => break StopReason::Idle,
                 Err(error) => break StopReason::ClaimFailed(error.to_string()),
             }
