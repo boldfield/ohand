@@ -429,3 +429,44 @@ unscheduled | remind me to call the roofer {time}, so I don't need to worry, I'l
 scheduled | remind me to call the roofer {time}, so I don't need to worry, thanks
 scheduled | remind me to call the roofer {time} so I don't need to worry!
 scheduled | remind me to call the roofer {time}, so there'll be no need to worry
+
+# --- I05b (PR #127 round 2): a coordinated or "about"-governed retraction verb keeps the request
+# only when its object is a noun phrase headed by a known thing (the allow-list the reason clause
+# already uses); an object the grammar cannot place, including new names for the reminder, its
+# time, the capture or the request, withdraws ---
+unscheduled | remind me {time} to call the roofer and cancel the nudges
+unscheduled | remind me {time} to call the roofer and cancel the prompt
+unscheduled | remind me {time} to call the roofer and cancel the prompt please
+unscheduled | remind me {time} to call the roofer and cancel the prompts
+unscheduled | remind me {time} to call the roofer and cancel the nine o'clock
+unscheduled | remind me {time} to call the roofer and cancel the nine
+unscheduled | remind me {time} to call the roofer and cancel the morning one
+unscheduled | remind me {time} to call the roofer and delete the audio
+unscheduled | remind me {time} to call the roofer and delete the voice clip
+unscheduled | remind me {time} to call the roofer and delete the clip
+unscheduled | remind me {time} to call the roofer and delete the dictation
+unscheduled | remind me {time} to call the roofer and delete the voice
+unscheduled | remind me {time} to call the roofer and cancel the ask
+unscheduled | remind me {time} to call the roofer and cancel my last ask
+unscheduled | remind me {time} to call the roofer and cancel the query
+unscheduled | remind me {time} to call the roofer and cancel the entry
+unscheduled | remind me {time} to call the roofer and stop the beeping
+unscheduled | remind me {time} to call the roofer and stop the buzzing
+unscheduled | remind me {time} to call the roofer and stop the alerting
+unscheduled | remind me {time} to call the roofer and cancel the thingy
+unscheduled | remind me {time} to call the roofer and cancel the gizmo
+unscheduled | remind me {time} to call the roofer and skip the whatsit
+unscheduled | remind me to call the roofer {time} and cancel the nudges
+unscheduled | remind me to call the roofer {time} and delete the audio
+unscheduled | remind me to call the roofer {time} and cancel the ask
+unscheduled | remind me to call the roofer {time} and stop the beeping
+unscheduled | remind me {time} about cancelling the nudges
+unscheduled | remind me {time} about cancelling the prompt
+unscheduled | remind me {time} about cancelling the ask
+unscheduled | remind me {time} to take the prompt back
+unscheduled | remind me {time} to take the ask back
+unscheduled | remind me {time} to take the audio back
+scheduled | remind me {time} to call the roofer and cancel the gas bill
+scheduled | remind me {time} to call the roofer and cancel the delivery
+scheduled | remind me {time} to call the library and take the books back
+scheduled | remind me {time} about returning the books

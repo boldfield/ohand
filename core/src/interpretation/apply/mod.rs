@@ -1599,7 +1599,7 @@ fn retracted_after(tokens: &[IntentToken], after: usize) -> bool {
 /// negation. An infinitive follows whose verb is neither one of the requested task's words, a way
 /// of contacting someone ([`CONTACT_VERBS`]) nor a pronoun-like word. Anything after the verb
 /// must be a phrase saying when ([`names_time_phrase`]) or a thing of the clause's own
-/// ([`reason_names_thing`]: a noun phrase headed by a [`THING_OBJECT_WORDS`] entry, "the quote",
+/// ([`names_task_object`]: a noun phrase headed by a [`THING_OBJECT_WORDS`] entry, "the quote",
 /// "the booking", "the order"). That rules out pronouns, indefinites ("anyone"), the task's own
 /// words and every noun the grammar does not know to be a thing ("the medic", "the handyman",
 /// "the staff", "my neighbour"): such an object most likely refers back to whoever the task is
@@ -1669,7 +1669,7 @@ fn need_gives_reason(
         && (if object.is_empty() {
             !RETRACTION_VERBS.contains(&verb_text)
         } else {
-            names_time_phrase(&object, request_words) || reason_names_thing(&object, request_words)
+            names_time_phrase(&object, request_words) || names_task_object(&object, request_words)
         })
         && !RETRACTION_FILLERS.contains(&verb_text)
         && !REASON_EXCLUDED_VERBS.contains(&verb_text)
@@ -1728,25 +1728,15 @@ const REASON_SUBJECT_WORDS: &[&str] = &[
     "should", "is", "are", "am", "be",
 ];
 
-/// Whether `words`, the complement object of a reason clause, name a thing of the clause's own: a
-/// task object in the positive shape of [`names_task_object`] whose head noun is a
-/// [`THING_OBJECT_WORDS`] entry ("the quote", "the gas bill", "the booking at the last minute").
-/// The list is an allow-list, so an object the grammar does not know to be a thing ("the medic",
-/// "the staff", "my landlord", "the crew") never gives a reason: after "call the roofer" it most
-/// likely names whoever the task is about, and withdrawing is the safe direction.
-fn reason_names_thing(words: &[&IntentToken], request_words: &[&str]) -> bool {
-    let texts = object_texts(words);
-    names_task_object(words, request_words)
-        && noun_phrase_end(&texts, 0, request_words)
-            .and_then(|end| texts.get(end.checked_sub(1)?))
-            .is_some_and(|head| THING_OBJECT_WORDS.contains(head))
-}
-
-/// Things and places a reason clause may name as the object of its complement ("so I don't need
-/// to chase the quote", "check the invoice", "cancel the booking", "explain the leak", "visit
-/// the shop", "handle the order"). People, roles, groups and institutions of people ("the medic",
-/// "the staff", "the office", "the team") are left out on purpose, as is anything that could
-/// stand for the request or the task; a noun that is not listed withdraws.
+/// Things and places a task object may name, whether as the object of a reason clause's
+/// complement ("so I don't need to chase the quote", "check the invoice", "cancel the booking",
+/// "explain the leak", "visit the shop", "handle the order") or of a retraction verb inside the
+/// requested task ("call the roofer and cancel the order", "delete the old photos", "take my
+/// library books back", "about cancelling the gym"). People, roles, groups and institutions of
+/// people ("the medic", "the staff", "the office", "the team") are left out on purpose, as is
+/// anything that could stand for the request, the reminder, its time or the capture ("the
+/// prompt", "the nudges", "the nine o'clock", "the audio", "the ask"); a noun that is not listed
+/// withdraws.
 const THING_OBJECT_WORDS: &[&str] = &[
     "quote",
     "quotes",
@@ -1860,6 +1850,8 @@ const THING_OBJECT_WORDS: &[&str] = &[
     "tools",
     "boxes",
     "photos",
+    "book",
+    "books",
     "cake",
     "flowers",
     "present",
@@ -2055,11 +2047,13 @@ fn request_attachment<'tokens>(
 /// Whether a retraction verb belongs to the task the reminder is for rather than withdrawing the
 /// request: it is the gerund after the request's own "about" ("remind me about cancelling the
 /// gym"), or a [`TASK_RETRACTION_VERBS`] entry coordinated with that task by "and" ("call the
-/// roofer and cancel the order"), and `object` (the rest of its clause) names something of its
-/// own ([`names_task_object`]). "and cancel it", "and cancel the reminder", "and forget I asked",
-/// "and drop the subject", "or forget the idea", ", and forget the plan",
-/// "and cancel that too", "and cancel the above", "and stop this nonsense" and a bare "and
-/// cancel" still withdraw.
+/// roofer and cancel the order"), and `object` (the rest of its clause) names a thing of its own
+/// ([`names_task_object`]: a noun phrase headed by a [`THING_OBJECT_WORDS`] entry). "and cancel
+/// it", "and cancel the reminder", "and cancel the nudges", "and cancel the prompt", "and cancel
+/// the nine o'clock", "and delete the audio", "and cancel the ask", "and stop the beeping", "and
+/// forget I asked", "and drop the subject", "or forget the idea", ", and forget the plan", "and
+/// cancel that too", "and cancel the above", "and stop this nonsense" and a bare "and cancel"
+/// still withdraw.
 fn verb_is_part_of_requested_task(
     tokens: &[IntentToken],
     time_end: usize,
@@ -2076,19 +2070,24 @@ fn verb_is_part_of_requested_task(
 }
 
 /// Whether `words` (unquoted, one clause) are a concrete task object, accepted only in a positive
-/// shape: a noun phrase (a [`NOUN_PHRASE_DETERMINERS`] entry followed by noun candidates), then
-/// any prepositional phrases each made of an [`OBJECT_PREPOSITIONS`] entry and such a noun
-/// phrase, then at most [`REPEAT_ADVERBS`]; politeness fillers ("please") are skipped. Anything
-/// else, including a bare pronoun or demonstrative ("it", "him", "that", "anyone", "I asked") or a
-/// trailing adverb ("the order too"), is not a task object: when the grammar is unsure the
-/// request stays withdrawn. "the order", "the gym" and "my library books" qualify; "that too",
-/// "this nonsense", "the above", "the reminder", "the whole business" and, after "call the
-/// roofer", "the phone call", "the callout" and "the roofing job" do not ([`is_noun_candidate`]).
+/// shape: a noun phrase (a [`NOUN_PHRASE_DETERMINERS`] entry followed by noun candidates) whose
+/// head noun is a [`THING_OBJECT_WORDS`] entry, then any prepositional phrases each made of an
+/// [`OBJECT_PREPOSITIONS`] entry and a noun phrase, then at most [`REPEAT_ADVERBS`]; politeness
+/// fillers ("please") are skipped. Anything else, including a bare pronoun or demonstrative
+/// ("it", "him", "that", "anyone", "I asked"), a trailing adverb ("the order too") or a head noun
+/// the grammar does not know to be a thing, is not a task object: the list is an allow-list, so
+/// a noun that names the reminder, its time, the capture or the request in words the grammar
+/// has not met ("the nudges", "the prompt", "the nine o'clock", "the audio", "the ask") never
+/// reopens a withdrawal. "the order", "the gym", "the gas bill" and "my library books" qualify;
+/// "that too", "this nonsense", "the above", "the reminder", "the whole business", "the query",
+/// "the beeping" and, after "call the roofer", "the phone call", "the callout" and "the roofing
+/// job" do not ([`is_noun_candidate`]).
 fn names_task_object(words: &[&IntentToken], request_words: &[&str]) -> bool {
     let texts = object_texts(words);
     noun_phrase_end(&texts, 0, request_words).is_some_and(|end| {
-        prepositional_phrases_end(&texts, end, OBJECT_PREPOSITIONS, request_words)
-            == Some(texts.len())
+        THING_OBJECT_WORDS.contains(&texts[end - 1])
+            && prepositional_phrases_end(&texts, end, OBJECT_PREPOSITIONS, request_words)
+                == Some(texts.len())
     })
 }
 
