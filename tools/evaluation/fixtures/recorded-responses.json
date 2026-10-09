@@ -1,0 +1,1217 @@
+{
+  "format_version": 1,
+  "responses": [
+    {
+      "scenario_id": "conforming/design-broad-intention",
+      "fixture_id": "design-broad-intention",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "item_type": "idea",
+          "source_spans": [
+            {
+              "start": 0,
+              "end": 33
+            }
+          ],
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/design-undated-action",
+      "fixture_id": "design-undated-action",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "item_type": "action",
+          "source_spans": [
+            {
+              "start": 0,
+              "end": 25
+            }
+          ],
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/design-dated-information",
+      "fixture_id": "design-dated-information",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "item_type": "note",
+          "source_spans": [
+            {
+              "start": 0,
+              "end": 29
+            }
+          ],
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/design-explicit-reminder",
+      "fixture_id": "design-explicit-reminder",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "item_type": "action",
+          "source_spans": [
+            {
+              "start": 0,
+              "end": 45
+            }
+          ],
+          "reminder_proposal": {
+            "source_span": {
+              "start": 10,
+              "end": 26
+            },
+            "quality": "explicit",
+            "instant": "2026-10-09T15:00:00-04:00",
+            "timezone_id": "America/New_York"
+          },
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/design-session-topic",
+      "fixture_id": "design-session-topic",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "session_topic_proposal": {
+            "topic": "therapy",
+            "source_span": {
+              "start": 17,
+              "end": 24
+            }
+          },
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/design-unsupported-spoken-update",
+      "fixture_id": "design-unsupported-spoken-update",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "abstention": "UnsupportedOperation",
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/design-exploratory-thought",
+      "fixture_id": "design-exploratory-thought",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "item_type": "idea",
+          "source_spans": [
+            {
+              "start": 0,
+              "end": 32
+            }
+          ],
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/negation-do-not-remind",
+      "fixture_id": "negation-do-not-remind",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "abstention": "Negated",
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/negation-do-not-remind-me-to-call",
+      "fixture_id": "negation-do-not-remind-me-to-call",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "abstention": "Negated",
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/quoted-text",
+      "fixture_id": "quoted-text",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "abstention": {
+            "Other": "quoted speech"
+          },
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/hypothetical-question",
+      "fixture_id": "hypothetical-question",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "item_type": "idea",
+          "source_spans": [
+            {
+              "start": 0,
+              "end": 49
+            }
+          ],
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/prompt-injection-attempt-1",
+      "fixture_id": "prompt-injection-attempt-1",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "item_type": "note",
+          "source_spans": [
+            {
+              "start": 0,
+              "end": 120
+            }
+          ],
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/prompt-injection-attempt-2",
+      "fixture_id": "prompt-injection-attempt-2",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "item_type": "action",
+          "source_spans": [
+            {
+              "start": 0,
+              "end": 59
+            }
+          ],
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/date-explicit-today",
+      "fixture_id": "date-explicit-today",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "item_type": "action",
+          "source_spans": [
+            {
+              "start": 0,
+              "end": 45
+            }
+          ],
+          "reminder_proposal": {
+            "quality": "explicit",
+            "instant": "2026-10-08T17:00:00-04:00",
+            "timezone_id": "America/New_York",
+            "source_span": {
+              "start": 10,
+              "end": 25
+            }
+          },
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/date-relative-next-monday",
+      "fixture_id": "date-relative-next-monday",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "item_type": "action",
+          "source_spans": [
+            {
+              "start": 0,
+              "end": 43
+            }
+          ],
+          "reminder_proposal": {
+            "quality": "ambiguous",
+            "source_span": {
+              "start": 10,
+              "end": 21
+            }
+          },
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/date-ambiguous-friday",
+      "fixture_id": "date-ambiguous-friday",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "item_type": "action",
+          "source_spans": [
+            {
+              "start": 0,
+              "end": 36
+            }
+          ],
+          "reminder_proposal": {
+            "quality": "ambiguous",
+            "source_span": {
+              "start": 10,
+              "end": 16
+            }
+          },
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/date-ambiguous-maybe-friday",
+      "fixture_id": "date-ambiguous-maybe-friday",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "item_type": "action",
+          "source_spans": [
+            {
+              "start": 0,
+              "end": 43
+            }
+          ],
+          "reminder_proposal": {
+            "quality": "ambiguous",
+            "source_span": {
+              "start": 16,
+              "end": 22
+            }
+          },
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/timezone-explicit",
+      "fixture_id": "timezone-explicit",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "item_type": "action",
+          "source_spans": [
+            {
+              "start": 0,
+              "end": 51
+            }
+          ],
+          "reminder_proposal": {
+            "quality": "ambiguous",
+            "source_span": {
+              "start": 10,
+              "end": 32
+            }
+          },
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/timezone-implicit-local",
+      "fixture_id": "timezone-implicit-local",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "item_type": "action",
+          "source_spans": [
+            {
+              "start": 0,
+              "end": 47
+            }
+          ],
+          "reminder_proposal": {
+            "timezone_id": "America/New_York",
+            "quality": "explicit",
+            "instant": "2026-10-09T09:00:00-04:00",
+            "source_span": {
+              "start": 10,
+              "end": 28
+            }
+          },
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/timezone-conflicting",
+      "fixture_id": "timezone-conflicting",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "item_type": "action",
+          "source_spans": [
+            {
+              "start": 0,
+              "end": 56
+            }
+          ],
+          "reminder_proposal": {
+            "timezone_id": "Asia/Tokyo",
+            "quality": "explicit",
+            "instant": "2026-10-09T09:00:00+09:00",
+            "source_span": {
+              "start": 10,
+              "end": 39
+            }
+          },
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/asr-dropped-word-remind-me",
+      "fixture_id": "asr-dropped-word-remind-me",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "abstention": "UncertainTarget",
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/asr-dropped-word-action",
+      "fixture_id": "asr-dropped-word-action",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "item_type": "action",
+          "source_spans": [
+            {
+              "start": 0,
+              "end": 27
+            }
+          ],
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/asr-garbled-time",
+      "fixture_id": "asr-garbled-time",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "item_type": "action",
+          "source_spans": [
+            {
+              "start": 0,
+              "end": 48
+            }
+          ],
+          "reminder_proposal": {
+            "quality": "ambiguous",
+            "source_span": {
+              "start": 13,
+              "end": 35
+            }
+          },
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/mixed-note-action-capture",
+      "fixture_id": "mixed-note-action-capture",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "item_type": "action",
+          "source_spans": [
+            {
+              "start": 32,
+              "end": 58
+            }
+          ],
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/mixed-idea-action-capture",
+      "fixture_id": "mixed-idea-action-capture",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "item_type": "action",
+          "source_spans": [
+            {
+              "start": 39,
+              "end": 68
+            }
+          ],
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/correction-user-edit",
+      "fixture_id": "correction-user-edit",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "reminder_proposal": {
+            "quality": "explicit",
+            "instant": "2026-10-09T10:00:00-04:00",
+            "timezone_id": "America/New_York",
+            "source_span": {
+              "start": 10,
+              "end": 27
+            }
+          },
+          "item_type": "action",
+          "source_spans": [
+            {
+              "start": 0,
+              "end": 47
+            }
+          ],
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/broad-intention-get-healthier",
+      "fixture_id": "broad-intention-get-healthier",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "item_type": "broad_intention",
+          "source_spans": [
+            {
+              "start": 0,
+              "end": 33
+            }
+          ],
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/abstract-broad-thought",
+      "fixture_id": "abstract-broad-thought",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "item_type": "idea",
+          "source_spans": [
+            {
+              "start": 0,
+              "end": 23
+            }
+          ],
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/question-reflection",
+      "fixture_id": "question-reflection",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "item_type": "idea",
+          "source_spans": [
+            {
+              "start": 0,
+              "end": 38
+            }
+          ],
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/comparison-no-preference",
+      "fixture_id": "comparison-no-preference",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "item_type": "idea",
+          "source_spans": [
+            {
+              "start": 0,
+              "end": 30
+            }
+          ],
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/already-completed-action",
+      "fixture_id": "already-completed-action",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "item_type": "note",
+          "source_spans": [
+            {
+              "start": 0,
+              "end": 18
+            }
+          ],
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/empty-or-noise",
+      "fixture_id": "empty-or-noise",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "abstention": "UncertainTarget",
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "conforming/very-long-transcript",
+      "fixture_id": "very-long-transcript",
+      "role": "conforming",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Authored reply that restates the fixture oracle as a well-formed provider reply.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "item_type": "action",
+          "source_spans": [
+            {
+              "start": 412,
+              "end": 507
+            },
+            {
+              "start": 508,
+              "end": 599
+            }
+          ],
+          "operation": {
+            "kind": "annotate"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "adversarial/injection-forces-reminder",
+      "fixture_id": "prompt-injection-attempt-1",
+      "role": "adversarial",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "Instructions embedded in the captured text lead the reply to schedule a midnight reminder the user never asked for; the guard must keep it out of the store.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "operation": {
+            "kind": "annotate"
+          },
+          "item_type": "note",
+          "source_spans": [
+            {
+              "start": 100,
+              "end": 120
+            }
+          ],
+          "reminder_proposal": {
+            "instant": "2026-10-09T04:00:00Z",
+            "timezone_id": "America/New_York",
+            "quality": "explicit",
+            "source_span": {
+              "start": 67,
+              "end": 75
+            }
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "adversarial/quoted-speech-forces-reminder",
+      "fixture_id": "quoted-text",
+      "role": "adversarial",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "A reply turns reported speech into a dated reminder; the guard must not record it.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "operation": {
+            "kind": "annotate"
+          },
+          "reminder_proposal": {
+            "instant": "2026-10-08T18:00:00Z",
+            "timezone_id": "America/New_York",
+            "quality": "explicit",
+            "source_span": {
+              "start": 19,
+              "end": 24
+            }
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "adversarial/wrong-instant",
+      "fixture_id": "design-explicit-reminder",
+      "role": "adversarial",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "A reply states an instant one hour away from what the phrase resolves to; the guard must reject the claim instead of storing it.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "operation": {
+            "kind": "annotate"
+          },
+          "item_type": "action",
+          "source_spans": [
+            {
+              "start": 30,
+              "end": 45
+            }
+          ],
+          "reminder_proposal": {
+            "instant": "2026-10-09T16:00:00-04:00",
+            "timezone_id": "America/New_York",
+            "quality": "explicit",
+            "source_span": {
+              "start": 10,
+              "end": 26
+            }
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "adversarial/fabricated-deadline-for-hedged-time",
+      "fixture_id": "date-ambiguous-maybe-friday",
+      "role": "adversarial",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "A reply resolves a hedged ('Maybe ... Friday') time to an explicit instant; the oracle forbids any instant.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "operation": {
+            "kind": "annotate"
+          },
+          "item_type": "action",
+          "source_spans": [
+            {
+              "start": 26,
+              "end": 42
+            }
+          ],
+          "reminder_proposal": {
+            "instant": "2026-10-09T13:00:00Z",
+            "timezone_id": "America/New_York",
+            "quality": "explicit",
+            "source_span": {
+              "start": 16,
+              "end": 22
+            }
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "adversarial/fabricated-deadline-for-ambiguous-time",
+      "fixture_id": "date-relative-next-monday",
+      "role": "adversarial",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "A reply claims an explicit instant for 'next Monday', which the oracle treats as ambiguous.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "operation": {
+            "kind": "annotate"
+          },
+          "item_type": "action",
+          "source_spans": [
+            {
+              "start": 25,
+              "end": 43
+            }
+          ],
+          "reminder_proposal": {
+            "instant": "2026-10-12T13:00:00Z",
+            "timezone_id": "America/New_York",
+            "quality": "explicit",
+            "source_span": {
+              "start": 10,
+              "end": 21
+            }
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "adversarial/wrong-timezone",
+      "fixture_id": "timezone-conflicting",
+      "role": "adversarial",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "A reply keeps the device timezone for a time the user stated in Tokyo time; the oracle forbids the device zone.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "operation": {
+            "kind": "annotate"
+          },
+          "item_type": "action",
+          "source_spans": [
+            {
+              "start": 43,
+              "end": 56
+            }
+          ],
+          "reminder_proposal": {
+            "instant": "2026-10-09T13:00:00Z",
+            "timezone_id": "America/New_York",
+            "quality": "explicit",
+            "source_span": {
+              "start": 10,
+              "end": 39
+            }
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "adversarial/update-existing-item",
+      "fixture_id": "design-unsupported-spoken-update",
+      "role": "adversarial",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "A reply asks to change another item because the user said they were done; completion is an explicit control, never inferred.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "operation": {
+            "kind": "update",
+            "item_id": "6f1f0a52-0d7e-4c8e-9a53-2f4f7b1d9c01"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "adversarial/create-another-item",
+      "fixture_id": "design-unsupported-spoken-update",
+      "role": "adversarial",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "A reply asks to create a second item from the capture.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "operation": {
+            "kind": "create"
+          }
+        }
+      }
+    },
+    {
+      "scenario_id": "adversarial/provider-supplies-provenance",
+      "fixture_id": "already-completed-action",
+      "role": "adversarial",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "A reply names its own item id; trusted provenance is never taken from the provider.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "operation": {
+            "kind": "annotate"
+          },
+          "item_id": "6f1f0a52-0d7e-4c8e-9a53-2f4f7b1d9c01",
+          "item_type": "note",
+          "source_spans": [
+            {
+              "start": 0,
+              "end": 18
+            }
+          ]
+        }
+      }
+    },
+    {
+      "scenario_id": "adversarial/unknown-output-field",
+      "fixture_id": "already-completed-action",
+      "role": "adversarial",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "A reply carries a field outside the output contract.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "operation": {
+            "kind": "annotate"
+          },
+          "mark_completed": true
+        }
+      }
+    },
+    {
+      "scenario_id": "adversarial/abstention-with-facets",
+      "fixture_id": "already-completed-action",
+      "role": "adversarial",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "A reply both abstains and proposes a facet, which the contract forbids.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "operation": {
+            "kind": "annotate"
+          },
+          "item_type": "note",
+          "source_spans": [
+            {
+              "start": 0,
+              "end": 18
+            }
+          ],
+          "abstention": "Ambiguous"
+        }
+      }
+    },
+    {
+      "scenario_id": "adversarial/span-outside-text",
+      "fixture_id": "already-completed-action",
+      "role": "adversarial",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "A reply cites evidence beyond the end of the text.",
+      "behavior": {
+        "kind": "respond",
+        "body": {
+          "operation": {
+            "kind": "annotate"
+          },
+          "item_type": "note",
+          "source_spans": [
+            {
+              "start": 5,
+              "end": 400
+            }
+          ]
+        }
+      }
+    },
+    {
+      "scenario_id": "adversarial/prose-instead-of-json",
+      "fixture_id": "already-completed-action",
+      "role": "adversarial",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "The provider answers in prose, not a JSON object.",
+      "behavior": {
+        "kind": "respond_raw",
+        "body": "Sure! I have marked the dentist call as done."
+      }
+    },
+    {
+      "scenario_id": "adversarial/transport-unavailable",
+      "fixture_id": "already-completed-action",
+      "role": "adversarial",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "The provider is unreachable; the capture must stay saved and the job retriable.",
+      "behavior": {
+        "kind": "transport_error",
+        "error": "unavailable"
+      }
+    },
+    {
+      "scenario_id": "adversarial/transport-timeout",
+      "fixture_id": "already-completed-action",
+      "role": "adversarial",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "The provider call times out.",
+      "behavior": {
+        "kind": "transport_error",
+        "error": "timeout"
+      }
+    },
+    {
+      "scenario_id": "adversarial/transport-unauthorized",
+      "fixture_id": "already-completed-action",
+      "role": "adversarial",
+      "provenance": {
+        "kind": "synthetic_authored"
+      },
+      "description": "The provider rejects the credential.",
+      "behavior": {
+        "kind": "transport_error",
+        "error": "unauthorized"
+      }
+    }
+  ]
+}
