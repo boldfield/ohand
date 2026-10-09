@@ -16,9 +16,10 @@
 //!   work is also overdue.
 //! * **Content-free by construction.** The snapshot holds counts, ages, timestamps and
 //!   machine-readable reason labels only: no item, job or capture identifiers and no text. A
-//!   stored reason is reported only if it is a short lowercase label
-//!   ([`UNRECOGNIZED_REASON`] otherwise), and each kind reports at most
-//!   [`MAX_REASONS_PER_KIND`] distinct reasons.
+//!   stored reason is reported only if it is one of the known reason constants the core and its
+//!   native bridge record ([`KNOWN_REASONS`]); anything else, however label-shaped, is reported
+//!   as [`UNRECOGNIZED_REASON`]. Each kind reports at most [`MAX_REASONS_PER_KIND`] distinct
+//!   reasons.
 //! * **No notification stream.** Health is a pull-only fact. [`HealthSummary`] says what a status
 //!   surface may show; nothing here, or in the native service that carries it, posts a
 //!   notification.
@@ -31,6 +32,7 @@ use crate::jobs::queue::{JobStatus, PROFILE_MISSING_REASON, PROFILE_REVOKED_REAS
 use crate::jobs::runner::{
     CAPABILITY_UNAVAILABLE_REASON, INTERRUPTED_REASON, RETRIES_EXHAUSTED_REASON,
 };
+use crate::jobs::runner::{INTERNAL_ERROR_REASON, NOT_SETTLED_REASON};
 use crate::store::schema::Database;
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Duration, Utc};
@@ -39,14 +41,47 @@ use std::collections::BTreeMap;
 
 /// Reason label the host records on provider work it put back because the device was offline.
 pub const OFFLINE_DEFERRED_REASON: &str = "offline_deferred";
-/// Label reported in place of a stored reason that is not a short lowercase machine label.
+/// Label reported in place of a stored reason that is not a known reason constant.
 pub const UNRECOGNIZED_REASON: &str = "unrecognized";
 /// Label that absorbs reasons beyond [`MAX_REASONS_PER_KIND`] for a kind.
 pub const OVERFLOW_REASON: &str = "other";
 /// Most distinct reason labels reported per error kind; further reasons fold into
 /// [`OVERFLOW_REASON`], so a snapshot holds at most `(MAX_REASONS_PER_KIND + 1)` groups per kind.
 pub const MAX_REASONS_PER_KIND: usize = 8;
-const MAX_REASON_LABEL_BYTES: usize = 64;
+
+/// Failure reasons that mean the job waits for the user to fix configuration or authorization
+/// rather than for the provider to recover.
+const CONFIGURATION_REASONS: &[&str] = &["unauthorized", "unsupported", "unsupported_job_version"];
+
+/// Every reason the core or its native bridge records on a job. A stored reason is reported only
+/// if it is listed here: a reason's syntax says nothing about where it came from, so unlisted
+/// text is never echoed.
+pub const KNOWN_REASONS: &[&str] = &[
+    "timeout",
+    "cancelled",
+    "unavailable",
+    "rate_limited",
+    "unauthorized",
+    "unsupported",
+    "unsupported_job_version",
+    "invalid_output",
+    "output_too_large",
+    "input_too_large",
+    "capability_unavailable",
+    "profile_mismatch",
+    "rejected",
+    "source_unavailable",
+    "permanent",
+    "native_failure",
+    OFFLINE_DEFERRED_REASON,
+    RETRIES_EXHAUSTED_REASON,
+    INTERRUPTED_REASON,
+    CAPABILITY_UNAVAILABLE_REASON,
+    INTERNAL_ERROR_REASON,
+    NOT_SETTLED_REASON,
+    PROFILE_REVOKED_REASON,
+    PROFILE_MISSING_REASON,
+];
 
 /// Thresholds for judging a stall.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +139,9 @@ pub enum RecoverableErrorKind {
     LeaseExpired,
     /// The job's pinned provider profile was revoked or no longer exists.
     DestinationUnavailable,
+    /// The job waits for credentials or configuration the user must fix (rejected or missing
+    /// authorization, unsupported configuration).
+    ConfigurationNeeded,
     /// The job ended after spending its retry budget.
     RetriesExhausted,
     /// The job ended with a failure retrying cannot fix.
@@ -117,7 +155,8 @@ impl RecoverableErrorKind {
             | RecoverableErrorKind::WaitingForNetwork
             | RecoverableErrorKind::CapabilityUnavailable
             | RecoverableErrorKind::LeaseExpired => RecoveryPath::Automatic,
-            RecoverableErrorKind::DestinationUnavailable => RecoveryPath::UserAction,
+            RecoverableErrorKind::DestinationUnavailable
+            | RecoverableErrorKind::ConfigurationNeeded => RecoveryPath::UserAction,
             RecoverableErrorKind::RetriesExhausted | RecoverableErrorKind::PermanentFailure => {
                 RecoveryPath::Terminal
             }
@@ -233,19 +272,18 @@ impl ErrorGroups {
     }
 }
 
-/// Reports a stored reason only when it is a short lowercase machine label, so a reason that
-/// somehow carried captured text can never leave the core through health.
+/// Reports a stored reason only when it is a known reason constant, so a reason that somehow
+/// carried captured text, even a single lowercase word, can never leave the core through health.
 fn safe_reason_label(reason: &str) -> String {
-    let is_label = !reason.is_empty()
-        && reason.len() <= MAX_REASON_LABEL_BYTES
-        && reason
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
-    if is_label {
+    if KNOWN_REASONS.contains(&reason) {
         reason.to_string()
     } else {
         UNRECOGNIZED_REASON.to_string()
     }
+}
+
+fn is_configuration_reason(reason: &str) -> bool {
+    CONFIGURATION_REASONS.contains(&reason)
 }
 
 fn age_seconds(now: DateTime<Utc>, since: DateTime<Utc>) -> i64 {
@@ -352,6 +390,10 @@ pub fn read_processing_health(
                         RecoverableErrorKind::WaitingForNetwork,
                         OFFLINE_DEFERRED_REASON.to_string(),
                     )),
+                    Some(configuration) if is_configuration_reason(configuration) => Some((
+                        RecoverableErrorKind::ConfigurationNeeded,
+                        configuration.to_string(),
+                    )),
                     Some(other) => Some((
                         RecoverableErrorKind::RetryScheduled,
                         safe_reason_label(other),
@@ -380,8 +422,8 @@ pub fn read_processing_health(
                        WHERE newer.item_id = j.item_id
                          AND newer.job_type = j.job_type
                          AND newer.job_id != j.job_id
-                         AND newer.created_at > j.created_at
-                         AND newer.status IN (?5, ?6, ?7))
+                         AND (newer.created_at > j.created_at
+                              OR (newer.created_at = j.created_at AND newer.rowid > j.rowid)))
               GROUP BY j.status, j.failure_reason",
         )?;
         let mut rows = statement.query(rusqlite::params![
@@ -389,9 +431,6 @@ pub fn read_processing_health(
             JobStatus::Cancelled.as_str(),
             PROFILE_REVOKED_REASON,
             PROFILE_MISSING_REASON,
-            JobStatus::Queued.as_str(),
-            JobStatus::Running.as_str(),
-            JobStatus::Completed.as_str(),
         ])?;
         while let Some(row) = rows.next()? {
             let status: String = row.get(0)?;
@@ -413,6 +452,10 @@ pub fn read_processing_health(
                 Some(RETRIES_EXHAUSTED_REASON) => (
                     RecoverableErrorKind::RetriesExhausted,
                     RETRIES_EXHAUSTED_REASON.to_string(),
+                ),
+                Some(configuration) if is_configuration_reason(configuration) => (
+                    RecoverableErrorKind::ConfigurationNeeded,
+                    configuration.to_string(),
                 ),
                 Some(other) => (
                     RecoverableErrorKind::PermanentFailure,

@@ -196,7 +196,7 @@ fn a_failing_model_is_retrying_not_stalled() {
     fail_job_with_backoff(
         &mut fixture.db,
         "job-1",
-        "provider_unavailable".to_string(),
+        "unavailable".to_string(),
         3600,
         7200,
         start(),
@@ -208,7 +208,7 @@ fn a_failing_model_is_retrying_not_stalled() {
     assert!(!waiting.stalled, "backoff in progress is not a stall");
     assert_eq!(waiting.summary, HealthSummary::Waiting);
     let retry = error_of(&waiting, RecoverableErrorKind::RetryScheduled);
-    assert_eq!(retry.reason, "provider_unavailable");
+    assert_eq!(retry.reason, "unavailable");
     assert_eq!(retry.recovery, RecoveryPath::Automatic);
     assert_eq!(retry.job_count, 1);
     assert!(retry.next_attempt_at.unwrap() > fixture.clock.now());
@@ -339,6 +339,48 @@ fn a_retired_destination_job_clears_once_newer_work_completes() {
 }
 
 #[test]
+fn a_failed_replacement_does_not_resurface_the_obsolete_destination_error() {
+    let mut fixture = Fixture::new();
+    fixture.profile("profile-v1");
+    fixture.item("item-1");
+    fixture.enqueue("job-old", "item-1", Some("profile-v1"));
+    revoke_profile(&mut fixture.db, "profile-v1", start()).unwrap();
+    assert_eq!(
+        error_of(
+            &fixture.health_at(1),
+            RecoverableErrorKind::DestinationUnavailable
+        )
+        .job_count,
+        1
+    );
+
+    fixture.clock.set(start() + Duration::minutes(2));
+    enqueue_job(
+        &mut fixture.db,
+        "job-new".to_string(),
+        "item-1".to_string(),
+        JOB_TYPE.to_string(),
+        1,
+        None,
+        None,
+        1,
+        fixture.clock.now(),
+    )
+    .unwrap();
+    fixture.force_job("job-new", "failed", Some("invalid_output"));
+
+    let health = fixture.health_at(3);
+    assert!(health
+        .errors
+        .iter()
+        .all(|error| error.kind != RecoverableErrorKind::DestinationUnavailable));
+    assert_eq!(
+        error_of(&health, RecoverableErrorKind::PermanentFailure).reason,
+        "invalid_output"
+    );
+}
+
+#[test]
 fn terminal_failures_are_reported_until_superseded_or_deleted() {
     let mut fixture = Fixture::new();
     fixture.queued_job("job-exhausted");
@@ -435,24 +477,88 @@ fn health_json_carries_no_capture_content_or_identifiers() {
 }
 
 #[test]
-fn reason_labels_are_short_lowercase_machine_labels() {
-    assert_eq!(
-        safe_reason_label("provider_unavailable"),
-        "provider_unavailable"
-    );
+fn only_known_reason_constants_are_reported() {
+    for known in KNOWN_REASONS {
+        assert_eq!(safe_reason_label(known), *known);
+    }
     assert_eq!(safe_reason_label("HTTP 503"), UNRECOGNIZED_REASON);
     assert_eq!(safe_reason_label(""), UNRECOGNIZED_REASON);
     assert_eq!(safe_reason_label(&"a".repeat(65)), UNRECOGNIZED_REASON);
-    assert_eq!(safe_reason_label(&"a".repeat(64)), "a".repeat(64));
+    assert_eq!(
+        safe_reason_label("therapy"),
+        UNRECOGNIZED_REASON,
+        "a one-word lowercase token is not provenance"
+    );
+    assert_eq!(
+        safe_reason_label("call_dr_smith_about_results"),
+        UNRECOGNIZED_REASON
+    );
+}
+
+#[test]
+fn stored_reasons_shaped_like_labels_never_leave_the_core() {
+    let mut fixture = Fixture::new();
+    fixture.queued_job("job-word");
+    fixture.queued_job("job-snake");
+    fixture.queued_job("job-retry");
+    fixture.force_job("job-word", "failed", Some("therapy"));
+    fixture.force_job("job-snake", "failed", Some("call_dr_smith_about_results"));
+    fixture.force_job("job-retry", "queued", Some("divorce_lawyer"));
+    let health = fixture.health_at(1);
+    let json = serde_json::to_string(&health).unwrap();
+    for leaked in ["therapy", "dr_smith", "divorce", "lawyer"] {
+        assert!(!json.contains(leaked), "{leaked} leaked into {json}");
+    }
+    assert!(health
+        .errors
+        .iter()
+        .all(|error| error.reason == UNRECOGNIZED_REASON));
+}
+
+#[test]
+fn rejected_credentials_and_unsupported_configuration_need_the_user() {
+    let mut fixture = Fixture::new();
+    fixture.queued_job("job-unauthorized");
+    fixture.queued_job("job-unsupported");
+    fixture.queued_job("job-version");
+    fixture.queued_job("job-backoff");
+    fixture.force_job("job-unauthorized", "failed", Some("unauthorized"));
+    fixture.force_job("job-unsupported", "failed", Some("unsupported"));
+    fixture.force_job("job-version", "failed", Some("unsupported_job_version"));
+    fixture.force_job("job-backoff", "queued", Some("unauthorized"));
+
+    let health = fixture.health_at(1);
+    assert_eq!(health.summary, HealthSummary::NeedsAttention);
+    assert!(health.errors.iter().all(|error| {
+        error.kind == RecoverableErrorKind::ConfigurationNeeded
+            && error.recovery == RecoveryPath::UserAction
+    }));
+    let total: u32 = health.errors.iter().map(|error| error.job_count).sum();
+    assert_eq!(total, 4);
+    assert!(health
+        .errors
+        .iter()
+        .all(|error| error.kind != RecoverableErrorKind::PermanentFailure
+            && error.kind != RecoverableErrorKind::RetryScheduled));
 }
 
 #[test]
 fn reasons_per_kind_are_bounded() {
     let mut fixture = Fixture::new();
-    for index in 0..(MAX_REASONS_PER_KIND + 8) {
+    let permanent_reasons: Vec<&str> = KNOWN_REASONS
+        .iter()
+        .copied()
+        .filter(|reason| *reason != RETRIES_EXHAUSTED_REASON && !is_configuration_reason(reason))
+        .collect();
+    assert!(permanent_reasons.len() >= MAX_REASONS_PER_KIND + 8);
+    for (index, reason) in permanent_reasons
+        .iter()
+        .take(MAX_REASONS_PER_KIND + 8)
+        .enumerate()
+    {
         let job_id = format!("job-{index}");
         fixture.queued_job(&job_id);
-        fixture.force_job(&job_id, "failed", Some(&format!("reason_{index}")));
+        fixture.force_job(&job_id, "failed", Some(reason));
     }
     let health = fixture.health_at(1);
     assert_eq!(health.errors.len(), MAX_REASONS_PER_KIND + 1);

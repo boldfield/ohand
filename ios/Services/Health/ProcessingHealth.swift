@@ -26,6 +26,7 @@ public enum ProcessingErrorKind: String, Decodable, Equatable, Sendable {
     case capabilityUnavailable = "capability_unavailable"
     case leaseExpired = "lease_expired"
     case destinationUnavailable = "destination_unavailable"
+    case configurationNeeded = "configuration_needed"
     case retriesExhausted = "retries_exhausted"
     case permanentFailure = "permanent_failure"
 }
