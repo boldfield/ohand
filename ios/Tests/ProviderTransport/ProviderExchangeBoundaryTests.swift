@@ -117,6 +117,24 @@ final class ProviderExchangeBoundaryTests: ProviderTransportTestCase {
         XCTAssertFalse(String(decoding: received.body, as: UTF8.self).contains(syntheticSecret))
     }
 
+    func testJobAtACorrectedRevisionSendsTheCorrectedTextWithACorrectionBasis() throws {
+        let reply = try anthropicReply()
+        let server = try startServer { _ in .complete(status: 200, headers: ["Content-Type": "application/json"], body: reply) }
+        let reference = try storeSecret()
+        var scenario = ProviderExchangeScenario(credentialReference: reference)
+        scenario.correctedText = "call the plumber tomorrow at 9"
+        let (session, sender) = try openSession(server: server, scenario: scenario)
+
+        let operationID = try session.startExchange()
+        let final = try XCTUnwrap(session.finalEvent(for: operationID))
+
+        XCTAssertEqual(try final.decode(ProviderExchangeEvent.self).phase, .completed)
+        let body = String(decoding: try XCTUnwrap(sender.requestsFromCore.first?.body), as: UTF8.self)
+        XCTAssertTrue(body.contains("call the plumber tomorrow at 9"))
+        XCTAssertFalse(body.contains("call the roofer tomorrow at 9"), "superseded text is never sent")
+        XCTAssertTrue(body.contains(ProviderExchangeSeed.correctionEventID))
+    }
+
     func testCredentialRotationBetweenExchangesAppliesToTheNextDispatchWithoutTouchingTheStoredReference() throws {
         let reply = try anthropicReply()
         let server = try startServer { _ in .complete(status: 200, body: reply) }

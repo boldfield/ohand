@@ -599,6 +599,34 @@ fn load_job_row(connection: &Connection, job_id: &str) -> Result<JobRow, AbiFail
         .ok_or(AbiFailure::NOT_FOUND)
 }
 
+/// The job's item's latest user text correction as the contract's correction record identity
+/// (the stored id without its `-correction` suffix) and the corrected text. That text, not the
+/// immutable capture text, is the item's effective text once a correction exists.
+fn latest_text_correction(
+    connection: &Connection,
+    job_id: &str,
+) -> Result<Option<(String, String)>, AbiFailure> {
+    let stored: Option<(String, String)> = connection
+        .query_row(
+            "SELECT corrections.correction_id, corrections.new_value FROM corrections \
+             JOIN jobs ON jobs.item_id = corrections.item_id \
+             WHERE jobs.job_id = ? AND corrections.kind = 'text' \
+             ORDER BY corrections.revision DESC LIMIT 1",
+            [job_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(storage_failure)?;
+    stored
+        .map(|(correction_id, corrected_text)| {
+            correction_id
+                .strip_suffix("-correction")
+                .map(|record_id| (record_id.to_string(), corrected_text))
+                .ok_or(failures::INVALID_JOB)
+        })
+        .transpose()
+}
+
 /// Authorizes the job and builds the request, all from stored state. Nothing is sent and no
 /// credential is touched; the first denial wins.
 fn prepare(connection: &Connection, job_id: &str) -> Result<Prepared, AbiFailure> {
@@ -622,19 +650,31 @@ fn prepare(connection: &Connection, job_id: &str) -> Result<Prepared, AbiFailure
         return Err(failures::STALE_SOURCE);
     }
     let source_revision = u64::try_from(row.source_revision).map_err(|_| failures::INVALID_JOB)?;
-    let text = row
-        .text
-        .filter(|text| !text.trim().is_empty())
-        .ok_or(failures::NO_TEXT)?;
+    let (text, text_basis) = match latest_text_correction(connection, job_id)? {
+        Some((correction_record_id, corrected_text)) => (
+            corrected_text,
+            TextBasis::Correction {
+                correction_record_id,
+                item_revision: source_revision,
+            },
+        ),
+        None => (
+            row.text.ok_or(failures::NO_TEXT)?,
+            TextBasis::Original {
+                item_revision: source_revision,
+            },
+        ),
+    };
+    if text.trim().is_empty() {
+        return Err(failures::NO_TEXT);
+    }
     let reference_time = DateTime::parse_from_rfc3339(&row.capture_instant)
         .map_err(|_| failures::INVALID_JOB)?
         .with_timezone(&Utc);
     let request = InterpretationRequest::new(
         row.capture_id,
         source_revision,
-        TextBasis::Original {
-            item_revision: source_revision,
-        },
+        text_basis,
         text,
         row.request_version.ok_or(failures::INVALID_JOB)?,
         M1_INSTRUCTION_VERSION,

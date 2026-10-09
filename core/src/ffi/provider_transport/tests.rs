@@ -21,6 +21,8 @@ const NOTE_TEXT: &str = "call the roofer tomorrow at 9";
 const CAPTURE_ID: &str = "5a1c0000-0000-4000-8000-0000000000c1";
 const ITEM_ID: &str = "5a1c0000-0000-4000-8000-0000000000e1";
 const REQUEST_VERSION: &str = "5a1c0000-0000-4000-8000-0000000000a1";
+const CORRECTED_TEXT: &str = "call the plumber tomorrow at 9";
+const CORRECTION_EVENT_ID: &str = "5a1c0000-0000-4000-8000-0000000000c9";
 const JOB_ID: &str = "job-synthetic-1";
 const ROUTE_ID: &str = "route-synthetic";
 
@@ -89,7 +91,9 @@ struct Scenario {
     authorized_destinations: Vec<String>,
     revoked: bool,
     item_revision: i64,
+    job_source_revision: i64,
     text: Option<&'static str>,
+    correction: Option<&'static str>,
 }
 
 impl Scenario {
@@ -109,7 +113,9 @@ impl Scenario {
             authorized_destinations: origins,
             revoked: false,
             item_revision: 0,
+            job_source_revision: 0,
             text: Some(NOTE_TEXT),
+            correction: None,
         }
     }
 }
@@ -190,15 +196,31 @@ fn seed(path: &str, scenario: &Scenario) {
         .execute(
             "INSERT INTO jobs (job_id, job_schema_version, item_id, job_type, source_revision, \
              profile_version, request_version, status, attempt_count, created_at) \
-             VALUES (?, 1, ?, 'interpret', 0, ?, ?, 'queued', 0, '2026-10-08T09:30:02Z')",
+             VALUES (?, 1, ?, 'interpret', ?, ?, ?, 'queued', 0, '2026-10-08T09:30:02Z')",
             rusqlite::params![
                 JOB_ID,
                 ITEM_ID,
+                scenario.job_source_revision,
                 scenario.profile.profile_version(),
                 REQUEST_VERSION
             ],
         )
         .unwrap();
+    if let Some(corrected_text) = scenario.correction {
+        transaction
+            .execute(
+                "INSERT INTO corrections (correction_id, item_id, revision, kind, old_value, \
+                 new_value, created_at) VALUES (?, ?, ?, 'text', ?, ?, '2026-10-08T09:35:00Z')",
+                rusqlite::params![
+                    format!("{CORRECTION_EVENT_ID}-correction"),
+                    ITEM_ID,
+                    scenario.item_revision,
+                    NOTE_TEXT,
+                    corrected_text
+                ],
+            )
+            .unwrap();
+    }
     transaction.commit().unwrap();
 }
 
@@ -449,6 +471,36 @@ fn a_valid_job_is_sent_to_the_pinned_destination_off_the_worker_and_completes() 
     wait_until_idle(session.handle);
     assert_eq!(session.complete(11, 200, b"{}").code(), "not_found");
     session.assert_no_command();
+    session.close();
+}
+
+#[test]
+fn a_job_at_a_corrected_revision_sends_the_corrected_text_with_a_correction_basis() {
+    let _guard = serial();
+    let mut scenario = Scenario::anthropic();
+    scenario.item_revision = 1;
+    scenario.job_source_revision = 1;
+    scenario.correction = Some(CORRECTED_TEXT);
+    let session = Session::open("corrected", &scenario);
+    session.register_native();
+
+    session.start(15, JOB_ID);
+    assert_eq!(session.event(15).status, OHAND_CORE_STATUS_OK);
+    let send = send_description(&session.command(15));
+    let body = send["body"].as_str().unwrap();
+    assert!(body.contains(CORRECTED_TEXT));
+    assert!(!body.contains(NOTE_TEXT), "superseded text is never sent");
+    assert!(body.contains(CORRECTION_EVENT_ID));
+    assert!(!body.contains(&format!("{CORRECTION_EVENT_ID}-correction")));
+
+    session.complete(15, 200, &anthropic_reply(valid_proposal()));
+    let completed = session.event(15);
+    assert_eq!(
+        completed.status, OHAND_CORE_STATUS_OK,
+        "{:?}",
+        completed.payload
+    );
+    wait_until_idle(session.handle);
     session.close();
 }
 

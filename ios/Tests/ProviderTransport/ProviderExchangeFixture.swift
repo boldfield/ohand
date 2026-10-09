@@ -17,6 +17,9 @@ struct ProviderExchangeScenario {
     var authorizedDestinations: [String] = [ProviderExchangeScenario.vendorOrigin]
     var profileRevoked = false
     var captureText = "call the roofer tomorrow at 9"
+    /// When set, the item is at revision 1 with this user text correction and the job is pinned to revision 1.
+    var correctedText: String?
+    var revision: Int { correctedText == nil ? 0 : 1 }
 }
 
 enum ProviderExchangeSeed {
@@ -24,6 +27,7 @@ enum ProviderExchangeSeed {
     private static let itemID = "5a1c0000-0000-4000-8000-0000000000e1"
     private static let requestVersion = "5a1c0000-0000-4000-8000-0000000000a1"
     private static let routeID = "route-synthetic"
+    static let correctionEventID = "5a1c0000-0000-4000-8000-0000000000c9"
     private static let retryPolicy = #"{"max_attempts":3,"initial_backoff_ms":500,"max_backoff_ms":30000}"#
     private static let capabilities =
         #"{"text_interpretation":{"capability":"text_interpretation","support":"supported","# +
@@ -67,7 +71,7 @@ enum ProviderExchangeSeed {
             """
             INSERT INTO items (item_id, capture_id, revision, lifecycle_state, save_state, sync_state, \
             processing_state, transcription_state, created_at, updated_at) VALUES (\(quote(itemID)), \
-            \(quote(captureID)), 0, 'active', 'saved_local', 'not_configured', 'unprocessed', 'not_applicable', \
+            \(quote(captureID)), \(scenario.revision), 'active', 'saved_local', 'not_configured', 'unprocessed', 'not_applicable', \
             '2026-10-08T09:30:01Z', '2026-10-08T09:30:01Z')
             """,
             """
@@ -81,11 +85,20 @@ enum ProviderExchangeSeed {
             """
             INSERT INTO jobs (job_id, job_schema_version, item_id, job_type, source_revision, profile_version, \
             request_version, status, attempt_count, created_at) VALUES (\(quote(ProviderExchangeScenario.jobID)), \
-            1, \(quote(itemID)), 'interpret', 0, \(profileVersion), \(quote(requestVersion)), 'queued', 0, \
+            1, \(quote(itemID)), 'interpret', \(scenario.revision), \(profileVersion), \(quote(requestVersion)), 'queued', 0, \
             '2026-10-08T09:30:02Z')
             """,
         ]
-        for statement in statements {
+        var allStatements = statements
+        if let correctedText = scenario.correctedText {
+            allStatements.append(
+                """
+                INSERT INTO corrections (correction_id, item_id, revision, kind, old_value, new_value, created_at) \
+                VALUES (\(quote(correctionEventID + "-correction")), \(quote(itemID)), 1, 'text', \
+                \(captureText), \(quote(correctedText)), '2026-10-08T09:35:00Z')
+                """)
+        }
+        for statement in allStatements {
             var message: UnsafeMutablePointer<CChar>?
             let code = sqlite3_exec(database, statement, nil, nil, &message)
             let detail = message.map { String(cString: $0) } ?? ""
