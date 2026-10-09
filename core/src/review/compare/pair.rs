@@ -108,6 +108,18 @@ pub enum ConfigurationDifference {
         first: u32,
         second: u32,
     },
+    RetryInitialBackoffMs {
+        first: u64,
+        second: u64,
+    },
+    RetryMaxBackoffMs {
+        first: u64,
+        second: u64,
+    },
+    /// The configured endpoint differs. Endpoint values are never reproduced.
+    Endpoint,
+    /// The authorized destination class or origins differ. Origins are never reproduced.
+    Destination,
     StructuredOutput {
         first: StructuredOutputMode,
         second: StructuredOutputMode,
@@ -132,6 +144,8 @@ pub enum ComparisonLimitation {
     UnknownProviderDefaults,
     /// The arms differ in more than model identity.
     ConfigurationDiffers,
+    /// Both arms name the same model, so this pair does not vary model identity at all.
+    ModelNotDistinct,
 }
 
 /// What can and cannot be concluded from running this pair, known before any request is sent.
@@ -146,11 +160,12 @@ pub struct Comparability {
 }
 
 impl Comparability {
-    /// True only when the sole known difference is the model and every setting was requested
-    /// explicitly. It is not proof that model identity was the only variable: effective
+    /// True only when the arms name different models, that is the sole known difference, and
+    /// every setting was requested explicitly. It is not proof that model identity was the only variable: effective
     /// settings still have to be confirmed by the response metadata of each call.
     pub fn no_known_confounders(&self) -> bool {
         self.unknown_defaults.is_empty()
+            && self.differences.contains(&ConfigurationDifference::Model)
             && !self
                 .differences
                 .iter()
@@ -160,6 +175,8 @@ impl Comparability {
     fn derive(
         first: &ProviderProfile,
         second: &ProviderProfile,
+        first_authorization: &Authorization,
+        second_authorization: &Authorization,
         unknown_defaults: Vec<DiagnosticSetting>,
     ) -> Comparability {
         let mut differences = Vec::new();
@@ -178,15 +195,37 @@ impl Comparability {
                 second: second.timeout_seconds(),
             });
         }
-        let (first_retries, second_retries) = (
-            first.retry_policy().max_attempts,
-            second.retry_policy().max_attempts,
-        );
-        if first_retries != second_retries {
+        let (first_retry, second_retry) = (first.retry_policy(), second.retry_policy());
+        if first_retry.max_attempts != second_retry.max_attempts {
             differences.push(ConfigurationDifference::RetryMaxAttempts {
-                first: first_retries,
-                second: second_retries,
+                first: first_retry.max_attempts,
+                second: second_retry.max_attempts,
             });
+        }
+        if first_retry.initial_backoff_ms != second_retry.initial_backoff_ms {
+            differences.push(ConfigurationDifference::RetryInitialBackoffMs {
+                first: first_retry.initial_backoff_ms,
+                second: second_retry.initial_backoff_ms,
+            });
+        }
+        if first_retry.max_backoff_ms != second_retry.max_backoff_ms {
+            differences.push(ConfigurationDifference::RetryMaxBackoffMs {
+                first: first_retry.max_backoff_ms,
+                second: second_retry.max_backoff_ms,
+            });
+        }
+        if first.endpoint() != second.endpoint() {
+            differences.push(ConfigurationDifference::Endpoint);
+        }
+        let sorted_origins = |authorization: &Authorization| {
+            let mut origins = authorization.destinations().to_vec();
+            origins.sort();
+            origins
+        };
+        if first_authorization.destination_class() != second_authorization.destination_class()
+            || sorted_origins(first_authorization) != sorted_origins(second_authorization)
+        {
+            differences.push(ConfigurationDifference::Destination);
         }
         let first_text = first.capability(ProviderCapability::TextInterpretation);
         let second_text = second.capability(ProviderCapability::TextInterpretation);
@@ -218,6 +257,9 @@ impl Comparability {
             .any(ConfigurationDifference::is_confounder)
         {
             limitations.push(ComparisonLimitation::ConfigurationDiffers);
+        }
+        if !differences.contains(&ConfigurationDifference::Model) {
+            limitations.push(ComparisonLimitation::ModelNotDistinct);
         }
         Comparability {
             differences,
@@ -314,15 +356,23 @@ pub fn derive_pair(
             .expect("check_arm accepted only authorized decisions")
             .clone()
     };
+    let (first_authorization, second_authorization) =
+        (authorization_of(&first), authorization_of(&second));
     Ok(PairedRequests {
-        comparability: Comparability::derive(first.profile, second.profile, unknown_defaults),
+        comparability: Comparability::derive(
+            first.profile,
+            second.profile,
+            &first_authorization,
+            &second_authorization,
+            unknown_defaults,
+        ),
         first: PairedArm {
             request: first_request,
-            authorization: authorization_of(&first),
+            authorization: first_authorization,
         },
         second: PairedArm {
             request: second_request,
-            authorization: authorization_of(&second),
+            authorization: second_authorization,
         },
     })
 }

@@ -13,7 +13,7 @@ use crate::privacy::routing::{
 use crate::providers::contracts::{
     CapabilityMetadata, DiagnosticRequest, DiagnosticSetting, DiagnosticSupport,
     InterpretationRequest, ProviderCapability, ProviderProfile, ProviderProfileBuilder,
-    ProviderProtocol, RequestedSettings, StructuredOutputMode, TextBasis,
+    ProviderProtocol, RequestedSettings, RetryPolicy, StructuredOutputMode, TextBasis,
 };
 use crate::store::schema::{Clock, Database};
 use crate::time::TimeContext;
@@ -22,6 +22,7 @@ const ROUTE: &str = "route-1";
 const OPENAI: &str = "https://api.openai.com";
 const ANTHROPIC: &str = "https://api.anthropic.com";
 const SELF_HOSTED: &str = "https://self-hosted.example.test";
+const OTHER_SELF_HOSTED: &str = "https://other-self-hosted.example.test";
 const STAMP: &str = "2026-01-15T10:30:00Z";
 const SOURCE_TEXT: &str = "Call the dentist tomorrow morning";
 
@@ -129,7 +130,9 @@ impl Fixture {
              VALUES (?, 'default', 'personal', ?, ?)",
             rusqlite::params![
                 ROUTE,
-                format!("[\"{OPENAI}\",\"{ANTHROPIC}\",\"{SELF_HOSTED}\"]"),
+                format!(
+                    "[\"{OPENAI}\",\"{ANTHROPIC}\",\"{SELF_HOSTED}\",\"{OTHER_SELF_HOSTED}\"]"
+                ),
                 STAMP
             ],
         );
@@ -807,4 +810,120 @@ fn comparability_never_reproduces_configured_names() {
     let report = format!("{:?}", pair.comparability);
     assert!(!report.contains("secret-model-name"));
     assert!(!report.contains(first_profile.profile_id()));
+}
+
+#[test]
+fn same_model_pair_is_not_reported_as_model_only() {
+    let mut fixture = Fixture::granted();
+    let first_profile = openai_profile("model-a");
+    let second_profile =
+        hosted_profile("second-openai", ProviderProtocol::OpenAi, "model-a", OPENAI);
+    let first_auth = fixture.authorize_interpretation(&first_profile);
+    let second_auth = fixture.authorize_interpretation(&second_profile);
+    let support = support_all();
+    let repeat = derive_pair(
+        &source(&fixture),
+        arm(&first_profile, &first_auth, &support),
+        arm(&second_profile, &second_auth, &support),
+    )
+    .unwrap()
+    .comparability;
+    assert!(repeat.differences.is_empty());
+    assert!(!repeat.no_known_confounders());
+    assert!(repeat
+        .limitations
+        .contains(&ComparisonLimitation::ModelNotDistinct));
+    assert_eq!(
+        repeat.limitations[0],
+        ComparisonLimitation::AgreementIsNotAccuracy
+    );
+}
+
+#[test]
+fn reports_backoff_differences_as_confounders() {
+    let mut fixture = Fixture::granted();
+    let first_profile = openai_profile("model-a");
+    let slow_retry = ProviderProfileBuilder::new("slow-retry", ProviderProtocol::OpenAi, "model-b")
+        .credential_ref("credential-ref")
+        .authorized_destination(OPENAI)
+        .retry_policy(RetryPolicy {
+            max_attempts: 3,
+            initial_backoff_ms: 2_000,
+            max_backoff_ms: 60_000,
+        })
+        .capability(supported_text(1000))
+        .build()
+        .unwrap();
+    let first_auth = fixture.authorize_interpretation(&first_profile);
+    let second_auth = fixture.authorize_interpretation(&slow_retry);
+    let support = support_all();
+    let comparability = derive_pair(
+        &source(&fixture),
+        arm(&first_profile, &first_auth, &support),
+        arm(&slow_retry, &second_auth, &support),
+    )
+    .unwrap()
+    .comparability;
+    assert!(!comparability.no_known_confounders());
+    assert!(comparability
+        .limitations
+        .contains(&ComparisonLimitation::ConfigurationDiffers));
+    for expected in [
+        ConfigurationDifference::RetryInitialBackoffMs {
+            first: 500,
+            second: 2_000,
+        },
+        ConfigurationDifference::RetryMaxBackoffMs {
+            first: 30_000,
+            second: 60_000,
+        },
+    ] {
+        assert!(
+            comparability.differences.contains(&expected),
+            "missing {expected:?}"
+        );
+    }
+    assert!(!comparability
+        .differences
+        .iter()
+        .any(|difference| matches!(difference, ConfigurationDifference::RetryMaxAttempts { .. })));
+}
+
+#[test]
+fn reports_endpoint_and_destination_differences_without_values() {
+    let mut fixture = Fixture::new();
+    fixture.grant("text_interpretation", &[SELF_HOSTED, OTHER_SELF_HOSTED]);
+    let self_hosted = |id: &str, model: &str, origin: &str| {
+        ProviderProfileBuilder::new(id, ProviderProtocol::SelfHosted, model)
+            .credential_ref("credential-ref")
+            .endpoint(origin)
+            .authorized_destination(origin)
+            .capability(supported_text(1000))
+            .build()
+            .unwrap()
+    };
+    let first_profile = self_hosted("self-a", "model-a", SELF_HOSTED);
+    let second_profile = self_hosted("self-b", "model-b", OTHER_SELF_HOSTED);
+    let first_auth = fixture.authorize_interpretation(&first_profile);
+    let second_auth = fixture.authorize_interpretation(&second_profile);
+    let support = support_all();
+    let comparability = derive_pair(
+        &source(&fixture),
+        arm(&first_profile, &first_auth, &support),
+        arm(&second_profile, &second_auth, &support),
+    )
+    .unwrap()
+    .comparability;
+    assert!(!comparability.no_known_confounders());
+    assert!(comparability
+        .limitations
+        .contains(&ComparisonLimitation::ConfigurationDiffers));
+    assert!(comparability
+        .differences
+        .contains(&ConfigurationDifference::Endpoint));
+    assert!(comparability
+        .differences
+        .contains(&ConfigurationDifference::Destination));
+    let report = format!("{comparability:?}");
+    assert!(!report.contains("self-hosted.example.test"));
 }
