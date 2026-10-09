@@ -40,7 +40,7 @@ const EVIDENCE_DIR_ENV_VAR: &str = "OHAND_SMOKE_EVIDENCE_DIR";
 const PRIVATE_EVIDENCE_DIR_ENV_VAR: &str = "OHAND_PRIVATE_EVIDENCE_DIR";
 const DEFAULT_PRIVATE_EVIDENCE_DIRECTORY: &str = ".ohand-private-evidence";
 const CREDENTIAL_REF: &str = "credential-ref/spark-endpoint";
-const TIMEOUT_SECONDS: u32 = 120;
+const TIMEOUT_SECONDS: u32 = 300;
 const SYNTHETIC_CAPTURES: [(&str, &str); 3] = [
     (
         "reminder-capture",

@@ -76,8 +76,10 @@ pub const LISTED_MODELS: [&str; 6] = [
     "glm-5.3-flash",
 ];
 
-/// Completion token bound sent with every request; the value the probe's chat request used.
-pub const MAX_COMPLETION_TOKENS: u32 = 1024;
+/// Completion token bound sent with every request. The verified model spends part of it on a
+/// separate `reasoning` field; at 1024 the smoke run's reminder capture ended with
+/// `finish_reason` `length` and empty content, so the bound is a ceiling, not a typical size.
+pub const MAX_COMPLETION_TOKENS: u32 = 4096;
 /// Path appended to the profile's base URL.
 pub const CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
 const RESPONSE_SCHEMA_NAME: &str = "interpretation_output";
