@@ -602,7 +602,7 @@ fn record_transient_failure(
         tx.commit().map_err(anyhow::Error::from)?;
         return Ok(TransientSettlement::Exhausted(outcome));
     }
-    let retry_at = now + chrono::Duration::seconds(transient_delay_seconds(policy, failures));
+    let retry_at = transient_retry_at(policy, now, failures);
     tx.execute(
         "UPDATE jobs SET status = ?, failure_reason = ?, next_attempt_at = ?, lease_expires_at = NULL
           WHERE job_id = ? AND status = ? AND attempt_count = ?",
@@ -634,25 +634,36 @@ fn transient_failures(db: &Database, job: &Job) -> Result<u64, DispatchError> {
 }
 
 /// Delay after the `failures`-th transient provider failure: the queue's exponential formula,
-/// `min(max, base * 2^failures)`, with the profile's backoff bounds.
-fn transient_delay_seconds(policy: &RetryPolicy, failures: u64) -> i64 {
-    let backoff = transient_backoff(policy);
+/// `min(max, base * 2^failures)`, computed and capped in the profile's own milliseconds so a
+/// non-integral-second maximum is never exceeded.
+fn transient_delay_milliseconds(policy: &RetryPolicy, failures: u64) -> u64 {
     let exponent = u32::try_from(failures).unwrap_or(u32::MAX);
     std::cmp::min(
-        backoff.max_seconds,
-        backoff
-            .base_seconds
-            .saturating_mul(2i64.saturating_pow(exponent)),
+        policy.max_backoff_ms,
+        policy
+            .initial_backoff_ms
+            .saturating_mul(2u64.saturating_pow(exponent)),
     )
 }
 
-fn transient_backoff(policy: &RetryPolicy) -> Backoff {
-    let seconds =
-        |milliseconds: u64| i64::try_from(milliseconds.div_ceil(1000)).unwrap_or(i64::MAX);
-    Backoff {
-        base_seconds: seconds(policy.initial_backoff_ms),
-        max_seconds: seconds(policy.max_backoff_ms),
-    }
+/// The latest retry time the queue can store and order: job timestamps are RFC 3339 text compared
+/// as strings, which only sorts correctly while the year has four digits.
+fn latest_storable_retry_at() -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339("9999-12-31T23:59:59.999+00:00")
+        .expect("constant timestamp parses")
+        .with_timezone(&Utc)
+}
+
+/// When to retry after `failures` transient provider failures. A delay beyond what a timestamp
+/// can represent or the queue can store is shortened to the latest storable time rather than
+/// panicking, so any accepted policy still re-queues durably and never waits past its maximum.
+fn transient_retry_at(policy: &RetryPolicy, now: DateTime<Utc>, failures: u64) -> DateTime<Utc> {
+    let latest = latest_storable_retry_at();
+    i64::try_from(transient_delay_milliseconds(policy, failures))
+        .ok()
+        .and_then(chrono::Duration::try_milliseconds)
+        .and_then(|delay| now.checked_add_signed(delay))
+        .map_or(latest, |retry_at| std::cmp::min(retry_at, latest))
 }
 
 fn failure_kind_name(kind: FailureKind) -> &'static str {

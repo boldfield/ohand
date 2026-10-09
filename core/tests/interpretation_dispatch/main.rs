@@ -18,7 +18,7 @@ use ohand_core::providers::anthropic::{
 };
 use ohand_core::providers::contracts::{
     CancelToken, CapabilityMetadata, Clock, FailureKind, ManualClock, ProviderCapability,
-    ProviderProfile, ProviderProfileBuilder, ProviderProtocol, StructuredOutputMode,
+    ProviderProfile, ProviderProfileBuilder, ProviderProtocol, RetryPolicy, StructuredOutputMode,
     TransportError,
 };
 use ohand_core::providers::openai::{HttpTransport, OpenAiAdapter};
@@ -528,9 +528,18 @@ impl Fixture {
 }
 
 /// The backoff after the `failures`-th transient failure under `anthropic_profile`'s default
-/// retry policy (1 s base after rounding 500 ms up, 30 s cap): `min(30, 1 * 2^failures)` seconds.
+/// retry policy (500 ms base, 30 s cap): `min(30 000, 500 * 2^failures)` milliseconds.
 fn transient_delay(failures: u32) -> Duration {
-    Duration::seconds(std::cmp::min(30, 1i64 << failures))
+    Duration::milliseconds(std::cmp::min(30_000, 500i64 << failures))
+}
+
+/// `anthropic_profile` with its retry policy replaced.
+fn anthropic_profile_with_retry(retry: RetryPolicy) -> ProviderProfile {
+    anthropic_profile()
+        .to_builder()
+        .retry_policy(retry)
+        .build()
+        .unwrap()
 }
 
 fn span_of(text: &str, needle: &str) -> Value {
@@ -978,6 +987,100 @@ fn transient_failures_stop_at_the_pinned_attempt_limit_and_keep_the_source() {
     assert_eq!(after.proposals, 0);
     assert_eq!(after.processing_state, "uninterpreted");
     assert_eq!(fixture.status().processing_job_status, None);
+}
+
+#[test]
+fn a_non_integral_second_backoff_maximum_is_never_exceeded() {
+    let mut fixture = Fixture::new(FREE_FORM);
+    let profile = anthropic_profile_with_retry(RetryPolicy {
+        max_attempts: 3,
+        initial_backoff_ms: 1_500,
+        max_backoff_ms: 1_500,
+    });
+    fixture.set_up_provider(&profile, ANTHROPIC_ORIGIN);
+    let providers = Providers::anthropic(vec![
+        FakeAnthropicStep::fail(TransportError::Unavailable),
+        FakeAnthropicStep::fail(TransportError::Unavailable),
+    ]);
+    let mut job = fixture.enqueue_and_claim(Some(&profile));
+    let mut at = now();
+
+    for attempt in 1..=2 {
+        let outcome = providers.run(&mut fixture, &job, at);
+        let retry_at = match outcome {
+            DispatchOutcome::BackedOff {
+                reason: WaitReason::Transient(FailureKind::Unavailable),
+                retry_at,
+            } => retry_at,
+            other => panic!("attempt {attempt}: {other:?}"),
+        };
+        assert_eq!(retry_at, at + Duration::milliseconds(1_500));
+        let stored = fixture.job_row(&job.job_id).next_attempt_at.unwrap();
+        assert_eq!(
+            DateTime::parse_from_rfc3339(&stored).unwrap(),
+            retry_at,
+            "the stored retry time keeps millisecond precision"
+        );
+        // Not eligible before the configured maximum has elapsed; eligible once it has.
+        assert!(claim_job_with_lease(
+            &mut fixture.db,
+            Duration::seconds(LEASE_SECONDS),
+            retry_at - Duration::milliseconds(1)
+        )
+        .unwrap()
+        .is_none());
+        at = retry_at;
+        job = fixture.claim(at);
+    }
+    assert_eq!(providers.calls_to_anthropic().len(), 2);
+}
+
+#[test]
+fn the_largest_accepted_backoff_policy_requeues_durably_instead_of_panicking() {
+    let mut fixture = Fixture::new(FREE_FORM);
+    let profile = anthropic_profile_with_retry(RetryPolicy {
+        max_attempts: 3,
+        initial_backoff_ms: u64::MAX,
+        max_backoff_ms: u64::MAX,
+    });
+    fixture.set_up_provider(&profile, ANTHROPIC_ORIGIN);
+    let providers =
+        Providers::anthropic(vec![FakeAnthropicStep::fail(TransportError::Unavailable)]);
+    let job = fixture.enqueue_and_claim(Some(&profile));
+    let before = fixture.durable();
+
+    let outcome = providers.run(&mut fixture, &job, now());
+
+    let retry_at = match outcome {
+        DispatchOutcome::BackedOff {
+            reason: WaitReason::Transient(FailureKind::Unavailable),
+            retry_at,
+        } => retry_at,
+        other => panic!("{other:?}"),
+    };
+    // The unrepresentable delay is shortened to the latest time the queue can store and order.
+    assert_eq!(retry_at.to_rfc3339(), "9999-12-31T23:59:59.999+00:00");
+    assert_eq!(fixture.durable(), before);
+    let row = fixture.job_row(&job.job_id);
+    assert_eq!(row.status, "queued");
+    assert_eq!(row.failure_reason.as_deref(), Some("unavailable"));
+    assert_eq!(
+        row.next_attempt_at.as_deref(),
+        Some("9999-12-31T23:59:59.999+00:00")
+    );
+    assert_eq!(
+        fixture.status().processing_job_status,
+        Some(ProcessingJobStatus::RetryingAfterTransient)
+    );
+    // Stored as a four-digit year, the retry still sorts after now: nothing is claimable early.
+    assert!(claim_job_with_lease(
+        &mut fixture.db,
+        Duration::seconds(LEASE_SECONDS),
+        now() + Duration::days(365 * 1000)
+    )
+    .unwrap()
+    .is_none());
+    assert_eq!(providers.calls_to_anthropic().len(), 1);
 }
 
 #[test]
