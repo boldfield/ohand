@@ -21,7 +21,8 @@ import Foundation
 /// current. Whenever an abandoned mutation completes late, the bridge re-applies the desired state
 /// under the same lock, so a late write is overwritten rather than trusted, and a check made
 /// earlier is never acted on after a newer operation has started. Re-applying is itself bounded
-/// and tracked; one that cannot finish is remembered and retried by `reconcile()`.
+/// and tracked, and counts as done only once the OS confirms the desired state; one that cannot
+/// finish or confirm is remembered and retried by `reconcile()`.
 ///
 /// The state an operation puts back when it fails is the state the bridge last recorded for the
 /// identifier, not what the OS listed when the operation began: the list can still show an
@@ -94,27 +95,15 @@ public final class NotificationBridge: Sendable {
                     throw error
                 }
 
-                let pending: [NotificationCenterPendingRequest]
+                let installed: NotificationCenterPendingRequest
                 do {
-                    pending = try await self.bounded { try await center.pendingRequests() }
+                    installed = try await self.confirmInstalled(centerRequest)
                 } catch {
-                    // The caller is told this schedule failed, so its install is undone again.
+                    // The read failed, or the OS accepted the add without keeping it. The caller
+                    // is told this schedule failed, so the earlier state is wanted again.
                     self.ledger.setDesired(identifier, stateBeforeAttempt)
                     self.enforceInBackground(identifier)
                     throw error
-                }
-                // Only the request that was asked for counts as installed. A pending request that
-                // merely shares the identifier is an earlier one the OS kept when it accepted
-                // this add without applying it, so reporting it would confirm a replacement that
-                // never happened and leave the OS firing at the earlier instant.
-                guard let installed = pending.first(where: { $0.identifier == identifier }),
-                      Self.matches(installed, centerRequest)
-                else {
-                    // The OS accepted the add without keeping it. The caller is told this
-                    // schedule failed, so the earlier state is wanted again.
-                    self.ledger.setDesired(identifier, stateBeforeAttempt)
-                    self.enforceInBackground(identifier)
-                    throw NotificationBridgeError.installNotConfirmed
                 }
                 self.ledger.markSettled(identifier)
                 return InstalledNotification(
@@ -156,17 +145,8 @@ public final class NotificationBridge: Sendable {
                 }
 
                 do {
-                    for attempt in 0..<self.maximumRemovalPolls {
-                        let pending = try await self.bounded { try await center.pendingRequests() }
-                        if !pending.contains(where: { $0.identifier == rawIdentifier }) {
-                            self.ledger.markSettled(rawIdentifier)
-                            return
-                        }
-                        if attempt + 1 < self.maximumRemovalPolls {
-                            try await Task.sleep(nanoseconds: UInt64(self.removalPollInterval * 1_000_000_000))
-                        }
-                    }
-                    throw NotificationBridgeError.cancelNotConfirmed
+                    try await self.confirmAbsent(rawIdentifier)
+                    self.ledger.markSettled(rawIdentifier)
                 } catch {
                     // The caller is told this cancel failed, so the earlier request is put back.
                     self.ledger.setDesired(rawIdentifier, stateBeforeAttempt)
@@ -314,6 +294,12 @@ public final class NotificationBridge: Sendable {
 
     /// Makes the OS match the desired state of `identifier`, under its lock so no other operation
     /// on it can interleave. Leaves an identifier with no known desired state alone.
+    ///
+    /// The identifier is settled only once the OS confirms the desired state, by the same
+    /// read-back `schedule` and `cancel` require: the OS accepts an add it then does not keep,
+    /// and carries out a removal asynchronously. A write it did not confirm leaves the identifier
+    /// unsettled for `reconcile()`, so an abandoned operation is never called undone on the
+    /// strength of a write alone.
     private func enforce(_ identifier: String) async throws {
         let center = self.center
         do {
@@ -326,6 +312,7 @@ public final class NotificationBridge: Sendable {
                     try await self.mutate(identifier, toward: generation) {
                         await center.removePending(identifiers: [identifier])
                     }
+                    try await self.confirmAbsent(identifier)
                 case let .installed(request):
                     let current = try await self.bounded { try await center.pendingRequests() }
                         .first(where: { $0.identifier == identifier })
@@ -338,9 +325,11 @@ public final class NotificationBridge: Sendable {
                         try await self.mutate(identifier, toward: generation) {
                             await center.removePending(identifiers: [identifier])
                         }
+                        try await self.confirmAbsent(identifier)
                         break
                     }
                     try await self.mutate(identifier, toward: generation) { try await center.add(request) }
+                    _ = try await self.confirmInstalled(request)
                 }
                 self.ledger.markSettled(identifier)
             }
@@ -348,6 +337,36 @@ public final class NotificationBridge: Sendable {
             ledger.markUnsettled(identifier)
             throw error
         }
+    }
+
+    /// Reads the pending list back and returns the entry that is `request` itself. Only the
+    /// request that was asked for counts as installed: a pending request that merely shares the
+    /// identifier is an earlier one the OS kept when it accepted the add without applying it, so
+    /// taking it as confirmation would report a replacement that never happened and leave the OS
+    /// firing at the earlier instant.
+    private func confirmInstalled(_ request: NotificationCenterRequest) async throws -> NotificationCenterPendingRequest {
+        let center = self.center
+        let pending = try await bounded { try await center.pendingRequests() }
+        guard let installed = pending.first(where: { $0.identifier == request.identifier }),
+              Self.matches(installed, request)
+        else {
+            throw NotificationBridgeError.installNotConfirmed
+        }
+        return installed
+    }
+
+    /// Polls the pending list until the OS no longer lists `identifier`, because removal is
+    /// asynchronous. Fails with `cancelNotConfirmed` when it is still listed after the last poll.
+    private func confirmAbsent(_ identifier: String) async throws {
+        let center = self.center
+        for attempt in 0..<maximumRemovalPolls {
+            let pending = try await bounded { try await center.pendingRequests() }
+            if !pending.contains(where: { $0.identifier == identifier }) { return }
+            if attempt + 1 < maximumRemovalPolls {
+                try await Task.sleep(nanoseconds: UInt64(removalPollInterval * 1_000_000_000))
+            }
+        }
+        throw NotificationBridgeError.cancelNotConfirmed
     }
 
     /// Whether a bounded call's failure leaves its effect unknown: the bridge stopped waiting.

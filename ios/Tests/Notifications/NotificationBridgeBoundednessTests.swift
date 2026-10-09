@@ -577,6 +577,66 @@ final class NotificationBridgeBoundednessTests: XCTestCase {
         XCTAssertTrue(quick.unreconciledIdentifiers.isEmpty)
     }
 
+    /// A cancelled cancel's removal lands late, and the earlier request is put back with an add
+    /// the center accepts without keeping. That must not count as reconciled: the identifier
+    /// stays unreconciled, and a later re-application that the OS confirms settles it.
+    func testARecoveryAddTheCenterDropsLeavesTheIdentifierUnreconciled() async throws {
+        let original = try request()
+        _ = try await bridge.schedule(original)
+
+        let removeGate = newGate()
+        center.removeGate = removeGate
+        let bridge = self.bridge!
+        let target = try identifier()
+        let failure = await failureAfterCancellingWhileSuspended(in: removeGate) {
+            try await bridge.cancel(target)
+        }
+        XCTAssertEqual(failure, .cancelled)
+        XCTAssertEqual(inner.pendingIdentifiers, ["reminder-1#1"])
+
+        inner.retainsAddedRequests = false
+        center.removeGate = nil
+        removeGate.release()
+        await eventually("the suspended removal to land late") { !self.inner.removedIdentifiers.isEmpty }
+        await eventually("the earlier request to be written again") { self.inner.addedRequests.count >= 2 }
+        await letLateWorkRun(bridge)
+        XCTAssertTrue(inner.pendingIdentifiers.isEmpty, "the center accepted the recovery add without keeping it")
+        XCTAssertEqual(bridge.unreconciledIdentifiers, ["reminder-1#1"], "an unconfirmed recovery is not settled")
+
+        inner.retainsAddedRequests = true
+        try await bridge.reconcile()
+        XCTAssertEqual(inner.pendingIdentifiers, ["reminder-1#1"], "re-applying put the earlier request back")
+        let restoredDue = try await pendingDueInstant()
+        XCTAssertEqual(restoredDue, original.dueInstant)
+        XCTAssertTrue(bridge.unreconciledIdentifiers.isEmpty)
+    }
+
+    /// An abandoned schedule's late install is undone with a removal the OS does not carry out
+    /// within the bridge's polls. The identifier stays unreconciled, and the request goes once a
+    /// later re-application confirms its removal.
+    func testARecoveryRemovalTheCenterDoesNotCarryOutLeavesTheIdentifierUnreconciled() async throws {
+        let gate = newGate()
+        center.addGate = gate
+        let quick = makeBridge(effectTimeout: 0.05)
+        let scheduleRequest = try request()
+
+        let failure = await failureOfHungCall { _ = try await quick.schedule(scheduleRequest) }
+        XCTAssertEqual(failure, .timedOut)
+
+        inner.removalDelayPolls = 100
+        gate.release()
+        await eventually("the late install to be added") { !self.inner.addedRequests.isEmpty }
+        await eventually("the undo removal to be issued") { !self.inner.removedIdentifiers.isEmpty }
+        await letLateWorkRun(quick)
+        XCTAssertEqual(inner.pendingIdentifiers, ["reminder-1#1"], "the OS has not carried out the removal")
+        XCTAssertEqual(quick.unreconciledIdentifiers, ["reminder-1#1"], "an unconfirmed removal is not settled")
+
+        inner.removalDelayPolls = 0
+        try await quick.reconcile()
+        XCTAssertTrue(inner.pendingIdentifiers.isEmpty, "re-applying removed the abandoned install")
+        XCTAssertTrue(quick.unreconciledIdentifiers.isEmpty)
+    }
+
     /// A provider that finishes its removal as soon as the bridge cancels it lands the removal
     /// before the abandoned cancel records the earlier state; the late completion's own check can
     /// then run before or after that record. Several rounds exercise both orders, for a cancelled
