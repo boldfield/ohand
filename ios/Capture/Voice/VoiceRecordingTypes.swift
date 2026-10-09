@@ -43,7 +43,7 @@ struct VoiceRecordingSummary: Equatable {
     var isComplete: Bool { end == .stoppedByUser && closedCleanly }
 }
 
-enum VoiceStartFailure: Equatable {
+enum VoiceStartFailure: Error, Equatable {
     case alreadyActive
     case notInForeground
     case microphoneDenied
