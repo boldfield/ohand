@@ -742,3 +742,100 @@ fn unrelated_but_in_bounds_session_topic_evidence_is_an_unsupported_claim() {
     assert_eq!(count(ungrounded, DefectKind::UnsupportedClaim, false), 1);
     assert_eq!(count(ungrounded, DefectKind::UnsupportedClaim, true), 1);
 }
+
+#[test]
+fn a_false_deadline_does_not_hide_unrelated_reminder_evidence() {
+    let corpus = corpus();
+    let fixture_id = "design-explicit-reminder";
+    let build = |reminder_phrase: &str| {
+        responses_from(
+            &corpus,
+            vec![scenario(
+                "wrong-instant-and-evidence",
+                fixture_id,
+                synthetic(),
+                json!({
+                    "operation": { "kind": "annotate" },
+                    "item_type": "action",
+                    "source_spans": [span_of(&corpus, fixture_id, "Remind me Friday at 3 p.m. to call the roofer")],
+                    "reminder_proposal": {
+                        "source_span": span_of(&corpus, fixture_id, reminder_phrase),
+                        "quality": "explicit",
+                        "instant": "2026-10-09T16:00:00-04:00",
+                        "timezone_id": "America/New_York"
+                    }
+                }),
+            )],
+        )
+    };
+
+    let wrong_instant_only = evaluate(&corpus, Some(&build("Friday at 3 p.m."))).expect("report");
+    let wrong_instant_only = wrong_instant_only.run(ExecutionKind::Fake).expect("fake");
+    assert_eq!(
+        count(wrong_instant_only, DefectKind::FalseDeadline, false),
+        1
+    );
+    assert_eq!(
+        count(wrong_instant_only, DefectKind::UnsupportedClaim, false),
+        0
+    );
+
+    let both = evaluate(&corpus, Some(&build("call the roofer"))).expect("report");
+    let both = both.run(ExecutionKind::Fake).expect("fake");
+    assert_eq!(count(both, DefectKind::FalseDeadline, false), 1);
+    assert_eq!(count(both, DefectKind::UnsupportedClaim, false), 1);
+    let details: Vec<_> = both.cases[0]
+        .candidate_defects
+        .iter()
+        .map(|defect| (defect.kind, defect.detail.clone()))
+        .collect();
+    assert!(details
+        .iter()
+        .any(|(kind, detail)| *kind == DefectKind::UnsupportedClaim
+            && detail.contains("reminder evidence")));
+}
+
+#[test]
+fn a_wrong_session_topic_does_not_hide_unrelated_topic_evidence() {
+    let corpus = corpus();
+    let fixture_id = "design-session-topic";
+    let build = |topic: &str, topic_phrase: &str| {
+        responses_from(
+            &corpus,
+            vec![scenario(
+                "wrong-topic-and-evidence",
+                fixture_id,
+                synthetic(),
+                json!({
+                    "operation": { "kind": "annotate" },
+                    "session_topic_proposal": {
+                        "topic": topic,
+                        "source_span": span_of(&corpus, fixture_id, topic_phrase)
+                    }
+                }),
+            )],
+        )
+    };
+
+    let wrong_topic_only = evaluate(&corpus, Some(&build("gardening", "therapy"))).expect("report");
+    let wrong_topic_only = wrong_topic_only.run(ExecutionKind::Fake).expect("fake");
+    assert_eq!(
+        count(wrong_topic_only, DefectKind::UnsupportedClaim, false),
+        1
+    );
+
+    let both = evaluate(&corpus, Some(&build("gardening", "Bring this"))).expect("report");
+    let both = both.run(ExecutionKind::Fake).expect("fake");
+    assert_eq!(count(both, DefectKind::UnsupportedClaim, false), 2);
+    let details: Vec<_> = both.cases[0]
+        .candidate_defects
+        .iter()
+        .map(|defect| defect.detail.clone())
+        .collect();
+    assert!(details
+        .iter()
+        .any(|detail| detail.contains("session topic")));
+    assert!(details
+        .iter()
+        .any(|detail| detail.contains("session-topic evidence")));
+}

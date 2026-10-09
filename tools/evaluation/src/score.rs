@@ -318,11 +318,15 @@ pub fn defects_against(
         }
     }
 
+    // Each reminder and topic check below is independent: one response with
+    // several semantic defects contributes to every class it breaks, so a
+    // false deadline cannot hide unrelated evidence or a wrong quality.
     let wanted_reminder = expected.reminder_proposal.as_ref();
     match (&view.reminder, wanted_reminder) {
         (Some(found), wanted) => {
             let wanted_instant = expected_instant(expected);
-            if found.instant.is_some() && found.instant != wanted_instant {
+            let false_deadline = found.instant.is_some() && found.instant != wanted_instant;
+            if false_deadline {
                 push(
                     DefectKind::FalseDeadline,
                     match wanted_instant {
@@ -330,49 +334,52 @@ pub fn defects_against(
                         Some(_) => "a reminder instant that is not the oracle's".to_string(),
                     },
                 );
-            } else if wanted.is_none() {
-                push(
+            }
+            match wanted {
+                // A reminder the oracle lacks is one defect: a false deadline
+                // when it carries an instant, otherwise an unsupported claim.
+                None if !false_deadline => push(
                     DefectKind::UnsupportedClaim,
                     "a reminder where the oracle has none".to_string(),
-                );
-            } else if let Some(wanted) = wanted {
-                let wanted_span = (wanted.source_span.start, wanted.source_span.end);
-                if found
-                    .evidence
-                    .is_some_and(|span| !overlaps(span, wanted_span))
-                {
-                    push(
-                        DefectKind::UnsupportedClaim,
-                        format!(
-                            "reminder evidence {}..{} overlaps not the oracle's {}..{}",
-                            found.evidence.map_or(0, |span| span.0),
-                            found.evidence.map_or(0, |span| span.1),
-                            wanted_span.0,
-                            wanted_span.1
-                        ),
-                    );
-                } else if found.instant.is_none() && wanted_instant.is_some() {
-                    push(
-                        DefectKind::MissedIntent,
-                        "a reminder without the instant the oracle has".to_string(),
-                    );
-                } else if found
-                    .quality
-                    .is_some_and(|quality| quality != wanted.quality)
-                {
-                    push(
-                        DefectKind::UnsupportedClaim,
-                        format!(
-                            "reminder quality {} where the oracle has {}",
-                            found.quality.map_or("unknown", |quality| quality.as_str()),
-                            wanted.quality.as_str()
-                        ),
-                    );
-                } else if wanted.timezone_id.is_some() && found.timezone_id != wanted.timezone_id {
-                    push(
-                        DefectKind::UnsupportedClaim,
-                        "reminder timezone differs from the oracle's".to_string(),
-                    );
+                ),
+                None => {}
+                Some(wanted) => {
+                    let wanted_span = (wanted.source_span.start, wanted.source_span.end);
+                    if let Some(span) = found.evidence {
+                        if !overlaps(span, wanted_span) {
+                            push(
+                                DefectKind::UnsupportedClaim,
+                                format!(
+                                    "reminder evidence {}..{} overlaps not the oracle's {}..{}",
+                                    span.0, span.1, wanted_span.0, wanted_span.1
+                                ),
+                            );
+                        }
+                    }
+                    if found.instant.is_none() && wanted_instant.is_some() {
+                        push(
+                            DefectKind::MissedIntent,
+                            "a reminder without the instant the oracle has".to_string(),
+                        );
+                    }
+                    if let Some(quality) = found.quality {
+                        if quality != wanted.quality {
+                            push(
+                                DefectKind::UnsupportedClaim,
+                                format!(
+                                    "reminder quality {} where the oracle has {}",
+                                    quality.as_str(),
+                                    wanted.quality.as_str()
+                                ),
+                            );
+                        }
+                    }
+                    if wanted.timezone_id.is_some() && found.timezone_id != wanted.timezone_id {
+                        push(
+                            DefectKind::UnsupportedClaim,
+                            "reminder timezone differs from the oracle's".to_string(),
+                        );
+                    }
                 }
             }
         }
@@ -383,33 +390,33 @@ pub fn defects_against(
         _ => {}
     }
 
-    let wanted_topic = expected
-        .session_topic_proposal
-        .as_ref()
-        .map(|topic| normalized_topic(&topic.topic));
-    match (&view.session_topic, wanted_topic) {
+    match (
+        &view.session_topic,
+        expected.session_topic_proposal.as_ref(),
+    ) {
         (Some(found), None) => push(
             DefectKind::UnsupportedClaim,
             format!("session topic {found:?} where the oracle has none"),
         ),
-        (Some(found), Some(wanted)) if normalized_topic(found) != wanted => push(
-            DefectKind::UnsupportedClaim,
-            format!("session topic {found:?} where the oracle has {wanted:?}"),
-        ),
-        (Some(_), Some(_))
-            if view.session_topic_span.is_some_and(|span| {
-                expected
-                    .session_topic_proposal
-                    .as_ref()
-                    .is_some_and(|topic| {
-                        !supported_by(span, std::slice::from_ref(&topic.source_span))
-                    })
-            }) =>
-        {
-            push(
-                DefectKind::UnsupportedClaim,
-                "session-topic evidence overlaps not the oracle's span".to_string(),
-            )
+        (Some(found), Some(wanted)) => {
+            let wanted_topic = normalized_topic(&wanted.topic);
+            if normalized_topic(found) != wanted_topic {
+                push(
+                    DefectKind::UnsupportedClaim,
+                    format!("session topic {found:?} where the oracle has {wanted_topic:?}"),
+                );
+            }
+            if let Some(span) = view.session_topic_span {
+                if !supported_by(span, std::slice::from_ref(&wanted.source_span)) {
+                    push(
+                        DefectKind::UnsupportedClaim,
+                        format!(
+                            "session-topic evidence {}..{} overlaps not the oracle's span",
+                            span.0, span.1
+                        ),
+                    );
+                }
+            }
         }
         (None, Some(_)) if may_miss(&|candidate| candidate.session_topic.is_some()) => push(
             DefectKind::MissedIntent,
