@@ -394,10 +394,10 @@ fn smoke_artifact_matches_the_cited_identifier_revision_and_time_and_passed() {
     assert!(raw["bytes"].as_u64().unwrap_or(0) > 0);
     let digest = raw["sha256"].as_str().expect("raw evidence digest");
     assert!(digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
-    assert!(
-        !raw["location"].as_str().unwrap_or_default().contains('/')
-            || raw["location"].as_str().unwrap().contains("outside Git")
-    );
+    assert!(raw["location"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("outside Git"));
     let requests = artifact["requests"].as_array().expect("requests");
     assert!(!requests.is_empty());
     for request in requests {
