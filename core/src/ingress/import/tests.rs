@@ -298,6 +298,20 @@ fn malformed_records_get_specific_rejections_and_write_nothing() {
         ),
         (
             Capture {
+                utc_offset_minutes: i32::MIN,
+                ..base.clone()
+            },
+            IngressRejection::MalformedTimeContext("utc_offset_minutes"),
+        ),
+        (
+            Capture {
+                utc_offset_minutes: i32::MAX,
+                ..base.clone()
+            },
+            IngressRejection::MalformedTimeContext("utc_offset_minutes"),
+        ),
+        (
+            Capture {
                 calendar: "hebrew".to_string(),
                 ..base.clone()
             },

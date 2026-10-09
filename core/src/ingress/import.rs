@@ -241,7 +241,7 @@ fn validate_record(capture: &Capture) -> Result<(), IngressRejection> {
     if capture.locale.trim().is_empty() {
         return Err(IngressRejection::MalformedTimeContext("locale"));
     }
-    if capture.utc_offset_minutes.abs() > MAX_UTC_OFFSET_MINUTES {
+    if !(-MAX_UTC_OFFSET_MINUTES..=MAX_UTC_OFFSET_MINUTES).contains(&capture.utc_offset_minutes) {
         return Err(IngressRejection::MalformedTimeContext("utc_offset_minutes"));
     }
     validate_time_context(capture, capture_instant)
