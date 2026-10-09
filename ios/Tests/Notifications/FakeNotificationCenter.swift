@@ -59,6 +59,11 @@ final class FakeNotificationCenter: NotificationCenterProviding, @unchecked Send
     }
 
     func removePending(identifiers: [String]) async {
+        removeImmediately(identifiers: identifiers)
+    }
+
+    /// The removal itself, callable synchronously, e.g. from a cancellation handler.
+    func removeImmediately(identifiers: [String]) {
         lock.lock()
         defer { lock.unlock() }
         removedIdentifiers.append(contentsOf: identifiers)
@@ -163,6 +168,9 @@ final class SuspendingNotificationCenter: NotificationCenterProviding, @unchecke
     /// reads the list once before `add` and once after it.
     var pendingCallsBeforeGate = 0
     var removeGate: SuspensionGate?
+    /// A removal suspended on `removeGate` completes as soon as its task is cancelled: the OS
+    /// state changes inside the cancellation handler, before the cancelling caller resumes.
+    var removalLandsWhenCancelled = false
     var deliveredGate: SuspensionGate?
 
     init(inner: FakeNotificationCenter) {
@@ -189,6 +197,16 @@ final class SuspendingNotificationCenter: NotificationCenterProviding, @unchecke
     }
 
     func removePending(identifiers: [String]) async {
+        if removalLandsWhenCancelled, let removeGate {
+            let inner = self.inner
+            await withTaskCancellationHandler {
+                await removeGate.wait()
+            } onCancel: {
+                inner.removeImmediately(identifiers: identifiers)
+                removeGate.release()
+            }
+            return
+        }
         await removeGate?.wait()
         await inner.removePending(identifiers: identifiers)
     }

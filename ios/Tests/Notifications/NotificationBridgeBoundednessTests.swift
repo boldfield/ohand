@@ -419,6 +419,57 @@ final class NotificationBridgeBoundednessTests: XCTestCase {
         XCTAssertTrue(quick.unreconciledIdentifiers.isEmpty)
     }
 
+    /// A provider that finishes its removal as soon as the bridge cancels it lands the removal
+    /// before the abandoned cancel records the earlier state; the late completion's own check can
+    /// then run before or after that record. Several rounds exercise both orders, for a cancelled
+    /// and a timed-out cancel, and the earlier request must survive every one.
+    func testACancelWhoseRemovalLandsWhenAbandonedStillPutsTheRequestBack() async throws {
+        let now = currentTime
+        for round in 0..<10 {
+            for timesOut in [false, true] {
+                let roundInner = FakeNotificationCenter()
+                let roundCenter = SuspendingNotificationCenter(inner: roundInner)
+                let roundBridge = NotificationBridge(
+                    center: roundCenter,
+                    ingestor: NotificationEventIngestor(now: { now }, handler: { _ in }),
+                    now: { now },
+                    removalPollInterval: 0,
+                    maximumRemovalPolls: 5,
+                    effectTimeout: timesOut ? 0.05 : 30
+                )
+                let original = try request()
+                _ = try await roundBridge.schedule(original)
+
+                let removeGate = newGate()
+                roundCenter.removeGate = removeGate
+                roundCenter.removalLandsWhenCancelled = true
+                let target = try identifier()
+                let failure: NotificationBridgeError?
+                if timesOut {
+                    failure = await failureOfHungCall { try await roundBridge.cancel(target) }
+                } else {
+                    failure = await failureAfterCancellingWhileSuspended(in: removeGate) {
+                        try await roundBridge.cancel(target)
+                    }
+                }
+                let context = "round \(round), \(timesOut ? "timed out" : "cancelled")"
+                XCTAssertEqual(failure, timesOut ? .timedOut : .cancelled, context)
+                XCTAssertEqual(roundInner.removedIdentifiers, ["reminder-1#1"], "the removal landed: \(context)")
+
+                roundCenter.removeGate = nil
+                await eventually("the earlier request to be put back: \(context)") {
+                    roundInner.pendingIdentifiers == ["reminder-1#1"]
+                }
+                await letLateWorkRun(roundBridge)
+                XCTAssertEqual(roundInner.pendingIdentifiers, ["reminder-1#1"], context)
+                let restoredDue = try await roundInner.pendingRequests()
+                    .first(where: { $0.identifier == "reminder-1#1" })?.dueInstant
+                XCTAssertEqual(restoredDue, original.dueInstant, context)
+                XCTAssertTrue(roundBridge.unreconciledIdentifiers.isEmpty, context)
+            }
+        }
+    }
+
     // MARK: Deadlines
 
     func testAHungProviderTimesOutWithANormalizedTransientError() async throws {

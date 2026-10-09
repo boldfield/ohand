@@ -119,8 +119,14 @@ public final class NotificationBridge: Sendable {
                         await center.removePending(identifiers: [rawIdentifier])
                     }
                 } catch let error where Self.isUncertain(error) {
-                    // The removal may still land; its late completion re-applies the earlier state.
+                    // The removal may still land. If it lands after this point, its late completion
+                    // re-applies the earlier state; if it landed before, its completion still saw
+                    // `.absent` as current and did nothing, so an earlier request is put back here
+                    // too. Re-applying runs under the lock and leaves a still-pending request alone.
                     self.ledger.setDesired(rawIdentifier, stateBeforeAttempt)
+                    if case .installed = stateBeforeAttempt {
+                        self.enforceInBackground(rawIdentifier)
+                    }
                     throw error
                 }
 
