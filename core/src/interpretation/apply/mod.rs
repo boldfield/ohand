@@ -863,10 +863,10 @@ const RETRACTION_IDIOMS: &[&[&str]] = &[
     &["second", "thoughts"],
 ];
 /// Verbs that withdraw an earlier request whatever their object is ("forget it", "forget about
-/// it", "skip the reminder", a bare "cancel" or "stop", "delete that"). Listing exact verb-object pairs
-/// would let every small rewording through, so the verb alone decides. The only exceptions are a
-/// negated verb ("don't forget the ladder" keeps the request) and an infinitive ("to cancel the
-/// subscription" is what the reminder is for).
+/// it", "skip the reminder", a bare "cancel" or "stop", "delete that"). Listing exact verb-object
+/// pairs would let every small rewording through, so the verb alone decides. The only exceptions
+/// are a negated verb ("don't forget the ladder" keeps the request) and an infinitive ("to cancel
+/// the subscription" is what the reminder is for).
 const RETRACTION_VERBS: &[&str] = &[
     "forget",
     "forgetting",
@@ -1137,6 +1137,26 @@ const WITHDRAWN_REQUEST_WORDS: &[&str] = &[
     "anybody",
     "everyone",
     "everybody",
+    "expert",
+    "experts",
+    "professional",
+    "professionals",
+    "pro",
+    "pros",
+    "rep",
+    "reps",
+    "errand",
+    "errands",
+    "chore",
+    "chores",
+    "duty",
+    "duties",
+    "assignment",
+    "assignments",
+    "obligation",
+    "obligations",
+    "commitment",
+    "commitments",
 ];
 /// Retraction verbs that also name ordinary tasks ("cancel the order", "delete the old photos",
 /// "stop the leak"). Only these may be coordinated inside the requested task; a coordinated
@@ -1450,12 +1470,7 @@ fn retracted_after(tokens: &[IntentToken], after: usize) -> bool {
             let text = next.text.as_str();
             !next.quoted
                 && ((RETRACTION_TARGETS.contains(&text)
-                    && !need_gives_reason(
-                        text,
-                        &later[..index],
-                        &same_clause[position + 1..],
-                        &request_words,
-                    ))
+                    && !need_gives_reason(&later, index, index + 1 + position, &request_words))
                     || NEEDLESS_WORDS.contains(&text)
                     || (DESIRE_WORDS.contains(&text)
                         && (wish_has_ended(&same_clause)
@@ -1471,24 +1486,50 @@ fn retracted_after(tokens: &[IntentToken], after: usize) -> bool {
 /// verb must be a phrase saying when ([`names_time_phrase`]) or a concrete object of its own
 /// ([`names_task_object`]), which rules out pronouns, indefinites ("anyone"), the task's own words
 /// and the generic names for whoever the task is about ("the man", "the guy", "the contractor",
-/// [`WITHDRAWN_REQUEST_WORDS`]). So "so I don't need to worry", "so I don't need to cancel at the
-/// last minute", "so I don't need to check the quote twice" and "so I don't need to cancel the
-/// booking" give a reason, while "so I don't need to phone him", "so I don't need to chase the
-/// contractor", "so I don't need to see the guy", "so I don't need to check anything", "so I
-/// don't need to contact the roofer after all", "so I don't need to cancel it" and "then again I
-/// don't need to phone the guy" withdraw. A retraction verb without anything after it ("so I don't need to cancel") withdraws
+/// [`WITHDRAWN_REQUEST_WORDS`]). After a verb aimed at a person ([`PERSON_DIRECTED_VERBS`]:
+/// "chase", "bother", "see") the object may not name a person at all ([`looks_like_person`]:
+/// "the handyman", "the plumber", "the expert"), so "chase the quote" gives a reason and "chase
+/// the handyman" does not.
+///
+/// Nothing else after the request may take it back. A retracting negation other than the one
+/// governing "need" ("nah so I don't need to worry", "nope, so I don't need to chase the quote")
+/// or a change-of-mind marker anywhere after the quoted time ([`CHANGE_OF_MIND_MARKERS`]:
+/// "actually so ...", "so actually ...", "so turns out ...", "so in fact ...", "so I don't
+/// actually need ...", "so I don't need to worry, actually") makes the clause a withdrawal
+/// whatever its complement: the speaker is correcting the request, not giving its purpose.
+///
+/// So "so I don't need to worry", "so I don't need to cancel at the last minute", "so I don't
+/// need to check the quote twice" and "so I don't need to cancel the booking" give a reason,
+/// while "so I don't need to phone him", "so I don't need to chase the contractor", "so I don't
+/// need to see the guy", "so I don't need to check anything", "so I don't need to contact the
+/// roofer after all", "so I don't need to cancel it", "then again I don't need to phone the guy",
+/// "nah so I don't need to chase the quote" and "so actually I don't need to check the quote"
+/// withdraw. A retraction verb without anything after it ("so I don't need to cancel") withdraws
 /// too. "I don't need to call the roofer", "I don't need to after all", "no need to do that", "I
 /// don't need to be told" and "no need to bother" still withdraw, as does a need that has ended
-/// ("so I don't need to worry anymore"). `before_negation` is what precedes the negation.
+/// ("so I don't need to worry anymore"). `later` is every token after the quoted time;
+/// `negation` and `need` index the retracting negation and the word it governs within it.
 fn need_gives_reason(
-    word: &str,
-    before_negation: &[&IntentToken],
-    after_need: &[&IntentToken],
+    later: &[&IntentToken],
+    negation: usize,
+    need: usize,
     request_words: &[&str],
 ) -> bool {
-    if word != "need" || wish_has_ended(after_need) {
+    let after_need: Vec<&IntentToken> = later[need + 1..]
+        .iter()
+        .copied()
+        .take_while(|next| !next.clause_break)
+        .collect();
+    if later[need].text != "need" || wish_has_ended(&after_need) {
         return false;
     }
+    let request_taken_back = later.iter().enumerate().any(|(index, token)| {
+        index != negation && !token.quoted && !token.clause_break && takes_request_back(&token.text)
+    });
+    if request_taken_back {
+        return false;
+    }
+    let before_negation = &later[..negation];
     let clause_start = before_negation
         .iter()
         .rposition(|previous| previous.clause_break)
@@ -1504,7 +1545,7 @@ fn need_gives_reason(
                 _ => false,
             }
     });
-    let [infinitive_marker, verb, rest @ ..] = after_need else {
+    let [infinitive_marker, verb, rest @ ..] = after_need.as_slice() else {
         return false;
     };
     let verb_text = verb.text.as_str();
@@ -1518,7 +1559,7 @@ fn need_gives_reason(
         && !infinitive_marker.quoted
         && infinitive_marker.text == "to"
         && !verb.quoted
-        && !desire_governs_reminder(after_need)
+        && !desire_governs_reminder(&after_need)
         && (if object.is_empty() {
             !RETRACTION_VERBS.contains(&verb_text)
         } else {
@@ -1529,6 +1570,76 @@ fn need_gives_reason(
         && !request_words.contains(&verb_text)
         && !CONTACT_VERBS.contains(&verb_text)
         && (verb_text == "worry" || !RETRACTION_TARGETS.contains(&verb_text))
+        && !(PERSON_DIRECTED_VERBS.contains(&verb_text)
+            && object.iter().any(|token| looks_like_person(&token.text)))
+}
+
+/// Whether a word after the request takes it back, so a negated "need" near it cannot give a
+/// reason: a retracting negation ("nah", "nope", "no", "don't") or a [`CHANGE_OF_MIND_MARKERS`]
+/// entry ("actually", "turns out", "in fact").
+fn takes_request_back(word: &str) -> bool {
+    is_retracting_negation(word) || CHANGE_OF_MIND_MARKERS.contains(&word)
+}
+
+/// Words that mark a correction of what was just said ("actually", "really", "turns out", "in
+/// fact", "wait", "hmm", "just kidding") or concede it ("though", "anyway", "whatever", "again"
+/// as in "then again"). Anywhere around a negated "need" they show the speaker is changing their
+/// mind, so the clause withdraws the request instead of giving its reason. "on second thought"
+/// and "never mind" are [`RETRACTION_IDIOMS`] and withdraw on their own.
+const CHANGE_OF_MIND_MARKERS: &[&str] = &[
+    "actually",
+    "really",
+    "honestly",
+    "frankly",
+    "truthfully",
+    "turns",
+    "fact",
+    "wait",
+    "hmm",
+    "hm",
+    "um",
+    "uh",
+    "erm",
+    "though",
+    "although",
+    "however",
+    "anyway",
+    "anyways",
+    "again",
+    "instead",
+    "rather",
+    "whatever",
+    "kidding",
+    "joking",
+    "jk",
+];
+
+/// Verbs that, in a reason clause, are aimed at a person ("chase", "bother", "see", "visit",
+/// "remember"). A reason built on one of them must have a thing as its object ("chase the quote",
+/// "handle the paperwork"); an object that names someone ("chase the handyman", "see the
+/// specialist") stands for whoever the task is about and withdraws ([`looks_like_person`]).
+const PERSON_DIRECTED_VERBS: &[&str] = &[
+    "chase", "chasing", "bug", "bother", "nag", "pester", "hassle", "hound", "see", "visit",
+    "meet", "remember", "handle", "ask", "tell", "consult", "follow", "catch", "find", "track",
+    "speak", "talk", "deal",
+];
+
+/// Endings of nouns that name a person by role or trade ("handyman", "tradesperson", "plumber",
+/// "contractor", "specialist", "technician", "assistant", "agent", "employee").
+const PERSON_SUFFIXES: &[&str] = &[
+    "man", "men", "person", "people", "er", "or", "ist", "ian", "ant", "ent", "ee",
+];
+
+/// Whether a word in the object of a person-directed verb names a person: a generic name for
+/// whoever the task is about ([`WITHDRAWN_REQUEST_WORDS`]: "the guy", "the expert", "anyone") or
+/// a noun with a role ending ([`PERSON_SUFFIXES`]). Short words are left alone, so "fee" is a
+/// thing while "employee" is not. Erring towards a person keeps the request withdrawn, the safe
+/// direction.
+fn looks_like_person(word: &str) -> bool {
+    const MINIMUM_LENGTH: usize = 4;
+    WITHDRAWN_REQUEST_WORDS.contains(&word)
+        || (word.chars().count() >= MINIMUM_LENGTH
+            && PERSON_SUFFIXES.iter().any(|suffix| word.ends_with(suffix)))
 }
 
 /// Ways of getting in touch with someone. They stand for "call the roofer" whichever of them the
@@ -1755,8 +1866,8 @@ fn prepositional_phrases_end(
 
 /// Where the noun phrase starting at `start` ends: a [`NOUN_PHRASE_DETERMINERS`] entry and then
 /// one or more words up to the next preposition, repeat adverb or end, every one of them a noun
-/// candidate ([`is_noun_candidate`]) and the last not a [`NON_HEAD_WORDS`] entry ("the last"). `None` when there is no such phrase or any of its words
-/// disqualifies it.
+/// candidate ([`is_noun_candidate`]) and the last not a [`NON_HEAD_WORDS`] entry ("the last").
+/// `None` when there is no such phrase or any of its words disqualifies it.
 fn noun_phrase_end(texts: &[&str], start: usize, request_words: &[&str]) -> Option<usize> {
     if !NOUN_PHRASE_DETERMINERS.contains(texts.get(start)?) {
         return None;
@@ -1781,10 +1892,10 @@ fn noun_phrase_end(texts: &[&str], start: usize, request_words: &[&str]) -> Opti
 
 /// Whether `word` may be part of a concrete task object: it is not a determiner, pronoun, filler,
 /// deictic word or adverb ([`OBJECT_DETERMINERS`], [`RETRACTION_FILLERS`], [`NON_NOUN_WORDS`],
-/// "-ly"), contains no digit (so "the 9am" cannot point at the reminder's own time), does not stand for the request, the reminder or "everything"
-/// ([`WITHDRAWN_REQUEST_WORDS`], [`REMINDER_OBJECT_WORDS`]), and does not share a stem with a
-/// word the request already used ([`shares_stem`]: "callout" after "call", "roofing" after
-/// "roofer").
+/// "-ly"), contains no digit (so "the 9am" cannot point at the reminder's own time), does not
+/// stand for the request, the reminder or "everything" ([`WITHDRAWN_REQUEST_WORDS`],
+/// [`REMINDER_OBJECT_WORDS`]), and does not share a stem with a word the request already used
+/// ([`shares_stem`]: "callout" after "call", "roofing" after "roofer").
 fn is_noun_candidate(word: &str, request_words: &[&str]) -> bool {
     !OBJECT_DETERMINERS.contains(&word)
         && !NOUN_PHRASE_DETERMINERS.contains(&word)
