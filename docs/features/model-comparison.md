@@ -135,6 +135,8 @@ Acceptance:
 1. Wire fixtures prove rendered I07 instructions rather than a version label reach the provider with the frozen input/context and explicit supported settings. Unsupported options fail explicitly rather than disappear.
 2. Available usage and actual configuration metadata are associated with this attempt; unknown usage remains unknown. Preserve existing error/refusal/cancellation bounds and production callers without introducing a separate CLI vendor implementation.
 
+Allowance recorded 2026-10-09: the XB02 contract has no way to return provider-reported usage with a transport error, so usage on a refusal or content-filter response is lost and acceptance 2 cannot be met inside the owned paths. XB04 may extend `core/src/providers/contracts/` additively so a rejected diagnostic transport result carries its observations into `DiagnosticFailure.usage` while keeping the Rejected class, with existing adapters, fakes and callers compiling unchanged. XB04 may also update the Anthropic refusal path under `core/src/providers/anthropic/` and its tests to use the same carrier, because XB03 has landed. This is a one-time allowance for this finding, not a transfer of XB02 or XB03 ownership.
+
 Source pointers: `core/src/providers/contracts/mod.rs:16`, `core/src/providers/contracts/dispatch.rs:124`, `core/src/providers/contracts/request.rs:43`, `core/src/interpretation/instructions/mod.rs:1`.
 
 ### XB05
