@@ -1024,6 +1024,10 @@ const WITHDRAWN_REQUEST_WORDS: &[&str] = &[
     "requests",
     "what",
     "words",
+    "alarm",
+    "alarms",
+    "timer",
+    "timers",
 ];
 /// Words that say a wish or need has ended when they follow a retracting negation ("no longer",
 /// "not anymore", "don't want it any more").
@@ -1188,9 +1192,14 @@ fn retracted_after(tokens: &[IntentToken], after: usize) -> bool {
         if matches_idiom(&later[index..]) {
             return true;
         }
+        let request_words = unquoted_words_before(tokens, token.start);
         if RETRACTION_VERBS.contains(&word) {
             return !verb_is_negated_or_infinitive(&later[..index])
-                && !verb_is_part_of_requested_task(&later[..index], &later[index + 1..]);
+                && !verb_is_part_of_requested_task(
+                    &later[..index],
+                    &later[index + 1..],
+                    &request_words,
+                );
         }
         let rest_of_clause: Vec<&IntentToken> = later[index + 1..]
             .iter()
@@ -1207,7 +1216,10 @@ fn retracted_after(tokens: &[IntentToken], after: usize) -> bool {
                         .position(|next| second_words.contains(&next.text.as_str()))
                         .is_some_and(|second_position| {
                             !(*task_object_may_intervene
-                                && names_task_object(&rest_of_clause[..second_position]))
+                                && names_task_object(
+                                    &rest_of_clause[..second_position],
+                                    &request_words,
+                                ))
                         })
             })
         {
@@ -1230,7 +1242,12 @@ fn retracted_after(tokens: &[IntentToken], after: usize) -> bool {
             let text = next.text.as_str();
             !next.quoted
                 && ((RETRACTION_TARGETS.contains(&text)
-                    && !need_takes_task_complement(text, &same_clause[position + 1..]))
+                    && !need_gives_reason(
+                        text,
+                        &later[..index],
+                        &same_clause[position + 1..],
+                        &request_words,
+                    ))
                     || NEEDLESS_WORDS.contains(&text)
                     || (DESIRE_WORDS.contains(&text)
                         && (wish_has_ended(&same_clause)
@@ -1239,24 +1256,53 @@ fn retracted_after(tokens: &[IntentToken], after: usize) -> bool {
     })
 }
 
-/// Whether a negated "need" is followed by an infinitive for something other than the reminder
-/// ("so I don't need to worry", "no need to double-check"), which gives the reason for the request
-/// and keeps it. "no need", "don't need to be reminded" and "no need to bother" still withdraw, as
-/// does a need that has ended ("I don't need to worry anymore").
-fn need_takes_task_complement(word: &str, after_need: &[&IntentToken]) -> bool {
+/// Whether a negated "need" gives the reason for the request: "so" or "then" opens its clause
+/// ("so I don't need to worry", "then there is no need to worry") and an infinitive follows whose
+/// verb is neither one of the requested task's words nor a pronoun-like or retraction word.
+/// "I don't need to call the roofer", "I don't need to after all", "no need to do that", "I don't
+/// need to be told" and "no need to bother" still withdraw, as does a need that has ended ("so I
+/// don't need to worry anymore"). `before_negation` is what precedes the negation.
+fn need_gives_reason(
+    word: &str,
+    before_negation: &[&IntentToken],
+    after_need: &[&IntentToken],
+    request_words: &[&str],
+) -> bool {
     if word != "need" || wish_has_ended(after_need) {
         return false;
     }
+    let reason_marker = before_negation
+        .iter()
+        .rev()
+        .take_while(|previous| !previous.clause_break)
+        .any(|previous| !previous.quoted && matches!(previous.text.as_str(), "so" | "then"));
     let [infinitive_marker, verb, ..] = after_need else {
         return false;
     };
     let verb_text = verb.text.as_str();
-    !infinitive_marker.quoted
+    reason_marker
+        && !infinitive_marker.quoted
         && infinitive_marker.text == "to"
         && !verb.quoted
         && !desire_governs_reminder(after_need)
         && !RETRACTION_VERBS.contains(&verb_text)
+        && !RETRACTION_FILLERS.contains(&verb_text)
+        && !REASON_EXCLUDED_VERBS.contains(&verb_text)
+        && !request_words.contains(&verb_text)
         && (verb_text == "worry" || !RETRACTION_TARGETS.contains(&verb_text))
+}
+
+/// Complement words that never give a reason: "I don't need to be told", "no need to do that".
+const REASON_EXCLUDED_VERBS: &[&str] = &["be", "do", "get", "have", "go", "that", "it", "this"];
+
+/// Every unquoted word of the capture that starts before character offset `end`, so a coordinated
+/// retraction can tell whether its object repeats the requested task.
+fn unquoted_words_before(tokens: &[IntentToken], end: usize) -> Vec<&str> {
+    tokens
+        .iter()
+        .filter(|token| token.start < end && !token.quoted && !token.clause_break)
+        .map(|token| token.text.as_str())
+        .collect()
 }
 
 /// Whether the words after a desire verb name the reminder as its object: the first word that is
@@ -1314,7 +1360,11 @@ fn verb_is_negated_or_infinitive(before: &[&IntentToken]) -> bool {
 /// gerund after "about" ("remind me about cancelling the gym"), and it has an object of its own
 /// ([`names_task_object`]). "and cancel it", "and cancel the reminder" and a bare "and cancel"
 /// still withdraw. `before` and `after` are the tokens around the verb, after the quoted time.
-fn verb_is_part_of_requested_task(before: &[&IntentToken], after: &[&IntentToken]) -> bool {
+fn verb_is_part_of_requested_task(
+    before: &[&IntentToken],
+    after: &[&IntentToken],
+    request_words: &[&str],
+) -> bool {
     let governing = before
         .iter()
         .rev()
@@ -1330,20 +1380,25 @@ fn verb_is_part_of_requested_task(before: &[&IntentToken], after: &[&IntentToken
         .take_while(|next| !next.clause_break)
         .filter(|next| !next.quoted)
         .collect();
-    names_task_object(&object)
+    names_task_object(&object, request_words)
 }
 
 /// Whether `words` (unquoted, one clause) name a concrete task object: after any determiners and
-/// fillers the first word is not an empty reference, and nothing in the span refers to the
-/// request itself, the reminder or "everything" ([`WITHDRAWN_REQUEST_WORDS`],
-/// [`REMINDER_OBJECT_WORDS`]). "the order", "the gym" and "the ladder" qualify; "it", "that", "the
-/// reminder" and "the whole thing" do not.
-fn names_task_object(words: &[&IntentToken]) -> bool {
+/// fillers the head word is not an empty reference, nothing in the span refers to the request
+/// itself, the reminder or "everything" ([`WITHDRAWN_REQUEST_WORDS`], [`REMINDER_OBJECT_WORDS`]),
+/// and the head word does not repeat a word already used by the request (`request_words`, the
+/// capture before the retraction verb). "the order", "the gym" and "the ladder" qualify; "it",
+/// "that", "the reminder", "the alarm", "the whole thing" and, after "call the roofer", "the call"
+/// do not.
+fn names_task_object(words: &[&IntentToken], request_words: &[&str]) -> bool {
     let mut content = words.iter().skip_while(|word| {
         OBJECT_DETERMINERS.contains(&word.text.as_str())
             || RETRACTION_FILLERS.contains(&word.text.as_str())
     });
-    content.next().is_some()
+    let Some(head) = content.next() else {
+        return false;
+    };
+    !request_words.contains(&head.text.as_str())
         && !words.iter().any(|word| {
             WITHDRAWN_REQUEST_WORDS.contains(&word.text.as_str())
                 || REMINDER_OBJECT_WORDS.contains(&word.text.as_str())

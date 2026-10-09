@@ -107,9 +107,9 @@ scheduled | remind me to take the rented ladder back {time}
 scheduled | remind me to call the roofer {time}, so I don't need to worry
 scheduled | remind me to call the roofer {time} so I do not need to worry
 scheduled | remind me to call the roofer {time}, then there is no need to worry
-scheduled | remind me to call the roofer {time}, I don't need to check the quote twice
-scheduled | remind me to call the roofer {time}, you don't need to explain the leak
-scheduled | remind me to call the roofer {time}, I won't need to chase the quote
+scheduled | remind me to call the roofer {time} so I don't need to check the quote twice
+scheduled | remind me to call the roofer {time} so you don't need to explain the leak
+scheduled | remind me to call the roofer {time} so I won't need to chase the quote
 
 # --- I05b: the same constructions as withdrawals, which must stay unscheduled ---
 unscheduled | remind me {time}, forget about cancelling
@@ -145,6 +145,20 @@ unscheduled | remind me {time}, I don't need to
 unscheduled | remind me {time}, no need to cancel
 unscheduled | remind me {time}, I don't need to schedule it
 unscheduled | remind me {time}, I don't need to remember on my own
+unscheduled | remind me to call the roofer {time}, actually I don't need to call him
+unscheduled | remind me to call the roofer {time}, I don't need to call the roofer
+unscheduled | remind me to call the roofer {time}, I don't need to after all
+unscheduled | remind me to call the roofer {time}, no need to do that
+unscheduled | remind me to call the roofer {time}, I don't need to be told
+unscheduled | remind me to call the roofer {time}, I don't need to worry
+unscheduled | remind me to call the roofer {time}, so I don't need to be told
+unscheduled | remind me to call the roofer {time}, so I don't need to call the roofer
+unscheduled | remind me to call the roofer {time}, so I don't need to worry anymore
+unscheduled | remind me {time} to call the roofer and cancel the call
+unscheduled | remind me {time}, I take the alarm back
+unscheduled | remind me to call the roofer {time}, and scratch the alarm
+unscheduled | remind me {time}, I take the timer back
+unscheduled | remind me {time} to call the roofer, I take the call back
 
 # --- I05b: further withdrawal phrasings inside the recorded grammar ---
 unscheduled | remind me to call the roofer {time}, please don't remind me
