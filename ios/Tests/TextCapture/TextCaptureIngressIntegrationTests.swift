@@ -105,6 +105,7 @@ final class TextCaptureIngressIntegrationTests: IngressStorageTestCase {
     }
 
     func testStagingFailureKeepsTheTextAndTheRetryIsTheSameRecord() throws {
+        model = nil
         service = nil
         let failingFileSystem = FailingIngressFileSystem()
         failingFileSystem.failing = [.write]
