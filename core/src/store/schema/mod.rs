@@ -63,6 +63,10 @@ pub const MIGRATIONS: &[MigrationStep] = &[
         target_version: 5,
         apply: add_reminder_source_phrase_v5,
     },
+    MigrationStep {
+        target_version: 6,
+        apply: add_job_transient_failure_count_v6,
+    },
 ];
 
 /// Database handle with schema validation.
@@ -729,6 +733,17 @@ fn add_reminder_source_phrase_v5(tx: &Transaction<'_>) -> Result<()> {
             created_at TEXT NOT NULL,
             FOREIGN KEY (item_id) REFERENCES items(item_id)
         )",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Step 6 (I06): count of provider calls that failed transiently, per job. Unlike
+/// `attempt_count` (which every claim increments, including cancellations, lease reclaims and
+/// configuration waits), this counts only the failures a profile's retry policy budgets.
+fn add_job_transient_failure_count_v6(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute(
+        "ALTER TABLE jobs ADD COLUMN transient_failure_count INTEGER NOT NULL DEFAULT 0",
         [],
     )?;
     Ok(())
