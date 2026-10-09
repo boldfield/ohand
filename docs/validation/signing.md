@@ -83,6 +83,7 @@ These could not be tested on Linux. The October 2026 run confirmed the following
 - ✓ `xcodebuild -exportArchive` accepts an unsigned archive with `method` `debugging` and the manual options above under Xcode 26.6.
 - ✓ A profile placed in `~/Library/Developer/Xcode/UserData/Provisioning Profiles` is found by name-independent UUID lookup during export.
 - ✓ A manually created Development profile satisfies the manual export options.
+- ⚠️ Xcode itself rejects an Xcode-managed profile under manual signing. The tool (sign_probe.py:154-156) refuses `IsXcodeManaged` profiles before calling xcodebuild, so Xcode's own rejection behaviour was not observed.
 - ⚠️ `security list-keychains -d user` parsing: confirmed if a `.p12` was imported, untested if keychain search-list modification was bypassed. The October 2026 record does not indicate whether `OHAND_SIGNING_CERT_PATH` was set, so this remains unconfirmed for now.
 - ✓ `devicectl device install app` accepts the extracted `.app` with the `OHAND_DEVICE_ID` format.
 
@@ -99,8 +100,8 @@ On 2026-10-09, the maintainer successfully built and installed BridgeProbe on a 
 | Device label | `trial-phone` |
 | Profile expiry | 2027-10-09T00:08:01Z |
 
-**Verified assumptions:** The run confirmed that `xcodebuild -exportArchive` accepts an unsigned archive with `debugging` method and manual signing options, UUID-based profile lookup works, the manually created Development profile is accepted, and `devicectl device install` succeeds with the OHAND_DEVICE_ID format.
+**Verified assumptions:** The run confirmed the assumptions marked ✓ above.
 
-**Install validity:** The BridgeProbe install is signed with a Development provisioning profile valid until 2027-10-09T00:08:01Z. A two-week trial must begin by 2027-09-25 to complete before profile expiry. The trial build (T10) is covered only if signed with this same profile; per [m1-external-prerequisites.md](../features/m1-external-prerequisites.md#signed-build-evidence-for-p08b), that profile is a wildcard App ID with the same certificate and device.
+**Install validity:** The BridgeProbe install is signed with a Development provisioning profile valid until 2027-10-09T00:08:01Z. A two-week trial must begin before 2027-09-25T00:08:01Z to complete before profile expiry. The trial build (T10) is covered only if signed with this same profile; per [m1-external-prerequisites.md](../features/m1-external-prerequisites.md#signed-build-evidence-for-p08b), that profile is a wildcard App ID with the same certificate and device.
 
 **Renewal:** The profile expires 2027-10-09. With an expiry over a year away, renewal is not planned within the trial window and remains untested.
