@@ -68,7 +68,14 @@ public final class ShadowReviewService {
 
     /// Runs one selected case. Cancel it with `cancel(jobID:)`. A case run while review is switched off is refused
     /// by the core (policy disabled) and stored as unreviewed rather than skipped locally.
+    /// A second call for a job whose run is still in flight is refused locally with `already_running`, so
+    /// `cancel(jobID:)` always reaches the one run that can send.
     public func review(jobID: String, completion: @escaping (ShadowReviewRunResult) -> Void) {
+        guard runningOperations[jobID] == nil else {
+            report(.failed(code: "already_running"))
+            completion(.failed(code: "already_running"))
+            return
+        }
         let request = RunRequest(jobID: jobID, policy: configuration.policy.wire)
         submit(.run(jobID: jobID, completion), failure: { completion(.failed(code: $0)) }) { operationID, body in
             try self.core.startShadowReview(operationID: operationID, request: body)

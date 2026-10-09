@@ -543,6 +543,7 @@ fn an_agreeing_review_is_one_request_and_records_a_verdict_without_changing_auth
     let send = session.dispatch(2, &job_id);
     assert_eq!(send["url"], "https://api.anthropic.com/v1/messages");
     assert_eq!(send["authorized_origins"], json!([ORIGIN]));
+    assert_eq!(send["capability"], "review");
     assert_eq!(
         send["credential"],
         json!({ "reference": CREDENTIAL_REFERENCE, "header": "x-api-key", "scheme": null })

@@ -154,6 +154,7 @@ final class ShadowReviewServiceTests: ProviderTransportTestCase {
         let fromCore = try XCTUnwrap(sender.requestsFromCore.first)
         XCTAssertEqual(fromCore.url.absoluteString, "https://api.anthropic.com/v1/messages")
         XCTAssertEqual(fromCore.authorization.authorizedOrigins, [ShadowReviewScenario.vendorOrigin])
+        XCTAssertEqual(fromCore.authorization.capability, .review, "the core's separate review grant is carried natively")
         let reference = try XCTUnwrap(fromCore.credential?.reference)
         XCTAssertEqual(fromCore.credential?.headerName, "x-api-key")
         XCTAssertNil(fromCore.credential?.scheme)
@@ -229,6 +230,27 @@ final class ShadowReviewServiceTests: ProviderTransportTestCase {
         XCTAssertEqual(sender.requestsFromCore.count, 1)
         XCTAssertEqual(try ShadowReviewSeed.authoritativeSnapshot(path: session.storePath), before)
         session.service.cancel(jobID: jobID)
+    }
+
+    func testOverlappingRunsOfOneJobAreRefusedSoCancellationStillReachesTheOnlyRequest() throws {
+        let (session, sender, server) = try serverSession(hang: true)
+        let jobID = try selectedJobID(session)
+
+        let first = session.startReview(jobID: jobID)
+        XCTAssertTrue(session.pump(until: { server.requests.count == 1 }), "the request reached the server")
+        let duplicate = session.startReview(jobID: jobID)
+        XCTAssertEqual(duplicate.value, .failed(code: "already_running"))
+        XCTAssertNil(first.value, "the duplicate did not disturb the in-flight run")
+
+        session.service.cancel(jobID: jobID)
+        XCTAssertTrue(session.pump(until: { first.value != nil }))
+
+        guard case .completed(let record, nil)? = first.value else { return XCTFail("expected a completed run") }
+        XCTAssertEqual(record.outcome, .unreviewed)
+        XCTAssertEqual(record.reason, "cancelled")
+        XCTAssertEqual(sender.requestsFromCore.count, 1)
+        XCTAssertEqual(server.requests.count, 1)
+        XCTAssertEqual(session.record(jobID: jobID), .found(record))
     }
 
     // MARK: route denial and budget

@@ -853,6 +853,7 @@ fn start_review_job(
             registration,
             receiver: Mutex::new(receiver),
             authorized_origins: dispatch.prepared.destinations.clone(),
+            capability: CAPABILITY_REVIEW,
         });
         let job_id = request.job_id;
         std::thread::Builder::new()

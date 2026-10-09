@@ -438,6 +438,7 @@ fn a_valid_job_is_sent_to_the_pinned_destination_off_the_worker_and_completes() 
     assert_eq!(send["url"], "https://api.anthropic.com/v1/messages");
     assert_eq!(send["method"], "POST");
     assert_eq!(send["authorized_origins"], json!([ANTHROPIC_ORIGIN]));
+    assert_eq!(send["capability"], "text_interpretation");
     assert_eq!(
         send["credential"],
         json!({ "reference": CREDENTIAL_REFERENCE, "header": "x-api-key", "scheme": null })
@@ -888,6 +889,7 @@ fn a_destination_outside_the_authorized_origins_is_refused_before_native_is_call
             registration,
             receiver: Mutex::new(receiver),
             authorized_origins: vec![ANTHROPIC_ORIGIN.to_string()],
+            capability: CAPABILITY_TEXT_INTERPRETATION,
         }),
     };
     let cancel = CancelToken::new();
