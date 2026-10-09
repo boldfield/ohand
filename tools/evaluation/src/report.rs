@@ -9,7 +9,9 @@ use std::collections::BTreeMap;
 
 use crate::corpus::Category;
 use crate::responses::Role;
-use crate::score::{AbstentionOutcome, Defect, DefectKind, ForbiddenHit, MutationClass, Stage};
+use crate::score::{
+    AbstentionOutcome, Defect, DefectKind, ForbiddenHit, MutationClass, RequestedOperation, Stage,
+};
 use crate::scratch::{AuthoritativeState, GuardOutcome};
 
 pub const REPORT_FORMAT_VERSION: u32 = 1;
@@ -51,7 +53,14 @@ pub enum ProducerOutcome {
     /// The provider call failed before any usable reply.
     ProviderFailure { kind: String },
     /// The reply could not be mapped to a proposal; recorded as an invalid-output failure.
-    MappingRejected { error: String },
+    /// `requested_operation` keeps what the rejected reply asked for (an update of an existing
+    /// item, or a new item), which is scored at the candidate stage even though the mapping
+    /// refused it.
+    MappingRejected {
+        error: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        requested_operation: Option<RequestedOperation>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -119,6 +128,9 @@ pub struct RunReport {
     #[serde(flatten)]
     pub status: RunStatus,
     pub totals: Totals,
+    /// The same counts, each with its own denominators, for every fixture class (category) that
+    /// the run covered, so a failure concentrated in one class is not averaged away.
+    pub by_category: BTreeMap<Category, Totals>,
     pub cases: Vec<CaseReport>,
 }
 
@@ -209,39 +221,15 @@ impl Report {
                 RunStatus::Executed => out.push_str(&format!("{} cases\n", run.totals.cases)),
             }
             let totals = &run.totals;
-            out.push_str(&format!(
-                "  oracle: {} abstain, {} action, {} resolved deadline, {} no reminder\n",
-                totals.oracle_abstains,
-                totals.oracle_has_action,
-                totals.oracle_has_resolved_instant,
-                totals.oracle_has_no_reminder
-            ));
-            out.push_str(&format!("  producer: {}\n", join_counts(&totals.producer)));
-            out.push_str(&format!("  guard: {}\n", join_counts(&totals.guard)));
-            out.push_str(&format!(
-                "  not handled where the oracle has facets: {}\n",
-                totals.not_handled_where_oracle_has_facets
-            ));
-            out.push_str(&format!(
-                "  candidate defects: {}\n",
-                join_counts(&named(&totals.candidate_defects))
-            ));
-            out.push_str(&format!(
-                "  authoritative defects: {}\n",
-                join_counts(&named(&totals.authoritative_defects))
-            ));
-            out.push_str(&format!(
-                "  abstentions: {}\n",
-                join_counts(&named(&totals.abstention))
-            ));
-            out.push_str(&format!(
-                "  forbidden, candidate stage: {}\n",
-                join_counts(&named(&totals.candidate_forbidden))
-            ));
-            out.push_str(&format!(
-                "  forbidden, authoritative: {}\n",
-                join_counts(&named(&totals.authoritative_forbidden))
-            ));
+            write_totals(&mut out, totals, "  ");
+            for (category, category_totals) in &run.by_category {
+                out.push_str(&format!(
+                    "  class {}: {} cases\n",
+                    category_name(*category),
+                    category_totals.cases
+                ));
+                write_class_counts(&mut out, category_totals, "    ");
+            }
             for case in &run.cases {
                 for hit in &case.authoritative_forbidden {
                     out.push_str(&format!(
@@ -276,6 +264,56 @@ impl Report {
     }
 }
 
+fn write_totals(out: &mut String, totals: &Totals, indent: &str) {
+    out.push_str(&format!(
+        "{indent}oracle: {} abstain, {} action, {} resolved deadline, {} no reminder\n",
+        totals.oracle_abstains,
+        totals.oracle_has_action,
+        totals.oracle_has_resolved_instant,
+        totals.oracle_has_no_reminder
+    ));
+    out.push_str(&format!(
+        "{indent}producer: {}\n",
+        join_counts(&totals.producer)
+    ));
+    out.push_str(&format!("{indent}guard: {}\n", join_counts(&totals.guard)));
+    out.push_str(&format!(
+        "{indent}not handled where the oracle has facets: {}\n",
+        totals.not_handled_where_oracle_has_facets
+    ));
+    write_class_counts(out, totals, indent);
+}
+
+fn write_class_counts(out: &mut String, totals: &Totals, indent: &str) {
+    out.push_str(&format!(
+        "{indent}candidate defects: {}\n",
+        join_counts(&named(&totals.candidate_defects))
+    ));
+    out.push_str(&format!(
+        "{indent}authoritative defects: {}\n",
+        join_counts(&named(&totals.authoritative_defects))
+    ));
+    out.push_str(&format!(
+        "{indent}abstentions: {}\n",
+        join_counts(&named(&totals.abstention))
+    ));
+    out.push_str(&format!(
+        "{indent}forbidden, candidate stage: {}\n",
+        join_counts(&named(&totals.candidate_forbidden))
+    ));
+    out.push_str(&format!(
+        "{indent}forbidden, authoritative: {}\n",
+        join_counts(&named(&totals.authoritative_forbidden))
+    ));
+}
+
+fn category_name(category: Category) -> String {
+    serde_json::to_value(category)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
 fn named<K: Serialize + Ord + Copy>(map: &BTreeMap<K, u64>) -> BTreeMap<String, u64> {
     map.iter()
         .map(|(key, count)| {
@@ -298,8 +336,24 @@ fn join_counts(map: &BTreeMap<String, u64>) -> String {
         .join(", ")
 }
 
-/// Fold one case into the run totals.
-pub fn tally(totals: &mut Totals, case: &CaseReport, oracle: &crate::corpus::Expected) {
+/// Fold one case into the run totals and into the totals of its fixture class.
+pub fn tally_with_category(
+    totals: &mut Totals,
+    by_category: &mut BTreeMap<Category, Totals>,
+    case: &CaseReport,
+    oracle: &crate::corpus::Expected,
+) {
+    tally_into(totals, case, oracle);
+    tally_into(
+        by_category
+            .entry(case.category)
+            .or_insert_with(Totals::empty),
+        case,
+        oracle,
+    );
+}
+
+fn tally_into(totals: &mut Totals, case: &CaseReport, oracle: &crate::corpus::Expected) {
     use ohand_core::store::events::ItemType;
     totals.cases += 1;
     if oracle.abstention.is_some() {

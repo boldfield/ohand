@@ -21,8 +21,10 @@ use ohand_core::store::events::{
 };
 use ohand_core::store::schema::{Clock, Database};
 use ohand_core::time::TimeContext;
+use rusqlite::OptionalExtension;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
 use tempfile::TempDir;
 
@@ -91,6 +93,10 @@ pub struct AuthoritativeState {
     pub reminder: Option<StoredReminder>,
     pub raw_capture_intact: bool,
     pub correction_preserved: bool,
+    /// Rows, per table, that belong to neither the evaluated item nor its capture. The scratch
+    /// store holds exactly one item, so any such row means an item was created or another item
+    /// was touched. Empty when nothing of the kind exists.
+    pub foreign_records: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -311,6 +317,13 @@ impl ScratchCase {
         Ok((outcome, self.read_state()?))
     }
 
+    /// Direct access to the scratch connection, so a test can plant the row a regressed guard
+    /// would have written and check that the harness notices.
+    #[cfg(test)]
+    pub(crate) fn connection_for_negative_control(&self) -> &rusqlite::Connection {
+        self.database.conn()
+    }
+
     /// The durable state without submitting anything.
     pub fn untouched_state(&self) -> Result<AuthoritativeState, EvaluationError> {
         self.read_state()
@@ -347,7 +360,27 @@ impl ScratchCase {
                 [&self.binding.item_id],
                 |row| row.get(0),
             )
-            .ok();
+            .optional()
+            .map_err(|error| store(&error))?;
+        let mut foreign_records = BTreeMap::new();
+        for (table, key_column, own_key) in [
+            ("items", "item_id", &self.binding.item_id),
+            ("captures", "capture_id", &self.binding.capture_id),
+            ("events", "item_id", &self.binding.item_id),
+            ("corrections", "item_id", &self.binding.item_id),
+            ("reminders", "item_id", &self.binding.item_id),
+        ] {
+            let foreign: i64 = tx
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE {key_column} != ?"),
+                    [own_key],
+                    |row| row.get(0),
+                )
+                .map_err(|error| store(&error))?;
+            if foreign > 0 {
+                foreign_records.insert(table.to_string(), foreign as u64);
+            }
+        }
         Ok(AuthoritativeState {
             item_type: item.item_type,
             session_topic: item.session_topic,
@@ -363,6 +396,7 @@ impl ScratchCase {
                 }),
             raw_capture_intact: capture_text.as_deref() == Some(self.context.raw_input.as_str()),
             correction_preserved: stored_correction == self.context.user_correction,
+            foreign_records,
         })
     }
 }

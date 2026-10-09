@@ -14,12 +14,13 @@ use std::sync::Arc;
 
 use crate::corpus::{CaseContext, Corpus, Fixture};
 use crate::report::{
-    tally, CaseReport, CorpusInfo, ExecutionKind, Gate, ProducerOutcome, Report, ResponsesInfo,
-    RunReport, RunStatus, Totals, CORPUS_PATH, NOTICES, REPORT_FORMAT_VERSION,
+    tally_with_category, CaseReport, CorpusInfo, ExecutionKind, Gate, ProducerOutcome, Report,
+    ResponsesInfo, RunReport, RunStatus, Totals, CORPUS_PATH, NOTICES, REPORT_FORMAT_VERSION,
 };
 use crate::responses::{Behavior, Provenance, Responses, Scenario};
 use crate::score::{
-    abstention_outcome, defects_against, forbidden_hits, invariant_hits, FacetView, Stage,
+    abstention_outcome, defects_against, forbidden_hits, invariant_hits, FacetView,
+    RequestedOperation, Stage,
 };
 use crate::scratch::{AuthoritativeState, GuardOutcome, JobBinding, ScratchCase, Submission};
 use crate::EvaluationError;
@@ -107,6 +108,7 @@ fn unavailable_run(execution: ExecutionKind, reason: &str) -> RunReport {
             reason: reason.to_string(),
         },
         totals: Totals::empty(),
+        by_category: BTreeMap::new(),
         cases: Vec::new(),
     }
 }
@@ -150,6 +152,7 @@ fn gate_for(runs: &[RunReport]) -> Gate {
 
 fn deterministic_run(corpus: &Corpus) -> Result<RunReport, EvaluationError> {
     let mut totals = Totals::empty();
+    let mut by_category = BTreeMap::new();
     let mut cases = Vec::new();
     for fixture in &corpus.fixtures {
         let context = fixture.case_context()?;
@@ -179,13 +182,14 @@ fn deterministic_run(corpus: &Corpus) -> Result<RunReport, EvaluationError> {
             &mut scratch,
             producer_submission,
         )?;
-        tally(&mut totals, &case, &fixture.expected);
+        tally_with_category(&mut totals, &mut by_category, &case, &fixture.expected);
         cases.push(case);
     }
     Ok(RunReport {
         execution: ExecutionKind::Deterministic,
         status: RunStatus::Executed,
         totals,
+        by_category,
         cases,
     })
 }
@@ -199,18 +203,20 @@ fn scenario_run(
         return None;
     }
     let mut totals = Totals::empty();
+    let mut by_category = BTreeMap::new();
     let mut reports = Vec::new();
     for (scenario, case) in cases {
         let fixture = corpus
             .fixture(&scenario.fixture_id)
             .expect("fixture ids are validated when responses load");
-        tally(&mut totals, &case, &fixture.expected);
+        tally_with_category(&mut totals, &mut by_category, &case, &fixture.expected);
         reports.push(case);
     }
     Some(RunReport {
         execution,
         status: RunStatus::Executed,
         totals,
+        by_category,
         cases: reports,
     })
 }
@@ -235,7 +241,10 @@ enum Produced {
     NotHandled,
     Proposal(Box<Proposal>),
     ProviderFailure(ProviderFailure),
-    MappingRejected { error: String },
+    MappingRejected {
+        error: String,
+        requested_operation: Option<RequestedOperation>,
+    },
 }
 
 fn profile() -> Result<ProviderProfile, EvaluationError> {
@@ -307,8 +316,21 @@ fn produce_from_scenario(
         Ok(proposal) => Produced::Proposal(Box::new(proposal)),
         Err(error) => Produced::MappingRejected {
             error: error.to_string(),
+            requested_operation: requested_operation_of(&output.proposal),
         },
     })
+}
+
+/// What a rejected reply asked for, read from the untrusted reply itself: the mapping refuses
+/// update and create operations, but the attempt is still a finding to report.
+fn requested_operation_of(
+    reply: &serde_json::Map<String, serde_json::Value>,
+) -> Option<RequestedOperation> {
+    match reply.get("operation")?.get("kind")?.as_str()? {
+        "update" => Some(RequestedOperation::Update),
+        "create" => Some(RequestedOperation::Create),
+        _ => None,
+    }
 }
 
 fn finish_case(
@@ -343,12 +365,21 @@ fn finish_case(
             None,
             None,
         ),
-        Produced::MappingRejected { error } => (
-            ProducerOutcome::MappingRejected { error },
+        Produced::MappingRejected {
+            error,
+            requested_operation,
+        } => (
+            ProducerOutcome::MappingRejected {
+                error,
+                requested_operation,
+            },
             Some(Submission::Failure(ProviderFailure::new(
                 FailureKind::InvalidOutput,
             ))),
-            None,
+            requested_operation.map(|requested_operation| FacetView {
+                requested_operation: Some(requested_operation),
+                ..FacetView::default()
+            }),
             None,
         ),
     };
@@ -369,7 +400,7 @@ fn finish_case(
         candidate,
         Stage::Candidate,
         None,
-        abstained || candidate_view.is_none(),
+        abstained || producer != ProducerOutcome::Proposed,
     );
     let authoritative_view = FacetView::of_state(&state);
     let authoritative_defects = defects_against(
@@ -412,4 +443,91 @@ fn finish_case(
         authoritative_forbidden,
         authoritative_state: state,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::score::MutationClass;
+    use std::path::PathBuf;
+
+    fn corpus() -> Corpus {
+        Corpus::load(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(CORPUS_PATH),
+        )
+        .expect("the synthetic corpus loads")
+    }
+
+    fn plant_second_item(scratch: &ScratchCase, label: &str) {
+        let connection = scratch.connection_for_negative_control();
+        connection
+            .execute(
+                "INSERT INTO captures (capture_id, text, capture_instant, timezone_id, \
+                 utc_offset_minutes, locale, calendar, item_scope, route_id, entry_locked, \
+                 created_at) VALUES (?, 'planted', '2026-01-01T00:00:00Z', 'UTC', 0, 'en-US', \
+                 'gregorian', 'personal', 'route-1', 0, '2026-01-01T00:00:00Z')",
+                [format!("capture-{label}")],
+            )
+            .expect("plant capture");
+        connection
+            .execute(
+                "INSERT INTO items (item_id, capture_id, revision, lifecycle_state, save_state, \
+                 sync_state, processing_state, transcription_state, created_at, updated_at) \
+                 VALUES (?, ?, 0, 'active', 'saved_local', 'not_configured', 'unprocessed', \
+                 'not_applicable', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [format!("item-{label}"), format!("capture-{label}")],
+            )
+            .expect("plant item");
+    }
+
+    fn run_with(fixture: &Fixture, plant: bool) -> (CaseReport, Totals) {
+        let context = fixture.case_context().expect("context");
+        let mut scratch = ScratchCase::open("negative-control", &context).expect("scratch");
+        if plant {
+            plant_second_item(&scratch, "stray");
+        }
+        let case = finish_case(
+            fixture,
+            "control".into(),
+            None,
+            &mut scratch,
+            Produced::NotHandled,
+        )
+        .expect("case");
+        let mut totals = Totals::empty();
+        let mut by_category = BTreeMap::new();
+        tally_with_category(&mut totals, &mut by_category, &case, &fixture.expected);
+        (case, totals)
+    }
+
+    #[test]
+    fn an_extra_item_in_durable_state_is_an_authoritative_operation_hit_that_fails_the_gate() {
+        let corpus = corpus();
+        let fixture = corpus.fixture("already-completed-action").expect("fixture");
+
+        let (clean, clean_totals) = run_with(fixture, false);
+        assert!(clean.authoritative_state.foreign_records.is_empty());
+        assert_eq!(clean_totals.authoritative_forbidden_total(), 0);
+
+        let (planted, totals) = run_with(fixture, true);
+        assert_eq!(planted.authoritative_state.foreign_records["items"], 1);
+        assert_eq!(planted.authoritative_state.foreign_records["captures"], 1);
+        assert!(planted
+            .authoritative_forbidden
+            .iter()
+            .any(|hit| hit.class == MutationClass::Operation));
+        assert_eq!(totals.authoritative_forbidden[&MutationClass::Operation], 1);
+
+        let gate = gate_for(&[RunReport {
+            execution: ExecutionKind::Deterministic,
+            status: RunStatus::Executed,
+            totals,
+            by_category: BTreeMap::new(),
+            cases: vec![planted],
+        }]);
+        assert!(!gate.passed);
+        assert_eq!(gate.forbidden_authoritative_mutations, 1);
+    }
 }

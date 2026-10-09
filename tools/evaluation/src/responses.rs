@@ -1,4 +1,4 @@
-//! Recorded provider-response fixtures (`fixtures/evaluation/recorded-responses.json`).
+//! Recorded provider-response fixtures (`tools/evaluation/fixtures/recorded-responses.json`).
 //!
 //! Each scenario is one provider reply to one corpus fixture. Unless a scenario carries a
 //! `live_run` provenance with the full authorization record, it is a synthetic authored scenario

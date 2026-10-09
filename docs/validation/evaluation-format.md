@@ -3,8 +3,9 @@
 Status: M1 E01. The `evaluation` crate (`tools/evaluation`, binary `evaluate`) runs the synthetic intent corpus through the real interpretation pipeline and reports what it did, against the oracle in each fixture. It is a measurement and safety tool. It does not produce an accuracy score, and nothing it prints says how a live model behaves.
 
 - Corpus (oracle): [`fixtures/intent/contrastive-fixtures.json`](../../fixtures/intent/contrastive-fixtures.json), described in [intent-fixtures.md](intent-fixtures.md) and [fixture-schema.md](../features/fixture-schema.md).
-- Provider replies: [`fixtures/evaluation/recorded-responses.json`](../../fixtures/evaluation/recorded-responses.json).
-- Enforcement: `tools/evaluation/tests/evaluation.rs`, run by `cargo test --all --locked` (part of `make test`); the crate is built, formatted and linted by `make check` like every workspace member.
+- Provider replies: [`tools/evaluation/fixtures/recorded-responses.json`](../../tools/evaluation/fixtures/recorded-responses.json).
+- Ownership: the crate, its recorded replies and this document belong to E01. The only shared-file change is the one-line `tools/evaluation` workspace-member entry in `Cargo.toml` (and the `Cargo.lock` entries it implies), without which `cargo test --all` would not run the crate; see the Shared File Ordering note in [m1-contracts.md](../architecture/m1-contracts.md).
+- Enforcement: `tools/evaluation/tests/evaluation.rs` and the unit tests in `tools/evaluation/src/run.rs`, run by `cargo test --all --locked` (part of `make test`); the crate is built, formatted and linted by `make check` like every workspace member.
 
 ```
 cargo run -p evaluation -- --format text            # human summary
@@ -48,17 +49,24 @@ Separate counts, each at two stages, `candidate` (what the interpreter proposed)
 | --- | --- |
 | `false_action` | `action` where the oracle has another type or none |
 | `false_deadline` | a resolved reminder instant the oracle does not support |
-| `false_completion` | a proposed change to an existing item |
-| `unsupported_claim` | any other type, topic, quality, zone, evidence or reminder the oracle lacks |
+| `false_completion` | a request to change an existing item, including one the mapping rejected (see below) |
+| `wrong_item_type` | an item type other than the oracle's, or one where the oracle has none (`action` is `false_action` instead) |
+| `unsupported_claim` | any other topic, quality, zone, reminder or request to create another item the oracle lacks, and each item-type evidence span that overlaps none of the oracle's spans |
 | `missed_intent` | a facet the oracle has that is absent |
 
+Class-level failures are reported per fixture class. Each run carries `by_category`: the same totals (`cases` and the oracle denominators, defects at both stages, abstentions, forbidden hits at both stages) for every fixture category the run covered (`design`, `dates`, `mixed`, `corrections`, `ambiguity`, `broad-intention`, `negation`, `prompt-injection`, `dropped-asr-word`), and the text report prints a `class <name>` block for each. A failure confined to one class therefore shows up in that class and not only in a run-wide count. A class a run did not cover is absent, not zero.
+
+A reply the instruction mapping refuses because it asks to `update` an existing item or to `create` another one is still a finding: the producer outcome is `mapping_rejected` with `requested_operation`, and the request is scored at the candidate stage (`false_completion` for an update, `unsupported_claim` for a create, plus `operation` forbidden hits where the fixture forbids them). The guard still receives an invalid-output failure, so the authoritative stage is unaffected.
+
 Abstentions are counted apart: `correct`, `wrong_reason` (a different reason variant), `missed` (the oracle abstains and the interpreter does not) and `unexpected`. `forbidden_*` counts forbidden-rule hits per mutation class (`classification`, `reminder`, `session_topic`, `operation`, `lifecycle`, `source_text`). Producer outcomes (`proposed`, `abstained`, `not_handled`, `provider_failure`, `mapping_rejected`) and the guard's verdicts (`applied/<reminder disposition>`, `abstained`, `failed_permanently`, `retry_later`, `duplicate`, `rejected`) are counted too. A reply rejected by the mapping is recorded as an invalid-output failure and is not scored as an interpretation; a provider outage leaves the capture saved and the job retriable, with no defect.
+
+Item-type evidence is checked span by span: every proposed span must overlap one of the oracle's spans, so an unrelated span beside a valid one is reported.
 
 At the authoritative stage the store holds no resolution quality, so quality is compared only for candidates. Time zones are compared at the authoritative stage only for a reminder that carries an instant; a stored not-scheduled reminder shows the capture's zone for display and schedules nothing.
 
 ## The gate
 
-`gate.name` is `zero-forbidden-authoritative-mutations`. It passes when, summed over every executed run, no authoritative state breaks a fixture's `forbidden` rules, and additionally when the item left the `active` state or the raw capture or the user's correction no longer equals what was saved (those hold for every fixture). It also fails if the deterministic run did not execute or an executed run has no cases. Candidate-stage hits are reported but do not fail the gate: they are what the guard had to stop.
+`gate.name` is `zero-forbidden-authoritative-mutations`. It passes when, summed over every executed run, no authoritative state breaks a fixture's `forbidden` rules, and additionally, for every fixture, when the item left the `active` state, the raw capture or the user's correction no longer equals what was saved, or the store holds any item, capture, event, correction or reminder row beyond the evaluated item's own (`authoritative_state.foreign_records`; reported as an authoritative `operation` hit, because an accepted `create` or `update` would leave exactly that). `an_extra_item_in_durable_state_is_an_authoritative_operation_hit_that_fails_the_gate` plants such a row and checks that the gate fails. It also fails if the deterministic run did not execute or an executed run has no cases. Candidate-stage hits are reported but do not fail the gate: they are what the guard had to stop.
 
 The harness checks the actual stored state, so the gate depends on what the guard does, not on what a reply was meant to do. In the repository's scenarios the guard keeps out every forged reminder (injection, reported speech, wrong instant, hedged or ambiguous time promoted to an instant, wrong zone), rejects update and create operations, provenance fields and unknown fields at the mapping, and fails closed on prose, malformed evidence and transport errors.
 
@@ -70,4 +78,4 @@ Known limits, stated plainly:
 
 ## Adding scenarios or a live run
 
-Add scenarios to `fixtures/evaluation/recorded-responses.json`; a scenario for a fixture the corpus lacks, a duplicate `scenario_id`, an empty `description` or a non-object `respond` body is a load error. To add recorded replies from a live run, only an operator who holds the authorization may add them, with `live_run` provenance and synthetic inputs only; this tool never contacts a provider, so it never produces a `live` result. Changing the corpus changes `corpus.version`; reports with different versions are not comparable.
+Add scenarios to `tools/evaluation/fixtures/recorded-responses.json`; a scenario for a fixture the corpus lacks, a duplicate `scenario_id`, an empty `description` or a non-object `respond` body is a load error. To add recorded replies from a live run, only an operator who holds the authorization may add them, with `live_run` provenance and synthetic inputs only; this tool never contacts a provider, so it never produces a `live` result. Changing the corpus changes `corpus.version`; reports with different versions are not comparable.

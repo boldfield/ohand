@@ -33,6 +33,9 @@ pub enum DefectKind {
     FalseDeadline,
     /// A request to change, or a change of, an existing item's lifecycle.
     FalseCompletion,
+    /// An item type other than the oracle's (and other than `action`, which is `FalseAction`),
+    /// or an item type where the oracle has none.
+    WrongItemType,
     /// Any other facet, evidence or quality the oracle does not support.
     UnsupportedClaim,
     /// A facet the oracle expects that was not produced (or that the guard dropped).
@@ -40,10 +43,11 @@ pub enum DefectKind {
 }
 
 impl DefectKind {
-    pub const ALL: [DefectKind; 5] = [
+    pub const ALL: [DefectKind; 6] = [
         DefectKind::FalseAction,
         DefectKind::FalseDeadline,
         DefectKind::FalseCompletion,
+        DefectKind::WrongItemType,
         DefectKind::UnsupportedClaim,
         DefectKind::MissedIntent,
     ];
@@ -246,7 +250,7 @@ pub fn defects_against(
             ),
         ),
         (Some(found), Some(wanted)) if found != wanted => push(
-            DefectKind::UnsupportedClaim,
+            DefectKind::WrongItemType,
             format!(
                 "item type {} where the oracle has {}",
                 found.as_str(),
@@ -254,7 +258,7 @@ pub fn defects_against(
             ),
         ),
         (Some(found), None) => push(
-            DefectKind::UnsupportedClaim,
+            DefectKind::WrongItemType,
             format!("item type {} where the oracle has none", found.as_str()),
         ),
         (None, Some(wanted)) if may_miss(&|candidate| candidate.item_type.is_some()) => push(
@@ -263,18 +267,21 @@ pub fn defects_against(
         ),
         _ => {}
     }
-    if view.item_type.is_some() && !view.spans.is_empty() {
+    if view.item_type.is_some() {
         if let Some(oracle_spans) = &expected.source_spans {
-            let supported = view.spans.iter().any(|span| {
-                oracle_spans
+            for span in &view.spans {
+                let supported = oracle_spans
                     .iter()
-                    .any(|oracle| overlaps(*span, (oracle.start, oracle.end)))
-            });
-            if !supported {
-                push(
-                    DefectKind::UnsupportedClaim,
-                    "item-type evidence overlaps none of the oracle's spans".to_string(),
-                );
+                    .any(|oracle| overlaps(*span, (oracle.start, oracle.end)));
+                if !supported {
+                    push(
+                        DefectKind::UnsupportedClaim,
+                        format!(
+                            "item-type evidence {}..{} overlaps none of the oracle's spans",
+                            span.0, span.1
+                        ),
+                    );
+                }
             }
         }
     }
@@ -454,8 +461,8 @@ pub fn forbidden_hits(forbidden: &Forbidden, view: &FacetView, stage: Stage) -> 
     hits
 }
 
-/// Hits that hold for every fixture: no pipeline path may complete an item or alter what the
-/// user saved.
+/// Hits that hold for every fixture: no pipeline path may complete an item, alter what the user
+/// saved, or create or touch any item other than the one evaluated.
 pub fn invariant_hits(state: &AuthoritativeState) -> Vec<ForbiddenHit> {
     let mut hits = Vec::new();
     let stage = Stage::Authoritative;
@@ -464,6 +471,19 @@ pub fn invariant_hits(state: &AuthoritativeState) -> Vec<ForbiddenHit> {
             stage,
             class: MutationClass::Lifecycle,
             rule: format!("item left the active state ({})", state.lifecycle),
+        });
+    }
+    if !state.foreign_records.is_empty() {
+        let found = state
+            .foreign_records
+            .iter()
+            .map(|(table, rows)| format!("{rows} in {table}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        hits.push(ForbiddenHit {
+            stage,
+            class: MutationClass::Operation,
+            rule: format!("records beyond the evaluated item's own appeared ({found})"),
         });
     }
     if !state.raw_capture_intact {

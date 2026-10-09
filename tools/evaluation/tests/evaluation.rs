@@ -24,7 +24,7 @@ fn corpus() -> Corpus {
 
 fn repository_responses(corpus: &Corpus) -> Responses {
     Responses::load(
-        &repository_path("fixtures/evaluation/recorded-responses.json"),
+        &repository_path("tools/evaluation/fixtures/recorded-responses.json"),
         corpus,
     )
     .expect("the recorded responses load")
@@ -484,4 +484,185 @@ fn a_change_request_against_an_existing_item_is_a_false_completion_defect() {
         .iter()
         .all(|defect| defect.kind != DefectKind::FalseAction
             && defect.kind != DefectKind::FalseDeadline));
+}
+
+#[test]
+fn class_level_failures_are_reported_per_fixture_class_without_leaking_across_classes() {
+    use evaluation::corpus::Category;
+    let corpus = corpus();
+    let fixture_id = "design-dated-information";
+    let responses = responses_from(
+        &corpus,
+        vec![scenario(
+            "false-action",
+            fixture_id,
+            synthetic(),
+            json!({
+                "operation": { "kind": "annotate" },
+                "item_type": "action",
+                "source_spans": [span_of(&corpus, fixture_id, "expires Friday")]
+            }),
+        )],
+    );
+    let report = evaluate(&corpus, Some(&responses)).expect("report");
+    let fake = report.run(ExecutionKind::Fake).expect("fake");
+
+    let design = &fake.by_category[&Category::Design];
+    assert_eq!(design.cases, 1);
+    assert_eq!(design.candidate_defects[&DefectKind::FalseAction], 1);
+    assert_eq!(design.authoritative_defects[&DefectKind::FalseAction], 1);
+    assert_eq!(fake.by_category.len(), 1, "only covered classes are listed");
+
+    let deterministic = report.run(ExecutionKind::Deterministic).expect("run");
+    assert!(deterministic.by_category.len() > 1);
+    for (category, totals) in &deterministic.by_category {
+        let cases_in_class = deterministic
+            .cases
+            .iter()
+            .filter(|case| case.category == *category)
+            .count() as u64;
+        assert_eq!(totals.cases, cases_in_class, "{category:?}");
+        assert_eq!(totals.candidate_defects[&DefectKind::FalseAction], 0);
+    }
+    for run in &report.runs {
+        for kind in DefectKind::ALL {
+            let across_classes: u64 = run
+                .by_category
+                .values()
+                .map(|totals| totals.authoritative_defects[&kind])
+                .sum();
+            assert_eq!(
+                across_classes, run.totals.authoritative_defects[&kind],
+                "{kind:?} in {:?}",
+                run.execution
+            );
+        }
+    }
+    assert!(report.to_text().contains("class design: 1 cases"));
+}
+
+#[test]
+fn a_wrong_item_type_is_counted_apart_from_unsupported_claims_and_false_actions() {
+    let corpus = corpus();
+    let fixture_id = "design-dated-information";
+    let responses = responses_from(
+        &corpus,
+        vec![scenario(
+            "idea-for-note",
+            fixture_id,
+            synthetic(),
+            json!({
+                "operation": { "kind": "annotate" },
+                "item_type": "idea",
+                "source_spans": [span_of(&corpus, fixture_id, "expires Friday")]
+            }),
+        )],
+    );
+    let report = evaluate(&corpus, Some(&responses)).expect("report");
+    let fake = report.run(ExecutionKind::Fake).expect("fake");
+
+    assert_eq!(count(fake, DefectKind::WrongItemType, false), 1);
+    assert_eq!(count(fake, DefectKind::WrongItemType, true), 1);
+    assert_eq!(count(fake, DefectKind::UnsupportedClaim, false), 0);
+    assert_eq!(count(fake, DefectKind::FalseAction, false), 0);
+}
+
+#[test]
+fn rejected_update_and_create_requests_are_reported_end_to_end() {
+    use evaluation::report::ProducerOutcome;
+    use evaluation::score::RequestedOperation;
+    let corpus = corpus();
+    let responses = repository_responses(&corpus);
+    let report = evaluate(&corpus, Some(&responses)).expect("report");
+    let fake = report.run(ExecutionKind::Fake).expect("fake");
+    let case = |id: &str| fake.cases.iter().find(|case| case.case_id == id).unwrap();
+
+    let update = case("adversarial/update-existing-item");
+    assert!(matches!(
+        update.producer,
+        ProducerOutcome::MappingRejected {
+            requested_operation: Some(RequestedOperation::Update),
+            ..
+        }
+    ));
+    assert!(update
+        .candidate_defects
+        .iter()
+        .any(|defect| defect.kind == DefectKind::FalseCompletion));
+    assert!(update
+        .candidate_forbidden
+        .iter()
+        .any(|hit| hit.class == MutationClass::Operation));
+    assert!(update.authoritative_defects.is_empty());
+    assert!(update.authoritative_forbidden.is_empty());
+
+    let create = case("adversarial/create-another-item");
+    assert!(matches!(
+        create.producer,
+        ProducerOutcome::MappingRejected {
+            requested_operation: Some(RequestedOperation::Create),
+            ..
+        }
+    ));
+    assert!(create
+        .candidate_forbidden
+        .iter()
+        .any(|hit| hit.class == MutationClass::Operation));
+    assert!(create.authoritative_forbidden.is_empty());
+
+    assert_eq!(count(fake, DefectKind::FalseCompletion, false), 1);
+    assert_eq!(count(fake, DefectKind::FalseCompletion, true), 0);
+    assert_eq!(
+        fake.totals.candidate_forbidden[&MutationClass::Operation],
+        2
+    );
+    assert_eq!(
+        fake.totals.authoritative_forbidden[&MutationClass::Operation],
+        0
+    );
+}
+
+#[test]
+fn every_claimed_evidence_span_must_be_supported_not_just_one() {
+    let corpus = corpus();
+    let fixture_id = "mixed-note-action-capture";
+    let valid = span_of(&corpus, fixture_id, "Remember to order new tile");
+    let unrelated = json!({ "start": 0, "end": 31 });
+    let responses = responses_from(
+        &corpus,
+        vec![
+            scenario(
+                "valid-only",
+                fixture_id,
+                synthetic(),
+                json!({
+                    "operation": { "kind": "annotate" },
+                    "item_type": "action",
+                    "source_spans": [valid.clone()]
+                }),
+            ),
+            scenario(
+                "valid-plus-unrelated",
+                fixture_id,
+                synthetic(),
+                json!({
+                    "operation": { "kind": "annotate" },
+                    "item_type": "action",
+                    "source_spans": [unrelated, valid]
+                }),
+            ),
+        ],
+    );
+    let report = evaluate(&corpus, Some(&responses)).expect("report");
+    let fake = report.run(ExecutionKind::Fake).expect("fake");
+    let case = |id: &str| fake.cases.iter().find(|case| case.case_id == id).unwrap();
+
+    assert!(case("valid-only").candidate_defects.is_empty());
+    let mixed = case("valid-plus-unrelated");
+    assert_eq!(mixed.candidate_defects.len(), 1);
+    assert_eq!(
+        mixed.candidate_defects[0].kind,
+        DefectKind::UnsupportedClaim
+    );
+    assert_eq!(count(fake, DefectKind::UnsupportedClaim, false), 1);
 }

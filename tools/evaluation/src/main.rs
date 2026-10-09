@@ -23,7 +23,7 @@ fn run() -> Result<ExitCode, String> {
     let repository_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut corpus_path = repository_root.join(evaluation::report::CORPUS_PATH);
     let mut responses_path =
-        Some(repository_root.join("fixtures/evaluation/recorded-responses.json"));
+        Some(repository_root.join("tools/evaluation/fixtures/recorded-responses.json"));
     let mut format = "json".to_string();
     let mut out: Option<PathBuf> = None;
     let mut enforce_gate = true;
