@@ -118,6 +118,8 @@ pub enum ConfigurationDifference {
     },
     /// The configured endpoint differs. Endpoint values are never reproduced.
     Endpoint,
+    /// The credential references (accounts) differ. Reference values are never reproduced.
+    Credential,
     /// The authorized destination class or origins differ. Origins are never reproduced.
     Destination,
     StructuredOutput {
@@ -216,6 +218,9 @@ impl Comparability {
         }
         if first.endpoint() != second.endpoint() {
             differences.push(ConfigurationDifference::Endpoint);
+        }
+        if first.credential_ref() != second.credential_ref() {
+            differences.push(ConfigurationDifference::Credential);
         }
         let sorted_origins = |authorization: &Authorization| {
             let mut origins = authorization.destinations().to_vec();

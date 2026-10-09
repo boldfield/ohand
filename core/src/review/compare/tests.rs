@@ -890,6 +890,43 @@ fn reports_backoff_differences_as_confounders() {
 }
 
 #[test]
+fn different_credential_refs_are_a_redacted_confounder() {
+    let mut fixture = Fixture::granted();
+    let first_profile = openai_profile("model-a");
+    let second_profile =
+        ProviderProfileBuilder::new("second-openai", ProviderProtocol::OpenAi, "model-b")
+            .credential_ref("other-account-secret-ref")
+            .authorized_destination(OPENAI)
+            .capability(supported_text(1000))
+            .build()
+            .unwrap();
+    let first_auth = fixture.authorize_interpretation(&first_profile);
+    let second_auth = fixture.authorize_interpretation(&second_profile);
+    let support = support_all();
+    let comparability = derive_pair(
+        &source(&fixture),
+        arm(&first_profile, &first_auth, &support),
+        arm(&second_profile, &second_auth, &support),
+    )
+    .unwrap()
+    .comparability;
+    assert_eq!(
+        comparability.differences,
+        vec![
+            ConfigurationDifference::Model,
+            ConfigurationDifference::Credential
+        ]
+    );
+    assert!(!comparability.no_known_confounders());
+    assert!(comparability
+        .limitations
+        .contains(&ComparisonLimitation::ConfigurationDiffers));
+    let report = format!("{comparability:?}");
+    assert!(!report.contains("other-account-secret-ref"));
+    assert!(!report.contains("credential-ref"));
+}
+
+#[test]
 fn reports_endpoint_and_destination_differences_without_values() {
     let mut fixture = Fixture::new();
     fixture.grant("text_interpretation", &[SELF_HOSTED, OTHER_SELF_HOSTED]);
