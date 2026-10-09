@@ -31,7 +31,10 @@ use crate::interpretation::instructions::content_version;
 pub const MAX_DIAGNOSTIC_INSTRUCTION_BYTES: usize = 64 * 1024;
 pub const MAX_DIAGNOSTIC_CONTEXT_BYTES: usize = 256 * 1024;
 pub const MAX_TEMPERATURE_MILLI: u32 = 2000;
-const MAX_REPORTED_MODEL_CHARS: usize = 128;
+/// Longest suffix (after the separating hyphen) that can still count as a pinned revision:
+/// a `YYYY-MM-DD` date. Bounding the suffix rather than the whole name keeps an exact echo of a
+/// long pinned model classified as [`ReportedModel::Pinned`].
+const MAX_REVISION_SUFFIX_CHARS: usize = 10;
 
 /// A model setting an experiment may request explicitly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -393,9 +396,9 @@ fn classify_reported_model(pinned_model: &str, reported_model: Option<&str>) -> 
     let Some(reported_model) = reported_model else {
         return ReportedModel::NotReported;
     };
-    if reported_model.len() > MAX_REPORTED_MODEL_CHARS {
-        return ReportedModel::Different;
-    }
+    // Exact equality is decided before any bound on the provider-controlled value: the pinned
+    // model is operator configuration with no length limit, and an exact echo of it is `Pinned`
+    // however long it is.
     if reported_model == pinned_model {
         return ReportedModel::Pinned;
     }
@@ -405,6 +408,9 @@ fn classify_reported_model(pinned_model: &str, reported_model: Option<&str>) -> 
     else {
         return ReportedModel::Different;
     };
+    if suffix.len() > MAX_REVISION_SUFFIX_CHARS {
+        return ReportedModel::Different;
+    }
     let digit_groups: Vec<&str> = suffix.split('-').collect();
     let all_digits = digit_groups
         .iter()

@@ -360,6 +360,59 @@ fn pinned_model_extended_only_by_date_or_short_revision_suffixes_is_recognized()
     }
 }
 
+/// Profiles accept any non-empty model string, so the pinned model may be far longer than any
+/// bound a provider-controlled echo could reasonably be held to. Equality and revision suffixes
+/// are judged relative to the pinned model, never against the reported name's total length.
+#[test]
+fn long_pinned_models_are_classified_by_relationship_not_total_length() {
+    let long_pinned_model = format!("synthetic-long-model-{}", "x".repeat(200));
+    assert!(long_pinned_model.len() > 128);
+
+    let metadata = configured_metadata(
+        "synthetic-self-hosted",
+        &long_pinned_model,
+        &long_pinned_model,
+    );
+    assert_eq!(metadata.provenance.reported_model, ReportedModel::Pinned);
+    assert_only_core_assigned_provenance(&metadata, &long_pinned_model);
+
+    for revision_suffix in ["20250929", "2026-01-05", "0125", "1"] {
+        let revision = format!("{long_pinned_model}-{revision_suffix}");
+        let metadata = configured_metadata("synthetic-self-hosted", &long_pinned_model, &revision);
+        assert_eq!(
+            metadata.provenance.reported_model,
+            ReportedModel::PinnedRevision,
+            "{revision_suffix}"
+        );
+        assert_only_core_assigned_provenance(&metadata, &long_pinned_model);
+    }
+
+    for other_suffix in ["0123456789abcdef", "12345", "latest", "2026-01", ""] {
+        let other = format!("{long_pinned_model}-{other_suffix}");
+        let metadata = configured_metadata("synthetic-self-hosted", &long_pinned_model, &other);
+        assert_eq!(
+            metadata.provenance.reported_model,
+            ReportedModel::Different,
+            "{other:?} must not count as the pinned model"
+        );
+        assert_only_core_assigned_provenance(&metadata, &long_pinned_model);
+    }
+
+    let truncated = &long_pinned_model[..128];
+    let metadata = configured_metadata("synthetic-self-hosted", &long_pinned_model, truncated);
+    assert_eq!(metadata.provenance.reported_model, ReportedModel::Different);
+    let unrelated_long_name = "m".repeat(long_pinned_model.len());
+    let metadata = configured_metadata(
+        "synthetic-self-hosted",
+        &long_pinned_model,
+        &unrelated_long_name,
+    );
+    assert_eq!(metadata.provenance.reported_model, ReportedModel::Different);
+    assert!(!serde_json::to_string(&metadata)
+        .unwrap()
+        .contains(&unrelated_long_name));
+}
+
 fn configured_metadata(profile_id: &str, model: &str, reported_model: &str) -> DiagnosticMetadata {
     let run = Run {
         profile: ProviderProfileBuilder::new(profile_id, ProviderProtocol::SelfHosted, model)
