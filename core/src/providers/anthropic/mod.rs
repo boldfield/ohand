@@ -16,7 +16,8 @@ use thiserror::Error;
 use crate::interpretation::instructions::output_schema;
 
 use super::contracts::{
-    AdapterCall, CancelToken, ProviderAdapter, ProviderCapability, ProviderProtocol,
+    AdapterCall, CancelToken, Clock, DiagnosticAdapterCall, DiagnosticResponse, DiagnosticSetting,
+    DiagnosticSupport, ProviderAdapter, ProviderCapability, ProviderProfile, ProviderProtocol,
     StructuredOutputMode, TransportError,
 };
 
@@ -171,26 +172,38 @@ impl AnthropicAdapter {
     }
 }
 
-impl ProviderAdapter for AnthropicAdapter {
-    fn invoke(&self, call: &AdapterCall<'_>) -> Result<Vec<u8>, TransportError> {
-        if call.cancel.is_cancelled() {
+impl AnthropicAdapter {
+    /// Cancellation, protocol and destination checks shared by every call kind; returns the
+    /// structured output mode the profile declares for text interpretation.
+    fn check_call(
+        &self,
+        profile: &ProviderProfile,
+        cancel: &CancelToken,
+    ) -> Result<StructuredOutputMode, TransportError> {
+        if cancel.is_cancelled() {
             return Err(TransportError::Cancelled);
         }
-        let profile = call.profile;
         if profile.protocol() != ProviderProtocol::Anthropic || profile.endpoint().is_some() {
             return Err(TransportError::Rejected);
         }
         if !is_authorized(&self.settings.endpoint, profile.authorized_destinations()) {
             return Err(TransportError::Rejected);
         }
-        let mode = profile
+        Ok(profile
             .capability(ProviderCapability::TextInterpretation)
             .map_or(StructuredOutputMode::None, |metadata| {
                 metadata.structured_output
-            });
-        let body = wire::build_messages_body(profile, call.request, &self.settings, mode)?;
+            }))
+    }
 
-        let timeout_ms = call.deadline_ms.saturating_sub(call.clock.now_ms());
+    /// Send one already-built body under the call's deadline, size bound and cancellation.
+    fn exchange(
+        &self,
+        profile: &ProviderProfile,
+        body: Vec<u8>,
+        limits: ExchangeLimits<'_>,
+    ) -> Result<HttpResponse, TransportError> {
+        let timeout_ms = limits.deadline_ms.saturating_sub(limits.clock.now_ms());
         if timeout_ms == 0 {
             return Err(TransportError::Timeout);
         }
@@ -207,23 +220,77 @@ impl ProviderAdapter for AnthropicAdapter {
             ],
             body,
             timeout_ms,
-            deadline_ms: call.deadline_ms,
-            max_response_bytes: call.max_response_bytes,
+            deadline_ms: limits.deadline_ms,
+            max_response_bytes: limits.max_response_bytes,
             credential: Some(CredentialAttachment {
                 reference: profile.credential_ref().as_str().to_string(),
                 header: CREDENTIAL_HEADER.to_string(),
             }),
         };
 
-        if call.cancel.is_cancelled() {
+        if limits.cancel.is_cancelled() {
             return Err(TransportError::Cancelled);
         }
-        let response = self.transport.send(&request, call.cancel)?;
-        if call.cancel.is_cancelled() {
+        let response = self.transport.send(&request, limits.cancel)?;
+        if limits.cancel.is_cancelled() {
             return Err(TransportError::Cancelled);
         }
+        Ok(response)
+    }
+}
+
+struct ExchangeLimits<'a> {
+    deadline_ms: u64,
+    max_response_bytes: usize,
+    cancel: &'a CancelToken,
+    clock: &'a dyn Clock,
+}
+
+impl ProviderAdapter for AnthropicAdapter {
+    fn invoke(&self, call: &AdapterCall<'_>) -> Result<Vec<u8>, TransportError> {
+        let mode = self.check_call(call.profile, call.cancel)?;
+        let body = wire::build_messages_body(call.profile, call.request, &self.settings, mode)?;
+        let response = self.exchange(
+            call.profile,
+            body,
+            ExchangeLimits {
+                deadline_ms: call.deadline_ms,
+                max_response_bytes: call.max_response_bytes,
+                cancel: call.cancel,
+                clock: call.clock,
+            },
+        )?;
         let schema = wire::effective_schema(mode, &self.settings);
         wire::decode_response(&response, call.max_response_bytes, &schema)
+    }
+
+    /// Temperature and output-token limit are honored as requested. Anthropic has no seed
+    /// parameter, so a requested seed is refused by `dispatch_diagnostic` before any transport.
+    fn diagnostic_support(&self) -> DiagnosticSupport {
+        DiagnosticSupport::supporting([
+            DiagnosticSetting::Temperature,
+            DiagnosticSetting::MaxOutputTokens,
+        ])
+    }
+
+    fn invoke_diagnostic(
+        &self,
+        call: &DiagnosticAdapterCall<'_>,
+    ) -> Result<DiagnosticResponse, TransportError> {
+        let mode = self.check_call(call.profile, call.cancel)?;
+        let body = wire::build_diagnostic_body(call.profile, call.request, &self.settings, mode)?;
+        let response = self.exchange(
+            call.profile,
+            body,
+            ExchangeLimits {
+                deadline_ms: call.deadline_ms,
+                max_response_bytes: call.max_response_bytes,
+                cancel: call.cancel,
+                clock: call.clock,
+            },
+        )?;
+        let schema = wire::effective_schema(mode, &self.settings);
+        wire::decode_reply(&response, call.max_response_bytes, &schema).map(Into::into)
     }
 }
 
