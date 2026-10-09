@@ -47,14 +47,14 @@ pub const WORKER_EVIDENCE_COLLECTED_AT: &str = "2026-10-08T09:39:09Z";
 
 /// Evidence identifier of the adapter smoke run: this adapter's own request, built from the real
 /// interpretation prompt and `output_schema()`, sent to the configured endpoint.
-pub const SMOKE_EVIDENCE_ID: &str = "self-hosted-adapter-smoke-20261009T111140Z-7be0c91a";
+pub const SMOKE_EVIDENCE_ID: &str = "self-hosted-adapter-smoke-20261009T145738Z-e45f02b4";
 /// Repository path of the sanitized smoke artifact.
 pub const SMOKE_EVIDENCE_ARTIFACT: &str =
-    "docs/validation/evidence/spark-adapter-smoke/self-hosted-adapter-smoke-20261009T111140Z-7be0c91a.json";
+    "docs/validation/evidence/spark-adapter-smoke/self-hosted-adapter-smoke-20261009T145738Z-e45f02b4.json";
 /// Adapter build revision recorded by the smoke artifact.
-pub const SMOKE_ADAPTER_REVISION: &str = "7be0c91a34616ac1b4caa434d2ba4fe0aa77f057";
+pub const SMOKE_ADAPTER_REVISION: &str = "e45f02b4cdec971bdd0e16cd162af60afe8a4a16";
 /// Collection time recorded by the smoke artifact.
-pub const SMOKE_EVIDENCE_COLLECTED_AT: &str = "2026-10-09T11:11:40Z";
+pub const SMOKE_EVIDENCE_COLLECTED_AT: &str = "2026-10-09T14:57:38Z";
 
 /// Evidence identifier of the V08b phone-context artifact (revision 2).
 pub const PHONE_EVIDENCE_ID: &str = "spark-phone-2026-10-08";
@@ -89,7 +89,8 @@ pub fn compatibility_boundary() -> &'static [&'static str] {
     &[
         "Verified: https with certificate validation; GET /models and POST /chat/completions answer 200 in OpenAI-compatible form (worker context).",
         "Verified (probe): a strict json_schema response_format returned content matching a two-key schema for deepseek-flash-iq3:latest only.",
-        "Verified (adapter smoke, worker context): the adapter's own request, carrying the interpretation output schema (optional properties included) as a strict json_schema, was answered 200 with an assistant message and finish_reason stop for three synthetic captures, and each reply mapped to a validated proposal. Calls took up to about 69 seconds against the profile's 120-second timeout.",
+        "Verified (adapter smoke, worker context, max_tokens 4096): the adapter's own request, carrying the interpretation output schema (optional properties included) as a strict json_schema, was answered 200 with an assistant message and finish_reason stop for three synthetic captures, and each reply mapped to a validated proposal. Calls took up to about 56 seconds; the smoke profile's timeout was 300 seconds.",
+        "Observed failure at max_tokens 1024 (artifacts self-hosted-adapter-smoke-20261009T145407Z-d1243e1f and -20261009T145540Z-d1243e1f): the reminder capture ended with finish_reason length and empty content because the model's separate reasoning output used the whole budget; the adapter reports InvalidOutput (not retriable). A request that needs more than the bound is therefore not interpreted; the capture itself stays durable.",
         "Not verified: reminder_proposal and session_topic_proposal output (no smoke capture produced them), other finish_reason values, streaming, rate limits.",
         "Not verified: the credential is validated; the endpoint answered requests with and without it.",
         "Not verified: chat requests from the phone context, and for the five other listed models.",

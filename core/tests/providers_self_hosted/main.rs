@@ -385,6 +385,19 @@ fn smoke_artifact_matches_the_cited_identifier_revision_and_time_and_passed() {
     assert_eq!(artifact["configured_scheme"], "https");
     assert_eq!(artifact["result"], "pass");
     assert!(SMOKE_EVIDENCE_ARTIFACT.contains(SMOKE_EVIDENCE_ID));
+    let raw = &artifact["private_raw_evidence"];
+    assert_eq!(raw["run_id"], SMOKE_EVIDENCE_ID);
+    assert_eq!(
+        raw["file_name"],
+        format!("{SMOKE_EVIDENCE_ID}.raw.json").as_str()
+    );
+    assert!(raw["bytes"].as_u64().unwrap_or(0) > 0);
+    let digest = raw["sha256"].as_str().expect("raw evidence digest");
+    assert!(digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert!(
+        !raw["location"].as_str().unwrap_or_default().contains('/')
+            || raw["location"].as_str().unwrap().contains("outside Git")
+    );
     let requests = artifact["requests"].as_array().expect("requests");
     assert!(!requests.is_empty());
     for request in requests {

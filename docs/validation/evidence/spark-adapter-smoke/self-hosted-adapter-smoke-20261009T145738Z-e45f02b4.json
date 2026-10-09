@@ -1,0 +1,87 @@
+{
+  "adapter_revision": {
+    "commit": "e45f02b4cdec971bdd0e16cd162af60afe8a4a16",
+    "dirty": false
+  },
+  "collected_at": "2026-10-09T14:57:38Z",
+  "collection_context": "odonian-worker",
+  "configured_scheme": "https",
+  "evidence_id": "self-hosted-adapter-smoke-20261009T145738Z-e45f02b4",
+  "failures": [],
+  "max_tokens": 4096,
+  "model": "deepseek-flash-iq3:latest",
+  "private_raw_evidence": {
+    "bytes": 30613,
+    "contents": "request and response bodies of every exchange; no endpoint address or credential",
+    "file_name": "self-hosted-adapter-smoke-20261009T145738Z-e45f02b4.raw.json",
+    "location": "private evidence directory of the collecting Odonian worker (OHAND_PRIVATE_EVIDENCE_DIR, default ~/.ohand-private-evidence), outside Git; mode 0600 in a 0700 directory",
+    "run_id": "self-hosted-adapter-smoke-20261009T145738Z-e45f02b4",
+    "sha256": "bcc8a07f435b0ab487e81e76dcb29bf071471a729d9a6b5f16437343df558b36"
+  },
+  "request_shape": "adapter-built: interpretation prompt, strict json_schema response_format carrying output_schema()",
+  "requests": [
+    {
+      "conforms_to_output_schema_top_level": true,
+      "content_bytes": 111,
+      "curl_failure": null,
+      "dispatch_result": "ok",
+      "elapsed_ms": 55334,
+      "finish_reason": "stop",
+      "http_status": 200,
+      "mapped_to_validated_proposal": true,
+      "message_role": "assistant",
+      "name": "reminder-capture",
+      "proposal_keys": [
+        "item_type",
+        "operation",
+        "source_spans"
+      ],
+      "response_bytes": 3551
+    },
+    {
+      "conforms_to_output_schema_top_level": true,
+      "content_bytes": 99,
+      "curl_failure": null,
+      "dispatch_result": "ok",
+      "elapsed_ms": 19902,
+      "finish_reason": "stop",
+      "http_status": 200,
+      "mapped_to_validated_proposal": true,
+      "message_role": "assistant",
+      "name": "idea-capture",
+      "proposal_keys": [
+        "item_type",
+        "operation",
+        "source_spans"
+      ],
+      "response_bytes": 1705
+    },
+    {
+      "conforms_to_output_schema_top_level": true,
+      "content_bytes": 99,
+      "curl_failure": null,
+      "dispatch_result": "ok",
+      "elapsed_ms": 9603,
+      "finish_reason": "stop",
+      "http_status": 200,
+      "mapped_to_validated_proposal": true,
+      "message_role": "assistant",
+      "name": "plain-note-capture",
+      "proposal_keys": [
+        "item_type",
+        "operation",
+        "source_spans"
+      ],
+      "response_bytes": 945
+    }
+  ],
+  "result": "pass",
+  "schema_version": 1,
+  "synthetic_context_time": "2026-01-05T09:00:00+00:00",
+  "transport": "curl subprocess standing in for the native https transport; certificate validation on, redirects not followed",
+  "unverified": [
+    "phone-context reachability of chat requests (owned by V08b)",
+    "models other than the one named above",
+    "endpoint credential validation (V08a: not enforced)"
+  ]
+}
