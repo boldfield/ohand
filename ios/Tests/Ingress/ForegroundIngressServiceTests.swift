@@ -200,7 +200,8 @@ final class ForegroundIngressServiceTests: IngressStorageTestCase {
             return XCTFail("got \(String(describing: report))")
         }
         XCTAssertTrue(exists(recordURL("capture-corrupt")))
-        XCTAssertEqual(report?.unclaimedInProgressAudio, [], "orphans are not reported while a record is unreadable")
+        XCTAssertEqual(report?.unclaimedAudioNotEvaluated, true, "orphan audio is unknown, not none, while a record is unreadable")
+        XCTAssertEqual(report?.unclaimedInProgressAudio, [])
     }
 
     func testRecoveredRecordWithUnsafeAudioNamesIsRefusedBeforeAnyFileOperation() throws {

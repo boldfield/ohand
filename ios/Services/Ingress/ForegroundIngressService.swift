@@ -60,7 +60,9 @@ final class ForegroundIngressService {
         var everyRecordReadable = true
 
         func finish() {
-            if everyRecordReadable {
+            if !everyRecordReadable {
+                report.unclaimedAudioNotEvaluated = true
+            } else {
                 do {
                     report.unclaimedInProgressAudio = try staging.unclaimedInProgressAudio(
                         claimedFileNames: claimedInProgressNames)

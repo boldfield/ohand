@@ -91,4 +91,7 @@ struct IngressRecoveryReport: Equatable {
     /// Set when the in-progress audio store could not be listed; unclaimed recordings may exist but are not visible,
     /// so callers must treat `unclaimedInProgressAudio` as "unknown", never as "none".
     var unclaimedAudioListingFailure: IngressStagingFailure?
+    /// Set when orphan classification was skipped because a staging record was unreadable (its claimed audio names
+    /// are unknown); `unclaimedInProgressAudio` is then "unknown", never "none".
+    var unclaimedAudioNotEvaluated = false
 }
