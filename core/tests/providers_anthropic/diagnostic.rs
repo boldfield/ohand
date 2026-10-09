@@ -14,9 +14,9 @@ use ohand_core::providers::anthropic::{
 };
 use ohand_core::providers::contracts::{
     dispatch, dispatch_diagnostic, DiagnosticFailure, DiagnosticFailureKind, DiagnosticOutput,
-    DiagnosticRequest, DiagnosticSetting, DispatchLimits, EffectiveSetting, FailureKind,
-    InterpretationRequest, ProviderProfile, ReportedModel, RequestedSettings, SettingValue,
-    StructuredOutputMode, TextBasis, TokenUsage, UsageAvailability,
+    DiagnosticRequest, DiagnosticSetting, DispatchLimits, EffectiveSetting, ErrorClass,
+    FailureKind, InterpretationRequest, ProviderProfile, ReportedModel, RequestedSettings,
+    SettingValue, StructuredOutputMode, TextBasis, TokenUsage, UsageAvailability,
 };
 use ohand_core::time::TimeContext;
 use serde_json::{json, Value};
@@ -487,6 +487,47 @@ fn unusable_content_keeps_the_usage_the_same_response_reported() {
 }
 
 #[test]
+fn refusal_is_rejected_and_keeps_the_usage_the_same_response_reported() {
+    let harness = Harness::new(vec![FakeAnthropicStep::respond_json(
+        200,
+        &message("refusal", json!([{ "type": "text", "text": "no" }])),
+    )]);
+    let failure = harness.diagnostic_failure();
+    assert_eq!(provider_failure_kind(&failure), FailureKind::Rejected);
+    assert_eq!(failure.class(), ErrorClass::Permanent);
+    assert_eq!(
+        failure.usage,
+        UsageAvailability::Reported {
+            usage: TokenUsage {
+                input_tokens: Some(42),
+                output_tokens: Some(17),
+            }
+        }
+    );
+}
+
+#[test]
+fn refusal_with_absent_or_malformed_usage_stays_unknown() {
+    for usage in [
+        None,
+        Some(json!({})),
+        Some(json!({ "input_tokens": "42", "output_tokens": -3 })),
+    ] {
+        let mut reply = message("refusal", json!([{ "type": "text", "text": "no" }]));
+        match &usage {
+            Some(usage) => reply["usage"] = usage.clone(),
+            None => {
+                reply.as_object_mut().unwrap().remove("usage");
+            }
+        }
+        let harness = Harness::new(vec![FakeAnthropicStep::respond_json(200, &reply)]);
+        let failure = harness.diagnostic_failure();
+        assert_eq!(provider_failure_kind(&failure), FailureKind::Rejected);
+        assert_eq!(failure.usage, UsageAvailability::Unavailable, "{usage:?}");
+    }
+}
+
+#[test]
 fn unparseable_bodies_and_errors_report_no_usage() {
     let cases: Vec<(&str, FakeAnthropicStep, FailureKind)> = vec![
         (
@@ -501,14 +542,6 @@ fn unparseable_bodies_and_errors_report_no_usage() {
                 &json!({ "type": "error", "error": { "type": "overloaded_error", "message": "x" } }),
             ),
             FailureKind::Unavailable,
-        ),
-        (
-            "refusal",
-            FakeAnthropicStep::respond_json(
-                200,
-                &message("refusal", json!([{ "type": "text", "text": "no" }])),
-            ),
-            FailureKind::Rejected,
         ),
         (
             "rate limit",

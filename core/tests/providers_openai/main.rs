@@ -1288,22 +1288,129 @@ mod diagnostic {
         assert!(!call.cancelled_on_entry);
     }
 
-    #[test]
-    fn provider_refusal_is_a_permanent_rejection_with_unknown_usage() {
-        let body = serde_json::to_vec(&json!({
+    fn refusal_body(refusal: Value, finish_reason: &str, usage: Option<Value>) -> Vec<u8> {
+        let mut body = json!({
+            "model": "gpt-synthetic",
             "choices": [{
                 "index": 0,
-                "message": {"role": "assistant", "content": null, "refusal": "synthetic refusal"},
-                "finish_reason": "stop"
-            }],
-            "usage": {"prompt_tokens": 5, "completion_tokens": 2}
-        }))
-        .unwrap();
-        let harness = Harness::new(vec![Step::http(200, body)]);
+                "message": {"role": "assistant", "content": null, "refusal": refusal},
+                "finish_reason": finish_reason
+            }]
+        });
+        if let Some(usage) = usage {
+            body["usage"] = usage;
+        }
+        serde_json::to_vec(&body).unwrap()
+    }
+
+    #[test]
+    fn provider_refusal_is_a_permanent_rejection_that_keeps_reported_usage() {
+        let harness = Harness::new(vec![Step::http(
+            200,
+            refusal_body(
+                json!("synthetic refusal"),
+                "stop",
+                Some(json!({"prompt_tokens": 5, "completion_tokens": 2})),
+            ),
+        )]);
         let failure = run(&harness).expect_err("refusal is not an answer");
         assert_eq!(provider_failure(&failure).kind, FailureKind::Rejected);
         assert_eq!(failure.class(), ErrorClass::Permanent);
+        assert_eq!(
+            failure.usage,
+            UsageAvailability::Reported {
+                usage: TokenUsage {
+                    input_tokens: Some(5),
+                    output_tokens: Some(2),
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn content_filter_rejection_keeps_reported_usage() {
+        let harness = Harness::new(vec![Step::http(
+            200,
+            refusal_body(
+                Value::Null,
+                "content_filter",
+                Some(json!({"prompt_tokens": 11, "completion_tokens": 0})),
+            ),
+        )]);
+        let failure = run(&harness).expect_err("filtered reply is not an answer");
+        assert_eq!(provider_failure(&failure).kind, FailureKind::Rejected);
+        assert_eq!(
+            failure.usage,
+            UsageAvailability::Reported {
+                usage: TokenUsage {
+                    input_tokens: Some(11),
+                    output_tokens: Some(0),
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn rejection_with_absent_or_malformed_usage_stays_unknown() {
+        for usage in [
+            None,
+            Some(json!({})),
+            Some(json!("five")),
+            Some(json!({"prompt_tokens": "5", "completion_tokens": -2})),
+        ] {
+            let harness = Harness::new(vec![Step::http(
+                200,
+                refusal_body(json!("synthetic refusal"), "stop", usage.clone()),
+            )]);
+            let failure = run(&harness).expect_err("refusal is not an answer");
+            assert_eq!(provider_failure(&failure).kind, FailureKind::Rejected);
+            assert_eq!(failure.usage, UsageAvailability::Unavailable, "{usage:?}");
+        }
+    }
+
+    #[test]
+    fn partial_usage_on_a_rejection_reports_only_the_count_present() {
+        let harness = Harness::new(vec![Step::http(
+            200,
+            refusal_body(
+                json!("synthetic refusal"),
+                "stop",
+                Some(json!({"prompt_tokens": 9})),
+            ),
+        )]);
+        let failure = run(&harness).expect_err("refusal is not an answer");
+        assert_eq!(
+            failure.usage,
+            UsageAvailability::Reported {
+                usage: TokenUsage {
+                    input_tokens: Some(9),
+                    output_tokens: None,
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn rejected_http_status_has_no_usage_to_report() {
+        let harness = Harness::new(vec![Step::http(400, error_body(None))]);
+        let failure = run(&harness).expect_err("bad request");
+        assert_eq!(provider_failure(&failure).kind, FailureKind::Rejected);
         assert_eq!(failure.usage, UsageAvailability::Unavailable);
+    }
+
+    #[test]
+    fn cancellation_after_a_refusal_with_usage_stays_cancelled() {
+        let harness = Harness::new(vec![Step::http(
+            200,
+            refusal_body(
+                json!("synthetic refusal"),
+                "stop",
+                Some(json!({"prompt_tokens": 5, "completion_tokens": 2})),
+            ),
+        )
+        .cancelling_mid_call()]);
+        let failure = run(&harness).expect_err("cancelled");
+        assert_eq!(provider_failure(&failure).kind, FailureKind::Cancelled);
     }
 
     #[test]

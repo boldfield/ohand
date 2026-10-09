@@ -8,8 +8,8 @@
 use crate::interpretation::instructions::render_prompt;
 use crate::providers::contracts::{
     AdapterCall, CallObservations, CancelToken, Clock, DiagnosticAdapterCall, DiagnosticResponse,
-    DiagnosticSetting, DiagnosticSupport, ProviderAdapter, ProviderProfile, SettingValue,
-    TokenUsage, TransportError,
+    DiagnosticSetting, DiagnosticSupport, DiagnosticTransportFailure, ProviderAdapter,
+    ProviderProfile, SettingValue, TokenUsage, TransportError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -141,7 +141,7 @@ impl<T: HttpTransport> OpenAiAdapter<T> {
         &self,
         call: &CallEnvelope<'_>,
         request: &OpenAiRequest,
-    ) -> Result<Exchange, TransportError> {
+    ) -> Result<Exchange, DiagnosticTransportFailure> {
         let endpoint = call
             .profile
             .endpoint()
@@ -198,7 +198,10 @@ impl<T: HttpTransport> ProviderAdapter for OpenAiAdapter<T> {
             cancel: call.cancel,
             clock: call.clock,
         };
-        match self.exchange(&envelope, &openai_request)? {
+        match self
+            .exchange(&envelope, &openai_request)
+            .map_err(|failure| failure.error)?
+        {
             Exchange::Completed(completion) => Ok(completion.content.into_bytes()),
             Exchange::OverLimit(body) => Ok(body),
         }
@@ -216,6 +219,14 @@ impl<T: HttpTransport> ProviderAdapter for OpenAiAdapter<T> {
         &self,
         call: &DiagnosticAdapterCall<'_>,
     ) -> Result<DiagnosticResponse, TransportError> {
+        self.invoke_diagnostic_observed(call)
+            .map_err(|failure| failure.error)
+    }
+
+    fn invoke_diagnostic_observed(
+        &self,
+        call: &DiagnosticAdapterCall<'_>,
+    ) -> Result<DiagnosticResponse, DiagnosticTransportFailure> {
         // The caller's instructions and context are sent verbatim; nothing is re-rendered and
         // no setting is added that the caller did not request.
         let mut openai_request = OpenAiRequest {
@@ -276,7 +287,7 @@ fn decode_response(
     status: u16,
     response_bytes: &[u8],
     within_bound: bool,
-) -> Result<Completion, TransportError> {
+) -> Result<Completion, DiagnosticTransportFailure> {
     if !(200..300).contains(&status) {
         let error_code = if within_bound {
             serde_json::from_slice::<OpenAiError>(response_bytes)
@@ -285,7 +296,7 @@ fn decode_response(
         } else {
             None
         };
-        return Err(map_error(status, error_code.as_deref()));
+        return Err(map_error(status, error_code.as_deref()).into());
     }
 
     let response: OpenAiResponse =
@@ -305,19 +316,31 @@ fn decode_response(
         .next()
         .ok_or(TransportError::InvalidOutput)?;
 
+    // Usage and model the provider reported in this response stay attached to every failure
+    // below, so a refused or unusable reply still accounts for the tokens it consumed.
+    let failure_with_observations = |error: TransportError| {
+        DiagnosticTransportFailure::with_observations(
+            error,
+            Some(CallObservations {
+                effective_settings: Vec::new(),
+                usage,
+                reported_model: model.clone(),
+            }),
+        )
+    };
     if choice.message.refusal.is_some() || choice.finish_reason.as_deref() == Some("content_filter")
     {
-        return Err(TransportError::Rejected);
+        return Err(failure_with_observations(TransportError::Rejected));
     }
     if choice.finish_reason.as_deref() != Some("stop") {
         // Only a completed answer may become a proposal: "length" is truncated output and
         // a missing, "tool_calls", "function_call" or unknown reason is not a final message.
-        return Err(TransportError::InvalidOutput);
+        return Err(failure_with_observations(TransportError::InvalidOutput));
     }
     let content = choice
         .message
         .content
-        .ok_or(TransportError::InvalidOutput)?;
+        .ok_or_else(|| failure_with_observations(TransportError::InvalidOutput))?;
     Ok(Completion {
         content,
         usage,
