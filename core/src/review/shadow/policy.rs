@@ -10,8 +10,9 @@ const SAMPLING_DOMAIN: &[u8] = b"ohand-shadow-sample-v1";
 /// budget, so a fresh install, a missing configuration and an unparsed one all dispatch nothing.
 ///
 /// The budget unit is one provider request. Selecting a case reserves `max_attempts_per_sample`
-/// requests for it; retries spend that reservation and never add to it, and requests a case did
-/// not use are released when it ends.
+/// requests for it, held until the case ends; retries spend that reservation and never add to
+/// it, and requests a case did not use are released when it ends. Requests a case did use count
+/// against the window containing its latest dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShadowPolicy {
     pub enabled: bool,
@@ -19,7 +20,7 @@ pub struct ShadowPolicy {
     pub sample_per_mille: u16,
     /// Length of the rolling budget window ending at the selection instant.
     pub window_seconds: i64,
-    /// Provider requests that may be reserved or spent within one window.
+    /// Provider requests that may be reserved (while a case is open) or spent within one window.
     pub max_requests_per_window: u32,
     /// Most provider requests (first attempt plus retries) one sampled case may use.
     pub max_attempts_per_sample: u32,

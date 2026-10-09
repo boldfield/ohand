@@ -71,7 +71,69 @@ fn read_gate_row(conn: &Connection, job_id: &str) -> Result<Option<JobGateRow>> 
 /// job may call the reviewer. Run it before every attempt, retries included: the policy switch,
 /// the per-sample request allowance and the route's `review` grant are all re-read each time, so
 /// disabling shadow review, revoking the profile or removing the grant stops the next request.
+///
+/// An `Allowed` decision also stamps `now` as the case's latest dispatch time in the same
+/// transaction, so the request is accounted to the window it is actually sent in even when the
+/// case was selected, or last retried, in an earlier window. A denial writes nothing.
 pub fn authorize_shadow_dispatch(
+    db: &mut Database,
+    job_id: &str,
+    lease_attempt: i32,
+    policy: &ShadowPolicy,
+    now: DateTime<Utc>,
+) -> Result<ShadowDispatchDecision> {
+    let tx = db.immediate_transaction()?;
+    let decision = decide_dispatch(&tx, job_id, lease_attempt, policy)?;
+    if matches!(decision, ShadowDispatchDecision::Allowed(_)) {
+        stamp_dispatch(&tx, job_id, lease_attempt, now)?;
+        tx.commit()?;
+    }
+    Ok(decision)
+}
+
+/// The dispatch time lives in `next_attempt_at`, which the queue ignores while a job is running
+/// and which a later retry or terminal write leaves intact or replaces with a later instant.
+/// The stamp never moves backwards.
+fn stamp_dispatch(
+    tx: &Transaction<'_>,
+    job_id: &str,
+    lease_attempt: i32,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let existing: Option<String> = tx.query_row(
+        "SELECT next_attempt_at FROM jobs WHERE job_id = ?",
+        [job_id],
+        |row| row.get(0),
+    )?;
+    let stamp = match existing {
+        Some(text) => {
+            let existing_instant = DateTime::parse_from_rfc3339(&text)
+                .with_context(|| format!("shadow job {job_id} has a malformed timestamp"))?
+                .with_timezone(&Utc);
+            existing_instant.max(now)
+        }
+        None => now,
+    };
+    let updated = tx.execute(
+        "UPDATE jobs SET next_attempt_at = ? \
+         WHERE job_id = ? AND job_type = ? AND status = ? AND attempt_count = ?",
+        rusqlite::params![
+            stamp.to_rfc3339(),
+            job_id,
+            JOB_TYPE_SHADOW_REVIEW,
+            JobStatus::Running.as_str(),
+            lease_attempt
+        ],
+    )?;
+    if updated != 1 {
+        return Err(anyhow!(
+            "shadow job {job_id} lost its lease during dispatch"
+        ));
+    }
+    Ok(())
+}
+
+fn decide_dispatch(
     conn: &Connection,
     job_id: &str,
     lease_attempt: i32,

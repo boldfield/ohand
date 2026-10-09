@@ -50,9 +50,14 @@ pub enum ShadowSelection {
     Skipped(ShadowSkip),
 }
 
-/// Provider requests reserved or spent by shadow cases created within the policy window ending
-/// at `now`. A case that is still open holds its full per-sample reservation; a finished case
-/// holds only the requests it actually used, so unused reservations are released.
+/// Provider requests reserved or spent that count against the window ending at `now`.
+///
+/// A case that is still open (queued, running or waiting to retry) holds its full per-sample
+/// reservation however old it is, because none of that reservation is settled yet. A finished
+/// case holds only the requests it actually used, counted while its latest activity is inside
+/// the window. Latest activity is the later of the case's creation and the last dispatch
+/// authorization stamped by [`super::authorize_shadow_dispatch`], so requests are accounted when
+/// they are sent, not only when the case was selected.
 pub fn requests_in_use(
     conn: &Connection,
     policy: &ShadowPolicy,
@@ -60,30 +65,41 @@ pub fn requests_in_use(
 ) -> Result<u32> {
     let window_start = now - Duration::seconds(policy.window_seconds);
     let mut statement = conn
-        .prepare("SELECT job_id, status, attempt_count, created_at FROM jobs WHERE job_type = ?")
+        .prepare(
+            "SELECT job_id, status, attempt_count, created_at, next_attempt_at \
+             FROM jobs WHERE job_type = ?",
+        )
         .context("preparing shadow budget read")?;
     let mut rows = statement.query([JOB_TYPE_SHADOW_REVIEW])?;
     let mut in_use: u64 = 0;
     while let Some(row) = rows.next()? {
         let job_id: String = row.get(0)?;
         let status: JobStatus = row.get::<_, String>(1)?.parse()?;
-        let attempts: i32 = row.get(2)?;
+        let attempts = u64::try_from(row.get::<_, i32>(2)?).unwrap_or(0);
         let created_text: String = row.get(3)?;
-        let created_at = DateTime::parse_from_rfc3339(&created_text)
-            .with_context(|| format!("shadow job {job_id} has a malformed created_at"))?
-            .with_timezone(&Utc);
-        if created_at <= window_start {
-            continue;
-        }
-        let attempts = u64::try_from(attempts).unwrap_or(0);
-        in_use += match status {
+        let stamped_text: Option<String> = row.get(4)?;
+        match status {
             JobStatus::Queued | JobStatus::Running => {
-                attempts.max(u64::from(policy.max_attempts_per_sample))
+                in_use += attempts.max(u64::from(policy.max_attempts_per_sample));
             }
-            JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled => attempts,
-        };
+            JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled => {
+                let mut latest_activity = parse_instant(&job_id, &created_text)?;
+                if let Some(stamped_text) = stamped_text {
+                    latest_activity = latest_activity.max(parse_instant(&job_id, &stamped_text)?);
+                }
+                if latest_activity > window_start {
+                    in_use += attempts;
+                }
+            }
+        }
     }
     Ok(u32::try_from(in_use).unwrap_or(u32::MAX))
+}
+
+fn parse_instant(job_id: &str, text: &str) -> Result<DateTime<Utc>> {
+    Ok(DateTime::parse_from_rfc3339(text)
+        .with_context(|| format!("shadow job {job_id} has a malformed timestamp"))?
+        .with_timezone(&Utc))
 }
 
 /// Offer one case for shadow review. A job is queued only when, in order: the policy is enabled

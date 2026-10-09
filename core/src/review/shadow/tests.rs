@@ -187,8 +187,23 @@ impl Fixture {
         (job.job_id, job.attempt_count)
     }
 
-    fn gate(&self, job_id: &str, attempt: i32, policy: &ShadowPolicy) -> ShadowDispatchDecision {
-        authorize_shadow_dispatch(self.db.conn(), job_id, attempt, policy).unwrap()
+    fn gate(
+        &mut self,
+        job_id: &str,
+        attempt: i32,
+        policy: &ShadowPolicy,
+    ) -> ShadowDispatchDecision {
+        self.gate_at(job_id, attempt, policy, t0())
+    }
+
+    fn gate_at(
+        &mut self,
+        job_id: &str,
+        attempt: i32,
+        policy: &ShadowPolicy,
+        now: DateTime<Utc>,
+    ) -> ShadowDispatchDecision {
+        authorize_shadow_dispatch(&mut self.db, job_id, attempt, policy, now).unwrap()
     }
 
     fn record(&self, job_id: &str) -> ShadowRecord {
@@ -400,7 +415,7 @@ fn sampling_is_deterministic_and_proportional() {
 }
 
 #[test]
-fn exhausted_budget_dispatches_nothing_and_rolls_over_with_the_window() {
+fn exhausted_budget_dispatches_nothing() {
     let mut fixture = Fixture::new(true);
     let policy = enabled_policy(2, 1);
     let first = fixture.select_record(&policy, t0());
@@ -419,16 +434,181 @@ fn exhausted_budget_dispatches_nothing_and_rolls_over_with_the_window() {
         })
     );
     assert_eq!(fixture.shadow_job_count(), 2);
+}
 
-    // The first reservation leaves the window; one slot opens, not two.
+/// Dispatch times at which a gate said `Allowed`, checked against every sliding window.
+fn assert_never_more_than_limit_in_any_window(sent: &[DateTime<Utc>], policy: &ShadowPolicy) {
+    for (index, start) in sent.iter().enumerate() {
+        let in_window = sent[index..]
+            .iter()
+            .filter(|sent_at| **sent_at < *start + Duration::seconds(policy.window_seconds))
+            .count();
+        assert!(
+            in_window <= policy.max_requests_per_window as usize,
+            "{in_window} requests inside one window starting at {start}"
+        );
+    }
+}
+
+#[test]
+fn an_old_pending_case_keeps_its_reservation_across_the_window() {
+    let mut fixture = Fixture::new(true);
+    let policy = enabled_policy(2, 1);
+    fixture.select_record(&policy, t0());
+    fixture.select_record(&policy, t0() + Duration::seconds(10));
+
+    // Both cases are still unsent when their creation time leaves the window: nothing is freed.
     let later = t0() + Duration::seconds(3600 + 5);
-    let reopened = fixture.select_record(&policy, later);
-    assert_eq!(reopened.outcome, ShadowOutcome::Pending);
+    assert_eq!(
+        requests_in_use(fixture.db.conn(), &policy, later).unwrap(),
+        2
+    );
     assert!(matches!(
         fixture.select_new(&policy, later),
         ShadowSelection::Skipped(ShadowSkip::BudgetExhausted { .. })
     ));
-    assert_eq!(fixture.shadow_job_count(), 3);
+    assert_eq!(fixture.shadow_job_count(), 2);
+
+    // Sending them settles the reservations, now accounted at their send time.
+    let mut sent = Vec::new();
+    for _ in 0..2 {
+        let (job_id, attempt) = fixture.claim(later);
+        assert!(matches!(
+            fixture.gate_at(&job_id, attempt, &policy, later),
+            ShadowDispatchDecision::Allowed(_)
+        ));
+        sent.push(later);
+        complete_job(&mut fixture.db, &job_id, attempt).unwrap();
+    }
+    assert_eq!(
+        requests_in_use(fixture.db.conn(), &policy, later).unwrap(),
+        2
+    );
+    assert!(matches!(
+        fixture.select_new(&policy, later + Duration::seconds(30)),
+        ShadowSelection::Skipped(ShadowSkip::BudgetExhausted { .. })
+    ));
+
+    // Only once those sends leave the window does the budget renew.
+    let renewed = later + Duration::seconds(3600 + 1);
+    assert_eq!(
+        requests_in_use(fixture.db.conn(), &policy, renewed).unwrap(),
+        0
+    );
+    for _ in 0..2 {
+        fixture.select_record(&policy, renewed);
+        let (job_id, attempt) = fixture.claim(renewed);
+        assert!(matches!(
+            fixture.gate_at(&job_id, attempt, &policy, renewed),
+            ShadowDispatchDecision::Allowed(_)
+        ));
+        sent.push(renewed);
+        complete_job(&mut fixture.db, &job_id, attempt).unwrap();
+    }
+    assert!(matches!(
+        fixture.select_new(&policy, renewed),
+        ShadowSelection::Skipped(ShadowSkip::BudgetExhausted { .. })
+    ));
+    assert_never_more_than_limit_in_any_window(&sent, &policy);
+}
+
+#[test]
+fn a_retry_after_the_window_is_accounted_to_the_window_it_is_sent_in() {
+    let mut fixture = Fixture::new(true);
+    let policy = enabled_policy(2, 2);
+    let record = fixture.select_record(&policy, t0());
+    let transient = ProviderFailure::new(FailureKind::Unavailable);
+    let mut sent = Vec::new();
+
+    let (job_id, attempt) = fixture.claim(t0());
+    assert_eq!(job_id, record.job_id);
+    assert!(matches!(
+        fixture.gate_at(&job_id, attempt, &policy, t0()),
+        ShadowDispatchDecision::Allowed(_)
+    ));
+    sent.push(t0());
+    record_shadow_failure(&mut fixture.db, &job_id, attempt, &transient, &policy, t0()).unwrap();
+
+    // The retry goes out after the first window ended; the case is open, so it still holds 2.
+    let retry_at = t0() + Duration::seconds(3600 + 5);
+    assert!(matches!(
+        fixture.select_new(&policy, retry_at),
+        ShadowSelection::Skipped(ShadowSkip::BudgetExhausted { .. })
+    ));
+    let (job_id, attempt) = fixture.claim(retry_at);
+    assert_eq!(attempt, 2);
+    assert!(matches!(
+        fixture.gate_at(&job_id, attempt, &policy, retry_at),
+        ShadowDispatchDecision::Allowed(_)
+    ));
+    sent.push(retry_at);
+    let ended = record_shadow_failure(
+        &mut fixture.db,
+        &job_id,
+        attempt,
+        &transient,
+        &policy,
+        retry_at,
+    )
+    .unwrap();
+    assert_eq!(ended.attempts_used, 2);
+
+    // Both of its requests stay charged while the retry is inside the window, so nothing new fits.
+    let soon = retry_at + Duration::seconds(60);
+    assert_eq!(
+        requests_in_use(fixture.db.conn(), &policy, soon).unwrap(),
+        2
+    );
+    assert!(matches!(
+        fixture.select_new(&policy, soon),
+        ShadowSelection::Skipped(ShadowSkip::BudgetExhausted { .. })
+    ));
+
+    let renewed = retry_at + Duration::seconds(3600 + 1);
+    let next = fixture.select_record(&policy, renewed);
+    let (job_id, attempt) = fixture.claim(renewed);
+    assert_eq!(job_id, next.job_id);
+    assert!(matches!(
+        fixture.gate_at(&job_id, attempt, &policy, renewed),
+        ShadowDispatchDecision::Allowed(_)
+    ));
+    sent.push(renewed);
+    assert_never_more_than_limit_in_any_window(&sent, &policy);
+}
+
+#[test]
+fn a_denied_gate_stamps_nothing_and_an_allowed_gate_never_moves_the_stamp_back() {
+    let mut fixture = Fixture::new(true);
+    let policy = enabled_policy(5, 2);
+    let record = fixture.select_record(&policy, t0());
+    let stamp = |fixture: &Fixture| -> Option<String> {
+        fixture
+            .db
+            .conn()
+            .query_row(
+                "SELECT next_attempt_at FROM jobs WHERE job_id = ?",
+                [&record.job_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let (job_id, attempt) = fixture.claim(t0());
+    assert_eq!(
+        fixture.gate_at(&job_id, attempt, &ShadowPolicy::default(), t0()),
+        ShadowDispatchDecision::Denied(ShadowDispatchDenial::Disabled)
+    );
+    assert_eq!(stamp(&fixture), None);
+
+    let later = t0() + Duration::seconds(100);
+    assert!(matches!(
+        fixture.gate_at(&job_id, attempt, &policy, later),
+        ShadowDispatchDecision::Allowed(_)
+    ));
+    assert!(matches!(
+        fixture.gate_at(&job_id, attempt, &policy, t0()),
+        ShadowDispatchDecision::Allowed(_)
+    ));
+    assert_eq!(stamp(&fixture), Some(later.to_rfc3339()));
 }
 
 #[test]
@@ -478,7 +658,7 @@ fn retries_spend_the_reservation_without_adding_to_it() {
             (record.job_id.as_str(), expected_attempt)
         );
         assert!(matches!(
-            fixture.gate(&job_id, attempt, &policy),
+            fixture.gate_at(&job_id, attempt, &policy, now),
             ShadowDispatchDecision::Allowed(_)
         ));
         let after =
@@ -628,7 +808,7 @@ fn dispatch_gate_enforces_the_per_sample_attempt_allowance() {
     for _ in 0..2 {
         let (job_id, attempt) = fixture.claim(now);
         assert!(matches!(
-            fixture.gate(&job_id, attempt, &policy),
+            fixture.gate_at(&job_id, attempt, &policy, now),
             ShadowDispatchDecision::Allowed(_)
         ));
         if attempt == 1 {
