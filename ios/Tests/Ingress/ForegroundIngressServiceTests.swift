@@ -203,6 +203,53 @@ final class ForegroundIngressServiceTests: IngressStorageTestCase {
         XCTAssertEqual(report?.unclaimedInProgressAudio, [], "orphans are not reported while a record is unreadable")
     }
 
+    func testRecoveredRecordWithUnsafeAudioNamesIsRefusedBeforeAnyFileOperation() throws {
+        let service = try makeService(importer: importer)
+        let victim = layout.rootDirectory.appendingPathComponent("victim.m4a")
+        try Data("not ingress audio".utf8).write(to: victim)
+        let unsafe = IngressRecord(
+            captureID: "capture-unsafe", text: nil,
+            audio: IngressAudioHandoff(inProgressFileName: "../victim.m4a", finalizedFileName: "../escape.m4a"),
+            context: context)
+        try JSONEncoder().encode(unsafe).write(to: recordURL("capture-unsafe"))
+
+        let report = recover(service)
+
+        guard case .keptForRetry(_, .recordUnreadable(.invalidRecord(.unsafeFileName)))? = report?.entries.first?.outcome else {
+            return XCTFail("got \(String(describing: report))")
+        }
+        XCTAssertTrue(importer.importedRecords.isEmpty)
+        XCTAssertTrue(exists(victim), "a path outside the ingress stores was not moved")
+        XCTAssertFalse(exists(layout.rootDirectory.appendingPathComponent("escape.m4a")))
+        XCTAssertTrue(exists(recordURL("capture-unsafe")))
+    }
+
+    func testRecoveredRecordFromANewerFormatIsKeptNotProcessed() throws {
+        let service = try makeService(importer: importer)
+        var future = textRecord("capture-future")
+        future.formatVersion = IngressRecord.currentFormatVersion + 1
+        try JSONEncoder().encode(future).write(to: recordURL("capture-future"))
+
+        let report = recover(service)
+
+        guard case .keptForRetry(_, .recordUnreadable(.unsupportedRecordVersion))? = report?.entries.first?.outcome else {
+            return XCTFail("got \(String(describing: report))")
+        }
+        XCTAssertTrue(importer.importedRecords.isEmpty)
+        XCTAssertTrue(exists(recordURL("capture-future")))
+    }
+
+    func testUnlistableInProgressAudioDirectoryIsReportedAsUnknownNotEmpty() throws {
+        let service = try makeService(importer: importer)
+        try Data("recoverable audio".utf8).write(to: inProgressAudioURL("interrupted.m4a"))
+        try FileManager.default.removeItem(at: layout.directory(for: .ingressInProgressAudio))
+
+        let report = recover(service)
+
+        XCTAssertNotNil(report?.unclaimedAudioListingFailure)
+        XCTAssertEqual(report?.unclaimedInProgressAudio, [])
+    }
+
     func testUnlistableStagingDirectoryIsReportedAsUnknownNotEmpty() throws {
         let service = try makeService(importer: importer)
         try FileManager.default.removeItem(at: layout.directory(for: .ingressStagingRecords))
@@ -266,11 +313,49 @@ final class ForegroundIngressServiceTests: IngressStorageTestCase {
         XCTAssertTrue(exists(finalizedAudioURL("capture-audio.m4a")))
     }
 
+    func testASecondCaptureCannotReuseAnotherCapturesFinalizedAudioName() throws {
+        let service = try makeService(importer: importer)
+        importer.results = [FakeForegroundIngressImporter.confirmation("capture-a")]
+        guard case .saved? = submit(service, try audioRecord("capture-a", bytes: Data("audio a".utf8))) else {
+            return XCTFail("expected saved")
+        }
+        let secondBytes = Data("audio b".utf8)
+        try secondBytes.write(to: inProgressAudioURL("capture-b.m4a"))
+        let reusing = IngressRecord(
+            captureID: "capture-b", text: nil,
+            audio: IngressAudioHandoff(inProgressFileName: "capture-b.m4a", finalizedFileName: "capture-a.m4a"),
+            context: context)
+
+        guard case .notStaged(_, .invalidRecord(.finalizedNameNotBoundToCapture))? = submit(service, reusing) else {
+            return XCTFail("expected the reused name to be refused")
+        }
+
+        XCTAssertEqual(importer.importedRecords.map(\.captureID), ["capture-a"])
+        XCTAssertEqual(try Data(contentsOf: inProgressAudioURL("capture-b.m4a")), secondBytes)
+        XCTAssertEqual(try Data(contentsOf: finalizedAudioURL("capture-a.m4a")), Data("audio a".utf8))
+        XCTAssertFalse(exists(recordURL("capture-b")))
+    }
+
+    func testSourceAndFinalizedFileBothPresentIsAConflictThatTouchesNeitherFile() throws {
+        let service = try makeService(importer: importer)
+        let record = try audioRecord("capture-b", bytes: Data("audio b".utf8))
+        try Data("someone else's audio".utf8).write(to: finalizedAudioURL("capture-b.m4a"))
+
+        guard case .keptForRetry(_, .sourceUnavailable(.audioDestinationConflict))? = submit(service, record) else {
+            return XCTFail("expected conflict")
+        }
+
+        XCTAssertTrue(importer.importedRecords.isEmpty, "the core is never asked to import another recording's audio")
+        XCTAssertEqual(try Data(contentsOf: inProgressAudioURL("capture-b.m4a")), Data("audio b".utf8))
+        XCTAssertEqual(try Data(contentsOf: finalizedAudioURL("capture-b.m4a")), Data("someone else's audio".utf8))
+        XCTAssertTrue(exists(recordURL("capture-b")))
+    }
+
     func testMissingOrEmptyAudioIsAnHonestFailureNotASave() throws {
         let service = try makeService(importer: importer)
         let missing = IngressRecord(
             captureID: "capture-missing", text: nil,
-            audio: IngressAudioHandoff(inProgressFileName: "gone.m4a", finalizedFileName: "gone.m4a"), context: context)
+            audio: IngressAudioHandoff(inProgressFileName: "gone.m4a", finalizedFileName: "capture-missing.m4a"), context: context)
         let empty = try audioRecord("capture-empty", bytes: Data())
 
         guard case .keptForRetry(_, .sourceUnavailable(.audioSourceMissing))? = submit(service, missing) else { return XCTFail("missing") }

@@ -61,8 +61,12 @@ final class ForegroundIngressService {
 
         func finish() {
             if everyRecordReadable {
-                report.unclaimedInProgressAudio = staging.unclaimedInProgressAudio(
-                    claimedFileNames: claimedInProgressNames)
+                do {
+                    report.unclaimedInProgressAudio = try staging.unclaimedInProgressAudio(
+                        claimedFileNames: claimedInProgressNames)
+                } catch {
+                    report.unclaimedAudioListingFailure = Self.stagingFailure(error)
+                }
             }
             completion(report)
         }

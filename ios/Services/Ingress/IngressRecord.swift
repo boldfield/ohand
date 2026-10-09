@@ -25,6 +25,8 @@ struct IngressAudioHandoff: Codable, Equatable {
 enum IngressRecordProblem: Error, Equatable {
     case unsafeCaptureID
     case unsafeFileName
+    /// The finalized audio name must start with `<captureID>.`, so two captures can never share a finalized file.
+    case finalizedNameNotBoundToCapture
     case exactlyOneSourceRequired
     case emptyText
 }
@@ -89,6 +91,9 @@ struct IngressRecord: Codable, Equatable {
         case let (nil, audio?):
             guard Self.isSafeFileName(audio.inProgressFileName), Self.isSafeFileName(audio.finalizedFileName) else {
                 throw IngressRecordProblem.unsafeFileName
+            }
+            guard audio.finalizedFileName.hasPrefix(captureID + ".") else {
+                throw IngressRecordProblem.finalizedNameNotBoundToCapture
             }
         default:
             throw IngressRecordProblem.exactlyOneSourceRequired

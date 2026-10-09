@@ -1,11 +1,10 @@
 import Foundation
-@testable import OhAndCoreBridge
-@testable import OhAndServices
+import OhAndCoreBridge
 
-/// Connects `ForegroundIngressService` to the real Rust core's transactional import. It lives with the tests until the
-/// Services target links the bridge's C module (V05b); it contains no ingress policy, only the mapping from the core's
-/// events to `IngressImportResult`. A result is `confirmed` only for a success event, which the core sends after the
-/// import transaction committed.
+/// Connects `ForegroundIngressService` to the real Rust core's transactional import. It contains no ingress policy,
+/// only the mapping from the core's events to `IngressImportResult`. A result is `confirmed` only for a success event,
+/// which the core sends after the import transaction committed. It owns the core's event handler, so an assembly that
+/// needs other event consumers must multiplex above it.
 final class CoreIngressImporter: ForegroundIngressImporting {
     private let core: CoreHandle
     private var pendingByOperationID: [UInt64: (IngressImportResult) -> Void] = [:]

@@ -25,6 +25,9 @@ enum IngressStagingFailure: Error, Equatable {
     case conflictingStagingRecord
     case audioSourceMissing
     case audioSourceEmpty
+    /// The recording to hand off and a file with the finalized name both exist, so the finalized file belongs to an
+    /// earlier move or another recording. Neither file is touched.
+    case audioDestinationConflict
     case storage(IngressStorageError)
     case unreadableRecord(IngressStorageError)
     case corruptRecord
@@ -85,4 +88,7 @@ struct IngressRecoveryReport: Equatable {
     /// Audio files in the in-progress store that no staging record owns: a recording that was interrupted before
     /// handoff. They are left in place for the recorder's own recovery.
     var unclaimedInProgressAudio: [String] = []
+    /// Set when the in-progress audio store could not be listed; unclaimed recordings may exist but are not visible,
+    /// so callers must treat `unclaimedInProgressAudio` as "unknown", never as "none".
+    var unclaimedAudioListingFailure: IngressStagingFailure?
 }

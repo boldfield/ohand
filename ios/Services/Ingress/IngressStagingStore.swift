@@ -99,6 +99,13 @@ final class IngressStagingStore {
         }
         let expectedName = "\(record.captureID).\(IngressRecord.fileExtension)"
         guard url.lastPathComponent == expectedName else { throw IngressStagingFailure.corruptRecord }
+        do {
+            try record.validate()
+        } catch let problem as IngressRecordProblem {
+            throw IngressStagingFailure.invalidRecord(problem)
+        } catch {
+            throw IngressStagingFailure.corruptRecord
+        }
         return record
     }
 
@@ -133,8 +140,13 @@ final class IngressStagingStore {
     }
 
     /// Audio files in the in-progress store that none of `claimedFileNames` owns.
-    func unclaimedInProgressAudio(claimedFileNames: Set<String>) -> [String] {
-        let names = (try? fileSystem.entryNames(in: inProgressAudioDirectory)) ?? []
+    func unclaimedInProgressAudio(claimedFileNames: Set<String>) throws -> [String] {
+        let names: [String]
+        do {
+            names = try fileSystem.entryNames(in: inProgressAudioDirectory)
+        } catch {
+            throw IngressStagingFailure.storage(IngressStorageError(error))
+        }
         return names.filter { !claimedFileNames.contains($0) && !$0.hasPrefix(".") }.sorted()
     }
 
@@ -144,15 +156,19 @@ final class IngressStagingStore {
     }
 
     /// Moves the recording to the finalized store so the reference the core keeps outlives the staging record. The
-    /// step is idempotent: a file already in the finalized store means an earlier attempt completed the move.
+    /// step is idempotent: a finalized file with the source gone means an earlier attempt of this same record completed
+    /// the move (the finalized name is bound to the capture ID). A rename never leaves both files, so both existing is
+    /// a conflict that touches neither.
     func finalizeAudio(_ handoff: IngressAudioHandoff) throws -> AudioFinalization {
         let source = inProgressAudioURL(fileName: handoff.inProgressFileName)
         let destination = finalizedAudioURL(fileName: handoff.finalizedFileName)
+        let sourceExists = fileSystem.fileExists(at: source)
         if fileSystem.fileExists(at: destination) {
+            guard !sourceExists else { throw IngressStagingFailure.audioDestinationConflict }
             try requireNonEmpty(destination)
             return .ready(moved: false)
         }
-        guard fileSystem.fileExists(at: source) else { throw IngressStagingFailure.audioSourceMissing }
+        guard sourceExists else { throw IngressStagingFailure.audioSourceMissing }
         try requireNonEmpty(source)
         do {
             try fileSystem.move(from: source, to: destination)
