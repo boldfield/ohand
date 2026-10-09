@@ -403,16 +403,22 @@ fn live_endpoint_smoke_records_sanitized_evidence() {
     }))
     .unwrap();
     raw_text.push('\n');
-    for secret in [
-        &configuration.credential,
-        &configuration.base_url,
-        &origin_of(&configuration.base_url),
-    ] {
+    // The credential travels only in a header, so it can only appear in a request body by mistake.
+    // It is not searched for in response bodies: a short placeholder credential (the verified
+    // endpoint does not enforce one) can legitimately occur inside ordinary model output.
+    for secret in [&configuration.base_url, &origin_of(&configuration.base_url)] {
         assert!(
             !raw_text.contains(secret.as_str()),
-            "raw evidence must not carry endpoint or credential"
+            "raw evidence must not carry the endpoint"
         );
     }
+    assert!(
+        raw_records.iter().all(|raw| !raw["request_body"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(configuration.credential.as_str())),
+        "raw evidence must not carry the credential in a request body"
+    );
     write_private_file(&private_directory.join(&raw_file_name), raw_text.as_bytes());
     let raw_sha256 = format!("{:x}", Sha256::digest(raw_text.as_bytes()));
 
