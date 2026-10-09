@@ -787,11 +787,39 @@ const REMINDER_CUES: &[&[&str]] = &[
     &["notify", "me"],
     &["ping", "me"],
 ];
+/// Plain negations, conditions and reporting or opinion words that, before a reminder cue or
+/// between the cue and the quoted time, show the text does not make the request itself. Negative
+/// contractions ("don't", "didn't", "isn't") are matched by [`is_negative_contraction`] rather
+/// than listed, so this list and [`RETRACTING_NEGATIONS`] agree on every one of them.
 const NEGATING_WORDS: &[&str] = &[
-    "not", "no", "never", "dont", "don't", "doesnt", "doesn't", "didnt", "didn't", "wont", "won't",
-    "cant", "can't", "cannot", "without", "if", "said", "says", "think", "thinks", "thought",
+    "not", "no", "never", "cannot", "without", "if", "said", "says", "think", "thinks", "thought",
     "believe", "believes", "believed", "told", "tells", "hope", "hopes", "hoped",
 ];
+/// Contracted negative auxiliaries typed without their apostrophe ("dont", "didnt", "isnt").
+/// With the apostrophe, straight or curly, every such contraction ends in "n't" after
+/// tokenization and needs no entry here.
+const APOSTROPHE_LESS_NEGATIONS: &[&str] = &[
+    "dont", "doesnt", "didnt", "wont", "cant", "isnt", "arent", "wasnt", "werent", "aint",
+    "shouldnt", "wouldnt", "couldnt", "mustnt", "neednt", "shant", "hasnt", "havent", "hadnt",
+];
+
+/// Whether a lowercased token is a negative auxiliary contraction: any word ending in "n't"
+/// (the tokenizer folds a curly apostrophe to a straight one) or an apostrophe-less spelling of
+/// one. "didn't", a curly-apostrophe "didn’t", "didnt", "isn't", "aren't", "wasn't" and
+/// "weren't" all match; "cannot" and the bare "not" are listed words instead.
+fn is_negative_contraction(word: &str) -> bool {
+    word.ends_with("n't") || APOSTROPHE_LESS_NEGATIONS.contains(&word)
+}
+
+/// Whether a token is a [`NEGATING_WORDS`] entry or a negative contraction.
+fn is_negating_word(word: &str) -> bool {
+    NEGATING_WORDS.contains(&word) || is_negative_contraction(word)
+}
+
+/// Whether a token is a [`RETRACTING_NEGATIONS`] entry or a negative contraction.
+fn is_retracting_negation(word: &str) -> bool {
+    RETRACTING_NEGATIONS.contains(&word) || is_negative_contraction(word)
+}
 /// Words that, between a reminder cue and the quoted time, exclude that time from the request
 /// ("remind me except on ...") or attach it to something else ("remind me to call Bob who called
 /// on ...").
@@ -875,11 +903,11 @@ const RETRACTION_PAIRS: &[(&[&str], &[&str])] = &[
 ];
 /// Plain negations (not reporting or opinion words) that withdraw an earlier request when they
 /// govern a reminder word ("actually don't remind me") or close their clause ("..., actually
-/// don't").
-const RETRACTING_NEGATIONS: &[&str] = &[
-    "not", "no", "never", "dont", "don't", "doesnt", "doesn't", "wont", "won't", "cant", "can't",
-    "cannot", "nope", "nah",
-];
+/// don't"). Negative contractions in every tense and person ("don't", "didn't", "isn't",
+/// "wasn't", with or without the apostrophe) are matched by [`is_negative_contraction`] through
+/// [`is_retracting_negation`] rather than listed, so "I didn't want that reminder" and "it isn't
+/// needed" withdraw exactly as "I did not want that reminder" and "it is not needed" do.
+const RETRACTING_NEGATIONS: &[&str] = &["not", "no", "never", "cannot", "nope", "nah"];
 /// Words a retracting negation may govern: the reminder itself or the act of being reminded.
 const RETRACTION_TARGETS: &[&str] = &[
     "remind",
@@ -1148,7 +1176,7 @@ fn retracted_after(tokens: &[IntentToken], after: usize) -> bool {
         }) {
             return true;
         }
-        if !RETRACTING_NEGATIONS.contains(&word) {
+        if !is_retracting_negation(word) {
             return false;
         }
         let same_clause: Vec<&IntentToken> = later[index + 1..]
@@ -1220,7 +1248,7 @@ fn verb_is_negated_or_infinitive(before: &[&IntentToken]) -> bool {
         .take_while(|previous| !previous.clause_break)
         .map(|previous| previous.text.as_str())
         .find(|previous| !RETRACTION_FILLERS.contains(previous))
-        .is_some_and(|previous| previous == "to" || RETRACTING_NEGATIONS.contains(&previous))
+        .is_some_and(|previous| previous == "to" || is_retracting_negation(previous))
 }
 
 /// Whether a reminder request whose cue ends at `cue_end` governs the quoted time `span`: the
@@ -1236,7 +1264,7 @@ fn request_governs_span(tokens: &[IntentToken], cue_end: usize, span: SourceSpan
 fn detaches_time(token: &IntentToken) -> bool {
     let word = token.text.as_str();
     token.clause_break
-        || NEGATING_WORDS.contains(&word)
+        || is_negating_word(word)
         || EXCLUDING_WORDS.contains(&word)
         || RECALL_WORDS.contains(&word)
         || COMPLETED_WORDS.contains(&word)
@@ -1252,7 +1280,7 @@ fn is_present_first_person_request(tokens: &[IntentToken], cue_start: usize, ver
         .collect();
     if clause_words
         .iter()
-        .any(|word| NEGATING_WORDS.contains(word) || COMPLETED_WORDS.contains(word))
+        .any(|word| is_negating_word(word) || COMPLETED_WORDS.contains(word))
     {
         return false;
     }
