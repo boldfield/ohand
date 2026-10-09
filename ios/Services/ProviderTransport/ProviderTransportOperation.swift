@@ -181,7 +181,12 @@ final class ProviderTransportOperation: NSObject, URLSessionDataDelegate {
             completionHandler(nil)
             return
         }
-        completionHandler(request)
+        // URLSession strips Authorization on redirects; the target is the same origin, so restore what we sent.
+        var followed = request
+        for (name, value) in urlRequest.allHTTPHeaderFields ?? [:] where followed.value(forHTTPHeaderField: name) == nil {
+            followed.setValue(value, forHTTPHeaderField: name)
+        }
+        completionHandler(followed)
     }
 
     // MARK: Response
