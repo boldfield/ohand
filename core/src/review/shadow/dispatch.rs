@@ -1,11 +1,12 @@
 use anyhow::{anyhow, Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
 use super::policy::ShadowPolicy;
 use super::record::{
     load_shadow_record, ShadowRecord, UnreviewedReason, ERROR_PREFIX, UNREVIEWED_PREFIX,
 };
+use super::selection::parse_instant;
 use crate::jobs::queue::{fail_job_with_backoff_in_tx, JobStatus};
 use crate::privacy::routing::{
     authorize_job, Authorization, AuthorizationDecision, DenialReason, JOB_TYPE_SHADOW_REVIEW,
@@ -27,6 +28,11 @@ pub enum ShadowDispatchDenial {
     NotLeased,
     /// The case already used its per-sample request allowance.
     AttemptsExhausted,
+    /// Sending would put more provider requests inside the budget window than the policy allows.
+    BudgetExhausted {
+        requests_spent: u32,
+        limit: u32,
+    },
     ItemUnavailable,
     /// The job has no pinned remote review profile.
     NoRemoteProfile,
@@ -75,6 +81,13 @@ fn read_gate_row(conn: &Connection, job_id: &str) -> Result<Option<JobGateRow>> 
 /// An `Allowed` decision also stamps `now` as the case's latest dispatch time in the same
 /// transaction, so the request is accounted to the window it is actually sent in even when the
 /// case was selected, or last retried, in an earlier window. A denial writes nothing.
+///
+/// The window budget is also enforced here, against requests actually spent: the case's own
+/// attempts plus every other case's attempts whose latest activity is inside the window must not
+/// exceed `max_requests_per_window`. Reservations made at selection already guarantee this under
+/// an unchanged policy; the check is what holds the limit when the policy changes afterwards
+/// (for example a raised `max_attempts_per_sample`, or a lowered `max_requests_per_window`,
+/// while cases are open). Lowering the limit therefore denies sends that were reserved earlier.
 pub fn authorize_shadow_dispatch(
     db: &mut Database,
     job_id: &str,
@@ -85,10 +98,54 @@ pub fn authorize_shadow_dispatch(
     let tx = db.immediate_transaction()?;
     let decision = decide_dispatch(&tx, job_id, lease_attempt, policy)?;
     if matches!(decision, ShadowDispatchDecision::Allowed(_)) {
+        let requests_spent = requests_spent_with(&tx, policy, now, job_id, lease_attempt)?;
+        if requests_spent > policy.max_requests_per_window {
+            return Ok(ShadowDispatchDecision::Denied(
+                ShadowDispatchDenial::BudgetExhausted {
+                    requests_spent,
+                    limit: policy.max_requests_per_window,
+                },
+            ));
+        }
         stamp_dispatch(&tx, job_id, lease_attempt, now)?;
         tx.commit()?;
     }
     Ok(decision)
+}
+
+/// Requests spent inside the window ending at `now`, counting this attempt of `job_id` and the
+/// attempts of every other shadow case whose latest activity (creation, last dispatch stamp or
+/// scheduled retry) is inside the window.
+fn requests_spent_with(
+    conn: &Connection,
+    policy: &ShadowPolicy,
+    now: DateTime<Utc>,
+    job_id: &str,
+    lease_attempt: i32,
+) -> Result<u32> {
+    let window_start = now - Duration::seconds(policy.window_seconds);
+    let mut statement = conn
+        .prepare(
+            "SELECT job_id, attempt_count, created_at, next_attempt_at \
+             FROM jobs WHERE job_type = ? AND job_id != ?",
+        )
+        .context("preparing shadow dispatch budget read")?;
+    let mut rows = statement.query(rusqlite::params![JOB_TYPE_SHADOW_REVIEW, job_id])?;
+    let mut spent = u64::try_from(lease_attempt).unwrap_or(0);
+    while let Some(row) = rows.next()? {
+        let other_id: String = row.get(0)?;
+        let attempts = u64::try_from(row.get::<_, i32>(1)?).unwrap_or(0);
+        let created_text: String = row.get(2)?;
+        let stamped_text: Option<String> = row.get(3)?;
+        let mut latest_activity = parse_instant(&other_id, &created_text)?;
+        if let Some(stamped_text) = stamped_text {
+            latest_activity = latest_activity.max(parse_instant(&other_id, &stamped_text)?);
+        }
+        if latest_activity > window_start {
+            spent += attempts;
+        }
+    }
+    Ok(u32::try_from(spent).unwrap_or(u32::MAX))
 }
 
 /// The dispatch time lives in `next_attempt_at`, which the queue ignores while a job is running

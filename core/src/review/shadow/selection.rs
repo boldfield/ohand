@@ -96,7 +96,7 @@ pub fn requests_in_use(
     Ok(u32::try_from(in_use).unwrap_or(u32::MAX))
 }
 
-fn parse_instant(job_id: &str, text: &str) -> Result<DateTime<Utc>> {
+pub(super) fn parse_instant(job_id: &str, text: &str) -> Result<DateTime<Utc>> {
     Ok(DateTime::parse_from_rfc3339(text)
         .with_context(|| format!("shadow job {job_id} has a malformed timestamp"))?
         .with_timezone(&Utc))

@@ -577,6 +577,67 @@ fn a_retry_after_the_window_is_accounted_to_the_window_it_is_sent_in() {
 }
 
 #[test]
+fn raising_the_attempt_allowance_after_selection_cannot_overspend_the_window() {
+    let mut fixture = Fixture::new(true);
+    let reserved_under = enabled_policy(2, 1);
+    let raised = enabled_policy(2, 2);
+    fixture.select_record(&reserved_under, t0());
+    fixture.select_record(&reserved_under, t0() + Duration::seconds(1));
+    let transient = ProviderFailure::new(FailureKind::Unavailable);
+    let mut sent = Vec::new();
+
+    for offset in [2, 3] {
+        let at = t0() + Duration::seconds(offset);
+        let (job_id, attempt) = fixture.claim(at);
+        assert!(matches!(
+            fixture.gate_at(&job_id, attempt, &raised, at),
+            ShadowDispatchDecision::Allowed(_)
+        ));
+        sent.push(at);
+        record_shadow_failure(&mut fixture.db, &job_id, attempt, &transient, &raised, at).unwrap();
+    }
+
+    for offset in [100, 101] {
+        let at = t0() + Duration::seconds(offset);
+        let (job_id, attempt) = fixture.claim(at);
+        assert_eq!(attempt, 2);
+        match fixture.gate_at(&job_id, attempt, &raised, at) {
+            ShadowDispatchDecision::Denied(ShadowDispatchDenial::BudgetExhausted {
+                requests_spent,
+                limit,
+            }) => {
+                assert_eq!(limit, 2);
+                assert!(requests_spent > limit);
+            }
+            other => panic!("retry beyond the reserved budget must be denied, got {other:?}"),
+        }
+        record_shadow_unreviewed(&mut fixture.db, &job_id, attempt, UnreviewedReason::Timeout)
+            .unwrap();
+    }
+    assert_never_more_than_limit_in_any_window(&sent, &raised);
+}
+
+#[test]
+fn lowering_the_window_limit_after_selection_denies_unsent_reserved_cases() {
+    let mut fixture = Fixture::new(true);
+    let selected_under = enabled_policy(2, 1);
+    let lowered = enabled_policy(1, 1);
+    fixture.select_record(&selected_under, t0());
+    fixture.select_record(&selected_under, t0());
+
+    let (first, first_attempt) = fixture.claim(t0());
+    assert!(matches!(
+        fixture.gate(&first, first_attempt, &lowered),
+        ShadowDispatchDecision::Allowed(_)
+    ));
+    let (second, second_attempt) = fixture.claim(t0());
+    assert!(matches!(
+        fixture.gate(&second, second_attempt, &lowered),
+        ShadowDispatchDecision::Denied(ShadowDispatchDenial::BudgetExhausted { .. })
+    ));
+}
+
+#[test]
 fn a_denied_gate_stamps_nothing_and_an_allowed_gate_never_moves_the_stamp_back() {
     let mut fixture = Fixture::new(true);
     let policy = enabled_policy(5, 2);
