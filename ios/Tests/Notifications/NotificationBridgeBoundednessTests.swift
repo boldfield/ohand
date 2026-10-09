@@ -278,6 +278,74 @@ final class NotificationBridgeBoundednessTests: XCTestCase {
         XCTAssertTrue(quick.unreconciledIdentifiers.isEmpty)
     }
 
+    func testARetryThatSucceedsWhileARemovalUndoIsSuspendedSurvivesTheLateRemoval() async throws {
+        let addGate = newGate()
+        center.addGate = addGate
+        let quick = makeBridge(effectTimeout: 0.05)
+        let scheduleRequest = try request()
+
+        let failure = await failureOfHungCall { _ = try await quick.schedule(scheduleRequest) }
+        XCTAssertEqual(failure, .timedOut)
+
+        let removeGate = newGate()
+        center.removeGate = removeGate
+        center.addGate = nil
+        addGate.release()
+        await eventually("the undo to block in removal") { removeGate.arrivals >= 1 }
+
+        let retried = try await quick.schedule(scheduleRequest)
+        XCTAssertEqual(retried.identifier, try identifier())
+        XCTAssertEqual(inner.pendingIdentifiers, ["reminder-1#1"])
+
+        center.removeGate = nil
+        removeGate.release()
+        await eventually("the suspended removal to land late") { !self.inner.removedIdentifiers.isEmpty }
+        await letLateWorkRun(quick)
+        XCTAssertEqual(inner.pendingIdentifiers, ["reminder-1#1"], "the retry's confirmed install survives")
+        let survivingDue = try await pendingDueInstant()
+        XCTAssertEqual(survivingDue, scheduleRequest.dueInstant)
+        XCTAssertTrue(quick.unreconciledIdentifiers.isEmpty)
+    }
+
+    func testANewerScheduleThatSucceedsWhileARestoreUndoIsSuspendedSurvivesTheLateRestore() async throws {
+        let quick = makeBridge(effectTimeout: 0.05)
+        let original = try request()
+        _ = try await quick.schedule(original)
+
+        let abandoned = NotificationScheduleRequest.generic(
+            identifier: original.identifier,
+            dueInstant: original.dueInstant.addingTimeInterval(600),
+            opaqueTargetID: original.opaqueTargetID
+        )
+        let abandonedAddGate = newGate()
+        center.addGate = abandonedAddGate
+        let failure = await failureOfHungCall { _ = try await quick.schedule(abandoned) }
+        XCTAssertEqual(failure, .timedOut)
+
+        let restoreGate = newGate()
+        center.addGate = restoreGate
+        abandonedAddGate.release()
+        await eventually("the restore of the earlier request to block in add") { restoreGate.arrivals >= 1 }
+
+        center.addGate = nil
+        let newer = NotificationScheduleRequest.generic(
+            identifier: original.identifier,
+            dueInstant: original.dueInstant.addingTimeInterval(1200),
+            opaqueTargetID: original.opaqueTargetID
+        )
+        _ = try await quick.schedule(newer)
+        let dueAfterNewer = try await pendingDueInstant()
+        XCTAssertEqual(dueAfterNewer, newer.dueInstant)
+
+        restoreGate.release()
+        // Adds so far: the original, the abandoned one landing late and the newer schedule.
+        await eventually("the suspended restore to land late") { self.inner.addedRequests.count >= 4 }
+        await letLateWorkRun(quick)
+        let finalDue = try await pendingDueInstant()
+        XCTAssertEqual(finalDue, newer.dueInstant, "the newer schedule's confirmed install survives")
+        XCTAssertTrue(quick.unreconciledIdentifiers.isEmpty)
+    }
+
     // MARK: Deadlines
 
     func testAHungProviderTimesOutWithANormalizedTransientError() async throws {

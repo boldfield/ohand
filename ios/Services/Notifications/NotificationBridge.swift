@@ -10,11 +10,17 @@ import Foundation
 ///
 /// Every OS call is cancellable and time-bounded: it runs as its own task and races a deadline and
 /// the caller's cancellation, so a provider that ignores cancellation or never answers still
-/// yields a normalized `cancelled` or `timed_out` result. A schedule that the OS completes after
-/// the caller has stopped waiting is undone again: the request is removed, or the request that was
-/// pending before the attempt is restored, unless a newer schedule of the same identifier has since
-/// started (which then owns the state). Undoing is itself bounded and tracked; an undo that cannot
-/// finish is remembered and retried by `reconcile()`.
+/// yields a normalized `cancelled` or `timed_out` result.
+///
+/// A call the bridge stopped waiting for can still complete later. To keep such late work from
+/// disturbing newer state, every mutation of one identifier runs exclusively (behind a bounded
+/// per-identifier lock), and the bridge remembers the state the newest confirmed or abandoned
+/// operation wants for that identifier: installed as confirmed, absent after a cancel, or what was
+/// pending before an abandoned schedule. Whenever an abandoned mutation completes late, the bridge
+/// re-applies that desired state under the same lock, so a late write is overwritten rather than
+/// trusted, and a check made earlier is never acted on after a newer operation has started.
+/// Re-applying is itself bounded and tracked; one that cannot finish is remembered and retried by
+/// `reconcile()`.
 public final class NotificationBridge: Sendable {
     private let center: NotificationCenterProviding
     private let now: @Sendable () -> Date
@@ -22,7 +28,8 @@ public final class NotificationBridge: Sendable {
     private let removalPollInterval: TimeInterval
     private let maximumRemovalPolls: Int
     private let effectTimeout: TimeInterval
-    private let reconciliation = AbandonedWorkLedger()
+    private let ledger = DesiredStateLedger()
+    private let identifierLocks = IdentifierLocks()
 
     public init(
         center: NotificationCenterProviding,
@@ -57,33 +64,39 @@ public final class NotificationBridge: Sendable {
             }
 
             let identifier = request.identifier.rawValue
-            let attempt = reconciliation.begin(identifier, kind: .schedule)
             let centerRequest = NotificationCenterRequest(
                 identifier: identifier, dueInstant: request.dueInstant, content: content)
-            let priorRequest = try await bounded { try await center.pendingRequests() }
-                .first(where: { $0.identifier == identifier })
-            let abandon: @Sendable () -> Void = { [self] in
-                self.undoAbandonedSchedule(centerRequest, attempt: attempt, prior: priorRequest)
-            }
-            try await bounded(
-                { try await center.add(centerRequest) },
-                onAbandonedSuccess: { _ in abandon() }
-            )
+            return try await exclusively(identifier) {
+                let priorRequest = try await self.bounded { try await center.pendingRequests() }
+                    .first(where: { $0.identifier == identifier })
+                let stateBeforeAttempt = Self.restorableState(of: priorRequest, identifier: identifier)
+                do {
+                    try await self.mutate(identifier, toward: nil) { try await center.add(centerRequest) }
+                } catch let error where Self.isUncertain(error) {
+                    // The add may still land; its late completion re-applies the earlier state.
+                    self.ledger.setDesired(identifier, stateBeforeAttempt)
+                    throw error
+                }
 
-            let pending: [NotificationCenterPendingRequest]
-            do {
-                pending = try await bounded { try await center.pendingRequests() }
-            } catch {
-                abandon()
-                throw error
+                let pending: [NotificationCenterPendingRequest]
+                do {
+                    pending = try await self.bounded { try await center.pendingRequests() }
+                } catch {
+                    // The caller is told this schedule failed, so its install is undone again.
+                    self.ledger.setDesired(identifier, stateBeforeAttempt)
+                    self.enforceInBackground(identifier)
+                    throw error
+                }
+                guard let installed = pending.first(where: { $0.identifier == identifier }) else {
+                    throw NotificationBridgeError.installNotConfirmed
+                }
+                self.ledger.setDesired(identifier, .installed(centerRequest))
+                self.ledger.markSettled(identifier)
+                return InstalledNotification(
+                    identifier: request.identifier,
+                    dueInstant: installed.dueInstant ?? request.dueInstant
+                )
             }
-            guard let installed = pending.first(where: { $0.identifier == identifier }) else {
-                throw NotificationBridgeError.installNotConfirmed
-            }
-            return InstalledNotification(
-                identifier: request.identifier,
-                dueInstant: installed.dueInstant ?? request.dueInstant
-            )
         } catch {
             throw NotificationBridgeError.normalized(error)
         }
@@ -95,16 +108,23 @@ public final class NotificationBridge: Sendable {
         do {
             let center = self.center
             let rawIdentifier = identifier.rawValue
-            reconciliation.begin(rawIdentifier, kind: .cancel)
-            try await bounded { await center.removePending(identifiers: [rawIdentifier]) }
-            for attempt in 0..<maximumRemovalPolls {
-                let pending = try await bounded { try await center.pendingRequests() }
-                if !pending.contains(where: { $0.identifier == identifier.rawValue }) { return }
-                if attempt + 1 < maximumRemovalPolls {
-                    try await Task.sleep(nanoseconds: UInt64(removalPollInterval * 1_000_000_000))
+            try await exclusively(rawIdentifier) {
+                let generation = self.ledger.setDesired(rawIdentifier, .absent)
+                try await self.mutate(rawIdentifier, toward: generation) {
+                    await center.removePending(identifiers: [rawIdentifier])
                 }
+                for attempt in 0..<self.maximumRemovalPolls {
+                    let pending = try await self.bounded { try await center.pendingRequests() }
+                    if !pending.contains(where: { $0.identifier == rawIdentifier }) {
+                        self.ledger.markSettled(rawIdentifier)
+                        return
+                    }
+                    if attempt + 1 < self.maximumRemovalPolls {
+                        try await Task.sleep(nanoseconds: UInt64(self.removalPollInterval * 1_000_000_000))
+                    }
+                }
+                throw NotificationBridgeError.cancelNotConfirmed
             }
-            throw NotificationBridgeError.cancelNotConfirmed
         } catch {
             throw NotificationBridgeError.normalized(error)
         }
@@ -167,68 +187,133 @@ public final class NotificationBridge: Sendable {
         return forwarded
     }
 
-    /// Retries every undo of abandoned work that could not finish earlier. Succeeds when nothing
-    /// is left to undo.
+    /// Re-applies the desired state of every identifier whose late work could not be settled
+    /// earlier. Succeeds when nothing is left unsettled.
     public func reconcile() async throws {
         do {
-            for (identifier, undo) in reconciliation.unfinishedUndos() {
+            for identifier in ledger.unsettledIdentifiers() {
                 try Task.checkCancellation()
-                try await perform(undo, for: identifier)
-                reconciliation.finish(identifier, undo: undo)
+                try await enforce(identifier)
             }
         } catch {
             throw NotificationBridgeError.normalized(error)
         }
     }
 
-    /// Waits for the undo of every abandoned schedule started so far. Each is bounded, so this
-    /// returns within the effect timeout of the slowest one.
+    /// Waits for every re-application started so far, including ones that late completions start
+    /// while waiting. Each is bounded, so this returns once the provider stops completing late.
     public func settleAbandonedWork() async {
         while true {
-            let running = reconciliation.trackedUndos()
+            let running = ledger.trackedWork()
             if running.isEmpty { return }
             for (key, task) in running {
                 await task.value
-                reconciliation.untrack(key)
+                ledger.untrack(key)
             }
         }
     }
 
-    /// Identifiers whose abandoned work could not be undone yet.
+    /// Identifiers whose desired state could not be re-applied yet.
     public var unreconciledIdentifiers: [String] {
-        reconciliation.unfinishedUndos().map { $0.0 }.sorted()
+        ledger.unsettledIdentifiers().sorted()
     }
 
-    private func undoAbandonedSchedule(
-        _ attempted: NotificationCenterRequest,
-        attempt: Int,
-        prior: NotificationCenterPendingRequest?
-    ) {
-        let identifier = attempted.identifier
-        guard let undo = reconciliation.undoForAbandonedSchedule(
-            identifier, attempt: attempt, attempted: attempted, prior: prior)
-        else { return }
+    /// Runs `body` while holding `identifier`'s lock. Waiting for the lock is bounded too; it is
+    /// held by at most a few bounded calls at a time.
+    private func exclusively<Value: Sendable>(
+        _ identifier: String,
+        _ body: @Sendable () async throws -> Value
+    ) async throws -> Value {
+        let locks = identifierLocks
+        try await bounded(
+            { await locks.acquire(identifier) },
+            timeout: effectTimeout * 4,
+            onAbandonedSuccess: { _ in locks.release(identifier) }
+        )
+        defer { locks.release(identifier) }
+        return try await body()
+    }
+
+    /// Runs one mutating OS call. If the bridge stops waiting and the call completes later, the
+    /// desired state is re-applied unless the late call was itself applying the still-current
+    /// `generation` of it.
+    private func mutate(
+        _ identifier: String,
+        toward generation: Int?,
+        _ operation: @escaping @Sendable () async throws -> Void
+    ) async throws {
+        try await bounded(operation, onAbandonedSuccess: { [self] _ in
+            if let generation, self.ledger.generation(of: identifier) == generation { return }
+            self.enforceInBackground(identifier)
+        })
+    }
+
+    /// Starts a tracked re-application of `identifier`'s desired state; a failure leaves the
+    /// identifier for `reconcile()`.
+    private func enforceInBackground(_ identifier: String) {
         let key = UUID()
         let task = Task { [self] in
             do {
-                try await perform(undo, for: identifier)
-                reconciliation.finish(identifier, undo: undo)
+                try await enforce(identifier)
             } catch {
-                reconciliation.remember(identifier, undo: undo, attempt: attempt)
+                ledger.markUnsettled(identifier)
             }
-            reconciliation.untrack(key)
+            ledger.untrack(key)
         }
-        reconciliation.track(key, task)
+        ledger.track(key, task)
     }
 
-    private func perform(_ undo: AbandonedUndo, for identifier: String) async throws {
+    /// Makes the OS match the desired state of `identifier`, under its lock so no other operation
+    /// on it can interleave. Leaves an identifier with no known desired state alone.
+    private func enforce(_ identifier: String) async throws {
         let center = self.center
-        switch undo {
-        case .remove:
-            try await bounded { await center.removePending(identifiers: [identifier]) }
-        case let .restore(request):
-            try await bounded { try await center.add(request) }
+        do {
+            try await exclusively(identifier) {
+                let (desired, generation) = self.ledger.desired(of: identifier)
+                switch desired {
+                case nil:
+                    break
+                case .absent:
+                    try await self.mutate(identifier, toward: generation) {
+                        await center.removePending(identifiers: [identifier])
+                    }
+                case let .installed(request):
+                    let current = try await self.bounded { try await center.pendingRequests() }
+                        .first(where: { $0.identifier == identifier })
+                    if let current, Self.matches(current, request) { break }
+                    try await self.mutate(identifier, toward: generation) { try await center.add(request) }
+                }
+                self.ledger.markSettled(identifier)
+            }
+        } catch {
+            ledger.markUnsettled(identifier)
+            throw error
         }
+    }
+
+    /// Whether a bounded call's failure leaves its effect unknown: the bridge stopped waiting.
+    private static func isUncertain(_ error: Error) -> Bool {
+        error is CancellationError || (error as? NotificationBridgeError) == .timedOut
+    }
+
+    private static func matches(_ pending: NotificationCenterPendingRequest, _ request: NotificationCenterRequest) -> Bool {
+        pending.dueInstant == request.dueInstant && pending.userInfo == request.content.userInfo
+    }
+
+    /// What to put back if a schedule is abandoned: nothing when nothing was pending, the earlier
+    /// generic request when one was, or nil (leave alone) when the earlier request cannot be
+    /// rebuilt from fixed wording.
+    private static func restorableState(
+        of prior: NotificationCenterPendingRequest?,
+        identifier: String
+    ) -> DesiredNotificationState? {
+        guard let prior else { return .absent }
+        guard let due = prior.dueInstant,
+              prior.userInfo[NotificationContent.kindKey] == NotificationPayloadKind.generic.rawValue,
+              let target = prior.userInfo[NotificationContent.targetKey].flatMap({ OpaqueIdentifier($0) })
+        else { return nil }
+        return .installed(NotificationCenterRequest(
+            identifier: identifier, dueInstant: due, content: .generic(opaqueTargetID: target)))
     }
 
     /// Runs one OS call as its own task and returns whichever happens first: the call's result, its
@@ -236,11 +321,12 @@ public final class NotificationBridge: Sendable {
     /// still finish; `onAbandonedSuccess` receives such a late result so its effect can be undone.
     private func bounded<Value: Sendable>(
         _ operation: @escaping @Sendable () async throws -> Value,
+        timeout: TimeInterval? = nil,
         onAbandonedSuccess: (@Sendable (Value) async -> Void)? = nil
     ) async throws -> Value {
         try Task.checkCancellation()
         let race = EffectRace<Value>()
-        let deadlineNanoseconds = UInt64(effectTimeout * 1_000_000_000)
+        let deadlineNanoseconds = UInt64((timeout ?? effectTimeout) * 1_000_000_000)
         return try await withTaskCancellationHandler {
             race.track(Task {
                 do {
@@ -336,83 +422,60 @@ private final class EffectRace<Value: Sendable>: @unchecked Sendable {
     }
 }
 
-/// How an abandoned schedule is undone.
-private enum AbandonedUndo: Equatable, Sendable {
-    case remove
-    case restore(NotificationCenterRequest)
+/// The state an identifier should be in, as decided by the newest operation on it.
+private enum DesiredNotificationState: Equatable, Sendable {
+    case absent
+    case installed(NotificationCenterRequest)
 }
 
-private enum BridgeOperationKind: Sendable {
-    case schedule
-    case cancel
-}
-
-/// Per-identifier record of the newest operation, of undo work in flight and of undo work that
-/// has not finished. Lets a late OS completion tell whether it is still the latest word on its
-/// identifier before it removes or restores anything.
-private final class AbandonedWorkLedger: @unchecked Sendable {
+/// Per-identifier desired state with a generation that changes on every decision, the set of
+/// identifiers whose desired state could not be re-applied, and the re-applications in flight.
+private final class DesiredStateLedger: @unchecked Sendable {
     private let lock = NSLock()
     private var counter = 0
-    private var newest: [String: (attempt: Int, kind: BridgeOperationKind)] = [:]
+    private var desired: [String: (state: DesiredNotificationState?, generation: Int)] = [:]
+    private var unsettled: Set<String> = []
     private var tracked: [UUID: Task<Void, Never>] = [:]
-    private var unfinished: [String: AbandonedUndo] = [:]
 
-    /// Registers a new operation on `identifier`; it now owns the identifier's state, so older
-    /// unfinished undos are dropped.
+    /// Records a decision; nil means the state is unknown and is left alone. Returns its generation.
     @discardableResult
-    func begin(_ identifier: String, kind: BridgeOperationKind) -> Int {
+    func setDesired(_ identifier: String, _ state: DesiredNotificationState?) -> Int {
         lock.lock()
         defer { lock.unlock() }
         counter += 1
-        newest[identifier] = (counter, kind)
-        unfinished[identifier] = nil
+        desired[identifier] = (state, counter)
         return counter
     }
 
-    /// The undo an abandoned schedule owes, or nil when a newer schedule owns the identifier or
-    /// the pending request is already equivalent to what was there before.
-    func undoForAbandonedSchedule(
-        _ identifier: String,
-        attempt: Int,
-        attempted: NotificationCenterRequest,
-        prior: NotificationCenterPendingRequest?
-    ) -> AbandonedUndo? {
-        lock.lock()
-        let latest = newest[identifier]
-        lock.unlock()
-        guard let latest else { return nil }
-        if latest.attempt != attempt {
-            return latest.kind == .cancel ? .remove : nil
-        }
-        guard let prior else { return .remove }
-        if prior.dueInstant == attempted.dueInstant && prior.userInfo == attempted.content.userInfo {
-            return nil
-        }
-        guard let due = prior.dueInstant,
-              prior.userInfo[NotificationContent.kindKey] == NotificationPayloadKind.generic.rawValue,
-              let target = prior.userInfo[NotificationContent.targetKey].flatMap({ OpaqueIdentifier($0) })
-        else { return nil }
-        return .restore(NotificationCenterRequest(
-            identifier: identifier, dueInstant: due, content: .generic(opaqueTargetID: target)))
-    }
-
-    func remember(_ identifier: String, undo: AbandonedUndo, attempt: Int) {
+    func desired(of identifier: String) -> (DesiredNotificationState?, Int?) {
         lock.lock()
         defer { lock.unlock() }
-        guard newest[identifier]?.attempt == attempt || newest[identifier]?.kind == .cancel else { return }
-        unfinished[identifier] = undo
+        let entry = desired[identifier]
+        return (entry?.state, entry?.generation)
     }
 
-    func finish(_ identifier: String, undo: AbandonedUndo) {
+    func generation(of identifier: String) -> Int? {
         lock.lock()
         defer { lock.unlock() }
-        if unfinished[identifier] == undo { unfinished[identifier] = nil }
+        return desired[identifier]?.generation
     }
 
-    func unfinishedUndos() -> [(String, AbandonedUndo)] {
+    func markUnsettled(_ identifier: String) {
         lock.lock()
         defer { lock.unlock() }
-        return unfinished.map { ($0.key, $0.value) }
+        unsettled.insert(identifier)
+    }
+
+    func markSettled(_ identifier: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        unsettled.remove(identifier)
+    }
+
+    func unsettledIdentifiers() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return Array(unsettled)
     }
 
     func track(_ key: UUID, _ task: Task<Void, Never>) {
@@ -427,9 +490,45 @@ private final class AbandonedWorkLedger: @unchecked Sendable {
         tracked[key] = nil
     }
 
-    func trackedUndos() -> [(UUID, Task<Void, Never>)] {
+    func trackedWork() -> [(UUID, Task<Void, Never>)] {
         lock.lock()
         defer { lock.unlock() }
         return tracked.map { ($0.key, $0.value) }
+    }
+}
+
+/// First-come, first-served exclusive ownership of an identifier. Acquiring does not honor
+/// cancellation itself; callers bound it, and an abandoned acquirer releases as soon as it is
+/// granted ownership.
+private final class IdentifierLocks: @unchecked Sendable {
+    private let lock = NSLock()
+    private var held: Set<String> = []
+    private var waiting: [String: [CheckedContinuation<Void, Never>]] = [:]
+
+    func acquire(_ identifier: String) async {
+        await withCheckedContinuation { (waiter: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            if held.insert(identifier).inserted {
+                lock.unlock()
+                waiter.resume()
+            } else {
+                waiting[identifier, default: []].append(waiter)
+                lock.unlock()
+            }
+        }
+    }
+
+    /// Hands ownership to the next waiter, if any, without letting a newcomer cut in.
+    func release(_ identifier: String) {
+        lock.lock()
+        if var queue = waiting[identifier], !queue.isEmpty {
+            let next = queue.removeFirst()
+            waiting[identifier] = queue.isEmpty ? nil : queue
+            lock.unlock()
+            next.resume()
+        } else {
+            held.remove(identifier)
+            lock.unlock()
+        }
     }
 }
