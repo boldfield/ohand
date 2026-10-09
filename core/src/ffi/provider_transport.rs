@@ -83,6 +83,9 @@ type TransportCallbackFn = unsafe extern "C" fn(*mut c_void, u64, u32, *const u8
 const WAIT_SLICE: Duration = Duration::from_millis(25);
 const QUEUE_RETRY_PAUSE: Duration = Duration::from_millis(10);
 const QUEUE_RETRY_LIMIT: u32 = 500;
+/// Capability labels carried on the native send command; they match `ProviderTransportCapability` raw values.
+const CAPABILITY_TEXT_INTERPRETATION: &str = "text_interpretation";
+const CAPABILITY_REVIEW: &str = "review";
 
 struct Registration {
     callback: TransportCallbackFn,
@@ -312,6 +315,7 @@ struct SendCommand<'a> {
     max_response_bytes: u64,
     credential: Option<CredentialJson<'a>>,
     authorized_origins: &'a [String],
+    capability: &'static str,
 }
 
 struct Outgoing<'a> {
@@ -329,6 +333,7 @@ struct ExchangeEnd {
     registration: Arc<Registration>,
     receiver: Mutex<Receiver<Completion>>,
     authorized_origins: Vec<String>,
+    capability: &'static str,
 }
 
 /// The core's HTTP effects, both adapter seams, backed by the registered native callback.
@@ -378,6 +383,7 @@ impl NativeTransport {
             max_response_bytes,
             credential,
             authorized_origins: &end.authorized_origins,
+            capability: end.capability,
         })
         .map_err(|_| TransportError::Rejected)?;
 
@@ -781,6 +787,7 @@ fn start_exchange_job(
             registration,
             receiver: Mutex::new(receiver),
             authorized_origins: prepared.destinations.clone(),
+            capability: CAPABILITY_TEXT_INTERPRETATION,
         });
         std::thread::Builder::new()
             .name("ohand-provider-exchange".to_string())
@@ -1011,6 +1018,8 @@ pub unsafe extern "C" fn ohand_core_fail_provider_exchange(
         answer(handle, operation_id, Completion::Failure(error))
     })
 }
+
+pub mod shadow_review;
 
 #[cfg(test)]
 mod tests;

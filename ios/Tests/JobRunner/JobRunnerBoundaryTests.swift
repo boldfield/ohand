@@ -85,11 +85,15 @@ final class JobRunnerBoundaryTests: ProviderTransportTestCase {
     func testLaunchDrainsTheReadyJobThroughTheRealTransportAndCompletesIt() throws {
         let server = try makeServer()
         let storePath = try makeStore()
-        let session = try open(storePath, sender: FixtureRoutingSender(underlying: transport, fixtureServer: server))
+        let routingSender = FixtureRoutingSender(underlying: transport, fixtureServer: server)
+        let session = try open(storePath, sender: routingSender)
 
         session.service.activate()
         XCTAssertTrue(session.waitForFinishedDrains(1))
 
+        XCTAssertEqual(
+            routingSender.requestsFromCore.map(\.authorization.capability), [.textInterpretation],
+            "the capability the core authorized is carried natively, not assumed")
         let summary = try XCTUnwrap(session.summary())
         XCTAssertEqual(summary.stop, "idle")
         XCTAssertEqual(summary.jobs.map(\.jobID), [ProviderExchangeScenario.jobID])
