@@ -88,4 +88,14 @@ These could not be tested here and are expected to be corrected by the first rea
 
 ## Evidence and validity
 
-Reserved for P08b. No signed build or device install has been observed, and this document makes no statement about how long an install stays valid; that must come from the profile expiry observed in the maintainer's evidence record.
+On 2026-10-09, the maintainer successfully built and installed BridgeProbe on a trial device. The signed build evidence is recorded in [`apple-signing-20261009T000932Z-c2cb6485.json`](./evidence/apple-signing/apple-signing-20261009T000932Z-c2cb6485.json):
+
+| Attribute | Value |
+| --- | --- |
+| Collection time | 2026-10-09T00:10:14Z |
+| Build revision | `6ac3d1f8d20dde731434d609120ad9cf77ac5956` |
+| Build identifier | `6ac3d1f8-c2cb6485` |
+| Device label | `trial-phone` |
+| Profile expiry | 2027-10-09T00:08:01Z |
+
+The install on the trial device succeeded on the collected profile. The provisioning profile is valid until 2027-10-09, providing profile coverage through the two-week trial period and beyond. Renewal-without-data-loss procedures have not yet been tested; this section will be updated when trial renewal is executed.
