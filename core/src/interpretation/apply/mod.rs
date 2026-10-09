@@ -892,9 +892,11 @@ const RETRACTION_VERBS: &[&str] = &[
     "rescind",
 ];
 /// Two-part withdrawals whose parts may be separated by other words of the same clause: "I take
-/// that back", "I changed my mind", "I'll remember on my own / by myself". When the flag is set,
-/// words that name something other than the request ("take the ladder back") between the parts
-/// are the requested task, not a withdrawal ([`names_task_object`]).
+/// that back", "I changed my mind", "I'll remember on my own / by myself". When the flag is set
+/// and the first part continues the request ([`request_attachment`]), an object that names
+/// something other than the request, between the parts ("take the ladder back") or directly after
+/// them ("take back the ladder"), makes it the requested task, not a withdrawal
+/// ([`names_task_object`]).
 const RETRACTION_PAIRS: &[(&[&str], &[&str], bool)] = &[
     (&["take", "took", "taking"], &["back"], true),
     (&["change", "changed", "changing"], &["mind"], false),
@@ -1004,15 +1006,21 @@ const OBJECT_LEAD_INS: &[&str] = &[
 /// the order", "take that back", "delete this one"), so the word after them decides.
 const OBJECT_DETERMINERS: &[&str] = &[
     "the", "a", "an", "this", "that", "these", "those", "my", "our", "your", "his", "her", "their",
-    "any", "some", "such", "another", "whole", "entire",
+    "any", "some", "such", "another",
 ];
-/// Words that, in the object of a retraction verb, stand for the request itself or for "everything"
-/// ("cancel it", "delete the whole thing", "take back what I said"). They keep a coordinated or
-/// "about"-governed retraction verb a withdrawal; the reminder words of [`REMINDER_OBJECT_WORDS`]
-/// do too.
+/// Words that, in the object of a retraction verb, stand for the request itself, for the person
+/// or thing the task is about, or for "everything" ("cancel it", "ring him", "delete the whole
+/// thing", "forget the entire plan", "drop the subject", "take back what I said", "after all").
+/// They keep a coordinated or "about"-governed retraction verb a withdrawal; the reminder words of
+/// [`REMINDER_OBJECT_WORDS`] do too.
 const WITHDRAWN_REQUEST_WORDS: &[&str] = &[
     "it",
     "them",
+    "him",
+    "whole",
+    "entire",
+    "anyway",
+    "anyways",
     "one",
     "ones",
     "all",
@@ -1042,6 +1050,29 @@ const WITHDRAWN_REQUEST_WORDS: &[&str] = &[
     "word",
     "part",
     "bit",
+    "schedule",
+    "schedules",
+    "subject",
+    "topic",
+    "matter",
+    "business",
+    "stuff",
+];
+/// Retraction verbs that also name ordinary tasks ("cancel the order", "delete the old photos",
+/// "stop the leak"). Only these may be coordinated inside the requested task; a coordinated
+/// "forget", "drop" or "scratch" ("and drop the subject") and any "or"-coordinated retraction
+/// ("or forget the idea") withdraw whatever their object.
+const TASK_RETRACTION_VERBS: &[&str] = &[
+    "cancel",
+    "canceled",
+    "cancelled",
+    "canceling",
+    "cancelling",
+    "skip",
+    "skipping",
+    "delete",
+    "remove",
+    "stop",
 ];
 /// Prepositions and conjunctions that carry no content of an object span ("cancel the order at
 /// the last minute"), so they are neither compared against the request nor taken as its head.
@@ -1217,16 +1248,22 @@ fn retracted_after(tokens: &[IntentToken], after: usize) -> bool {
             return true;
         }
         let request_words = unquoted_words_before(tokens, token.start);
-        if RETRACTION_VERBS.contains(&word) {
-            return !verb_is_negated_or_infinitive(&later[..index])
-                && !verb_is_part_of_requested_task(tokens, after, token, &request_words);
-        }
         let rest_of_clause: Vec<&IntentToken> = later[index + 1..]
             .iter()
             .copied()
             .take_while(|next| !next.clause_break)
             .filter(|next| !next.quoted)
             .collect();
+        if RETRACTION_VERBS.contains(&word) {
+            return !verb_is_negated_or_infinitive(&later[..index])
+                && !verb_is_part_of_requested_task(
+                    tokens,
+                    after,
+                    token,
+                    &rest_of_clause,
+                    &request_words,
+                );
+        }
         if RETRACTION_PAIRS
             .iter()
             .any(|(first_words, second_words, task_object_may_intervene)| {
@@ -1236,9 +1273,13 @@ fn retracted_after(tokens: &[IntentToken], after: usize) -> bool {
                         .position(|next| second_words.contains(&next.text.as_str()))
                         .is_some_and(|second_position| {
                             !(*task_object_may_intervene
-                                && follows_request_lead(tokens, after, token.start, "to")
+                                && request_attachment(tokens, after, token).is_some()
                                 && names_task_object(
-                                    &rest_of_clause[..second_position],
+                                    if second_position == 0 {
+                                        &rest_of_clause[1..]
+                                    } else {
+                                        &rest_of_clause[..second_position]
+                                    },
                                     &request_words,
                                 ))
                         })
@@ -1279,11 +1320,15 @@ fn retracted_after(tokens: &[IntentToken], after: usize) -> bool {
 
 /// Whether a negated "need" gives the reason for the request: "so" or "then" opens its clause
 /// ("so I don't need to worry", "then there is no need to worry") and an infinitive follows whose
-/// verb is neither one of the requested task's words nor a pronoun-like word. A retraction verb
-/// qualifies only with an object of its own ("so I don't need to cancel at the last minute");
-/// bare or with a withdrawn object ("so I don't need to cancel it") it withdraws. "I don't need to call the roofer", "I don't need to after all", "no need to do that", "I don't
-/// need to be told" and "no need to bother" still withdraw, as does a need that has ended ("so I
-/// don't need to worry anymore"). `before_negation` is what precedes the negation.
+/// verb is neither one of the requested task's words nor a pronoun-like word. Any object the
+/// infinitive has must name something other than the request ([`names_task_object`]): "so I
+/// don't need to check the quote twice" and "so I don't need to cancel at the last minute" give a
+/// reason, while "so I don't need to phone him", "so I don't need to contact the roofer after
+/// all" and "so I don't need to cancel it" withdraw. A retraction verb without an object ("so I
+/// don't need to cancel") withdraws too. "I don't need to call the roofer", "I don't need to
+/// after all", "no need to do that", "I don't need to be told" and "no need to bother" still
+/// withdraw, as does a need that has ended ("so I don't need to worry anymore").
+/// `before_negation` is what precedes the negation.
 fn need_gives_reason(
     word: &str,
     before_negation: &[&IntentToken],
@@ -1313,7 +1358,11 @@ fn need_gives_reason(
         && infinitive_marker.text == "to"
         && !verb.quoted
         && !desire_governs_reminder(after_need)
-        && (!RETRACTION_VERBS.contains(&verb_text) || names_task_object(&object, request_words))
+        && (if object.is_empty() {
+            !RETRACTION_VERBS.contains(&verb_text)
+        } else {
+            names_task_object(&object, request_words)
+        })
         && !RETRACTION_FILLERS.contains(&verb_text)
         && !REASON_EXCLUDED_VERBS.contains(&verb_text)
         && !request_words.contains(&verb_text)
@@ -1405,58 +1454,73 @@ fn follows_request_lead(
         && (lead.end == time_end || REQUEST_LEAD_WORDS.contains(&lead.text.as_str()))
 }
 
+/// The word that attaches `verb` to the reminder request, if any, skipping fillers in between:
+/// "and" when the verb is coordinated with the requested task inside one clause ("call the shop
+/// and take the ladder back", "call the roofer and then cancel the order"), or "to" or "about"
+/// when it directly continues the request ([`follows_request_lead`]: "remind me {time} to please
+/// take the ladder back", "remind me about cancelling the gym"). A coordination that opens after
+/// a clause break (", and forget the plan"), "or" ("or forget the idea") and a new clause of the
+/// speaker ("I take that back", "I want to take my word back") attach nothing.
+fn request_attachment<'tokens>(
+    tokens: &'tokens [IntentToken],
+    time_end: usize,
+    verb: &IntentToken,
+) -> Option<&'tokens str> {
+    let mut nearest_first = tokens
+        .iter()
+        .rev()
+        .filter(|token| token.start < verb.start)
+        .skip_while(|token| {
+            !token.quoted
+                && !token.clause_break
+                && RETRACTION_FILLERS.contains(&token.text.as_str())
+        });
+    let governing = nearest_first.next()?;
+    if governing.quoted || governing.clause_break {
+        return None;
+    }
+    let attached = match governing.text.as_str() {
+        "and" => nearest_first
+            .next()
+            .is_some_and(|previous| !previous.quoted && !previous.clause_break),
+        joiner @ ("to" | "about") => {
+            follows_request_lead(tokens, time_end, governing.start + 1, joiner)
+        }
+        _ => false,
+    };
+    attached.then_some(governing.text.as_str())
+}
+
 /// Whether a retraction verb belongs to the task the reminder is for rather than withdrawing the
-/// request: it is coordinated with that task inside one clause ("call the roofer and cancel the
-/// order") or is the gerund after the request's own "about" ("remind me about cancelling the
-/// gym"), and it has an object of its own ([`names_task_object`]). A coordination that opens
-/// after a clause break (", and forget the plan"), "and cancel it", "and cancel the reminder" and
-/// a bare "and cancel" still withdraw. `verb` is the retraction verb; the request is everything
-/// before it.
+/// request: it is the gerund after the request's own "about" ("remind me about cancelling the
+/// gym"), or a [`TASK_RETRACTION_VERBS`] entry coordinated with that task by "and" ("call the
+/// roofer and cancel the order"), and `object` (the rest of its clause) names something of its
+/// own ([`names_task_object`]). "and cancel it", "and cancel the reminder", "and forget I asked",
+/// "and drop the subject", "or forget the idea", ", and forget the plan" and a bare "and cancel"
+/// still withdraw.
 fn verb_is_part_of_requested_task(
     tokens: &[IntentToken],
     time_end: usize,
     verb: &IntentToken,
+    object: &[&IntentToken],
     request_words: &[&str],
 ) -> bool {
-    let preceding: Vec<&IntentToken> = tokens
-        .iter()
-        .filter(|token| token.start < verb.start)
-        .collect();
-    let mut nearest_first = preceding.iter().rev().skip_while(|token| {
-        !token.quoted && !token.clause_break && RETRACTION_FILLERS.contains(&token.text.as_str())
-    });
-    let Some(governing) = nearest_first.next() else {
-        return false;
-    };
-    if governing.quoted || governing.clause_break {
-        return false;
-    }
-    let coordinated = match governing.text.as_str() {
-        "and" | "or" => nearest_first
-            .next()
-            .is_some_and(|previous| !previous.quoted && !previous.clause_break),
-        "about" => follows_request_lead(tokens, time_end, governing.start + 1, "about"),
+    let attached = match request_attachment(tokens, time_end, verb) {
+        Some("about") => true,
+        Some("and") => TASK_RETRACTION_VERBS.contains(&verb.text.as_str()),
         _ => false,
     };
-    if !coordinated {
-        return false;
-    }
-    let object: Vec<&IntentToken> = tokens
-        .iter()
-        .filter(|token| token.start > verb.start)
-        .take_while(|token| !token.clause_break)
-        .filter(|token| !token.quoted)
-        .collect();
-    names_task_object(&object, request_words)
+    attached && names_task_object(object, request_words)
 }
 
 /// Whether `words` (unquoted, one clause) name a concrete task object: after any determiners,
 /// fillers and prepositions there is at least one content word, nothing in the span refers to the
 /// request itself, the reminder or "everything" ([`WITHDRAWN_REQUEST_WORDS`],
-/// [`REMINDER_OBJECT_WORDS`]), and no content word repeats a word already used by the request
+/// [`REMINDER_OBJECT_WORDS`]), no word is a subject pronoun opening a clause of the speaker
+/// ("forget I asked"), and no content word repeats a word already used by the request
 /// (`request_words`, the capture before the retraction verb). "the order", "the gym" and "the
-/// ladder" qualify; "it", "that", "the reminder", "the alarm", "my note", "the whole thing" and,
-/// after "call the roofer", "the call" and "the phone call" do not.
+/// ladder" qualify; "it", "him", "that", "the reminder", "the alarm", "my note", "the whole
+/// business", "I asked" and, after "call the roofer", "the call" and "the phone call" do not.
 fn names_task_object(words: &[&IntentToken], request_words: &[&str]) -> bool {
     let mut content_words = words
         .iter()
@@ -1470,8 +1534,12 @@ fn names_task_object(words: &[&IntentToken], request_words: &[&str]) -> bool {
     content_words.peek().is_some()
         && content_words.all(|word| !request_words.contains(&word))
         && !words.iter().any(|word| {
-            WITHDRAWN_REQUEST_WORDS.contains(&word.text.as_str())
-                || REMINDER_OBJECT_WORDS.contains(&word.text.as_str())
+            let text = word.text.as_str();
+            WITHDRAWN_REQUEST_WORDS.contains(&text)
+                || REMINDER_OBJECT_WORDS.contains(&text)
+                || SUBJECT_PRONOUNS.contains(&text)
+                || FIRST_PERSON_SUBJECTS.contains(&text)
+                || FIRST_PERSON_PROGRESSIVE.contains(&text)
         })
 }
 
