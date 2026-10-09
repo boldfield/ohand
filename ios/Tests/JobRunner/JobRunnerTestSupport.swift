@@ -18,6 +18,7 @@ enum JobStoreInspector {
         var database: OpaquePointer?
         guard sqlite3_open_v2(path, &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else { return nil }
         defer { sqlite3_close(database) }
+        sqlite3_busy_timeout(database, 2000)
         var statement: OpaquePointer?
         let sql = "SELECT status, attempt_count, failure_reason FROM jobs WHERE job_id = ?"
         guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else { return nil }
