@@ -10,10 +10,12 @@ enum PrivateReadDenied: Error, Equatable {
     case notAGatedRead
 }
 
-/// The core operations that return stored history. Saving a capture is deliberately absent: capture never needs, and
+/// The core operations that return stored history or state derived from it, including the store check, whose report
+/// carries the stored capture count. Saving a capture is deliberately absent: capture never needs, and
 /// never grants, read access. The core handle is adapted to this protocol where the app is assembled, so this module
 /// does not depend on the bridge's C module.
 protocol PrivateReadSource: AnyObject {
+    func startStoreCheck(operationID: UInt64) throws
     func startGetCapture(operationID: UInt64, captureID: String) throws
     func startItemStatus(operationID: UInt64, itemID: String) throws
 }
@@ -23,6 +25,9 @@ protocol PrivateReadSource: AnyObject {
 /// The core answers asynchronously, so checking the scope only at request time would let a read that began while
 /// authenticated deliver stored content after a relock. Callers therefore pass every event for a gated operation
 /// through `admit`, which approves delivery only while the authorization that issued the read is still current.
+///
+/// The gate is the only sanctioned path to the core's read verbs: `CoreHandle` itself stays ungated, so app assembly
+/// must route every history, status and store-check read through this gate and must not call those verbs directly.
 final class PrivateReadGate {
     private let session: ReadAuthenticationSession
     private let source: PrivateReadSource
@@ -32,6 +37,12 @@ final class PrivateReadGate {
     init(session: ReadAuthenticationSession, source: PrivateReadSource) {
         self.session = session
         self.source = source
+    }
+
+    func startStoreCheck(operationID: UInt64) throws {
+        try issue(operationID: operationID) {
+            try source.startStoreCheck(operationID: operationID)
+        }
     }
 
     func startGetCapture(operationID: UInt64, captureID: String) throws {

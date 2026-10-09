@@ -35,8 +35,10 @@ final class LocalAuthenticationBoundary: ReadAuthenticationBoundary {
             return
         }
         lock.lock()
+        let supersededContext = pendingContext
         pendingContext = context
         lock.unlock()
+        supersededContext?.invalidate()
         context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { [weak self] success, error in
             self?.clear(context)
             completion(Self.outcome(success: success, error: error))

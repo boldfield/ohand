@@ -8,6 +8,13 @@ private final class RecordingRedactionPresenter: RedactionPresenter {
     func hideRedaction() { calls.append("hide") }
 }
 
+private final class LoggingRedactionPresenter: RedactionPresenter {
+    private let log: (String) -> Void
+    init(log: @escaping (String) -> Void) { self.log = log }
+    func showRedaction() { log("show") }
+    func hideRedaction() { log("hide") }
+}
+
 final class SessionLifecycleCoordinatorTests: XCTestCase {
     private var center: NotificationCenter!
     private var boundary: FakeReadAuthenticationBoundary!
@@ -71,6 +78,42 @@ final class SessionLifecycleCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(presenter.calls.last, "hide")
         XCTAssertEqual(session.scope, .captureOnly)
+    }
+
+    func testRelockIsPublishedBeforeTheCoverComesOffOnReturnFromBackground() {
+        XCTAssertEqual(authenticateAndWait(session), .authenticated)
+        var log: [String] = []
+        session.observeScope { transition in
+            if case .relocked = transition.cause { log.append("relock-published") }
+        }
+        let loggingPresenter = LoggingRedactionPresenter(log: { log.append($0) })
+        let loggingCoordinator = SessionLifecycleCoordinator(
+            session: session, presenter: loggingPresenter, notificationCenter: center)
+        coordinator.stop()
+        loggingCoordinator.start()
+
+        center.post(name: UIApplication.willResignActiveNotification, object: nil)
+        center.post(name: UIApplication.didEnterBackgroundNotification, object: nil)
+        center.post(name: UIApplication.willEnterForegroundNotification, object: nil)
+        center.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+
+        guard let hideIndex = log.firstIndex(of: "hide"), let relockIndex = log.firstIndex(of: "relock-published") else {
+            return XCTFail("expected a published relock and a hide, got \(log)")
+        }
+        XCTAssertLessThan(relockIndex, hideIndex, "observers learn of the relock before the cover comes off: \(log)")
+        XCTAssertEqual(session.scope, .captureOnly)
+        loggingCoordinator.stop()
+    }
+
+    func testProtectedDataRelockWhileActiveIsPublishedToObservers() {
+        XCTAssertEqual(authenticateAndWait(session), .authenticated)
+        var transitions: [SessionScopeTransition] = []
+        session.observeScope { transitions.append($0) }
+
+        center.post(name: UIApplication.protectedDataWillBecomeUnavailableNotification, object: nil)
+
+        XCTAssertEqual(transitions, [SessionScopeTransition(scope: .captureOnly, cause: .relocked(.protectedDataUnavailable))])
+        XCTAssertEqual(presenter.calls, [], "no cover was needed, but displayed content can still be dropped")
     }
 
     func testStoppedCoordinatorIgnoresLifecycleNotifications() {

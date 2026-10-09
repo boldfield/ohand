@@ -118,6 +118,94 @@ final class ReadAuthenticationSessionTests: XCTestCase {
         XCTAssertEqual(session.scope, .authenticated)
     }
 
+    func testObserverIsToldOfSuccessRelockAndFailedOrCancelledReauthentication() {
+        var transitions: [SessionScopeTransition] = []
+        session.observeScope { transitions.append($0) }
+
+        XCTAssertEqual(authenticateAndWait(session), .authenticated)
+        session.relock(.enteredBackground)
+        XCTAssertEqual(authenticateAndWait(session), .authenticated)
+        boundary.nextOutcome = .cancelled
+        XCTAssertEqual(authenticateAndWait(session), .notAuthenticated(.cancelled))
+        boundary.nextOutcome = .denied
+        XCTAssertEqual(authenticateAndWait(session), .notAuthenticated(.denied))
+        boundary.nextOutcome = .unavailable
+        XCTAssertEqual(authenticateAndWait(session), .notAuthenticated(.unavailable))
+
+        XCTAssertEqual(transitions, [
+            SessionScopeTransition(scope: .authenticated, cause: .authenticated),
+            SessionScopeTransition(scope: .captureOnly, cause: .relocked(.enteredBackground)),
+            SessionScopeTransition(scope: .authenticated, cause: .authenticated),
+            SessionScopeTransition(scope: .captureOnly, cause: .authenticationFailed(.cancelled)),
+            SessionScopeTransition(scope: .captureOnly, cause: .authenticationFailed(.denied)),
+            SessionScopeTransition(scope: .captureOnly, cause: .authenticationFailed(.unavailable)),
+        ])
+    }
+
+    func testObserverRunsAfterTheScopeChangedAndBeforeRelockReturns() {
+        var scopeSeenByObserver: SessionReadScope?
+        var observerHasRun = false
+        session.observeScope { _ in
+            scopeSeenByObserver = self.session.scope
+            observerHasRun = true
+        }
+        XCTAssertEqual(authenticateAndWait(session), .authenticated)
+        observerHasRun = false
+
+        session.relock(.protectedDataUnavailable)
+
+        XCTAssertTrue(observerHasRun, "the relock was published before relock returned")
+        XCTAssertEqual(scopeSeenByObserver, .captureOnly)
+    }
+
+    func testRelockWhileAlreadyCaptureOnlyIsStillPublished() {
+        var transitions: [SessionScopeTransition] = []
+        session.observeScope { transitions.append($0) }
+
+        session.relock(.willEnterForeground)
+
+        XCTAssertEqual(transitions, [SessionScopeTransition(scope: .captureOnly, cause: .relocked(.willEnterForeground))])
+    }
+
+    func testSupersededAttemptIsNotPublishedAsAScopeChange() {
+        boundary.defersCompletion = true
+        var transitions: [SessionScopeTransition] = []
+        session.observeScope { transitions.append($0) }
+        let secondCompleted = expectation(description: "second completes")
+        session.authenticate(reason: "first") { _ in }
+        session.authenticate(reason: "second") { _ in secondCompleted.fulfill() }
+
+        boundary.completeDeferredAttempt(at: 0, with: .succeeded)
+        XCTAssertEqual(transitions, [])
+        boundary.completeDeferredAttempt(at: 1, with: .succeeded)
+        wait(for: [secondCompleted], timeout: 5)
+
+        XCTAssertEqual(transitions, [SessionScopeTransition(scope: .authenticated, cause: .authenticated)])
+    }
+
+    func testRemovedObserverIsNotToldAndOthersStillAre() {
+        var removedCalls = 0
+        var keptCalls = 0
+        let removed = session.observeScope { _ in removedCalls += 1 }
+        session.observeScope { _ in keptCalls += 1 }
+        session.removeScopeObserver(removed)
+
+        session.relock(.explicit)
+
+        XCTAssertEqual(removedCalls, 0)
+        XCTAssertEqual(keptCalls, 1)
+    }
+
+    func testObserversAreToldInRegistrationOrder() {
+        var order: [Int] = []
+        session.observeScope { _ in order.append(1) }
+        session.observeScope { _ in order.append(2) }
+
+        session.relock(.explicit)
+
+        XCTAssertEqual(order, [1, 2])
+    }
+
     func testPlatformErrorsMapToNonSuccessOutcomesAndNeverToSuccess() {
         XCTAssertEqual(LocalAuthenticationBoundary.outcome(success: true, error: nil), .succeeded)
         XCTAssertEqual(LocalAuthenticationBoundary.outcome(success: false, error: LAError(.userCancel)), .cancelled)

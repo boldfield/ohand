@@ -52,6 +52,10 @@ final class PrivateReadCoreIntegrationTests: XCTestCase {
         private let core: CoreHandle
         init(core: CoreHandle) { self.core = core }
 
+        func startStoreCheck(operationID: UInt64) throws {
+            try core.startStoreCheck(operationID: operationID)
+        }
+
         func startGetCapture(operationID: UInt64, captureID: String) throws {
             try core.startGetCapture(operationID: operationID, captureID: captureID)
         }
@@ -111,6 +115,14 @@ final class PrivateReadCoreIntegrationTests: XCTestCase {
             return try waitForEvent(operationID)
         }
 
+        func readStoreCheck() throws -> StoreCheckReport {
+            let operationID = allocateOperationID()
+            try gate.startStoreCheck(operationID: operationID)
+            let event = try waitForEvent(operationID)
+            try gate.admit(operationID: operationID)
+            return try event.decode(StoreCheckReport.self)
+        }
+
         func readCapture(_ captureID: String) throws -> CaptureRecord {
             let event = try startGatedCaptureRead(captureID)
             try gate.admit(operationID: event.operationID)
@@ -135,6 +147,11 @@ final class PrivateReadCoreIntegrationTests: XCTestCase {
         ) { error in
             XCTAssertEqual(error as? PrivateReadDenied, expected, file: file, line: line)
         }
+        XCTAssertThrowsError(
+            try launch.gate.startStoreCheck(operationID: launch.allocateOperationID()), file: file, line: line
+        ) { error in
+            XCTAssertEqual(error as? PrivateReadDenied, expected, file: file, line: line)
+        }
         RunLoop.current.run(until: Date().addingTimeInterval(0.2))
         XCTAssertEqual(launch.events.count, eventsBefore, "the core was never asked, so it never answered", file: file, line: line)
     }
@@ -152,6 +169,35 @@ final class PrivateReadCoreIntegrationTests: XCTestCase {
 
         XCTAssertEqual(authenticateAndWait(launch.session), .authenticated)
         XCTAssertEqual(try launch.readCapture(capture.captureID), capture, "the capture saved before authentication is intact")
+    }
+
+    func testStoreCheckIsDeniedBeforeAuthenticationAndAfterRelockButCapturesAreCounted() throws {
+        let launch = try Launch(path: layout.databaseURL.path)
+        defer { launch.close() }
+        _ = try launch.save(makeCapture(id: "capture-counted", text: "synthetic note behind the store check"))
+
+        let eventsBefore = launch.events.count
+        XCTAssertThrowsError(try launch.readStoreCheck()) { error in
+            XCTAssertEqual(error as? PrivateReadDenied, .sessionNotAuthenticated)
+        }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        XCTAssertEqual(launch.events.count, eventsBefore, "the denied store check never reached the core")
+        XCTAssertEqual(authenticateAndWait(launch.session), .authenticated)
+        XCTAssertEqual(try launch.readStoreCheck().captureCount, 1)
+
+        launch.session.relock(.enteredBackground)
+        XCTAssertThrowsError(try launch.readStoreCheck()) { error in
+            XCTAssertEqual(error as? PrivateReadDenied, .sessionNotAuthenticated)
+        }
+
+        XCTAssertEqual(authenticateAndWait(launch.session), .authenticated)
+        let operationID = launch.allocateOperationID()
+        try launch.gate.startStoreCheck(operationID: operationID)
+        launch.session.relock(.willEnterForeground)
+        let lateEvent = try launch.waitForEvent(operationID)
+        XCTAssertThrowsError(try launch.gate.admit(operationID: lateEvent.operationID)) { error in
+            XCTAssertEqual(error as? PrivateReadDenied, .relockedBeforeDelivery)
+        }
     }
 
     func testRelockDeniesNewReadsAndAuthenticatingAgainRestoresThemWithSourceIntact() throws {
