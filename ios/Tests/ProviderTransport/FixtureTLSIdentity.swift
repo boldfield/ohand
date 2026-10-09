@@ -23,9 +23,11 @@ final class FixtureTLSIdentity {
         let keyAttributes: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
             kSecAttrKeySizeInBits as String: 256,
-            kSecAttrIsPermanent as String: true,
-            kSecAttrLabel as String: label,
-            kSecAttrApplicationTag as String: Data(label.utf8),
+            kSecPrivateKeyAttrs as String: [
+                kSecAttrIsPermanent as String: true,
+                kSecAttrLabel as String: label,
+                kSecAttrApplicationTag as String: Data(label.utf8),
+            ] as [String: Any],
         ]
         guard let privateKey = SecKeyCreateRandomKey(keyAttributes as CFDictionary, &keyError),
             let publicKey = SecKeyCopyPublicKey(privateKey),
