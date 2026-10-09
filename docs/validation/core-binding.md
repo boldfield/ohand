@@ -72,6 +72,12 @@ The run for the exact submitted commit, found with `gh run list --workflow ios.y
 - The Rust toolchain is pinned by `rust-toolchain.toml`; the iOS targets are installed by the run-script phase with `rustup target add`, and the Cargo build runs under `env -i` so Xcode's compiler variables do not leak into the bundled SQLite C build.
 - The simulator slice needs `aarch64-apple-ios-sim` (and `x86_64-apple-ios` when Xcode builds an Intel simulator slice); there is no `x86_64-apple-ios-sim` Rust target.
 
+## Foreground ingress import (C02b)
+
+`ohand_core_start_import_foreground_ingress` (`core/src/ffi/ingress_import.rs`, bridged by `CoreHandle+IngressImport.swift`) queues the C02a transactional import. The failure code carries the commit status: `ingress_not_committed` and the validation codes wrote nothing, `ingress_commit_unknown` may have committed, `ingress_conflicting_reuse` left the stored capture untouched, and `ingress_item_deleted` is terminal. Only a success event is a "saved" acknowledgment.
+
+`ForegroundIngressService` (`ios/Services/Ingress`) stages an `IngressRecord` durably, moves recorded audio from the in-progress to the finalized store, imports, and removes the record only after confirmation. It holds the single foreground writer lock; recovery re-imports leftover records, which converge by capture ID. `CoreIngressImporter` (the bridge adapter to the core import) lives in `ios/Services/Ingress`. When a staging record is unreadable the claimed audio names are unknown, so recovery sets `unclaimedAudioNotEvaluated` rather than reporting an empty orphan list. Lock-state behavior and a real kill are device evidence, not covered by the simulator tests, which simulate interruption by reopening the service and core from disk.
+
 ## Not covered
 
 - Physical device builds (`aarch64-apple-ios`) are scripted but not exercised here.

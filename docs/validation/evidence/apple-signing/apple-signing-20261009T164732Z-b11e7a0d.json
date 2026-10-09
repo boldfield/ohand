@@ -1,0 +1,32 @@
+{
+  "build_identifier": "257343f3-b11e7a0d",
+  "build_revision": "257343f3ff0f4ac310307630c948708ab31e7444",
+  "bundle_identifier": "com.boldfield.ohand.probes.notification",
+  "collected_at": "2026-10-09T16:47:45Z",
+  "device": {
+    "label": "trial-phone"
+  },
+  "export_method": "debugging",
+  "failed_stage": null,
+  "identity_class": "Apple Development",
+  "install": {
+    "performed": true,
+    "requested": true,
+    "succeeded": true
+  },
+  "private_evidence_reference": "b11e7a0d",
+  "profile": {
+    "device_scoped": true,
+    "expires_at": "2027-10-09T00:08:01Z"
+  },
+  "route": "development",
+  "schema": "ohand.apple-signing-evidence.v1",
+  "scheme": "NotificationProbe",
+  "signing_style": "manual",
+  "status": "succeeded",
+  "toolchain": {
+    "xcode_build": "17F113",
+    "xcode_version": "Xcode 26.6"
+  },
+  "working_tree_clean": false
+}
