@@ -1008,7 +1008,9 @@ const RETRACTION_VERBS: &[&str] = &[
 /// and the first part continues the request ([`request_attachment`]), an object that names
 /// something other than the request, between the parts ("take the ladder back") or directly after
 /// them ("take back the ladder"), makes it the requested task, not a withdrawal
-/// ([`names_task_object`]).
+/// ([`names_task_object`]). The rest of the clause belongs to that object ("take the ladder back
+/// to the shop"), so a phrase after the second part must name a known thing or time as well:
+/// "take the ladder back to the prompt" withdraws.
 const RETRACTION_PAIRS: &[(&[&str], &[&str], bool)] = &[
     (&["take", "took", "taking"], &["back"], true),
     (&["change", "changed", "changing"], &["mind"], false),
@@ -1299,6 +1301,35 @@ const OBJECT_PREPOSITIONS: &[&str] = &[
 /// Prepositions that open a phrase saying when ("cancel at the last minute", "pay by the
 /// weekend").
 const TIME_PREPOSITIONS: &[&str] = &["at", "on", "by", "before", "until", "in"];
+/// Times a prepositional phrase may name ("at the last minute", "by the weekend", "by the end of
+/// the week", "by the deadline"). Like [`THING_OBJECT_WORDS`] this is an allow-list: a word that
+/// could stand for the reminder's own slot ("the nine", "the time", "the slot", and the parts of
+/// the day and hours of [`WITHDRAWN_REQUEST_WORDS`], "the morning") is left out, so "cancel at
+/// the nine", "cancel by the slot" and "cancel in the morning" withdraw.
+const TIME_OBJECT_WORDS: &[&str] = &[
+    "minute",
+    "minutes",
+    "moment",
+    "week",
+    "weeks",
+    "weekend",
+    "weekends",
+    "fortnight",
+    "month",
+    "months",
+    "year",
+    "years",
+    "deadline",
+    "end",
+    "start",
+    "beginning",
+    "meantime",
+    "holidays",
+    "spring",
+    "summer",
+    "autumn",
+    "winter",
+];
 /// Adverbs of repetition that may close a task object ("check the quote twice").
 const REPEAT_ADVERBS: &[&str] = &["twice", "again"];
 /// Modifiers that cannot end a noun phrase: "cancel the last" and "cancel the first" point back at
@@ -1550,16 +1581,15 @@ fn retracted_after(tokens: &[IntentToken], after: usize) -> bool {
                         .iter()
                         .position(|next| second_words.contains(&next.text.as_str()))
                         .is_some_and(|second_position| {
+                            let object: Vec<&IntentToken> = rest_of_clause
+                                .iter()
+                                .enumerate()
+                                .filter(|(position, _)| *position != second_position)
+                                .map(|(_, next)| *next)
+                                .collect();
                             !(*task_object_may_intervene
                                 && request_attachment(tokens, after, token).is_some()
-                                && names_task_object(
-                                    if second_position == 0 {
-                                        &rest_of_clause[1..]
-                                    } else {
-                                        &rest_of_clause[..second_position]
-                                    },
-                                    &request_words,
-                                ))
+                                && names_task_object(&object, &request_words))
                         })
             })
         {
@@ -2071,34 +2101,38 @@ fn verb_is_part_of_requested_task(
 
 /// Whether `words` (unquoted, one clause) are a concrete task object, accepted only in a positive
 /// shape: a noun phrase (a [`NOUN_PHRASE_DETERMINERS`] entry followed by noun candidates) whose
-/// head noun is a [`THING_OBJECT_WORDS`] entry, then any prepositional phrases each made of an
-/// [`OBJECT_PREPOSITIONS`] entry and a noun phrase, then at most [`REPEAT_ADVERBS`]; politeness
-/// fillers ("please") are skipped. Anything else, including a bare pronoun or demonstrative
-/// ("it", "him", "that", "anyone", "I asked"), a trailing adverb ("the order too") or a head noun
-/// the grammar does not know to be a thing, is not a task object: the list is an allow-list, so
-/// a noun that names the reminder, its time, the capture or the request in words the grammar
-/// has not met ("the nudges", "the prompt", "the nine o'clock", "the audio", "the ask") never
-/// reopens a withdrawal. "the order", "the gym", "the gas bill" and "my library books" qualify;
-/// "that too", "this nonsense", "the above", "the reminder", "the whole business", "the query",
-/// "the beeping" and, after "call the roofer", "the phone call", "the callout" and "the roofing
-/// job" do not ([`is_noun_candidate`]).
+/// head noun is a [`THING_OBJECT_WORDS`] entry, then any prepositional phrases
+/// ([`prepositional_phrases_end`]: each an [`OBJECT_PREPOSITIONS`] or [`TIME_PREPOSITIONS`] entry
+/// and a noun phrase headed by a known thing or time), then at most [`REPEAT_ADVERBS`];
+/// politeness fillers ("please") are skipped. Anything else, including a bare pronoun or
+/// demonstrative ("it", "him", "that", "anyone", "I asked"), a trailing adverb ("the order too")
+/// or a head noun the grammar does not know to be a thing, is not a task object: the list is an
+/// allow-list, so a noun that names the reminder, its time, the capture or the request in words
+/// the grammar has not met ("the nudges", "the prompt", "the nine o'clock", "the audio", "the
+/// ask") never reopens a withdrawal, wherever in the object it sits ("the delivery of the
+/// prompt", "the order for the nudges"). "the order", "the gym", "the gas bill", "my library
+/// books", "the delivery of the parcel" and "the order at the shop" qualify; "that too", "this
+/// nonsense", "the above", "the reminder", "the whole business", "the query", "the beeping" and,
+/// after "call the roofer", "the phone call", "the callout" and "the roofing job" do not
+/// ([`is_noun_candidate`]).
 fn names_task_object(words: &[&IntentToken], request_words: &[&str]) -> bool {
     let texts = object_texts(words);
-    noun_phrase_end(&texts, 0, request_words).is_some_and(|end| {
-        THING_OBJECT_WORDS.contains(&texts[end - 1])
-            && prepositional_phrases_end(&texts, end, OBJECT_PREPOSITIONS, request_words)
-                == Some(texts.len())
+    noun_phrase_end(&texts, 0, request_words, &[THING_OBJECT_WORDS]).is_some_and(|end| {
+        prepositional_phrases_end(&texts, end, request_words) == Some(texts.len())
     })
 }
 
-/// Whether `words` (unquoted, one clause) only say when: one or more prepositional phrases, each
-/// a [`TIME_PREPOSITIONS`] entry and a noun phrase ("at the last minute", "by the weekend"), then
-/// at most [`REPEAT_ADVERBS`]. A complement object ("the booking", "the contractor", "him") or a
-/// phrase about a person or thing ("to the guy", "about it") is not one.
+/// Whether `words` (unquoted, one clause) only say when: one or more prepositional phrases, the
+/// first opened by a [`TIME_PREPOSITIONS`] entry ("at the last minute", "by the weekend", "by the
+/// end of the week"), then at most [`REPEAT_ADVERBS`]. A complement object ("the booking", "the
+/// contractor", "him") or a phrase about a person or an unknown thing ("to the guy", "about it",
+/// "at the prompt") is not one ([`prepositional_phrases_end`]).
 fn names_time_phrase(words: &[&IntentToken], request_words: &[&str]) -> bool {
     let texts = object_texts(words);
-    prepositional_phrases_end(&texts, 0, TIME_PREPOSITIONS, request_words)
-        .is_some_and(|end| end > 0 && end == texts.len())
+    texts
+        .first()
+        .is_some_and(|first| TIME_PREPOSITIONS.contains(first))
+        && prepositional_phrases_end(&texts, 0, request_words) == Some(texts.len())
 }
 
 /// The words of an object span without politeness fillers ("please").
@@ -2110,18 +2144,30 @@ fn object_texts<'words>(words: &[&'words IntentToken]) -> Vec<&'words str> {
         .collect()
 }
 
-/// Where the run of prepositional phrases starting at `start` ends, each phrase a `prepositions`
-/// entry followed by a noun phrase ([`noun_phrase_end`]), including any [`REPEAT_ADVERBS`] after
-/// them. `None` when a preposition is not followed by a noun phrase.
+/// Where the run of prepositional phrases starting at `start` ends, each phrase an
+/// [`OBJECT_PREPOSITIONS`] or [`TIME_PREPOSITIONS`] entry followed by a noun phrase
+/// ([`noun_phrase_end`]) headed by a [`THING_OBJECT_WORDS`] or [`TIME_OBJECT_WORDS`] entry ("of
+/// the parcel", "at the shop", "at the last minute", "by the end of the week"), including any
+/// [`REPEAT_ADVERBS`] after them. The same positive boundary applies to every attached phrase as
+/// to the object's own head, so a reminder, time, capture or request word reached through a
+/// preposition ("of the prompt", "of the nudges", "at the nine", "for the audio") still withdraws.
+/// `None` when a preposition is not followed by such a noun phrase.
 fn prepositional_phrases_end(
     texts: &[&str],
     start: usize,
-    prepositions: &[&str],
     request_words: &[&str],
 ) -> Option<usize> {
     let mut position = start;
-    while position < texts.len() && prepositions.contains(&texts[position]) {
-        position = noun_phrase_end(texts, position + 1, request_words)?;
+    while texts
+        .get(position)
+        .is_some_and(|word| OBJECT_PREPOSITIONS.contains(word) || TIME_PREPOSITIONS.contains(word))
+    {
+        position = noun_phrase_end(
+            texts,
+            position + 1,
+            request_words,
+            &[THING_OBJECT_WORDS, TIME_OBJECT_WORDS],
+        )?;
     }
     while position < texts.len() && REPEAT_ADVERBS.contains(&texts[position]) {
         position += 1;
@@ -2131,9 +2177,15 @@ fn prepositional_phrases_end(
 
 /// Where the noun phrase starting at `start` ends: a [`NOUN_PHRASE_DETERMINERS`] entry and then
 /// one or more words up to the next preposition, repeat adverb or end, every one of them a noun
-/// candidate ([`is_noun_candidate`]) and the last not a [`NON_HEAD_WORDS`] entry ("the last").
-/// `None` when there is no such phrase or any of its words disqualifies it.
-fn noun_phrase_end(texts: &[&str], start: usize, request_words: &[&str]) -> Option<usize> {
+/// candidate ([`is_noun_candidate`]) and the last an entry of one of the `head_words` allow-lists
+/// (so neither a [`NON_HEAD_WORDS`] modifier, "the last", nor a word the grammar does not know,
+/// "the prompt"). `None` when there is no such phrase or any of its words disqualifies it.
+fn noun_phrase_end(
+    texts: &[&str],
+    start: usize,
+    request_words: &[&str],
+    head_words: &[&[&str]],
+) -> Option<usize> {
     if !NOUN_PHRASE_DETERMINERS.contains(texts.get(start)?) {
         return None;
     }
@@ -2146,12 +2198,11 @@ fn noun_phrase_end(texts: &[&str], start: usize, request_words: &[&str]) -> Opti
         })
         .map_or(texts.len(), |offset| start + 1 + offset);
     let phrase = &texts[start + 1..end];
-    (phrase
-        .last()
-        .is_some_and(|head| !NON_HEAD_WORDS.contains(head))
-        && phrase
-            .iter()
-            .all(|word| is_noun_candidate(word, request_words)))
+    (phrase.last().is_some_and(|head| {
+        !NON_HEAD_WORDS.contains(head) && head_words.iter().any(|known| known.contains(head))
+    }) && phrase
+        .iter()
+        .all(|word| is_noun_candidate(word, request_words)))
     .then_some(end)
 }
 

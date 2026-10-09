@@ -470,3 +470,53 @@ scheduled | remind me {time} to call the roofer and cancel the gas bill
 scheduled | remind me {time} to call the roofer and cancel the delivery
 scheduled | remind me {time} to call the library and take the books back
 scheduled | remind me {time} about returning the books
+
+# --- I05b round 4: the known-thing boundary applies to every attached noun phrase ---
+# a reminder, time, capture or request word reached through a preposition still withdraws
+unscheduled | remind me {time} to call the roofer and cancel the delivery of the prompt
+unscheduled | remind me {time} to call the roofer and cancel the delivery of the nudges
+unscheduled | remind me {time} to call the roofer and cancel the delivery of the nudge
+unscheduled | remind me {time} to call the roofer and cancel the delivery of the reminder
+unscheduled | remind me {time} to call the roofer and cancel the order for the nudges
+unscheduled | remind me {time} to call the roofer and cancel the order from the prompt
+unscheduled | remind me {time} to call the roofer and cancel the order with the alerts
+unscheduled | remind me {time} to call the roofer and cancel the delivery of the nine o'clock
+unscheduled | remind me {time} to call the roofer and cancel the order at the nine
+unscheduled | remind me {time} to call the roofer and cancel the order by the slot
+unscheduled | remind me {time} to call the roofer and cancel the order at the time
+unscheduled | remind me {time} to call the roofer and cancel the delivery of the morning
+unscheduled | remind me to call the roofer {time}, so I don't need to cancel in the morning
+unscheduled | remind me {time} to call the roofer and delete the photos of the audio
+unscheduled | remind me {time} to call the roofer and delete the photos from the voice clip
+unscheduled | remind me {time} to call the roofer and cancel the delivery of the ask
+unscheduled | remind me {time} to call the roofer and cancel the delivery of the query
+unscheduled | remind me {time} to call the roofer and cancel the delivery of the whole thing
+unscheduled | remind me {time} to call the roofer and cancel the delivery of the roofing
+unscheduled | remind me {time} about cancelling the delivery of the prompt
+unscheduled | remind me {time} about cancelling the order for the nudges
+unscheduled | remind me {time} to take the ladder back to the prompt
+unscheduled | remind me {time} to take the ladder back to the nudges
+unscheduled | remind me to call the roofer {time}, so I don't need to cancel at the prompt
+unscheduled | remind me to call the roofer {time}, so I don't need to cancel by the nudges
+unscheduled | remind me to call the roofer {time}, so I don't need to cancel at the nine
+unscheduled | remind me to call the roofer {time}, so I don't need to cancel by the slot
+unscheduled | remind me to call the roofer {time}, so I don't need to cancel the booking at the prompt
+unscheduled | remind me to call the roofer {time}, so I don't need to check the quote of the nudges
+unscheduled | remind me to call the roofer {time}, so I don't need to cancel the delivery of the audio
+unscheduled | remind me to call the roofer {time}, so I don't need to cancel the delivery of the ask
+unscheduled | remind me to call the roofer {time}, so I don't need to chase the quote from the medic
+unscheduled | remind me to call the roofer {time}, so I don't need to chase the quote from the roofer
+# a nested phrase that names a known thing or time still schedules
+scheduled | remind me {time} to call the roofer and cancel the delivery of the order
+scheduled | remind me {time} to call the roofer and cancel the delivery of the parcel
+scheduled | remind me {time} to call the roofer and cancel the order for the gift
+scheduled | remind me {time} to call the roofer and cancel the order from the shop
+scheduled | remind me {time} to call the roofer and cancel the order by the weekend
+scheduled | remind me {time} to call the roofer and cancel the order at the end of the week
+scheduled | remind me {time} about cancelling the delivery of the parcel
+scheduled | remind me {time} to take the ladder back to the garage
+scheduled | remind me to call the roofer {time}, so I don't need to cancel by the deadline
+scheduled | remind me to call the roofer {time}, so I don't need to cancel by the end of the week
+scheduled | remind me to call the hotel {time}, so I don't need to cancel the booking by the weekend
+scheduled | remind me to call the roofer {time}, so I don't need to check the quote by the deadline
+scheduled | remind me to call the roofer {time}, so I don't need to chase the quote from the shop
