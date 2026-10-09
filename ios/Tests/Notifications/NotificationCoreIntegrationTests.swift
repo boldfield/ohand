@@ -213,7 +213,7 @@ final class NotificationCoreIntegrationTests: XCTestCase {
 
         center.delivered = [NotificationCenterDeliveredNotification(
             identifier: sent.identifier, deliveredAt: due, userInfo: sent.content.userInfo)]
-        let forwarded = try runAsync { await bridge.ingestDeliveredNotifications() }
+        let forwarded = try runAsync { try await bridge.ingestDeliveredNotifications() }
         XCTAssertEqual(forwarded, 1)
         XCTAssertEqual(recorder.events.first?.identifier, notificationID)
         XCTAssertEqual(recorder.events.first?.kind, .delivered)
@@ -275,5 +275,32 @@ final class NotificationCoreIntegrationTests: XCTestCase {
         }
         let pending = try await bridge.pendingNotifications()
         XCTAssertFalse(pending.contains { $0.identifier == identifier })
+    }
+
+    func testRealCenterSchedulesListsAndCancelsWhenPermissionIsGranted() async throws {
+        let center = SystemNotificationCenter()
+        let status = await center.authorization()
+        try XCTSkipUnless(
+            [.authorized, .provisional, .ephemeral].contains(status),
+            "notification permission is not granted on this simulator; only the denied path can be observed"
+        )
+
+        let bridge = NotificationBridge(center: center, ingestor: NotificationEventIngestor(handler: { _ in }))
+        let identifier = try XCTUnwrap(
+            NotificationIdentifier(reminderID: UUID().uuidString.lowercased(), scheduleGeneration: 1))
+        let request = NotificationScheduleRequest.generic(
+            identifier: identifier,
+            dueInstant: Date().addingTimeInterval(3600),
+            opaqueTargetID: try XCTUnwrap(OpaqueIdentifier("item-1"))
+        )
+
+        let installed = try await bridge.schedule(request)
+        XCTAssertEqual(installed.identifier, identifier)
+        let pending = try await bridge.pendingNotifications()
+        XCTAssertTrue(pending.contains { $0.identifier == identifier && $0.opaqueTargetID?.rawValue == "item-1" })
+
+        try await bridge.cancel(identifier)
+        let afterCancel = try await bridge.pendingNotifications()
+        XCTAssertFalse(afterCancel.contains { $0.identifier == identifier })
     }
 }

@@ -40,6 +40,8 @@ public struct NotificationBridgeError: Error, Equatable, CustomStringConvertible
         .transient, "cancel_not_confirmed", "the system still holds the cancelled request")
     public static let centerFailed = NotificationBridgeError(
         .transient, "notification_center_failed", "the system notification center reported a failure")
+    public static let timedOut = NotificationBridgeError(
+        .transient, "timed_out", "the system notification center did not answer in time")
     public static let cancelled = NotificationBridgeError(
         .cancelled, "cancelled", "the notification operation was cancelled")
 

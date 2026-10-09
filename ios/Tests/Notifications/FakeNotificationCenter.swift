@@ -111,3 +111,81 @@ final class EventRecorder: @unchecked Sendable {
         recorded.append(event)
     }
 }
+
+/// A latch that suspends callers without honoring task cancellation, like a provider that ignores
+/// it. Releasing lets every suspended caller continue.
+final class SuspensionGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var arrivalCount = 0
+
+    var arrivals: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return arrivalCount
+    }
+
+    func wait() async {
+        await withCheckedContinuation { (waiter: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            arrivalCount += 1
+            if isOpen {
+                lock.unlock()
+                waiter.resume()
+            } else {
+                waiters.append(waiter)
+                lock.unlock()
+            }
+        }
+    }
+
+    func release() {
+        lock.lock()
+        isOpen = true
+        let suspended = waiters
+        waiters = []
+        lock.unlock()
+        suspended.forEach { $0.resume() }
+    }
+}
+
+/// Wraps a center so chosen calls suspend on a gate before reaching it. The wrapped call still
+/// runs after release, which is how a late OS completion is reproduced.
+final class SuspendingNotificationCenter: NotificationCenterProviding, @unchecked Sendable {
+    let inner: FakeNotificationCenter
+    var authorizationGate: SuspensionGate?
+    var addGate: SuspensionGate?
+    var pendingGate: SuspensionGate?
+    var removeGate: SuspensionGate?
+    var deliveredGate: SuspensionGate?
+
+    init(inner: FakeNotificationCenter) {
+        self.inner = inner
+    }
+
+    func authorization() async -> NotificationAuthorization {
+        await authorizationGate?.wait()
+        return await inner.authorization()
+    }
+
+    func add(_ request: NotificationCenterRequest) async throws {
+        await addGate?.wait()
+        try await inner.add(request)
+    }
+
+    func pendingRequests() async throws -> [NotificationCenterPendingRequest] {
+        await pendingGate?.wait()
+        return try await inner.pendingRequests()
+    }
+
+    func removePending(identifiers: [String]) async {
+        await removeGate?.wait()
+        await inner.removePending(identifiers: identifiers)
+    }
+
+    func deliveredNotifications() async -> [NotificationCenterDeliveredNotification] {
+        await deliveredGate?.wait()
+        return await inner.deliveredNotifications()
+    }
+}

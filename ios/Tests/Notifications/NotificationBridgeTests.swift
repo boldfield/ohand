@@ -279,7 +279,7 @@ final class NotificationBridgeTests: XCTestCase {
                 identifier: "someone-elses-notification", deliveredAt: currentTime, userInfo: [:]),
         ]
 
-        let forwarded = await bridge.ingestDeliveredNotifications()
+        let forwarded = try await bridge.ingestDeliveredNotifications()
 
         XCTAssertEqual(forwarded, 1)
         let event = try XCTUnwrap(recorder.events.first)
