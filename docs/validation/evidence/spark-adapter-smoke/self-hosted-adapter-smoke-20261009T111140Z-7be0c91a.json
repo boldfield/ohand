@@ -1,0 +1,79 @@
+{
+  "adapter_revision": {
+    "commit": "7be0c91a34616ac1b4caa434d2ba4fe0aa77f057",
+    "dirty": false
+  },
+  "collected_at": "2026-10-09T11:11:40Z",
+  "collection_context": "odonian-worker",
+  "configured_scheme": "https",
+  "evidence_id": "self-hosted-adapter-smoke-20261009T111140Z-7be0c91a",
+  "failures": [],
+  "max_tokens": 1024,
+  "model": "deepseek-flash-iq3:latest",
+  "request_shape": "adapter-built: interpretation prompt, strict json_schema response_format carrying output_schema()",
+  "requests": [
+    {
+      "conforms_to_output_schema_top_level": true,
+      "content_bytes": 110,
+      "curl_failure": null,
+      "dispatch_result": "ok",
+      "elapsed_ms": 68808,
+      "finish_reason": "stop",
+      "http_status": 200,
+      "mapped_to_validated_proposal": true,
+      "message_role": "assistant",
+      "name": "reminder-capture",
+      "proposal_keys": [
+        "item_type",
+        "operation",
+        "source_spans"
+      ],
+      "response_bytes": 3364
+    },
+    {
+      "conforms_to_output_schema_top_level": true,
+      "content_bytes": 99,
+      "curl_failure": null,
+      "dispatch_result": "ok",
+      "elapsed_ms": 18753,
+      "finish_reason": "stop",
+      "http_status": 200,
+      "mapped_to_validated_proposal": true,
+      "message_role": "assistant",
+      "name": "idea-capture",
+      "proposal_keys": [
+        "item_type",
+        "operation",
+        "source_spans"
+      ],
+      "response_bytes": 1432
+    },
+    {
+      "conforms_to_output_schema_top_level": true,
+      "content_bytes": 90,
+      "curl_failure": null,
+      "dispatch_result": "ok",
+      "elapsed_ms": 8754,
+      "finish_reason": "stop",
+      "http_status": 200,
+      "mapped_to_validated_proposal": true,
+      "message_role": "assistant",
+      "name": "plain-note-capture",
+      "proposal_keys": [
+        "item_type",
+        "operation",
+        "source_spans"
+      ],
+      "response_bytes": 915
+    }
+  ],
+  "result": "pass",
+  "schema_version": 1,
+  "synthetic_context_time": "2026-01-05T09:00:00+00:00",
+  "transport": "curl subprocess standing in for the native https transport; certificate validation on, redirects not followed",
+  "unverified": [
+    "phone-context reachability of chat requests (owned by V08b)",
+    "models other than the one named above",
+    "endpoint credential validation (V08a: not enforced)"
+  ]
+}

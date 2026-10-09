@@ -202,3 +202,18 @@ These facts are recorded as the exact verified compatibility boundary:
 Phone-context reachability off-LAN (cellular) succeeds only via the tailnet hostname or via the configured hostname with `curl -L` (which follows the redirect to tailnet). Direct requests to the configured hostname off-LAN receive HTTP 302, not direct endpoint access. The exact compatibility boundary is recorded in gap 4: a client that converts 302 POST to GET (like Foundation URLSession) cannot complete chat completions through the configured hostname off-LAN.
 
 Unobserved: chat-path behavior on phone, whether credential is validated by the endpoint, endpoint behavior with Tailscale disconnected, and implications of the model configuration mismatch. V09 must evaluate whether these gaps are acceptable for the endpoint's intended use and decide the phone-context base URL (tailnet hostname vs. forwarder configuration).
+
+## V09 adapter smoke run
+
+The self-hosted adapter (`core/src/providers/self_hosted/`) was run against the configured endpoint from the Odonian worker on 2026-10-09 with its own request: the interpretation prompt and the full `output_schema()` as a strict `json_schema`, three synthetic captures. The transport was a `curl` subprocess standing in for the native HTTPS transport. Re-run with `OHAND_SMOKE_EVIDENCE_DIR=docs/validation/evidence/spark-adapter-smoke cargo test --test providers_self_hosted live_endpoint_smoke -- --ignored`.
+
+| Artifact (`docs/validation/evidence/spark-adapter-smoke/`) | Adapter revision | `max_tokens` | Result |
+| --- | --- | --- | --- |
+| `self-hosted-adapter-smoke-20261009T111140Z-7be0c91a.json` | `7be0c91a` | 1024 | pass, 3/3; superseded, its raw exchange was not preserved |
+| `self-hosted-adapter-smoke-20261009T145407Z-d1243e1f.json` | `d1243e1f` | 1024 | fail: reminder capture `finish_reason` `length`, empty content (reasoning used the budget) |
+| `self-hosted-adapter-smoke-20261009T145540Z-d1243e1f.json` | `d1243e1f` | 1024 | fail: same reminder capture, same outcome |
+| `self-hosted-adapter-smoke-20261009T145738Z-e45f02b4.json` | `e45f02b4cdec971bdd0e16cd162af60afe8a4a16` | 4096 | pass, 3/3: 200, assistant, `finish_reason` `stop`, each reply mapped to a validated proposal. The cited evidence for `Supported`. |
+
+The sanitized artifacts carry no endpoint, credential, captured text or model output text. Each also carries `private_raw_evidence`: the run id, file name, size and SHA-256 of the raw exchange (request and response bodies, no endpoint or credential), kept outside Git in the collecting worker's private evidence directory (`OHAND_PRIVATE_EVIDENCE_DIR`, default `~/.ohand-private-evidence`, mode 0600 in a 0700 directory), the same convention as `docs/validation/signing.md`. The harness refuses a private directory inside the repository. The raw file for the cited run was written on the worker that collected it; recompute the SHA-256 of `<file_name>` there to audit it. No raw files exist for the `7be0c91a` run. The leak check on the raw file looks for the endpoint everywhere but for the credential only in request bodies, because the configured credential is a short placeholder word the model's own output can contain.
+
+Observed latency reached about 69 seconds for one call, so a profile for this endpoint needs a timeout above the 30 seconds used in unit tests. No smoke capture produced `reminder_proposal` or `session_topic_proposal`, so those remain unverified.
