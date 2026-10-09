@@ -75,7 +75,7 @@ fn is_inside_any_callback() -> bool {
     DELIVERING_FOR.with(|slot| slot.get()).is_some()
 }
 
-pub(super) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 

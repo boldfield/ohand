@@ -70,7 +70,7 @@ fn into_result(status: u32, bytes: Vec<u8>) -> OhandCoreResult {
     OhandCoreResult { status, data, len }
 }
 
-fn guarded(operation: impl FnOnce() -> Result<(), AbiFailure>) -> OhandCoreResult {
+pub(crate) fn guarded(operation: impl FnOnce() -> Result<(), AbiFailure>) -> OhandCoreResult {
     let outcome = catch_unwind(AssertUnwindSafe(operation)).unwrap_or(Err(AbiFailure::INTERNAL));
     match outcome {
         Ok(()) => into_result(super::failure::OHAND_CORE_STATUS_OK, Vec::new()),

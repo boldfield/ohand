@@ -10,24 +10,24 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread::ThreadId;
 use std::time::Duration;
 
-const WAIT: Duration = Duration::from_secs(10);
+pub(crate) const WAIT: Duration = Duration::from_secs(10);
 const SETTLE: Duration = Duration::from_millis(150);
 
 static SERIAL: Mutex<()> = Mutex::new(());
 
 /// Counters are process-wide, so every test runs one at a time.
-fn serial() -> MutexGuard<'static, ()> {
+pub(crate) fn serial() -> MutexGuard<'static, ()> {
     SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-struct Event {
-    operation_id: u64,
-    status: u32,
-    payload: Vec<u8>,
-    thread: ThreadId,
+pub(crate) struct Event {
+    pub(crate) operation_id: u64,
+    pub(crate) status: u32,
+    pub(crate) payload: Vec<u8>,
+    pub(crate) thread: ThreadId,
 }
 
-struct Recorder {
+pub(crate) struct Recorder {
     sender: Mutex<Sender<Event>>,
 }
 
@@ -52,7 +52,7 @@ unsafe extern "C" fn record_event(
     });
 }
 
-fn recorder() -> (Box<Recorder>, Receiver<Event>) {
+pub(crate) fn recorder() -> (Box<Recorder>, Receiver<Event>) {
     let (sender, receiver) = channel();
     (
         Box::new(Recorder {
@@ -66,23 +66,23 @@ fn context_of(recorder: &Recorder) -> *mut c_void {
     recorder as *const Recorder as *mut c_void
 }
 
-struct Outcome {
-    status: u32,
-    payload: Vec<u8>,
+pub(crate) struct Outcome {
+    pub(crate) status: u32,
+    pub(crate) payload: Vec<u8>,
 }
 
 impl Outcome {
-    fn code(&self) -> String {
+    pub(crate) fn code(&self) -> String {
         let value: serde_json::Value = serde_json::from_slice(&self.payload).unwrap();
         value["code"].as_str().unwrap().to_string()
     }
-    fn class(&self) -> String {
+    pub(crate) fn class(&self) -> String {
         let value: serde_json::Value = serde_json::from_slice(&self.payload).unwrap();
         value["class"].as_str().unwrap().to_string()
     }
 }
 
-fn consume(mut result: OhandCoreResult) -> Outcome {
+pub(crate) fn consume(mut result: OhandCoreResult) -> Outcome {
     let payload = if result.data.is_null() {
         Vec::new()
     } else {
@@ -96,7 +96,7 @@ fn consume(mut result: OhandCoreResult) -> Outcome {
     Outcome { status, payload }
 }
 
-fn open_memory() -> OhandCoreHandle {
+pub(crate) fn open_memory() -> OhandCoreHandle {
     let mut handle = 0;
     let outcome = consume(unsafe { ohand_core_open(b":memory:".as_ptr(), 8, &mut handle) });
     assert_eq!(outcome.status, OHAND_CORE_STATUS_OK);
@@ -104,12 +104,12 @@ fn open_memory() -> OhandCoreHandle {
     handle
 }
 
-fn assert_rejected(outcome: &Outcome, status: u32, code: &str) {
+pub(crate) fn assert_rejected(outcome: &Outcome, status: u32, code: &str) {
     assert_eq!(outcome.status, status);
     assert_eq!(outcome.code(), code);
 }
 
-fn register(handle: OhandCoreHandle, recorder: &Recorder) {
+pub(crate) fn register(handle: OhandCoreHandle, recorder: &Recorder) {
     let outcome = consume(ohand_core_set_event_callback(
         handle,
         Some(record_event),

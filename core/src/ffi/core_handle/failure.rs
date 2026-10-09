@@ -85,6 +85,26 @@ impl AbiFailure {
         "reentrant_call",
         "the call is not allowed from inside an event callback",
     );
+    pub const INVALID_REQUEST: AbiFailure = AbiFailure::fixed(
+        ErrorClass::Permanent,
+        "invalid_request",
+        "the request is empty or is not the expected JSON",
+    );
+    pub const INVALID_CAPTURE: AbiFailure = AbiFailure::fixed(
+        ErrorClass::Permanent,
+        "invalid_capture",
+        "the capture is missing content or a required field, or has an unsupported value",
+    );
+    pub const CAPTURE_CONFLICT: AbiFailure = AbiFailure::fixed(
+        ErrorClass::Permanent,
+        "capture_conflict",
+        "the capture ID is already used by a capture with different content",
+    );
+    pub const NOT_FOUND: AbiFailure = AbiFailure::fixed(
+        ErrorClass::Permanent,
+        "not_found",
+        "no stored record has that identifier",
+    );
     pub const STORE_UNAVAILABLE: AbiFailure = AbiFailure::fixed(
         ErrorClass::Permanent,
         "store_unavailable",
