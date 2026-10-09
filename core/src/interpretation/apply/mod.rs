@@ -1479,35 +1479,43 @@ fn retracted_after(tokens: &[IntentToken], after: usize) -> bool {
     })
 }
 
-/// Whether a negated "need" gives the reason for the request: "so" or "then" (but not the
-/// concessive "then again") opens its clause ("so I don't need to worry", "then there is no need
-/// to worry") and an infinitive follows whose verb is neither one of the requested task's words,
-/// a way of contacting someone ([`CONTACT_VERBS`]) nor a pronoun-like word. Anything after the
-/// verb must be a phrase saying when ([`names_time_phrase`]) or a concrete object of its own
-/// ([`names_task_object`]), which rules out pronouns, indefinites ("anyone"), the task's own words
-/// and the generic names for whoever the task is about ("the man", "the guy", "the contractor",
-/// [`WITHDRAWN_REQUEST_WORDS`]). After a verb aimed at a person ([`PERSON_DIRECTED_VERBS`]:
-/// "chase", "bother", "see") the object may not name a person at all ([`looks_like_person`]:
-/// "the handyman", "the plumber", "the expert"), so "chase the quote" gives a reason and "chase
-/// the handyman" does not.
+/// Whether a negated "need" gives the reason for the request. A reason clause has one positive
+/// shape. It opens the request directly ([`reason_clause_opens_request`]): after the quoted time
+/// come only clause breaks and [`REASON_LEAD_INS`] ("ok", "and"), then the marker "so", "so that"
+/// or "then" (not the concessive "then again"), then nothing but a subject and its auxiliaries
+/// ([`REASON_SUBJECT_WORDS`]: "I", "you", "we", "there", "there's", "do", "will", "is") before the
+/// negation. An infinitive follows whose verb is neither one of the requested task's words, a way
+/// of contacting someone ([`CONTACT_VERBS`]) nor a pronoun-like word. Anything after the verb
+/// must be a phrase saying when ([`names_time_phrase`]) or a thing of the clause's own
+/// ([`reason_names_thing`]: a noun phrase headed by a [`THING_OBJECT_WORDS`] entry, "the quote",
+/// "the booking", "the order"). That rules out pronouns, indefinites ("anyone"), the task's own
+/// words and every noun the grammar does not know to be a thing ("the medic", "the handyman",
+/// "the staff", "my neighbour"): such an object most likely refers back to whoever the task is
+/// about, and when the grammar is unsure the request stays withdrawn.
 ///
-/// Nothing else after the request may take it back. A retracting negation other than the one
-/// governing "need" ("nah so I don't need to worry", "nope, so I don't need to chase the quote")
-/// or a change-of-mind marker anywhere after the quoted time ([`CHANGE_OF_MIND_MARKERS`]:
-/// "actually so ...", "so actually ...", "so turns out ...", "so in fact ...", "so I don't
-/// actually need ...", "so I don't need to worry, actually") makes the clause a withdrawal
-/// whatever its complement: the speaker is correcting the request, not giving its purpose.
+/// Words of the speaker's own before "so" say why the reminder is unnecessary ("I already called
+/// him so I don't need to worry", "it's done so ...", "I'll remember so ...", "I set an alarm so
+/// ..."), and words between "so" and the subject hedge or correct the request ("so it seems ...",
+/// "so apparently ...", "so I guess ...", "so actually ...", "so turns out ..."); neither shape
+/// gives a reason. Nor may anything else after the request take it back: a retracting negation
+/// other than the one governing "need" ("nah so I don't need to worry") or a change-of-mind
+/// marker anywhere after the quoted time ([`CHANGE_OF_MIND_MARKERS`]: "so I don't actually need
+/// ...", "so I don't need to worry, actually") makes the clause a withdrawal whatever its
+/// complement, and so does any further clause after it ("so I don't need to worry, I already
+/// called him", "..., it's done"): the reason clause closes the capture, allowing only clause
+/// breaks and a closing thanks ([`REASON_CLOSERS`]) after its complement.
 ///
-/// So "so I don't need to worry", "so I don't need to cancel at the last minute", "so I don't
-/// need to check the quote twice" and "so I don't need to cancel the booking" give a reason,
-/// while "so I don't need to phone him", "so I don't need to chase the contractor", "so I don't
-/// need to see the guy", "so I don't need to check anything", "so I don't need to contact the
-/// roofer after all", "so I don't need to cancel it", "then again I don't need to phone the guy",
-/// "nah so I don't need to chase the quote" and "so actually I don't need to check the quote"
-/// withdraw. A retraction verb without anything after it ("so I don't need to cancel") withdraws
-/// too. "I don't need to call the roofer", "I don't need to after all", "no need to do that", "I
-/// don't need to be told" and "no need to bother" still withdraw, as does a need that has ended
-/// ("so I don't need to worry anymore"). `later` is every token after the quoted time;
+/// So "so I don't need to worry", "ok so I don't need to worry", "so that I don't need to
+/// worry", "so I don't need to cancel at the last minute", "so I don't need to check the quote
+/// twice", "so I don't need to handle the order" and "then there is no need to worry" give a
+/// reason, while "so I don't need to phone him", "so I don't need to chase the contractor", "so I
+/// don't need to chase the medic", "so I don't need to check anything", "so I don't need to
+/// contact the roofer after all", "so I don't need to cancel it", "then again I don't need to
+/// phone the guy", "he called me so I don't need to worry" and "so probably I don't need to check
+/// the quote" withdraw. A retraction verb without anything after it ("so I don't need to cancel")
+/// withdraws too. "I don't need to call the roofer", "I don't need to after all", "no need to do
+/// that", "I don't need to be told" and "no need to bother" still withdraw, as does a need that
+/// has ended ("so I don't need to worry anymore"). `later` is every token after the quoted time;
 /// `negation` and `need` index the retracting negation and the word it governs within it.
 fn need_gives_reason(
     later: &[&IntentToken],
@@ -1526,25 +1534,12 @@ fn need_gives_reason(
     let request_taken_back = later.iter().enumerate().any(|(index, token)| {
         index != negation && !token.quoted && !token.clause_break && takes_request_back(&token.text)
     });
-    if request_taken_back {
+    let closes_capture = later[need + 1 + after_need.len()..].iter().all(|token| {
+        token.clause_break || (!token.quoted && REASON_CLOSERS.contains(&token.text.as_str()))
+    });
+    if request_taken_back || !closes_capture || !reason_clause_opens_request(&later[..negation]) {
         return false;
     }
-    let before_negation = &later[..negation];
-    let clause_start = before_negation
-        .iter()
-        .rposition(|previous| previous.clause_break)
-        .map_or(0, |position| position + 1);
-    let clause = &before_negation[clause_start..];
-    let reason_marker = clause.iter().enumerate().any(|(position, previous)| {
-        !previous.quoted
-            && match previous.text.as_str() {
-                "so" => true,
-                "then" => clause
-                    .get(position + 1)
-                    .is_none_or(|next| next.quoted || next.text != "again"),
-                _ => false,
-            }
-    });
     let [infinitive_marker, verb, rest @ ..] = after_need.as_slice() else {
         return false;
     };
@@ -1555,24 +1550,211 @@ fn need_gives_reason(
         .take_while(|next| !next.clause_break)
         .filter(|next| !next.quoted)
         .collect();
-    reason_marker
-        && !infinitive_marker.quoted
+    !infinitive_marker.quoted
         && infinitive_marker.text == "to"
         && !verb.quoted
         && !desire_governs_reminder(&after_need)
         && (if object.is_empty() {
             !RETRACTION_VERBS.contains(&verb_text)
         } else {
-            names_time_phrase(&object, request_words) || names_task_object(&object, request_words)
+            names_time_phrase(&object, request_words) || reason_names_thing(&object, request_words)
         })
         && !RETRACTION_FILLERS.contains(&verb_text)
         && !REASON_EXCLUDED_VERBS.contains(&verb_text)
         && !request_words.contains(&verb_text)
         && !CONTACT_VERBS.contains(&verb_text)
         && (verb_text == "worry" || !RETRACTION_TARGETS.contains(&verb_text))
-        && !(PERSON_DIRECTED_VERBS.contains(&verb_text)
-            && object.iter().any(|token| looks_like_person(&token.text)))
 }
+
+/// Whether `before_negation`, every token between the quoted time and the retracting negation,
+/// is exactly the opening of a reason clause: clause breaks and [`REASON_LEAD_INS`] only, then
+/// the marker ("so", "so that", or "then" not followed by "again"), then [`REASON_SUBJECT_WORDS`]
+/// only. Any other word before the marker is a clause of the speaker's own ("I already called
+/// him so ...", "it's done so ..."), and any other word after it is a hedge or a correction ("so
+/// it seems ...", "so I guess ...", "so actually ..."); both withdraw.
+fn reason_clause_opens_request(before_negation: &[&IntentToken]) -> bool {
+    let Some(marker) = before_negation.iter().position(|token| {
+        !token.clause_break && (token.quoted || !REASON_LEAD_INS.contains(&token.text.as_str()))
+    }) else {
+        return false;
+    };
+    let marker_token = before_negation[marker];
+    if marker_token.quoted {
+        return false;
+    }
+    let next = before_negation
+        .get(marker + 1)
+        .filter(|next| !next.quoted && !next.clause_break)
+        .map(|next| next.text.as_str());
+    let subject_start = match (marker_token.text.as_str(), next) {
+        ("so", Some("that")) => marker + 2,
+        ("so", _) => marker + 1,
+        ("then", Some("again")) => return false,
+        ("then", _) => marker + 1,
+        _ => return false,
+    };
+    before_negation[subject_start..].iter().all(|token| {
+        !token.quoted && !token.clause_break && REASON_SUBJECT_WORDS.contains(&token.text.as_str())
+    })
+}
+
+/// Words that may stand between the quoted time and the "so" of a reason clause without opening
+/// a clause of the speaker's own ("..., ok so I don't need to worry", "... and then I won't need
+/// to chase the quote").
+const REASON_LEAD_INS: &[&str] = &["ok", "okay", "and"];
+/// Words that may close the capture after a reason clause ("so I don't need to worry, thanks").
+/// Any other clause after the reason ("..., I already called him", "..., it's done") says the
+/// reminder is unnecessary and withdraws.
+const REASON_CLOSERS: &[&str] = &["thanks", "thank", "you", "please", "pls", "cheers", "ta"];
+/// The subject of a reason clause and the auxiliaries that may precede its negation: "so I don't
+/// need", "so I do not need", "so we won't need", "so you will not need", "then there is no
+/// need", "so there's no need", "so there'll be no need". Anything else between the marker and
+/// the negation ("so it seems I ...", "so apparently I ...", "so I guess I ...") hedges or
+/// corrects the request.
+const REASON_SUBJECT_WORDS: &[&str] = &[
+    "i", "you", "we", "there", "there's", "there'll", "do", "does", "will", "would", "shall",
+    "should", "is", "are", "am", "be",
+];
+
+/// Whether `words`, the complement object of a reason clause, name a thing of the clause's own: a
+/// task object in the positive shape of [`names_task_object`] whose head noun is a
+/// [`THING_OBJECT_WORDS`] entry ("the quote", "the gas bill", "the booking at the last minute").
+/// The list is an allow-list, so an object the grammar does not know to be a thing ("the medic",
+/// "the staff", "my landlord", "the crew") never gives a reason: after "call the roofer" it most
+/// likely names whoever the task is about, and withdrawing is the safe direction.
+fn reason_names_thing(words: &[&IntentToken], request_words: &[&str]) -> bool {
+    let texts = object_texts(words);
+    names_task_object(words, request_words)
+        && noun_phrase_end(&texts, 0, request_words)
+            .and_then(|end| texts.get(end.checked_sub(1)?))
+            .is_some_and(|head| THING_OBJECT_WORDS.contains(head))
+}
+
+/// Things and places a reason clause may name as the object of its complement ("so I don't need
+/// to chase the quote", "check the invoice", "cancel the booking", "explain the leak", "visit
+/// the shop", "handle the order"). People, roles, groups and institutions of people ("the medic",
+/// "the staff", "the office", "the team") are left out on purpose, as is anything that could
+/// stand for the request or the task; a noun that is not listed withdraws.
+const THING_OBJECT_WORDS: &[&str] = &[
+    "quote",
+    "quotes",
+    "estimate",
+    "estimates",
+    "invoice",
+    "invoices",
+    "bill",
+    "bills",
+    "receipt",
+    "receipts",
+    "statement",
+    "statements",
+    "paperwork",
+    "form",
+    "forms",
+    "document",
+    "documents",
+    "contract",
+    "contracts",
+    "warranty",
+    "policy",
+    "order",
+    "orders",
+    "booking",
+    "bookings",
+    "reservation",
+    "reservations",
+    "appointment",
+    "appointments",
+    "ticket",
+    "tickets",
+    "deposit",
+    "payment",
+    "payments",
+    "refund",
+    "refunds",
+    "fee",
+    "fees",
+    "fine",
+    "fines",
+    "rent",
+    "balance",
+    "subscription",
+    "membership",
+    "renewal",
+    "delivery",
+    "parcel",
+    "package",
+    "shipment",
+    "leak",
+    "leaks",
+    "roof",
+    "gutter",
+    "gutters",
+    "ceiling",
+    "wall",
+    "walls",
+    "floor",
+    "fence",
+    "garage",
+    "kitchen",
+    "bathroom",
+    "garden",
+    "lawn",
+    "car",
+    "van",
+    "bike",
+    "house",
+    "flat",
+    "apartment",
+    "shop",
+    "store",
+    "bank",
+    "pharmacy",
+    "gym",
+    "pool",
+    "library",
+    "school",
+    "dinner",
+    "lunch",
+    "breakfast",
+    "meal",
+    "meals",
+    "groceries",
+    "shopping",
+    "laundry",
+    "dishes",
+    "bins",
+    "rubbish",
+    "trash",
+    "email",
+    "emails",
+    "letter",
+    "letters",
+    "report",
+    "reports",
+    "spreadsheet",
+    "slides",
+    "presentation",
+    "website",
+    "app",
+    "account",
+    "password",
+    "prescription",
+    "medication",
+    "pills",
+    "key",
+    "keys",
+    "ladder",
+    "tools",
+    "boxes",
+    "photos",
+    "cake",
+    "flowers",
+    "present",
+    "presents",
+    "gift",
+    "gifts",
+];
 
 /// Whether a word after the request takes it back, so a negated "need" near it cannot give a
 /// reason: a retracting negation ("nah", "nope", "no", "don't") or a [`CHANGE_OF_MIND_MARKERS`]
@@ -1613,34 +1795,6 @@ const CHANGE_OF_MIND_MARKERS: &[&str] = &[
     "joking",
     "jk",
 ];
-
-/// Verbs that, in a reason clause, are aimed at a person ("chase", "bother", "see", "visit",
-/// "remember"). A reason built on one of them must have a thing as its object ("chase the quote",
-/// "handle the paperwork"); an object that names someone ("chase the handyman", "see the
-/// specialist") stands for whoever the task is about and withdraws ([`looks_like_person`]).
-const PERSON_DIRECTED_VERBS: &[&str] = &[
-    "chase", "chasing", "bug", "bother", "nag", "pester", "hassle", "hound", "see", "visit",
-    "meet", "remember", "handle", "ask", "tell", "consult", "follow", "catch", "find", "track",
-    "speak", "talk", "deal",
-];
-
-/// Endings of nouns that name a person by role or trade ("handyman", "tradesperson", "plumber",
-/// "contractor", "specialist", "technician", "assistant", "agent", "employee").
-const PERSON_SUFFIXES: &[&str] = &[
-    "man", "men", "person", "people", "er", "or", "ist", "ian", "ant", "ent", "ee",
-];
-
-/// Whether a word in the object of a person-directed verb names a person: a generic name for
-/// whoever the task is about ([`WITHDRAWN_REQUEST_WORDS`]: "the guy", "the expert", "anyone") or
-/// a noun with a role ending ([`PERSON_SUFFIXES`]). Short words are left alone, so "fee" is a
-/// thing while "employee" is not. Erring towards a person keeps the request withdrawn, the safe
-/// direction.
-fn looks_like_person(word: &str) -> bool {
-    const MINIMUM_LENGTH: usize = 4;
-    WITHDRAWN_REQUEST_WORDS.contains(&word)
-        || (word.chars().count() >= MINIMUM_LENGTH
-            && PERSON_SUFFIXES.iter().any(|suffix| word.ends_with(suffix)))
-}
 
 /// Ways of getting in touch with someone. They stand for "call the roofer" whichever of them the
 /// task used, so "so I don't need to ring the man" withdraws like "I don't need to call him".

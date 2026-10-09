@@ -361,3 +361,71 @@ unscheduled | remind me to call the roofer {time}, so I don't need to check the 
 unscheduled | remind me to call the roofer {time}, so I don't need to worry... just kidding
 unscheduled | remind me to call the roofer {time}, so I don't need to chase the quote, or whatever
 unscheduled | remind me to call the roofer {time}, so I don't need to worry though
+
+# --- I05b round 7 (PR #127): the reason clause opens the request; thing objects are an allow-list ---
+# a clause of the speaker's own before "so" says why the reminder is unnecessary, whatever it says
+unscheduled | remind me to call the roofer {time}, I already called him so I don't need to worry
+unscheduled | remind me to call the roofer {time}, I've already called him so I don't need to worry
+unscheduled | remind me to call the roofer {time}, he already came so I don't need to worry
+unscheduled | remind me to call the roofer {time}, he called me so I don't need to worry
+unscheduled | remind me to call the roofer {time}, it's done so I don't need to worry
+unscheduled | remind me to call the roofer {time}, it's sorted so I don't need to worry
+unscheduled | remind me to call the roofer {time}, the roof is fixed so I don't need to worry
+unscheduled | remind me to call the roofer {time}, I'll remember so I don't need to worry
+unscheduled | remind me to call the roofer {time}, I've got it so I don't need to worry
+unscheduled | remind me to call the roofer {time}, I set an alarm so I don't need to worry
+unscheduled | remind me to call the roofer {time}, I wrote it down so I don't need to worry
+unscheduled | remind me to call the roofer {time}, I already did so I don't need to chase the quote
+unscheduled | remind me to call the roofer {time}, it's handled so I do not need to check the quote
+unscheduled | remind me to call the roofer {time} already so I don't need to worry
+unscheduled | remind me to call the roofer {time}, done so I don't need to worry
+# a hedge between "so" and the subject, or between the subject and its negation, corrects the request
+unscheduled | remind me to call the roofer {time}, so it seems I don't need to worry
+unscheduled | remind me to call the roofer {time}, so apparently I don't need to worry
+unscheduled | remind me to call the roofer {time}, so I guess I don't need to chase the quote
+unscheduled | remind me to call the roofer {time}, so I suppose I don't need to chase the quote
+unscheduled | remind me to call the roofer {time}, so probably I don't need to check the quote
+unscheduled | remind me to call the roofer {time}, so maybe I don't need to check the quote
+unscheduled | remind me to call the roofer {time}, so I think I don't need to check the quote
+unscheduled | remind me to call the roofer {time}, so perhaps we don't need to check the quote
+unscheduled | remind me to call the roofer {time}, so I probably won't need to chase the quote
+unscheduled | remind me to call the roofer {time}, then I guess I don't need to chase the quote
+# the reason clause may open after a comma or a lead-in, and may use "so that"
+scheduled | remind me to call the roofer {time}, ok so I don't need to worry
+scheduled | remind me to call the roofer {time} okay so I don't need to chase the quote
+scheduled | remind me to call the roofer {time} so that I don't need to worry
+scheduled | remind me to call the roofer {time}, so that I don't need to chase the quote
+scheduled | remind me to call the roofer {time} and then I won't need to chase the quote
+scheduled | remind me to call the roofer {time}. so I don't need to worry
+scheduled | remind me to call the roofer {time}, so there's no need to worry
+scheduled | remind me to call the roofer {time}, so we won't need to check the quote
+# the object of a reason clause must be a thing the grammar knows; any other noun refers back to
+# whoever the task is about, whatever its ending
+unscheduled | remind me to call the doctor {time}, so I don't need to chase the medic
+unscheduled | remind me to call the doctor {time}, so I do not need to chase the medic
+unscheduled | remind me to call the doctor {time}, so I don't need to see the medic
+unscheduled | remind me to call the doctor {time}, so I don't need to ask the receptionist
+unscheduled | remind me to call the roofer {time}, so I don't need to chase the staff
+unscheduled | remind me to call the roofer {time}, so I don't need to chase my neighbour
+unscheduled | remind me to call the roofer {time}, so I don't need to chase my landlord
+unscheduled | remind me to call the roofer {time}, so I don't need to chase the office
+unscheduled | remind me to call the roofer {time}, so I don't need to bother the crew
+unscheduled | remind me to call the roofer {time}, so I don't need to handle the tradie
+unscheduled | remind me to call the roofer {time}, so I don't need to check the plumber
+unscheduled | remind me to call the roofer {time}, so I don't need to pay the roofing firm
+unscheduled | remind me to call the roofer {time}, so I don't need to chase the mob
+scheduled | remind me to call the roofer {time}, so I don't need to handle the order
+scheduled | remind me to call the roofer {time} so I do not need to handle the order
+scheduled | remind me to call the roofer {time} so I don't need to chase the gas bill
+scheduled | remind me to call the roofer {time} so I don't need to pay the deposit
+scheduled | remind me to call the hotel {time} so I don't need to check the reservation
+scheduled | remind me to call the roofer {time} so I don't need to see the estimate
+# the reason clause closes the capture; a further clause after it says the reminder is unnecessary
+unscheduled | remind me to call the roofer {time}, so I don't need to worry, I already called him
+unscheduled | remind me to call the roofer {time}, so I don't need to worry, it's done
+unscheduled | remind me to call the roofer {time}, so I don't need to chase the quote, I set an alarm
+unscheduled | remind me to call the roofer {time} so I don't need to worry. he called me
+unscheduled | remind me to call the roofer {time}, so I don't need to worry, I'll remember
+scheduled | remind me to call the roofer {time}, so I don't need to worry, thanks
+scheduled | remind me to call the roofer {time} so I don't need to worry!
+scheduled | remind me to call the roofer {time}, so there'll be no need to worry
