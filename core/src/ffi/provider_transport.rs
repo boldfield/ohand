@@ -1012,5 +1012,7 @@ pub unsafe extern "C" fn ohand_core_fail_provider_exchange(
     })
 }
 
+pub mod shadow_review;
+
 #[cfg(test)]
 mod tests;
