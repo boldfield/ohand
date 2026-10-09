@@ -18,7 +18,7 @@ Status: in-progress, device evidence collected 2026-10-09; acceptance criteria i
 
 **Primary evidence manifest**: `docs/validation/evidence/device-feasibility/2026-10-09-device-matrix.json` — comprehensive test results matrix with per-probe results and artifact citations.
 
-**Sanitized artifacts**: Referenced by name in the evidence (audio-probe/recording-*.wav, transcription-probe/p04-*.png, etc.). Committed PNG screenshots and WAV files reside in `docs/validation/evidence/device-feasibility/` (public artifacts only; PERSONAL screenshots excluded).
+**Sanitized artifacts**: Referenced by name in the evidence (audio-probe/recording-*.wav, transcription-probe/p04-*.png, etc.). Screenshots and WAV recordings are private and not committed to the repository.
 
 **Private evidence**: Raw evidence retained locally on the maintainer's Mac at `~/.ohand-private-evidence/p09/` (not committed): full-resolution screenshots, app container exports, logs, and signing records.
 
@@ -33,7 +33,9 @@ Status: in-progress, device evidence collected 2026-10-09; acceptance criteria i
 
 ## Acceptance Criteria Assessment
 
-### AC1: Record Measured Cold/Warm/Locked/Unlocked Capture, Permission States, Interruptions, Offline ASR, Notifications, Handoff, Accessibility, Secure Credential Behavior
+Per parent task spec, 6 acceptance criteria:
+
+### Parent AC1: Record Measured Cold/Warm/Locked/Unlocked Capture, Permission States, Interruptions, Offline ASR, Notifications, Handoff, Accessibility, Secure Credential Behavior
 
 **Status**: Partially tested; unobservable and untested cases marked below.
 
@@ -46,7 +48,7 @@ Status: in-progress, device evidence collected 2026-10-09; acceptance criteria i
 - **Permission grant/revoke**: Granted: "Recording..." (3.33 s file saved). Revoked: "Failed to start recording: Microphone permission denied".
 - **Normal stop**: 6.92 s file, size consistent with 32000 B/s; plays.
 - **Cancel mid-recording**: 3.86 s partial file (127,732 bytes); file matches exactly and plays.
-- **System notification interruption**: 5.86 s partial file (191,764 bytes); file matches and plays.
+- **Audio session interruption**: 5.86 s partial file (191,764 bytes); file matches and plays.
 - **Background recording (10 s)**: 9.71 s captured (314,676 bytes); signal present across entire span (no UIBackgroundModes: audio required).
 - **Recording while locked (10 s)**: 8.19 s captured (266,100 bytes); signal continuous.
 - **Extended recording (300+ s)**: UI timer continued past 500 s; stop reported 300.00 s (9,604,096 bytes); header consistent.
@@ -116,7 +118,7 @@ Status: in-progress, device evidence collected 2026-10-09; acceptance criteria i
 **Tested scenarios**:
 - **Locked retrieval** (armed 18:56:18Z, backgrounded 18:56:22Z):
   - Offsets 1, 3, 6 s (protectedDataAvailable true): All five classes status 0.
-  - Offsets 10, 15, 20 s (protectedDataAvailable false, locked): WhenUnlocked, WhenUnlockedThisDeviceOnly, WhenPasscodeSetThisDeviceOnly return -25308 errSecInteractionNotAllowed; **AfterFirstUnlock and AfterFirstUnlockedThisDeviceOnly status 0 with matching values** (readable while locked).
+  - Offsets 10, 15, 20 s (protectedDataAvailable false, locked): WhenUnlocked, WhenUnlockedThisDeviceOnly, WhenPasscodeSetThisDeviceOnly return -25308 errSecInteractionNotAllowed; **AfterFirstUnlock and AfterFirstUnlockThisDeviceOnly status 0 with matching values** (readable while locked).
   - Background task expired 25 s after backgrounding.
 - **Unlocked retrieval**: All five classes status 0, protectedDataAvailable true.
 - **Relaunch** (force-quit, relaunch, retrieve): All five classes status 0.
@@ -140,9 +142,9 @@ Status: in-progress, device evidence collected 2026-10-09; acceptance criteria i
 - Before first unlock after reboot.
 - System termination between handoff and commit.
 
-**Note**: The "lock screen entry" scenario did not measure capture WITH device physically locked. The device had already been unlocked when the app foregrounded (passive unlock not instrumented). This is a design-consistent behavior but does not measure locked-capture timing or locked-data-access constraints.
+**Note**: The "lock screen entry" scenario did not measure capture WITH device physically locked. The device had already been unlocked when the app foregrounded (passive unlock not instrumented). This does not measure locked-capture timing or locked-data-access constraints.
 
-### AC2: Measure Trigger-to-Ready and End-of-Input-to-Durable-Save Separately
+### Parent AC2: Measure Trigger-to-Ready and End-of-Input-to-Durable-Save Separately; Physical-Device Evidence Cannot Be Substituted
 
 **Status**: UNMET. Measurements do not match protocol definitions.
 
@@ -154,18 +156,14 @@ Status: in-progress, device evidence collected 2026-10-09; acceptance criteria i
 
 Per m1-protocol.md §Latency Measurements, these must report median, p95, min/max for each trigger/input type. Without these distributions, AC2 cannot be marked satisfied.
 
-### AC3: Physical-Device Evidence Cannot Be Substituted by Simulator or Blank Checklist
-
-**Status**: Evidence is from physical iPhone 16 Pro hardware only; no simulator results included.
-
-### AC4: Baseline Target: iPhone 16 Pro, iOS 26.6.2; Record Actual Observed OS Build
+### Parent AC3: Baseline Target: iPhone 16 Pro, iOS 26.6.2; Record Actual Observed OS Build
 
 **Status**: Target achieved.
 - **Hardware**: iPhone 16 Pro (trial-phone)
 - **Actual OS Build**: iOS 26.6.2 (build 23G90), verified via xcrun devicectl
 - **Signing records**: Per-probe builds documented in evidence manifest
 
-### AC5: Offline Speech Availability and Time-to-Transcript are Physical-Device Checks
+### Parent AC4: Offline Speech Availability and Time-to-Transcript are Physical-Device Checks
 
 **Status**: Offline transcription confirmed; time-to-transcript recorded.
 
@@ -180,13 +178,11 @@ Per m1-protocol.md §Latency Measurements, these must report median, p95, min/ma
 - en-US: "Ready: on-device recognition is available"
 - fr-FR: "Pending: on-device recognition unavailable"
 
-### AC6: Every Observed Result Cites Named Sanitized Evidence Artifact, Build/Revision, and Collection Time
+### Parent AC5: Every Observed Result Cites Named Sanitized Evidence Artifact, Build/Revision, and Collection Time; Preserve Raw Private Evidence with Auditable Reference
 
-**Status**: Primary evidence manifest (2026-10-09-device-matrix.json) contains results with artifact citations. This document cross-references per-probe builds and collection window (2026-10-09T17:30:00Z–19:12:00Z). Per-result ISO timestamps not recorded in manifest; broad collection window applies to all results.
+**Status (Sanitized artifacts)**: Primary evidence manifest (2026-10-09-device-matrix.json) contains results with artifact citations. This document cross-references per-probe builds and collection window (2026-10-09T17:30:00Z–19:12:00Z). Per-result ISO timestamps not recorded in manifest; broad collection window applies to all results.
 
-### AC7: Preserve Raw Private Evidence Locally with Auditable Reference
-
-**Status**: Raw evidence retained at `~/.ohand-private-evidence/p09/` (maintainer's Mac, not committed); auditable reference in manifest's `private_evidence_reference` field.
+**Status (Private evidence reference)**: Raw evidence retained at `~/.ohand-private-evidence/p09/` (maintainer's Mac, not committed); auditable reference in manifest's `private_evidence_reference` field.
 
 ## Coverage and Unmet Checks
 
@@ -194,14 +190,14 @@ Required protocol scenarios (m1-protocol.md) status:
 
 | Scenario | Status | Evidence |
 | --- | --- | --- |
-| Offline capture | ✓ Tested | P03/P04: offline transcription, offline audio recording |
-| Interrupted voice recording | ✓ Tested | P03: cancel, notification interrupt, background, lock |
+| Offline capture | ✓ Tested | P04: offline on-device transcription (airplane mode); P03 audio recording not run offline |
+| Interrupted voice recording | ✓ Tested | P03: cancel, audio session interruption, background; recording during lock not interrupted |
 | Interrupted import | ✗ Unmet | P07 does not measure app termination between handoff and commit |
 | Provider unavailable | ✗ Unmet | No cloud provider configured in trial; fallback not tested |
 | Denied permissions | ✓ Tested | P03/P04: revoke flows; explicit failure states |
 | Permission changes | ✓ Tested | P03/P04: grant/revoke cycles |
-| Cold launch | ✓ Tested | P07 cold launch 4.961 s latency (post-save handoff, not UI-ready) |
-| Warm launch | ✓ Tested | P07 warm launch with re-listed identifiers |
+| Cold launch | ✗ Unmet | P07 measured handoff post-save latency (4.961 s), not trigger-to-ready distribution |
+| Warm launch | ✗ Unmet | P07 measured handoff post-save latency, not trigger-to-ready distribution |
 | Locked device capture | ✗ Unmet | P02 measured control entry from already-unlocked device; true locked-capture and locked-data-access not measured |
 | Device lock during processing | ✓ Tested | P03 recording during lock; P11 keychain during lock |
 | Background interruption | ✓ Tested | P03 10 s background; P05 closed-app notification |
@@ -248,10 +244,10 @@ From the evidence matrix:
 - **AC2 (Trigger-to-ready and end-of-input-to-save latencies)**: No measured distributions; estimates and derived values do not satisfy protocol requirements.
 - **Locked-device-capture timing**: Not measured with device physically locked.
 - **Reminder scheduling**: Offline path confirmed (P04); reminder delivery and scheduling workflow not tested.
-- **Device-state resilience**: Many required scenarios (multi-day gap, reboot, time-zone change, low power, focus modes, reinstall) not tested.
+- **Device-state resilience**: Many required scenarios (multi-day gap, time-zone change, low power, focus modes, reinstall, reboot survival after scheduled reminder) not tested; P11 reboot was tested.
 - **Configuration and backend handling**: Single provider (offline); two-backend and capability-mismatch scenarios not tested.
 
-**Evidence is insufficient for M1 feasibility certification.** The collected results demonstrate that offline transcription, local notifications, and keychain separation function as designed on iPhone 16 Pro iOS 26.6.2. However, the absence of latency distributions, locked-device measurements, multi-day resilience tests, and two-provider configuration tests means the task acceptance criteria remain unmet per AC2, AC3, and protocol requirements.
+**Evidence is insufficient for M1 feasibility certification.** The collected results demonstrate that offline transcription, local notifications, and keychain separation function as designed on iPhone 16 Pro iOS 26.6.2. However, the absence of latency distributions, locked-device measurements, multi-day resilience tests, and two-provider configuration tests means the task acceptance criteria remain unmet per Parent AC2 and protocol requirements.
 
 A follow-up trial run or focused completion task is required to:
 1. Measure and report trigger-to-ready and end-of-input-to-save as median/p95/min/max.
