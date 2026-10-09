@@ -113,6 +113,8 @@ const WAIT_SLICE: Duration = Duration::from_millis(25);
 const QUEUE_RETRY_PAUSE: Duration = Duration::from_millis(10);
 const QUEUE_RETRY_LIMIT: u32 = 500;
 /// A native capability run is abandoned before the runner's lease would lapse.
+/// The job runner only runs `interpret` jobs, which the core authorizes under this capability.
+const CAPABILITY_TEXT_INTERPRETATION: &str = "text_interpretation";
 const CAPABILITY_DEADLINE: Duration = Duration::from_secs(240);
 /// Recorded on a provider job put back because the host reported no network.
 const OFFLINE_DEFERRED_REASON: &str = "offline_deferred";
@@ -300,6 +302,7 @@ struct SendCommand<'a> {
     max_response_bytes: u64,
     credential: Option<CredentialJson<'a>>,
     authorized_origins: &'a [String],
+    capability: &'static str,
 }
 
 struct Outgoing<'a> {
@@ -378,6 +381,7 @@ impl HostTransport {
             max_response_bytes,
             credential,
             authorized_origins: &authorized_origins,
+            capability: CAPABILITY_TEXT_INTERPRETATION,
         })
         .map_err(|_| TransportError::Rejected)?;
 
