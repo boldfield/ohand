@@ -5,10 +5,10 @@
 
 use chrono::{DateTime, Duration, Utc};
 use ohand_core::domain::status::{ItemStatus, ProcessingJobStatus, ProcessingState};
-use ohand_core::interpretation::apply::ApplyOutcome;
+use ohand_core::interpretation::apply::{ApplyError, ApplyOutcome};
 use ohand_core::interpretation::dispatch::{
-    AdapterRegistry, DispatchOutcome, InterpretationDispatcher, InterpretationRoute, RetireReason,
-    WaitReason,
+    AdapterRegistry, DispatchError, DispatchOutcome, InterpretationDispatcher, InterpretationRoute,
+    RetireReason, WaitReason,
 };
 use ohand_core::jobs::queue::{claim_job_with_lease, enqueue_job, Job};
 use ohand_core::privacy::routing::{DenialReason, JOB_TYPE_INTERPRET};
@@ -225,9 +225,23 @@ impl Providers {
         cancel: &CancelToken,
         at: DateTime<Utc>,
     ) -> DispatchOutcome {
-        InterpretationDispatcher::new(&self.registry, self.clock.as_ref())
-            .run_job(&mut fixture.db, job, cancel, at)
+        self.try_run(fixture, job, cancel, at)
             .expect("dispatcher runs the job")
+    }
+
+    fn try_run(
+        &self,
+        fixture: &mut Fixture,
+        job: &Job,
+        cancel: &CancelToken,
+        at: DateTime<Utc>,
+    ) -> Result<DispatchOutcome, DispatchError> {
+        InterpretationDispatcher::new(&self.registry, self.clock.as_ref()).run_job(
+            &mut fixture.db,
+            job,
+            cancel,
+            at,
+        )
     }
 }
 
@@ -463,6 +477,42 @@ impl Fixture {
             )
             .optional()
             .unwrap()
+    }
+
+    fn transient_failures(&self, job_id: &str) -> i64 {
+        open(&self.path)
+            .conn()
+            .query_row(
+                "SELECT transient_failure_count FROM jobs WHERE job_id = ?",
+                [job_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    /// A second active item with its own capture, for jobs that must not cross items.
+    fn add_other_item(&self, capture_text: &str) -> String {
+        let other_item_id = Uuid::new_v4().to_string();
+        let other_capture_id = Uuid::new_v4().to_string();
+        self.db
+            .conn()
+            .execute(
+                "INSERT INTO captures (capture_id, text, capture_instant, timezone_id, \
+                 utc_offset_minutes, locale, calendar, item_scope, route_id, entry_locked, created_at) \
+                 VALUES (?, ?, ?, 'UTC', 0, 'en', 'gregorian', 'personal', ?, 0, ?)",
+                rusqlite::params![other_capture_id, capture_text, NOW, ROUTE_ID, NOW],
+            )
+            .unwrap();
+        self.db
+            .conn()
+            .execute(
+                "INSERT INTO items (item_id, capture_id, revision, lifecycle_state, save_state, \
+                 sync_state, processing_state, transcription_state, created_at, updated_at) \
+                 VALUES (?, ?, 0, 'active', 'saved_local', 'not_configured', 'unprocessed', 'not_applicable', ?, ?)",
+                rusqlite::params![other_item_id, other_capture_id, NOW, NOW],
+            )
+            .unwrap();
+        other_item_id
     }
 
     fn stored_proposal_id(&self) -> String {
@@ -994,6 +1044,279 @@ fn a_cancelled_call_requeues_immediately_without_touching_the_item() {
     assert!(providers.calls_to_anthropic().is_empty());
     assert_eq!(fixture.durable(), before);
     assert_eq!(fixture.job_row(&job.job_id).status, "queued");
+}
+
+#[test]
+fn cancellations_do_not_spend_the_transient_retry_budget() {
+    let mut fixture = Fixture::new(FREE_FORM);
+    let profile = anthropic_profile();
+    fixture.set_up_provider(&profile, ANTHROPIC_ORIGIN);
+    let max_attempts = profile.retry_policy().max_attempts;
+    let providers = Providers::anthropic(
+        (0..max_attempts)
+            .map(|_| FakeAnthropicStep::fail(TransportError::Unavailable))
+            .collect(),
+    );
+    let mut job = fixture.enqueue_and_claim(Some(&profile));
+    let cancel = CancelToken::new();
+    cancel.cancel();
+    for _ in 0..2 {
+        let outcome = providers.run_with(&mut fixture, &job, &cancel, now());
+        assert!(
+            matches!(outcome, DispatchOutcome::BackedOff { .. }),
+            "{outcome:?}"
+        );
+        job = fixture.claim(now());
+    }
+    assert!(job.attempt_count > max_attempts as i32 - 1);
+    assert!(providers.calls_to_anthropic().is_empty());
+    assert_eq!(fixture.transient_failures(&job.job_id), 0);
+
+    let mut at = now();
+    for attempt in 1..=max_attempts {
+        let outcome = providers.run(&mut fixture, &job, at);
+        if attempt < max_attempts {
+            let retry_at = match outcome {
+                DispatchOutcome::BackedOff {
+                    reason: WaitReason::Transient(FailureKind::Unavailable),
+                    retry_at,
+                } => retry_at,
+                other => panic!("attempt {attempt}: {other:?}"),
+            };
+            at = retry_at + Duration::seconds(1);
+            job = fixture.claim(at);
+        } else {
+            assert!(
+                matches!(
+                    outcome,
+                    DispatchOutcome::Failed {
+                        outcome: ApplyOutcome::Failed {
+                            processing_state: ProcessingState::Uninterpreted
+                        },
+                        ..
+                    }
+                ),
+                "{outcome:?}"
+            );
+        }
+    }
+
+    assert_eq!(providers.calls_to_anthropic().len(), max_attempts as usize);
+    assert_eq!(
+        fixture.transient_failures(&job.job_id),
+        i64::from(max_attempts)
+    );
+    let row = fixture.job_row(&job.job_id);
+    assert_eq!(row.status, "failed");
+    assert_eq!(row.failure_reason.as_deref(), Some("retries_exhausted"));
+    assert_eq!(fixture.durable().capture_text, FREE_FORM);
+}
+
+#[test]
+fn configuration_waits_do_not_spend_the_transient_retry_budget() {
+    let mut fixture = Fixture::new(FREE_FORM);
+    let profile = anthropic_profile();
+    fixture.install(&profile);
+    let max_attempts = profile.retry_policy().max_attempts;
+    let providers = Providers::anthropic(
+        (0..max_attempts)
+            .map(|_| FakeAnthropicStep::fail(TransportError::Unavailable))
+            .collect(),
+    );
+    let mut job = fixture.enqueue_and_claim(Some(&profile));
+    let mut at = now();
+    for _ in 0..max_attempts {
+        let outcome = providers.run(&mut fixture, &job, at);
+        let retry_at = match outcome {
+            DispatchOutcome::BackedOff {
+                reason: WaitReason::Denied(DenialReason::RouteNotConfigured),
+                retry_at,
+            } => retry_at,
+            other => panic!("{other:?}"),
+        };
+        at = retry_at + Duration::seconds(1);
+        job = fixture.claim(at);
+    }
+    assert!(providers.calls_to_anthropic().is_empty());
+    assert!(job.attempt_count > max_attempts as i32);
+
+    fixture.authorize(&[ANTHROPIC_ORIGIN]);
+    for attempt in 1..=max_attempts {
+        let outcome = providers.run(&mut fixture, &job, at);
+        if attempt < max_attempts {
+            let retry_at = match outcome {
+                DispatchOutcome::BackedOff {
+                    reason: WaitReason::Transient(FailureKind::Unavailable),
+                    retry_at,
+                } => retry_at,
+                other => panic!("attempt {attempt}: {other:?}"),
+            };
+            at = retry_at + Duration::seconds(1);
+            job = fixture.claim(at);
+        } else {
+            assert!(
+                matches!(outcome, DispatchOutcome::Failed { .. }),
+                "{outcome:?}"
+            );
+        }
+    }
+
+    assert_eq!(providers.calls_to_anthropic().len(), max_attempts as usize);
+    let row = fixture.job_row(&job.job_id);
+    assert_eq!(row.status, "failed");
+    assert_eq!(row.failure_reason.as_deref(), Some("retries_exhausted"));
+}
+
+#[test]
+fn a_reclaimed_stale_lease_makes_no_provider_call_and_changes_nothing() {
+    let mut fixture = Fixture::new(FREE_FORM);
+    let profile = anthropic_profile();
+    fixture.set_up_provider(&profile, ANTHROPIC_ORIGIN);
+    let providers = Providers::anthropic(vec![anthropic_reply(annotate_action(
+        FREE_FORM,
+        "call the roofer",
+    ))]);
+    let stale = fixture.enqueue_and_claim(Some(&profile));
+    let later = now() + Duration::seconds(LEASE_SECONDS + 1);
+    let current = fixture.claim(later);
+    assert_eq!(current.job_id, stale.job_id);
+    assert_eq!(current.attempt_count, stale.attempt_count + 1);
+    let before = fixture.durable();
+    let row_before = fixture.job_row(&stale.job_id);
+
+    let result = providers.try_run(&mut fixture, &stale, &CancelToken::new(), later);
+
+    assert!(
+        matches!(
+            result,
+            Err(DispatchError::Apply(ApplyError::StaleLease { .. }))
+        ),
+        "{result:?}"
+    );
+    assert!(providers.calls_to_anthropic().is_empty());
+    assert_eq!(fixture.durable(), before);
+    assert_eq!(fixture.job_row(&stale.job_id), row_before);
+    assert_eq!(fixture.transient_failures(&stale.job_id), 0);
+
+    // The live lease still runs normally.
+    let outcome = providers.run(&mut fixture, &current, later);
+    assert!(
+        matches!(outcome, DispatchOutcome::Interpreted { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(providers.calls_to_anthropic().len(), 1);
+}
+
+#[test]
+fn an_expired_unreclaimed_lease_makes_no_provider_call() {
+    let mut fixture = Fixture::new(FREE_FORM);
+    let profile = anthropic_profile();
+    fixture.set_up_provider(&profile, ANTHROPIC_ORIGIN);
+    let providers = Providers::anthropic(vec![anthropic_reply(annotate_action(
+        FREE_FORM,
+        "call the roofer",
+    ))]);
+    let job = fixture.enqueue_and_claim(Some(&profile));
+    let before = fixture.durable();
+    let row_before = fixture.job_row(&job.job_id);
+
+    let expired = now() + Duration::seconds(LEASE_SECONDS + 1);
+    let result = providers.try_run(&mut fixture, &job, &CancelToken::new(), expired);
+
+    assert!(
+        matches!(
+            result,
+            Err(DispatchError::Apply(ApplyError::StaleLease { .. }))
+        ),
+        "{result:?}"
+    );
+    assert!(providers.calls_to_anthropic().is_empty());
+    assert_eq!(fixture.durable(), before);
+    assert_eq!(fixture.job_row(&job.job_id), row_before);
+}
+
+#[test]
+fn a_job_that_is_not_running_in_durable_state_makes_no_provider_call() {
+    let mut fixture = Fixture::new(FREE_FORM);
+    let profile = anthropic_profile();
+    fixture.set_up_provider(&profile, ANTHROPIC_ORIGIN);
+    let providers = Providers::anthropic(vec![anthropic_reply(annotate_action(
+        FREE_FORM,
+        "call the roofer",
+    ))]);
+    let job = fixture.enqueue_and_claim(Some(&profile));
+    let cancel = CancelToken::new();
+    cancel.cancel();
+    providers.run_with(&mut fixture, &job, &cancel, now());
+    assert_eq!(fixture.job_row(&job.job_id).status, "queued");
+    let before = fixture.durable();
+
+    let result = providers.try_run(&mut fixture, &job, &CancelToken::new(), now());
+
+    assert!(
+        matches!(
+            result,
+            Err(DispatchError::Apply(ApplyError::JobNotRunning { .. }))
+        ),
+        "{result:?}"
+    );
+    assert!(providers.calls_to_anthropic().is_empty());
+    assert_eq!(fixture.durable(), before);
+}
+
+#[test]
+fn a_job_altered_by_the_caller_makes_no_provider_call_and_changes_nothing() {
+    let mut fixture = Fixture::new(FREE_FORM);
+    let profile = anthropic_profile();
+    fixture.set_up_provider(&profile, ANTHROPIC_ORIGIN);
+    let other_item_id = fixture.add_other_item("buy stamps and envelopes");
+    let providers = Providers::anthropic(vec![anthropic_reply(annotate_action(
+        FREE_FORM,
+        "call the roofer",
+    ))]);
+    let job = fixture.enqueue_and_claim(Some(&profile));
+    let before = fixture.durable();
+    let row_before = fixture.job_row(&job.job_id);
+
+    let mut other_item = job.clone();
+    other_item.item_id = other_item_id.clone();
+    let mut other_revision = job.clone();
+    other_revision.source_revision += 1;
+    let mut other_request = job.clone();
+    other_request.request_version = Some("a-different-request".to_string());
+    let mut other_profile = job.clone();
+    other_profile.profile_version = Some(openai_profile().profile_version().to_string());
+    let mut dropped_profile = job.clone();
+    dropped_profile.profile_version = None;
+
+    for (altered, expected_field) in [
+        (other_item, "item_id"),
+        (other_revision, "source_revision"),
+        (other_request, "request_version"),
+        (other_profile, "profile_version"),
+        (dropped_profile, "profile_version"),
+    ] {
+        let result = providers.try_run(&mut fixture, &altered, &CancelToken::new(), now());
+        match result {
+            Err(DispatchError::Apply(ApplyError::JobBindingMismatch { field })) => {
+                assert_eq!(field, expected_field)
+            }
+            other => panic!("{expected_field}: {other:?}"),
+        }
+    }
+
+    assert!(providers.calls_to_anthropic().is_empty());
+    assert_eq!(fixture.durable(), before);
+    assert_eq!(fixture.job_row(&job.job_id), row_before);
+    let other_processing: String = open(&fixture.path)
+        .conn()
+        .query_row(
+            "SELECT processing_state FROM items WHERE item_id = ?",
+            [&other_item_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(other_processing, "unprocessed");
 }
 
 #[test]

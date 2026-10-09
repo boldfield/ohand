@@ -23,12 +23,18 @@
 //! reason) rather than as an interpretation result. Capture saving never waits on this module: it
 //! runs only for an already-saved item and only for a job someone has claimed.
 //!
-//! Retry policy for transient failures comes from the pinned profile's retry policy. While the
-//! job has attempts left the capture stays safe and the item reports `retrying_after_transient`.
-//! When a transient failure happens on the last allowed attempt (`max_attempts` claims, counted by
-//! the job's `attempt_count`) the job ends `failed` with reason `retries_exhausted` through the
-//! I05 rules: the source and any prior result are kept and a first interpretation stays
-//! `uninterpreted`.
+//! Retry policy for transient failures comes from the pinned profile's retry policy and is spent
+//! only by provider calls that failed transiently (a durable per-job counter). While attempts
+//! remain the capture stays safe and the item reports `retrying_after_transient`. The failure that
+//! is the `max_attempts`-th ends the job `failed` with reason `retries_exhausted` through the I05
+//! rules: the source and any prior result are kept and a first interpretation stays
+//! `uninterpreted`. Cancellations, lease reclaims and configuration or source waits do not spend
+//! the budget.
+//!
+//! The caller's `Job` is a claim receipt only. Before the source is read or anything is sent the
+//! dispatcher reloads the durable row and requires the live lease (same attempt, running, not
+//! expired) and agreement on item, revision, request and profile; a stale or altered job fails
+//! with no provider call and no mutation.
 
 mod registry;
 mod source;
@@ -43,7 +49,9 @@ use crate::interpretation::apply::{
 use crate::interpretation::contracts::Proposal;
 use crate::interpretation::fast_path::recognize_with_session_topic;
 use crate::interpretation::instructions::{InterpretationMapping, M1_INSTRUCTION_VERSION};
-use crate::jobs::queue::{fail_job_with_backoff, get_job, Job, JobStatus};
+use crate::jobs::queue::{
+    fail_job_with_backoff, fail_job_with_backoff_in_tx, get_job, Job, JobStatus,
+};
 use crate::privacy::routing::{authorize_job, Authorization, DenialReason, JOB_TYPE_INTERPRET};
 use crate::providers::contracts::{
     dispatch, CancelToken, Clock as ProviderClock, DispatchLimits, ErrorClass, FailureKind,
@@ -170,20 +178,22 @@ impl<'a> InterpretationDispatcher<'a> {
     pub fn run_job(
         &self,
         db: &mut Database,
-        job: &Job,
+        claimed: &Job,
         cancel: &CancelToken,
         now: DateTime<Utc>,
     ) -> Result<DispatchOutcome, DispatchError> {
-        if job.job_type != JOB_TYPE_INTERPRET {
+        if claimed.job_type != JOB_TYPE_INTERPRET {
             return Err(DispatchError::NotAnInterpretationJob {
-                job_type: job.job_type.clone(),
+                job_type: claimed.job_type.clone(),
             });
         }
-        if job.status != JobStatus::Running {
+        if claimed.status != JobStatus::Running {
             return Err(DispatchError::JobNotRunning {
-                status: job.status.as_str(),
+                status: claimed.status.as_str(),
             });
         }
+        let stored = bind_running_job(db, claimed, now)?;
+        let job = &stored;
         let Some(request_version) = job.request_version.as_deref() else {
             return self.record_failure(db, job, ProviderFailure::new(FailureKind::Rejected), now);
         };
@@ -283,18 +293,17 @@ impl<'a> InterpretationDispatcher<'a> {
             },
             Err(failure) => match failure.class {
                 ErrorClass::Transient => {
-                    if retries_exhausted(job, profile.retry_policy()) {
+                    let policy = profile.retry_policy();
+                    if !record_transient_failure(db, job, policy, now, &failure)? {
                         return self.exhausted(db, job, failure, now);
                     }
-                    let backoff = transient_backoff(profile.retry_policy());
-                    self.back_off(
-                        db,
-                        job,
-                        WaitReason::Transient(failure.kind),
-                        failure_kind_name(failure.kind),
-                        backoff,
-                        now,
-                    )
+                    let retry_at = get_job(db, &job.job_id)?
+                        .and_then(|stored| stored.next_attempt_at)
+                        .unwrap_or(now);
+                    Ok(DispatchOutcome::BackedOff {
+                        reason: WaitReason::Transient(failure.kind),
+                        retry_at,
+                    })
                 }
                 ErrorClass::Cancelled => self.back_off(
                     db,
@@ -468,10 +477,120 @@ fn configuration_backoff() -> Backoff {
     }
 }
 
-/// Every claim increments the job's `attempt_count`, so the claim being run is attempt number
-/// `attempt_count`; the pinned policy allows `max_attempts` of them.
-fn retries_exhausted(job: &Job, policy: &RetryPolicy) -> bool {
-    u32::try_from(job.attempt_count).unwrap_or(0) >= policy.max_attempts
+/// Reload the durable job and fence the caller's copy against it before anything is read or sent.
+/// The caller's `Job` is only a claim receipt: the lease must still be the live one (same attempt,
+/// still running, not expired) and every field that selects what is disclosed and to whom must
+/// agree with the stored row. The stored row is what the dispatcher then works from.
+fn bind_running_job(
+    db: &Database,
+    claimed: &Job,
+    now: DateTime<Utc>,
+) -> Result<Job, DispatchError> {
+    let stored = get_job(db, &claimed.job_id)?
+        .ok_or_else(|| ApplyError::JobNotFound(claimed.job_id.clone()))?;
+    if stored.job_type != JOB_TYPE_INTERPRET {
+        return Err(DispatchError::NotAnInterpretationJob {
+            job_type: stored.job_type,
+        });
+    }
+    if stored.status != JobStatus::Running {
+        return Err(ApplyError::JobNotRunning {
+            status: stored.status.as_str(),
+        }
+        .into());
+    }
+    if stored.attempt_count != claimed.attempt_count {
+        return Err(ApplyError::StaleLease {
+            presented: claimed.attempt_count,
+            current: stored.attempt_count,
+        }
+        .into());
+    }
+    let lease_expired = match stored.lease_expires_at {
+        Some(expires_at) => expires_at <= now,
+        None => true,
+    };
+    if lease_expired {
+        return Err(ApplyError::StaleLease {
+            presented: claimed.attempt_count,
+            current: stored.attempt_count,
+        }
+        .into());
+    }
+    let mismatched_field = if stored.item_id != claimed.item_id {
+        Some("item_id")
+    } else if stored.source_revision != claimed.source_revision {
+        Some("source_revision")
+    } else if stored.request_version != claimed.request_version {
+        Some("request_version")
+    } else if stored.profile_version != claimed.profile_version {
+        Some("profile_version")
+    } else {
+        None
+    };
+    if let Some(field) = mismatched_field {
+        return Err(ApplyError::JobBindingMismatch { field }.into());
+    }
+    Ok(stored)
+}
+
+/// Count one transient provider failure against the job's retry budget and, while attempts
+/// remain, re-queue it with the profile's backoff, in one transaction fenced by the lease. Returns
+/// `false` when this failure used the last allowed attempt; nothing is re-queued then and the
+/// caller ends the job through the I05 failure rules.
+///
+/// Only failed provider calls are counted: cancellations, lease reclaims and configuration or
+/// source waits all raise the job's `attempt_count` but never spend the budget.
+fn record_transient_failure(
+    db: &mut Database,
+    job: &Job,
+    policy: &RetryPolicy,
+    now: DateTime<Utc>,
+    failure: &ProviderFailure,
+) -> Result<bool, DispatchError> {
+    let tx = db.immediate_transaction()?;
+    let affected = tx
+        .execute(
+            "UPDATE jobs SET transient_failure_count = transient_failure_count + 1
+              WHERE job_id = ? AND status = ? AND attempt_count = ?",
+            rusqlite::params![&job.job_id, JobStatus::Running.as_str(), job.attempt_count],
+        )
+        .map_err(anyhow::Error::from)?;
+    if affected == 0 {
+        return Err(DispatchError::Apply(ApplyError::StaleLease {
+            presented: job.attempt_count,
+            current: tx
+                .query_row(
+                    "SELECT attempt_count FROM jobs WHERE job_id = ?",
+                    [&job.job_id],
+                    |row| row.get(0),
+                )
+                .map_err(anyhow::Error::from)?,
+        }));
+    }
+    let failures: i64 = tx
+        .query_row(
+            "SELECT transient_failure_count FROM jobs WHERE job_id = ?",
+            [&job.job_id],
+            |row| row.get(0),
+        )
+        .map_err(anyhow::Error::from)?;
+    if u64::try_from(failures).unwrap_or(0) >= u64::from(policy.max_attempts) {
+        tx.commit().map_err(anyhow::Error::from)?;
+        return Ok(false);
+    }
+    let backoff = transient_backoff(policy);
+    fail_job_with_backoff_in_tx(
+        &tx,
+        &job.job_id,
+        failure_kind_name(failure.kind).to_string(),
+        backoff.base_seconds,
+        backoff.max_seconds,
+        now,
+        job.attempt_count,
+    )?;
+    tx.commit().map_err(anyhow::Error::from)?;
+    Ok(true)
 }
 
 fn transient_backoff(policy: &RetryPolicy) -> Backoff {
