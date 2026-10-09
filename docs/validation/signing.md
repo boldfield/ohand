@@ -81,7 +81,8 @@ The `.p12` password and the temporary keychain password are passed to `security`
 These could not be tested on Linux. The October 2026 run confirmed the following:
 
 - ✓ `xcodebuild -exportArchive` accepts an unsigned archive with `method` `debugging` and the manual options above under Xcode 26.6.
-- ✓ A profile placed in `~/Library/Developer/Xcode/UserData/Provisioning Profiles` is found by name-independent UUID lookup during export.
+- ✓ A profile placed in `~/Library/Developer/Xcode/UserData/Provisioning Profiles` is found by name-independent UUID lookup during export on a Mac with stored profiles.
+- ⚠️ UUID lookup on a Mac where Xcode has not yet stored any profile: not exercised. The October 2026 run occurred on a Mac with an Xcode-managed profile already stored (per [m1-external-prerequisites.md](../features/m1-external-prerequisites.md#signed-build-evidence-for-p08b)), so the fresh-Mac case was not observed.
 - ✓ A manually created Development profile satisfies the manual export options.
 - ⚠️ Xcode itself rejects an Xcode-managed profile under manual signing. The tool (sign_probe.py:154-156) refuses `IsXcodeManaged` profiles before calling xcodebuild, so Xcode's own rejection behaviour was not observed.
 - ⚠️ `security list-keychains -d user` parsing: confirmed if a `.p12` was imported, untested if keychain search-list modification was bypassed. The October 2026 record does not indicate whether `OHAND_SIGNING_CERT_PATH` was set, so this remains unconfirmed for now.
@@ -104,4 +105,4 @@ On 2026-10-09, the maintainer successfully built and installed BridgeProbe on a 
 
 **Install validity:** The BridgeProbe install is signed with a Development provisioning profile valid until 2027-10-09T00:08:01Z. A two-week trial must begin before 2027-09-25T00:08:01Z to complete before profile expiry. The trial build (T10) is covered only if signed with this same profile; per [m1-external-prerequisites.md](../features/m1-external-prerequisites.md#signed-build-evidence-for-p08b), that profile is a wildcard App ID with the same certificate and device.
 
-**Renewal:** The profile expires 2027-10-09. With an expiry over a year away, renewal is not planned within the trial window and remains untested.
+**Renewal:** The profile expires 2027-10-09T00:08:01Z. With an expiry approximately one year away at the time of collection, renewal is not planned within the trial window and remains untested.
