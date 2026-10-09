@@ -130,16 +130,14 @@ pub struct OracleReminder {
     pub instant: Option<String>,
     pub timezone_id: Option<String>,
     pub quality: TimeResolutionQuality,
-    #[allow(dead_code)]
-    source_span: OracleSpan,
+    pub source_span: OracleSpan,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OracleTopic {
     pub topic: String,
-    #[allow(dead_code)]
-    source_span: OracleSpan,
+    pub source_span: OracleSpan,
 }
 
 #[derive(Debug, Default, Deserialize)]

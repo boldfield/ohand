@@ -51,7 +51,7 @@ Separate counts, each at two stages, `candidate` (what the interpreter proposed)
 | `false_deadline` | a resolved reminder instant the oracle does not support |
 | `false_completion` | a request to change an existing item, including one the mapping rejected (see below) |
 | `wrong_item_type` | an item type other than the oracle's, or one where the oracle has none (`action` is `false_action` instead) |
-| `unsupported_claim` | any other topic, quality, zone, reminder or request to create another item the oracle lacks, and each item-type evidence span that overlaps none of the oracle's spans |
+| `unsupported_claim` | any other topic, quality, zone, reminder or request to create another item the oracle lacks, each item-type evidence span that overlaps none of the oracle's spans, and reminder or session-topic evidence that overlaps none of the oracle's corresponding span |
 | `missed_intent` | a facet the oracle has that is absent |
 
 Class-level failures are reported per fixture class. Each run carries `by_category`: the same totals (`cases` and the oracle denominators, defects at both stages, abstentions, forbidden hits at both stages) for every fixture category the run covered (`design`, `dates`, `mixed`, `corrections`, `ambiguity`, `broad-intention`, `negation`, `prompt-injection`, `dropped-asr-word`), and the text report prints a `class <name>` block for each. A failure confined to one class therefore shows up in that class and not only in a run-wide count. A class a run did not cover is absent, not zero.
@@ -60,7 +60,7 @@ A reply the instruction mapping refuses because it asks to `update` an existing 
 
 Abstentions are counted apart: `correct`, `wrong_reason` (a different reason variant), `missed` (the oracle abstains and the interpreter does not) and `unexpected`. `forbidden_*` counts forbidden-rule hits per mutation class (`classification`, `reminder`, `session_topic`, `operation`, `lifecycle`, `source_text`). Producer outcomes (`proposed`, `abstained`, `not_handled`, `provider_failure`, `mapping_rejected`) and the guard's verdicts (`applied/<reminder disposition>`, `abstained`, `failed_permanently`, `retry_later`, `duplicate`, `rejected`) are counted too. A reply rejected by the mapping is recorded as an invalid-output failure and is not scored as an interpretation; a provider outage leaves the capture saved and the job retriable, with no defect.
 
-Item-type evidence is checked span by span: every proposed span must overlap one of the oracle's spans, so an unrelated span beside a valid one is reported.
+Item-type evidence is checked span by span: every proposed span must overlap one of the oracle's spans, so an unrelated span beside a valid one is reported. Reminder and session-topic evidence is compared with the oracle's span for that same facet. At the authoritative stage the evidence a stored facet rested on is carried over from the candidate, since the store keeps none.
 
 At the authoritative stage the store holds no resolution quality, so quality is compared only for candidates. Time zones are compared at the authoritative stage only for a reminder that carries an instant; a stored not-scheduled reminder shows the capture's zone for display and schedules nothing.
 

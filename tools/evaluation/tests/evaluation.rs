@@ -666,3 +666,79 @@ fn every_claimed_evidence_span_must_be_supported_not_just_one() {
     );
     assert_eq!(count(fake, DefectKind::UnsupportedClaim, false), 1);
 }
+
+#[test]
+fn unrelated_but_in_bounds_reminder_evidence_is_an_unsupported_claim() {
+    let corpus = corpus();
+    let fixture_id = "design-explicit-reminder";
+    let build = |reminder_phrase: &str| {
+        responses_from(
+            &corpus,
+            vec![scenario(
+                "reminder-evidence",
+                fixture_id,
+                synthetic(),
+                json!({
+                    "operation": { "kind": "annotate" },
+                    "item_type": "action",
+                    "source_spans": [span_of(&corpus, fixture_id, "Remind me Friday at 3 p.m. to call the roofer")],
+                    "reminder_proposal": {
+                        "source_span": span_of(&corpus, fixture_id, reminder_phrase),
+                        "quality": "explicit",
+                        "instant": "2026-10-09T15:00:00-04:00",
+                        "timezone_id": "America/New_York"
+                    }
+                }),
+            )],
+        )
+    };
+
+    let grounded = evaluate(&corpus, Some(&build("Friday at 3 p.m."))).expect("report");
+    let grounded = grounded.run(ExecutionKind::Fake).expect("fake");
+    assert_eq!(count(grounded, DefectKind::UnsupportedClaim, false), 0);
+    assert_eq!(count(grounded, DefectKind::UnsupportedClaim, true), 0);
+
+    let ungrounded = evaluate(&corpus, Some(&build("call the roofer"))).expect("report");
+    let ungrounded = ungrounded.run(ExecutionKind::Fake).expect("fake");
+    assert_eq!(count(ungrounded, DefectKind::UnsupportedClaim, false), 1);
+    // The guard refuses a reminder whose cited phrase states no reminder intent, so nothing
+    // unsupported survives to durable state.
+    assert_eq!(count(ungrounded, DefectKind::UnsupportedClaim, true), 0);
+    assert!(ungrounded.cases[0]
+        .candidate_defects
+        .iter()
+        .any(|defect| defect.detail.contains("reminder evidence")));
+}
+
+#[test]
+fn unrelated_but_in_bounds_session_topic_evidence_is_an_unsupported_claim() {
+    let corpus = corpus();
+    let fixture_id = "design-session-topic";
+    let build = |topic_phrase: &str| {
+        responses_from(
+            &corpus,
+            vec![scenario(
+                "topic-evidence",
+                fixture_id,
+                synthetic(),
+                json!({
+                    "operation": { "kind": "annotate" },
+                    "session_topic_proposal": {
+                        "topic": "therapy",
+                        "source_span": span_of(&corpus, fixture_id, topic_phrase)
+                    }
+                }),
+            )],
+        )
+    };
+
+    let grounded = evaluate(&corpus, Some(&build("therapy"))).expect("report");
+    let grounded = grounded.run(ExecutionKind::Fake).expect("fake");
+    assert_eq!(count(grounded, DefectKind::UnsupportedClaim, false), 0);
+    assert_eq!(count(grounded, DefectKind::UnsupportedClaim, true), 0);
+
+    let ungrounded = evaluate(&corpus, Some(&build("Bring this"))).expect("report");
+    let ungrounded = ungrounded.run(ExecutionKind::Fake).expect("fake");
+    assert_eq!(count(ungrounded, DefectKind::UnsupportedClaim, false), 1);
+    assert_eq!(count(ungrounded, DefectKind::UnsupportedClaim, true), 1);
+}

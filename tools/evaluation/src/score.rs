@@ -12,7 +12,7 @@ use ohand_core::interpretation::contracts::{
 use ohand_core::store::events::ItemType;
 use serde::Serialize;
 
-use crate::corpus::{Expected, FacetBan, Forbidden, ForbiddenOperation, ReminderBan};
+use crate::corpus::{Expected, FacetBan, Forbidden, ForbiddenOperation, OracleSpan, ReminderBan};
 use crate::scratch::AuthoritativeState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -123,6 +123,8 @@ pub struct ReminderView {
     pub quality: Option<TimeResolutionQuality>,
     pub instant: Option<DateTime<Utc>>,
     pub timezone_id: Option<String>,
+    /// The time phrase the candidate cites; the store keeps none.
+    pub evidence: Option<(usize, usize)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -139,6 +141,8 @@ pub struct FacetView {
     pub spans: Vec<(usize, usize)>,
     pub reminder: Option<ReminderView>,
     pub session_topic: Option<String>,
+    /// The evidence the candidate cites for its session topic; the store keeps none.
+    pub session_topic_span: Option<(usize, usize)>,
     pub requested_operation: Option<RequestedOperation>,
 }
 
@@ -175,11 +179,17 @@ impl FacetView {
                         .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
                         .map(|instant| instant.with_timezone(&Utc)),
                     timezone_id: reminder.timezone_id.clone(),
+                    evidence: reminder.source_span.map(|span| (span.start, span.end)),
                 }),
             session_topic: proposal
                 .session_topic_proposal
                 .as_ref()
                 .map(|topic| topic.topic.clone()),
+            session_topic_span: proposal
+                .session_topic_proposal
+                .as_ref()
+                .and_then(|topic| topic.source_span)
+                .map(|span| (span.start, span.end)),
             requested_operation,
         }
     }
@@ -194,10 +204,29 @@ impl FacetView {
                 quality: None,
                 instant: reminder.resolved_instant,
                 timezone_id: reminder.timezone_id.clone(),
+                evidence: None,
             }),
             session_topic: state.session_topic.clone(),
+            session_topic_span: None,
             requested_operation: None,
         }
+    }
+
+    /// Carries the candidate's cited evidence onto durable state for each facet that survived
+    /// the guard, so the evidence a stored claim rested on is assessed like the claim itself.
+    pub fn with_evidence_of(mut self, candidate: &FacetView) -> FacetView {
+        if self.item_type.is_some() {
+            self.spans = candidate.spans.clone();
+        }
+        if let (Some(reminder), Some(candidate_reminder)) =
+            (self.reminder.as_mut(), candidate.reminder.as_ref())
+        {
+            reminder.evidence = candidate_reminder.evidence;
+        }
+        if self.session_topic.is_some() {
+            self.session_topic_span = candidate.session_topic_span;
+        }
+        self
     }
 }
 
@@ -212,6 +241,12 @@ fn expected_instant(expected: &Expected) -> Option<DateTime<Utc>> {
 
 fn normalized_topic(topic: &str) -> String {
     topic.trim().to_lowercase()
+}
+
+fn supported_by(span: (usize, usize), oracle_spans: &[OracleSpan]) -> bool {
+    oracle_spans
+        .iter()
+        .any(|oracle| overlaps(span, (oracle.start, oracle.end)))
 }
 
 fn overlaps(left: (usize, usize), right: (usize, usize)) -> bool {
@@ -270,10 +305,7 @@ pub fn defects_against(
     if view.item_type.is_some() {
         if let Some(oracle_spans) = &expected.source_spans {
             for span in &view.spans {
-                let supported = oracle_spans
-                    .iter()
-                    .any(|oracle| overlaps(*span, (oracle.start, oracle.end)));
-                if !supported {
+                if !supported_by(*span, oracle_spans) {
                     push(
                         DefectKind::UnsupportedClaim,
                         format!(
@@ -304,7 +336,22 @@ pub fn defects_against(
                     "a reminder where the oracle has none".to_string(),
                 );
             } else if let Some(wanted) = wanted {
-                if found.instant.is_none() && wanted_instant.is_some() {
+                let wanted_span = (wanted.source_span.start, wanted.source_span.end);
+                if found
+                    .evidence
+                    .is_some_and(|span| !overlaps(span, wanted_span))
+                {
+                    push(
+                        DefectKind::UnsupportedClaim,
+                        format!(
+                            "reminder evidence {}..{} overlaps not the oracle's {}..{}",
+                            found.evidence.map_or(0, |span| span.0),
+                            found.evidence.map_or(0, |span| span.1),
+                            wanted_span.0,
+                            wanted_span.1
+                        ),
+                    );
+                } else if found.instant.is_none() && wanted_instant.is_some() {
                     push(
                         DefectKind::MissedIntent,
                         "a reminder without the instant the oracle has".to_string(),
@@ -349,6 +396,21 @@ pub fn defects_against(
             DefectKind::UnsupportedClaim,
             format!("session topic {found:?} where the oracle has {wanted:?}"),
         ),
+        (Some(_), Some(_))
+            if view.session_topic_span.is_some_and(|span| {
+                expected
+                    .session_topic_proposal
+                    .as_ref()
+                    .is_some_and(|topic| {
+                        !supported_by(span, std::slice::from_ref(&topic.source_span))
+                    })
+            }) =>
+        {
+            push(
+                DefectKind::UnsupportedClaim,
+                "session-topic evidence overlaps not the oracle's span".to_string(),
+            )
+        }
         (None, Some(_)) if may_miss(&|candidate| candidate.session_topic.is_some()) => push(
             DefectKind::MissedIntent,
             "no session topic; the oracle has one".to_string(),

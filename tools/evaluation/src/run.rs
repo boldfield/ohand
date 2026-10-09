@@ -402,7 +402,10 @@ fn finish_case(
         None,
         abstained || producer != ProducerOutcome::Proposed,
     );
-    let authoritative_view = FacetView::of_state(&state);
+    let authoritative_view = match candidate_view.as_ref() {
+        Some(candidate_view) => FacetView::of_state(&state).with_evidence_of(candidate_view),
+        None => FacetView::of_state(&state),
+    };
     let authoritative_defects = defects_against(
         &fixture.expected,
         &authoritative_view,
