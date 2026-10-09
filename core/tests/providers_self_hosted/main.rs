@@ -39,6 +39,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
+mod live_smoke;
+
 const BASE_URL: &str = "https://spark.tailnet.example:8443/v1";
 const ORIGIN: &str = "https://spark.tailnet.example:8443";
 const CREDENTIAL_REF: &str = "credential-ref/spark-endpoint";
@@ -301,14 +303,23 @@ fn completion(content: &str) -> Vec<u8> {
     .unwrap()
 }
 
+fn envelope_with_message(message: Value) -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "id": "chatcmpl-synthetic",
+        "object": "chat.completion",
+        "choices": [{"index": 0, "message": message, "finish_reason": "stop"}]
+    }))
+    .unwrap()
+}
+
 fn failure_of(result: Result<InterpretationOutput, ProviderFailure>) -> ProviderFailure {
     result.expect_err("expected failure")
 }
 
-// ---- Recorded contract fixtures ----
+// ---- Synthetic contract fixtures (OpenAI chat completion envelope; finish_reason unobserved by V08a) ----
 
 #[test]
-fn recorded_chat_completion_fixture_decodes_into_a_proposal() {
+fn synthetic_chat_completion_fixture_decodes_into_a_proposal() {
     let harness = Harness::new(vec![Step::http(200, FIXTURE_OK)]);
     let output = harness.run().expect("fixture decodes");
     assert_eq!(output.proposal["operation"], json!({"kind": "annotate"}));
@@ -316,7 +327,7 @@ fn recorded_chat_completion_fixture_decodes_into_a_proposal() {
 }
 
 #[test]
-fn recorded_truncated_completion_fixture_is_invalid_output() {
+fn synthetic_truncated_completion_fixture_is_invalid_output() {
     let harness = Harness::new(vec![Step::http(200, FIXTURE_TRUNCATED)]);
     let failure = failure_of(harness.run());
     assert_eq!(failure.kind, FailureKind::InvalidOutput);
@@ -324,7 +335,7 @@ fn recorded_truncated_completion_fixture_is_invalid_output() {
 }
 
 #[test]
-fn recorded_models_fixture_matches_the_listed_models_and_the_probe_artifact() {
+fn synthetic_models_fixture_matches_the_listed_models_and_the_probe_artifact() {
     let fixture: Value = serde_json::from_str(FIXTURE_MODELS).unwrap();
     let fixture_ids: Vec<&str> = fixture["data"]
         .as_array()
@@ -889,6 +900,12 @@ fn malformed_envelopes_and_content_are_invalid_output() {
         completion("not a json object"),
         completion("[1, 2, 3]"),
         completion(""),
+        envelope_with_message(json!({"content": PROPOSAL})),
+        envelope_with_message(json!({"role": null, "content": PROPOSAL})),
+        envelope_with_message(json!({"role": "user", "content": PROPOSAL})),
+        envelope_with_message(json!({"role": "system", "content": PROPOSAL})),
+        envelope_with_message(json!({"role": "tool", "content": PROPOSAL})),
+        envelope_with_message(json!({"role": "Assistant", "content": PROPOSAL})),
     ];
     for body in bodies {
         let harness = Harness::new(vec![Step::http(200, body)]);

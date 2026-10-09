@@ -173,6 +173,8 @@ struct Choice {
 
 #[derive(Debug, Clone, Deserialize)]
 struct ChoiceMessage {
+    #[serde(default)]
+    role: Option<String>,
     content: Option<String>,
     #[serde(default)]
     refusal: Option<String>,
@@ -272,6 +274,10 @@ fn decode_response(status: u16, response_bytes: &[u8]) -> Result<Vec<u8>, Transp
         .next()
         .ok_or(TransportError::InvalidOutput)?;
 
+    // V08a classifies any message that is not an assistant message as incompatible.
+    if choice.message.role.as_deref() != Some("assistant") {
+        return Err(TransportError::InvalidOutput);
+    }
     if choice.message.refusal.is_some() || choice.finish_reason.as_deref() == Some("content_filter")
     {
         return Err(TransportError::Rejected);
