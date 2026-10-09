@@ -2033,7 +2033,8 @@
       "S03",
       "L03b",
       "L04b",
-      "J03"
+      "J03",
+      "N02"
     ],
     "B03": [
       "B02"
@@ -2268,6 +2269,10 @@
     {
       "date": "2026-10-09",
       "change": "Standing native-boundary allowance: a task whose acceptance needs an unexported core operation may add one task-named module under core/src/ffi/ (+ pub mod line) and one extension file under ios/OhAndCoreBridge/. V05b may also give OhAndServices the core search-path/link settings once. Real-core simulator tests may seed routes/profiles/jobs by SQL until U05 exposes creation."
+    },
+    {
+      "date": "2026-10-09",
+      "change": "B02 also depends on N02: its composition test must observe a scheduler request through the real native notification bridge, which did not exist when B02 was claimed."
     }
   ]
 }
