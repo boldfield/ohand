@@ -12,7 +12,7 @@ final class VoiceRecordingEndTests: VoiceCaptureTestCase {
     private func savedSummary() throws -> VoiceRecordingSummary {
         guard case .saved(let summary, _) = try lastOutcome() else {
             XCTFail("expected saved, got \(String(describing: outcomes.last))")
-            throw XCTSkip("not saved")
+            throw UnexpectedOutcomeError.notSaved
         }
         return summary
     }

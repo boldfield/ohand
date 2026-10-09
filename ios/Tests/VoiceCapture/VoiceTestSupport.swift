@@ -168,6 +168,8 @@ final class IngressVoiceHandoff: VoiceRecordingHandoffReceiving {
     }
 }
 
+enum UnexpectedOutcomeError: Error { case startSucceeded, notSaved }
+
 /// A protected storage tree, a scripted ingress importer behind the real ingress service, and a recording controller
 /// wired to a synthetic engine, a private notification center and a manual poller.
 class VoiceCaptureTestCase: IngressStorageTestCase {
@@ -254,7 +256,9 @@ class VoiceCaptureTestCase: IngressStorageTestCase {
         var result: Result<VoiceRecordingStarted, VoiceStartFailure>?
         controller.start { result = $0 }
         switch try XCTUnwrap(result, "start did not complete") {
-        case .success: throw XCTSkip("start unexpectedly succeeded")
+        case .success:
+            XCTFail("start unexpectedly succeeded")
+            throw UnexpectedOutcomeError.startSucceeded
         case .failure(let failure): return failure
         }
     }
@@ -279,15 +283,6 @@ class VoiceCaptureTestCase: IngressStorageTestCase {
 
     func lastOutcome() throws -> VoiceCaptureOutcome {
         try XCTUnwrap(outcomes.last, "no outcome was delivered")
-    }
-
-    func summary(of outcome: VoiceCaptureOutcome) throws -> VoiceRecordingSummary {
-        switch outcome {
-        case .saved(let summary, _), .keptForRetry(let summary, _), .retainedUnsubmitted(let summary), .itemDeleted(let summary):
-            return summary
-        case .unrecoverable:
-            throw XCTSkip("outcome has no summary: \(outcome)")
-        }
     }
 
     func recordingFile(_ captureID: String) -> URL { inProgressAudioURL("\(captureID).wav") }
