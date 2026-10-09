@@ -76,6 +76,7 @@ final class ForegroundIngressServiceTests: IngressStorageTestCase {
         XCTAssertTrue(exists(recordURL("capture-1")))
 
         failingFileSystem.failing = []
+        importer.onImport = nil
         importer.results = [FakeForegroundIngressImporter.confirmation("capture-1", already: true)]
         let report = recover(service)
         XCTAssertEqual(importer.importedRecords.count, 2, "the leftover record is re-imported, which is idempotent")
