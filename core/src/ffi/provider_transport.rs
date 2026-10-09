@@ -11,7 +11,8 @@
 //! The exchange runs off the core worker thread, so a slow provider cannot stall capture saves.
 //!
 //! * `ohand_core_set_provider_transport` registers the native transport callback for a handle
-//!   (null clears it). The callback runs on an exchange thread, never on the worker, and must
+//!   (null clears it; a null callback with a non-null context clears it only if that context is
+//!   still the registered one, so a stale registrant cannot remove its replacement). The callback runs on an exchange thread, never on the worker, and must
 //!   return promptly (start the request and return). Clearing or replacing the callback waits
 //!   for a running invocation, cancels the handle's in-flight exchanges, and must not be called
 //!   from inside the callback itself.
@@ -800,7 +801,9 @@ fn start_exchange_job(
 }
 
 /// Registers `callback` with `context` as the native provider transport of `handle`, replacing
-/// any previous registration; a null `callback` clears it. Either way the handle's running
+/// any previous registration; a null `callback` clears it. A null `callback` with a non-null
+/// `context` clears only if that context is still the registered one and otherwise does nothing,
+/// so a superseded registrant can release itself without removing its replacement. Either way the handle's running
 /// exchanges are cancelled and a running invocation is waited for, so the previous context is
 /// unused once this returns. Clearing is allowed for a handle that has been closed.
 #[no_mangle]
@@ -820,7 +823,18 @@ pub extern "C" fn ohand_core_set_provider_transport(
                 });
                 lock(&TRANSPORTS).insert(handle, registration)
             }
-            None => lock(&TRANSPORTS).remove(&handle),
+            None => {
+                let mut transports = lock(&TRANSPORTS);
+                let still_current = context.is_null()
+                    || transports
+                        .get(&handle)
+                        .is_some_and(|current| current.context == context as usize);
+                if still_current {
+                    transports.remove(&handle)
+                } else {
+                    None
+                }
+            }
         };
         if let Some(previous) = previous {
             cancel_exchanges_of(handle);

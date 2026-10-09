@@ -135,7 +135,8 @@ public final class ProviderTransportRegistration: @unchecked Sendable {
     }
 
     /// Unregisters the handler, cancelling the handle's running exchanges, and releases the registration's
-    /// retained context. Idempotent. After it returns the handler is never invoked again.
+    /// retained context. Idempotent. After it returns the handler is never invoked again. A registration that a
+    /// later `registerProviderTransport` replaced only releases itself and leaves the replacement active.
     public func invalidate() {
         stateLock.lock()
         guard !isInvalidated else {
@@ -145,7 +146,8 @@ public final class ProviderTransportRegistration: @unchecked Sendable {
         isInvalidated = true
         stateLock.unlock()
 
-        _ = try? consumeCoreResult(ohand_core_set_provider_transport(handleIdentifier, nil, nil))
+        let ownContext = Unmanaged.passUnretained(self).toOpaque()
+        _ = try? consumeCoreResult(ohand_core_set_provider_transport(handleIdentifier, nil, ownContext))
         Unmanaged.passUnretained(self).release()
     }
 }

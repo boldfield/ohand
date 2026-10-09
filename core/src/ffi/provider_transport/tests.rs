@@ -265,6 +265,15 @@ impl Session {
         assert_eq!(outcome.status, OHAND_CORE_STATUS_OK);
     }
 
+    fn clear_native_if_current(&self, context: *mut c_void) {
+        let outcome = consume(ohand_core_set_provider_transport(
+            self.handle,
+            None,
+            context,
+        ));
+        assert_eq!(outcome.status, OHAND_CORE_STATUS_OK);
+    }
+
     fn clear_native(&self) {
         let outcome = consume(ohand_core_set_provider_transport(
             self.handle,
@@ -792,6 +801,43 @@ fn clearing_the_transport_cancels_running_exchanges() {
     wait_until_idle(session.handle);
 
     assert_eq!(session.start(92, JOB_ID).code(), "transport_not_registered");
+    session.close();
+}
+
+#[test]
+fn clearing_a_replaced_registration_by_context_leaves_the_replacement_active() {
+    let _guard = serial();
+    let session = Session::open("replaced", &Scenario::anthropic());
+    session.register_native();
+    let first_context = &*session.native_context as *const NativeSide as *mut c_void;
+
+    let (sender, replacement_commands) = std::sync::mpsc::channel();
+    let replacement = Box::new(NativeSide {
+        sender: Mutex::new(sender),
+    });
+    let replacement_context = &*replacement as *const NativeSide as *mut c_void;
+    let registered = consume(ohand_core_set_provider_transport(
+        session.handle,
+        Some(record_command),
+        replacement_context,
+    ));
+    assert_eq!(registered.status, OHAND_CORE_STATUS_OK);
+
+    session.clear_native_if_current(first_context);
+
+    assert_eq!(session.start(95, JOB_ID).status, OHAND_CORE_STATUS_OK);
+    session.event(95);
+    let command = replacement_commands
+        .recv_timeout(WAIT)
+        .expect("the replacement still receives commands");
+    assert_eq!(command.operation_id, 95);
+    session.assert_no_command();
+
+    session.clear_native_if_current(replacement_context);
+    let (status, _, class) = failure_of(&session.event(95));
+    assert_eq!((status, class.as_str()), (4, "cancelled"));
+    wait_until_idle(session.handle);
+    assert_eq!(session.start(96, JOB_ID).code(), "transport_not_registered");
     session.close();
 }
 

@@ -249,6 +249,24 @@ final class ProviderExchangeBoundaryTests: ProviderTransportTestCase {
             "only the dispatched event arrived; the closed core delivers nothing further")
     }
 
+    func testInvalidatingASupersededRegistrationLeavesTheReplacementActive() throws {
+        let reply = try anthropicReply()
+        let server = try startServer { _ in .complete(status: 200, headers: ["Content-Type": "application/json"], body: reply) }
+        let reference = try storeSecret()
+        let (session, originalSender) = try openSession(
+            server: server, scenario: ProviderExchangeScenario(credentialReference: reference))
+        let replacementSender = FixtureRoutingSender(underlying: transport, fixtureServer: server)
+
+        try session.replaceTransportThenShutDownTheOldCoordinator(sender: replacementSender)
+
+        let operationID = try session.startExchange()
+        let final = try XCTUnwrap(session.finalEvent(for: operationID))
+        XCTAssertNil(failure(of: final), "the replacement transport still serves exchanges")
+        XCTAssertEqual(try final.decode(ProviderExchangeEvent.self).phase, .completed)
+        XCTAssertEqual(replacementSender.requestsFromCore.count, 1)
+        XCTAssertTrue(originalSender.requestsFromCore.isEmpty, "the superseded transport is never used")
+    }
+
     // MARK: response and error mapping
 
     func testProviderHTTPStatusesKeepTheExistingErrorContract() throws {

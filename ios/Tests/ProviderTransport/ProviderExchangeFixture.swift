@@ -172,7 +172,7 @@ final class FixtureRoutingSender: ProviderRequestSender {
 /// XCTest runs synchronous tests, so waiting pumps the run loop.
 final class ProviderExchangeSession {
     let core: CoreHandle
-    private let coordinator: ProviderExchangeCoordinator
+    private var coordinator: ProviderExchangeCoordinator
     private(set) var events: [CoreEvent] = []
     private var nextOperationID: UInt64 = 1
     private var isClosed = false
@@ -184,6 +184,14 @@ final class ProviderExchangeSession {
             XCTAssertTrue(Thread.isMainThread, "events are delivered on the main thread")
             self.events.append(event)
         }
+    }
+
+    /// Attaches a second coordinator, which replaces the first as the core's transport, then shuts the first down
+    /// so its registration is invalidated after having been superseded.
+    func replaceTransportThenShutDownTheOldCoordinator(sender: ProviderRequestSender) throws {
+        let superseded = coordinator
+        coordinator = try ProviderExchangeCoordinator.attach(to: core, sender: sender)
+        superseded.shutDown()
     }
 
     func startExchange(jobID: String = ProviderExchangeScenario.jobID) throws -> UInt64 {
