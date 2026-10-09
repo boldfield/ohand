@@ -128,7 +128,7 @@ final class NotificationCoreIntegrationTests: XCTestCase {
             "INSERT INTO reminders (reminder_id, item_id, request_state, schedule_state, delivery_state, "
                 + "acknowledgment_state, resolved_instant, timezone_id, schedule_generation, created_at, updated_at) "
                 + "VALUES ('\(reminderID)', '\(itemID)', 'resolved', 'pending_schedule', 'unknown', "
-                + "'not_acknowledged', '2027-01-15T08:00:00Z', 'UTC', 2, '2026-10-08T09:30:02Z', "
+                + "'not_acknowledged', '2027-02-14T08:00:00Z', 'UTC', 2, '2026-10-08T09:30:02Z', "
                 + "'2026-10-08T09:30:02Z')",
         ])
     }
@@ -191,7 +191,7 @@ final class NotificationCoreIntegrationTests: XCTestCase {
             removalPollInterval: 0
         )
 
-        let due = try XCTUnwrap(ISO8601DateFormatter().date(from: "2027-01-15T08:00:00Z"))
+        let due = try XCTUnwrap(ISO8601DateFormatter().date(from: "2027-02-14T08:00:00Z"))
         let scheduleRequest = NotificationScheduleRequest.generic(
             identifier: notificationID, dueInstant: due, opaqueTargetID: coreItemID)
         let installed = try runAsync { try await bridge.schedule(scheduleRequest) }
