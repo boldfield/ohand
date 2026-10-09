@@ -13,6 +13,8 @@ final class FakeNotificationCenter: NotificationCenterProviding, @unchecked Send
     var addError: Error?
     var pendingReadError: Error?
     var retainsAddedRequests = true
+    /// Report due instants at whole seconds, as the real center's calendar trigger does.
+    var reportsWholeSecondDueInstants = false
     /// Polls of the pending list a removed request stays visible for.
     var removalDelayPolls = 0
     var delivered: [NotificationCenterDeliveredNotification] = []
@@ -49,10 +51,13 @@ final class FakeNotificationCenter: NotificationCenterProviding, @unchecked Send
                 removalCountdown[identifier] = remaining - 1
             }
         }
+        let reportsWholeSeconds = reportsWholeSecondDueInstants
         return pending.values.map { request in
             NotificationCenterPendingRequest(
                 identifier: request.identifier,
-                dueInstant: request.dueInstant,
+                dueInstant: reportsWholeSeconds
+                    ? Date(timeIntervalSince1970: request.dueInstant.timeIntervalSince1970.rounded(.down))
+                    : request.dueInstant,
                 userInfo: request.content.userInfo
             )
         }

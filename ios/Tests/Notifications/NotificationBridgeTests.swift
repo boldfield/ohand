@@ -133,6 +133,44 @@ final class NotificationBridgeTests: XCTestCase {
         await assertFailure(.installNotConfirmed, .transient) { _ = try await self.bridge.schedule(request) }
     }
 
+    func testAReplacementTheCenterAcceptsButDoesNotKeepFailsAndLeavesTheEarlierRequestPending() async throws {
+        _ = try await bridge.schedule(genericRequest(dueIn: 3600))
+        center.retainsAddedRequests = false
+
+        let replacement = try genericRequest(dueIn: 7200)
+        await assertFailure(.installNotConfirmed, .transient) { _ = try await self.bridge.schedule(replacement) }
+        await bridge.settleAbandonedWork()
+
+        XCTAssertEqual(center.pendingIdentifiers, ["reminder-1#1"])
+        let pending = try await bridge.pendingNotifications()
+        XCTAssertEqual(pending.count, 1)
+        XCTAssertEqual(pending.first?.dueInstant, currentTime.addingTimeInterval(3600))
+        XCTAssertEqual(center.addedRequests.count, 2, "the earlier request is still there, so nothing is written again")
+        XCTAssertEqual(bridge.unreconciledIdentifiers, [])
+    }
+
+    func testAReplacementWithAnotherTargetTheCenterDoesNotKeepIsNotReportedInstalled() async throws {
+        _ = try await bridge.schedule(genericRequest(item: "item-1"))
+        center.retainsAddedRequests = false
+
+        let replacement = try genericRequest(item: "item-2")
+        await assertFailure(.installNotConfirmed, .transient) { _ = try await self.bridge.schedule(replacement) }
+        await bridge.settleAbandonedWork()
+
+        let pending = try await bridge.pendingNotifications()
+        XCTAssertEqual(pending.map(\.opaqueTargetID?.rawValue), ["item-1"])
+        XCTAssertEqual(bridge.unreconciledIdentifiers, [])
+    }
+
+    func testAnInstallTheCenterReportsAtWholeSecondsIsConfirmed() async throws {
+        center.reportsWholeSecondDueInstants = true
+        let installed = try await bridge.schedule(genericRequest(dueIn: 3600.75))
+
+        XCTAssertEqual(installed.dueInstant, currentTime.addingTimeInterval(3600))
+        XCTAssertEqual(center.pendingIdentifiers, ["reminder-1#1"])
+        XCTAssertEqual(bridge.unreconciledIdentifiers, [])
+    }
+
     func testCenterFailuresAreNormalizedWithoutTheirText() async throws {
         struct LeakyError: Error, CustomStringConvertible {
             var description: String { "token=sk-synthetic-credential-0000 body=synthetic-canary roof deposit" }

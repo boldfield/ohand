@@ -56,7 +56,9 @@ public final class NotificationBridge: Sendable {
     }
 
     /// Installs the request, replacing any pending request with the same identifier, and returns
-    /// what the OS reports pending afterwards.
+    /// what the OS reports pending afterwards. The install is confirmed only when the OS lists
+    /// this request, with its due instant and payload, under the identifier; an earlier request
+    /// still listed there is not confirmation.
     public func schedule(_ request: NotificationScheduleRequest) async throws -> InstalledNotification {
         do {
             let content = try Self.content(for: request)
@@ -101,7 +103,13 @@ public final class NotificationBridge: Sendable {
                     self.enforceInBackground(identifier)
                     throw error
                 }
-                guard let installed = pending.first(where: { $0.identifier == identifier }) else {
+                // Only the request that was asked for counts as installed. A pending request that
+                // merely shares the identifier is an earlier one the OS kept when it accepted
+                // this add without applying it, so reporting it would confirm a replacement that
+                // never happened and leave the OS firing at the earlier instant.
+                guard let installed = pending.first(where: { $0.identifier == identifier }),
+                      Self.matches(installed, centerRequest)
+                else {
                     // The OS accepted the add without keeping it. The caller is told this
                     // schedule failed, so the earlier state is wanted again.
                     self.ledger.setDesired(identifier, stateBeforeAttempt)
@@ -347,8 +355,17 @@ public final class NotificationBridge: Sendable {
         error is CancellationError || (error as? NotificationBridgeError) == .timedOut
     }
 
+    /// Whether the OS lists `request` itself under its identifier: the same payload, due at the
+    /// same instant. Instants compare at whole seconds, because the calendar trigger the real
+    /// center installs carries no finer precision and reports the instant it kept.
     private static func matches(_ pending: NotificationCenterPendingRequest, _ request: NotificationCenterRequest) -> Bool {
-        pending.dueInstant == request.dueInstant && pending.userInfo == request.content.userInfo
+        guard let pendingDue = pending.dueInstant else { return false }
+        return wholeSecond(pendingDue) == wholeSecond(request.dueInstant)
+            && pending.userInfo == request.content.userInfo
+    }
+
+    private static func wholeSecond(_ instant: Date) -> Date {
+        Date(timeIntervalSince1970: instant.timeIntervalSince1970.rounded(.down))
     }
 
     /// What a schedule or cancel puts back if it fails: the state the bridge last recorded for the
