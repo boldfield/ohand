@@ -47,6 +47,20 @@ final class PrivateReadCoreIntegrationTests: XCTestCase {
         )
     }
 
+    /// Adapts the real core handle to the gate's read-verb protocol, as app assembly does.
+    private final class CoreHandleReadSource: PrivateReadSource {
+        private let core: CoreHandle
+        init(core: CoreHandle) { self.core = core }
+
+        func startGetCapture(operationID: UInt64, captureID: String) throws {
+            try core.startGetCapture(operationID: operationID, captureID: captureID)
+        }
+
+        func startItemStatus(operationID: UInt64, itemID: String) throws {
+            try core.startItemStatus(operationID: operationID, itemID: itemID)
+        }
+    }
+
     /// One app launch: a real core, a fresh (capture-only) session and the gate in front of the core's read verbs.
     private final class Launch {
         let core: CoreHandle
@@ -59,7 +73,7 @@ final class PrivateReadCoreIntegrationTests: XCTestCase {
         init(path: String) throws {
             core = try CoreHandle(path: path)
             session = ReadAuthenticationSession(boundary: boundary)
-            gate = PrivateReadGate(session: session, source: core)
+            gate = PrivateReadGate(session: session, source: CoreHandleReadSource(core: core))
             try core.setEventHandler { [unowned self] event in
                 self.events.append(event)
             }
@@ -98,7 +112,9 @@ final class PrivateReadCoreIntegrationTests: XCTestCase {
         }
 
         func readCapture(_ captureID: String) throws -> CaptureRecord {
-            try gate.admit(startGatedCaptureRead(captureID)).decode(CaptureReadout.self).capture
+            let event = try startGatedCaptureRead(captureID)
+            try gate.admit(operationID: event.operationID)
+            return try event.decode(CaptureReadout.self).capture
         }
     }
 
@@ -166,10 +182,10 @@ final class PrivateReadCoreIntegrationTests: XCTestCase {
         launch.session.relock(.enteredBackground)
         let lateEvent = try launch.waitForEvent(operationID)
 
-        XCTAssertThrowsError(try launch.gate.admit(lateEvent)) { error in
+        XCTAssertThrowsError(try launch.gate.admit(operationID: lateEvent.operationID)) { error in
             XCTAssertEqual(error as? PrivateReadDenied, .relockedBeforeDelivery)
         }
-        XCTAssertThrowsError(try launch.gate.admit(lateEvent), "an answer is admitted at most once") { error in
+        XCTAssertThrowsError(try launch.gate.admit(operationID: lateEvent.operationID), "an answer is admitted at most once") { error in
             XCTAssertEqual(error as? PrivateReadDenied, .notAGatedRead)
         }
 

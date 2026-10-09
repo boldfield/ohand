@@ -1,5 +1,4 @@
 import Foundation
-import OhAndCoreBridge
 
 /// Why a private read was refused. Content-free by construction: it never reports whether the requested record exists.
 enum PrivateReadDenied: Error, Equatable {
@@ -12,19 +11,18 @@ enum PrivateReadDenied: Error, Equatable {
 }
 
 /// The core operations that return stored history. Saving a capture is deliberately absent: capture never needs, and
-/// never grants, read access.
+/// never grants, read access. The core handle is adapted to this protocol where the app is assembled, so this module
+/// does not depend on the bridge's C module.
 protocol PrivateReadSource: AnyObject {
     func startGetCapture(operationID: UInt64, captureID: String) throws
     func startItemStatus(operationID: UInt64, itemID: String) throws
 }
 
-extension CoreHandle: PrivateReadSource {}
-
 /// Gates private reads on the session read scope, both when a read starts and when its answer arrives.
 ///
 /// The core answers asynchronously, so checking the scope only at request time would let a read that began while
 /// authenticated deliver stored content after a relock. Callers therefore pass every event for a gated operation
-/// through `admit`, which hands the event back only while the authorization that issued the read is still current.
+/// through `admit`, which approves delivery only while the authorization that issued the read is still current.
 final class PrivateReadGate {
     private let session: ReadAuthenticationSession
     private let source: PrivateReadSource
@@ -48,15 +46,15 @@ final class PrivateReadGate {
         }
     }
 
-    /// Returns `event` only if the read it answers is still authorized; otherwise throws and the payload, success or
-    /// failure, is not exposed to the caller.
-    func admit(_ event: CoreEvent) throws -> CoreEvent {
+    /// Returns normally only if the read that `operationID` answers is still authorized; otherwise throws, and the
+    /// caller must discard the answer, success or failure, without decoding or logging it. Each answer is admitted at
+    /// most once.
+    func admit(operationID: UInt64) throws {
         lock.lock()
-        let authorization = pendingReads.removeValue(forKey: event.operationID)
+        let authorization = pendingReads.removeValue(forKey: operationID)
         lock.unlock()
         guard let authorization else { throw PrivateReadDenied.notAGatedRead }
         guard session.isCurrent(authorization) else { throw PrivateReadDenied.relockedBeforeDelivery }
-        return event
     }
 
     private func issue(operationID: UInt64, _ start: () throws -> Void) throws {
