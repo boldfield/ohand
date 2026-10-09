@@ -389,7 +389,15 @@ impl Session {
     fn authoritative_state(&self) -> Vec<String> {
         let connection = open_connection(&self.path);
         let mut rows = Vec::new();
-        for table in ["items", "proposals", "corrections", "route_authorizations"] {
+        for table in [
+            "items",
+            "proposals",
+            "corrections",
+            "route_authorizations",
+            "reminders",
+            "reminder_commands",
+            "events",
+        ] {
             let mut statement = connection
                 .prepare(&format!("SELECT * FROM {table} ORDER BY 1"))
                 .unwrap();

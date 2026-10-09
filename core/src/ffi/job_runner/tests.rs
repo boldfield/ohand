@@ -382,6 +382,7 @@ fn a_ready_job_is_sent_to_the_pinned_destination_off_the_worker_and_completes() 
     assert_eq!(send["url"], "https://api.anthropic.com/v1/messages");
     assert_eq!(send["method"], "POST");
     assert_eq!(send["authorized_origins"], json!([ANTHROPIC_ORIGIN]));
+    assert_eq!(send["capability"], "text_interpretation");
     assert_eq!(
         send["credential"],
         json!({ "reference": CREDENTIAL_REFERENCE, "header": "x-api-key", "scheme": null })
