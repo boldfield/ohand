@@ -2,23 +2,24 @@
 
 This document transcribes what was observed on the target phone during the two P09 sessions. It adds no measurement of its own. Every result cites a sanitized evidence record committed under `docs/validation/evidence/device-feasibility/`, the build that was installed, and a collection time. It is graded against `docs/features/m1-plan.md#p09`, as stated in the P09 scope amendment in `docs/features/m1-task-refinement.md`.
 
-**Status: not a full certification of the documented probe matrix.** Every category in the first acceptance criterion has device evidence, but a number of documented checks were not run, were not observable, or were deferred. [Unmet checks](#unmet-checks) lists each one precisely. Nothing below should be read as covering them.
+**Status: every pinned P09 criterion has device evidence or a recorded deferral; the documented probe matrix is not certified as complete.** Capture while locked is now closed by a Face-ID-covered lock-screen press (P02). The checks that were not run or not observable are listed in [Unmet checks](#unmet-checks); P09 scope amendments 1 and 2 in `docs/features/m1-task-refinement.md` defer the named ones to U10 and T05, where they remain unmet until observed. Nothing below should be read as covering them.
 
 ## Evidence records
 
 | Short name | Committed file | Collected |
 | --- | --- | --- |
-| `matrix` | `2026-10-09-device-matrix.json` (`device-feasibility-2026-10-09`) | 2026-10-09T17:30:00Z to 2026-10-09T19:12:00Z (as stated in the record) |
+| `matrix` | `2026-10-09-device-matrix.json` (`device-feasibility-2026-10-09`, revision 4; rev 2 to 4 were added on 2026-10-10 and changed no observed value) | 2026-10-09T17:30:00Z to 2026-10-09T19:12:00Z (as stated in the record) |
 | `latency` | `2026-10-10-latency-accessibility.json` (`device-feasibility-2026-10-10-latency-accessibility`) | 2026-10-10T05:18:00Z to 2026-10-10T05:31:00Z |
-| `manifest` | `2026-10-09-private-evidence-manifest.json` | generated 2026-10-10T05:49:30Z |
+| `manifest` | `2026-10-09-private-evidence-manifest.json` | generated 2026-10-10T17:30:00Z |
 
-All three are in `docs/validation/evidence/device-feasibility/`.
+All three are in `docs/validation/evidence/device-feasibility/`. A fourth committed record, `docs/validation/evidence/apple-signing/manual-signing-20261009-probes.json`, covers the signing of three probes.
 
 Only these three JSON files are committed. The screenshots, WAV files, app-container files, logs and screen recordings that the results cite by name are **private** and stay on the maintainer's Mac under `~/.ohand-private-evidence/p09/`. Several show the home or lock screen and must never be published. The `manifest` record is the auditable reference: for every private artifact it lists the relative path, size in bytes, SHA-256, modification time and a `personal` flag. Artifact names below are paths relative to that root, and each appears in the manifest.
 
 Artifact modification times are the finest per-result time available (`manifest.timestamps`: on-device creation time where AirDrop preserved it, otherwise the copy time). Two caveats:
 
 - The eight `audio-probe/recording-*.wav` files have modification times from 2026-10-09T17:11:51Z to 17:40:27Z, and `matrix.collected_at` starts at 17:30:00Z. The record does not explain the difference and it is not reconciled here.
+- The two screenshots added on 2026-10-10 (`capture-probe/p02-02-...-PERSONAL.png`, `audio-probe/p03-02-permission-denied.png`) have modification time 2026-10-10T17:27:57Z, which is the copy time.
 - The `latency/ScreenRecording_*` files carry the copy time (05:32:43Z). Their device-clock start times are in the file names (22-18-54, 22-19-54, 22-20-51 and 22-27-08 America/Los_Angeles, which is 05:18:54Z, 05:19:54Z, 05:20:51Z and 05:27:08Z).
 
 ## Device, OS and builds
@@ -34,15 +35,17 @@ Artifact modification times are the finest per-result time available (`manifest.
 | --- | --- | --- |
 | BridgeProbe | 6ac3d1f8 | `evidence/apple-signing/apple-signing-20261009T000932Z-c2cb6485.json` |
 | AudioProbe | 257343f3 | `evidence/apple-signing/apple-signing-20261009T164701Z-5b3f5c34.json` |
-| TranscriptionProbe | 257343f3 | `evidence/apple-signing/apple-signing-20261009T164718Z-e2dc1dae.json` |
-| NotificationProbe | 257343f3 | `evidence/apple-signing/apple-signing-20261009T164732Z-b11e7a0d.json` |
-| CredentialProbe | 257343f3 | none: `matrix.builds` says "manual archive + export with the development profile; no tooling record" |
-| CaptureProbe (app and control extension) | 257343f3 | none: "manual archive + export; app + control extension; no tooling record" |
-| TauriProbe | 257343f3 | none: "tauri ios build --debug, development route; no tooling record" |
+| TranscriptionProbe | 257343f3 (see caveat) | `evidence/apple-signing/apple-signing-20261009T164718Z-e2dc1dae.json` (`working_tree_clean` false) |
+| NotificationProbe | 257343f3 (see caveat) | `evidence/apple-signing/apple-signing-20261009T164732Z-b11e7a0d.json` (`working_tree_clean` false) |
+| CredentialProbe | 257343f3 | `evidence/apple-signing/manual-signing-20261009-probes.json` (manual, written afterwards) |
+| CaptureProbe (app and control extension) | 257343f3 | same manual record |
+| TauriProbe | 257343f3 | same manual record (`tauri ios build --debug`, development route) |
+
+**Build-identity caveat.** The TranscriptionProbe and NotificationProbe signing records both have `working_tree_clean` false: the archives were built from revision 257343f3 with uncommitted files in the working tree that the tool did not list. Revision 257343f3 therefore does not provably identify what was installed for those two probes (`matrix.builds`). The manual record for the other three probes states `working_tree_clean` as "not recorded", so the same cannot be shown for them either. AudioProbe and BridgeProbe are the only probes whose records state a clean working tree.
 
 The second session (`latency`) reports CaptureProbe, AudioProbe and TauriProbe as the same installs as the first.
 
-Signing behaviour observed: the four tooling records show manual signing, route `development`, export method `debugging`, identity class Apple Development, a device-scoped profile expiring 2027-10-09T00:08:01Z, and a successful install. For the three probes without a tooling record, `manifest.signing_of_probes_without_sign_probe_records` describes the manual procedure used (same development profile, installed with `devicectl`). That description is the maintainer's account; there is no tool-generated record for those three, so their signing is **not** established by a tooling record.
+Signing behaviour observed: the four tooling records show manual signing, route `development`, export method `debugging`, identity class Apple Development, a device-scoped profile expiring 2027-10-09T00:08:01Z, and a successful install. For CredentialProbe, CaptureProbe and TauriProbe the signing tool does not apply. The manual record was produced on 2026-10-10T09:43:01Z by inspecting the exported `.app` bundles (`codesign -dvv` and the embedded profile); it shows the same route, export method, signing style, identity class, profile expiry and one provisioned device, and per-probe procedures and bundle identifiers. It proves what was installed, not what was built from: those three were signed by hand and no record was written at build time, so they have no tool-generated record. `manifest.signing_of_probes_without_sign_probe_records` repeats the procedure.
 
 ## Results by area
 
@@ -51,8 +54,9 @@ Signing behaviour observed: the four tooling records show manual signing, route 
 Build CaptureProbe 257343f3. Doc: `docs/validation/capture-entry.md`.
 
 - **Unlocked, Control Center press to entry.** The first session recorded "about 2 s (maintainer estimate)", which is not a measurement and is superseded by the timed trials in [Latency](#latency).
-- **From the lock screen.** The control was pressed from the lock screen. No Face ID prompt was observed. The app opened showing only the new entry, and the entry reported `Protected data: available`. The record's reading is that the device was already unlocked by the time the app foregrounded, and that passive unlock was not instrumented. The `latency` record adds that locked-device capture cannot be measured by screen recording, because iOS stops the recording when the device locks. Net result: with this entry mechanism the app opened only after unlock; **capture while the device remained locked was not observed**. Artifacts: `capture-probe/p02-01-control-from-lock-screen-entry.png` (2026-10-09T19:09:57Z).
-- **Entry and records.** Entry text `Entry: controlIntent, warm launch; Protected data: available; Result: Saved`. Four control presses produced four distinct records (two cold, two warm), all `protectedDataAvailable` true, with no duplicate `perform()` observed. Artifacts: `capture-probe/container/CaptureProbe/records/*.json` (mtimes 2026-10-09T18:39:50Z to 19:08:41Z in the manifest) and `capture-probe/container/CaptureProbe/last-presented.json`.
+- **From the lock screen, 2026-10-09.** The control was pressed from the lock screen. No Face ID prompt was observed. The app opened showing only the new entry, and the entry reported `Protected data: available`. The record's reading is that the device was already unlocked by the time the app foregrounded; passive unlock was not instrumented. Artifact: `capture-probe/p02-01-control-from-lock-screen-entry.png` (2026-10-09T19:09:57Z).
+- **From the lock screen with the Face ID sensor covered, 2026-10-10 (`matrix` rev 3, `control_from_lock_screen_face_id_covered`).** Same build. The phone was locked, Control Center was opened from the lock screen and the capture control pressed. iOS showed the passcode prompt ("Enter Passcode", Face ID glyph in the Dynamic Island), CaptureProbe did not open and no record was written. Together with the previous run this is the observation that the control entry does not capture while the device is locked: it runs only after an unlock, by passive Face ID or passcode. Artifact: `capture-probe/p02-02-control-from-lock-screen-face-id-covered-PERSONAL.png` (lock-screen UI, never published; 201767 bytes, SHA-256 `3292c608...f3394b`, mtime 2026-10-10T17:27:57Z in the manifest). The `latency` record separately notes that locked-device latency cannot be screen-recorded because iOS stops the recording on lock; since no capture happens while locked, there is no locked trigger-to-ready figure.
+- **Entry and records.** Entry text `Entry: controlIntent, warm launch; Protected data: available; Result: Saved`. Four control presses produced four distinct records, all `protectedDataAvailable` true, with no duplicate `perform()` observed: `41A78519` (cold, 2026-10-09T19:05:15.718Z), `3A88285C` (warm, 19:05:49.893Z), `16FD4C42` (cold, 19:06:12.533Z), `3C52A783` (warm, 19:08:41.970Z), as named in `matrix.sections.P02_capture_entry.records_named`. The same directory also holds five records from the P07 shortcut-URL session (`CB02991B`, `2A507CA9`, `FD79078E`, `0F88724D`, `CCDE605F`, 18:38:51Z to 18:46:56Z), so it contains nine in all, all `protectedDataAvailable` true. Artifacts: `capture-probe/container/CaptureProbe/records/<id>.json` and `capture-probe/container/CaptureProbe/last-presented.json`.
 
 ### Latency
 
@@ -81,17 +85,17 @@ Per-trial values are in `latency.sections.P02_trigger_to_ready.cold_trials` and 
 
 Touch-down to Saved per trial: 0.183, 0.150, 0.150, 0.150, 0.150 s. Release lies between touch-down and the Saved frame, so release-to-durable-save is at most these figures. Artifacts: `latency/ScreenRecording_10-09-2026 22-20-51_1.MP4`, `latency/frames/strip-audio-t1.png`.
 
-**Not measured:** trigger-to-ready for a locked device (see above); a text-capture save latency distinct from the control path (no such measurement exists in either record); trigger-to-ready for voice (the AudioProbe Start button was not timed); trigger-to-ready from the home screen, Action button or Shortcuts.
+**Not measured:** trigger-to-ready for a locked device (the control does not open the app while locked, see P02); a text-capture save latency distinct from the control path (no such measurement exists in either record); trigger-to-ready for voice (the AudioProbe Start button was not timed); trigger-to-ready from the home screen, Action button or Shortcuts.
 
 ### Voice recording, permission and interruptions (P03)
 
-Build AudioProbe 257343f3. Doc: `docs/validation/audio-probe.md`. Record: `matrix.sections.P03_audio`. Files: `audio-probe/recording-*.wav` (eight files, 16 kHz mono Int16, inspected with `afinfo` and a header/RMS script), each listed with size and SHA-256 in the manifest.
+Build AudioProbe 257343f3. Doc: `docs/validation/audio-probe.md`. Record: `matrix.sections.P03_audio`. Files: `audio-probe/recording-*.wav` (eight files, 16 kHz mono Int16, inspected with `afinfo` and a header/RMS script), each listed with size and SHA-256 in the manifest. The artifact for each result is named in `matrix.sections.P03_audio.artifact_by_result`; modification times are from the manifest.
 
 | Check | Observed (as recorded) | Artifact (size from manifest) |
 | --- | --- | --- |
-| Permission granted | "Recording..."; recording saved (3.33 s file) | not individually identified in the record |
-| Permission revoked in Settings, then Start | "Failed to start recording: Microphone permission denied" | not individually identified |
-| Normal stop | Saved, 6.92 s file, size consistent with 32000 B/s, plays | not individually identified |
+| Permission granted | "Recording..."; recording saved (3.33 s file) | `recording-FFA2D1F3-...wav`, 3.335 s, 110804 bytes, 2026-10-09T17:11:51Z |
+| Permission revoked in Settings, then Start | "Failed to start recording: Microphone permission denied"; Duration 0.0 s, no recording file written | `audio-probe/p03-02-permission-denied.png` (screenshot taken 2026-10-10 after revoking the permission again; 157929 bytes, SHA-256 `c0949d60...c7e5`, mtime 2026-10-10T17:27:57Z is the copy time) |
+| Normal stop | Saved, 6.92 s file, plays | `recording-A267F648-...wav`, 6.923 s, 225620 bytes, 2026-10-09T17:18:20Z. The record says the size is consistent with 32000 B/s; 225620 bytes at 32000 B/s is about 7.05 s, so the duration and size in the record do not reconcile exactly and are not reconciled here |
 | Cancel | "Partial: 3.86s, 127732 bytes, Cancelled"; protection class shown; file matches and plays | `recording-A35AC340-...wav`, 127732 bytes, 2026-10-09T17:19:38Z |
 | Interruption | "Partial: 5.86s, 191764 bytes, Audio interrupted"; protection class shown; file matches and plays. The record does not state what caused the interruption | `recording-6E0C20DF-...wav`, 191764 bytes, 2026-10-09T17:22:24Z |
 | 10 s in background | "Recording was not interrupted. Saved: 9.71s, 314676 bytes"; signal present across the span; no `UIBackgroundModes: audio` was needed for 10 s | `recording-795A6E61-...wav`, 314676 bytes, 2026-10-09T17:28:24Z |
@@ -99,7 +103,7 @@ Build AudioProbe 257343f3. Doc: `docs/validation/audio-probe.md`. Record: `matri
 | Upper bound | UI timer kept running past 500 s; Stop reported "Saved: 300.00s, 9604096 bytes"; header consistent | `recording-EA86CCD8-...wav`, 9604096 bytes, 2026-10-09T17:35:27Z |
 | Process death (force-quit while recording) | A WAV exists (54594 bytes) with an unfinalized header (data length 0; 1.58 s of PCM present); `afinfo` duration 0.000, not playable as-is | `recording-AC879EC1-...wav`, 54594 bytes, 2026-10-09T17:40:27Z |
 
-Not tested: low-free-space refusal. Survival of the earlier fixture after microphone permission revoke is covered under P04.
+Not tested: low-free-space refusal (deferred to T05). Survival of the earlier fixture after microphone permission revoke is covered under P04.
 
 ### Offline transcription (P04)
 
@@ -168,27 +172,28 @@ The AfterFirstUnlock classes therefore remain readable while the device is locke
 
 ## Unmet checks
 
-These documented checks have no device evidence, either because they were not run, could not be observed, or were deferred. None is certified.
+These documented checks have no device evidence, either because they were not run, could not be observed, or were deferred. None is certified. P09 scope amendment 2 (`docs/features/m1-task-refinement.md`) defers the items marked T05 or U10 out of P09; they stay unmet until observed there.
 
-1. **Hardware keyboard navigation of the Tauri probe** (`tauri-handoff.md` step 4): not run, no keyboard. Deferred to U10 by the recorded scope amendment.
-2. **Capture while the device stays locked** and **trigger-to-ready for a locked device**: the control opened the app only after passive unlock, and screen recording stops on lock.
-3. **Offline speech with an immediate screen lock, and P04 interruption and cancel**: not observable with the 0.15 to 0.32 s fixture.
-4. **Capture-entry (`capture-entry.md`)**: file write behaviour before first unlock after reboot, including survival of the pending-entry file; behaviour when the system terminates the app between handoff and commit; the Shortcuts or Action-button entry (a shortcut URL warm entry appears in the P07 artifacts but its latency was not measured).
-5. **P03**: low-free-space refusal.
-6. **P04**: whether the earlier fixture survived a permission revoke.
-7. **P05**: Focus and summaries, Low Power Mode, reboot survival of scheduled notifications, time-zone change after scheduling, provisional and ephemeral authorization, reinstall or OS-upgrade survival.
-8. **P07**: whether the Tauri summary announces automatically under VoiceOver.
-9. **P11**: passcode removal.
-10. **Signing**: no tooling record for CredentialProbe, CaptureProbe or TauriProbe.
-11. **Latency**: touch-up is not observable, so all latencies are touch-down upper bounds; voice Start and text-field trigger-to-ready were not timed; sample sizes are 5 or 6 per condition.
+1. **Hardware keyboard navigation of the Tauri probe** (`tauri-handoff.md` step 4): not run, no keyboard. Deferred to U10 (amendment 1).
+2. **Offline speech with an immediate screen lock, and P04 interruption and cancel**: not observable with the 0.15 to 0.32 s fixture. Deferred to T05 (amendment 2).
+3. **Capture-entry (`capture-entry.md`)**: file write behaviour before first unlock after reboot, and behaviour when the system terminates the app between handoff and commit. Deferred to T05 (amendment 2). Also not run and not named in the amendments: the Shortcuts or Action-button entry (a shortcut URL warm entry appears in the P07 records but its latency was not measured).
+4. **P03**: low-free-space refusal. Deferred to T05.
+5. **P04**: whether the earlier fixture survived a permission revoke. Deferred to T05.
+6. **P05**: Focus and summaries, Low Power Mode, reboot survival of scheduled notifications, time-zone change after scheduling, provisional and ephemeral authorization, reinstall or OS-upgrade survival. Deferred to T05.
+7. **P11**: passcode removal. Deferred to T05.
+8. **P07**: whether the Tauri summary announces automatically under VoiceOver. Not exercised and not named in an amendment.
+9. **Build identity**: revision 257343f3 does not provably identify the TranscriptionProbe and NotificationProbe installs (`working_tree_clean` false), and the working-tree state of CredentialProbe, CaptureProbe and TauriProbe was not recorded.
+10. **Latency**: touch-up is not observable, so all latencies are touch-down upper bounds; voice Start and text-field trigger-to-ready were not timed; sample sizes are 5 or 6 per condition.
+
+Closed since the previous revision of this document: capture while the device stays locked (P02, 2026-10-10 passcode prompt); the P03 permission-denied screenshot; named artifacts for every P03 result; the manual signing record for three probes.
 
 ## Acceptance mapping
 
 | Criterion (`m1-plan.md#p09`) | Where recorded | Status |
 | --- | --- | --- |
-| 1. Measured cold/warm/locked/unlocked capture, permission states, interruptions, offline ASR, notifications with UI closed, handoff, accessibility, secure credential behaviour | Capture entry, Latency, P03, P04, P05, P07, Accessibility, P11 | Device evidence exists for each category; gaps are items 1 to 9 above (locked capture and ASR-under-lock in particular) |
-| 2. Trigger-to-ready and end-of-input-to-durable-save measured separately; no simulator or checklist substitution | Latency | Measured on the device for the control path (cold, warm) and voice Stop; locked, voice Start and text field are not measured |
-| 3. Record the precise unmet check and block rather than certify | Unmet checks | Unmet checks are listed; the matrix is not certified |
-| 4. Observed OS build, signing and credential-lock behaviour in sanitized evidence | Device, OS and builds; P11 | OS build 26.6.2 (23G90) observed; tooling records for four probes, none for three |
-| 5. Offline speech and time to transcript on the device, including immediate screen lock; saved audio distinguished from transcription and installed reminders | P04, P05 | Offline transcription and time measured; immediate screen lock not exercised |
-| 6. Every result cites a named sanitized artifact, build/revision and collection time; raw private evidence preserved with an auditable reference | Evidence records, per-section citations | Sections cite artifacts, builds and times; private files are referenced by path, size, SHA-256 and mtime in `manifest`. Items without an individually named artifact are marked as such |
+| 1. Measured cold/warm/locked/unlocked capture, permission states, interruptions, offline ASR, notifications with UI closed, handoff, accessibility, secure credential behaviour | Capture entry, Latency, P03, P04, P05, P07, Accessibility, P11 | Device evidence exists for each category. Locked capture: the control does not capture while locked (P02, two runs). P04 interruption is not observable (item 2); the remaining gaps are items 1 to 8 above, deferred as listed |
+| 2. Trigger-to-ready and end-of-input-to-durable-save measured separately; no simulator or checklist substitution | Latency | Measured on the device for the control path (cold, warm) and voice Stop; a locked trigger-to-ready does not exist because the control does not open the app while locked; voice Start and text field are not timed |
+| 3. Record the precise unmet check and block rather than certify | Unmet checks | Unmet checks are listed with their deferral; the matrix is not certified, and T05, U10 keep the deferred items |
+| 4. Observed OS build, signing and credential-lock behaviour in sanitized evidence | Device, OS and builds; P11 | OS build 26.6.2 (23G90) observed; signing records for all seven probes (four tool-generated, three manual and written afterwards); build identity caveat for two probes |
+| 5. Offline speech and time to transcript on the device, including immediate screen lock; saved audio distinguished from transcription and installed reminders | P04, P05 | Offline transcription and time measured; immediate screen lock not exercised (item 2, deferred to T05) |
+| 6. Every result cites a named sanitized artifact, build/revision and collection time; raw private evidence preserved with an auditable reference | Evidence records, per-section citations | Sections cite artifacts, builds and times; private files are referenced by path, size, SHA-256 and mtime in `manifest`. P05, P07 and P04 cite screenshot ranges (`p0N-01` to `p0N-NN`) in the sections above rather than one file per sentence; each file in the range is in the manifest. Per-result times are file modification times, not instrument timestamps |
