@@ -3,9 +3,9 @@
   "device-feasibility-2026-10-09",
   "device-feasibility-2026-10-10-latency-accessibility"
  ],
- "generated_at": "2026-10-10T05:49:30Z",
+ "generated_at": "2026-10-10T17:30:00Z",
  "root": "~/.ohand-private-evidence/p09/ on the maintainer's Mac (never committed)",
- "purpose": "Auditable reference for every private artifact the two sanitized records cite: relative path, size, SHA-256 and file modification time. A reviewer with access to the Mac can verify each cited file against this list; nobody else needs the files to check that the records cite real, fixed artifacts. Entries marked personal show the maintainer's home or lock screen and are never to be published. Derived working files (per-frame raw dumps and 2 fps caption crops) are excluded; the strips and tiles built from them are included.",
+ "purpose": "Auditable reference for every private artifact the two sanitized records cite: relative path, size, SHA-256 and file modification time. A reviewer with access to the Mac can verify each cited file against this list; nobody else needs the files to check that the records cite real, fixed artifacts. Entries marked personal show the maintainer's home or lock screen and are never to be published. Derived working files (per-frame raw dumps and 2 fps caption crops) are excluded; the strips and tiles built from them are included. Two screenshots taken by the maintainer on 2026-10-10 (lock-screen passcode prompt after a Face-ID-covered control press; AudioProbe 'Microphone permission denied') were added in the matrix's rev 4; their modified_utc is the copy time.",
  "timestamps": "modified_utc is the file's mtime after AirDrop or devicectl copy; for screenshots and screen recordings it is the on-device creation time where AirDrop preserved it, otherwise the copy time. The device clock during both sessions was America/Los_Angeles and is visible in the status bar of every screenshot.",
  "signing_of_probes_without_sign_probe_records": {
   "CredentialProbe": "manual xcodebuild archive (CODE_SIGNING_ALLOWED=NO) then -exportArchive with method debugging, signingStyle manual, Apple Development identity and the same development provisioning profile whose expiry (2027-10-09T00:08:01Z) the four apple-signing-*.json records carry; installed with devicectl. The sign_probe tool only supports Bridge, Audio, Transcription and Notification probes.",
@@ -767,6 +767,20 @@
    "bytes": 419129,
    "sha256": "1a54855e838f5d3b7536217db9a323a8a6a53ae553efb8036800e31c021fad31",
    "modified_utc": "2026-10-09T18:02:11Z",
+   "personal": false
+  },
+  {
+   "path": "capture-probe/p02-02-control-from-lock-screen-face-id-covered-PERSONAL.png",
+   "bytes": 201767,
+   "sha256": "3292c6085efdcaa3ff554d5bba57c1c826eb5502e80272997d3b7ced98f3394b",
+   "modified_utc": "2026-10-10T17:27:57Z",
+   "personal": true
+  },
+  {
+   "path": "audio-probe/p03-02-permission-denied.png",
+   "bytes": 157929,
+   "sha256": "c0949d6c518a52315f7d24530dc96b427f69ce9edffdaba1967634b90fd3c7e5",
+   "modified_utc": "2026-10-10T17:27:57Z",
    "personal": false
   }
  ]
