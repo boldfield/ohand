@@ -59,10 +59,20 @@ pub struct AttachmentRule {
     pub scheme: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CredentialUse {
     pub reference: String,
     pub rule: AttachmentRule,
+}
+
+/// The credential reference names private configuration and is left out.
+impl std::fmt::Debug for CredentialUse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CredentialUse")
+            .field("rule", &self.rule)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone)]

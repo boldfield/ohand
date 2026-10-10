@@ -4,12 +4,14 @@
 //! profile selection never adds to it, and a credential reference is usable only at the origin
 //! it was granted for.
 
+use std::fmt;
+
 use url::Url;
 
 use super::error::HostTransportError;
 
 /// `https://host:port` in canonical form.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct Origin(String);
 
 fn origin_of(url: &Url) -> Origin {
@@ -35,15 +37,26 @@ pub(crate) fn parse_https_url(text: &str) -> Result<Url, HostTransportError> {
     Ok(url)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct Grant {
     origin: Origin,
     credential_reference: Option<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct DestinationPolicy {
     grants: Vec<Grant>,
+}
+
+/// Approved origins and credential references are private configuration, so only the grant
+/// count is shown.
+impl fmt::Debug for DestinationPolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DestinationPolicy")
+            .field("grant_count", &self.grants.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl DestinationPolicy {

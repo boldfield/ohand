@@ -422,6 +422,24 @@ fn failures_and_debug_output_never_contain_secret_values_or_endpoints() {
 }
 
 #[test]
+fn policy_and_credential_debug_output_omit_endpoints_and_references() {
+    let policy = DestinationPolicy::new()
+        .approve_origin("https://open.synthetic.invalid/v1")
+        .unwrap()
+        .approve_credential("https://private.synthetic.invalid:8443/v1", REFERENCE)
+        .unwrap();
+    let rendered = format!("{policy:?}");
+    assert!(!rendered.contains("synthetic.invalid"));
+    assert!(!rendered.contains("8443"));
+    assert!(!rendered.contains(REFERENCE));
+    assert!(rendered.contains("grant_count: 2"));
+
+    let credential = credential_use();
+    let rendered = format!("{credential:?}");
+    assert!(!rendered.contains(REFERENCE));
+}
+
+#[test]
 fn masking_covers_json_escaped_secrets_and_a_prefix_cut_at_the_size_bound() {
     let secret = b"ab\"cd-secret";
     let mut escaped = b"{\"m\":\"ab\\\"cd-secret and ab\"cd-secret\"}".to_vec();
