@@ -2314,7 +2314,7 @@
     },
     {
       "date": "2026-10-10",
-      "change": "P09 scope amendment 4: docs/validation/evidence/device-feasibility/p09-probe-matrix-sweep.json enumerates all 55 device cells the probe docs assign to P09 (observed / deferred / not observable). Newly deferred by name: speech model install path, size and network need (T07 docs, T05 observation); delivered/repeating notifications consuming pending slots (T05); authorization decision changes in Settings with pending requests, clock/date/DST changes (T05); interruption duration against interruption start (T05). Recorded not observable: P11 pre-first-unlock keychain cell; capture-entry write after first unlock while locked. Replaces amendment 3's closing sentence. T05, T07, U10 not lowered."
+      "change": "P09 scope amendment 4: docs/validation/evidence/device-feasibility/p09-probe-matrix-sweep.json enumerates all 54 device cells the probe docs assign to P09 (observed / deferred / not observable). Newly deferred by name: speech model install path, size and network need (T07 docs, T05 observation); delivered/repeating notifications consuming pending slots (T05); authorization decision changes in Settings with pending requests, clock/date/DST changes (T05); interruption duration against interruption start (T05). Recorded not observable: P11 pre-first-unlock keychain cell; capture-entry write after first unlock while locked. Replaces amendment 3's closing sentence. T05, T07, U10 not lowered."
     }
   ]
 }
