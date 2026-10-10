@@ -2311,6 +2311,10 @@
     {
       "date": "2026-10-10",
       "change": "P09 scope amendment 3: Shortcuts/Action-button cold and warm entry latency (capture-entry.md) is deferred to T05; the VoiceOver live-status announcement of the Tauri probe summary (tauri-handoff.md step 5) is deferred to U10; untimed voice Start / text-field trigger-to-ready to T05. Found by PR #151 round 2 as unmet and unnamed. T05 and U10 are not lowered. P09's unmet-checks list is now fully named across amendments 1-3."
+    },
+    {
+      "date": "2026-10-10",
+      "change": "P09 scope amendment 4: docs/validation/evidence/device-feasibility/p09-probe-matrix-sweep.json enumerates all 54 device cells the probe docs assign to P09 (observed / deferred / not observable). Newly deferred by name: speech model install path, size and network need (T07 docs, T05 observation); delivered/repeating notifications consuming pending slots (T05); authorization decision changes in Settings with pending requests, clock/date/DST changes (T05); interruption duration against interruption start (T05). Recorded not observable: P11 pre-first-unlock keychain cell; capture-entry write after first unlock while locked. Replaces amendment 3's closing sentence. T05, T07, U10 not lowered."
     }
   ]
 }

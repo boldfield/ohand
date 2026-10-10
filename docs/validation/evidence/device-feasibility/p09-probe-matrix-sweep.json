@@ -1,0 +1,376 @@
+{
+ "sweep_id": "p09-probe-matrix-sweep",
+ "revision": 1,
+ "task": "P09",
+ "generated": "2026-10-10",
+ "author": "coordinator",
+ "purpose": "The complete enumeration of device cells that the six probe documents assign to P09, each mapped to the record field that observes it, or to the amendment that defers it by name, or marked not observable with the reason. A documented cell missing from this list is a defect in this file to be fixed by adding the cell, not a reason to reject P09 for omission. Records cited: 2026-10-09-device-matrix.json (rev 4) and 2026-10-10-latency-accessibility.json.",
+ "sources": [
+  "docs/validation/audio-probe.md",
+  "docs/validation/transcription-probe.md",
+  "docs/validation/notification-probe.md",
+  "docs/validation/credential-probe.md",
+  "docs/validation/capture-entry.md",
+  "docs/validation/tauri-handoff.md"
+ ],
+ "amendments": "docs/features/m1-task-refinement.md, P09 scope amendments 1 to 4",
+ "counts": {
+  "observed": 33,
+  "deferred": 19,
+  "not_observable": 2
+ },
+ "cells": [
+  {
+   "doc": "docs/validation/audio-probe.md",
+   "item": "1 permission: granted shows Recording..., revoked shows denied text",
+   "status": "observed",
+   "evidence": "2026-10-09-device-matrix.json P03_audio 1_permission; artifact_by_result p03-02-permission-denied.png"
+  },
+  {
+   "doc": "docs/validation/audio-probe.md",
+   "item": "2 normal stop: Saved vs Partial, duration within 0.2 s, size, plays",
+   "status": "observed",
+   "evidence": "2026-10-09-device-matrix.json P03_audio 2_normal_stop"
+  },
+  {
+   "doc": "docs/validation/audio-probe.md",
+   "item": "2 normal stop: how long Stop took",
+   "status": "observed",
+   "evidence": "2026-10-10-latency-accessibility.json P03_end_of_input_to_save (0.15 to 0.183 s touch-down to Saved, n=5)"
+  },
+  {
+   "doc": "docs/validation/audio-probe.md",
+   "item": "3 cancel: Partial ... Cancelled, duration, size, plays",
+   "status": "observed",
+   "evidence": "2026-10-09-device-matrix.json P03_audio 3_cancel"
+  },
+  {
+   "doc": "docs/validation/audio-probe.md",
+   "item": "4 interruption: UI updates immediately to Partial ... Audio interrupted; file plays",
+   "status": "observed",
+   "evidence": "2026-10-09-device-matrix.json P03_audio 4_interruption"
+  },
+  {
+   "doc": "docs/validation/audio-probe.md",
+   "item": "4 interruption: recorded duration against the moment the interruption began",
+   "status": "deferred",
+   "to": "T05",
+   "amendment": 4,
+   "why": "the interruption start was not timed in the 2026-10-09 session"
+  },
+  {
+   "doc": "docs/validation/audio-probe.md",
+   "item": "4 interruption: after it ends nothing resumes and a new Start creates a new file",
+   "status": "observed",
+   "evidence": "2026-10-09-device-matrix.json P03_audio: the interrupted file is exactly 5.86 s and unchanged; steps 5 to 8 were each started afterwards and each produced a distinct recording-<UUID>.wav (artifact_by_result). Observed by file identity, not by a separately recorded real-time check"
+  },
+  {
+   "doc": "docs/validation/audio-probe.md",
+   "item": "5 background 10 s",
+   "status": "observed",
+   "evidence": "2026-10-09-device-matrix.json P03_audio 5_background_10s"
+  },
+  {
+   "doc": "docs/validation/audio-probe.md",
+   "item": "6 lock 10 s, protection class, audio while locked",
+   "status": "observed",
+   "evidence": "2026-10-09-device-matrix.json P03_audio 6_lock_10s"
+  },
+  {
+   "doc": "docs/validation/audio-probe.md",
+   "item": "7 bounds: 300 s auto-stop, final size, Stop result",
+   "status": "observed",
+   "evidence": "2026-10-09-device-matrix.json P03_audio 7_bounds"
+  },
+  {
+   "doc": "docs/validation/audio-probe.md",
+   "item": "7 bounds: refusal text under low free space (below 50 MB)",
+   "status": "deferred",
+   "to": "T05",
+   "amendment": 2
+  },
+  {
+   "doc": "docs/validation/audio-probe.md",
+   "item": "8 process death: WAV exists, playable or not",
+   "status": "observed",
+   "evidence": "2026-10-09-device-matrix.json P03_audio 8_process_death"
+  },
+  {
+   "doc": "docs/validation/transcription-probe.md",
+   "item": "1 snapshot: status for en-US, fr-FR, zz-ZZ before and after permission",
+   "status": "observed",
+   "evidence": "2026-10-09-device-matrix.json P04_transcription 1_snapshot"
+  },
+  {
+   "doc": "docs/validation/transcription-probe.md",
+   "item": "2 offline recognition in airplane mode and with network",
+   "status": "observed",
+   "evidence": "2026-10-09-device-matrix.json P04_transcription 2_offline"
+  },
+  {
+   "doc": "docs/validation/transcription-probe.md",
+   "item": "3 fail-closed with an absent model (fr-FR)",
+   "status": "observed",
+   "evidence": "2026-10-09-device-matrix.json P04_transcription 3_fail_closed"
+  },
+  {
+   "doc": "docs/validation/transcription-probe.md",
+   "item": "4 permission denied then revoked; revocation while backgrounded seen on return",
+   "status": "observed",
+   "evidence": "2026-10-09-device-matrix.json P04_transcription 4_permission_revoked"
+  },
+  {
+   "doc": "docs/validation/transcription-probe.md",
+   "item": "4 permission: the fixture file is still there after revocation",
+   "status": "deferred",
+   "to": "T05",
+   "amendment": 2
+  },
+  {
+   "doc": "docs/validation/transcription-probe.md",
+   "item": "5 timing: duration for at least five runs",
+   "status": "observed",
+   "evidence": "2026-10-09-device-matrix.json P04_transcription 5_timing_seconds (7 runs)"
+  },
+  {
+   "doc": "docs/validation/transcription-probe.md",
+   "item": "6 interruption: lock immediately, then switch apps",
+   "status": "deferred",
+   "to": "T05",
+   "amendment": 2,
+   "why": "not observable: the fixture completes in 0.15 to 0.32 s"
+  },
+  {
+   "doc": "docs/validation/transcription-probe.md",
+   "item": "7 cancel shows Cancelled and nothing replaces it",
+   "status": "deferred",
+   "to": "T05",
+   "amendment": 2,
+   "why": "not observable for the same reason"
+  },
+  {
+   "doc": "docs/validation/transcription-probe.md",
+   "item": "line 68: which languages have an on-device model, how a missing model is installed, its size, whether installation needs network",
+   "status": "deferred",
+   "to": "T07 (documents the install path in the setup docs) and T05 (observes it on the phone)",
+   "amendment": 4,
+   "why": "the M1 trial is en-US and the en-US model was present; the fr-FR install path was not exercised"
+  },
+  {
+   "doc": "docs/validation/notification-probe.md",
+   "item": "delivery with the screen locked and with the app terminated",
+   "status": "observed",
+   "evidence": "2026-10-09-device-matrix.json P05_notifications locked_delivery, closed_app_delivery"
+  },
+  {
+   "doc": "docs/validation/notification-probe.md",
+   "item": "banner and lock-screen presentation the person sees",
+   "status": "observed",
+   "evidence": "2026-10-09-device-matrix.json P05_notifications; private p05-04 and p05-06 screenshots (PERSONAL)"
+  },
+  {
+   "doc": "docs/validation/notification-probe.md",
+   "item": "Focus and scheduled summaries, Low Power Mode, reboot",
+   "status": "deferred",
+   "to": "T05",
+   "amendment": 2
+  },
+  {
+   "doc": "docs/validation/notification-probe.md",
+   "item": "the 64-request retention rule on the target OS",
+   "status": "observed",
+   "evidence": "2026-10-09-device-matrix.json P05_notifications capacity (64 most recently added retained; silent drop)"
+  },
+  {
+   "doc": "docs/validation/notification-probe.md",
+   "item": "provisional and ephemeral authorization and the transitions between states",
+   "status": "deferred",
+   "to": "T05",
+   "amendment": 2
+  },
+  {
+   "doc": "docs/validation/notification-probe.md",
+   "item": "the person changing the authorization decision in Settings while requests are pending",
+   "status": "deferred",
+   "to": "T05",
+   "amendment": 4,
+   "why": "named here because amendment 2 named only provisional and ephemeral authorization"
+  },
+  {
+   "doc": "docs/validation/notification-probe.md",
+   "item": "time-zone change after scheduling (floating and explicit-zone triggers)",
+   "status": "deferred",
+   "to": "T05",
+   "amendment": 2
+  },
+  {
+   "doc": "docs/validation/notification-probe.md",
+   "item": "clock change and date-change or DST behaviour on a device",
+   "status": "deferred",
+   "to": "T05",
+   "amendment": 4,
+   "why": "named here because amendment 2 named only the time-zone change"
+  },
+  {
+   "doc": "docs/validation/notification-probe.md",
+   "item": "whether delivered notifications or repeating triggers count against the pending limit",
+   "status": "deferred",
+   "to": "T05",
+   "amendment": 4,
+   "why": "the probe has no delivered-or-repeating capacity mode; N04a keeps fewer than 64 pending by design, so the answer does not change the M1 contract"
+  },
+  {
+   "doc": "docs/validation/notification-probe.md",
+   "item": "delivery of a pending request across an OS upgrade or a reinstall",
+   "status": "deferred",
+   "to": "T05",
+   "amendment": 2
+  },
+  {
+   "doc": "docs/validation/credential-probe.md",
+   "item": "1 locked retrieval per class and per attempt, EXPIRED line",
+   "status": "observed",
+   "evidence": "2026-10-09-device-matrix.json P11_credentials 1_locked_retrieval (background task expired at 25 s)"
+  },
+  {
+   "doc": "docs/validation/credential-probe.md",
+   "item": "2 unlocked retrieval",
+   "status": "observed",
+   "evidence": "2026-10-09-device-matrix.json P11_credentials 2_unlocked"
+  },
+  {
+   "doc": "docs/validation/credential-probe.md",
+   "item": "3 relaunch after force-quit",
+   "status": "observed",
+   "evidence": "2026-10-09-device-matrix.json P11_credentials 3_relaunch"
+  },
+  {
+   "doc": "docs/validation/credential-probe.md",
+   "item": "4 reboot then first unlock",
+   "status": "observed",
+   "evidence": "2026-10-09-device-matrix.json P11_credentials 4_reboot"
+  },
+  {
+   "doc": "docs/validation/credential-probe.md",
+   "item": "4 retrieval before the first unlock after reboot (the pre-first-unlock cell)",
+   "status": "not_observable",
+   "why": "the probe cannot run before first unlock (credential-probe.md line 106); P09 adds no other mechanism, so the cell is recorded as not observed. V04's lock claim keeps depending on it; Apple's documented semantics are documentation, not evidence",
+   "listed_by_amendment": 4
+  },
+  {
+   "doc": "docs/validation/credential-probe.md",
+   "item": "5 passcode removal",
+   "status": "deferred",
+   "to": "T05",
+   "amendment": 2
+  },
+  {
+   "doc": "docs/validation/capture-entry.md",
+   "item": "Control Center control opens the app cold and warm, with latency",
+   "status": "observed",
+   "evidence": "2026-10-10-latency-accessibility.json P02 cold and warm trials; 2026-10-09-device-matrix.json P02_capture_entry"
+  },
+  {
+   "doc": "docs/validation/capture-entry.md",
+   "item": "Shortcuts or Action-button entry opens the app cold and warm",
+   "status": "observed",
+   "evidence": "2026-10-09-device-matrix.json P02_capture_entry records_named (five shortcutURL records); tauri-handoff/p07-04 screenshot"
+  },
+  {
+   "doc": "docs/validation/capture-entry.md",
+   "item": "Shortcuts or Action-button entry latency, cold and warm",
+   "status": "deferred",
+   "to": "T05",
+   "amendment": 3
+  },
+  {
+   "doc": "docs/validation/capture-entry.md",
+   "item": "control from the lock screen: what authentication the system requires, no earlier captures exposed",
+   "status": "observed",
+   "evidence": "2026-10-09-device-matrix.json P02_capture_entry control_from_lock_screen (passive Face ID unlock, only the new entry shown) and control_from_lock_screen_face_id_covered (passcode prompt, app does not open)"
+  },
+  {
+   "doc": "docs/validation/capture-entry.md",
+   "item": "whether perform() ever runs more than once per press",
+   "status": "observed",
+   "evidence": "2026-10-09-device-matrix.json P02_capture_entry records (four presses, four records)"
+  },
+  {
+   "doc": "docs/validation/capture-entry.md",
+   "item": "file write before first unlock after reboot, and survival of the pending-entry file across a reboot before first unlock",
+   "status": "deferred",
+   "to": "T05",
+   "amendment": 2
+  },
+  {
+   "doc": "docs/validation/capture-entry.md",
+   "item": "file write after first unlock while locked",
+   "status": "not_observable",
+   "why": "this entry path does not run while locked (passcode prompt, 2026-10-10), so the cell cannot be reached through the control; the production app's locked write path is T05's",
+   "listed_by_amendment": 4
+  },
+  {
+   "doc": "docs/validation/capture-entry.md",
+   "item": "file write while unlocked with the chosen protection class",
+   "status": "observed",
+   "evidence": "2026-10-09-device-matrix.json P02_capture_entry entry (Protected data: available; Result: Saved)"
+  },
+  {
+   "doc": "docs/validation/capture-entry.md",
+   "item": "system termination between the handoff and the commit",
+   "status": "deferred",
+   "to": "T05",
+   "amendment": 2
+  },
+  {
+   "doc": "docs/validation/tauri-handoff.md",
+   "item": "1 cold handoff",
+   "status": "observed",
+   "evidence": "2026-10-09-device-matrix.json P07_handoff 1_cold"
+  },
+  {
+   "doc": "docs/validation/tauri-handoff.md",
+   "item": "2 warm handoff",
+   "status": "observed",
+   "evidence": "2026-10-09-device-matrix.json P07_handoff 2_warm"
+  },
+  {
+   "doc": "docs/validation/tauri-handoff.md",
+   "item": "3 hostile route rejected",
+   "status": "observed",
+   "evidence": "2026-10-09-device-matrix.json P07_handoff 3_hostile"
+  },
+  {
+   "doc": "docs/validation/tauri-handoff.md",
+   "item": "4 hardware keyboard navigation",
+   "status": "deferred",
+   "to": "U10",
+   "amendment": 1
+  },
+  {
+   "doc": "docs/validation/tauri-handoff.md",
+   "item": "5 VoiceOver: handoff button announced as a button with its hint; Received captures heading in the rotor; identifiers read in full; summary read",
+   "status": "observed",
+   "evidence": "2026-10-10-latency-accessibility.json P07_accessibility"
+  },
+  {
+   "doc": "docs/validation/tauri-handoff.md",
+   "item": "5 VoiceOver: the summary is a live status (announces automatically when the count changes)",
+   "status": "deferred",
+   "to": "U10",
+   "amendment": 3
+  },
+  {
+   "doc": "docs/validation/tauri-handoff.md",
+   "item": "6 large text in both apps",
+   "status": "observed",
+   "evidence": "2026-10-09-device-matrix.json P07_handoff 6_large_text (CaptureProbe button label overflow recorded as a defect)"
+  },
+  {
+   "doc": "docs/validation/tauri-handoff.md",
+   "item": "7 secret isolation of the handoff file",
+   "status": "observed",
+   "evidence": "2026-10-09-device-matrix.json P07_handoff 7_secret_isolation"
+  }
+ ]
+}
