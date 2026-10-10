@@ -7,6 +7,8 @@
 //! guard to a scratch store, and the report compares both the candidate and the durable state
 //! with the fixture's oracle. See `docs/validation/evaluation-format.md`.
 
+#[path = "../comparison/mod.rs"]
+pub mod comparison;
 pub mod corpus;
 pub mod report;
 pub mod responses;
