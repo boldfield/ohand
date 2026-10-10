@@ -9,8 +9,8 @@ use super::{AnthropicSettings, HttpResponse, INTERPRETATION_TOOL_NAME};
 use crate::interpretation::instructions::render_prompt;
 use crate::providers::contracts::{
     CallObservations, DiagnosticRequest, DiagnosticResponse, DiagnosticSetting,
-    InterpretationRequest, ProviderProfile, SettingValue, StructuredOutputMode, TokenUsage,
-    TransportError,
+    DiagnosticTransportFailure, InterpretationRequest, ProviderProfile, SettingValue,
+    StructuredOutputMode, TokenUsage, TransportError,
 };
 
 /// Schema the `interpret` tool advertises and the extracted input must satisfy. Only a profile
@@ -192,7 +192,9 @@ impl From<DecodedReply> for DiagnosticResponse {
 
 /// Output a decoded-but-unusable reply as an empty body: the shared harness classifies a body
 /// that is not a JSON object as `InvalidOutput`.
-fn invalid_output(observations: Option<CallObservations>) -> Result<DecodedReply, TransportError> {
+fn invalid_output(
+    observations: Option<CallObservations>,
+) -> Result<DecodedReply, DiagnosticTransportFailure> {
     Ok(DecodedReply {
         body: Vec::new(),
         observations,
@@ -205,7 +207,9 @@ pub(super) fn decode_response(
     max_response_bytes: usize,
     schema: &Value,
 ) -> Result<Vec<u8>, TransportError> {
-    decode_reply(response, max_response_bytes, schema).map(|reply| reply.body)
+    decode_reply(response, max_response_bytes, schema)
+        .map(|reply| reply.body)
+        .map_err(|failure| failure.error)
 }
 
 /// Token counts are reported only when the response carries them as non-negative integers; a
@@ -243,21 +247,23 @@ pub(super) fn decode_reply(
     response: &HttpResponse,
     max_response_bytes: usize,
     schema: &Value,
-) -> Result<DecodedReply, TransportError> {
+) -> Result<DecodedReply, DiagnosticTransportFailure> {
     if response.body.len() > max_response_bytes {
         // A non-2xx status is classified from the status alone, without reading the body, so a
         // large gateway error page keeps its retry semantics. Any other oversized body is handed
         // back undecoded so the shared harness applies its size bound before any parsing.
         if !(200..300).contains(&response.status) {
-            return Err(map_status(response.status));
+            return Err(map_status(response.status).into());
         }
         return Ok(DecodedReply::plain(response.body.clone()));
     }
     if let Some(error_type) = error_envelope_type(&response.body) {
-        return Err(map_error_type(&error_type).unwrap_or_else(|| map_status(response.status)));
+        return Err(map_error_type(&error_type)
+            .unwrap_or_else(|| map_status(response.status))
+            .into());
     }
     if !(200..300).contains(&response.status) {
-        return Err(map_status(response.status));
+        return Err(map_status(response.status).into());
     }
     let Ok(envelope) = serde_json::from_slice::<Value>(&response.body) else {
         return invalid_output(None);
@@ -268,7 +274,13 @@ pub(super) fn decode_reply(
     let observations = observe(&envelope);
     match envelope.get("stop_reason").and_then(Value::as_str) {
         Some("tool_use") => {}
-        Some("refusal") => return Err(TransportError::Rejected),
+        // Usage reported on a refusal stays attached to the rejected attempt.
+        Some("refusal") => {
+            return Err(DiagnosticTransportFailure::with_observations(
+                TransportError::Rejected,
+                observations,
+            ))
+        }
         _ => return invalid_output(observations),
     }
     let Some(blocks) = envelope.get("content").and_then(Value::as_array) else {

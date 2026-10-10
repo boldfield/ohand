@@ -3,7 +3,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use super::diagnostic::{DiagnosticAdapterCall, DiagnosticResponse, DiagnosticSupport};
+use super::diagnostic::{
+    DiagnosticAdapterCall, DiagnosticResponse, DiagnosticSupport, DiagnosticTransportFailure,
+};
 use super::failure::{FailureKind, ProviderFailure};
 use super::profile::{CapabilitySupport, ProviderCapability, ProviderProfile};
 use super::request::InterpretationRequest;
@@ -141,6 +143,17 @@ pub trait ProviderAdapter {
         _call: &DiagnosticAdapterCall<'_>,
     ) -> Result<DiagnosticResponse, TransportError> {
         Err(TransportError::Rejected)
+    }
+
+    /// Like [`invoke_diagnostic`](Self::invoke_diagnostic), but a failure may carry what the
+    /// provider disclosed before failing (for example usage on a refusal), which
+    /// `dispatch_diagnostic` attaches to the failed attempt. The default carries nothing, so
+    /// adapters that only implement `invoke_diagnostic` behave as before.
+    fn invoke_diagnostic_observed(
+        &self,
+        call: &DiagnosticAdapterCall<'_>,
+    ) -> Result<DiagnosticResponse, DiagnosticTransportFailure> {
+        self.invoke_diagnostic(call).map_err(Into::into)
     }
 }
 
