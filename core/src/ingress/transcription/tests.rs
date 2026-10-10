@@ -1,5 +1,5 @@
 use super::*;
-use crate::domain::items::verify_state_integrity;
+use crate::domain::items::{load_item_state, verify_state_integrity, ItemState, TextState};
 use crate::ingress::import::import_foreground_ingress;
 use crate::jobs::queue::{claim_job_with_lease, enqueue_job, get_job, get_jobs_for_item};
 use crate::lifecycle::delete_intent::mark_deletion_intent;
@@ -115,11 +115,9 @@ impl Store {
     fn attachments(&self) -> i64 {
         self.open()
             .conn()
-            .query_row(
-                "SELECT COUNT(*) FROM events WHERE event_id LIKE 'transcript-attachment-%'",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM transcript_attachments", [], |row| {
+                row.get(0)
+            })
             .unwrap()
     }
 
@@ -150,6 +148,14 @@ impl Store {
 
     fn search(&self, query: &str) -> Vec<crate::retrieval::index::SearchHit> {
         search_index(self.open().conn(), query, &[ItemScope::Personal]).unwrap()
+    }
+
+    fn item_state(&self) -> ItemState {
+        let mut database = self.open();
+        let transaction = database.immediate_transaction().unwrap();
+        load_item_state(&transaction, &self.item_id)
+            .unwrap()
+            .expect("the item exists")
     }
 
     fn interpretation_jobs(&self) -> Vec<Job> {
@@ -268,8 +274,22 @@ fn a_transcript_becomes_the_item_text_with_provenance_in_one_transaction() {
     assert_eq!(interpretation.profile_version, None);
     assert_eq!(store.job("transcription-1").status, JobStatus::Completed);
 
-    // Provenance lives in existing storage: the correction event names the source job, the
-    // revision it produced and the successful-transcription time; the audio is untouched.
+    // Provenance: the transcript is a text event, and its row names the source job, the audio
+    // identity, the recognizer and the successful-transcription time.
+    let provenance = transcript_provenance(store.open().conn(), &store.item_id)
+        .unwrap()
+        .expect("the attachment recorded its provenance");
+    assert_eq!(provenance.source_job_id, "transcription-1");
+    assert_eq!(provenance.attached_revision, 1);
+    assert_eq!(provenance.audio_reference, AUDIO_REFERENCE);
+    assert_eq!(provenance.audio_sha256, AUDIO_SHA256);
+    assert_eq!(provenance.recognizer, "on-device-recognizer/1");
+    assert_eq!(provenance.detected_language.as_deref(), Some("en-US"));
+    assert_eq!(provenance.confidence, Some(0.91));
+    assert_eq!(
+        DateTime::parse_from_rfc3339(&provenance.transcribed_at).unwrap(),
+        later()
+    );
     let (event_id, event_revision, happened_at): (String, i32, String) = store
         .open()
         .conn()
@@ -279,14 +299,25 @@ fn a_transcript_becomes_the_item_text_with_provenance_in_one_transaction() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
-    assert_eq!(event_id, "transcript-attachment-transcription-1");
-    assert_eq!(event_revision + 1, 1);
-    assert_eq!(DateTime::parse_from_rfc3339(&happened_at).unwrap(), later());
+    assert_eq!(event_id, provenance.event_id);
+    assert_eq!(event_revision + 1, provenance.attached_revision);
+    assert_eq!(happened_at, provenance.transcribed_at);
     assert_eq!(
         store.scalar_text("SELECT created_at FROM corrections"),
         happened_at,
-        "the correction carries the same success time"
+        "the text carries the same success time"
     );
+
+    // The projection reports machine text, never a user correction.
+    let state = store.item_state();
+    assert_eq!(
+        state.current_text,
+        TextState::Transcribed {
+            text: TRANSCRIPT.to_string(),
+            transcribed_at: happened_at.clone(),
+        }
+    );
+    assert!(!state.provenance.text_corrected);
 
     // The transcript is searchable and shown as the current text; the capture is untouched.
     let hits = store.search("ferns");
@@ -649,6 +680,18 @@ fn a_user_correction_of_the_transcript_is_a_normal_correction() {
     let hits = store.search("friday");
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].current_text, "water the ferns on friday");
+
+    let state = store.item_state();
+    assert!(matches!(
+        state.current_text,
+        TextState::Corrected { ref text, .. } if text == "water the ferns on friday"
+    ));
+    assert!(state.provenance.text_corrected);
+    let mut database = store.open();
+    let transaction = database.immediate_transaction().unwrap();
+    assert!(verify_state_integrity(&transaction, &store.item_id)
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -721,6 +764,162 @@ fn a_redelivery_after_the_item_was_deleted_reveals_and_restores_nothing() {
         store.scalar_text("SELECT COALESCE(GROUP_CONCAT(new_value), '') FROM corrections"),
         ""
     );
+    assert_eq!(store.attachments(), 0, "deletion removes the provenance");
+    assert!(transcript_provenance(store.open().conn(), &store.item_id)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn deletion_removes_the_audio_identity_and_the_transcript_text() {
+    let store = Store::with_voice_capture();
+    let job = store.claim_transcription_job("transcription-1");
+    apply_transcription_outcome(
+        &mut store.open(),
+        &outcome(&job, recognized(TRANSCRIPT)),
+        later(),
+    )
+    .unwrap();
+    assert_eq!(store.attachments(), 1);
+
+    mark_deletion_intent(&mut store.open(), &store.item_id, 1, later()).unwrap();
+
+    assert_eq!(store.attachments(), 0);
+    assert_eq!(
+        store.scalar_text("SELECT COALESCE(GROUP_CONCAT(correction_new_value), '') FROM events"),
+        ""
+    );
+    assert_eq!(store.count("corrections"), 0);
+    assert_eq!(store.count("search_index"), 0);
+}
+
+#[test]
+fn a_redelivery_with_a_different_audio_identity_or_recognizer_is_a_conflict() {
+    let store = Store::with_voice_capture();
+    let job = store.claim_transcription_job("transcription-1");
+    let original = outcome(&job, recognized(TRANSCRIPT));
+    apply_transcription_outcome(&mut store.open(), &original, later()).unwrap();
+
+    let mut other_reference = original.clone();
+    other_reference.audio_reference = "staging/2026-10-08/other.m4a".to_string();
+
+    let altered_transcript = |change: &dyn Fn(&mut RecognizedTranscript)| {
+        let mut changed = original.clone();
+        let RecognizerResult::Transcript(transcript) = &mut changed.result else {
+            unreachable!()
+        };
+        change(transcript);
+        changed
+    };
+    let candidates = [
+        other_reference,
+        altered_transcript(&|t| t.audio_sha256 = "f".repeat(64)),
+        altered_transcript(&|t| t.recognizer = "another-recognizer/2".to_string()),
+        altered_transcript(&|t| t.detected_language = Some("fr-FR".to_string())),
+        altered_transcript(&|t| t.confidence = Some(0.2)),
+        altered_transcript(&|t| t.confidence = None),
+    ];
+    for candidate in candidates {
+        let error =
+            apply_transcription_outcome(&mut store.open(), &candidate, later()).unwrap_err();
+        assert!(
+            matches!(kind_of(&error), TranscriptionErrorKind::ConflictingResult),
+            "{candidate:?}"
+        );
+    }
+    assert_eq!(store.attachments(), 1);
+    assert_eq!(store.count("events"), 1);
+    assert_eq!(store.search("ferns")[0].current_text, TRANSCRIPT);
+
+    let retry = apply_transcription_outcome(&mut store.open(), &original, later()).unwrap();
+    assert!(matches!(
+        retry.disposition,
+        TranscriptionDisposition::AlreadyAttached { revision: 1, .. }
+    ));
+}
+
+/// Another voice item whose text event holds `event_id`, as any caller can create.
+fn foreign_event_holding(store: &Store, event_id: &str) -> String {
+    let mut other_capture = voice_capture();
+    other_capture.capture_id = "3f9c1e52-0000-4000-8000-0000000000c6".to_string();
+    other_capture.audio_reference = Some("staging/2026-10-08/clip-6.m4a".to_string());
+    let other_item = import_foreground_ingress(&mut store.open(), &other_capture)
+        .unwrap()
+        .item_id;
+    let mut foreign = user_text_correction(&other_item, 0, TRANSCRIPT);
+    foreign.event_id = event_id.to_string();
+    save_event(&mut store.open(), &foreign, 0).unwrap();
+    other_item
+}
+
+#[test]
+fn a_foreign_event_with_an_unscoped_transcript_id_neither_blocks_nor_fakes_a_redelivery() {
+    let store = Store::with_voice_capture();
+    let job = store.claim_transcription_job("transcription-1");
+    let other_item = foreign_event_holding(&store, "transcript-attachment-transcription-1");
+
+    let request = outcome(&job, recognized(TRANSCRIPT));
+    let acknowledgment = apply_transcription_outcome(&mut store.open(), &request, later()).unwrap();
+    assert!(
+        matches!(
+            acknowledgment.disposition,
+            TranscriptionDisposition::Attached { revision: 1, .. }
+        ),
+        "the first delivery attaches instead of being taken for a redelivery"
+    );
+    assert_eq!(store.item_row().2, "transcribed");
+    assert_eq!(store.job("transcription-1").status, JobStatus::Completed);
+
+    let other_state: (String, i32) = store
+        .open()
+        .conn()
+        .query_row(
+            "SELECT transcription_state, revision FROM items WHERE item_id = ?",
+            [&other_item],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(other_state, ("audio_pending".to_string(), 1));
+    assert!(transcript_provenance(store.open().conn(), &other_item)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn a_foreign_event_holding_the_exact_event_id_is_skipped_not_trusted() {
+    let store = Store::with_voice_capture();
+    let job = store.claim_transcription_job("transcription-1");
+    let exact_id = format!("transcript-attachment-{}-transcription-1", store.item_id);
+    let other_item = foreign_event_holding(&store, &exact_id);
+
+    let request = outcome(&job, recognized(TRANSCRIPT));
+    let acknowledgment = apply_transcription_outcome(&mut store.open(), &request, later()).unwrap();
+    assert!(matches!(
+        acknowledgment.disposition,
+        TranscriptionDisposition::Attached { revision: 1, .. }
+    ));
+    let provenance = transcript_provenance(store.open().conn(), &store.item_id)
+        .unwrap()
+        .unwrap();
+    assert_ne!(provenance.event_id, exact_id);
+    let foreign_item: String = store
+        .open()
+        .conn()
+        .query_row(
+            "SELECT item_id FROM events WHERE event_id = ?",
+            [&exact_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(foreign_item, other_item, "the foreign event is untouched");
+
+    let retry = apply_transcription_outcome(&mut store.open(), &request, later()).unwrap();
+    assert!(matches!(
+        retry.disposition,
+        TranscriptionDisposition::AlreadyAttached { revision: 1, .. }
+    ));
+    assert_eq!(store.attachments(), 1);
+    assert_eq!(store.item_row().3, 1);
 }
 
 #[test]

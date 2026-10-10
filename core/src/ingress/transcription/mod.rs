@@ -7,29 +7,39 @@
 //! * verifies the job is a running `transcription_attachment` job and that the caller holds its
 //!   lease (the job's `attempt_count`), and that the job is authorized to run (on device only);
 //! * refuses, and retires the job, when the outcome can no longer be authoritative: the item was
-//!   deleted, the user already supplied text (a correction), a transcript was already attached,
-//!   the recorded audio is gone, or the outcome was made from different audio than the capture's;
-//! * for a transcript, writes it as the item's text correction through the event API (so the
-//!   revision check, correction history, search index and interpretation source all see it),
-//!   moves the transcription state to `transcribed`, completes the job and, only when the new
-//!   job is authorized, enqueues the requested interpretation job at the new revision;
+//!   deleted, the item already has text (typed, corrected or transcribed), the recorded audio is
+//!   gone, or the outcome was made from different audio than the capture's;
+//! * for a transcript, writes it through the event API as the item's current text (so the
+//!   revision check, history, search index and interpretation source all see it), records the
+//!   transcript provenance row, moves the transcription state to `transcribed`, completes the
+//!   job and, only when the new job is authorized, enqueues the requested interpretation job at
+//!   the new revision;
 //! * for unsupported, failed or empty (abstained) recognition, writes no text: the audio stays the
 //!   sole source, the transcription state says why, and the job ends with a content-free reason.
 //!
-//! A transcript is stored once. The correction event's ID derives from the job and its
-//! `happened_at` is the successful-transcription time, so a retry (same job) after a crash or
-//! lost acknowledgment finds that event and returns the committed result, and a different job
-//! can never attach a second transcript because the item is already `transcribed`. Provenance
-//! lives only in existing storage: the event (source job, revision, success time), the
-//! completed job and the capture's immutable audio reference, which the outcome must match.
-//! The recognizer's digest, name, language and confidence are validated but not persisted:
-//! storing them needs a schema change that no task has been allowed to make yet. Saved audio (`save_state`), transcript
-//! completion (`transcription_state`) and interpretation completion (`processing_state`) are
-//! independent: attaching a transcript changes only the second, and queues the third.
+//! The transcript is machine text, not a user edit. The text is stored as a text event (so every
+//! existing reader sees the current text), and the `transcript_attachments` row marks that event
+//! as a transcript: the item projection reports `TextState::Transcribed` and leaves
+//! `text_corrected` false. A later user correction supersedes it as a normal correction. The row
+//! is keyed by item and by source job and holds the audio reference and SHA-256, recognizer,
+//! language, confidence and the successful-transcription time; [`transcript_provenance`] reads
+//! it. Deletion redacts the text and removes the row.
 //!
-//! The capture row is never modified. The transcript text lives only in the correction history,
-//! so deletion redacts it with the item's other readable content.
+//! A transcript is stored once. A retry of the same job after a crash or lost acknowledgment finds
+//! the job's row and returns the committed result only when the retry carries the same text, audio
+//! reference, digest, recognizer, language and confidence; anything else is a conflict. A different
+//! job cannot attach a second transcript because the item is already `transcribed`. The event ID
+//! includes the item and the job and is never trusted by itself: a foreign event that already
+//! holds the ID is skipped, and redelivery is decided only by the job's own provenance row. Saved
+//! audio (`save_state`), transcript completion (`transcription_state`) and interpretation
+//! completion (`processing_state`) are independent: attaching a transcript changes only the
+//! second, and queues the third.
+//!
+//! The capture row is never modified.
 
+use crate::domain::items::{
+    load_item_state, validate_state_transition, StateTransition, TransitionValidity,
+};
 use crate::domain::status::TranscriptionState;
 use crate::jobs::queue::{complete_job_in_tx, enqueue_job_in_tx, get_job_internal, Job, JobStatus};
 use crate::privacy::routing::{
@@ -37,12 +47,12 @@ use crate::privacy::routing::{
     JOB_TYPE_TRANSCRIPTION_ATTACHMENT,
 };
 use crate::store::events::{
-    get_event, save_event_in_tx, Correction, CorrectionKind, Event, EventPayload, EventType,
+    save_event_in_tx, Correction, CorrectionKind, Event, EventPayload, EventType,
 };
 use crate::store::schema::Database;
 use anyhow::anyhow;
 use chrono::{DateTime, Utc};
-use rusqlite::{OptionalExtension, Transaction};
+use rusqlite::{Connection, OptionalExtension, Transaction};
 use std::fmt;
 
 pub use crate::ingress::import::CommitStatus;
@@ -297,9 +307,16 @@ pub(crate) fn apply_with_fault_points(
     let item = load_item(&transaction, &job.item_id)?;
     let resolved = resolve(&outcome.result);
 
-    if let Some(stored) = get_event(&transaction, &transcript_event_id(&job.job_id))? {
-        let disposition = redelivery(&transaction, &item, &stored, &resolved, &job)?;
+    if let Some(attachment) = load_attachment_for_job(&transaction, &job.job_id)? {
+        let disposition = redelivery(&transaction, &job, &attachment, &resolved, outcome)?;
         return Ok(acknowledgment(&job, disposition));
+    }
+    if item.lifecycle_state == "deleted" && job.status == JobStatus::Completed {
+        // A finished attachment redelivered after deletion: deletion already removed it.
+        return Ok(acknowledgment(
+            &job,
+            TranscriptionDisposition::Discarded(DiscardReason::ItemDeleted),
+        ));
     }
     if let Resolved::Pending(pending) = &resolved {
         if is_settled_pending(&job, outcome.lease_attempt, pending) {
@@ -356,6 +373,7 @@ pub(crate) fn apply_with_fault_points(
                 &job,
                 &item,
                 transcript,
+                &outcome.audio_reference,
                 transcribed_at,
                 fault_point,
             )?;
@@ -537,15 +555,13 @@ struct ItemRow {
     revision: i32,
     lifecycle_state: String,
     transcription_state: TranscriptionState,
-    capture_text: Option<String>,
     audio_reference: Option<String>,
 }
 
 fn load_item(transaction: &Transaction<'_>, item_id: &str) -> Result<ItemRow, TranscriptionError> {
     let row = transaction
         .query_row(
-            "SELECT i.revision, i.lifecycle_state, i.transcription_state,
-                    c.text, c.audio_reference
+            "SELECT i.revision, i.lifecycle_state, i.transcription_state, c.audio_reference
                FROM items i JOIN captures c ON c.capture_id = i.capture_id
               WHERE i.item_id = ?",
             [item_id],
@@ -555,7 +571,6 @@ fn load_item(transaction: &Transaction<'_>, item_id: &str) -> Result<ItemRow, Tr
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
                 ))
             },
         )
@@ -569,53 +584,154 @@ fn load_item(transaction: &Transaction<'_>, item_id: &str) -> Result<ItemRow, Tr
         revision: row.0,
         lifecycle_state: row.1,
         transcription_state,
-        capture_text: row.3,
-        audio_reference: row.4,
+        audio_reference: row.3,
     })
 }
 
-fn transcript_event_id(job_id: &str) -> String {
-    format!("transcript-attachment-{job_id}")
+/// The stored result of a transcript attachment, as read back from durable state.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TranscriptProvenance {
+    pub item_id: String,
+    /// The transcription job whose result this is.
+    pub source_job_id: String,
+    /// The text event that holds the transcript.
+    pub event_id: String,
+    /// The item revision that includes the transcript.
+    pub attached_revision: i32,
+    pub audio_reference: String,
+    /// SHA-256 of the audio file the recognizer read.
+    pub audio_sha256: String,
+    pub recognizer: String,
+    pub detected_language: Option<String>,
+    pub confidence: Option<f64>,
+    /// When recognition succeeded (RFC 3339).
+    pub transcribed_at: String,
 }
 
-/// The job already attached its transcript in an earlier delivery.
+const PROVENANCE_COLUMNS: &str = "item_id, source_job_id, event_id, attached_revision,
+    audio_reference, audio_sha256, recognizer, detected_language, confidence, transcribed_at";
+
+fn provenance_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TranscriptProvenance> {
+    Ok(TranscriptProvenance {
+        item_id: row.get(0)?,
+        source_job_id: row.get(1)?,
+        event_id: row.get(2)?,
+        attached_revision: row.get(3)?,
+        audio_reference: row.get(4)?,
+        audio_sha256: row.get(5)?,
+        recognizer: row.get(6)?,
+        detected_language: row.get(7)?,
+        confidence: row.get(8)?,
+        transcribed_at: row.get(9)?,
+    })
+}
+
+/// The transcript provenance of an item, or `None` when no transcript was attached (including
+/// after deletion, which removes it). The transcription time starts the retention clock for
+/// audio kept after a transcript.
+pub fn transcript_provenance(
+    connection: &Connection,
+    item_id: &str,
+) -> anyhow::Result<Option<TranscriptProvenance>> {
+    Ok(connection
+        .query_row(
+            &format!("SELECT {PROVENANCE_COLUMNS} FROM transcript_attachments WHERE item_id = ?"),
+            [item_id],
+            provenance_from_row,
+        )
+        .optional()?)
+}
+
+fn load_attachment_for_job(
+    transaction: &Transaction<'_>,
+    job_id: &str,
+) -> Result<Option<TranscriptProvenance>, TranscriptionError> {
+    Ok(transaction
+        .query_row(
+            &format!(
+                "SELECT {PROVENANCE_COLUMNS} FROM transcript_attachments WHERE source_job_id = ?"
+            ),
+            [job_id],
+            provenance_from_row,
+        )
+        .optional()?)
+}
+
+/// The event ID for a job's transcript. Event IDs share one global namespace, so an ID that a
+/// foreign event already holds is skipped rather than trusted.
+fn unused_transcript_event_id(
+    transaction: &Transaction<'_>,
+    item_id: &str,
+    job_id: &str,
+) -> Result<String, TranscriptionError> {
+    let base = format!("transcript-attachment-{item_id}-{job_id}");
+    let mut candidate = base.clone();
+    let mut suffix = 1;
+    loop {
+        let taken: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM events WHERE event_id = ?)",
+            [&candidate],
+            |row| row.get(0),
+        )?;
+        if !taken {
+            return Ok(candidate);
+        }
+        candidate = format!("{base}#{suffix}");
+        suffix += 1;
+    }
+}
+
+/// The job already attached its transcript in an earlier delivery. The retry must present the
+/// same audio identity and result; otherwise it is a conflict and nothing is returned as done.
 fn redelivery(
     transaction: &Transaction<'_>,
-    item: &ItemRow,
-    stored: &Event,
-    resolved: &Resolved<'_>,
     job: &Job,
+    attachment: &TranscriptProvenance,
+    resolved: &Resolved<'_>,
+    outcome: &TranscriptionOutcome,
 ) -> Result<TranscriptionDisposition, TranscriptionError> {
-    if item.lifecycle_state == "deleted" {
-        return Ok(TranscriptionDisposition::Discarded(
-            DiscardReason::ItemDeleted,
-        ));
-    }
+    let conflict = || TranscriptionError::not_committed(TranscriptionErrorKind::ConflictingResult);
     let Resolved::Transcript(transcript) = resolved else {
-        return Err(TranscriptionError::not_committed(
-            TranscriptionErrorKind::ConflictingResult,
-        ));
+        return Err(conflict());
     };
-    let attached_revision = stored.revision + 1;
-    let same_text = matches!(
-        &stored.payload,
-        EventPayload::Correction(correction) if correction.new_value == transcript.text
-    );
-    if !same_text {
-        return Err(TranscriptionError::not_committed(
-            TranscriptionErrorKind::ConflictingResult,
-        ));
+    if attachment.item_id != job.item_id {
+        return Err(anyhow!(
+            "transcript attachment of job {} belongs to another item",
+            job.job_id
+        )
+        .into());
+    }
+    let stored_text: Option<String> = transaction
+        .query_row(
+            "SELECT correction_new_value FROM events
+              WHERE event_id = ? AND item_id = ? AND event_type = 'correction'
+                AND correction_kind = 'text'",
+            rusqlite::params![attachment.event_id, attachment.item_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let same_identity = attachment.audio_reference == outcome.audio_reference
+        && attachment.audio_sha256 == transcript.audio_sha256
+        && attachment.recognizer == transcript.recognizer
+        && attachment.detected_language == transcript.detected_language
+        && attachment.confidence == transcript.confidence;
+    if !same_identity || stored_text.as_deref() != Some(transcript.text.as_str()) {
+        return Err(conflict());
     }
     let queued_interpretation: Option<String> = transaction
         .query_row(
             "SELECT job_id FROM jobs WHERE item_id = ? AND job_type = ? AND source_revision = ?
               ORDER BY created_at ASC, rowid ASC LIMIT 1",
-            rusqlite::params![job.item_id, JOB_TYPE_INTERPRET, attached_revision],
+            rusqlite::params![
+                job.item_id,
+                JOB_TYPE_INTERPRET,
+                attachment.attached_revision
+            ],
             |row| row.get(0),
         )
         .optional()?;
     Ok(TranscriptionDisposition::AlreadyAttached {
-        revision: attached_revision,
+        revision: attachment.attached_revision,
         interpretation: match queued_interpretation {
             Some(job_id) => InterpretationQueued::Queued { job_id },
             None => InterpretationQueued::NotRequested,
@@ -648,17 +764,14 @@ fn discard_reason(
         | TranscriptionState::TranscriptionUnsupported
         | TranscriptionState::TranscriptionFailed => {}
     }
-    let user_text_exists: bool = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM corrections WHERE item_id = ? AND kind = 'text')",
-        [&job.item_id],
-        |row| row.get(0),
-    )?;
-    let capture_has_text = item
-        .capture_text
-        .as_deref()
-        .is_some_and(|text| !text.is_empty());
-    if user_text_exists || capture_has_text {
-        return Ok(Some(DiscardReason::TextAlreadyPresent));
+    let state = load_item_state(transaction, &job.item_id)?
+        .ok_or_else(|| anyhow!("item {} of the job does not exist", job.item_id))?;
+    match validate_state_transition(&state, StateTransition::TranscriptAttached) {
+        TransitionValidity::Valid => {}
+        TransitionValidity::NotAllowed => return Ok(Some(DiscardReason::ItemDeleted)),
+        TransitionValidity::ForbiddenOverride => {
+            return Ok(Some(DiscardReason::TextAlreadyPresent))
+        }
     }
     Ok(match item.audio_reference.as_deref() {
         None => Some(DiscardReason::AudioUnavailable),
@@ -734,18 +847,20 @@ fn require_unused_job_id(
     Ok(())
 }
 
-/// Write the transcript as the item's text correction. Returns the item revision that includes
+/// Write the transcript as the item's text and record its provenance. Returns the item revision that includes
 /// the transcript.
 fn attach_transcript(
     transaction: &Transaction<'_>,
     job: &Job,
     item: &ItemRow,
     transcript: &RecognizedTranscript,
+    audio_reference: &str,
     transcribed_at: DateTime<Utc>,
     fault_point: &mut dyn FnMut(TranscriptionStage) -> anyhow::Result<()>,
 ) -> Result<i32, TranscriptionError> {
+    let event_id = unused_transcript_event_id(transaction, &job.item_id, &job.job_id)?;
     let event = Event::new(
-        transcript_event_id(&job.job_id),
+        event_id.clone(),
         job.item_id.clone(),
         item.revision,
         EventType::Correction,
@@ -758,9 +873,27 @@ fn attach_transcript(
     )?;
     save_event_in_tx(transaction, &event, item.revision)
         .map_err(|error| TranscriptionError::from(anyhow::Error::new(error)))?;
+    let attached_revision = item.revision + 1;
+    transaction.execute(
+        "INSERT INTO transcript_attachments
+            (item_id, source_job_id, event_id, attached_revision, audio_reference, audio_sha256,
+             recognizer, detected_language, confidence, transcribed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rusqlite::params![
+            job.item_id,
+            job.job_id,
+            event_id,
+            attached_revision,
+            audio_reference,
+            transcript.audio_sha256,
+            transcript.recognizer,
+            transcript.detected_language,
+            transcript.confidence,
+            event.happened_at,
+        ],
+    )?;
     fault_point(TranscriptionStage::EventWritten)?;
 
-    let attached_revision = item.revision + 1;
     transaction.execute(
         "UPDATE items SET transcription_state = ? WHERE item_id = ?",
         rusqlite::params![TranscriptionState::Transcribed.as_str(), job.item_id],

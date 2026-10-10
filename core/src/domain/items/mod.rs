@@ -78,11 +78,17 @@ impl fmt::Display for LifecycleState {
     }
 }
 
-/// Current text state: either the original capture text or a user correction.
+/// Current text state: the original capture text, an on-device transcript or a user correction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TextState {
     /// Original text from capture (or empty if only audio).
     Original { text: Option<String> },
+    /// Machine text recognized from the capture's audio; the user has not touched it.
+    /// `transcribed_at` is the time recognition succeeded.
+    Transcribed {
+        text: String,
+        transcribed_at: String,
+    },
     /// Corrected by the user; preserves the timestamp of the correction event.
     Corrected { text: String, corrected_at: String },
 }
@@ -91,7 +97,7 @@ impl TextState {
     pub fn text(&self) -> Option<&str> {
         match self {
             TextState::Original { text } => text.as_deref(),
-            TextState::Corrected { text, .. } => Some(text),
+            TextState::Transcribed { text, .. } | TextState::Corrected { text, .. } => Some(text),
         }
     }
 }
@@ -139,6 +145,15 @@ pub fn validate_state_transition(
         StateTransition::TextCorrected(_) => {
             // Text corrections are allowed at any lifecycle state (even completed/cancelled).
             Valid
+        }
+
+        StateTransition::TranscriptAttached => {
+            // A transcript fills text that does not exist yet. It never replaces typed text, a
+            // user correction or an earlier transcript.
+            match &current.current_text {
+                TextState::Original { text } if text.as_deref().is_none_or(str::is_empty) => Valid,
+                _ => ForbiddenOverride,
+            }
         }
 
         StateTransition::Completed => {
@@ -198,6 +213,8 @@ pub enum StateTransition {
     SessionTopicSet(Option<String>),
     /// User-corrected text.
     TextCorrected(String),
+    /// Text recognized from the capture's audio on the device. Machine output, not an edit.
+    TranscriptAttached,
     /// User marked item as completed.
     Completed,
     /// User marked item as cancelled.
@@ -362,23 +379,30 @@ fn load_item_state_with(
 
     // Resolve text: check for user text correction.
     let (current_text, text_corrected) = {
-        let text_correction: Option<(String, String)> = tx
+        let text_correction: Option<(String, String, bool)> = tx
             .query_row(
-                "SELECT new_value, created_at FROM corrections
-                 WHERE item_id = ? AND kind = 'text' ORDER BY revision DESC LIMIT 1",
+                "SELECT c.new_value, c.created_at,
+                        EXISTS(SELECT 1 FROM transcript_attachments t
+                                WHERE t.item_id = c.item_id
+                                  AND c.correction_id = t.event_id || '-correction')
+                   FROM corrections c
+                  WHERE c.item_id = ? AND c.kind = 'text' ORDER BY c.revision DESC LIMIT 1",
                 [item_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
 
         match text_correction {
-            Some((corrected_text, corrected_at)) => (
-                TextState::Corrected {
-                    text: corrected_text,
-                    corrected_at,
+            Some((text, transcribed_at, true)) => (
+                TextState::Transcribed {
+                    text,
+                    transcribed_at,
                 },
-                true,
+                false,
             ),
+            Some((text, corrected_at, false)) => {
+                (TextState::Corrected { text, corrected_at }, true)
+            }
             None => (TextState::Original { text: capture_text }, false),
         }
     };
@@ -485,7 +509,11 @@ pub fn rebuild_state_from_events(tx: &Transaction<'_>, item_id: &str) -> Result<
 
     // Replay all corrections in order.
     let mut corrections_stmt = tx.prepare(
-        "SELECT kind, new_value, created_at FROM corrections WHERE item_id = ? ORDER BY revision ASC",
+        "SELECT c.kind, c.new_value, c.created_at,
+                EXISTS(SELECT 1 FROM transcript_attachments t
+                        WHERE t.item_id = c.item_id
+                          AND c.correction_id = t.event_id || '-correction')
+           FROM corrections c WHERE c.item_id = ? ORDER BY c.revision ASC",
     )?;
     let corrections = corrections_stmt
         .query_map([item_id], |row| {
@@ -493,11 +521,12 @@ pub fn rebuild_state_from_events(tx: &Transaction<'_>, item_id: &str) -> Result<
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, bool>(3)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
-    for (kind, new_value, corrected_at) in corrections {
+    for (kind, new_value, corrected_at, is_transcript) in corrections {
         match kind.as_str() {
             "type" => {
                 current_type = Some(
@@ -516,6 +545,13 @@ pub fn rebuild_state_from_events(tx: &Transaction<'_>, item_id: &str) -> Result<
             "session_topic" => {
                 current_session_topic = Some(new_value);
                 session_topic_corrected = true;
+            }
+            "text" if is_transcript => {
+                current_text = TextState::Transcribed {
+                    text: new_value,
+                    transcribed_at: corrected_at,
+                };
+                text_corrected = false;
             }
             "text" => {
                 current_text = TextState::Corrected {
@@ -849,6 +885,47 @@ mod tests {
 
         let empty_original = TextState::Original { text: None };
         assert_eq!(empty_original.text(), None);
+    }
+
+    #[test]
+    fn test_transcript_fills_missing_text_but_never_replaces_text() {
+        let mut state = ItemState {
+            item_id: "item-1".to_string(),
+            capture_id: "capture-1".to_string(),
+            revision: 0,
+            item_type: None,
+            scope: ItemScope::Personal,
+            session_topic: None,
+            lifecycle_state: LifecycleState::Active,
+            current_text: TextState::Original { text: None },
+            provenance: FieldProvenance::default(),
+        };
+        let attach = |state: &ItemState| {
+            validate_state_transition(state, StateTransition::TranscriptAttached)
+        };
+        assert_eq!(attach(&state), TransitionValidity::Valid);
+
+        state.current_text = TextState::Original {
+            text: Some("typed".to_string()),
+        };
+        assert_eq!(attach(&state), TransitionValidity::ForbiddenOverride);
+
+        state.current_text = TextState::Transcribed {
+            text: "heard".to_string(),
+            transcribed_at: "2026-10-08T10:00:00Z".to_string(),
+        };
+        assert_eq!(attach(&state), TransitionValidity::ForbiddenOverride);
+        assert_eq!(state.current_text.text(), Some("heard"));
+
+        state.current_text = TextState::Corrected {
+            text: "edited".to_string(),
+            corrected_at: "2026-10-08T10:01:00Z".to_string(),
+        };
+        assert_eq!(attach(&state), TransitionValidity::ForbiddenOverride);
+
+        state.current_text = TextState::Original { text: None };
+        state.lifecycle_state = LifecycleState::Deleted;
+        assert_eq!(attach(&state), TransitionValidity::NotAllowed);
     }
 
     #[test]
