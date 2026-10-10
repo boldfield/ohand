@@ -394,7 +394,10 @@ fn echoed_secrets_are_masked_in_error_bodies_and_headers_without_changing_length
 fn secrets_echoed_as_response_header_names_are_masked_in_any_letter_case() {
     // Both canaries are valid header-name tokens; the mixed-case one checks that lowercasing
     // during parsing does not let the secret through.
-    for canary in ["synthetic-canary-lower-4e2b9d10", "Synthetic-Canary-Mixed-4E2B9D10"] {
+    for canary in [
+        "synthetic-canary-lower-4e2b9d10",
+        "Synthetic-Canary-Mixed-4E2B9D10",
+    ] {
         let authority = TestAuthority::new();
         let fixture = start_fixture(&authority, move |_| Reply::Full {
             status: 401,
