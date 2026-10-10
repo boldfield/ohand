@@ -8,6 +8,10 @@ struct VoiceRecordingLimits: Equatable {
     var minimumFreeBytesToStart: Int64 = 50_000_000
     var minimumFreeBytesWhileRecording: Int64 = 10_000_000
     var pollIntervalSeconds: TimeInterval = 1
+    /// A continuation shorter than this is not offered: there is too little room left to be worth starting.
+    var minimumContinuationSeconds: TimeInterval = 1
+    /// The recorder's 16 kHz mono 16-bit byte rate, used to check the size bound before a continuation starts.
+    var bytesPerSecond: Int64 = 32_000
 }
 
 /// Why a recording stopped. Only `stoppedByUser` with a clean close is a complete recording.
@@ -21,6 +25,9 @@ enum VoiceRecordingEnd: Equatable {
     case leftForeground
     case deviceLocking
     case recorderFailed
+    /// Not an end the recorder saw: a recording found in the in-progress store after a restart, finished by the user.
+    /// How it originally ended is unknown, so it is never presented as complete.
+    case recoveredOnReentry
 
     var reachedLimit: Bool {
         self == .durationLimit || self == .sizeLimit || self == .lowStorage
@@ -51,6 +58,13 @@ enum VoiceStartFailure: Error, Equatable {
     case storageSpaceUnknown
     case insufficientStorage
     case recorderUnavailable
+    /// The recording to continue is missing, unreadable or not a recording this recorder wrote.
+    case recordingNotContinuable
+    /// The recording already uses the duration or size bound, so nothing more can be added.
+    case nothingLeftToRecord
+    /// Audio added to this recording earlier was never joined and is still on disk. Another continuation would collide
+    /// with it, so it is refused until that audio is finished or deleted.
+    case continuationLeftoverPresent
 }
 
 struct VoiceRecordingStarted: Equatable {
@@ -111,6 +125,16 @@ enum VoiceCaptureOutcome: Equatable {
     /// The user cancelled. The audio stays in the in-progress store, unsubmitted, until the user decides.
     case retainedUnsubmitted(VoiceRecordingSummary)
     case itemDeleted(VoiceRecordingSummary)
+    /// The audio added to an existing recording was not joined to it. The existing recording is exactly as it was.
+    /// `segmentRetained` says whether the new audio was kept as its own recoverable recording.
+    case continuationNotJoined(captureID: String, end: VoiceRecordingEnd, reason: VoiceContinuationFailure, segmentRetained: Bool)
     /// No readable audio exists. `fileRetained` says whether unreadable bytes were left on disk for recovery.
     case unrecoverable(captureID: String, end: VoiceRecordingEnd, fileRetained: Bool)
+}
+
+enum VoiceContinuationFailure: Equatable {
+    /// The added audio could not be read back.
+    case noReadableAudio
+    /// The joined recording could not be written or did not verify.
+    case joinFailed
 }
