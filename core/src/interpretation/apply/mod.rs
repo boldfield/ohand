@@ -41,6 +41,7 @@ use crate::providers::contracts::{ErrorClass, ProviderFailure};
 use crate::reminders::state::{
     apply_derived_request, DerivedReminderRequest, ReminderStateError, RequestState,
 };
+use crate::store::events::current_transcript;
 use crate::store::schema::{Clock, Database};
 use crate::time::resolver::{TimeContext, TimeResolver};
 use chrono::{DateTime, Utc};
@@ -382,7 +383,8 @@ fn correction_matches(proposal_correction_id: &str, stored_correction_id: &str) 
 }
 
 /// The text a proposal's span offsets refer to, which must be the item's current effective text:
-/// the original capture text until a text correction exists, afterwards the latest correction.
+/// the latest text correction when one exists, else the on-device transcript when one is
+/// attached, else the original capture text.
 fn resolve_basis_text(
     tx: &Transaction<'_>,
     item_id: &str,
@@ -398,17 +400,27 @@ fn resolve_basis_text(
         )
         .optional()
         .map_err(anyhow::Error::from)?;
-    match (basis, latest_correction) {
+    if let Some((current_id, current_text)) = latest_correction {
+        return match basis {
+            TextBasis::Correction {
+                correction_record_id,
+                ..
+            } if correction_matches(correction_record_id, &current_id) => Ok(current_text),
+            _ => Err(ApplyError::TextBasisStale),
+        };
+    }
+    let transcript = current_transcript(tx, item_id).map_err(anyhow::Error::from)?;
+    match (basis, transcript) {
         (TextBasis::Original { .. }, None) => capture_text
             .map(str::to_string)
             .ok_or(ApplyError::NoSourceText),
         (
-            TextBasis::Correction {
-                correction_record_id,
+            TextBasis::Transcript {
+                transcript_record_id,
                 ..
             },
-            Some((current_id, current_text)),
-        ) if correction_matches(correction_record_id, &current_id) => Ok(current_text),
+            Some(transcript),
+        ) if *transcript_record_id == transcript.transcript_record_id => Ok(transcript.text),
         _ => Err(ApplyError::TextBasisStale),
     }
 }
@@ -570,6 +582,10 @@ fn insert_proposal_row(
             correction_record_id,
             ..
         } => ("correction", Some(correction_record_id.as_str())),
+        TextBasis::Transcript {
+            transcript_record_id,
+            ..
+        } => ("transcript", Some(transcript_record_id.as_str())),
     };
     let reminder_json = proposal
         .reminder_proposal

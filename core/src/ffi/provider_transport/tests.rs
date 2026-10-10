@@ -23,6 +23,8 @@ const ITEM_ID: &str = "5a1c0000-0000-4000-8000-0000000000e1";
 const REQUEST_VERSION: &str = "5a1c0000-0000-4000-8000-0000000000a1";
 const CORRECTED_TEXT: &str = "call the plumber tomorrow at 9";
 const CORRECTION_EVENT_ID: &str = "5a1c0000-0000-4000-8000-0000000000c9";
+const TRANSCRIPT_TEXT: &str = "call the electrician tomorrow at 9";
+const TRANSCRIPT_RECORD_ID: &str = "5a1c0000-0000-8000-8000-0000000000d1";
 const JOB_ID: &str = "job-synthetic-1";
 const ROUTE_ID: &str = "route-synthetic";
 
@@ -94,6 +96,7 @@ struct Scenario {
     job_source_revision: i64,
     text: Option<&'static str>,
     correction: Option<&'static str>,
+    transcript: Option<&'static str>,
 }
 
 impl Scenario {
@@ -116,6 +119,7 @@ impl Scenario {
             job_source_revision: 0,
             text: Some(NOTE_TEXT),
             correction: None,
+            transcript: None,
         }
     }
 }
@@ -206,6 +210,22 @@ fn seed(path: &str, scenario: &Scenario) {
             ],
         )
         .unwrap();
+    if let Some(transcript_text) = scenario.transcript {
+        transaction
+            .execute(
+                "INSERT INTO transcript_attachments (item_id, source_job_id, \
+                 transcript_record_id, text, attached_revision, audio_reference, audio_sha256, \
+                 recognizer, transcribed_at) VALUES (?, 'transcription-synthetic', ?, ?, 1, \
+                 'staging/synthetic.m4a', ?, 'on-device-recognizer/1', '2026-10-08T09:31:00Z')",
+                rusqlite::params![
+                    ITEM_ID,
+                    TRANSCRIPT_RECORD_ID,
+                    transcript_text,
+                    "0".repeat(64)
+                ],
+            )
+            .unwrap();
+    }
     if let Some(corrected_text) = scenario.correction {
         transaction
             .execute(
@@ -215,7 +235,7 @@ fn seed(path: &str, scenario: &Scenario) {
                     format!("{CORRECTION_EVENT_ID}-correction"),
                     ITEM_ID,
                     scenario.item_revision,
-                    NOTE_TEXT,
+                    scenario.transcript.or(scenario.text),
                     corrected_text
                 ],
             )
@@ -510,6 +530,69 @@ fn a_job_at_a_corrected_revision_sends_the_corrected_text_with_a_correction_basi
         "{:?}",
         completed.payload
     );
+    wait_until_idle(session.handle);
+    session.close();
+}
+
+#[test]
+fn a_transcribed_voice_capture_is_sent_as_machine_text_with_a_transcript_basis() {
+    let _guard = serial();
+    let mut scenario = Scenario::anthropic();
+    scenario.text = None;
+    scenario.transcript = Some(TRANSCRIPT_TEXT);
+    scenario.item_revision = 1;
+    scenario.job_source_revision = 1;
+    let session = Session::open("transcribed", &scenario);
+    session.register_native();
+
+    session.start(16, JOB_ID);
+    assert_eq!(session.event(16).status, OHAND_CORE_STATUS_OK);
+    let send = send_description(&session.command(16));
+    let body = send["body"].as_str().unwrap();
+    assert!(body.contains(TRANSCRIPT_TEXT));
+    assert!(body.contains(TRANSCRIPT_RECORD_ID));
+    assert!(body.contains("transcript_record_id"));
+    assert!(
+        !body.contains("correction_record_id"),
+        "a transcript is never presented as a user correction"
+    );
+
+    session.complete(16, 200, &anthropic_reply(valid_proposal()));
+    let completed = session.event(16);
+    assert_eq!(
+        completed.status, OHAND_CORE_STATUS_OK,
+        "{:?}",
+        completed.payload
+    );
+    wait_until_idle(session.handle);
+    session.close();
+}
+
+#[test]
+fn a_user_correction_of_a_transcript_is_sent_with_the_correction_basis() {
+    let _guard = serial();
+    let mut scenario = Scenario::anthropic();
+    scenario.text = None;
+    scenario.transcript = Some(TRANSCRIPT_TEXT);
+    scenario.correction = Some(CORRECTED_TEXT);
+    scenario.item_revision = 2;
+    scenario.job_source_revision = 2;
+    let session = Session::open("transcribed-corrected", &scenario);
+    session.register_native();
+
+    session.start(17, JOB_ID);
+    assert_eq!(session.event(17).status, OHAND_CORE_STATUS_OK);
+    let send = send_description(&session.command(17));
+    let body = send["body"].as_str().unwrap();
+    assert!(body.contains(CORRECTED_TEXT));
+    assert!(body.contains(CORRECTION_EVENT_ID));
+    assert!(
+        !body.contains(TRANSCRIPT_TEXT),
+        "the superseded transcript is never sent"
+    );
+    assert!(!body.contains(TRANSCRIPT_RECORD_ID));
+
+    session.cancel(17);
     wait_until_idle(session.handle);
     session.close();
 }

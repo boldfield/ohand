@@ -23,6 +23,8 @@ const PROPOSAL_ID: &str = "5a1c0000-0000-4000-8000-0000000000b1";
 const INTERPRET_JOB_ID: &str = "job-interpret-1";
 const ROUTE_ID: &str = "route-synthetic";
 const REVIEW_MODEL: &str = "synthetic-review-model";
+const TRANSCRIPT_TEXT: &str = "call the electrician tomorrow at 9";
+const TRANSCRIPT_RECORD_ID: &str = "5a1c0000-0000-8000-8000-0000000000d1";
 
 struct Command {
     operation_id: u64,
@@ -80,6 +82,8 @@ struct Scenario {
     profile: ProviderProfile,
     review_granted: bool,
     with_primary: bool,
+    /// A voice capture whose effective text is this on-device transcript.
+    transcript: Option<&'static str>,
 }
 
 impl Scenario {
@@ -88,6 +92,7 @@ impl Scenario {
             profile: review_profile(),
             review_granted: true,
             with_primary: true,
+            transcript: None,
         }
     }
 
@@ -129,10 +134,15 @@ fn seed(path: &str, scenario: &Scenario) {
         .execute(
             "INSERT INTO captures (capture_id, text, audio_reference, capture_instant, \
              timezone_id, utc_offset_minutes, locale, calendar, item_scope, route_id, \
-             entry_locked, created_at) VALUES (?, ?, NULL, '2026-10-08T09:30:00Z', \
+             entry_locked, created_at) VALUES (?, ?, ?, '2026-10-08T09:30:00Z', \
              'America/Chicago', -300, 'en_US', 'gregorian', 'personal', ?, 0, \
              '2026-10-08T09:30:01Z')",
-            rusqlite::params![CAPTURE_ID, NOTE_TEXT, ROUTE_ID],
+            rusqlite::params![
+                CAPTURE_ID,
+                scenario.transcript.is_none().then_some(NOTE_TEXT),
+                scenario.transcript.map(|_| "staging/synthetic.m4a"),
+                ROUTE_ID
+            ],
         )
         .unwrap();
     transaction
@@ -144,6 +154,22 @@ fn seed(path: &str, scenario: &Scenario) {
             rusqlite::params![ITEM_ID, CAPTURE_ID],
         )
         .unwrap();
+    if let Some(transcript_text) = scenario.transcript {
+        transaction
+            .execute(
+                "INSERT INTO transcript_attachments (item_id, source_job_id, \
+                 transcript_record_id, text, attached_revision, audio_reference, audio_sha256, \
+                 recognizer, transcribed_at) VALUES (?, 'transcription-synthetic', ?, ?, 0, \
+                 'staging/synthetic.m4a', ?, 'on-device-recognizer/1', '2026-10-08T09:31:00Z')",
+                rusqlite::params![
+                    ITEM_ID,
+                    TRANSCRIPT_RECORD_ID,
+                    transcript_text,
+                    "0".repeat(64)
+                ],
+            )
+            .unwrap();
+    }
     transaction
         .execute(
             "INSERT INTO routes (route_id, route_name, scope, processing_destinations, \
@@ -188,9 +214,20 @@ fn seed(path: &str, scenario: &Scenario) {
                 "INSERT INTO proposals (proposal_id, item_id, capture_id, source_revision, \
                  schema_version, text_basis_kind, text_basis_id, applied_state, proposal_type, \
                  reminder_proposal, session_topic_proposal, source_spans, abstained, \
-                 request_version, created_at) VALUES (?, ?, ?, 0, 1, 'original', NULL, \
+                 request_version, created_at) VALUES (?, ?, ?, 0, 1, ?, ?, \
                  'applied', 'action', NULL, NULL, '[]', 0, ?, '2026-10-08T09:31:00Z')",
-                rusqlite::params![PROPOSAL_ID, ITEM_ID, CAPTURE_ID, REQUEST_VERSION],
+                rusqlite::params![
+                    PROPOSAL_ID,
+                    ITEM_ID,
+                    CAPTURE_ID,
+                    if scenario.transcript.is_some() {
+                        "transcript"
+                    } else {
+                        "original"
+                    },
+                    scenario.transcript.map(|_| TRANSCRIPT_RECORD_ID),
+                    REQUEST_VERSION
+                ],
             )
             .unwrap();
     }
@@ -571,6 +608,34 @@ fn an_agreeing_review_is_one_request_and_records_a_verdict_without_changing_auth
     let stored = payload_of(&session.read_record(3, &job_id));
     assert_eq!(stored["record"], record);
     assert_eq!(session.authoritative_state(), before);
+    session.assert_no_command();
+    session.close();
+}
+
+#[test]
+fn a_transcribed_item_is_reviewed_on_its_transcript_with_the_transcript_basis() {
+    let _guard = serial();
+    let scenario = Scenario {
+        transcript: Some(TRANSCRIPT_TEXT),
+        ..Scenario::standard()
+    };
+    let session = Session::open("transcript", &scenario);
+    session.register_native();
+    let job_id = session.select(1);
+
+    let send = session.dispatch(2, &job_id);
+    let body = send["body"].as_str().unwrap();
+    assert!(body.contains(TRANSCRIPT_TEXT));
+    assert!(body.contains(TRANSCRIPT_RECORD_ID));
+    assert!(
+        !body.contains("correction_record_id"),
+        "a transcript is never presented as a user correction"
+    );
+
+    session.complete(2, &anthropic_reply("action"));
+    let record = session.final_record(2);
+    assert_eq!(record["outcome"], "reviewed");
+    assert_eq!(record["verdict"], "agreement");
     session.assert_no_command();
     session.close();
 }

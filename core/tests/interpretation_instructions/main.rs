@@ -155,9 +155,9 @@ fn request_for_fixture(profile: &ProviderProfile, fixture: &Value) -> Interpreta
         )
     };
     let revision = match text_basis {
-        TextBasis::Original { item_revision } | TextBasis::Correction { item_revision, .. } => {
-            item_revision
-        }
+        TextBasis::Original { item_revision }
+        | TextBasis::Correction { item_revision, .. }
+        | TextBasis::Transcript { item_revision, .. } => item_revision,
     };
     let time = time_context(
         context["capture_instant"]

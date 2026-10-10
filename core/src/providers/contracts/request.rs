@@ -17,6 +17,11 @@ pub enum TextBasis {
         correction_record_id: String,
         item_revision: u64,
     },
+    /// An on-device transcript of the capture's audio that the user has not corrected.
+    Transcript {
+        transcript_record_id: String,
+        item_revision: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -144,6 +149,15 @@ impl InterpretationRequest {
             } => {
                 if Uuid::parse_str(correction_record_id).is_err() {
                     return Err(E::InvalidIdentifier("correction_record_id"));
+                }
+                *item_revision
+            }
+            TextBasis::Transcript {
+                transcript_record_id,
+                item_revision,
+            } => {
+                if Uuid::parse_str(transcript_record_id).is_err() {
+                    return Err(E::InvalidIdentifier("transcript_record_id"));
                 }
                 *item_revision
             }

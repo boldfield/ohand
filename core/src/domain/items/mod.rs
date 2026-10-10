@@ -5,6 +5,7 @@
 // Implementation owned by D04.
 
 // Re-export types from events module for convenience in D04 tests.
+use crate::store::events::current_transcript;
 pub use crate::store::events::{ItemScope, ItemType};
 use anyhow::{anyhow, Result};
 use rusqlite::{OptionalExtension, Transaction};
@@ -78,11 +79,17 @@ impl fmt::Display for LifecycleState {
     }
 }
 
-/// Current text state: either the original capture text or a user correction.
+/// Current text state: the original capture text, an on-device transcript or a user correction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TextState {
     /// Original text from capture (or empty if only audio).
     Original { text: Option<String> },
+    /// Machine text recognized from the capture's audio; the user has not touched it.
+    /// `transcribed_at` is the time recognition succeeded.
+    Transcribed {
+        text: String,
+        transcribed_at: String,
+    },
     /// Corrected by the user; preserves the timestamp of the correction event.
     Corrected { text: String, corrected_at: String },
 }
@@ -91,7 +98,7 @@ impl TextState {
     pub fn text(&self) -> Option<&str> {
         match self {
             TextState::Original { text } => text.as_deref(),
-            TextState::Corrected { text, .. } => Some(text),
+            TextState::Transcribed { text, .. } | TextState::Corrected { text, .. } => Some(text),
         }
     }
 }
@@ -139,6 +146,15 @@ pub fn validate_state_transition(
         StateTransition::TextCorrected(_) => {
             // Text corrections are allowed at any lifecycle state (even completed/cancelled).
             Valid
+        }
+
+        StateTransition::TranscriptAttached => {
+            // A transcript fills text that does not exist yet. It never replaces typed text, a
+            // user correction or an earlier transcript.
+            match &current.current_text {
+                TextState::Original { text } if text.as_deref().is_none_or(str::is_empty) => Valid,
+                _ => ForbiddenOverride,
+            }
         }
 
         StateTransition::Completed => {
@@ -198,6 +214,8 @@ pub enum StateTransition {
     SessionTopicSet(Option<String>),
     /// User-corrected text.
     TextCorrected(String),
+    /// Text recognized from the capture's audio on the device. Machine output, not an edit.
+    TranscriptAttached,
     /// User marked item as completed.
     Completed,
     /// User marked item as cancelled.
@@ -360,7 +378,7 @@ fn load_item_state_with(
         }
     }
 
-    // Resolve text: check for user text correction.
+    // Resolve text: a user text correction, else the on-device transcript, else the capture.
     let (current_text, text_corrected) = {
         let text_correction: Option<(String, String)> = tx
             .query_row(
@@ -372,14 +390,17 @@ fn load_item_state_with(
             .optional()?;
 
         match text_correction {
-            Some((corrected_text, corrected_at)) => (
-                TextState::Corrected {
-                    text: corrected_text,
-                    corrected_at,
-                },
-                true,
-            ),
-            None => (TextState::Original { text: capture_text }, false),
+            Some((text, corrected_at)) => (TextState::Corrected { text, corrected_at }, true),
+            None => match current_transcript(tx, item_id)? {
+                Some(transcript) => (
+                    TextState::Transcribed {
+                        text: transcript.text,
+                        transcribed_at: transcript.transcribed_at,
+                    },
+                    false,
+                ),
+                None => (TextState::Original { text: capture_text }, false),
+            },
         }
     };
 
@@ -482,6 +503,14 @@ pub fn rebuild_state_from_events(tx: &Transaction<'_>, item_id: &str) -> Result<
     let mut scope_corrected = false;
     let mut session_topic_corrected = false;
     let mut text_corrected = false;
+
+    // An attached transcript is the text until a user text correction supersedes it.
+    if let Some(transcript) = current_transcript(tx, item_id)? {
+        current_text = TextState::Transcribed {
+            text: transcript.text,
+            transcribed_at: transcript.transcribed_at,
+        };
+    }
 
     // Replay all corrections in order.
     let mut corrections_stmt = tx.prepare(
@@ -849,6 +878,47 @@ mod tests {
 
         let empty_original = TextState::Original { text: None };
         assert_eq!(empty_original.text(), None);
+    }
+
+    #[test]
+    fn test_transcript_fills_missing_text_but_never_replaces_text() {
+        let mut state = ItemState {
+            item_id: "item-1".to_string(),
+            capture_id: "capture-1".to_string(),
+            revision: 0,
+            item_type: None,
+            scope: ItemScope::Personal,
+            session_topic: None,
+            lifecycle_state: LifecycleState::Active,
+            current_text: TextState::Original { text: None },
+            provenance: FieldProvenance::default(),
+        };
+        let attach = |state: &ItemState| {
+            validate_state_transition(state, StateTransition::TranscriptAttached)
+        };
+        assert_eq!(attach(&state), TransitionValidity::Valid);
+
+        state.current_text = TextState::Original {
+            text: Some("typed".to_string()),
+        };
+        assert_eq!(attach(&state), TransitionValidity::ForbiddenOverride);
+
+        state.current_text = TextState::Transcribed {
+            text: "heard".to_string(),
+            transcribed_at: "2026-10-08T10:00:00Z".to_string(),
+        };
+        assert_eq!(attach(&state), TransitionValidity::ForbiddenOverride);
+        assert_eq!(state.current_text.text(), Some("heard"));
+
+        state.current_text = TextState::Corrected {
+            text: "edited".to_string(),
+            corrected_at: "2026-10-08T10:01:00Z".to_string(),
+        };
+        assert_eq!(attach(&state), TransitionValidity::ForbiddenOverride);
+
+        state.current_text = TextState::Original { text: None };
+        state.lifecycle_state = LifecycleState::Deleted;
+        assert_eq!(attach(&state), TransitionValidity::NotAllowed);
     }
 
     #[test]
