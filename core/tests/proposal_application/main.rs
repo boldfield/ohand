@@ -1412,60 +1412,6 @@ fn a_dated_fact_that_does_not_ask_for_a_reminder_stays_unscheduled() {
         "remind me what I already did on 2026-01-16 09:00:00",
         "Bob told me I need to set a reminder for 2026-01-16 09:00:00",
         "Bob hopes I want to set a reminder for 2026-01-16 09:00:00",
-        "remind me to call the roofer 2026-01-16 09:00:00, actually don't remind me",
-        "remind me to call the roofer 2026-01-16 09:00:00, actually don't",
-        "remind me to call the roofer 2026-01-16 09:00:00, actually no",
-        "remind me to call the roofer 2026-01-16 09:00:00 but don't actually remind me",
-        "remind me to call the roofer 2026-01-16 09:00:00, never mind",
-        "remind me to call the roofer 2026-01-16 09:00:00. scratch that",
-        "remind me to call the roofer 2026-01-16 09:00:00, forget it",
-        "remind me to call the roofer 2026-01-16 09:00:00, on second thought no reminder",
-        "remind me to call the roofer 2026-01-16 09:00:00, no need",
-        "remind me to call the roofer 2026-01-16 09:00:00, don't bother",
-        "remind me to call the roofer 2026-01-16 09:00:00 or not",
-        "remind me to call the roofer 2026-01-16 09:00:00, actually forget about it",
-        "remind me to call the roofer 2026-01-16 09:00:00, actually skip the reminder",
-        "remind me to call the roofer 2026-01-16 09:00:00, cancel",
-        "remind me to call the roofer 2026-01-16 09:00:00, delete that",
-        "remind me to call the roofer 2026-01-16 09:00:00, I take that back",
-        "remind me to call the roofer 2026-01-16 09:00:00, I changed my mind",
-        "remind me to call the roofer 2026-01-16 09:00:00, actually I'll remember on my own",
-        "remind me to call the roofer 2026-01-16 09:00:00, just ignore this one",
-        "remind me to call the roofer 2026-01-16 09:00:00, on second thought drop it",
-        "remind me to call the roofer 2026-01-16 09:00:00, actually I no longer want that reminder",
-        "remind me to call the roofer 2026-01-16 09:00:00, I no longer need it",
-        "remind me to call the roofer 2026-01-16 09:00:00, it's no longer necessary",
-        "remind me to call the roofer 2026-01-16 09:00:00, no longer",
-        "remind me to call the roofer 2026-01-16 09:00:00, I don't need it anymore",
-        "remind me to call the roofer 2026-01-16 09:00:00, I don't want it any more",
-        "remind me to call the roofer 2026-01-16 09:00:00, not needed",
-        "remind me to call the roofer 2026-01-16 09:00:00, it's not required",
-        "remind me to call the roofer 2026-01-16 09:00:00, it's not necessary",
-        "remind me to call the roofer 2026-01-16 09:00:00, stop",
-        "remind me to call the roofer 2026-01-16 09:00:00, actually I don't want that reminder",
-        "remind me to call the roofer 2026-01-16 09:00:00, I don't need the reminder",
-        "remind me to call the roofer 2026-01-16 09:00:00, I don't want any reminders",
-        "remind me to call the roofer 2026-01-16 09:00:00, I don't want to be reminded",
-        "remind me to call the roofer 2026-01-16 09:00:00, I don't want you to remind me",
-        "remind me to call the roofer 2026-01-16 09:00:00, I don't desire that reminder",
-        "remind me to call the roofer 2026-01-16 09:00:00, I do not desire that reminder",
-        "remind me to call the roofer 2026-01-16 09:00:00, I no longer desire it",
-        "remind me to call the roofer 2026-01-16 09:00:00, I don't desire it anymore",
-        "remind me to call the roofer 2026-01-16 09:00:00, I don't wish to be reminded",
-        "remind me to call the roofer 2026-01-16 09:00:00, I don't wish for that reminder",
-        "remind me to call the roofer 2026-01-16 09:00:00, I no longer wish for it",
-        "remind me to call the roofer 2026-01-16 09:00:00, I never wanted that reminder",
-        "remind me to call the roofer 2026-01-16 09:00:00, I don't need any reminding",
-        "remind me to call the roofer 2026-01-16 09:00:00, I didn't want that reminder",
-        "remind me to call the roofer 2026-01-16 09:00:00, I didn’t want that reminder",
-        "remind me to call the roofer 2026-01-16 09:00:00, I didnt want that reminder",
-        "remind me to call the roofer 2026-01-16 09:00:00, it isn't needed",
-        "remind me to call the roofer 2026-01-16 09:00:00, the reminder isn't necessary",
-        "remind me to call the roofer 2026-01-16 09:00:00, it isnt required",
-        "remind me to call the roofer 2026-01-16 09:00:00, reminders aren't needed",
-        "remind me to call the roofer 2026-01-16 09:00:00, it wasn't necessary",
-        "remind me to call the roofer 2026-01-16 09:00:00, those weren't wanted",
-        "remind me to call the roofer 2026-01-16 09:00:00, you shouldn't remind me",
     ] {
         let (fixture, disposition) = apply_reminder_candidate(
             text,
@@ -1497,24 +1443,6 @@ fn natural_first_person_reminder_requests_bind_to_the_quoted_time() {
         "need to set a reminder for 2026-01-16 09:00:00",
         "could you please remind me on 2026-01-16 09:00:00",
         "remind me to call the café roofer 2026-01-16 09:00:00",
-        "remind me to call the roofer 2026-01-16 09:00:00, don't forget the ladder",
-        "remind me to call the roofer 2026-01-16 09:00:00, I don't want to miss it",
-        "remind me to call the roofer 2026-01-16 09:00:00, it's not urgent",
-        "remind me to call the roofer 2026-01-16 09:00:00, he said \"never mind\" last time",
-        "set a reminder for 2026-01-16 09:00:00 to cancel the old subscription",
-        "remind me to call the roofer 2026-01-16 09:00:00, don't cancel the ladder order",
-        "remind me to call the roofer 2026-01-16 09:00:00 to stop the leak",
-        "remind me to call the roofer 2026-01-16 09:00:00, I want it fixed",
-        "remind me to call the roofer 2026-01-16 09:00:00, don't stop looking for quotes",
-        "remind me to call the roofer 2026-01-16 09:00:00, I don't want the quote to expire",
-        "remind me to call the roofer 2026-01-16 09:00:00, I don't want to miss the call",
-        "remind me to call the roofer 2026-01-16 09:00:00, I don't wish to miss it",
-        "remind me to call the roofer 2026-01-16 09:00:00, I don't desire to be late",
-        "remind me to call the roofer 2026-01-16 09:00:00, I wish it were fixed",
-        "remind me to call the roofer 2026-01-16 09:00:00, I desire a quick quote",
-        "remind me to call the roofer 2026-01-16 09:00:00, I didn't want to miss the call last time",
-        "remind me to call the roofer 2026-01-16 09:00:00, it isn't urgent",
-        "remind me to call the roofer 2026-01-16 09:00:00, the quote wasn't cheap",
     ] {
         let (fixture, disposition) = apply_reminder_candidate(
             text,
@@ -1531,6 +1459,103 @@ fn natural_first_person_reminder_requests_bind_to_the_quoted_time() {
         );
         assert!(fixture.reminder_effects().is_some(), "{text}");
     }
+}
+
+const WITHDRAWAL_CORPUS: &str = include_str!("withdrawal_corpus.txt");
+const CORPUS_TIME_PHRASE: &str = "2026-01-16 09:00:00";
+
+#[derive(Debug, PartialEq)]
+enum CorpusExpectation {
+    Unscheduled,
+    Scheduled,
+}
+
+/// Parse `<expectation> | <capture text>` lines; `{time}` becomes the quoted time phrase.
+fn withdrawal_corpus() -> Vec<(CorpusExpectation, String)> {
+    WITHDRAWAL_CORPUS
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            let (expectation, text) = line
+                .split_once(" | ")
+                .unwrap_or_else(|| panic!("malformed corpus line: {line}"));
+            let expectation = match expectation {
+                "unscheduled" => CorpusExpectation::Unscheduled,
+                "scheduled" => CorpusExpectation::Scheduled,
+                other => panic!("unknown corpus expectation {other:?} in: {line}"),
+            };
+            (expectation, text.replace("{time}", CORPUS_TIME_PHRASE))
+        })
+        .collect()
+}
+
+fn source_text_of(fixture: &Fixture) -> String {
+    open(&fixture.path)
+        .conn()
+        .query_row(
+            "SELECT text FROM captures WHERE capture_id = ?",
+            [&fixture.capture_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn the_withdrawal_corpus_decides_which_reminder_requests_schedule() {
+    let corpus = withdrawal_corpus();
+    let withdrawals = corpus
+        .iter()
+        .filter(|(expectation, _)| *expectation == CorpusExpectation::Unscheduled)
+        .count();
+    let controls = corpus.len() - withdrawals;
+    assert!(withdrawals > 0 && controls > 0, "corpus needs both kinds");
+
+    for (expectation, text) in &corpus {
+        let (fixture, disposition) = apply_reminder_candidate(
+            text,
+            CORPUS_TIME_PHRASE,
+            Some("2026-01-16T09:00:00Z"),
+            TimeResolutionQuality::Explicit,
+            ItemType::Action,
+        );
+
+        match expectation {
+            CorpusExpectation::Unscheduled => {
+                assert_eq!(disposition, ReminderDisposition::NoExplicitIntent, "{text}");
+                assert_eq!(fixture.reminder_effects(), None, "{text}");
+                let durable = fixture.durable();
+                assert_eq!(durable.item_type.as_deref(), Some("action"), "{text}");
+                assert_eq!(durable.processing_state, "processed", "{text}");
+                assert_eq!(durable.reminders, 0, "{text}");
+                assert_eq!(
+                    source_text_of(&fixture),
+                    *text,
+                    "the source record stays intact: {text}"
+                );
+            }
+            CorpusExpectation::Scheduled => {
+                assert_eq!(
+                    disposition,
+                    ReminderDisposition::Recorded(ReminderRequestState::Resolved),
+                    "{text}"
+                );
+                let (_, _, operations, _) = fixture
+                    .reminder_effects()
+                    .unwrap_or_else(|| panic!("no reminder recorded for: {text}"));
+                assert_eq!(operations, vec![OperationType::Schedule], "{text}");
+                assert_eq!(fixture.durable().reminders, 1, "{text}");
+                assert_eq!(
+                    fixture.reminder_row().resolved_instant.as_deref(),
+                    Some("2026-01-16T09:00:00Z"),
+                    "{text}"
+                );
+            }
+        }
+    }
+    println!(
+        "withdrawal corpus: {withdrawals} withdrawals stayed unscheduled, {controls} controls scheduled"
+    );
 }
 
 #[test]
