@@ -21,6 +21,7 @@ final class VoiceRecordingCoreIntegrationTests: IngressStorageTestCase {
         let notificationCenter = NotificationCenter()
         let poller = ManualPoller()
         private(set) var controller: VoiceRecordingController?
+        private(set) var coordinator: VoiceRecoveryCoordinator?
         private(set) var service: ForegroundIngressService?
         private(set) var outcomes: [VoiceCaptureOutcome] = []
 
@@ -37,16 +38,23 @@ final class VoiceRecordingCoreIntegrationTests: IngressStorageTestCase {
                 environment.isForeground = { true }
                 let manualPoller = poller
                 environment.schedulePoll = { interval, handler in manualPoller.schedule(interval: interval, handler: handler) }
+                let voiceHandoff = IngressVoiceHandoff(service: ingress, context: context)
                 let newController = VoiceRecordingController(
                     inProgressDirectory: layout.directory(for: .ingressInProgressAudio),
                     engine: engine,
                     permission: permission,
-                    handoff: IngressVoiceHandoff(service: ingress, context: context),
+                    handoff: voiceHandoff,
                     environment: environment,
                     notificationCenter: notificationCenter,
                     makeCaptureID: { "voice-core-1" })
                 newController.onOutcome = { [unowned self] in outcomes.append($0) }
                 controller = newController
+                coordinator = VoiceRecoveryCoordinator(
+                    inProgressDirectory: layout.directory(for: .ingressInProgressAudio),
+                    ingress: IngressVoiceRecovery(service: ingress),
+                    handoff: voiceHandoff,
+                    controller: newController,
+                    environment: environment)
             } catch {
                 core.close()
                 throw error
@@ -54,6 +62,7 @@ final class VoiceRecordingCoreIntegrationTests: IngressStorageTestCase {
         }
 
         func terminate() {
+            coordinator = nil
             controller = nil
             service = nil
             core.close()
@@ -127,6 +136,21 @@ final class VoiceRecordingCoreIntegrationTests: IngressStorageTestCase {
         return try XCTUnwrap(runtime.outcomes.first, "no outcome was delivered")
     }
 
+    private func waitUntil(_ description: String, _ condition: () -> Bool) throws {
+        let deadline = Date().addingTimeInterval(30)
+        while !condition() && Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+        XCTAssertTrue(condition(), "timed out waiting for \(description)")
+    }
+
+    private func refreshListing(_ runtime: Runtime) throws -> VoiceRecoveryListing {
+        var listing: VoiceRecoveryListing?
+        try XCTUnwrap(runtime.coordinator).refresh { listing = $0 }
+        try waitUntil("the recovery listing") { listing != nil }
+        return try XCTUnwrap(listing)
+    }
+
     private func startRecording(_ runtime: Runtime) throws {
         var result: Result<VoiceRecordingStarted, VoiceStartFailure>?
         try XCTUnwrap(runtime.controller).start { result = $0 }
@@ -160,6 +184,62 @@ final class VoiceRecordingCoreIntegrationTests: IngressStorageTestCase {
         XCTAssertEqual(boundary.protectionByPath[recordingPath], inProgressPolicy.fileProtection,
                        "the recording received the in-progress store's class while it was being written")
         XCTAssertEqual(boundary.exclusionByPath[layout.directory(for: .ingressInProgressAudio).path], true)
+    }
+
+    func testCancelledRecordingIsOfferedAfterRestartAndFinishedIntoTheCore() throws {
+        let beforeDeath = try launch()
+        try startRecording(beforeDeath)
+        try XCTUnwrap(beforeDeath.controller).cancel()
+        guard case .retainedUnsubmitted = try waitForOutcome(beforeDeath) else { return XCTFail("expected a retained recording") }
+        XCTAssertEqual(try itemCount(captureID: "voice-core-1"), 0, "a cancellation saves nothing")
+        beforeDeath.terminate()
+
+        let relaunched = try launch()
+        let listing = try refreshListing(relaunched)
+        let recording = try XCTUnwrap(listing.recordings.first)
+        XCTAssertEqual(listing.recordings.count, 1)
+        XCTAssertEqual(recording.captureID, "voice-core-1")
+        XCTAssertEqual(try XCTUnwrap(recording.durationSeconds), 0.5, accuracy: 0.001)
+        XCTAssertEqual(try itemCount(captureID: "voice-core-1"), 0, "discovery saves nothing")
+
+        var result: Result<VoiceCaptureOutcome, VoiceRecoveryFailure>?
+        try XCTUnwrap(relaunched.coordinator).finish(recording) { result = $0 }
+        try waitUntil("the finish") { result != nil }
+
+        guard case .saved(let summary, _) = try XCTUnwrap(result).get() else { return XCTFail("expected saved") }
+        XCTAssertEqual(summary.end, .recoveredOnReentry)
+        XCTAssertEqual(try itemCount(captureID: "voice-core-1"), 1)
+        XCTAssertEqual(try audioReference(captureID: "voice-core-1"), "FinalizedAudio/voice-core-1.wav")
+        XCTAssertEqual(try AVAudioFile(forReading: finalizedAudioURL("voice-core-1.wav")).length, 8000)
+        XCTAssertFalse(exists(inProgressAudioURL("voice-core-1.wav")))
+        XCTAssertFalse(exists(recordURL("voice-core-1")))
+    }
+
+    func testContinuedRecordingIsJoinedAndSavedOnceInTheCore() throws {
+        let beforeDeath = try launch()
+        try startRecording(beforeDeath)
+        try XCTUnwrap(beforeDeath.controller).cancel()
+        _ = try waitForOutcome(beforeDeath)
+        beforeDeath.terminate()
+
+        let relaunched = try launch()
+        let recording = try XCTUnwrap(try refreshListing(relaunched).recordings.first)
+        var started: Result<VoiceRecordingStarted, VoiceRecoveryFailure>?
+        try XCTUnwrap(relaunched.coordinator).continueRecording(recording) { started = $0 }
+        try waitUntil("the continuation to start") { started != nil }
+        XCTAssertEqual(try XCTUnwrap(started).get().captureID, "voice-core-1")
+
+        try XCTUnwrap(relaunched.controller).stop()
+        let outcome = try waitForOutcome(relaunched)
+
+        guard case .saved(let summary, _) = outcome else { return XCTFail("expected saved, got \(outcome)") }
+        XCTAssertTrue(summary.isComplete)
+        XCTAssertEqual(summary.durationSeconds, 1.0, accuracy: 0.001)
+        XCTAssertEqual(try itemCount(captureID: "voice-core-1"), 1)
+        XCTAssertEqual(try AVAudioFile(forReading: finalizedAudioURL("voice-core-1.wav")).length, 16000)
+        XCTAssertFalse(exists(inProgressAudioURL("voice-core-1.wav")))
+        XCTAssertFalse(exists(inProgressAudioURL("voice-core-1-continued.wav")))
+        XCTAssertFalse(exists(inProgressAudioURL("voice-core-1-joined.wav")))
     }
 
     func testInterruptedRecordingSurvivesProcessDeathBeforeImportAndSavesOnce() throws {
