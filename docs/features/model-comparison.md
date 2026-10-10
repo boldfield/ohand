@@ -165,6 +165,8 @@ Acceptance:
 
 Source pointers: `core/src/providers/contracts/mod.rs:16`, `core/src/providers/contracts/dispatch.rs:124`, `core/src/providers/contracts/request.rs:43`, `docs/architecture/m1-contracts.md:237`, `docs/architecture/m1-contracts.md:250`.
 
+Allowance recorded 2026-10-10 (one-time, after PR #152 round 2): the only failing required check on XB06 was a pre-existing crash in `core/src/ffi/job_health/tests.rs`, where a test dropped its boxed event recorder while the worker could still be inside the callback (SIGSEGV in 5 of 60 runs, also seen by the C05a round-1 reviewers). XB06 may carry the test-only fix that clears the event-callback registration before dropping the recorder, in that file only, because it repairs the check XB06 must pass and no other task on the board touches it. This is not a transfer of FFI ownership and authorizes no non-test change.
+
 ### XB07
 
 Execute synthetic paired cases via normalized diagnostic adapters and the journal, with explicit attempt budgets and deterministic recorded arm order.
