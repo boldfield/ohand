@@ -93,6 +93,15 @@ impl FrozenComparisonSource {
                 }
                 *item_revision
             }
+            TextBasis::Transcript {
+                transcript_record_id,
+                item_revision,
+            } => {
+                if Uuid::parse_str(transcript_record_id).is_err() {
+                    return Err(ComparisonError::InvalidIdentifier("transcript_record_id"));
+                }
+                *item_revision
+            }
         };
         if basis_revision != source_revision {
             return Err(ComparisonError::RevisionMismatch);

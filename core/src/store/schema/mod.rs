@@ -67,6 +67,10 @@ pub const MIGRATIONS: &[MigrationStep] = &[
         target_version: 6,
         apply: add_job_transient_failure_count_v6,
     },
+    MigrationStep {
+        target_version: 7,
+        apply: add_transcript_attachments_v7,
+    },
 ];
 
 /// Database handle with schema validation.
@@ -744,6 +748,33 @@ fn add_reminder_source_phrase_v5(tx: &Transaction<'_>) -> Result<()> {
 fn add_job_transient_failure_count_v6(tx: &Transaction<'_>) -> Result<()> {
     tx.execute(
         "ALTER TABLE jobs ADD COLUMN transient_failure_count INTEGER NOT NULL DEFAULT 0",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Step 7 (C05a): the on-device transcript attached to a voice capture and its provenance. The
+/// transcript is machine text, not a user correction: the item's `transcript` event marks the
+/// revision that attached it, and this row holds the text under `transcript_record_id` (a UUID,
+/// also that event's id), which job produced it, which audio (reference and SHA-256) and
+/// recognizer it came from, and when recognition succeeded. At most one transcript exists per
+/// item and per job. The row holds readable text and an audio digest, so deletion removes it.
+fn add_transcript_attachments_v7(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute(
+        "CREATE TABLE transcript_attachments (
+            item_id TEXT PRIMARY KEY,
+            source_job_id TEXT NOT NULL UNIQUE,
+            transcript_record_id TEXT NOT NULL UNIQUE,
+            text TEXT NOT NULL,
+            attached_revision INTEGER NOT NULL,
+            audio_reference TEXT NOT NULL,
+            audio_sha256 TEXT NOT NULL,
+            recognizer TEXT NOT NULL,
+            detected_language TEXT,
+            confidence REAL,
+            transcribed_at TEXT NOT NULL,
+            FOREIGN KEY (item_id) REFERENCES items(item_id) ON DELETE CASCADE
+        )",
         [],
     )?;
     Ok(())

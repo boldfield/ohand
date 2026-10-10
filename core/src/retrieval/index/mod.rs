@@ -1,13 +1,14 @@
-// Full-text index over original and explicitly corrected text.
+// Full-text index over original, transcribed and explicitly corrected text.
 // Implementation owned by R01.
 //
 // `search_index` is a derived projection with exactly one row per readable item:
 // the original capture text, the effective current text (latest explicit text correction,
-// else the original) and which of the two is current. Only user-authored text is indexed;
-// model proposals, summaries and other derived values never enter it.
+// else the on-device transcript of the capture's audio, else the original) and which of the
+// three is current. Only source text is indexed: user-authored text and the transcript of the
+// user's own recording. Model proposals, summaries and other derived values never enter it.
 //
 // Every write goes through `sync_item_in_tx`, which re-reads the authoritative tables
-// (items, captures, corrections) and replaces the item's row, so the hooks are idempotent,
+// (items, captures, corrections, transcript_attachments) and replaces the item's row, so the hooks are idempotent,
 // order-independent and converge on exactly what `rebuild_index` produces. Lifecycle and
 // privacy scope are never copied into the index: searches join `items`/`captures` at query
 // time, so a stale or orphaned index row can neither resurrect a deleted item nor leak text
@@ -42,23 +43,30 @@ const PROJECTION_SQL: &str = "
                (SELECT t.new_value FROM corrections t
                  WHERE t.item_id = i.item_id AND t.kind = 'text'
                  ORDER BY t.revision DESC LIMIT 1),
+               (SELECT a.text FROM transcript_attachments a WHERE a.item_id = i.item_id),
                c.text),
            CASE WHEN EXISTS (SELECT 1 FROM corrections t
                               WHERE t.item_id = i.item_id AND t.kind = 'text')
-                THEN 'corrected' ELSE 'original' END
+                THEN 'corrected'
+                WHEN EXISTS (SELECT 1 FROM transcript_attachments a WHERE a.item_id = i.item_id)
+                THEN 'transcribed'
+                ELSE 'original' END
       FROM items i
       JOIN captures c ON c.capture_id = i.capture_id
      WHERE i.lifecycle_state != 'deleted'
        AND (?1 IS NULL OR i.item_id = ?1)
        AND (c.text IS NOT NULL
             OR EXISTS (SELECT 1 FROM corrections t
-                        WHERE t.item_id = i.item_id AND t.kind = 'text'))";
+                        WHERE t.item_id = i.item_id AND t.kind = 'text')
+            OR EXISTS (SELECT 1 FROM transcript_attachments a WHERE a.item_id = i.item_id))";
 
 /// Which text the current value of an item comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextBasis {
     /// The text as captured.
     Original,
+    /// The on-device transcript of the capture's audio; machine text the user has not corrected.
+    Transcribed,
     /// The latest explicit user text correction.
     Corrected,
 }
@@ -67,6 +75,7 @@ impl TextBasis {
     pub fn as_str(&self) -> &'static str {
         match self {
             TextBasis::Original => "original",
+            TextBasis::Transcribed => "transcribed",
             TextBasis::Corrected => "corrected",
         }
     }
@@ -74,6 +83,7 @@ impl TextBasis {
     fn parse(stored: &str) -> Result<Self> {
         match stored {
             "original" => Ok(TextBasis::Original),
+            "transcribed" => Ok(TextBasis::Transcribed),
             "corrected" => Ok(TextBasis::Corrected),
             other => Err(anyhow!("Unknown text basis in search index: {other}")),
         }

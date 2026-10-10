@@ -91,6 +91,10 @@ enum TextBasisWire {
         correction_record_id: String,
         item_revision: u64,
     },
+    Transcript {
+        transcript_record_id: String,
+        item_revision: u64,
+    },
 }
 
 fn deserialize_text_basis<'de, D>(deserializer: D) -> Result<TextBasis, D::Error>
@@ -106,14 +110,21 @@ where
             correction_record_id,
             item_revision,
         },
+        TextBasisWire::Transcript {
+            transcript_record_id,
+            item_revision,
+        } => TextBasis::Transcript {
+            transcript_record_id,
+            item_revision,
+        },
     })
 }
 
 fn basis_revision(text_basis: &TextBasis) -> u64 {
     match text_basis {
-        TextBasis::Original { item_revision } | TextBasis::Correction { item_revision, .. } => {
-            *item_revision
-        }
+        TextBasis::Original { item_revision }
+        | TextBasis::Correction { item_revision, .. }
+        | TextBasis::Transcript { item_revision, .. } => *item_revision,
     }
 }
 
@@ -468,12 +479,16 @@ impl Proposal {
         parse_uuid(&self.request_version, "request_version")?;
         let source_revision = u64::try_from(self.source_revision)
             .map_err(|_| ProposalError::NegativeRevision(self.source_revision))?;
-        if let TextBasis::Correction {
-            correction_record_id,
-            ..
-        } = &self.text_basis
-        {
-            parse_uuid(correction_record_id, "correction_record_id")?;
+        match &self.text_basis {
+            TextBasis::Original { .. } => {}
+            TextBasis::Correction {
+                correction_record_id,
+                ..
+            } => parse_uuid(correction_record_id, "correction_record_id")?,
+            TextBasis::Transcript {
+                transcript_record_id,
+                ..
+            } => parse_uuid(transcript_record_id, "transcript_record_id")?,
         }
         let basis_revision = basis_revision(&self.text_basis);
         if basis_revision != source_revision {
