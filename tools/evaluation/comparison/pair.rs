@@ -17,6 +17,8 @@ pub enum DisagreementFacet {
     SessionTopic,
     Abstention,
     RequestedOperation,
+    /// The source spans an arm cites for its item, reminder or session topic.
+    GroundingEvidence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -65,6 +67,22 @@ pub(super) fn disagreement(a: Option<&Candidate>, b: Option<&Candidate>) -> Disa
     }
     if a.view.requested_operation != b.view.requested_operation {
         facets.push(DisagreementFacet::RequestedOperation);
+    }
+    let evidence_key = |candidate: &Candidate| {
+        let mut spans = candidate.view.spans.clone();
+        spans.sort_unstable();
+        (
+            spans,
+            candidate
+                .view
+                .reminder
+                .as_ref()
+                .and_then(|reminder| reminder.evidence),
+            candidate.view.session_topic_span,
+        )
+    };
+    if evidence_key(a) != evidence_key(b) {
+        facets.push(DisagreementFacet::GroundingEvidence);
     }
     if facets.is_empty() {
         Disagreement::Agree

@@ -21,6 +21,76 @@ pub(super) fn arm_key(arm: ArmLabel) -> &'static str {
 
 pub(super) const ARMS: [ArmLabel; 2] = [ArmLabel::A, ArmLabel::B];
 
+const SECRET_PREFIXES: &[&str] = &[
+    "sk-",
+    "sk_",
+    "ghp_",
+    "gho_",
+    "ghs_",
+    "ghu_",
+    "github_pat_",
+    "xoxb-",
+    "xoxp-",
+    "xoxa-",
+    "xapp-",
+    "npm_",
+    "glpat-",
+    "hf_",
+    "pypi-",
+    "dop_v1_",
+    "shpat_",
+    "shpss_",
+];
+
+const SECRET_WORDS: &[&str] = &[
+    "secret",
+    "password",
+    "passwd",
+    "passphrase",
+    "credential",
+    "apikey",
+    "privatekey",
+    "accesskey",
+    "accesstoken",
+    "authtoken",
+    "apitoken",
+    "bearertoken",
+    "authorization",
+];
+
+/// Labels and reason codes are serialized into reports, so anything shaped like a credential
+/// is refused: a known token prefix, a credential word, a long hex run, or a long segment
+/// that is very long or mixes letters and digits. Plain version labels such as
+/// `profile-2026.10` pass.
+fn looks_like_credential(text: &str) -> bool {
+    let lowered = text.to_ascii_lowercase();
+    let squashed: String = lowered
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    if SECRET_WORDS.iter().any(|word| squashed.contains(word)) {
+        return true;
+    }
+    let is_delimiter = |character: char| matches!(character, '.' | '-' | '_');
+    let prefixed = SECRET_PREFIXES.iter().any(|prefix| {
+        lowered.match_indices(prefix).any(|(index, _)| {
+            index == 0
+                || lowered[..index]
+                    .chars()
+                    .next_back()
+                    .is_some_and(is_delimiter)
+        })
+    });
+    prefixed
+        || lowered.split(is_delimiter).any(|segment| {
+            let has_digit = segment.bytes().any(|byte| byte.is_ascii_digit());
+            let has_letter = segment.bytes().any(|byte| byte.is_ascii_alphabetic());
+            let hex_run =
+                segment.len() >= 16 && segment.bytes().all(|byte| byte.is_ascii_hexdigit());
+            hex_run || segment.len() >= 32 || (segment.len() >= 20 && has_digit && has_letter)
+        })
+}
+
 /// A short lowercase snake_case code such as `timed_out` or `not_authorized`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
@@ -35,9 +105,9 @@ impl ReasonCode {
             && code
                 .bytes()
                 .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
-        if !valid {
+        if !valid || looks_like_credential(code) {
             return Err(EvaluationError::Setup(format!(
-                "a reason code is 1 to {} characters of a-z, 0-9 and underscore",
+                "a reason code is 1 to {} characters of a-z, 0-9 and underscore, and not credential-shaped",
                 Self::MAX_LEN
             )));
         }
@@ -64,9 +134,9 @@ impl Label {
             && label
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
-        if !valid {
+        if !valid || looks_like_credential(label) {
             return Err(EvaluationError::Setup(format!(
-                "a label is 1 to {} characters of letters, digits, '.', '_' and '-'",
+                "a label is 1 to {} characters of letters, digits, '.', '_' and '-', and not credential-shaped",
                 Self::MAX_LEN
             )));
         }

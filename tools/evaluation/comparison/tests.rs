@@ -156,7 +156,10 @@ fn a_wrong_deadline_on_one_arm_is_that_arms_defect_and_a_separate_disagreement()
     assert_eq!(
         case.disagreement,
         Disagreement::Differ {
-            facets: vec![DisagreementFacet::Reminder]
+            facets: vec![
+                DisagreementFacet::Reminder,
+                DisagreementFacet::GroundingEvidence
+            ]
         }
     );
     assert_eq!(
@@ -167,6 +170,41 @@ fn a_wrong_deadline_on_one_arm_is_that_arms_defect_and_a_separate_disagreement()
     // only B proposed a wrong deadline: objective cleanliness is not disagreement.
     assert_eq!(report.paired_objective.neither_clean, 1);
     assert_eq!(report.paired_objective.only_b_clean, 0);
+}
+
+#[test]
+fn differing_reminder_evidence_is_a_disagreement_even_when_the_proposed_time_matches() {
+    let fixture = "design-explicit-reminder";
+    let mut unrelated_evidence = match scripted("conforming/design-explicit-reminder") {
+        ArmOutcome::Completed { output } => output,
+        other => panic!("not a reply: {other:?}"),
+    };
+    unrelated_evidence["reminder_proposal"]["source_span"] = json!({ "start": 0, "end": 5 });
+    let report = score(&input(
+        &[fixture],
+        vec![pair(
+            fixture,
+            scripted("conforming/design-explicit-reminder"),
+            ArmOutcome::completed(unrelated_evidence),
+        )],
+    ));
+
+    assert_eq!(
+        report.cases[0].disagreement,
+        Disagreement::Differ {
+            facets: vec![DisagreementFacet::GroundingEvidence]
+        }
+    );
+    assert_eq!(report.disagreement.agree, 0);
+    assert_eq!(report.disagreement.differ, 1);
+    assert_eq!(
+        report.disagreement.by_facet[&DisagreementFacet::GroundingEvidence],
+        1
+    );
+    assert!(!report
+        .disagreement
+        .by_facet
+        .contains_key(&DisagreementFacet::Reminder));
 }
 
 #[test]
@@ -556,5 +594,45 @@ fn reasons_and_labels_cannot_carry_urls_or_free_text() {
     assert!(Label::new("profile-a.v1").is_ok());
     for bad in ["", "a b", "https://host.example", "a/b", "key=value"] {
         assert!(Label::new(bad).is_err(), "{bad:?}");
+    }
+}
+
+#[test]
+fn credential_shaped_labels_and_reasons_are_refused() {
+    for bad in [
+        "sk-proj-syntheticcredential123456",
+        "AKIAIOSFODNN7EXAMPLE",
+        "0123456789abcdef0123456789abcdef",
+        "exp-ghp_abcdefgh1234",
+        "profile.eyJhbGciOiJIUzI1NiJ9abc",
+        "my-secret-profile",
+        "api_key_profile",
+    ] {
+        assert!(Label::new(bad).is_err(), "label {bad:?}");
+    }
+    for bad in [
+        "sk_proj_syntheticcredential123456",
+        "0123456789abcdef0123456789abcdef",
+        "ghp_abcdefgh1234",
+        "password_rejected",
+    ] {
+        assert!(ReasonCode::new(bad).is_err(), "reason {bad:?}");
+        assert!(ArmOutcome::no_response(NoResponseKind::Failed, bad).is_err());
+    }
+    for good in [
+        "experiment-0001",
+        "profile-a.v1",
+        "task-2026.10",
+        "asia-pacific",
+    ] {
+        assert!(Label::new(good).is_ok(), "label {good:?}");
+    }
+    for good in [
+        "timed_out",
+        "not_authorized",
+        "max_tokens_exceeded",
+        "http_503",
+    ] {
+        assert!(ReasonCode::new(good).is_ok(), "reason {good:?}");
     }
 }
