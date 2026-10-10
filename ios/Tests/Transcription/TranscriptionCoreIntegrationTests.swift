@@ -336,7 +336,9 @@ final class TranscriptionCoreIntegrationTests: IngressStorageTestCase {
 
         guard case .success(let firstAck) = attached else { return XCTFail("the first apply must commit") }
         XCTAssertEqual(firstAck.disposition, .attached)
-        XCTAssertEqual(firstAck.transcriptionState, "transcribed")
+        XCTAssertNotNil(firstAck.revision)
+        XCTAssertNil(firstAck.transcriptionState)
+        XCTAssertEqual(store.item?.transcriptionState, "transcribed")
         guard case .success(let secondAck) = repeated else { return XCTFail("a redelivery must converge") }
         XCTAssertEqual(secondAck.disposition, .alreadyAttached)
         guard case .failure(let conflict) = conflicting else { return XCTFail("a different transcript must be refused") }
