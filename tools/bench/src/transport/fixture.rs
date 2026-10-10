@@ -79,6 +79,8 @@ pub enum Reply {
     Endless,
     /// Write these bytes as the whole response, then close.
     Raw(Vec<u8>),
+    /// Write these bytes, then close the TCP connection without close_notify.
+    RawWithoutCloseNotify(Vec<u8>),
 }
 
 impl Reply {
@@ -243,6 +245,11 @@ fn serve(
             let _ = tls.flush();
             tls.conn.send_close_notify();
             let _ = tls.flush();
+        }
+        Reply::RawWithoutCloseNotify(bytes) => {
+            let _ = tls.write_all(&bytes);
+            let _ = tls.flush();
+            let _ = tls.sock.shutdown(std::net::Shutdown::Both);
         }
         Reply::Hang => {
             while !stop.load(Ordering::SeqCst) {

@@ -587,7 +587,7 @@ fn chunked_bodies_are_decoded_and_bounded() {
 }
 
 #[test]
-fn close_delimited_bodies_end_at_close_and_short_length_framed_bodies_fail() {
+fn close_delimited_bodies_need_close_notify_and_short_length_framed_bodies_fail() {
     let authority = TestAuthority::new();
     let delimited = start_fixture(&authority, |_| {
         Reply::Raw(b"HTTP/1.1 200 OK\r\nconnection: close\r\n\r\nuntil close".to_vec())
@@ -595,8 +595,15 @@ fn close_delimited_bodies_end_at_close_and_short_length_framed_bodies_fail() {
     let short = start_fixture(&authority, |_| {
         Reply::Raw(b"HTTP/1.1 200 OK\r\ncontent-length: 50\r\n\r\nonly part".to_vec())
     });
+    let cut_off = start_fixture(&authority, |_| {
+        Reply::RawWithoutCloseNotify(
+            b"HTTP/1.1 200 OK\r\nconnection: close\r\n\r\nmaybe cut".to_vec(),
+        )
+    });
     let policy = approved(&delimited)
         .approve_origin(&short.url("/"))
+        .unwrap()
+        .approve_origin(&cut_off.url("/"))
         .unwrap();
     let transport = transport_for(&authority, policy, Arc::new(RecordingResolver::default()));
 
@@ -604,6 +611,10 @@ fn close_delimited_bodies_end_at_close_and_short_length_framed_bodies_fail() {
     assert_eq!(response.body, b"until close");
     assert_eq!(
         send(&transport, &request_to(short.url("/"), None)).unwrap_err(),
+        HostTransportError::Unreachable
+    );
+    assert_eq!(
+        send(&transport, &request_to(cut_off.url("/"), None)).unwrap_err(),
         HostTransportError::Unreachable
     );
     assert_no_open_sockets(&transport);

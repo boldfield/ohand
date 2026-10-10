@@ -194,6 +194,8 @@ pub(crate) struct Session<'a> {
     budget: &'a Budget<'a>,
     received: Vec<u8>,
     tcp_closed: bool,
+    /// The server ended the TLS stream with close_notify, so nothing was cut off in transit.
+    close_notified: bool,
 }
 
 impl<'a> Session<'a> {
@@ -212,6 +214,7 @@ impl<'a> Session<'a> {
             budget,
             received: Vec::new(),
             tcp_closed: false,
+            close_notified: false,
         };
         while session.tls.is_handshaking() {
             if session.tcp_closed {
@@ -270,7 +273,10 @@ impl<'a> Session<'a> {
         loop {
             self.budget.check()?;
             match self.tls.reader().read(&mut chunk) {
-                Ok(0) => return Ok(false),
+                Ok(0) => {
+                    self.close_notified = true;
+                    return Ok(false);
+                }
                 Ok(count) => {
                     self.received.extend_from_slice(&chunk[..count]);
                     return Ok(true);
@@ -366,7 +372,14 @@ pub(crate) fn read_response(
         Framing::UntilClose => loop {
             let wanted = (read_limit - body.len()).min(session.received.len());
             body.extend(session.received.drain(..wanted));
-            if body.len() >= read_limit || !session.fill()? {
+            if body.len() >= read_limit {
+                break;
+            }
+            if !session.fill()? {
+                // Without close_notify the end of the body cannot be told from a truncation.
+                if !session.close_notified {
+                    return Err(HostTransportError::Unreachable);
+                }
                 break;
             }
         },

@@ -313,6 +313,9 @@ fn parse_reply(message: &[u8], id: u16, question_section: &[u8]) -> Reply {
     parse_answers(message, question_end, answer_count).map_or(Reply::Failed, Reply::Addresses)
 }
 
+/// Accepts every A/AAAA record in the answer section whatever its owner name, so a CNAME
+/// chain's final addresses are used. A wrong address is caught by certificate verification
+/// before any request or credential is written.
 fn parse_answers(message: &[u8], mut at: usize, answer_count: u16) -> Option<Vec<IpAddr>> {
     let mut addresses = Vec::new();
     for _ in 0..answer_count {
