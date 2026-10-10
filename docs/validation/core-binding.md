@@ -78,6 +78,14 @@ The run for the exact submitted commit, found with `gh run list --workflow ios.y
 
 `ForegroundIngressService` (`ios/Services/Ingress`) stages an `IngressRecord` durably, moves recorded audio from the in-progress to the finalized store, imports, and removes the record only after confirmation. It holds the single foreground writer lock; recovery re-imports leftover records, which converge by capture ID. `CoreIngressImporter` (the bridge adapter to the core import) lives in `ios/Services/Ingress`. When a staging record is unreadable the claimed audio names are unknown, so recovery sets `unclaimedAudioNotEvaluated` rather than reporting an empty orphan list. Lock-state behavior and a real kill are device evidence, not covered by the simulator tests, which simulate interruption by reopening the service and core from disk.
 
+## Offline transcription attachment (C05b)
+
+Two exports in `core/src/ffi/transcription_attachment.rs` (bridged by `CoreHandle+Transcription.swift`) carry the on-device transcription handler's traffic. `ohand_core_start_read_transcription_job` reads a running `transcription_attachment` job under its lease (`job_id`, `lease_attempt`) and returns the item and capture IDs, the stored audio reference, the capture locale and the item's states; it writes nothing. `ohand_core_start_apply_transcription_outcome` hands one recognizer outcome (`transcript`, `unsupported` or `failed`) to the guarded C05a `apply_transcription_outcome` and returns its disposition (`attached`, `already_attached`, `pending` or `discarded`), with no transcript text. Requests are bounded and reject unknown fields; a transcript over the core's size limit is refused before any write.
+
+Failure codes: `transcription_lease_not_held` (stale or duplicate delivery, nothing written), `transcription_wrong_job_type`, `transcription_rejected` (malformed, nothing written), `transcription_not_authorized`, `transcription_conflicting_result` (the job already attached a different transcript), `transcription_not_committed` (nothing written, retry is safe) and `transcription_commit_unknown` (retry with the same outcome, which converges). Messages are fixed strings and never echo the request.
+
+`TranscriptionJobHandler` (`ios/Services/Transcription`) is registered with `JobRunnerService` for the `transcription_attachment` job type. `SpeechFrameworkRecognizer` requires on-device recognition and has no remote path: an unsupported language or missing model is applied as `unsupported`, leaving the item pending and the audio kept. The simulator tests drive the real handler, job runner and core with a scripted recognizer; whether the speech framework recognizes real speech offline on a device is device evidence and is not claimed here. No production code enqueues `transcription_attachment` jobs yet.
+
 ## Not covered
 
 - Physical device builds (`aarch64-apple-ios`) are scripted but not exercised here.
