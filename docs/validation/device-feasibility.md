@@ -2,7 +2,7 @@
 
 This document transcribes what was observed on the target phone during the two P09 sessions. It adds no measurement of its own. Every result cites a sanitized evidence record committed under `docs/validation/evidence/device-feasibility/`, the build that was installed, and a collection time. It is graded against `docs/features/m1-plan.md#p09`, as stated in the P09 scope amendment in `docs/features/m1-task-refinement.md`.
 
-**Status: every pinned P09 criterion has device evidence or a recorded deferral; the documented probe matrix is not certified as complete.** Capture while locked is now closed by a Face-ID-covered lock-screen press (P02). The checks that were not run or not observable are listed in [Unmet checks](#unmet-checks); P09 scope amendments 1 and 2 in `docs/features/m1-task-refinement.md` defer the named ones to U10 and T05, where they remain unmet until observed. Nothing below should be read as covering them.
+**Status: every pinned P09 criterion has device evidence or a recorded deferral; the documented probe matrix is not certified as complete.** Capture while locked is now closed by a Face-ID-covered lock-screen press (P02). The checks that were not run or not observable are listed in [Unmet checks](#unmet-checks); P09 scope amendments 1, 2 and 3 in `docs/features/m1-task-refinement.md` defer the named ones to U10 and T05, where they remain unmet until observed. Nothing below should be read as covering them.
 
 ## Evidence records
 
@@ -16,7 +16,7 @@ All three are in `docs/validation/evidence/device-feasibility/`. A fourth commit
 
 Only these three JSON files are committed. The screenshots, WAV files, app-container files, logs and screen recordings that the results cite by name are **private** and stay on the maintainer's Mac under `~/.ohand-private-evidence/p09/`. Several show the home or lock screen and must never be published. The `manifest` record is the auditable reference: for every private artifact it lists the relative path, size in bytes, SHA-256, modification time and a `personal` flag. Artifact names below are paths relative to that root, and each appears in the manifest.
 
-Artifact modification times are the finest per-result time available (`manifest.timestamps`: on-device creation time where AirDrop preserved it, otherwise the copy time). Two caveats:
+Artifact modification times are the finest per-result time available (`manifest.timestamps`: on-device creation time where AirDrop preserved it, otherwise the copy time). Three caveats:
 
 - The eight `audio-probe/recording-*.wav` files have modification times from 2026-10-09T17:11:51Z to 17:40:27Z, and `matrix.collected_at` starts at 17:30:00Z. The record does not explain the difference and it is not reconciled here.
 - The two screenshots added on 2026-10-10 (`capture-probe/p02-02-...-PERSONAL.png`, `audio-probe/p03-02-permission-denied.png`) have modification time 2026-10-10T17:27:57Z, which is the copy time.
@@ -172,18 +172,18 @@ The AfterFirstUnlock classes therefore remain readable while the device is locke
 
 ## Unmet checks
 
-These documented checks have no device evidence, either because they were not run, could not be observed, or were deferred. None is certified. P09 scope amendment 2 (`docs/features/m1-task-refinement.md`) defers the items marked T05 or U10 out of P09; they stay unmet until observed there.
+These documented checks have no device evidence, either because they were not run, could not be observed, or were deferred. None is certified. P09 scope amendments 1, 2 and 3 (`docs/features/m1-task-refinement.md`) defer the items marked T05 or U10 out of P09; they stay unmet until observed there.
 
 1. **Hardware keyboard navigation of the Tauri probe** (`tauri-handoff.md` step 4): not run, no keyboard. Deferred to U10 (amendment 1).
 2. **Offline speech with an immediate screen lock, and P04 interruption and cancel**: not observable with the 0.15 to 0.32 s fixture. Deferred to T05 (amendment 2).
-3. **Capture-entry (`capture-entry.md`)**: file write behaviour before first unlock after reboot, and behaviour when the system terminates the app between handoff and commit. Deferred to T05 (amendment 2). Also not run and not named in the amendments: the Shortcuts or Action-button entry (a shortcut URL warm entry appears in the P07 records but its latency was not measured).
+3. **Capture-entry (`capture-entry.md`)**: file write behaviour before first unlock after reboot, and behaviour when the system terminates the app between handoff and commit. Deferred to T05 (amendment 2). Shortcuts or Action-button entry latency on cold and warm launch: not measured (the shortcut-URL entries in the P07 records show only that the entry opens the app). Deferred to T05 (amendment 3).
 4. **P03**: low-free-space refusal. Deferred to T05.
 5. **P04**: whether the earlier fixture survived a permission revoke. Deferred to T05.
 6. **P05**: Focus and summaries, Low Power Mode, reboot survival of scheduled notifications, time-zone change after scheduling, provisional and ephemeral authorization, reinstall or OS-upgrade survival. Deferred to T05.
 7. **P11**: passcode removal. Deferred to T05.
-8. **P07**: whether the Tauri summary announces automatically under VoiceOver. Not exercised and not named in an amendment.
-9. **Build identity**: revision 257343f3 does not provably identify the TranscriptionProbe and NotificationProbe installs (`working_tree_clean` false), and the working-tree state of CredentialProbe, CaptureProbe and TauriProbe was not recorded.
-10. **Latency**: touch-up is not observable, so all latencies are touch-down upper bounds; voice Start and text-field trigger-to-ready were not timed; sample sizes are 5 or 6 per condition.
+8. **P07**: whether the Tauri summary announces automatically under VoiceOver. Not exercised. Deferred to U10 (amendment 3); the summary's static VoiceOver reading is recorded in `latency`.
+9. **Build identity** (a recorded caveat on the evidence, not a deferred check): revision 257343f3 does not provably identify the TranscriptionProbe and NotificationProbe installs (`working_tree_clean` false), and the working-tree state of CredentialProbe, CaptureProbe and TauriProbe was not recorded.
+10. **Latency**: touch-up is not observable, so all latencies are touch-down upper bounds; voice Start and text-field trigger-to-ready were not timed (deferred to T05, amendment 3); sample sizes are 5 or 6 per condition.
 
 Closed since the previous revision of this document: capture while the device stays locked (P02, 2026-10-10 passcode prompt); the P03 permission-denied screenshot; named artifacts for every P03 result; the manual signing record for three probes.
 
@@ -191,7 +191,7 @@ Closed since the previous revision of this document: capture while the device st
 
 | Criterion (`m1-plan.md#p09`) | Where recorded | Status |
 | --- | --- | --- |
-| 1. Measured cold/warm/locked/unlocked capture, permission states, interruptions, offline ASR, notifications with UI closed, handoff, accessibility, secure credential behaviour | Capture entry, Latency, P03, P04, P05, P07, Accessibility, P11 | Device evidence exists for each category. Locked capture: the control does not capture while locked (P02, two runs). P04 interruption is not observable (item 2); the remaining gaps are items 1 to 8 above, deferred as listed |
+| 1. Measured cold/warm/locked/unlocked capture, permission states, interruptions, offline ASR, notifications with UI closed, handoff, accessibility, secure credential behaviour | Capture entry, Latency, P03, P04, P05, P07, Accessibility, P11 | Device evidence exists for each category. Locked capture: the control does not capture while locked (P02, two runs). P04 interruption is not observable (item 2); the remaining gaps are items 1 to 8 above, each deferred by name in amendments 1 to 3 |
 | 2. Trigger-to-ready and end-of-input-to-durable-save measured separately; no simulator or checklist substitution | Latency | Measured on the device for the control path (cold, warm) and voice Stop; a locked trigger-to-ready does not exist because the control does not open the app while locked; voice Start and text field are not timed |
 | 3. Record the precise unmet check and block rather than certify | Unmet checks | Unmet checks are listed with their deferral; the matrix is not certified, and T05, U10 keep the deferred items |
 | 4. Observed OS build, signing and credential-lock behaviour in sanitized evidence | Device, OS and builds; P11 | OS build 26.6.2 (23G90) observed; signing records for all seven probes (four tool-generated, three manual and written afterwards); build identity caveat for two probes |
