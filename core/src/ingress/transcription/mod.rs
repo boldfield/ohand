@@ -9,31 +9,31 @@
 //! * refuses, and retires the job, when the outcome can no longer be authoritative: the item was
 //!   deleted, the item already has text (typed, corrected or transcribed), the recorded audio is
 //!   gone, or the outcome was made from different audio than the capture's;
-//! * for a transcript, writes it through the event API as the item's current text (so the
-//!   revision check, history, search index and interpretation source all see it), records the
-//!   transcript provenance row, moves the transcription state to `transcribed`, completes the
-//!   job and, only when the new job is authorized, enqueues the requested interpretation job at
-//!   the new revision;
+//! * for a transcript, records it in `transcript_attachments` with its provenance and writes a
+//!   `transcript` event through the event API (so the revision check, history and search index
+//!   see it), moves the transcription state to `transcribed`, completes the job and, only when
+//!   the new job is authorized, enqueues the requested interpretation job at the new revision;
 //! * for unsupported, failed or empty (abstained) recognition, writes no text: the audio stays the
 //!   sole source, the transcription state says why, and the job ends with a content-free reason.
 //!
-//! The transcript is machine text, not a user edit. The text is stored as a text event (so every
-//! existing reader sees the current text), and the `transcript_attachments` row marks that event
-//! as a transcript: the item projection reports `TextState::Transcribed` and leaves
-//! `text_corrected` false. A later user correction supersedes it as a normal correction. The row
-//! is keyed by item and by source job and holds the audio reference and SHA-256, recognizer,
-//! language, confidence and the successful-transcription time; [`transcript_provenance`] reads
-//! it. Deletion redacts the text and removes the row.
+//! The transcript is machine text, not a user edit, and is never stored as a correction. The
+//! item projection reports `TextState::Transcribed` and leaves `text_corrected` false;
+//! interpretation sends it with the `Transcript` text basis and search reports it as
+//! `transcribed`. A later user correction supersedes it as a normal correction whose old value is
+//! the transcript. The row is keyed by item and by source job and holds the text, the transcript
+//! record id (a UUID, also the event id), the audio reference and SHA-256, recognizer, language,
+//! confidence and the successful-transcription time; [`transcript_provenance`] reads it.
+//! Deletion removes the row, and with it the text and the audio digest.
 //!
 //! A transcript is stored once. A retry of the same job after a crash or lost acknowledgment finds
 //! the job's row and returns the committed result only when the retry carries the same text, audio
 //! reference, digest, recognizer, language and confidence; anything else is a conflict. A different
-//! job cannot attach a second transcript because the item is already `transcribed`. The event ID
-//! includes the item and the job and is never trusted by itself: a foreign event that already
-//! holds the ID is skipped, and redelivery is decided only by the job's own provenance row. Saved
-//! audio (`save_state`), transcript completion (`transcription_state`) and interpretation
-//! completion (`processing_state`) are independent: attaching a transcript changes only the
-//! second, and queues the third.
+//! job cannot attach a second transcript because the item is already `transcribed`. The record id
+//! is derived from the item and the job, but event ids share one unrestricted namespace, so an id
+//! that a foreign event or record already holds is skipped rather than trusted, and redelivery is
+//! decided only by the job's own row. Saved audio (`save_state`), transcript completion
+//! (`transcription_state`) and interpretation completion (`processing_state`) are independent:
+//! attaching a transcript changes only the second, and queues the third.
 //!
 //! The capture row is never modified.
 
@@ -46,13 +46,12 @@ use crate::privacy::routing::{
     authorize_job, AuthorizationDecision, DenialReason, JOB_TYPE_INTERPRET,
     JOB_TYPE_TRANSCRIPTION_ATTACHMENT,
 };
-use crate::store::events::{
-    save_event_in_tx, Correction, CorrectionKind, Event, EventPayload, EventType,
-};
+use crate::store::events::{save_transcript_event_in_tx, Event, EventPayload, EventType};
 use crate::store::schema::Database;
 use anyhow::anyhow;
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, Transaction};
+use sha2::{Digest, Sha256};
 use std::fmt;
 
 pub use crate::ingress::import::CommitStatus;
@@ -594,8 +593,9 @@ pub struct TranscriptProvenance {
     pub item_id: String,
     /// The transcription job whose result this is.
     pub source_job_id: String,
-    /// The text event that holds the transcript.
-    pub event_id: String,
+    /// UUID of the transcript record; also the id of the item's `transcript` event.
+    pub transcript_record_id: String,
+    pub text: String,
     /// The item revision that includes the transcript.
     pub attached_revision: i32,
     pub audio_reference: String,
@@ -608,21 +608,23 @@ pub struct TranscriptProvenance {
     pub transcribed_at: String,
 }
 
-const PROVENANCE_COLUMNS: &str = "item_id, source_job_id, event_id, attached_revision,
-    audio_reference, audio_sha256, recognizer, detected_language, confidence, transcribed_at";
+const PROVENANCE_COLUMNS: &str = "item_id, source_job_id, transcript_record_id, text,
+    attached_revision, audio_reference, audio_sha256, recognizer, detected_language, confidence,
+    transcribed_at";
 
 fn provenance_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TranscriptProvenance> {
     Ok(TranscriptProvenance {
         item_id: row.get(0)?,
         source_job_id: row.get(1)?,
-        event_id: row.get(2)?,
-        attached_revision: row.get(3)?,
-        audio_reference: row.get(4)?,
-        audio_sha256: row.get(5)?,
-        recognizer: row.get(6)?,
-        detected_language: row.get(7)?,
-        confidence: row.get(8)?,
-        transcribed_at: row.get(9)?,
+        transcript_record_id: row.get(2)?,
+        text: row.get(3)?,
+        attached_revision: row.get(4)?,
+        audio_reference: row.get(5)?,
+        audio_sha256: row.get(6)?,
+        recognizer: row.get(7)?,
+        detected_language: row.get(8)?,
+        confidence: row.get(9)?,
+        transcribed_at: row.get(10)?,
     })
 }
 
@@ -657,28 +659,53 @@ fn load_attachment_for_job(
         .optional()?)
 }
 
-/// The event ID for a job's transcript. Event IDs share one global namespace, so an ID that a
-/// foreign event already holds is skipped rather than trusted.
-fn unused_transcript_event_id(
+/// The transcript record id for a job's transcript: a name-based UUID (version 8, SHA-256) over
+/// the item and the job, so the same job always derives the same id. Event ids share one
+/// unrestricted namespace, so an id that a foreign event or record already holds is skipped (by
+/// deriving the next candidate) rather than trusted.
+fn unused_transcript_record_id(
     transaction: &Transaction<'_>,
     item_id: &str,
     job_id: &str,
 ) -> Result<String, TranscriptionError> {
-    let base = format!("transcript-attachment-{item_id}-{job_id}");
-    let mut candidate = base.clone();
-    let mut suffix = 1;
+    let mut collision_index: u32 = 0;
     loop {
+        let candidate = transcript_record_id_candidate(item_id, job_id, collision_index);
         let taken: bool = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM events WHERE event_id = ?)",
+            "SELECT EXISTS(SELECT 1 FROM events WHERE event_id = ?1)
+                 OR EXISTS(SELECT 1 FROM transcript_attachments WHERE transcript_record_id = ?1)",
             [&candidate],
             |row| row.get(0),
         )?;
         if !taken {
             return Ok(candidate);
         }
-        candidate = format!("{base}#{suffix}");
-        suffix += 1;
+        collision_index += 1;
     }
+}
+
+pub(crate) fn transcript_record_id_candidate(
+    item_id: &str,
+    job_id: &str,
+    collision_index: u32,
+) -> String {
+    let mut hasher = Sha256::new();
+    for part in [
+        "ohand.transcript-record.v1".as_bytes(),
+        item_id.as_bytes(),
+        job_id.as_bytes(),
+        &collision_index.to_be_bytes(),
+    ] {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part);
+    }
+    let digest = hasher.finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    uuid::Builder::from_custom_bytes(bytes)
+        .into_uuid()
+        .hyphenated()
+        .to_string()
 }
 
 /// The job already attached its transcript in an earlier delivery. The retry must present the
@@ -701,21 +728,30 @@ fn redelivery(
         )
         .into());
     }
-    let stored_text: Option<String> = transaction
-        .query_row(
-            "SELECT correction_new_value FROM events
-              WHERE event_id = ? AND item_id = ? AND event_type = 'correction'
-                AND correction_kind = 'text'",
-            rusqlite::params![attachment.event_id, attachment.item_id],
-            |row| row.get(0),
+    let event_recorded: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM events
+                        WHERE event_id = ? AND item_id = ? AND event_type = ?)",
+        rusqlite::params![
+            attachment.transcript_record_id,
+            attachment.item_id,
+            EventType::Transcript.as_str()
+        ],
+        |row| row.get(0),
+    )?;
+    if !event_recorded {
+        return Err(anyhow!(
+            "transcript record {} of job {} has no transcript event",
+            attachment.transcript_record_id,
+            job.job_id
         )
-        .optional()?;
+        .into());
+    }
     let same_identity = attachment.audio_reference == outcome.audio_reference
         && attachment.audio_sha256 == transcript.audio_sha256
         && attachment.recognizer == transcript.recognizer
         && attachment.detected_language == transcript.detected_language
         && attachment.confidence == transcript.confidence;
-    if !same_identity || stored_text.as_deref() != Some(transcript.text.as_str()) {
+    if !same_identity || attachment.text != transcript.text {
         return Err(conflict());
     }
     let queued_interpretation: Option<String> = transaction
@@ -847,8 +883,8 @@ fn require_unused_job_id(
     Ok(())
 }
 
-/// Write the transcript as the item's text and record its provenance. Returns the item revision that includes
-/// the transcript.
+/// Record the transcript with its provenance and write the item's `transcript` event. Returns the
+/// item revision that includes the transcript.
 fn attach_transcript(
     transaction: &Transaction<'_>,
     job: &Job,
@@ -858,40 +894,41 @@ fn attach_transcript(
     transcribed_at: DateTime<Utc>,
     fault_point: &mut dyn FnMut(TranscriptionStage) -> anyhow::Result<()>,
 ) -> Result<i32, TranscriptionError> {
-    let event_id = unused_transcript_event_id(transaction, &job.item_id, &job.job_id)?;
-    let event = Event::new(
-        event_id.clone(),
-        job.item_id.clone(),
-        item.revision,
-        EventType::Correction,
-        EventPayload::Correction(Correction {
-            kind: CorrectionKind::Text,
-            old_value: None,
-            new_value: transcript.text.clone(),
-        }),
-        transcribed_at.to_rfc3339(),
-    )?;
-    save_event_in_tx(transaction, &event, item.revision)
-        .map_err(|error| TranscriptionError::from(anyhow::Error::new(error)))?;
+    let transcript_record_id = unused_transcript_record_id(transaction, &job.item_id, &job.job_id)?;
     let attached_revision = item.revision + 1;
+    let happened_at = transcribed_at.to_rfc3339();
+    // The row comes first: the event write refuses a transcript event without its record, and
+    // the search index reads the text from the row.
     transaction.execute(
         "INSERT INTO transcript_attachments
-            (item_id, source_job_id, event_id, attached_revision, audio_reference, audio_sha256,
-             recognizer, detected_language, confidence, transcribed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (item_id, source_job_id, transcript_record_id, text, attached_revision,
+             audio_reference, audio_sha256, recognizer, detected_language, confidence,
+             transcribed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         rusqlite::params![
             job.item_id,
             job.job_id,
-            event_id,
+            transcript_record_id,
+            transcript.text,
             attached_revision,
             audio_reference,
             transcript.audio_sha256,
             transcript.recognizer,
             transcript.detected_language,
             transcript.confidence,
-            event.happened_at,
+            happened_at,
         ],
     )?;
+    let event = Event::new(
+        transcript_record_id,
+        job.item_id.clone(),
+        item.revision,
+        EventType::Transcript,
+        EventPayload::Transcript,
+        happened_at,
+    )?;
+    save_transcript_event_in_tx(transaction, &event, item.revision)
+        .map_err(|error| TranscriptionError::from(anyhow::Error::new(error)))?;
     fault_point(TranscriptionStage::EventWritten)?;
 
     transaction.execute(

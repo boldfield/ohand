@@ -542,21 +542,8 @@ fn prepare_review(connection: &Connection, job_id: &str) -> Result<Prepared, Abi
         return Err(failures::STALE_SOURCE);
     }
     let source_revision = u64::try_from(row.source_revision).map_err(|_| failures::INVALID_JOB)?;
-    let (text, text_basis) = match latest_text_correction(connection, job_id)? {
-        Some((correction_record_id, corrected_text)) => (
-            corrected_text,
-            TextBasis::Correction {
-                correction_record_id,
-                item_revision: source_revision,
-            },
-        ),
-        None => (
-            row.text.ok_or(failures::NO_TEXT)?,
-            TextBasis::Original {
-                item_revision: source_revision,
-            },
-        ),
-    };
+    let (text, text_basis) =
+        effective_text(connection, job_id, &row.item_id, row.text, source_revision)?;
     if text.trim().is_empty() {
         return Err(failures::NO_TEXT);
     }

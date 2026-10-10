@@ -753,18 +753,19 @@ fn add_job_transient_failure_count_v6(tx: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Step 7 (C05a): provenance of a transcript attached to a voice capture. The transcript text is
-/// not stored here: it is the item's text correction (`event_id` names that event), so history,
-/// search and interpretation read it through the existing paths. This row records that the
-/// correction is a recognizer result rather than a user edit, which job produced it, which audio
-/// and recognizer it came from and when recognition succeeded. At most one attachment exists per
-/// item and per job. The row holds an audio reference and digest, so deletion removes it.
+/// Step 7 (C05a): the on-device transcript attached to a voice capture and its provenance. The
+/// transcript is machine text, not a user correction: the item's `transcript` event marks the
+/// revision that attached it, and this row holds the text under `transcript_record_id` (a UUID,
+/// also that event's id), which job produced it, which audio (reference and SHA-256) and
+/// recognizer it came from, and when recognition succeeded. At most one transcript exists per
+/// item and per job. The row holds readable text and an audio digest, so deletion removes it.
 fn add_transcript_attachments_v7(tx: &Transaction<'_>) -> Result<()> {
     tx.execute(
         "CREATE TABLE transcript_attachments (
             item_id TEXT PRIMARY KEY,
             source_job_id TEXT NOT NULL UNIQUE,
-            event_id TEXT NOT NULL UNIQUE,
+            transcript_record_id TEXT NOT NULL UNIQUE,
+            text TEXT NOT NULL,
             attached_revision INTEGER NOT NULL,
             audio_reference TEXT NOT NULL,
             audio_sha256 TEXT NOT NULL,

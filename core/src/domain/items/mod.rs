@@ -5,6 +5,7 @@
 // Implementation owned by D04.
 
 // Re-export types from events module for convenience in D04 tests.
+use crate::store::events::current_transcript;
 pub use crate::store::events::{ItemScope, ItemType};
 use anyhow::{anyhow, Result};
 use rusqlite::{OptionalExtension, Transaction};
@@ -377,33 +378,29 @@ fn load_item_state_with(
         }
     }
 
-    // Resolve text: check for user text correction.
+    // Resolve text: a user text correction, else the on-device transcript, else the capture.
     let (current_text, text_corrected) = {
-        let text_correction: Option<(String, String, bool)> = tx
+        let text_correction: Option<(String, String)> = tx
             .query_row(
-                "SELECT c.new_value, c.created_at,
-                        EXISTS(SELECT 1 FROM transcript_attachments t
-                                WHERE t.item_id = c.item_id
-                                  AND c.correction_id = t.event_id || '-correction')
-                   FROM corrections c
-                  WHERE c.item_id = ? AND c.kind = 'text' ORDER BY c.revision DESC LIMIT 1",
+                "SELECT new_value, created_at FROM corrections
+                 WHERE item_id = ? AND kind = 'text' ORDER BY revision DESC LIMIT 1",
                 [item_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
 
         match text_correction {
-            Some((text, transcribed_at, true)) => (
-                TextState::Transcribed {
-                    text,
-                    transcribed_at,
-                },
-                false,
-            ),
-            Some((text, corrected_at, false)) => {
-                (TextState::Corrected { text, corrected_at }, true)
-            }
-            None => (TextState::Original { text: capture_text }, false),
+            Some((text, corrected_at)) => (TextState::Corrected { text, corrected_at }, true),
+            None => match current_transcript(tx, item_id)? {
+                Some(transcript) => (
+                    TextState::Transcribed {
+                        text: transcript.text,
+                        transcribed_at: transcript.transcribed_at,
+                    },
+                    false,
+                ),
+                None => (TextState::Original { text: capture_text }, false),
+            },
         }
     };
 
@@ -507,13 +504,17 @@ pub fn rebuild_state_from_events(tx: &Transaction<'_>, item_id: &str) -> Result<
     let mut session_topic_corrected = false;
     let mut text_corrected = false;
 
+    // An attached transcript is the text until a user text correction supersedes it.
+    if let Some(transcript) = current_transcript(tx, item_id)? {
+        current_text = TextState::Transcribed {
+            text: transcript.text,
+            transcribed_at: transcript.transcribed_at,
+        };
+    }
+
     // Replay all corrections in order.
     let mut corrections_stmt = tx.prepare(
-        "SELECT c.kind, c.new_value, c.created_at,
-                EXISTS(SELECT 1 FROM transcript_attachments t
-                        WHERE t.item_id = c.item_id
-                          AND c.correction_id = t.event_id || '-correction')
-           FROM corrections c WHERE c.item_id = ? ORDER BY c.revision ASC",
+        "SELECT kind, new_value, created_at FROM corrections WHERE item_id = ? ORDER BY revision ASC",
     )?;
     let corrections = corrections_stmt
         .query_map([item_id], |row| {
@@ -521,12 +522,11 @@ pub fn rebuild_state_from_events(tx: &Transaction<'_>, item_id: &str) -> Result<
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
-                row.get::<_, bool>(3)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
-    for (kind, new_value, corrected_at, is_transcript) in corrections {
+    for (kind, new_value, corrected_at) in corrections {
         match kind.as_str() {
             "type" => {
                 current_type = Some(
@@ -545,13 +545,6 @@ pub fn rebuild_state_from_events(tx: &Transaction<'_>, item_id: &str) -> Result<
             "session_topic" => {
                 current_session_topic = Some(new_value);
                 session_topic_corrected = true;
-            }
-            "text" if is_transcript => {
-                current_text = TextState::Transcribed {
-                    text: new_value,
-                    transcribed_at: corrected_at,
-                };
-                text_corrected = false;
             }
             "text" => {
                 current_text = TextState::Corrected {

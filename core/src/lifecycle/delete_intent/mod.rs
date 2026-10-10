@@ -609,7 +609,7 @@ fn remove_readable_content_in_tx(tx: &Transaction<'_>, item_id: &str) -> Result<
         rusqlite::params![item_id],
     )?;
 
-    // Delete transcript provenance: it names the deleted recording's audio reference and digest.
+    // Delete the transcript and its provenance: the text, the audio reference and its digest.
     tx.execute(
         "DELETE FROM transcript_attachments WHERE item_id = ?",
         rusqlite::params![item_id],

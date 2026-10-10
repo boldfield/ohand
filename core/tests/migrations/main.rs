@@ -1233,20 +1233,20 @@ fn test_v6_to_v7_migration_adds_transcript_attachments_without_touching_sources(
                 })?;
         assert_eq!(attachments, 0);
 
-        let insert = |item: &str, job: &str, event: &str| {
+        let insert = |item: &str, job: &str, record: &str| {
             db.conn().execute(
-                "INSERT INTO transcript_attachments (item_id, source_job_id, event_id, attached_revision, audio_reference, audio_sha256, recognizer, transcribed_at)
-                 VALUES (?, ?, ?, 1, 'clip.m4a', 'abc', 'recognizer/1', '2026-01-15T10:31:00Z')",
-                rusqlite::params![item, job, event],
+                "INSERT INTO transcript_attachments (item_id, source_job_id, transcript_record_id, text, attached_revision, audio_reference, audio_sha256, recognizer, transcribed_at)
+                 VALUES (?, ?, ?, 'synthetic transcript', 1, 'clip.m4a', 'abc', 'recognizer/1', '2026-01-15T10:31:00Z')",
+                rusqlite::params![item, job, record],
             )
         };
-        insert("item-1", "job-1", "event-1")?;
+        insert("item-1", "job-1", "record-1")?;
         assert!(
-            insert("item-1", "job-2", "event-2").is_err(),
+            insert("item-1", "job-2", "record-2").is_err(),
             "an item holds at most one transcript attachment"
         );
         assert!(
-            insert("missing-item", "job-3", "event-3").is_err(),
+            insert("missing-item", "job-3", "record-3").is_err(),
             "an attachment needs its item"
         );
     }
