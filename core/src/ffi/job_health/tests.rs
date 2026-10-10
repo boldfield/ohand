@@ -22,6 +22,17 @@ fn read_health(handle: OhandCoreHandle, operation_id: u64, stall: u32, grace: u3
     assert_eq!(event.operation_id, operation_id);
     assert_eq!(event.status, OHAND_CORE_STATUS_OK);
     assert_ne!(event.thread, std::thread::current().id());
+    // The worker can still be inside `record_event` (releasing the recorder's lock) after the
+    // event has been received. Clearing the registration takes the delivery lock, so it returns
+    // only once that callback has finished; dropping the recorder before then is a
+    // use-after-free that crashes nondeterministically.
+    let cleared = consume(ohand_core_set_event_callback(
+        handle,
+        None,
+        std::ptr::null_mut(),
+    ));
+    assert_eq!(cleared.status, OHAND_CORE_STATUS_OK);
+    drop(recorder);
     serde_json::from_slice(&event.payload).unwrap()
 }
 
