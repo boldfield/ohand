@@ -1440,6 +1440,56 @@ mod diagnostic {
     }
 
     #[test]
+    fn reported_usage_survives_empty_or_structurally_bad_choices() {
+        let usage = json!({"prompt_tokens": 5, "completion_tokens": 2});
+        let choices_variants = [
+            json!([]),
+            json!([{"index": 0, "finish_reason": "stop"}]),
+            json!([{"message": "not an object", "finish_reason": "stop"}]),
+            json!([42]),
+            json!("nope"),
+        ];
+        for choices in choices_variants {
+            let harness = Harness::new(vec![Step::http(
+                200,
+                serde_json::to_vec(&json!({
+                    "model": "gpt-synthetic",
+                    "choices": choices.clone(),
+                    "usage": usage.clone()
+                }))
+                .unwrap(),
+            )]);
+            let failure = run(&harness).expect_err("no usable choice");
+            assert_eq!(
+                provider_failure(&failure).kind,
+                FailureKind::InvalidOutput,
+                "{choices}"
+            );
+            assert_eq!(
+                failure.usage,
+                UsageAvailability::Reported {
+                    usage: TokenUsage {
+                        input_tokens: Some(5),
+                        output_tokens: Some(2),
+                    }
+                },
+                "{choices}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_choices_without_usage_stay_unknown() {
+        let harness = Harness::new(vec![Step::http(
+            200,
+            serde_json::to_vec(&json!({"choices": []})).unwrap(),
+        )]);
+        let failure = run(&harness).expect_err("no usable choice");
+        assert_eq!(provider_failure(&failure).kind, FailureKind::InvalidOutput);
+        assert_eq!(failure.usage, UsageAvailability::Unavailable);
+    }
+
+    #[test]
     fn malformed_provider_content_is_invalid_output() {
         let harness = Harness::new(vec![Step::ok("not json at all")]);
         let failure = run(&harness).expect_err("not a JSON object");

@@ -45,16 +45,6 @@ enum ResponseFormat {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct OpenAiResponse {
-    choices: Vec<Choice>,
-    // Kept as raw values so a malformed observation never fails an otherwise valid reply.
-    #[serde(default)]
-    model: Option<Value>,
-    #[serde(default)]
-    usage: Option<Value>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
 struct Choice {
     message: ChoiceMessage,
     #[serde(default)]
@@ -299,25 +289,22 @@ fn decode_response(
         return Err(map_error(status, error_code.as_deref()).into());
     }
 
-    let response: OpenAiResponse =
+    let envelope: Value =
         serde_json::from_slice(response_bytes).map_err(|_| TransportError::InvalidOutput)?;
-    let usage = response.usage.as_ref().map(|usage| TokenUsage {
+    if !envelope.is_object() {
+        return Err(TransportError::InvalidOutput.into());
+    }
+    // Usage and model the provider reported in this response stay attached to every failure
+    // below, so a refused or unusable reply still accounts for the tokens it consumed. They
+    // are read from the raw envelope so a malformed choice or observation cannot drop them.
+    let usage = envelope.get("usage").map(|usage| TokenUsage {
         input_tokens: usage.get("prompt_tokens").and_then(Value::as_u64),
         output_tokens: usage.get("completion_tokens").and_then(Value::as_u64),
     });
-    let model = response
-        .model
-        .as_ref()
+    let model = envelope
+        .get("model")
         .and_then(Value::as_str)
         .map(str::to_string);
-    let choice = response
-        .choices
-        .into_iter()
-        .next()
-        .ok_or(TransportError::InvalidOutput)?;
-
-    // Usage and model the provider reported in this response stay attached to every failure
-    // below, so a refused or unusable reply still accounts for the tokens it consumed.
     let failure_with_observations = |error: TransportError| {
         DiagnosticTransportFailure::with_observations(
             error,
@@ -328,6 +315,13 @@ fn decode_response(
             }),
         )
     };
+    let choice: Choice = envelope
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| serde_json::from_value(choice.clone()).ok())
+        .ok_or_else(|| failure_with_observations(TransportError::InvalidOutput))?;
+
     if choice.message.refusal.is_some() || choice.finish_reason.as_deref() == Some("content_filter")
     {
         return Err(failure_with_observations(TransportError::Rejected));
