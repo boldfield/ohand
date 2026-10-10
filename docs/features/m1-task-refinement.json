@@ -740,6 +740,11 @@
         "docs/architecture/m1-contracts.md:555",
         "core/src/ingress/mod.rs:1",
         "core/src/store/captures/mod.rs:106"
+      ],
+      "ownership_allowances": [
+        "core/src/domain/items/ (transcript event type, TextState::Transcribed and its StateTransition; granted 2026-10-10 after PR #150 round 2; one PR, ordered before C05b)",
+        "core/src/store/schema/ and core/tests/migrations/ (schema v7: transcript provenance table keyed by item and source job; same grant)",
+        "core/src/lifecycle/delete_intent/ (redact transcript event text and delete provenance rows on deletion, with test; same grant)"
       ]
     },
     {
@@ -2273,6 +2278,14 @@
     {
       "date": "2026-10-09",
       "change": "B02 also depends on N02: its composition test must observe a scheduler request through the real native notification bridge, which did not exist when B02 was claimed."
+    },
+    {
+      "date": "2026-10-09",
+      "change": "P09 scope amendment, recorded by the coordinator on 2026-10-09 at the maintainer's direction: hardware keyboard navigation of the Tauri probe (docs/validation/tauri-handoff.md device procedure step 4) is deferred out of P09 to U10, which already owns keyboard and accessibility navigation of the real management UI with a documented actual-device pass. Reason: the maintainer has no Bluetooth or Smart Keyboard for the trial phone, and the probe is a feasibility shell, not the UI that ships. The checks that were run are recorded in docs/validation/evidence/device-feasibility/2026-10-09-device-matrix.json and 2026-10-10-latency-accessibility.json; each record lists its own not-tested and not-observable items, which remain unmet P09 checks unless a later amendment defers them. P09's acceptance is otherwise unchanged; it is graded against its own pinned criteria in docs/features/m1-plan.md#p09, not against docs/validation/m1-protocol.md, which is T08's two-week trial rubric."
+    },
+    {
+      "date": "2026-10-10",
+      "change": "C05a ownership allowance for transcript provenance: a transcript event type and TextState::Transcribed in core/src/domain/items/, schema v7 transcript provenance table with migration tests, and deletion redaction in core/src/lifecycle/delete_intent/. Granted after PR #150 showed criterion 1 cannot be met inside the owned paths without projecting machine text as a user correction or discarding the audio identity."
     }
   ]
 }
