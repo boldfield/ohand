@@ -6,9 +6,11 @@
 //! All records use synthetic fixtures only. No credentials, private endpoints, or
 //! production capture data enter journal records.
 //!
-//! # Reserved modules
-//! - `executor`: Paired execution of cases through comparison arms
+//! # Modules
+//! - `executor`: Bounded, resumable paired execution of cases through comparison arms
 //! - `transport`: Bounded, credential-safe host HTTP effect and its provider-trait bindings
+//!
+//! # Reserved modules
 //! - `cli`: Command-line interface for benchmark orchestration
 //! - `report`: Structured output and summary reporting
 
@@ -16,11 +18,11 @@ mod guard;
 mod journal;
 mod records;
 
+pub mod executor;
 pub mod transport;
 
 // Reserved modules for future implementation
 pub mod cli;
-pub mod executor;
 pub mod report;
 
 pub use guard::{is_secret_or_endpoint, json_is_secret_or_endpoint};
