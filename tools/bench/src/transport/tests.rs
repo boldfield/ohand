@@ -662,6 +662,210 @@ fn the_dispatch_clock_deadline_ends_a_call_even_with_a_long_relative_budget() {
     assert_exchange_torn_down(&fixture);
 }
 
+// --- Phases before the request is on the wire ----------------------------------------------
+
+/// A name lookup that blocks until released, then fails. Releasing it at the end of a test lets
+/// the stuck lookup thread finish.
+#[derive(Clone, Default)]
+struct StalledLookup {
+    gate: Arc<(Mutex<bool>, std::sync::Condvar)>,
+    started: Arc<AtomicUsize>,
+}
+
+impl StalledLookup {
+    fn lookup(&self) -> impl Fn(&str) -> std::io::Result<Vec<std::net::SocketAddr>> + Send + Sync {
+        let gate = Arc::clone(&self.gate);
+        let started = Arc::clone(&self.started);
+        move |_| {
+            started.fetch_add(1, Ordering::SeqCst);
+            let (open, signal) = &*gate;
+            let mut released = open.lock().unwrap();
+            while !*released {
+                released = signal.wait(released).unwrap();
+            }
+            Err(std::io::Error::other("released"))
+        }
+    }
+
+    fn release(&self) {
+        let (open, signal) = &*self.gate;
+        *open.lock().unwrap() = true;
+        signal.notify_all();
+    }
+
+    fn wait_until_started(&self) {
+        let waiting_since = Instant::now();
+        while self.started.load(Ordering::SeqCst) == 0 {
+            assert!(waiting_since.elapsed() < Duration::from_secs(3));
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+fn wait_for_no_live_workers(transport: &HostTransport) {
+    let waiting_since = Instant::now();
+    while transport.live_workers() != 0 {
+        assert!(
+            waiting_since.elapsed() < Duration::from_secs(2),
+            "the dispatch worker outlived its aborted dispatch"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn cancellation_during_name_resolution_ends_the_worker_before_any_connection() {
+    let authority = TestAuthority::new();
+    let fixture = start_fixture(&authority, echo_ok);
+    let stalled = StalledLookup::default();
+    let transport = HostTransport::builder(
+        approved(&fixture),
+        RecordingResolver::with_secret(REFERENCE, CANARY),
+    )
+    .trust_root_der(authority.root_der())
+    .lookup(stalled.lookup())
+    .build()
+    .unwrap();
+
+    let cancel = CancelToken::new();
+    let canceller = cancel.clone();
+    let watched = stalled.clone();
+    thread::spawn(move || {
+        watched.wait_until_started();
+        canceller.cancel();
+    });
+    let mut request = request_to(fixture.url("/"), Some(credential_use()));
+    request.timeout = Duration::from_secs(60);
+    let started = Instant::now();
+    let error = transport.send(&request, &cancel, None).unwrap_err();
+
+    assert_eq!(error, HostTransportError::Cancelled);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    wait_for_no_live_workers(&transport);
+    assert_eq!(fixture.connections(), 0);
+    stalled.release();
+}
+
+#[test]
+fn the_dispatch_clock_deadline_during_name_resolution_ends_the_worker() {
+    let authority = TestAuthority::new();
+    let fixture = start_fixture(&authority, echo_ok);
+    let stalled = StalledLookup::default();
+    let transport = HostTransport::builder(
+        approved(&fixture),
+        RecordingResolver::with_secret(REFERENCE, CANARY),
+    )
+    .trust_root_der(authority.root_der())
+    .lookup(stalled.lookup())
+    .build()
+    .unwrap();
+
+    let clock = Arc::new(ManualClock::new());
+    let advancing = Arc::clone(&clock);
+    let watched = stalled.clone();
+    thread::spawn(move || {
+        watched.wait_until_started();
+        advancing.advance_ms(10_000);
+    });
+    let mut request = request_to(fixture.url("/"), Some(credential_use()));
+    request.timeout = Duration::from_secs(60);
+    let started = Instant::now();
+    let error = transport
+        .send(
+            &request,
+            &CancelToken::new(),
+            Some(ClockDeadline {
+                clock: clock.as_ref(),
+                deadline_ms: 5_000,
+            }),
+        )
+        .unwrap_err();
+
+    assert_eq!(error, HostTransportError::Timeout);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    wait_for_no_live_workers(&transport);
+    assert_eq!(fixture.connections(), 0);
+    stalled.release();
+}
+
+/// A TCP server that accepts, reads whatever arrives and never answers, and records the bytes
+/// received and whether the client closed.
+struct SilentTcpServer {
+    port: u16,
+    received: Arc<Mutex<Vec<u8>>>,
+    closed: Arc<AtomicUsize>,
+}
+
+impl SilentTcpServer {
+    fn start() -> SilentTcpServer {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let closed = Arc::new(AtomicUsize::new(0));
+        let (seen, done) = (Arc::clone(&received), Arc::clone(&closed));
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buffer = [0u8; 4096];
+                loop {
+                    match stream.read(&mut buffer) {
+                        Ok(0) | Err(_) => break,
+                        Ok(count) => seen.lock().unwrap().extend_from_slice(&buffer[..count]),
+                    }
+                }
+                done.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        SilentTcpServer {
+            port,
+            received,
+            closed,
+        }
+    }
+}
+
+#[test]
+fn cancellation_during_the_tls_handshake_tears_down_the_connection_without_the_credential() {
+    let authority = TestAuthority::new();
+    let server = SilentTcpServer::start();
+    let url = format!("https://localhost:{}/", server.port);
+    let policy = DestinationPolicy::new()
+        .approve_credential(&url, REFERENCE)
+        .unwrap();
+    let transport = transport_for(
+        &authority,
+        policy,
+        RecordingResolver::with_secret(REFERENCE, CANARY),
+    );
+
+    let cancel = CancelToken::new();
+    let canceller = cancel.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(200));
+        canceller.cancel();
+    });
+    let mut request = request_to(url, Some(credential_use()));
+    request.timeout = Duration::from_secs(60);
+    let started = Instant::now();
+    let error = transport.send(&request, &cancel, None).unwrap_err();
+
+    assert_eq!(error, HostTransportError::Cancelled);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    wait_for_no_live_workers(&transport);
+    let waiting_since = Instant::now();
+    while server.closed.load(Ordering::SeqCst) == 0
+        && waiting_since.elapsed() < Duration::from_secs(3)
+    {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(server.closed.load(Ordering::SeqCst), 1);
+    let received = server.received.lock().unwrap().clone();
+    assert!(!received.is_empty(), "the handshake had begun");
+    assert!(!received
+        .windows(CANARY.len())
+        .any(|window| window == CANARY.as_bytes()));
+}
+
 // --- Bindings to the provider transport traits ---------------------------------------------------
 
 #[test]

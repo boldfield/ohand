@@ -3,12 +3,15 @@
 //! One POST per call with: https only and certificate validation against fixed roots, an
 //! explicit destination/credential grant list, no redirects followed (a 3xx is returned as a
 //! bare status), a bounded response body, a real-time budget plus an optional dispatch-clock
-//! deadline, and cancellation. Cancellation and expiry shut down the live connection, so the
-//! exchange ends and the resolved secret is dropped promptly rather than at the relative budget. The secret is resolved at dispatch after the
-//! destination check, attached by the transport, and masked out of everything returned.
+//! deadline, and cancellation. Cancellation and expiry end every phase of the exchange (name
+//! lookup, connect, handshake, request, response), so the dispatch stops and the resolved secret
+//! is dropped promptly rather than at the relative budget. The secret is resolved at dispatch
+//! after the destination check, written only onto an established, verified TLS stream, and
+//! masked out of everything returned.
 
 use std::error::Error as StdError;
 use std::io::Read;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
 use std::thread;
@@ -17,9 +20,12 @@ use std::time::{Duration, Instant};
 use ohand_core::providers::contracts::{CancelToken, Clock};
 use rustls::pki_types::CertificateDer;
 use rustls::{ClientConfig, RootCertStore};
+use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use super::abort::{AbortHandle, AbortableTls};
+use super::abort::{
+    system_lookup, AbortHandle, AbortableResolver, AbortableTls, HeldSecret, Lookup,
+};
 use super::credential::{CredentialResolver, SecretValue};
 use super::error::HostTransportError;
 use super::policy::{parse_https_url, DestinationPolicy};
@@ -118,9 +124,20 @@ pub struct HostTransportBuilder {
     policy: DestinationPolicy,
     resolver: Arc<dyn CredentialResolver>,
     extra_roots: Vec<Vec<u8>>,
+    lookup: Arc<Lookup>,
 }
 
 impl HostTransportBuilder {
+    /// Replaces system name resolution so tests can stall or redirect it deterministically.
+    #[cfg(test)]
+    pub(crate) fn lookup(
+        mut self,
+        lookup: impl Fn(&str) -> std::io::Result<Vec<std::net::SocketAddr>> + Send + Sync + 'static,
+    ) -> HostTransportBuilder {
+        self.lookup = Arc::new(lookup);
+        self
+    }
+
     /// Trusts one more root certificate (DER), in addition to the bundled public roots.
     pub fn trust_root_der(mut self, certificate_der: Vec<u8>) -> HostTransportBuilder {
         self.extra_roots.push(certificate_der);
@@ -146,6 +163,8 @@ impl HostTransportBuilder {
                 policy: self.policy,
                 resolver: self.resolver,
                 tls: Arc::new(tls),
+                lookup: self.lookup,
+                live_workers: Arc::new(AtomicUsize::new(0)),
             }),
         })
     }
@@ -155,6 +174,24 @@ struct Inner {
     policy: DestinationPolicy,
     resolver: Arc<dyn CredentialResolver>,
     tls: Arc<ClientConfig>,
+    lookup: Arc<Lookup>,
+    live_workers: Arc<AtomicUsize>,
+}
+
+/// Counts a dispatch's worker thread for as long as it runs.
+struct LiveWorker(Arc<AtomicUsize>);
+
+impl LiveWorker {
+    fn start(counter: &Arc<AtomicUsize>) -> LiveWorker {
+        counter.fetch_add(1, Ordering::SeqCst);
+        LiveWorker(Arc::clone(counter))
+    }
+}
+
+impl Drop for LiveWorker {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 #[derive(Clone)]
@@ -171,7 +208,14 @@ impl HostTransport {
             policy,
             resolver,
             extra_roots: Vec::new(),
+            lookup: Arc::new(system_lookup),
         }
+    }
+
+    /// Dispatch worker threads still running; they end promptly once a dispatch is aborted.
+    #[cfg(test)]
+    pub(crate) fn live_workers(&self) -> usize {
+        self.inner.live_workers.load(Ordering::SeqCst)
     }
 
     pub fn send(
@@ -196,8 +240,11 @@ impl HostTransport {
             return Err(HostTransportError::Timeout);
         }
 
+        let abort = Arc::new(AbortHandle::default());
         // Resolved only now, after the destination is approved, and used for this call alone.
-        let attachment = match &request.credential {
+        // The value stays with the caller-side handle: the worker gets it only once a verified
+        // TLS connection exists, and abort() drops it.
+        let credential_slot = match &request.credential {
             Some(credential) => {
                 let secret = self
                     .inner
@@ -205,31 +252,37 @@ impl HostTransport {
                     .resolve(&credential.reference)
                     .map_err(|_| HostTransportError::CredentialUnavailable)?;
                 let header_value = header_value_for(&credential.rule, &secret);
-                Some(ResolvedAttachment {
-                    header: credential.rule.header.clone(),
+                abort.hold(HeldSecret {
                     header_value,
                     secret,
+                });
+                Some(CredentialSlot {
+                    header: credential.rule.header.clone(),
+                    placeholder: format!("bench-slot-{}", Uuid::new_v4().simple()),
                 })
             }
             None => None,
         };
         if cancel.is_cancelled() {
+            abort.abort();
             return Err(HostTransportError::Cancelled);
         }
 
-        let abort = Arc::new(AbortHandle::default());
         let job = Job {
             url: url.to_string(),
             headers: request.headers.clone(),
             body: request.body.clone(),
             timeout: request.timeout + WORKER_GRACE,
             max_response_bytes: request.max_response_bytes,
-            attachment,
+            credential_slot,
             tls: Arc::clone(&self.inner.tls),
+            lookup: Arc::clone(&self.inner.lookup),
             abort: Arc::clone(&abort),
         };
         let (sender, receiver) = mpsc::channel();
+        let live = LiveWorker::start(&self.inner.live_workers);
         thread::spawn(move || {
+            let _live = live;
             // The caller may have left (cancelled or timed out); the result is then dropped.
             let _ = sender.send(perform(job));
         });
@@ -314,10 +367,11 @@ fn header_value_for(rule: &AttachmentRule, secret: &SecretValue) -> Zeroizing<St
     })
 }
 
-struct ResolvedAttachment {
+/// Where the credential goes in the request: the worker sets a random placeholder value, and
+/// the connection swaps in the real header value after the TLS handshake.
+struct CredentialSlot {
     header: String,
-    header_value: Zeroizing<String>,
-    secret: SecretValue,
+    placeholder: String,
 }
 
 struct Job {
@@ -326,16 +380,25 @@ struct Job {
     body: Vec<u8>,
     timeout: Duration,
     max_response_bytes: usize,
-    attachment: Option<ResolvedAttachment>,
+    credential_slot: Option<CredentialSlot>,
     tls: Arc<ClientConfig>,
+    lookup: Arc<Lookup>,
     abort: Arc<AbortHandle>,
 }
 
 fn perform(job: Job) -> Result<SecureResponse, HostTransportError> {
     let agent = ureq::AgentBuilder::new()
+        .resolver(AbortableResolver {
+            lookup: job.lookup,
+            abort: Arc::clone(&job.abort),
+        })
         .tls_connector(Arc::new(AbortableTls {
             config: job.tls,
-            abort: job.abort,
+            abort: Arc::clone(&job.abort),
+            placeholder: job
+                .credential_slot
+                .as_ref()
+                .map(|slot| slot.placeholder.clone()),
         }))
         .redirects(0)
         .https_only(true)
@@ -346,8 +409,8 @@ fn perform(job: Job) -> Result<SecureResponse, HostTransportError> {
     for (name, value) in &job.headers {
         call = call.set(name, value);
     }
-    if let Some(attachment) = &job.attachment {
-        call = call.set(&attachment.header, &attachment.header_value);
+    if let Some(slot) = &job.credential_slot {
+        call = call.set(&slot.header, &slot.placeholder);
     }
     let response = match call.send_bytes(&job.body) {
         Ok(response) | Err(ureq::Error::Status(_, response)) => response,
@@ -380,8 +443,10 @@ fn perform(job: Job) -> Result<SecureResponse, HostTransportError> {
         .map_err(|error| classify_io(&error))?;
     let truncated = body.len() as u64 > job.max_response_bytes as u64;
 
-    if let Some(attachment) = &job.attachment {
-        let secret = attachment.secret.as_bytes();
+    if job.credential_slot.is_some() {
+        // No released credential means the dispatch ended underneath us; fail closed.
+        let held = job.abort.released().ok_or(HostTransportError::Cancelled)?;
+        let secret = held.secret.as_bytes();
         mask_secret(&mut body, secret, truncated);
         for (_, value) in &mut headers {
             let mut masked = std::mem::take(value).into_bytes();
