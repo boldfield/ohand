@@ -67,10 +67,6 @@ pub const MIGRATIONS: &[MigrationStep] = &[
         target_version: 6,
         apply: add_job_transient_failure_count_v6,
     },
-    MigrationStep {
-        target_version: 7,
-        apply: add_transcript_attachments_v7,
-    },
 ];
 
 /// Database handle with schema validation.
@@ -748,32 +744,6 @@ fn add_reminder_source_phrase_v5(tx: &Transaction<'_>) -> Result<()> {
 fn add_job_transient_failure_count_v6(tx: &Transaction<'_>) -> Result<()> {
     tx.execute(
         "ALTER TABLE jobs ADD COLUMN transient_failure_count INTEGER NOT NULL DEFAULT 0",
-        [],
-    )?;
-    Ok(())
-}
-
-/// Step 7 (C05a): provenance of a transcript attached to a voice capture. The transcript text is
-/// not stored here: it is the item's text correction, so correction history, search and
-/// interpretation read it through the existing paths. This row records only that the correction
-/// is a recognizer result, which job produced it, which audio it was made from and when it
-/// succeeded. At most one attachment exists per item, which makes a duplicate attachment
-/// structurally impossible.
-fn add_transcript_attachments_v7(tx: &Transaction<'_>) -> Result<()> {
-    tx.execute(
-        "CREATE TABLE transcript_attachments (
-            item_id TEXT PRIMARY KEY,
-            capture_id TEXT NOT NULL UNIQUE,
-            source_job_id TEXT NOT NULL UNIQUE,
-            audio_sha256 TEXT NOT NULL,
-            recognizer TEXT NOT NULL,
-            detected_language TEXT,
-            confidence REAL,
-            transcribed_at TEXT NOT NULL,
-            attached_revision INTEGER NOT NULL,
-            FOREIGN KEY (item_id) REFERENCES items(item_id),
-            FOREIGN KEY (capture_id) REFERENCES captures(capture_id)
-        )",
         [],
     )?;
     Ok(())

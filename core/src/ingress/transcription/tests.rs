@@ -112,6 +112,17 @@ impl Store {
             .unwrap()
     }
 
+    fn attachments(&self) -> i64 {
+        self.open()
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE event_id LIKE 'transcript-attachment-%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
     fn count(&self, table: &str) -> i64 {
         self.open()
             .conn()
@@ -257,46 +268,25 @@ fn a_transcript_becomes_the_item_text_with_provenance_in_one_transaction() {
     assert_eq!(interpretation.profile_version, None);
     assert_eq!(store.job("transcription-1").status, JobStatus::Completed);
 
-    // Provenance: recognizer, original-audio identity and the successful-transcription time.
-    let (job_id, digest, recognizer, language, confidence, transcribed_at, attached): (
-        String,
-        String,
-        String,
-        Option<String>,
-        Option<f64>,
-        String,
-        i32,
-    ) = store
+    // Provenance lives in existing storage: the correction event names the source job, the
+    // revision it produced and the successful-transcription time; the audio is untouched.
+    let (event_id, event_revision, happened_at): (String, i32, String) = store
         .open()
         .conn()
         .query_row(
-            "SELECT source_job_id, audio_sha256, recognizer, detected_language, confidence,
-                    transcribed_at, attached_revision
-               FROM transcript_attachments WHERE item_id = ?",
+            "SELECT event_id, revision, happened_at FROM events WHERE item_id = ?",
             [&store.item_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                ))
-            },
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
-    assert_eq!(job_id, "transcription-1");
-    assert_eq!(digest, AUDIO_SHA256);
-    assert_eq!(recognizer, "on-device-recognizer/1");
-    assert_eq!(language.as_deref(), Some("en-US"));
-    assert_eq!(confidence, Some(0.91));
+    assert_eq!(event_id, "transcript-attachment-transcription-1");
+    assert_eq!(event_revision + 1, 1);
+    assert_eq!(DateTime::parse_from_rfc3339(&happened_at).unwrap(), later());
     assert_eq!(
-        DateTime::parse_from_rfc3339(&transcribed_at).unwrap(),
-        later()
+        store.scalar_text("SELECT created_at FROM corrections"),
+        happened_at,
+        "the correction carries the same success time"
     );
-    assert_eq!(attached, 1);
 
     // The transcript is searchable and shown as the current text; the capture is untouched.
     let hits = store.search("ferns");
@@ -386,12 +376,12 @@ fn redelivery_after_commit_returns_the_original_result_and_duplicates_nothing() 
             other => panic!("unexpected first disposition {other:?}"),
         }
     );
-    assert_eq!(store.count("transcript_attachments"), 1);
+    assert_eq!(store.attachments(), 1);
     assert_eq!(store.count("corrections"), 1);
     assert_eq!(store.count("events"), 1);
     assert_eq!(store.interpretation_jobs().len(), 1);
     assert_eq!(store.item_row().3, 1, "the revision is bumped once");
-    let transcribed_at = store.scalar_text("SELECT transcribed_at FROM transcript_attachments");
+    let transcribed_at = store.scalar_text("SELECT happened_at FROM events");
     assert_eq!(
         DateTime::parse_from_rfc3339(&transcribed_at).unwrap(),
         later(),
@@ -428,7 +418,7 @@ fn a_different_transcript_for_an_attached_job_is_a_conflict() {
 fn a_failure_before_commit_rolls_back_everything_and_the_retry_succeeds() {
     for failing_stage in [
         TranscriptionStage::EventWritten,
-        TranscriptionStage::AttachmentWritten,
+        TranscriptionStage::StateUpdated,
         TranscriptionStage::JobSettled,
         TranscriptionStage::InterpretationQueued,
     ] {
@@ -454,11 +444,7 @@ fn a_failure_before_commit_rolls_back_everything_and_the_retry_succeeds() {
             TranscriptionErrorKind::Storage(_)
         ));
 
-        assert_eq!(
-            store.count("transcript_attachments"),
-            0,
-            "{failing_stage:?}"
-        );
+        assert_eq!(store.attachments(), 0, "{failing_stage:?}");
         assert_eq!(store.count("events"), 0, "{failing_stage:?}");
         assert_eq!(store.count("search_index"), 0, "{failing_stage:?}");
         assert!(store.interpretation_jobs().is_empty(), "{failing_stage:?}");
@@ -479,7 +465,7 @@ fn a_failure_before_commit_rolls_back_everything_and_the_retry_succeeds() {
             ),
             "{failing_stage:?}"
         );
-        assert_eq!(store.count("transcript_attachments"), 1);
+        assert_eq!(store.attachments(), 1);
         assert_eq!(store.interpretation_jobs().len(), 1);
     }
 }
@@ -499,7 +485,7 @@ fn a_lost_acknowledgment_reports_committed_and_the_retry_is_idempotent() {
     })
     .unwrap_err();
     assert_eq!(error.commit_status, CommitStatus::Committed);
-    assert_eq!(store.count("transcript_attachments"), 1);
+    assert_eq!(store.attachments(), 1);
 
     let retry = apply_transcription_outcome(&mut store.open(), &request, later()).unwrap();
     assert!(matches!(
@@ -545,7 +531,7 @@ fn unsupported_failed_and_empty_outcomes_keep_the_audio_and_an_explicit_pending_
         assert_eq!(processing, "unprocessed");
         assert_eq!(transcription, expected_state);
         assert_eq!(revision, 0, "no text was attached");
-        assert_eq!(store.count("transcript_attachments"), 0);
+        assert_eq!(store.attachments(), 0);
         assert_eq!(store.count("events"), 0);
         assert_eq!(store.count("search_index"), 0);
         assert!(store.interpretation_jobs().is_empty());
@@ -615,7 +601,7 @@ fn a_late_result_after_a_user_correction_cannot_replace_the_corrected_text() {
     let hits = store.search("ferns");
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].current_text, "water the ferns on friday");
-    assert_eq!(store.count("transcript_attachments"), 0);
+    assert_eq!(store.attachments(), 0);
     assert_eq!(store.count("corrections"), 1);
     assert_eq!(store.item_row().2, "audio_pending");
     assert!(store.interpretation_jobs().is_empty());
@@ -702,7 +688,7 @@ fn a_late_result_after_deletion_attaches_nothing() {
         acknowledgment.disposition,
         TranscriptionDisposition::Discarded(DiscardReason::ItemDeleted)
     );
-    assert_eq!(store.count("transcript_attachments"), 0);
+    assert_eq!(store.attachments(), 0);
     assert_eq!(store.count("search_index"), 0);
     assert!(store.interpretation_jobs().is_empty());
     assert_eq!(
@@ -759,7 +745,7 @@ fn a_second_job_cannot_replace_an_attached_transcript() {
         acknowledgment.disposition,
         TranscriptionDisposition::Discarded(DiscardReason::AlreadyTranscribed)
     );
-    assert_eq!(store.count("transcript_attachments"), 1);
+    assert_eq!(store.attachments(), 1);
     assert_eq!(store.search("ferns")[0].current_text, TRANSCRIPT);
     assert_eq!(store.item_row().3, 1);
 }
@@ -776,7 +762,7 @@ fn a_result_for_different_or_missing_audio_is_not_attached() {
         acknowledgment.disposition,
         TranscriptionDisposition::Discarded(DiscardReason::AudioIdentityMismatch)
     );
-    assert_eq!(store.count("transcript_attachments"), 0);
+    assert_eq!(store.attachments(), 0);
     assert_eq!(store.item_row().2, "audio_pending");
 
     let store = Store::with_voice_capture();
@@ -796,7 +782,7 @@ fn a_result_for_different_or_missing_audio_is_not_attached() {
         acknowledgment.disposition,
         TranscriptionDisposition::Discarded(DiscardReason::AudioUnavailable)
     );
-    assert_eq!(store.count("transcript_attachments"), 0);
+    assert_eq!(store.attachments(), 0);
 }
 
 #[test]
@@ -885,7 +871,7 @@ fn the_lease_fences_stale_and_foreign_deliveries() {
         TranscriptionErrorKind::NotATranscriptionJob { .. }
     ));
 
-    assert_eq!(store.count("transcript_attachments"), 0);
+    assert_eq!(store.attachments(), 0);
     assert_eq!(store.item_row().2, "audio_pending");
     assert_eq!(store.job("transcription-1").status, JobStatus::Running);
 }
@@ -926,7 +912,7 @@ fn a_transcription_job_pinned_to_a_provider_is_not_authorized() {
         kind_of(&error),
         TranscriptionErrorKind::NotAuthorized(DenialReason::LocalOnlyJobHasProfile)
     ));
-    assert_eq!(store.count("transcript_attachments"), 0);
+    assert_eq!(store.attachments(), 0);
 }
 
 #[test]
@@ -1047,6 +1033,6 @@ fn an_interpretation_job_id_already_in_use_is_rejected_without_attaching() {
         kind_of(&error),
         TranscriptionErrorKind::Validation(TranscriptionRejection::InterpretationJobIdInUse)
     ));
-    assert_eq!(store.count("transcript_attachments"), 0);
+    assert_eq!(store.attachments(), 0);
     assert_eq!(store.item_row().2, "audio_pending");
 }
