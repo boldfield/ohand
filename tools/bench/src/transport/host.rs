@@ -3,38 +3,32 @@
 //! One POST per call with: https only and certificate validation against fixed roots, an
 //! explicit destination/credential grant list, no redirects followed (a 3xx is returned as a
 //! bare status), a bounded response body, a real-time budget plus an optional dispatch-clock
-//! deadline, and cancellation. Cancellation and expiry end every phase of the exchange (name
-//! lookup, connect, handshake, request, response), so the dispatch stops and the resolved secret
-//! is dropped promptly rather than at the relative budget. The secret is resolved at dispatch
-//! after the destination check, written only onto an established, verified TLS stream, and
-//! masked out of everything returned.
+//! deadline, and cancellation. The whole exchange (name lookup, connect, handshake, request,
+//! response) runs on the calling thread in waits of at most one poll step, so cancellation and
+//! expiry end it promptly and, when `send` returns, no thread, socket or copy of the secret
+//! from this call is left behind. The secret is resolved at dispatch after the destination
+//! check, written only onto an established, verified TLS stream, and masked out of everything
+//! returned.
 
-use std::error::Error as StdError;
-use std::io::Read;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::AtomicUsize;
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use ohand_core::providers::contracts::{CancelToken, Clock};
-use rustls::pki_types::CertificateDer;
+use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, RootCertStore};
-use uuid::Uuid;
+use url::{Host, Url};
 use zeroize::Zeroizing;
 
-use super::abort::{
-    system_lookup, AbortHandle, AbortableResolver, AbortableTls, HeldSecret, Lookup,
-};
 use super::credential::{CredentialResolver, SecretValue};
+use super::dns::NameService;
 use super::error::HostTransportError;
+use super::exchange::{self, clock_expired, Budget, Session, SocketCounter};
 use super::policy::{parse_https_url, DestinationPolicy};
 use super::redact::mask_secret;
-
-/// How often a waiting call re-checks cancellation and deadlines.
-const POLL_INTERVAL: Duration = Duration::from_millis(5);
-/// The worker's own HTTP timeout outlives the caller's budget so the caller's deadline decides.
-const WORKER_GRACE: Duration = Duration::from_millis(250);
 
 const RESERVED_HEADERS: &[&str] = &[
     "host",
@@ -124,17 +118,15 @@ pub struct HostTransportBuilder {
     policy: DestinationPolicy,
     resolver: Arc<dyn CredentialResolver>,
     extra_roots: Vec<Vec<u8>>,
-    lookup: Arc<Lookup>,
+    name_service: NameService,
 }
 
 impl HostTransportBuilder {
-    /// Replaces system name resolution so tests can stall or redirect it deterministically.
+    /// Replaces the system hosts file and nameservers so tests can stall or answer name
+    /// lookups deterministically.
     #[cfg(test)]
-    pub(crate) fn lookup(
-        mut self,
-        lookup: impl Fn(&str) -> std::io::Result<Vec<std::net::SocketAddr>> + Send + Sync + 'static,
-    ) -> HostTransportBuilder {
-        self.lookup = Arc::new(lookup);
+    pub(crate) fn name_service(mut self, name_service: NameService) -> HostTransportBuilder {
+        self.name_service = name_service;
         self
     }
 
@@ -163,8 +155,8 @@ impl HostTransportBuilder {
                 policy: self.policy,
                 resolver: self.resolver,
                 tls: Arc::new(tls),
-                lookup: self.lookup,
-                live_workers: Arc::new(AtomicUsize::new(0)),
+                name_service: self.name_service,
+                open_sockets: Arc::new(AtomicUsize::new(0)),
             }),
         })
     }
@@ -174,24 +166,8 @@ struct Inner {
     policy: DestinationPolicy,
     resolver: Arc<dyn CredentialResolver>,
     tls: Arc<ClientConfig>,
-    lookup: Arc<Lookup>,
-    live_workers: Arc<AtomicUsize>,
-}
-
-/// Counts a dispatch's worker thread for as long as it runs.
-struct LiveWorker(Arc<AtomicUsize>);
-
-impl LiveWorker {
-    fn start(counter: &Arc<AtomicUsize>) -> LiveWorker {
-        counter.fetch_add(1, Ordering::SeqCst);
-        LiveWorker(Arc::clone(counter))
-    }
-}
-
-impl Drop for LiveWorker {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
-    }
+    name_service: NameService,
+    open_sockets: SocketCounter,
 }
 
 #[derive(Clone)]
@@ -208,14 +184,14 @@ impl HostTransport {
             policy,
             resolver,
             extra_roots: Vec::new(),
-            lookup: Arc::new(system_lookup),
+            name_service: NameService::default(),
         }
     }
 
-    /// Dispatch worker threads still running; they end promptly once a dispatch is aborted.
+    /// Sockets (DNS and TCP) currently open on behalf of any dispatch.
     #[cfg(test)]
-    pub(crate) fn live_workers(&self) -> usize {
-        self.inner.live_workers.load(Ordering::SeqCst)
+    pub(crate) fn open_sockets(&self) -> usize {
+        self.inner.open_sockets.load(Ordering::SeqCst)
     }
 
     pub fn send(
@@ -239,82 +215,103 @@ impl HostTransport {
         if request.timeout.is_zero() || clock_expired(clock_deadline) {
             return Err(HostTransportError::Timeout);
         }
+        let budget = Budget::new(cancel, request.timeout, clock_deadline);
 
-        let abort = Arc::new(AbortHandle::default());
-        // Resolved only now, after the destination is approved, and used for this call alone.
-        // The value stays with the caller-side handle: the worker gets it only once a verified
-        // TLS connection exists, and abort() drops it.
-        let credential_slot = match &request.credential {
+        // Resolved only now, after the destination is approved, and used for this call alone;
+        // it is dropped when this call returns.
+        let credential = match &request.credential {
             Some(credential) => {
                 let secret = self
                     .inner
                     .resolver
                     .resolve(&credential.reference)
                     .map_err(|_| HostTransportError::CredentialUnavailable)?;
-                let header_value = header_value_for(&credential.rule, &secret);
-                abort.hold(HeldSecret {
-                    header_value,
-                    secret,
-                });
-                Some(CredentialSlot {
-                    header: credential.rule.header.clone(),
-                    placeholder: format!("bench-slot-{}", Uuid::new_v4().simple()),
-                })
+                Some((&credential.rule, secret))
             }
             None => None,
         };
-        if cancel.is_cancelled() {
-            abort.abort();
-            return Err(HostTransportError::Cancelled);
+        budget.check()?;
+
+        let (addresses, server_name) = self.destination(&url, &budget)?;
+        let tcp = exchange::connect(&addresses, &budget, &self.inner.open_sockets)?;
+        let mut session = Session::open(tcp, Arc::clone(&self.inner.tls), server_name, &budget)?;
+        let head = request_head(
+            &url,
+            request,
+            credential.as_ref().map(|(rule, secret)| (*rule, secret)),
+        );
+        session.write_all(&head)?;
+        drop(head);
+        session.write_all(&request.body)?;
+        let read_limit = request.max_response_bytes.saturating_add(1);
+        let raw = exchange::read_response(&mut session, read_limit)?;
+        drop(session);
+
+        // A redirect is reported, never followed, and neither its target nor its body is
+        // returned.
+        if (300..400).contains(&raw.status) {
+            return Ok(SecureResponse {
+                status: raw.status,
+                headers: Vec::new(),
+                body: Vec::new(),
+                truncated: false,
+            });
         }
-
-        let job = Job {
-            url: url.to_string(),
-            headers: request.headers.clone(),
-            body: request.body.clone(),
-            timeout: request.timeout + WORKER_GRACE,
-            max_response_bytes: request.max_response_bytes,
-            credential_slot,
-            tls: Arc::clone(&self.inner.tls),
-            lookup: Arc::clone(&self.inner.lookup),
-            abort: Arc::clone(&abort),
-        };
-        let (sender, receiver) = mpsc::channel();
-        let live = LiveWorker::start(&self.inner.live_workers);
-        thread::spawn(move || {
-            let _live = live;
-            // The caller may have left (cancelled or timed out); the result is then dropped.
-            let _ = sender.send(perform(job));
-        });
-
-        let started = Instant::now();
-        let outcome = loop {
-            if cancel.is_cancelled() {
-                break Err(HostTransportError::Cancelled);
+        let truncated = raw.body.len() > request.max_response_bytes;
+        let mut body = raw.body;
+        let mut headers = raw.headers;
+        if let Some((_, secret)) = &credential {
+            let secret = secret.as_bytes();
+            mask_secret(&mut body, secret, truncated);
+            for (_, value) in &mut headers {
+                let mut masked = std::mem::take(value).into_bytes();
+                mask_secret(&mut masked, secret, false);
+                *value = String::from_utf8_lossy(&masked).into_owned();
             }
-            if started.elapsed() >= request.timeout || clock_expired(clock_deadline) {
-                break Err(HostTransportError::Timeout);
-            }
-            match receiver.recv_timeout(POLL_INTERVAL) {
-                Ok(outcome) => {
-                    if cancel.is_cancelled() {
-                        break Err(HostTransportError::Cancelled);
-                    }
-                    break outcome;
-                }
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => break Err(HostTransportError::Unreachable),
-            }
-        };
-        // Whatever ended the wait, the exchange ends with it: the worker's socket is shut down
-        // so it stops reading and writing and drops the resolved secret.
-        abort.abort();
-        outcome
+        }
+        Ok(SecureResponse {
+            status: raw.status,
+            headers,
+            body,
+            truncated,
+        })
     }
-}
 
-fn clock_expired(clock_deadline: Option<ClockDeadline<'_>>) -> bool {
-    clock_deadline.is_some_and(|deadline| deadline.clock.now_ms() >= deadline.deadline_ms)
+    /// The addresses to connect to and the name the certificate must carry.
+    fn destination(
+        &self,
+        url: &Url,
+        budget: &Budget<'_>,
+    ) -> Result<(Vec<SocketAddr>, ServerName<'static>), HostTransportError> {
+        let port = url
+            .port_or_known_default()
+            .ok_or(HostTransportError::InvalidRequest)?;
+        let (ips, server_name) = match url.host() {
+            Some(Host::Domain(name)) => {
+                let server_name = ServerName::try_from(name.to_string())
+                    .map_err(|_| HostTransportError::InvalidRequest)?;
+                let ips =
+                    self.inner
+                        .name_service
+                        .resolve(name, budget, &self.inner.open_sockets)?;
+                (ips, server_name)
+            }
+            Some(Host::Ipv4(address)) => (
+                vec![IpAddr::V4(address)],
+                ServerName::IpAddress(IpAddr::V4(address).into()),
+            ),
+            Some(Host::Ipv6(address)) => (
+                vec![IpAddr::V6(address)],
+                ServerName::IpAddress(IpAddr::V6(address).into()),
+            ),
+            None => return Err(HostTransportError::InvalidRequest),
+        };
+        let addresses = ips
+            .into_iter()
+            .map(|ip| SocketAddr::new(ip, port))
+            .collect();
+        Ok((addresses, server_name))
+    }
 }
 
 fn is_token(text: &str) -> bool {
@@ -358,157 +355,39 @@ fn validate_headers(request: &SecureRequest) -> Result<(), HostTransportError> {
     Ok(())
 }
 
-fn header_value_for(rule: &AttachmentRule, secret: &SecretValue) -> Zeroizing<String> {
-    // SecretValue only holds printable ASCII, so this conversion cannot fail.
-    let secret_text = String::from_utf8_lossy(secret.as_bytes());
-    Zeroizing::new(match &rule.scheme {
-        Some(scheme) => format!("{scheme} {secret_text}"),
-        None => secret_text.into_owned(),
-    })
-}
-
-/// Where the credential goes in the request: the worker sets a random placeholder value, and
-/// the connection swaps in the real header value after the TLS handshake.
-struct CredentialSlot {
-    header: String,
-    placeholder: String,
-}
-
-struct Job {
-    url: String,
-    headers: Vec<(String, String)>,
-    body: Vec<u8>,
-    timeout: Duration,
-    max_response_bytes: usize,
-    credential_slot: Option<CredentialSlot>,
-    tls: Arc<ClientConfig>,
-    lookup: Arc<Lookup>,
-    abort: Arc<AbortHandle>,
-}
-
-fn perform(job: Job) -> Result<SecureResponse, HostTransportError> {
-    let agent = ureq::AgentBuilder::new()
-        .resolver(AbortableResolver {
-            lookup: job.lookup,
-            abort: Arc::clone(&job.abort),
-        })
-        .tls_connector(Arc::new(AbortableTls {
-            config: job.tls,
-            abort: Arc::clone(&job.abort),
-            placeholder: job
-                .credential_slot
-                .as_ref()
-                .map(|slot| slot.placeholder.clone()),
-        }))
-        .redirects(0)
-        .https_only(true)
-        .max_idle_connections(0)
-        .timeout(job.timeout)
-        .build();
-    let mut call = agent.post(&job.url);
-    for (name, value) in &job.headers {
-        call = call.set(name, value);
+/// The request line and headers. The credential, when present, is written as
+/// `header: <scheme> <secret>` or `header: <secret>`; the buffer is wiped when dropped.
+fn request_head(
+    url: &Url,
+    request: &SecureRequest,
+    credential: Option<(&AttachmentRule, &SecretValue)>,
+) -> Zeroizing<Vec<u8>> {
+    let mut target = url.path().to_string();
+    if let Some(query) = url.query() {
+        target.push('?');
+        target.push_str(query);
     }
-    if let Some(slot) = &job.credential_slot {
-        call = call.set(&slot.header, &slot.placeholder);
+    let mut authority = url.host_str().unwrap_or_default().to_string();
+    if let Some(port) = url.port() {
+        authority.push_str(&format!(":{port}"));
     }
-    let response = match call.send_bytes(&job.body) {
-        Ok(response) | Err(ureq::Error::Status(_, response)) => response,
-        Err(ureq::Error::Transport(transport)) => return Err(classify(&transport)),
-    };
-
-    let status = response.status();
-    // A redirect is reported, never followed, and neither its target nor its body is returned.
-    if (300..400).contains(&status) {
-        return Ok(SecureResponse {
-            status,
-            headers: Vec::new(),
-            body: Vec::new(),
-            truncated: false,
-        });
+    let mut head = Zeroizing::new(Vec::with_capacity(512));
+    head.extend_from_slice(format!("POST {target} HTTP/1.1\r\nhost: {authority}\r\n").as_bytes());
+    head.extend_from_slice(format!("content-length: {}\r\n", request.body.len()).as_bytes());
+    head.extend_from_slice(b"connection: close\r\n");
+    for (name, value) in &request.headers {
+        head.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
     }
-
-    let mut headers = Vec::new();
-    for name in response.headers_names() {
-        for value in response.all(&name) {
-            headers.push((name.clone(), value.to_string()));
+    if let Some((rule, secret)) = credential {
+        head.extend_from_slice(rule.header.as_bytes());
+        head.extend_from_slice(b": ");
+        if let Some(scheme) = &rule.scheme {
+            head.extend_from_slice(scheme.as_bytes());
+            head.push(b' ');
         }
+        head.extend_from_slice(secret.as_bytes());
+        head.extend_from_slice(b"\r\n");
     }
-    let read_limit = (job.max_response_bytes as u64).saturating_add(1);
-    let mut body = Vec::new();
-    response
-        .into_reader()
-        .take(read_limit)
-        .read_to_end(&mut body)
-        .map_err(|error| classify_io(&error))?;
-    let truncated = body.len() as u64 > job.max_response_bytes as u64;
-
-    if job.credential_slot.is_some() {
-        // No released credential means the dispatch ended underneath us; fail closed.
-        let held = job.abort.released().ok_or(HostTransportError::Cancelled)?;
-        let secret = held.secret.as_bytes();
-        mask_secret(&mut body, secret, truncated);
-        for (_, value) in &mut headers {
-            let mut masked = std::mem::take(value).into_bytes();
-            mask_secret(&mut masked, secret, false);
-            *value = String::from_utf8_lossy(&masked).into_owned();
-        }
-    }
-    Ok(SecureResponse {
-        status,
-        headers,
-        body,
-        truncated,
-    })
-}
-
-fn classify(transport: &ureq::Transport) -> HostTransportError {
-    let mut current: Option<&(dyn StdError + 'static)> = Some(transport);
-    while let Some(error) = current {
-        if let Some(io_error) = error.downcast_ref::<std::io::Error>() {
-            let classified = classify_io(io_error);
-            if classified != HostTransportError::Unreachable {
-                return classified;
-            }
-        }
-        if let Some(tls_error) = error.downcast_ref::<rustls::Error>() {
-            let classified = classify_tls(tls_error);
-            if classified != HostTransportError::Unreachable {
-                return classified;
-            }
-        }
-        current = error.source();
-    }
-    match transport.kind() {
-        ureq::ErrorKind::InvalidUrl
-        | ureq::ErrorKind::UnknownScheme
-        | ureq::ErrorKind::InsecureRequestHttpsOnly
-        | ureq::ErrorKind::BadHeader => HostTransportError::InvalidRequest,
-        _ => HostTransportError::Unreachable,
-    }
-}
-
-fn classify_io(error: &std::io::Error) -> HostTransportError {
-    if matches!(
-        error.kind(),
-        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-    ) {
-        return HostTransportError::Timeout;
-    }
-    if let Some(tls_error) = error
-        .get_ref()
-        .and_then(|inner| inner.downcast_ref::<rustls::Error>())
-    {
-        return classify_tls(tls_error);
-    }
-    HostTransportError::Unreachable
-}
-
-fn classify_tls(error: &rustls::Error) -> HostTransportError {
-    match error {
-        rustls::Error::InvalidCertificate(_) | rustls::Error::NoCertificatesPresented => {
-            HostTransportError::TlsVerificationFailed
-        }
-        _ => HostTransportError::Unreachable,
-    }
+    head.extend_from_slice(b"\r\n");
+    head
 }

@@ -4,10 +4,11 @@
 //! transport traits that landed in core. Secret bytes are resolved here, out of band, at
 //! dispatch time, and never leave this module: not in arguments, journals, output or errors.
 
-mod abort;
 mod bindings;
 mod credential;
+mod dns;
 mod error;
+mod exchange;
 mod host;
 mod policy;
 mod redact;

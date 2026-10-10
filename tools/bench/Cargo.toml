@@ -9,7 +9,9 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
 ohand-core = { path = "../../core" }
-ureq = { version = "2", default-features = false, features = ["tls"] }
+socket2 = "0.5"
+libc = "0.2"
+httparse = "1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "0.26"
 zeroize = "1"

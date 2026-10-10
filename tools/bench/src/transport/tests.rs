@@ -10,6 +10,7 @@ use ohand_core::providers::anthropic::{
 use ohand_core::providers::contracts::{CancelToken, ManualClock, SystemClock, TransportError};
 use ohand_core::providers::openai::HttpTransport;
 
+use super::dns::NameService;
 use super::fixture::{Fixture, RecordedRequest, Reply, TestAuthority};
 use super::redact::mask_secret;
 use super::*;
@@ -538,6 +539,58 @@ fn an_endless_body_is_cut_at_the_bound_quickly() {
     assert!(started.elapsed() < Duration::from_secs(5));
 }
 
+#[test]
+fn chunked_bodies_are_decoded_and_bounded() {
+    let authority = TestAuthority::new();
+    let fixture = start_fixture(&authority, |_| {
+        Reply::Raw(
+            b"HTTP/1.1 100 Continue\r\n\r\n\
+              HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n\
+              5;ext=1\r\nhello\r\n7\r\n, world\r\n0\r\n\r\n"
+                .to_vec(),
+        )
+    });
+    let transport = transport_for(
+        &authority,
+        approved(&fixture),
+        Arc::new(RecordingResolver::default()),
+    );
+
+    let mut request = request_to(fixture.url("/"), None);
+    let whole = send(&transport, &request).unwrap();
+    assert_eq!(whole.status, 200);
+    assert_eq!(whole.body, b"hello, world");
+    assert!(!whole.truncated);
+
+    request.max_response_bytes = 6;
+    let cut = send(&transport, &request).unwrap();
+    assert_eq!(cut.body, b"hello, ");
+    assert!(cut.truncated);
+}
+
+#[test]
+fn close_delimited_bodies_end_at_close_and_short_length_framed_bodies_fail() {
+    let authority = TestAuthority::new();
+    let delimited = start_fixture(&authority, |_| {
+        Reply::Raw(b"HTTP/1.1 200 OK\r\nconnection: close\r\n\r\nuntil close".to_vec())
+    });
+    let short = start_fixture(&authority, |_| {
+        Reply::Raw(b"HTTP/1.1 200 OK\r\ncontent-length: 50\r\n\r\nonly part".to_vec())
+    });
+    let policy = approved(&delimited)
+        .approve_origin(&short.url("/"))
+        .unwrap();
+    let transport = transport_for(&authority, policy, Arc::new(RecordingResolver::default()));
+
+    let response = send(&transport, &request_to(delimited.url("/"), None)).unwrap();
+    assert_eq!(response.body, b"until close");
+    assert_eq!(
+        send(&transport, &request_to(short.url("/"), None)).unwrap_err(),
+        HostTransportError::Unreachable
+    );
+    assert_no_open_sockets(&transport);
+}
+
 // --- Deadline and cancellation ----------------------------------------------------------------
 
 /// The request reached the server, and the client then closed the connection well inside the
@@ -589,6 +642,7 @@ fn cancellation_returns_promptly_while_the_request_is_in_flight() {
     assert_eq!(error, HostTransportError::Cancelled);
     assert_eq!(TransportError::from(error), TransportError::Cancelled);
     assert!(started.elapsed() < Duration::from_secs(5));
+    assert_no_open_sockets(&transport);
     assert_exchange_torn_down(&fixture);
 }
 
@@ -659,115 +713,214 @@ fn the_dispatch_clock_deadline_ends_a_call_even_with_a_long_relative_budget() {
 
     assert_eq!(error, HostTransportError::Timeout);
     assert!(started.elapsed() < Duration::from_secs(5));
+    assert_no_open_sockets(&transport);
     assert_exchange_torn_down(&fixture);
 }
 
 // --- Phases before the request is on the wire ----------------------------------------------
 
-/// A name lookup that blocks until released, then fails. Releasing it at the end of a test lets
-/// the stuck lookup thread finish.
-#[derive(Clone, Default)]
-struct StalledLookup {
-    gate: Arc<(Mutex<bool>, std::sync::Condvar)>,
-    started: Arc<AtomicUsize>,
+/// Everything a dispatch opened is closed by the time `send` returns. The exchange runs on the
+/// calling thread, so there is no worker or lookup helper that could still hold a socket.
+fn assert_no_open_sockets(transport: &HostTransport) {
+    assert_eq!(
+        transport.open_sockets(),
+        0,
+        "a socket outlived the dispatch that opened it"
+    );
 }
 
-impl StalledLookup {
-    fn lookup(&self) -> impl Fn(&str) -> std::io::Result<Vec<std::net::SocketAddr>> + Send + Sync {
-        let gate = Arc::clone(&self.gate);
-        let started = Arc::clone(&self.started);
-        move |_| {
-            started.fetch_add(1, Ordering::SeqCst);
-            let (open, signal) = &*gate;
-            let mut released = open.lock().unwrap();
-            while !*released {
-                released = signal.wait(released).unwrap();
+/// A loopback UDP nameserver that counts queries and either never answers or answers A
+/// queries for one name with 127.0.0.1, other record types for that name with no records, and
+/// every other name with NXDOMAIN.
+struct FakeNameserver {
+    address: std::net::SocketAddr,
+    queries: Arc<AtomicUsize>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl FakeNameserver {
+    fn silent() -> FakeNameserver {
+        FakeNameserver::start(None)
+    }
+
+    fn answering(name: &'static str) -> FakeNameserver {
+        FakeNameserver::start(Some(name))
+    }
+
+    fn start(answered_name: Option<&'static str>) -> FakeNameserver {
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(10)))
+            .unwrap();
+        let address = socket.local_addr().unwrap();
+        let queries = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (counted, stopping) = (Arc::clone(&queries), Arc::clone(&stop));
+        thread::spawn(move || {
+            let mut buffer = [0u8; 512];
+            while !stopping.load(Ordering::SeqCst) {
+                let Ok((length, peer)) = socket.recv_from(&mut buffer) else {
+                    continue;
+                };
+                counted.fetch_add(1, Ordering::SeqCst);
+                if let Some(name) = answered_name {
+                    let reply = FakeNameserver::reply(&buffer[..length], name);
+                    let _ = socket.send_to(&reply, peer);
+                }
             }
-            Err(std::io::Error::other("released"))
+        });
+        FakeNameserver {
+            address,
+            queries,
+            stop,
         }
     }
 
-    fn release(&self) {
-        let (open, signal) = &*self.gate;
-        *open.lock().unwrap() = true;
-        signal.notify_all();
+    fn reply(query: &[u8], answered_name: &str) -> Vec<u8> {
+        let mut at = 12;
+        let mut labels = Vec::new();
+        while query[at] != 0 {
+            let length = query[at] as usize;
+            labels.push(String::from_utf8_lossy(&query[at + 1..at + 1 + length]).into_owned());
+            at += 1 + length;
+        }
+        let record_type = u16::from_be_bytes([query[at + 1], query[at + 2]]);
+        let mut reply = query[..at + 5].to_vec();
+        if labels.join(".") != answered_name {
+            reply[2..4].copy_from_slice(&0x8183u16.to_be_bytes());
+            return reply;
+        }
+        reply[2..4].copy_from_slice(&0x8180u16.to_be_bytes());
+        if record_type == 1 {
+            reply[6..8].copy_from_slice(&1u16.to_be_bytes());
+            reply.extend_from_slice(&[0xC0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 127, 0, 0, 1]);
+        }
+        reply
     }
 
-    fn wait_until_started(&self) {
+    fn queries(&self) -> usize {
+        self.queries.load(Ordering::SeqCst)
+    }
+
+    fn wait_for_query(&self) {
         let waiting_since = Instant::now();
-        while self.started.load(Ordering::SeqCst) == 0 {
+        while self.queries() == 0 {
             assert!(waiting_since.elapsed() < Duration::from_secs(3));
             thread::sleep(Duration::from_millis(5));
         }
     }
-}
 
-fn wait_for_no_live_workers(transport: &HostTransport) {
-    let waiting_since = Instant::now();
-    while transport.live_workers() != 0 {
-        assert!(
-            waiting_since.elapsed() < Duration::from_secs(2),
-            "the dispatch worker outlived its aborted dispatch"
-        );
-        thread::sleep(Duration::from_millis(5));
+    fn name_service(&self) -> NameService {
+        NameService::fixed(
+            std::path::PathBuf::from("/nonexistent/bench-hosts"),
+            vec![self.address],
+        )
     }
 }
 
+impl Drop for FakeNameserver {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+}
+
+fn transport_with_names(
+    authority: &TestAuthority,
+    policy: DestinationPolicy,
+    nameserver: &FakeNameserver,
+) -> HostTransport {
+    HostTransport::builder(policy, RecordingResolver::with_secret(REFERENCE, CANARY))
+        .trust_root_der(authority.root_der())
+        .name_service(nameserver.name_service())
+        .build()
+        .unwrap()
+}
+
 #[test]
-fn cancellation_during_name_resolution_ends_the_worker_before_any_connection() {
+fn names_resolve_through_the_configured_nameserver() {
     let authority = TestAuthority::new();
-    let fixture = start_fixture(&authority, echo_ok);
-    let stalled = StalledLookup::default();
-    let transport = HostTransport::builder(
-        approved(&fixture),
-        RecordingResolver::with_secret(REFERENCE, CANARY),
-    )
-    .trust_root_der(authority.root_der())
-    .lookup(stalled.lookup())
-    .build()
-    .unwrap();
+    let fixture = Fixture::start(authority.issue("api.bench.test"), echo_ok);
+    let nameserver = FakeNameserver::answering("api.bench.test");
+    let url = format!("https://api.bench.test:{}/v1", fixture.port());
+    let policy = DestinationPolicy::new()
+        .approve_credential(&url, REFERENCE)
+        .unwrap();
+    let transport = transport_with_names(&authority, policy, &nameserver);
+
+    let response = send(&transport, &request_to(url, Some(credential_use()))).unwrap();
+
+    assert_eq!(response.status, 200);
+    assert!(nameserver.queries() >= 1);
+    assert_eq!(fixture.requests()[0].header("x-api-key"), Some(CANARY));
+    assert_eq!(
+        fixture.requests()[0].header("host"),
+        Some(format!("api.bench.test:{}", fixture.port()).as_str())
+    );
+    assert_no_open_sockets(&transport);
+}
+
+#[test]
+fn a_name_without_addresses_is_unreachable_without_connecting() {
+    let authority = TestAuthority::new();
+    let nameserver = FakeNameserver::answering("api.bench.test");
+    let url = "https://missing.bench.test/v1".to_string();
+    let policy = DestinationPolicy::new()
+        .approve_credential(&url, REFERENCE)
+        .unwrap();
+    let transport = transport_with_names(&authority, policy, &nameserver);
+
+    let error = send(&transport, &request_to(url, Some(credential_use()))).unwrap_err();
+
+    assert_eq!(error, HostTransportError::Unreachable);
+    assert!(nameserver.queries() >= 1);
+    assert_no_open_sockets(&transport);
+}
+
+#[test]
+fn cancellation_during_name_resolution_ends_the_lookup_and_closes_its_socket() {
+    let authority = TestAuthority::new();
+    let nameserver = Arc::new(FakeNameserver::silent());
+    let url = "https://api.bench.test/v1".to_string();
+    let policy = DestinationPolicy::new()
+        .approve_credential(&url, REFERENCE)
+        .unwrap();
+    let transport = transport_with_names(&authority, policy, &nameserver);
 
     let cancel = CancelToken::new();
     let canceller = cancel.clone();
-    let watched = stalled.clone();
+    let watched = Arc::clone(&nameserver);
     thread::spawn(move || {
-        watched.wait_until_started();
+        watched.wait_for_query();
         canceller.cancel();
     });
-    let mut request = request_to(fixture.url("/"), Some(credential_use()));
+    let mut request = request_to(url, Some(credential_use()));
     request.timeout = Duration::from_secs(60);
     let started = Instant::now();
     let error = transport.send(&request, &cancel, None).unwrap_err();
 
     assert_eq!(error, HostTransportError::Cancelled);
-    assert!(started.elapsed() < Duration::from_secs(5));
-    wait_for_no_live_workers(&transport);
-    assert_eq!(fixture.connections(), 0);
-    stalled.release();
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_no_open_sockets(&transport);
 }
 
 #[test]
-fn the_dispatch_clock_deadline_during_name_resolution_ends_the_worker() {
+fn the_dispatch_clock_deadline_during_name_resolution_ends_the_lookup() {
     let authority = TestAuthority::new();
-    let fixture = start_fixture(&authority, echo_ok);
-    let stalled = StalledLookup::default();
-    let transport = HostTransport::builder(
-        approved(&fixture),
-        RecordingResolver::with_secret(REFERENCE, CANARY),
-    )
-    .trust_root_der(authority.root_der())
-    .lookup(stalled.lookup())
-    .build()
-    .unwrap();
+    let nameserver = Arc::new(FakeNameserver::silent());
+    let url = "https://api.bench.test/v1".to_string();
+    let policy = DestinationPolicy::new()
+        .approve_credential(&url, REFERENCE)
+        .unwrap();
+    let transport = transport_with_names(&authority, policy, &nameserver);
 
     let clock = Arc::new(ManualClock::new());
     let advancing = Arc::clone(&clock);
-    let watched = stalled.clone();
+    let watched = Arc::clone(&nameserver);
     thread::spawn(move || {
-        watched.wait_until_started();
+        watched.wait_for_query();
         advancing.advance_ms(10_000);
     });
-    let mut request = request_to(fixture.url("/"), Some(credential_use()));
+    let mut request = request_to(url, Some(credential_use()));
     request.timeout = Duration::from_secs(60);
     let started = Instant::now();
     let error = transport
@@ -782,10 +935,91 @@ fn the_dispatch_clock_deadline_during_name_resolution_ends_the_worker() {
         .unwrap_err();
 
     assert_eq!(error, HostTransportError::Timeout);
-    assert!(started.elapsed() < Duration::from_secs(5));
-    wait_for_no_live_workers(&transport);
-    assert_eq!(fixture.connections(), 0);
-    stalled.release();
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_no_open_sockets(&transport);
+}
+
+/// A loopback listener whose accept queue is full, so a further TCP connect to it stalls in
+/// the SYN phase instead of completing or failing.
+struct StalledListener {
+    _listener: socket2::Socket,
+    _queued: Vec<socket2::Socket>,
+    port: u16,
+}
+
+impl StalledListener {
+    fn start() -> StalledListener {
+        use socket2::{Domain, Socket, Type};
+        let listener = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
+        let any_port: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        listener.bind(&any_port.into()).unwrap();
+        listener.listen(0).unwrap();
+        let address = listener.local_addr().unwrap().as_socket().unwrap();
+        let mut queued = Vec::new();
+        for _ in 0..64 {
+            let probe = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
+            match probe.connect_timeout(&address.into(), Duration::from_millis(200)) {
+                Ok(()) => queued.push(probe),
+                Err(_) => {
+                    return StalledListener {
+                        _listener: listener,
+                        _queued: queued,
+                        port: address.port(),
+                    }
+                }
+            }
+        }
+        panic!("could not fill the listener's accept queue to stall a connect");
+    }
+}
+
+#[test]
+fn cancellation_while_the_tcp_connect_is_stalled_ends_it_promptly() {
+    let authority = TestAuthority::new();
+    let stalled = StalledListener::start();
+    let url = format!("https://127.0.0.1:{}/v1", stalled.port);
+    let policy = DestinationPolicy::new()
+        .approve_credential(&url, REFERENCE)
+        .unwrap();
+    let transport = transport_for(
+        &authority,
+        policy,
+        RecordingResolver::with_secret(REFERENCE, CANARY),
+    );
+
+    let cancel = CancelToken::new();
+    let canceller = cancel.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(150));
+        canceller.cancel();
+    });
+    let mut request = request_to(url, Some(credential_use()));
+    request.timeout = Duration::from_secs(60);
+    let started = Instant::now();
+    let error = transport.send(&request, &cancel, None).unwrap_err();
+
+    assert_eq!(error, HostTransportError::Cancelled);
+    assert!(started.elapsed() >= Duration::from_millis(150));
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_no_open_sockets(&transport);
+}
+
+#[test]
+fn the_relative_deadline_ends_a_stalled_tcp_connect() {
+    let authority = TestAuthority::new();
+    let stalled = StalledListener::start();
+    let url = format!("https://127.0.0.1:{}/v1", stalled.port);
+    let policy = DestinationPolicy::new().approve_origin(&url).unwrap();
+    let transport = transport_for(&authority, policy, Arc::new(RecordingResolver::default()));
+
+    let mut request = request_to(url, None);
+    request.timeout = Duration::from_millis(200);
+    let started = Instant::now();
+    let error = send(&transport, &request).unwrap_err();
+
+    assert_eq!(error, HostTransportError::Timeout);
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_no_open_sockets(&transport);
 }
 
 /// A TCP server that accepts, reads whatever arrives and never answers, and records the bytes
@@ -851,7 +1085,7 @@ fn cancellation_during_the_tls_handshake_tears_down_the_connection_without_the_c
 
     assert_eq!(error, HostTransportError::Cancelled);
     assert!(started.elapsed() < Duration::from_secs(5));
-    wait_for_no_live_workers(&transport);
+    assert_no_open_sockets(&transport);
     let waiting_since = Instant::now();
     while server.closed.load(Ordering::SeqCst) == 0
         && waiting_since.elapsed() < Duration::from_secs(3)

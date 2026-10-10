@@ -77,6 +77,8 @@ pub enum Reply {
     HoldUntilClosed,
     /// Announce a large body, then stream bytes until the client goes away.
     Endless,
+    /// Write these bytes as the whole response, then close.
+    Raw(Vec<u8>),
 }
 
 impl Reply {
@@ -164,6 +166,10 @@ impl Fixture {
         }
     }
 
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
     pub fn url(&self, path: &str) -> String {
         format!("https://localhost:{}{path}", self.port)
     }
@@ -228,6 +234,12 @@ fn serve(
             head.push_str("connection: close\r\n\r\n");
             let _ = tls.write_all(head.as_bytes());
             let _ = tls.write_all(&body);
+            let _ = tls.flush();
+            tls.conn.send_close_notify();
+            let _ = tls.flush();
+        }
+        Reply::Raw(bytes) => {
+            let _ = tls.write_all(&bytes);
             let _ = tls.flush();
             tls.conn.send_close_notify();
             let _ = tls.flush();
