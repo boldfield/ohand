@@ -53,14 +53,15 @@ enum VoiceRecoveryMessages {
             var detail = "\(duration(durationSeconds)), \(size(recording.fileSizeBytes)). Kept on this device. "
                 + "It is not saved until you finish it."
             if recording.isUnjoinedAddedAudio {
-                detail += " This is audio added to another recording that was not joined to it."
+                detail += " This is audio added to another recording. It may already be part of that recording, so it is kept "
+                    + "separately until you finish or delete it."
             } else if recording.hasUnjoinedAddedAudio {
                 detail += " Audio added to it earlier is kept as a separate recording, so more cannot be added until "
                     + "that one is finished or deleted."
             }
             return VoiceRecoveryRow(
                 fileName: recording.fileName,
-                title: recording.isUnjoinedAddedAudio ? "Added audio not joined" : "Recording not saved yet",
+                title: recording.isUnjoinedAddedAudio ? "Added audio kept separately" : "Recording not saved yet",
                 detail: detail,
                 actions: actions)
         }

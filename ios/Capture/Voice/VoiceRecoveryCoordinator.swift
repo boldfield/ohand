@@ -4,8 +4,8 @@ import Foundation
 /// user's explicit choice for exactly one of them: finish it, add more audio to it, or delete it.
 ///
 /// Nothing here runs by itself: there is no cleanup queue, and nothing is deleted or submitted without a call for that
-/// one recording. The one thing discovery removes is a leftover continuation file whose audio is provably still held
-/// by the recording it was added to (see `settleContinuationLeftovers`). Discovery goes through the ingress writer's
+/// one recording. The one thing discovery removes is a leftover joined copy that was made from two files that both
+/// still exist (see `settleContinuationLeftovers`). Discovery goes through the ingress writer's
 /// own recovery pass, so captures already staged are retried there and are never offered here, and a pass that cannot
 /// tell who owns a file offers nothing and says so. Normal capture never waits on this type.
 ///
@@ -83,38 +83,23 @@ final class VoiceRecoveryCoordinator {
 
     /// A continuation writes the added audio to `<id>-continued.wav`, joins it with `<id>.wav` through
     /// `<id>-joined.wav`, replaces `<id>.wav` and then removes the segment. A process that died inside that sequence
-    /// leaves helper files next to the recording, and listing them as recordings of their own could submit the same
-    /// audio twice. Only these two cases are provable and are removed:
-    /// - a joined file while both `<id>.wav` and `<id>-continued.wav` exist: the joined file is a copy made from them
-    ///   and the replacement that would consume it never happened;
-    /// - a segment whose frames are exactly the tail of `<id>.wav`: the replacement happened and only the removal of
-    ///   the segment did not.
-    /// Anything else is kept and listed, so audio is never discarded on a guess.
+    /// leaves helper files next to the recording, and listing a joined copy as a recording of its own could submit the
+    /// same audio twice. Only one case is provable and removed: a joined file while both `<id>.wav` and
+    /// `<id>-continued.wav` exist, because the joined file is then only a copy made from files that are still there.
+    /// A segment is never removed here: whether it was already joined cannot be told from the files alone (the
+    /// recording may simply end with the same samples, such as silence), so it is kept and listed and the user decides.
     private func settleContinuationLeftovers(in names: [String], hidden: Set<String>) -> [String] {
         let present = Set(names)
         var removed = Set<String>()
         for name in names where !hidden.contains(name) {
             let captureID: String
-            let isJoinedCopy: Bool
-            if name.hasSuffix(Self.joinedSuffix) {
-                captureID = String(name.dropLast(Self.joinedSuffix.count))
-                isJoinedCopy = true
-            } else if name.hasSuffix(Self.segmentSuffix) {
-                captureID = String(name.dropLast(Self.segmentSuffix.count))
-                isJoinedCopy = false
-            } else {
-                continue
-            }
+            guard name.hasSuffix(Self.joinedSuffix) else { continue }
+            captureID = String(name.dropLast(Self.joinedSuffix.count))
             let baseName = captureID + ".wav"
             let segmentName = captureID + Self.segmentSuffix
-            guard !captureID.isEmpty, present.contains(baseName), !hidden.contains(baseName),
-                  !hidden.contains(segmentName) else { continue }
+            guard !captureID.isEmpty, present.contains(baseName), present.contains(segmentName),
+                  !hidden.contains(baseName), !hidden.contains(segmentName) else { continue }
             let url = inProgressDirectory.appendingPathComponent(name)
-            if isJoinedCopy {
-                guard present.contains(segmentName) else { continue }
-            } else {
-                guard environment.endsWithAudio(inProgressDirectory.appendingPathComponent(baseName), url) else { continue }
-            }
             environment.removeFile(url)
             if environment.fileSizeBytes(url) == nil { removed.insert(name) }
         }

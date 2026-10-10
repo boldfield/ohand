@@ -302,8 +302,7 @@ class VoiceCaptureTestCase: IngressStorageTestCase {
             replaceFile: { [unowned self] original, replacement in
                 if replaceShouldFail { return false }
                 return VoiceRecordingEnvironment.replaceFileAtomically(original, with: replacement)
-            },
-            endsWithAudio: { whole, tail in VoiceRecordingEnvironment.audio(whole, endsWith: tail) })
+            })
     }
 
     func makeCoordinator(

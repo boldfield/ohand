@@ -543,7 +543,7 @@ final class VoiceRecoveryTests: VoiceCaptureTestCase {
         let baseRow = try XCTUnwrap(rows.first { $0.fileName == base.fileName })
         XCTAssertEqual(baseRow.actions, [.finish, .delete])
         XCTAssertTrue(baseRow.detail.contains("separate recording"), "the row says why more cannot be added")
-        XCTAssertEqual(try XCTUnwrap(rows.first { $0.fileName == segment.fileName }).title, "Added audio not joined")
+        XCTAssertEqual(try XCTUnwrap(rows.first { $0.fileName == segment.fileName }).title, "Added audio kept separately")
 
         var forced = base
         forced.canContinue = true
@@ -594,17 +594,18 @@ final class VoiceRecoveryTests: VoiceCaptureTestCase {
         XCTAssertTrue(exists(inProgressAudioURL("voice-left-2-joined.wav")))
     }
 
-    func testASegmentAlreadyJoinedBeforeAProcessDeathIsSettledAndOnlyTheJoinedRecordingRemains() throws {
+    func testASegmentIdenticalToTheRecordingTailIsKeptBecauseTheJoinMayHaveFailed() throws {
         try leaveRecording("voice-left-1", frames: 12000)
         try leaveRecording("voice-left-1-continued", frames: 4000)
         restart()
 
         let listing = try refreshListing()
 
-        XCTAssertEqual(listing.recordings.map { $0.fileName }, ["voice-left-1.wav"])
-        XCTAssertFalse(exists(inProgressAudioURL("voice-left-1-continued.wav")))
-        XCTAssertEqual(try audioFrames(recordingFile("voice-left-1")), 12000, "the recording keeps all its audio")
-        XCTAssertTrue(try XCTUnwrap(listing.recordings.first).canContinue, "no leftover blocks more audio")
+        XCTAssertEqual(Set(listing.recordings.map { $0.fileName }), ["voice-left-1.wav", "voice-left-1-continued.wav"])
+        XCTAssertTrue(exists(inProgressAudioURL("voice-left-1-continued.wav")), "the only copy of added audio is never deleted")
+        XCTAssertEqual(try audioFrames(recordingFile("voice-left-1")), 12000)
+        XCTAssertEqual(try audioFrames(inProgressAudioURL("voice-left-1-continued.wav")), 4000)
+        XCTAssertFalse(try XCTUnwrap(listing.recordings.first { $0.captureID == "voice-left-1" }).canContinue)
     }
 
     func testASegmentThatIsNotTheTailOfTheRecordingIsKeptAsItsOwnRecording() throws {
