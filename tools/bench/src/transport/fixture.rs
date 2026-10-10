@@ -73,6 +73,8 @@ pub enum Reply {
     },
     /// Accept the request and never answer.
     Hang,
+    /// Accept the request, never answer, and record when the client closes the connection.
+    HoldUntilClosed,
     /// Announce a large body, then stream bytes until the client goes away.
     Endless,
 }
@@ -97,6 +99,7 @@ pub struct Fixture {
     port: u16,
     requests: Arc<Mutex<Vec<RecordedRequest>>>,
     connections: Arc<AtomicUsize>,
+    closed: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
     accept_thread: Option<JoinHandle<()>>,
 }
@@ -123,12 +126,14 @@ impl Fixture {
         let port = listener.local_addr().unwrap().port();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let connections = Arc::new(AtomicUsize::new(0));
+        let closed = Arc::new(AtomicUsize::new(0));
         let stop = Arc::new(AtomicBool::new(false));
         let handler: Arc<Handler> = Arc::new(handler);
 
         let accept_thread = {
             let requests = Arc::clone(&requests);
             let connections = Arc::clone(&connections);
+            let closed = Arc::clone(&closed);
             let stop = Arc::clone(&stop);
             thread::spawn(move || {
                 while !stop.load(Ordering::SeqCst) {
@@ -138,9 +143,10 @@ impl Fixture {
                             let config = Arc::clone(&config);
                             let handler = Arc::clone(&handler);
                             let requests = Arc::clone(&requests);
+                            let closed = Arc::clone(&closed);
                             let stop = Arc::clone(&stop);
                             thread::spawn(move || {
-                                serve(stream, config, &*handler, &requests, &stop)
+                                serve(stream, config, &*handler, &requests, &closed, &stop)
                             });
                         }
                         Err(_) => thread::sleep(Duration::from_millis(2)),
@@ -152,6 +158,7 @@ impl Fixture {
             port,
             requests,
             connections,
+            closed,
             stop,
             accept_thread: Some(accept_thread),
         }
@@ -163,6 +170,11 @@ impl Fixture {
 
     pub fn connections(&self) -> usize {
         self.connections.load(Ordering::SeqCst)
+    }
+
+    /// Connections a `HoldUntilClosed` reply saw the client close.
+    pub fn closed_connections(&self) -> usize {
+        self.closed.load(Ordering::SeqCst)
     }
 
     pub fn requests(&self) -> Vec<RecordedRequest> {
@@ -184,6 +196,7 @@ fn serve(
     config: Arc<ServerConfig>,
     handler: &Handler,
     requests: &Mutex<Vec<RecordedRequest>>,
+    closed: &AtomicUsize,
     stop: &AtomicBool,
 ) {
     stream.set_nonblocking(false).unwrap();
@@ -222,6 +235,28 @@ fn serve(
         Reply::Hang => {
             while !stop.load(Ordering::SeqCst) {
                 thread::sleep(Duration::from_millis(10));
+            }
+        }
+        Reply::HoldUntilClosed => {
+            let _ = tls.sock.set_read_timeout(Some(Duration::from_millis(20)));
+            let mut sink = [0u8; 256];
+            while !stop.load(Ordering::SeqCst) {
+                match tls.read(&mut sink) {
+                    Ok(0) => {
+                        closed.fetch_add(1, Ordering::SeqCst);
+                        return;
+                    }
+                    Ok(_) => {}
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) => {}
+                    Err(_) => {
+                        closed.fetch_add(1, Ordering::SeqCst);
+                        return;
+                    }
+                }
             }
         }
         Reply::Endless => {

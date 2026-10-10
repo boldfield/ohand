@@ -5,7 +5,9 @@
 const MASK: u8 = b'*';
 
 /// Masks every occurrence of the secret in its raw and JSON-string-escaped forms. When the data
-/// was cut at the size bound, a trailing partial prefix of the secret is masked too.
+/// was cut at the size bound, a trailing partial prefix of the secret is masked too. Other
+/// encodings (for example `\/` or `\uXXXX` escapes) are not recognised: this is a backstop for
+/// echoed credentials, not a guarantee against a hostile server.
 pub(crate) fn mask_secret(data: &mut [u8], secret: &[u8], truncated: bool) {
     if secret.is_empty() {
         return;

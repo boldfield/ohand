@@ -3,7 +3,8 @@
 //! One POST per call with: https only and certificate validation against fixed roots, an
 //! explicit destination/credential grant list, no redirects followed (a 3xx is returned as a
 //! bare status), a bounded response body, a real-time budget plus an optional dispatch-clock
-//! deadline, and prompt return on cancellation. The secret is resolved at dispatch after the
+//! deadline, and cancellation. Cancellation and expiry shut down the live connection, so the
+//! exchange ends and the resolved secret is dropped promptly rather than at the relative budget. The secret is resolved at dispatch after the
 //! destination check, attached by the transport, and masked out of everything returned.
 
 use std::error::Error as StdError;
@@ -18,6 +19,7 @@ use rustls::pki_types::CertificateDer;
 use rustls::{ClientConfig, RootCertStore};
 use zeroize::Zeroizing;
 
+use super::abort::{AbortHandle, AbortableTls};
 use super::credential::{CredentialResolver, SecretValue};
 use super::error::HostTransportError;
 use super::policy::{parse_https_url, DestinationPolicy};
@@ -215,6 +217,7 @@ impl HostTransport {
             return Err(HostTransportError::Cancelled);
         }
 
+        let abort = Arc::new(AbortHandle::default());
         let job = Job {
             url: url.to_string(),
             headers: request.headers.clone(),
@@ -223,6 +226,7 @@ impl HostTransport {
             max_response_bytes: request.max_response_bytes,
             attachment,
             tls: Arc::clone(&self.inner.tls),
+            abort: Arc::clone(&abort),
         };
         let (sender, receiver) = mpsc::channel();
         thread::spawn(move || {
@@ -231,24 +235,28 @@ impl HostTransport {
         });
 
         let started = Instant::now();
-        loop {
+        let outcome = loop {
             if cancel.is_cancelled() {
-                return Err(HostTransportError::Cancelled);
+                break Err(HostTransportError::Cancelled);
             }
             if started.elapsed() >= request.timeout || clock_expired(clock_deadline) {
-                return Err(HostTransportError::Timeout);
+                break Err(HostTransportError::Timeout);
             }
             match receiver.recv_timeout(POLL_INTERVAL) {
                 Ok(outcome) => {
                     if cancel.is_cancelled() {
-                        return Err(HostTransportError::Cancelled);
+                        break Err(HostTransportError::Cancelled);
                     }
-                    return outcome;
+                    break outcome;
                 }
                 Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => return Err(HostTransportError::Unreachable),
+                Err(RecvTimeoutError::Disconnected) => break Err(HostTransportError::Unreachable),
             }
-        }
+        };
+        // Whatever ended the wait, the exchange ends with it: the worker's socket is shut down
+        // so it stops reading and writing and drops the resolved secret.
+        abort.abort();
+        outcome
     }
 }
 
@@ -320,11 +328,15 @@ struct Job {
     max_response_bytes: usize,
     attachment: Option<ResolvedAttachment>,
     tls: Arc<ClientConfig>,
+    abort: Arc<AbortHandle>,
 }
 
 fn perform(job: Job) -> Result<SecureResponse, HostTransportError> {
     let agent = ureq::AgentBuilder::new()
-        .tls_config(job.tls)
+        .tls_connector(Arc::new(AbortableTls {
+            config: job.tls,
+            abort: job.abort,
+        }))
         .redirects(0)
         .https_only(true)
         .max_idle_connections(0)

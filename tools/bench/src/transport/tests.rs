@@ -438,10 +438,15 @@ fn masking_covers_json_escaped_secrets_and_a_prefix_cut_at_the_size_bound() {
 #[test]
 fn environment_resolver_maps_references_explicitly() {
     let variable = "OHAND_BENCH_TEST_ONLY_SYNTHETIC_SECRET_01";
-    std::env::set_var(variable, CANARY);
-    let resolver = EnvCredentialResolver::new()
-        .map_reference(REFERENCE, variable)
-        .map_reference("unset-ref", "OHAND_BENCH_TEST_ONLY_UNSET_VARIABLE_01");
+    let value = Arc::new(Mutex::new(Some(std::ffi::OsString::from(CANARY))));
+    let lookup_value = Arc::clone(&value);
+    let resolver = EnvCredentialResolver::with_lookup(move |name| {
+        (name == variable)
+            .then(|| lookup_value.lock().unwrap().clone())
+            .flatten()
+    })
+    .map_reference(REFERENCE, variable)
+    .map_reference("unset-ref", "OHAND_BENCH_TEST_ONLY_UNSET_VARIABLE_01");
 
     assert!(resolver.resolve(REFERENCE).is_ok());
     assert_eq!(
@@ -452,12 +457,16 @@ fn environment_resolver_maps_references_explicitly() {
         resolver.resolve("unset-ref").unwrap_err(),
         CredentialError::NotFound
     );
-    std::env::set_var(variable, "has space");
+    *value.lock().unwrap() = Some(std::ffi::OsString::from("has space"));
     assert_eq!(
         resolver.resolve(REFERENCE).unwrap_err(),
         CredentialError::Malformed
     );
-    std::env::remove_var(variable);
+    *value.lock().unwrap() = None;
+    assert_eq!(
+        resolver.resolve(REFERENCE).unwrap_err(),
+        CredentialError::NotFound
+    );
 }
 
 // --- Redirects ----------------------------------------------------------------------------
@@ -531,6 +540,17 @@ fn an_endless_body_is_cut_at_the_bound_quickly() {
 
 // --- Deadline and cancellation ----------------------------------------------------------------
 
+/// The request reached the server, and the client then closed the connection well inside the
+/// 60 s relative budget the caller gave: the exchange itself was aborted, not just abandoned.
+fn assert_exchange_torn_down(fixture: &Fixture) {
+    let waiting_since = Instant::now();
+    while fixture.closed_connections() == 0 && waiting_since.elapsed() < Duration::from_secs(3) {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(fixture.requests().len(), 1);
+    assert_eq!(fixture.closed_connections(), 1);
+}
+
 #[test]
 fn a_silent_server_hits_the_relative_deadline() {
     let authority = TestAuthority::new();
@@ -551,7 +571,7 @@ fn a_silent_server_hits_the_relative_deadline() {
 #[test]
 fn cancellation_returns_promptly_while_the_request_is_in_flight() {
     let authority = TestAuthority::new();
-    let fixture = start_fixture(&authority, |_| Reply::Hang);
+    let fixture = start_fixture(&authority, |_| Reply::HoldUntilClosed);
     let resolver = RecordingResolver::with_secret(REFERENCE, CANARY);
     let transport = transport_for(&authority, approved(&fixture), resolver);
 
@@ -569,6 +589,7 @@ fn cancellation_returns_promptly_while_the_request_is_in_flight() {
     assert_eq!(error, HostTransportError::Cancelled);
     assert_eq!(TransportError::from(error), TransportError::Cancelled);
     assert!(started.elapsed() < Duration::from_secs(5));
+    assert_exchange_torn_down(&fixture);
 }
 
 #[test]
@@ -612,7 +633,7 @@ fn cancelled_or_exhausted_calls_never_connect_or_resolve() {
 #[test]
 fn the_dispatch_clock_deadline_ends_a_call_even_with_a_long_relative_budget() {
     let authority = TestAuthority::new();
-    let fixture = start_fixture(&authority, |_| Reply::Hang);
+    let fixture = start_fixture(&authority, |_| Reply::HoldUntilClosed);
     let resolver = RecordingResolver::with_secret(REFERENCE, CANARY);
     let transport = transport_for(&authority, approved(&fixture), resolver);
 
@@ -638,6 +659,7 @@ fn the_dispatch_clock_deadline_ends_a_call_even_with_a_long_relative_budget() {
 
     assert_eq!(error, HostTransportError::Timeout);
     assert!(started.elapsed() < Duration::from_secs(5));
+    assert_exchange_torn_down(&fixture);
 }
 
 // --- Bindings to the provider transport traits ---------------------------------------------------
