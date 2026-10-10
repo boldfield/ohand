@@ -14,7 +14,6 @@ use ohand_core::providers::contracts::{
     StructuredOutputMode,
 };
 use serde_json::{Map, Value};
-use std::mem::Discriminant;
 
 use crate::corpus::Fixture;
 use crate::report::{CaseReport, ProducerOutcome};
@@ -32,7 +31,9 @@ const PROFILE_ID: &str = "comparison-synthetic-profile";
 #[derive(Debug, Clone)]
 pub(super) struct Candidate {
     pub view: FacetView,
-    pub abstention: Option<Discriminant<AbstentionReason>>,
+    /// Compared across arms but never serialized, so a model-written `Other` reason stays out
+    /// of the report.
+    pub abstention: Option<AbstentionReason>,
 }
 
 pub(super) struct ScoredArm {
@@ -69,6 +70,18 @@ fn profile() -> Result<ProviderProfile, EvaluationError> {
         )
         .build()
         .map_err(|error| EvaluationError::Setup(error.to_string()))
+}
+
+fn normalized_abstention(reason: &AbstentionReason) -> AbstentionReason {
+    match reason {
+        AbstentionReason::Other(text) => AbstentionReason::Other(
+            text.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_lowercase(),
+        ),
+        other => other.clone(),
+    }
 }
 
 enum Produced {
@@ -219,7 +232,7 @@ pub(super) fn score_in_scratch(
     )
     .then(|| Candidate {
         view: candidate_view.clone().unwrap_or_default(),
-        abstention: candidate_abstention.as_ref().map(std::mem::discriminant),
+        abstention: candidate_abstention.as_ref().map(normalized_abstention),
     });
 
     let mut report = CaseReport {

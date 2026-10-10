@@ -636,3 +636,78 @@ fn credential_shaped_labels_and_reasons_are_refused() {
         assert!(ReasonCode::new(good).is_ok(), "reason {good:?}");
     }
 }
+
+#[test]
+fn private_host_shaped_labels_are_refused() {
+    for bad in [
+        "prod.internal",
+        "db.corp.local",
+        "build.lan",
+        "nas.home.arpa",
+        "localhost",
+        "exp-localhost",
+        "intranet.intranet",
+        "10.0.0.5",
+        "host-192.168.1.20",
+        "svc.internal-v2",
+    ] {
+        assert!(Label::new(bad).is_err(), "label {bad:?}");
+    }
+    for good in [
+        "profile-a.v1",
+        "task-2026.10",
+        "localization-1.2",
+        "internal-review",
+        "model.localized",
+        "claude-haiku-4-5-20251001",
+        "gpt-6.1-sol",
+    ] {
+        assert!(Label::new(good).is_ok(), "label {good:?}");
+    }
+}
+
+fn other_abstention(fixture_id: &str, reason: &str) -> ArmOutcome {
+    let ArmOutcome::Completed { mut output } = scripted(&format!("conforming/{fixture_id}")) else {
+        panic!("not a reply");
+    };
+    output.insert("abstention".to_string(), json!({ "Other": reason }));
+    ArmOutcome::completed(output)
+}
+
+#[test]
+fn distinct_other_abstention_reasons_are_a_disagreement_without_serializing_the_text() {
+    let fixture = "quoted-text";
+    let report = score(&input(
+        &[fixture],
+        vec![pair(
+            fixture,
+            other_abstention(fixture, "quoted speech"),
+            other_abstention(fixture, "not the speakers intent"),
+        )],
+    ));
+    assert_eq!(
+        report.cases[0].disagreement,
+        Disagreement::Differ {
+            facets: vec![DisagreementFacet::Abstention]
+        }
+    );
+    assert_eq!(report.disagreement.agree, 0);
+    assert_eq!(report.disagreement.differ, 1);
+    let serialized = serde_json::to_string(&report).unwrap();
+    assert!(!serialized.contains("quoted speech"));
+    assert!(!serialized.contains("speakers intent"));
+}
+
+#[test]
+fn other_abstention_reasons_that_differ_only_in_case_or_spacing_agree() {
+    let fixture = "quoted-text";
+    let report = score(&input(
+        &[fixture],
+        vec![pair(
+            fixture,
+            other_abstention(fixture, "Quoted  speech"),
+            other_abstention(fixture, " quoted speech "),
+        )],
+    ));
+    assert_eq!(report.cases[0].disagreement, Disagreement::Agree);
+}

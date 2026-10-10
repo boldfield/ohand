@@ -58,6 +58,43 @@ const SECRET_WORDS: &[&str] = &[
     "authorization",
 ];
 
+const PRIVATE_HOST_SUFFIXES: &[&str] = &[
+    ".internal",
+    ".local",
+    ".lan",
+    ".corp",
+    ".home.arpa",
+    ".localdomain",
+    ".localhost",
+    ".intranet",
+];
+
+/// True for `localhost`, a hostname under a private-network suffix (`db.corp.local`), or a
+/// dotted-quad address, whether it is the whole label or one delimited part of it.
+fn looks_like_private_host(text: &str) -> bool {
+    let lowered = text.to_ascii_lowercase();
+    let is_boundary = |character: Option<char>| {
+        character.is_none_or(|character| !character.is_ascii_alphanumeric())
+    };
+    let suffixed = PRIVATE_HOST_SUFFIXES.iter().any(|suffix| {
+        lowered.match_indices(suffix).any(|(index, _)| {
+            index > 0 && is_boundary(lowered[index + suffix.len()..].chars().next())
+        })
+    });
+    let localhost = lowered.match_indices("localhost").any(|(index, _)| {
+        is_boundary(lowered[..index].chars().next_back())
+            && is_boundary(lowered[index + "localhost".len()..].chars().next())
+    });
+    let dotted_quad = lowered.split(['_', '-']).any(|part| {
+        let octets: Vec<&str> = part.split('.').collect();
+        octets.len() == 4
+            && octets
+                .iter()
+                .all(|octet| !octet.is_empty() && octet.bytes().all(|byte| byte.is_ascii_digit()))
+    });
+    suffixed || localhost || dotted_quad
+}
+
 /// Labels and reason codes are serialized into reports, so anything shaped like a credential
 /// is refused: a known token prefix, a credential word, a long hex run, or a long segment
 /// that is very long or mixes letters and digits. Plain version labels such as
@@ -134,9 +171,9 @@ impl Label {
             && label
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
-        if !valid || looks_like_credential(label) {
+        if !valid || looks_like_credential(label) || looks_like_private_host(label) {
             return Err(EvaluationError::Setup(format!(
-                "a label is 1 to {} characters of letters, digits, '.', '_' and '-', and not credential-shaped",
+                "a label is 1 to {} characters of letters, digits, '.', '_' and '-', and not credential- or private-host-shaped",
                 Self::MAX_LEN
             )));
         }
