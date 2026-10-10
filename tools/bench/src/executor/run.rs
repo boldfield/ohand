@@ -48,7 +48,7 @@ struct Meter {
 /// The first arm of every even-numbered case is A and of every odd-numbered case is B, so each
 /// arm leads about half of the cases and a shared endpoint is never loaded by both at once.
 fn counterbalanced_order(position: usize) -> [ArmLabel; 2] {
-    if position % 2 == 0 {
+    if position.is_multiple_of(2) {
         [ArmLabel::A, ArmLabel::B]
     } else {
         [ArmLabel::B, ArmLabel::A]
@@ -162,9 +162,7 @@ impl Executor {
     /// configuration differs fails and leaves it untouched, so results of different
     /// configurations are never merged. The journal's own experiment id is kept.
     pub fn open(path: impl AsRef<Path>, experiment: Experiment) -> Result<Self, ExecutorError> {
-        experiment
-            .validate()
-            .map_err(|message| JournalError::Validation(message))?;
+        experiment.validate().map_err(JournalError::Validation)?;
         let path = path.as_ref();
         let mut writer = JournalWriter::open(path)?;
         let reader = JournalReader::open(path)?;
@@ -447,7 +445,7 @@ impl Executor {
 
             meter.reserved += 1;
             let mut attempt = Attempt::new(prepared.record_id.clone(), arm_key(task.arm))
-                .map_err(|message| JournalError::Validation(message))?;
+                .map_err(JournalError::Validation)?;
             let mut envelope = self.envelope(Phase::Reserved, true, task);
             envelope.reservation = Some(self.state.reservations + 1);
             envelope.side_attempt = Some(side_attempt);
@@ -494,7 +492,7 @@ impl Executor {
         detail: String,
     ) -> Result<(), ExecutorError> {
         let mut attempt = Attempt::new(task.prepared.record_id.clone(), arm_key(task.arm))
-            .map_err(|message| JournalError::Validation(message))?;
+            .map_err(JournalError::Validation)?;
         let mut envelope = self.envelope(Phase::Skipped, false, task);
         envelope.class = Some(skip_class.to_string());
         envelope.detail = Some(detail.clone());

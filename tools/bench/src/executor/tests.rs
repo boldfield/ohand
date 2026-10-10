@@ -124,15 +124,13 @@ impl World {
             (&world.item_id, &world.capture_id, STAMP, STAMP),
         )
         .unwrap();
-        for (id, destinations) in [("grant-1", format!("[\"{OPENAI}\",\"{ANTHROPIC}\"]"))] {
-            conn.execute(
-                "INSERT INTO route_authorizations (auth_id, route_id, capability, \
-                 authorized_destinations, created_at) \
-                 VALUES (?, ?, 'text_interpretation', ?, ?)",
-                (id, ROUTE, destinations, STAMP),
-            )
-            .unwrap();
-        }
+        conn.execute(
+            "INSERT INTO route_authorizations (auth_id, route_id, capability, \
+             authorized_destinations, created_at) \
+             VALUES ('grant-1', ?, 'text_interpretation', ?, ?)",
+            (ROUTE, format!("[\"{OPENAI}\",\"{ANTHROPIC}\"]"), STAMP),
+        )
+        .unwrap();
         world
     }
 
@@ -548,7 +546,7 @@ fn reservation_is_journaled_before_dispatch_and_authorization_precedes_every_att
                 .attempts()
                 .into_iter()
                 .filter(|attempt| attempt.state == AttemptState::Unknown)
-                .map(|attempt| envelope_of(attempt))
+                .map(envelope_of)
                 .collect();
             seen.borrow_mut().push(open);
         });
