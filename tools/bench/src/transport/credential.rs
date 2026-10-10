@@ -57,7 +57,8 @@ pub trait CredentialResolver: Send + Sync {
 type EnvLookup = dyn Fn(&OsStr) -> Option<OsString> + Send + Sync;
 
 /// Reads secrets from process environment variables named by an explicit, non-secret mapping
-/// from credential reference to variable name. An unmapped reference is `NotFound`.
+/// from credential reference to variable name. An unmapped reference is `NotFound`. `Debug`
+/// prints only the mapping count: references and variable names name private configuration.
 #[derive(Clone)]
 pub struct EnvCredentialResolver {
     variables_by_reference: BTreeMap<String, String>,
@@ -68,7 +69,7 @@ impl fmt::Debug for EnvCredentialResolver {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("EnvCredentialResolver")
-            .field("variables_by_reference", &self.variables_by_reference)
+            .field("reference_count", &self.variables_by_reference.len())
             .finish_non_exhaustive()
     }
 }

@@ -437,6 +437,13 @@ fn policy_and_credential_debug_output_omit_endpoints_and_references() {
     let credential = credential_use();
     let rendered = format!("{credential:?}");
     assert!(!rendered.contains(REFERENCE));
+
+    let variable = "OHAND_BENCH_TEST_ONLY_SYNTHETIC_VARIABLE_02";
+    let resolver = EnvCredentialResolver::with_lookup(|_| None).map_reference(REFERENCE, variable);
+    let rendered = format!("{resolver:?}");
+    assert!(!rendered.contains(REFERENCE));
+    assert!(!rendered.contains(variable));
+    assert!(rendered.contains("reference_count: 1"));
 }
 
 #[test]
