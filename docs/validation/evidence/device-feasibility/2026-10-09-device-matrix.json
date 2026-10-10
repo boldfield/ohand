@@ -1,6 +1,6 @@
 {
   "evidence_id": "device-feasibility-2026-10-09",
-  "revision": 2,
+  "revision": 4,
   "task": "P09",
   "collector": "maintainer on the trial phone; coordinator pulled app containers with xcrun devicectl and recorded values from maintainer screenshots",
   "collected_at": "2026-10-09T17:30:00Z to 2026-10-09T19:12:00Z",
@@ -33,7 +33,7 @@
       },
       "artifact_by_result": {
         "1_permission (granted, 3.33 s)": "audio-probe/recording-FFA2D1F3-B049-4619-B679-FD6D28537F68.wav (3.335 s, 110804 bytes)",
-        "1_permission (revoked)": "no artifact: the 'Microphone permission denied' message was reported by the maintainer from the screen and not screenshotted (unmet artifact)",
+        "1_permission (revoked)": "audio-probe/p03-02-permission-denied.png (2026-10-10, maintainer screenshot: AudioProbe after Start with the microphone permission revoked in Settings; 'Microphone permission denied' in red under the controls, Duration 0.0s, no recording file written)",
         "2_normal_stop (6.92 s)": "audio-probe/recording-A267F648-ACD4-4138-9BB9-1485FC6163A9.wav (6.923 s, 225620 bytes)",
         "3_cancel (3.86 s partial)": "audio-probe/recording-A35AC340-69B0-41D6-AE6E-DF95F942531F.wav (3.864 s, 127732 bytes)",
         "4_interruption (5.86 s partial)": "audio-probe/recording-6E0C20DF-61C7-4A84-AF27-BE102BDF308E.wav (5.865 s, 191764 bytes)",
@@ -104,13 +104,14 @@
     },
     "P02_capture_entry": {
       "doc": "docs/validation/capture-entry.md, 'Needs a physical device'",
-      "artifacts": "capture-probe/p02-01-control-from-lock-screen-entry.png, container/CaptureProbe/records/",
+      "artifacts": "capture-probe/p02-01-control-from-lock-screen-entry.png, capture-probe/p02-02-control-from-lock-screen-face-id-covered-PERSONAL.png, container/CaptureProbe/records/",
       "results": {
         "control_unlocked": "Control Center press to entry on screen: about 2 s (maintainer estimate).",
         "control_from_lock_screen": "No Face ID prompt observed; the app opened showing only the new entry; the entry reported protected data available, so the device was unlocked by the time the app foregrounded (passive unlock not instrumented).",
         "entry": "Entry: controlIntent, warm launch; Protected data: available; Result: Saved.",
         "records": "Four control presses produced four distinct records (two cold, two warm), all protectedDataAvailable true; no duplicate perform() observed.",
-        "not_measured": "Before first unlock after reboot; system termination between handoff and commit."
+        "not_measured": "Before first unlock after reboot; system termination between handoff and commit.",
+        "control_from_lock_screen_face_id_covered": "2026-10-10, maintainer, same build: phone locked, Face ID sensor covered, Control Center opened from the lock screen, capture control pressed. iOS showed the passcode prompt ('Enter Passcode', Face ID glyph in the Dynamic Island) and did not open CaptureProbe; no record was written. Together with the 2026-10-09 result this closes the locked-capture check: the control entry cannot capture while the device is locked, it runs only after an unlock (passive Face ID or passcode). Screenshot: capture-probe/p02-02-control-from-lock-screen-face-id-covered-PERSONAL.png (lock-screen UI, never published; listed in the private evidence manifest)."
       },
       "records_named": {
         "controlIntent (the four P02 presses)": [
@@ -140,6 +141,8 @@
     "Large text at maximum clips labels in CaptureProbe, AudioProbe and CredentialProbe."
   ],
   "revision_notes": [
-    "rev 2 (2026-10-10): named the WAV behind each P03 result by its measured duration and size; named the four controlIntent records P02 refers to and the five shortcut-URL records from P07 that share the directory; recorded the working_tree_clean=false caveat on two signing records; pointed at the manual signing record for the three probes the signing tool does not support. No observed value changed."
+    "rev 2 (2026-10-10): named the WAV behind each P03 result by its measured duration and size; named the four controlIntent records P02 refers to and the five shortcut-URL records from P07 that share the directory; recorded the working_tree_clean=false caveat on two signing records; pointed at the manual signing record for the three probes the signing tool does not support. No observed value changed.",
+    "rev 3 (2026-10-10): added the Face-ID-covered lock-screen control press (passcode prompt, no capture while locked), closing the P02 locked-capture item that the 2026-10-09 run could not separate from the passive unlock. No other value changed.",
+    "rev 4 (2026-10-10): both 2026-10-10 screenshots filed and added to the private evidence manifest; the P03 revoked-permission result now cites audio-probe/p03-02-permission-denied.png, closing the artifact the round-1 reviewers named. No observed value changed."
   ]
 }

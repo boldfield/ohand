@@ -8,7 +8,7 @@
 //!
 //! # Reserved modules
 //! - `executor`: Paired execution of cases through comparison arms
-//! - `transport`: Credential-safe HTTP and provider communication
+//! - `transport`: Bounded, credential-safe host HTTP effect and its provider-trait bindings
 //! - `cli`: Command-line interface for benchmark orchestration
 //! - `report`: Structured output and summary reporting
 
@@ -16,11 +16,12 @@ mod guard;
 mod journal;
 mod records;
 
+pub mod transport;
+
 // Reserved modules for future implementation
 pub mod cli;
 pub mod executor;
 pub mod report;
-pub mod transport;
 
 pub use guard::{is_secret_or_endpoint, json_is_secret_or_endpoint};
 pub use journal::{JournalError, JournalReader, JournalRecord, JournalWriter, TruncationRecovery};
