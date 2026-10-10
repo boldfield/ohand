@@ -146,7 +146,7 @@
         }
       },
       "durable_save": "In all eleven trials the entry with 'Result: Saved' is present in the first visible app frame; the record file is written before the first frame is drawn. End-of-input-to-durable-save for this entry path is therefore at most press_to_first_visible.",
-      "locked_device": "Not measurable by this method: iOS stops the screen recording when the device locks. The first record's P02 result stands: from the lock screen the control opened the app only after the passive Face ID unlock, with protected data already available, so this entry mechanism does not capture while locked."
+      "locked_device": "Not measurable by this method: iOS stops the screen recording when the device locks. The first record's P02 result stands: from the lock screen the control opened the app only after the passive Face ID unlock, with protected data already available, so this entry mechanism does not capture while locked. Confirmed on 2026-10-10 with the Face ID sensor covered: the control press from the lock screen produced the iOS passcode prompt and the app did not open (2026-10-09-device-matrix.json rev 3, P02 control_from_lock_screen_face_id_covered)."
     },
     "P03_end_of_input_to_save": {
       "doc": "docs/validation/audio-probe.md, Finalization and 'Needs a physical device'",

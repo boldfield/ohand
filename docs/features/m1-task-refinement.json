@@ -2294,6 +2294,10 @@
     {
       "date": "2026-10-10",
       "change": "C05a allowance extension after PR #150 round 3: EventType lives in core/src/store/events/, not core/src/domain/items/, and interpretation dispatch, the FFI provider transport and the retrieval index all read any text correction as the user's correction, so the transcript reached interpretation as TextBasis::Correction with a non-UUID record id and the authorized interpretation request failed validation. C05a may add EventType::Transcript (store/events), an additive TextBasis::Transcript with a UUID record id (providers/contracts/request.rs, interpretation/contracts), transcript-basis reads in interpretation/dispatch/source.rs and ffi/provider_transport.rs, and a Transcribed basis in retrieval/index, with end-to-end attach-to-validated-request, transport, and retrieval tests. ios/ is not granted; fixtures/intent is unchanged."
+    },
+    {
+      "date": "2026-10-10",
+      "change": "P09 scope amendment 2, recorded by the coordinator at the maintainer's direction: the remaining not-tested/not-observable items in the P09 records are deferred to T05 (actual-device M1 functional exit matrix, production build, same phone): offline ASR with immediate screen lock (the probe fixture transcribes in ~0.3 s), before-first-unlock capture and termination between handoff and commit (P02), low-free-space refusal, Focus/Low Power/reboot/time-zone/provisional-ephemeral-auth/reinstall survival of notifications (P05), passcode removal (P11), and fixture survival after background revoke (P04). They are added to T05's matrix by name; T05's criteria are not lowered. The locked-capture check is closed by the Face-ID-covered lock-screen press in docs/validation/evidence/device-feasibility/2026-10-09-device-matrix.json rev 3 (passcode prompt, no capture while locked). The P03 permission-denied screenshot remains a required P09 artifact."
     }
   ]
 }
