@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use super::dispatch::{
     complete_call, preflight, CancelToken, Clock, DispatchLimits, InterpretationOutput,
-    ProviderAdapter,
+    ProviderAdapter, TransportError,
 };
 use super::failure::{ErrorClass, FailureKind, ProviderFailure};
 use super::profile::{ProviderProfile, ProviderProtocol};
@@ -270,6 +270,36 @@ pub struct CallObservations {
 pub struct DiagnosticResponse {
     pub body: Vec<u8>,
     pub observations: Option<CallObservations>,
+}
+
+/// A transport failure of a diagnostic call together with whatever the provider disclosed in
+/// the same exchange before failing, such as the usage on a refusal. The failure class is
+/// exactly `error`'s; the observations only enrich the failed attempt's evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticTransportFailure {
+    pub error: TransportError,
+    pub observations: Option<CallObservations>,
+}
+
+impl DiagnosticTransportFailure {
+    pub fn with_observations(
+        error: TransportError,
+        observations: Option<CallObservations>,
+    ) -> DiagnosticTransportFailure {
+        DiagnosticTransportFailure {
+            error,
+            observations,
+        }
+    }
+}
+
+impl From<TransportError> for DiagnosticTransportFailure {
+    fn from(error: TransportError) -> DiagnosticTransportFailure {
+        DiagnosticTransportFailure {
+            error,
+            observations: None,
+        }
+    }
 }
 
 /// Everything an adapter receives for one diagnostic call.
@@ -531,9 +561,9 @@ pub fn dispatch_diagnostic(
         cancel,
         clock,
     };
-    let (body, observations) = match adapter.invoke_diagnostic(&call) {
+    let (body, observations) = match adapter.invoke_diagnostic_observed(&call) {
         Ok(response) => (Ok(response.body), response.observations),
-        Err(error) => (Err(error), None),
+        Err(failure) => (Err(failure.error), failure.observations),
     };
     let reported_usage =
         UsageAvailability::from_reported(observations.as_ref().and_then(|observed| observed.usage));

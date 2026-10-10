@@ -17,8 +17,8 @@ use crate::interpretation::instructions::output_schema;
 
 use super::contracts::{
     AdapterCall, CancelToken, Clock, DiagnosticAdapterCall, DiagnosticResponse, DiagnosticSetting,
-    DiagnosticSupport, ProviderAdapter, ProviderCapability, ProviderProfile, ProviderProtocol,
-    StructuredOutputMode, TransportError,
+    DiagnosticSupport, DiagnosticTransportFailure, ProviderAdapter, ProviderCapability,
+    ProviderProfile, ProviderProtocol, StructuredOutputMode, TransportError,
 };
 
 pub mod fake;
@@ -277,6 +277,14 @@ impl ProviderAdapter for AnthropicAdapter {
         &self,
         call: &DiagnosticAdapterCall<'_>,
     ) -> Result<DiagnosticResponse, TransportError> {
+        self.invoke_diagnostic_observed(call)
+            .map_err(|failure| failure.error)
+    }
+
+    fn invoke_diagnostic_observed(
+        &self,
+        call: &DiagnosticAdapterCall<'_>,
+    ) -> Result<DiagnosticResponse, DiagnosticTransportFailure> {
         let mode = self.check_call(call.profile, call.cancel)?;
         let body = wire::build_diagnostic_body(call.profile, call.request, &self.settings, mode)?;
         let response = self.exchange(
