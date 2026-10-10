@@ -44,8 +44,8 @@ struct RecoverableVoiceRecording: Equatable {
     var modifiedAt: Date?
     /// True when audio can still be added within the duration and size bounds and no earlier added audio is waiting.
     var canContinue: Bool
-    /// True when this file is audio added to another recording that was never joined onto it; it is its own recording
-    /// until the user finishes or deletes it.
+    /// True when this file is audio added to another recording that may never have been joined onto it; it is its own
+    /// recording until the user finishes or deletes it. Stays true after that other recording is finished or deleted.
     var isUnjoinedAddedAudio = false
     /// True when audio added to this recording earlier is still kept as a separate file, so more cannot be added yet.
     var hasUnjoinedAddedAudio = false

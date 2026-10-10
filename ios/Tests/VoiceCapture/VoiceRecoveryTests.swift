@@ -608,6 +608,41 @@ final class VoiceRecoveryTests: VoiceCaptureTestCase {
         XCTAssertFalse(try XCTUnwrap(listing.recordings.first { $0.captureID == "voice-left-1" }).canContinue)
     }
 
+    func testAddedAudioKeepsItsDuplicateWarningAfterTheRecordingItWasAddedToIsFinished() throws {
+        try leaveRecording("voice-left-1", frames: 12000)
+        try leaveRecording("voice-left-1-continued", frames: 4000)
+        restart()
+        let listing = try refreshListing()
+        XCTAssertEqual(Set(listing.recordings.map { $0.fileName }), ["voice-left-1.wav", "voice-left-1-continued.wav"])
+
+        confirmNextImport("voice-left-1")
+        _ = try finishResult(try XCTUnwrap(listing.recordings.first { $0.captureID == "voice-left-1" })).get()
+        XCTAssertFalse(exists(recordingFile("voice-left-1")), "the finished recording left the in-progress store")
+        let afterFinishing = try refreshListing()
+
+        let segment = try XCTUnwrap(afterFinishing.recordings.first)
+        XCTAssertEqual(afterFinishing.recordings.map { $0.fileName }, ["voice-left-1-continued.wav"])
+        XCTAssertTrue(segment.isUnjoinedAddedAudio, "the helper name still marks it as added audio")
+        let row = try XCTUnwrap(VoiceRecoveryMessages.rows(for: afterFinishing).first)
+        XCTAssertEqual(row.title, "Added audio kept separately")
+        XCTAssertTrue(row.detail.contains("even if that one was saved"))
+        XCTAssertTrue(row.detail.contains("save the same audio twice"))
+        XCTAssertEqual(importer.importedRecords.count, 1, "nothing else was submitted")
+        XCTAssertEqual(try audioFrames(inProgressAudioURL("voice-left-1-continued.wav")), 4000, "the added audio is kept")
+    }
+
+    func testAnOrdinaryRecordingIsNotLabelledAddedAudio() throws {
+        try leaveRecording("voice-left-1", frames: 8000)
+        try leaveRecording("continued", frames: 8000)
+        restart()
+
+        let listing = try refreshListing()
+
+        XCTAssertEqual(listing.recordings.count, 2)
+        XCTAssertFalse(listing.recordings.contains { $0.isUnjoinedAddedAudio })
+        XCTAssertTrue(VoiceRecoveryMessages.rows(for: listing).allSatisfy { $0.title == "Recording not saved yet" })
+    }
+
     func testASegmentThatIsNotTheTailOfTheRecordingIsKeptAsItsOwnRecording() throws {
         try leaveRecording("voice-left-1", frames: 8050)
         try leaveRecording("voice-left-1-continued", frames: 4000, seed: 7)

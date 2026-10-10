@@ -126,9 +126,10 @@ final class VoiceRecoveryCoordinator {
         let hasLeftoverFile = [Self.segmentSuffix, Self.joinedSuffix].contains { suffix in
             environment.fileSizeBytes(inProgressDirectory.appendingPathComponent(captureID + suffix)) != nil
         }
-        let isAddedAudio = captureID.hasSuffix("-continued")
-            && environment.fileSizeBytes(inProgressDirectory.appendingPathComponent(
-                String(captureID.dropLast("-continued".count)) + ".wav")) != nil
+        // The suffix alone is the evidence: generated capture IDs never end in it. The base may already have been
+        // finished or deleted, and the added audio may still be part of a saved base, so the label stays either way.
+        let addedAudioSuffix = String(Self.segmentSuffix.dropLast(4))
+        let isAddedAudio = captureID.count > addedAudioSuffix.count && captureID.hasSuffix(addedAudioSuffix)
         let minimumBytes = Int64(limits.minimumContinuationSeconds) * limits.bytesPerSecond
         let hasRoom = durationSeconds.map { duration in
             limits.maxDurationSeconds - duration >= limits.minimumContinuationSeconds

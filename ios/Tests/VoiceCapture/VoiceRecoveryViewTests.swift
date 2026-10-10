@@ -266,6 +266,27 @@ final class VoiceRecoveryViewTests: VoiceCaptureTestCase {
         XCTAssertTrue(try XCTUnwrap(model.rows.first { $0.fileName == "voice-left-1.wav" }).detail.contains("separate recording"))
     }
 
+    func testAddedAudioStillWarnsOnScreenAfterTheRecordingItWasAddedToIsFinished() throws {
+        try leaveRecording("voice-left-1", frames: 12000)
+        try leaveRecording("voice-left-1-continued", frames: 4000)
+        relaunchAndShow()
+        XCTAssertEqual(Set(model.rows.map { $0.fileName }), ["voice-left-1.wav", "voice-left-1-continued.wav"])
+
+        confirmNextImport("voice-left-1")
+        assertTappable(control(.finish, "voice-left-1"), "finish")
+        model.perform(.finish, onFileName: "voice-left-1.wav")
+        settle()
+
+        XCTAssertTrue((model.status ?? "").hasPrefix("Saved"))
+        XCTAssertEqual(model.rows.map { $0.fileName }, ["voice-left-1-continued.wav"])
+        let row = try XCTUnwrap(model.rows.first)
+        XCTAssertEqual(row.title, "Added audio kept separately")
+        XCTAssertTrue(row.detail.contains("save the same audio twice"), "the duplicate risk is still shown")
+        XCTAssertNotEqual(frames[VoiceRecoveryView.rowIdentifier("voice-left-1-continued.wav")] ?? .zero, .zero)
+        assertTappable(control(.delete, "voice-left-1-continued"), "delete the added audio")
+        XCTAssertEqual(importer.importedRecords.count, 1)
+    }
+
     // MARK: Normal capture
 
     func testStartingANewRecordingNeedsNothingFromTheRecoverySurface() throws {
