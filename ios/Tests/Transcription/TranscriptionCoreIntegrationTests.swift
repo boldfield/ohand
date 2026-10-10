@@ -47,7 +47,7 @@ private final class TranscriptionSession {
 
     /// Runs one async client call to completion while the main run loop delivers the core's events.
     func runToCompletion<Value>(_ operation: @escaping @Sendable () async -> Value) throws -> Value {
-        let box = ResultBox<Value>()
+        let box = TranscriptionAnswerBox<Value>()
         Task { box.set(await operation()) }
         XCTAssertTrue(pump(until: { box.value != nil }), "the core never answered")
         return try XCTUnwrap(box.value)
@@ -62,7 +62,7 @@ private final class TranscriptionSession {
     }
 }
 
-private final class ResultBox<Value>: @unchecked Sendable {
+private final class TranscriptionAnswerBox<Value>: @unchecked Sendable {
     private let lock = NSLock()
     private var stored: Value?
 
