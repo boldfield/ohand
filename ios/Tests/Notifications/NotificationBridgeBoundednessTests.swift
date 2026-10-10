@@ -169,6 +169,56 @@ final class NotificationBridgeBoundednessTests: XCTestCase {
         XCTAssertEqual(whileReadingDelivered, .cancelled)
     }
 
+    /// Cancellation can arrive once the OS has answered the delivered-list read, while the events
+    /// are being forwarded. The effect must still end with the fixed `cancelled` result, not the
+    /// runtime's own cancellation error, and must forward nothing after the cancellation.
+    func testCancellationAfterTheDeliveredListReadCompletedIsReportedAsCancelled() async throws {
+        let now = currentTime
+        let delivered = ["reminder-1#1", "reminder-1#2"].map { identifier in
+            NotificationCenterDeliveredNotification(
+                identifier: identifier, deliveredAt: now.addingTimeInterval(-30),
+                userInfo: ["ohand.target": "item-1", "ohand.kind": "generic"])
+        }
+        inner.delivered = delivered
+        let recorder = EventRecorder()
+        let deliveredGate = newGate()
+        center.deliveredGate = deliveredGate
+        deliveredGate.release()
+        // Forwarding the first event cancels the task that is running the effect: the read has
+        // returned by then, so the cancellation lands inside the forwarding loop.
+        let cancellingBridge = NotificationBridge(
+            center: center,
+            ingestor: NotificationEventIngestor(now: { now }, handler: { event in
+                recorder.record(event)
+                withUnsafeCurrentTask { task in task?.cancel() }
+            }),
+            now: { now },
+            removalPollInterval: 0,
+            maximumRemovalPolls: 5,
+            effectTimeout: 30
+        )
+
+        let task = Task { () -> Result<Int, Error> in
+            do {
+                return .success(try await cancellingBridge.ingestDeliveredNotifications())
+            } catch {
+                return .failure(error)
+            }
+        }
+        let outcome = await task.value
+
+        XCTAssertEqual(deliveredGate.arrivals, 1, "the delivered list was read before cancellation")
+        XCTAssertEqual(recorder.events.map { $0.identifier.rawValue }, ["reminder-1#1"],
+                       "nothing is forwarded after the cancellation")
+        switch outcome {
+        case .success(let forwarded):
+            XCTFail("a cancelled ingestion reported success after forwarding \(forwarded) events")
+        case .failure(let error):
+            XCTAssertFalse(error is CancellationError, "the runtime's cancellation error must not escape")
+            XCTAssertEqual(error as? NotificationBridgeError, .cancelled)
+        }
+    }
+
     // MARK: Abandoned work must not disturb newer or earlier state
 
     private func pendingDueInstant() async throws -> Date? {

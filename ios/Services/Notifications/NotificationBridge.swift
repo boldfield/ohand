@@ -193,27 +193,30 @@ public final class NotificationBridge: Sendable {
 
     /// Reports every notification the OS still lists as delivered, for the launch-time check of
     /// requests that fired while the app was not running. Returns how many events were forwarded.
+    ///
+    /// The whole operation, including the forwarding of each delivered notification, reports a
+    /// normalized result: cancellation that arrives once the OS has answered but before every
+    /// event is forwarded ends it with `cancelled`, like cancellation during the read itself.
     @discardableResult
     public func ingestDeliveredNotifications() async throws -> Int {
         try? await reconcile()
-        let deliveredNotifications: [NotificationCenterDeliveredNotification]
         do {
             let center = self.center
-            deliveredNotifications = try await bounded { await center.deliveredNotifications() }
+            let deliveredNotifications = try await bounded { await center.deliveredNotifications() }
+            var forwarded = 0
+            for delivered in deliveredNotifications {
+                try Task.checkCancellation()
+                let accepted = ingestor.ingestDelivered(
+                    requestIdentifier: delivered.identifier,
+                    userInfo: delivered.userInfo,
+                    deliveredAt: delivered.deliveredAt
+                )
+                if accepted { forwarded += 1 }
+            }
+            return forwarded
         } catch {
             throw NotificationBridgeError.normalized(error)
         }
-        var forwarded = 0
-        for delivered in deliveredNotifications {
-            try Task.checkCancellation()
-            let accepted = ingestor.ingestDelivered(
-                requestIdentifier: delivered.identifier,
-                userInfo: delivered.userInfo,
-                deliveredAt: delivered.deliveredAt
-            )
-            if accepted { forwarded += 1 }
-        }
-        return forwarded
     }
 
     /// Re-applies the desired state of every identifier whose late work could not be settled
