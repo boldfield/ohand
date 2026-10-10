@@ -391,6 +391,46 @@ fn echoed_secrets_are_masked_in_error_bodies_and_headers_without_changing_length
 }
 
 #[test]
+fn secrets_echoed_as_response_header_names_are_masked_in_any_letter_case() {
+    // Both canaries are valid header-name tokens; the mixed-case one checks that lowercasing
+    // during parsing does not let the secret through.
+    for canary in ["synthetic-canary-lower-4e2b9d10", "Synthetic-Canary-Mixed-4E2B9D10"] {
+        let authority = TestAuthority::new();
+        let fixture = start_fixture(&authority, move |_| Reply::Full {
+            status: 401,
+            headers: vec![
+                (canary.to_string(), "rejected".to_string()),
+                (format!("x-seen-{canary}-echo"), "rejected".to_string()),
+            ],
+            body: b"{\"error\":\"invalid key\"}".to_vec(),
+        });
+        let resolver = RecordingResolver::with_secret(REFERENCE, canary);
+        let transport = transport_for(&authority, approved(&fixture), resolver);
+
+        let response = send(
+            &transport,
+            &request_to(fixture.url("/"), Some(credential_use())),
+        )
+        .unwrap();
+
+        assert_eq!(response.status, 401);
+        let lowercase_canary = canary.to_ascii_lowercase();
+        for (name, value) in &response.headers {
+            assert!(!name.contains(canary), "{name}");
+            assert!(!name.contains(&lowercase_canary), "{name}");
+            assert!(!value.contains(canary), "{value}");
+        }
+        let masked = "*".repeat(canary.len());
+        assert!(response.headers.iter().any(|(name, _)| name == &masked));
+        assert!(response
+            .headers
+            .iter()
+            .any(|(name, _)| name == &format!("x-seen-{masked}-echo")));
+        assert!(!format!("{response:?}").contains(&lowercase_canary));
+    }
+}
+
+#[test]
 fn failures_and_debug_output_never_contain_secret_values_or_endpoints() {
     let authority = TestAuthority::new();
     let fixture = start_fixture(&authority, |_| Reply::Hang);

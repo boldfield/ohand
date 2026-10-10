@@ -99,6 +99,8 @@ impl std::fmt::Debug for SecureRequest {
 #[derive(Clone, PartialEq, Eq)]
 pub struct SecureResponse {
     pub status: u16,
+    /// Lowercase names with verbatim values. Any occurrence of the dispatched secret in a name
+    /// or a value is masked before the response is returned.
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
     /// The body reached the size bound: it holds exactly `max_response_bytes + 1` bytes and
@@ -273,10 +275,17 @@ impl HostTransport {
         if let Some((_, secret)) = &credential {
             let secret = secret.as_bytes();
             mask_secret(&mut body, secret, truncated);
-            for (_, value) in &mut headers {
-                let mut masked = std::mem::take(value).into_bytes();
-                mask_secret(&mut masked, secret, false);
-                *value = String::from_utf8_lossy(&masked).into_owned();
+            // Header names were lowercased while parsing, so a secret echoed in the name
+            // position (in any letter case) is matched against its lowercase form; values are
+            // kept verbatim and matched as-is.
+            let lowercase_secret = Zeroizing::new(secret.to_ascii_lowercase());
+            for (name, value) in &mut headers {
+                let mut masked_name = std::mem::take(name).into_bytes();
+                mask_secret(&mut masked_name, &lowercase_secret, false);
+                *name = String::from_utf8_lossy(&masked_name).into_owned();
+                let mut masked_value = std::mem::take(value).into_bytes();
+                mask_secret(&mut masked_value, secret, false);
+                *value = String::from_utf8_lossy(&masked_value).into_owned();
             }
         }
         Ok(SecureResponse {
