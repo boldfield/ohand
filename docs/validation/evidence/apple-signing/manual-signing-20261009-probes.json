@@ -1,0 +1,39 @@
+{
+  "schema": "ohand.apple-signing-evidence.manual.v1",
+  "recorded_at": "2026-10-10T09:43:01Z",
+  "why": "tools/apple-build/sign_probe.py supports only AudioProbe, BridgeProbe, NotificationProbe and TranscriptionProbe. The three probes below were signed on 2026-10-09 by hand with the same identity and profile and installed with xcrun devicectl; no record was written at build time. This record was produced afterwards by inspecting the exported .app bundles kept on the maintainer's Mac (codesign -dvv and the embedded provisioning profile), so it proves what was installed but not that the working tree was clean at archive time.",
+  "common": {
+    "route": "development",
+    "export_method": "debugging",
+    "signing_style": "manual",
+    "identity_class": "Apple Development",
+    "profile_expiry": "2027-10-09T00:08:01Z",
+    "profile_app_id": "wildcard",
+    "provisioned_devices": 1,
+    "build_revision": "257343f3ff0f4ac310307630c948708ab31e7444",
+    "working_tree_clean": "not recorded"
+  },
+  "probes": [
+    {
+      "scheme": "CredentialProbe",
+      "bundle_identifier": "com.boldfield.ohand.probes.credential",
+      "version": "0.1.0 (1)",
+      "procedure": "xcodebuild archive with CODE_SIGNING_ALLOWED=NO, then xcodebuild -exportArchive with method debugging and manual signing; profile embedded 2026-10-09T16:49 local",
+      "verified": "codesign -dvv on the exported bundle: identifier and Apple Development authority present"
+    },
+    {
+      "scheme": "CaptureProbe",
+      "bundle_identifier": "com.boldfield.ohand.probes.capture",
+      "version": "0.1.0 (1)",
+      "procedure": "same as CredentialProbe (app and control extension); profile embedded 2026-10-09T16:50 local",
+      "verified": "codesign -dvv on the exported bundle"
+    },
+    {
+      "scheme": "TauriProbe",
+      "bundle_identifier": "com.boldfield.ohand.tauri-probe",
+      "version": "0.1.0",
+      "procedure": "npx tauri ios build --ci --debug --export-method debugging with APPLE_DEVELOPMENT_TEAM and IOS_MOBILE_PROVISION; profile embedded 2026-10-09T16:54 local",
+      "verified": "codesign -dvv on the exported bundle"
+    }
+  ]
+}

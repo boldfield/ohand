@@ -740,6 +740,15 @@
         "docs/architecture/m1-contracts.md:555",
         "core/src/ingress/mod.rs:1",
         "core/src/store/captures/mod.rs:106"
+      ],
+      "ownership_allowances": [
+        "core/src/domain/items/ (transcript event type, TextState::Transcribed and its StateTransition; granted 2026-10-10 after PR #150 round 2; one PR, ordered before C05b)",
+        "core/src/store/schema/ and core/tests/migrations/ (schema v7: transcript provenance table keyed by item and source job; same grant)",
+        "core/src/lifecycle/delete_intent/ (redact transcript event text and delete provenance rows on deletion, with test; same grant)",
+        "core/src/store/events/ (EventType::Transcript with its own payload, never a corrections row; UUID transcript record identity, UUIDv5 over item and source job acceptable; extension granted 2026-10-10 after PR #150 round 3; same PR)",
+        "core/src/providers/contracts/request.rs and core/src/interpretation/contracts/ (additive TextBasis::Transcript { transcript_record_id, item_revision } with UUID validation and wire mirror; existing adapters, fakes and fixtures compile unchanged; same extension)",
+        "core/src/interpretation/dispatch/source.rs, core/src/ffi/provider_transport.rs and their tests (use the transcript with the Transcript basis when no user text correction exists; a correction still wins; same extension)",
+        "core/src/retrieval/index/ (Transcribed basis; projection prefers correction, then transcript, then captured text; same extension)"
       ]
     },
     {
@@ -2276,7 +2285,15 @@
     },
     {
       "date": "2026-10-09",
-      "change": "P09 scope amendment, recorded by the coordinator on 2026-10-09 at the maintainer's direction: hardware keyboard navigation of the Tauri probe (docs/validation/tauri-handoff.md device procedure step 4) is deferred out of P09 to U10, which already owns keyboard and accessibility navigation of the real management UI with a documented actual-device pass. Reason: the maintainer has no Bluetooth or Smart Keyboard for the trial phone, and the probe is a feasibility shell, not the UI that ships. Every other P09 check was run: docs/validation/evidence/device-feasibility/2026-10-09-device-matrix.json and 2026-10-10-latency-accessibility.json. P09's acceptance is otherwise unchanged; it is graded against its own pinned criteria in docs/features/m1-plan.md#p09, not against docs/validation/m1-protocol.md, which is T08's two-week trial rubric."
+      "change": "P09 scope amendment, recorded by the coordinator on 2026-10-09 at the maintainer's direction: hardware keyboard navigation of the Tauri probe (docs/validation/tauri-handoff.md device procedure step 4) is deferred out of P09 to U10, which already owns keyboard and accessibility navigation of the real management UI with a documented actual-device pass. Reason: the maintainer has no Bluetooth or Smart Keyboard for the trial phone, and the probe is a feasibility shell, not the UI that ships. The checks that were run are recorded in docs/validation/evidence/device-feasibility/2026-10-09-device-matrix.json and 2026-10-10-latency-accessibility.json; each record lists its own not-tested and not-observable items, which remain unmet P09 checks unless a later amendment defers them. P09's acceptance is otherwise unchanged; it is graded against its own pinned criteria in docs/features/m1-plan.md#p09, not against docs/validation/m1-protocol.md, which is T08's two-week trial rubric."
+    },
+    {
+      "date": "2026-10-10",
+      "change": "C05a ownership allowance for transcript provenance: a transcript event type and TextState::Transcribed in core/src/domain/items/, schema v7 transcript provenance table with migration tests, and deletion redaction in core/src/lifecycle/delete_intent/. Granted after PR #150 showed criterion 1 cannot be met inside the owned paths without projecting machine text as a user correction or discarding the audio identity."
+    },
+    {
+      "date": "2026-10-10",
+      "change": "C05a allowance extension after PR #150 round 3: EventType lives in core/src/store/events/, not core/src/domain/items/, and interpretation dispatch, the FFI provider transport and the retrieval index all read any text correction as the user's correction, so the transcript reached interpretation as TextBasis::Correction with a non-UUID record id and the authorized interpretation request failed validation. C05a may add EventType::Transcript (store/events), an additive TextBasis::Transcript with a UUID record id (providers/contracts/request.rs, interpretation/contracts), transcript-basis reads in interpretation/dispatch/source.rs and ffi/provider_transport.rs, and a Transcribed basis in retrieval/index, with end-to-end attach-to-validated-request, transport, and retrieval tests. ios/ is not granted; fixtures/intent is unchanged."
     }
   ]
 }

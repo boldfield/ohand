@@ -1,6 +1,6 @@
 {
   "evidence_id": "device-feasibility-2026-10-09",
-  "revision": 1,
+  "revision": 2,
   "task": "P09",
   "collector": "maintainer on the trial phone; coordinator pulled app containers with xcrun devicectl and recorded values from maintainer screenshots",
   "collected_at": "2026-10-09T17:30:00Z to 2026-10-09T19:12:00Z",
@@ -10,11 +10,11 @@
   "builds": {
     "BridgeProbe": "6ac3d1f8 (signed, apple-signing-20261009T000932Z-c2cb6485.json)",
     "AudioProbe": "257343f3 (apple-signing-20261009T164701Z-5b3f5c34.json)",
-    "TranscriptionProbe": "257343f3 (apple-signing-20261009T164718Z-e2dc1dae.json)",
-    "NotificationProbe": "257343f3 (apple-signing-20261009T164732Z-b11e7a0d.json)",
-    "CredentialProbe": "257343f3 (manual archive + export with the development profile; no tooling record)",
-    "CaptureProbe": "257343f3 (manual archive + export; app + control extension; no tooling record)",
-    "TauriProbe": "257343f3 (tauri ios build --debug, development route; no tooling record)"
+    "TranscriptionProbe": "257343f3 (apple-signing-20261009T164718Z-e2dc1dae.json) ; working_tree_clean=false in that record: the archive was built from revision 257343f3 with uncommitted files in the working tree that the tool did not list, so the installed build is not provably identical to the committed revision (caveat, unmet traceability)",
+    "NotificationProbe": "257343f3 (apple-signing-20261009T164732Z-b11e7a0d.json) ; working_tree_clean=false in that record: the archive was built from revision 257343f3 with uncommitted files in the working tree that the tool did not list, so the installed build is not provably identical to the committed revision (caveat, unmet traceability)",
+    "CredentialProbe": "257343f3 (manual archive + export with the development profile; no tooling record) ; signed manually, see apple-signing/manual-signing-20261009-probes.json",
+    "CaptureProbe": "257343f3 (manual archive + export; app + control extension; no tooling record) ; signed manually, see apple-signing/manual-signing-20261009-probes.json",
+    "TauriProbe": "257343f3 (tauri ios build --debug, development route; no tooling record) ; signed manually, see apple-signing/manual-signing-20261009-probes.json"
   },
   "private_evidence_reference": "~/.ohand-private-evidence/p09/ on the maintainer's Mac: screenshots named below, pulled WAV files, app-container files and logs. Not committed. Files suffixed PERSONAL show the home or lock screen and are never to be published.",
   "sections": {
@@ -30,6 +30,17 @@
         "6_lock_10s": "'Recording was not interrupted. Saved: 8.19s, 266100 bytes', protection class shown; file matches; signal continuous, quieter mid-file.",
         "7_bounds": "UI timer kept running past 500 s; Stop reported 'Saved: 300.00s, 9604096 bytes'; header consistent. Low-free-space refusal: not tested.",
         "8_process_death": "Force-quit while recording: a WAV exists (54594 bytes) with an unfinalized header (data length 0; 1.58 s of PCM present); afinfo duration 0.000; not playable as-is, as the doc predicted."
+      },
+      "artifact_by_result": {
+        "1_permission (granted, 3.33 s)": "audio-probe/recording-FFA2D1F3-B049-4619-B679-FD6D28537F68.wav (3.335 s, 110804 bytes)",
+        "1_permission (revoked)": "no artifact: the 'Microphone permission denied' message was reported by the maintainer from the screen and not screenshotted (unmet artifact)",
+        "2_normal_stop (6.92 s)": "audio-probe/recording-A267F648-ACD4-4138-9BB9-1485FC6163A9.wav (6.923 s, 225620 bytes)",
+        "3_cancel (3.86 s partial)": "audio-probe/recording-A35AC340-69B0-41D6-AE6E-DF95F942531F.wav (3.864 s, 127732 bytes)",
+        "4_interruption (5.86 s partial)": "audio-probe/recording-6E0C20DF-61C7-4A84-AF27-BE102BDF308E.wav (5.865 s, 191764 bytes)",
+        "5_background_10s (9.71 s)": "audio-probe/recording-795A6E61-2818-4CF7-B2D3-B0AE0F81DE27.wav (9.706 s, 314676 bytes)",
+        "6_lock_10s (8.19 s)": "audio-probe/recording-49906AFF-2358-4792-8B23-5243CA528591.wav (8.188 s, 266100 bytes)",
+        "7_bounds (300.00 s)": "audio-probe/recording-EA86CCD8-CFA2-4C87-8716-CAAF685F5F7E.wav (300.000 s, 9604096 bytes)",
+        "8_process_death (unfinalized)": "audio-probe/recording-AC879EC1-9B6C-4D14-B37A-9A7D29A6420E.wav (54594 bytes; header reports 1.578 s, written before the force-quit)"
       }
     },
     "P04_transcription": {
@@ -40,7 +51,15 @@
         "2_offline": "Airplane mode, all radios off: 'Transcribed on device in 0.32s, mean confidence 0.98: \"Remind me to call the dentist tomorrow at nine\"'. Network on: same transcript in 0.15 s. Offline on-device recognition confirmed.",
         "3_fail_closed": "fr-FR with network on: Pending, no transcript. On-device-only flag honoured.",
         "4_permission_revoked": "Revoked while backgrounded: iOS relaunched the app ('No audio loaded'); after Generate: 'Pending: speech recognition permission denied or revoked. Audio kept; no transcription was attempted.' Survival of the previous fixture file not checked.",
-        "5_timing_seconds": [0.32, 0.15, 0.28, 0.15, 0.15, 0.15, 0.15],
+        "5_timing_seconds": [
+          0.32,
+          0.15,
+          0.28,
+          0.15,
+          0.15,
+          0.15,
+          0.15
+        ],
         "6_interruption": "Not observable: the fixture completes in 0.15-0.32 s, faster than a lock or app switch.",
         "7_cancel": "Not observable for the same reason."
       }
@@ -92,6 +111,22 @@
         "entry": "Entry: controlIntent, warm launch; Protected data: available; Result: Saved.",
         "records": "Four control presses produced four distinct records (two cold, two warm), all protectedDataAvailable true; no duplicate perform() observed.",
         "not_measured": "Before first unlock after reboot; system termination between handoff and commit."
+      },
+      "records_named": {
+        "controlIntent (the four P02 presses)": [
+          "41A78519 cold 2026-10-09T19:05:15.718Z",
+          "3A88285C warm 2026-10-09T19:05:49.893Z",
+          "16FD4C42 cold 2026-10-09T19:06:12.533Z",
+          "3C52A783 warm 2026-10-09T19:08:41.970Z"
+        ],
+        "shortcutURL (P07 handoff session, same directory)": [
+          "CB02991B cold 2026-10-09T18:38:51.727Z",
+          "2A507CA9 cold 2026-10-09T18:39:50.902Z",
+          "FD79078E warm 2026-10-09T18:40:55.181Z",
+          "0F88724D warm 2026-10-09T18:42:30.542Z",
+          "CCDE605F warm 2026-10-09T18:46:56.730Z"
+        ],
+        "note": "identifiers are the first eight characters of the record file names under capture-probe/container/CaptureProbe/records/; all nine report protectedDataAvailable true"
       }
     }
   },
@@ -103,5 +138,8 @@
     "Pending-notification limit is 64 with oldest-added eviction.",
     "Handoff carries only the identifier; hostile URLs are rejected; cold-launch URL arrives before the webview is ready.",
     "Large text at maximum clips labels in CaptureProbe, AudioProbe and CredentialProbe."
+  ],
+  "revision_notes": [
+    "rev 2 (2026-10-10): named the WAV behind each P03 result by its measured duration and size; named the four controlIntent records P02 refers to and the five shortcut-URL records from P07 that share the directory; recorded the working_tree_clean=false caveat on two signing records; pointed at the manual signing record for the three probes the signing tool does not support. No observed value changed."
   ]
 }
