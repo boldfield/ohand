@@ -9,21 +9,21 @@ import XCTest
 /// loop.
 private final class TranscriptionSession {
     let core: CoreHandle
-    let client: TranscriptionCoreClient
+    let capability: TranscriptionCapability
     let service: JobRunnerService
+    var client: TranscriptionCoreClient { capability.client }
     let sender = GatedSender(forwarding: nil, open: true)
     private(set) var otherEvents: [CoreEvent] = []
     private var isClosed = false
 
     init(storePath: String, layout: ProtectedStorageLayout, recognizer: OnDeviceRecognizing) throws {
         core = try CoreHandle(path: storePath)
-        client = TranscriptionCoreClient(core: core)
-        let handler = TranscriptionJobHandler(core: client, recognizer: recognizer, layout: layout)
-        service = try JobRunnerService.attach(
-            to: core, storePath: storePath, sender: sender, capabilities: [handler], isReachable: true, retryDelay: 3600)
+        capability = TranscriptionCapability.make(core: core, layout: layout, recognizer: recognizer)
+        service = try capability.attachJobRunner(
+            to: core, storePath: storePath, sender: sender, isReachable: true, retryDelay: 3600)
         try core.setEventHandler { [unowned self] event in
             XCTAssertTrue(Thread.isMainThread, "events are delivered on the main thread")
-            if !self.service.handle(event) && !self.client.handle(event) {
+            if !self.service.handle(event) && !self.capability.handle(event) {
                 self.otherEvents.append(event)
             }
         }
@@ -56,7 +56,7 @@ private final class TranscriptionSession {
     func close() {
         guard !isClosed else { return }
         isClosed = true
-        client.shutDown()
+        capability.shutDown()
         service.shutDown()
         core.close()
     }
@@ -148,6 +148,26 @@ final class TranscriptionCoreIntegrationTests: IngressStorageTestCase {
     private func transcript(_ text: String, digest: String? = nil) -> TranscriptionResultRequest {
         .transcript(RecognizedTranscriptRequest(
             text: text, confidence: 0.9, detectedLanguage: nil, recognizer: "fixture/1", audioSHA256: digest ?? audioDigest))
+    }
+
+    // MARK: production composition
+
+    func testTheProductionCompositionRegistersTheHandlerWithTheSpeechFrameworkRecognizer() throws {
+        let store = try seededStore()
+        let core = try CoreHandle(path: store.path)
+        let capability = TranscriptionCapability.make(core: core, layout: layout)
+        let sender = GatedSender(forwarding: nil, open: true)
+        let service = try capability.attachJobRunner(to: core, storePath: store.path, sender: sender)
+        defer {
+            capability.shutDown()
+            service.shutDown()
+            core.close()
+        }
+
+        XCTAssertTrue(capability.recognizer is SpeechFrameworkRecognizer, "production uses the on-device speech framework")
+        XCTAssertTrue(capability.recognizer.recognizerName.hasPrefix("apple-sfspeech-on-device/"))
+        XCTAssertEqual(capability.handler.jobType, "transcription_attachment")
+        XCTAssertEqual(sender.requestCount, 0)
     }
 
     // MARK: queued job to attached transcript

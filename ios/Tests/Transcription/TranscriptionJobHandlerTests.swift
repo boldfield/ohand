@@ -29,11 +29,12 @@ final class TranscriptionJobHandlerTests: XCTestCase {
     private func makeHandler(
         core: FakeTranscriptionCore,
         recognizer: FakeOnDeviceRecognizer,
-        applyAttempts: Int = 3
+        applyAttempts: Int = 3,
+        recognitionTimeout: TimeInterval = TranscriptionJobHandler.defaultRecognitionTimeout
     ) -> TranscriptionJobHandler {
         TranscriptionJobHandler(
             core: core, recognizer: recognizer, audio: DirectoryAudioLocator(directory: directory),
-            applyAttempts: applyAttempts, applyRetryDelay: 0)
+            applyAttempts: applyAttempts, applyRetryDelay: 0, recognitionTimeout: recognitionTimeout)
     }
 
     private func makeCore(
@@ -157,6 +158,21 @@ final class TranscriptionJobHandlerTests: XCTestCase {
         XCTAssertEqual(result, .interrupted)
         XCTAssertTrue(recognizer.wasCancelledWhileRecognizing)
         XCTAssertTrue(core.applied.isEmpty)
+    }
+
+    func testARecognitionThatNeverAnswersIsCancelledAndRetriedLater() async {
+        let core = makeCore()
+        let recognizer = FakeOnDeviceRecognizer(outcome: .failed, holdsUntilCancelled: true)
+
+        let result = await makeHandler(core: core, recognizer: recognizer, recognitionTimeout: 0.1).run(run)
+
+        XCTAssertEqual(result, .transientFailure(reason: "recognition_timed_out"))
+        XCTAssertEqual(recognizer.callCount, 1)
+        XCTAssertTrue(core.applied.isEmpty, "a timed-out recognition applies nothing")
+        for _ in 0..<200 where !recognizer.wasCancelledWhileRecognizing {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(recognizer.wasCancelledWhileRecognizing, "the stalled recognition is told to stop")
     }
 
     func testATaskCancelledBeforeStartingDoesNothing() async {
