@@ -1562,11 +1562,13 @@ fn retracted_after(tokens: &[IntentToken], after: usize) -> bool {
             return true;
         }
         let request_words = unquoted_words_before(tokens, token.start);
+        // The rest of the clause keeps its quoted tokens: they never match a retraction word
+        // below, but an object that contains one must fail the task-object boundary rather
+        // than lose the word (`cancel the "prompt" delivery` is not "cancel the delivery").
         let rest_of_clause: Vec<&IntentToken> = later[index + 1..]
             .iter()
             .copied()
             .take_while(|next| !next.clause_break)
-            .filter(|next| !next.quoted)
             .collect();
         if RETRACTION_VERBS.contains(&word) {
             return !verb_is_negated_or_infinitive(&later[..index])
@@ -1584,7 +1586,7 @@ fn retracted_after(tokens: &[IntentToken], after: usize) -> bool {
                 first_words.contains(&word)
                     && rest_of_clause
                         .iter()
-                        .position(|next| second_words.contains(&next.text.as_str()))
+                        .position(|next| !next.quoted && second_words.contains(&next.text.as_str()))
                         .is_some_and(|second_position| {
                             let object: Vec<&IntentToken> = rest_of_clause
                                 .iter()
@@ -1695,7 +1697,6 @@ fn need_gives_reason(
         .iter()
         .copied()
         .take_while(|next| !next.clause_break)
-        .filter(|next| !next.quoted)
         .collect();
     !infinitive_marker.quoted
         && infinitive_marker.text == "to"
@@ -2105,7 +2106,7 @@ fn verb_is_part_of_requested_task(
     attached && names_task_object(object, request_words)
 }
 
-/// Whether `words` (unquoted, one clause) are a concrete task object, accepted only in a positive
+/// Whether `words` (one clause) are a concrete task object, accepted only in a positive
 /// shape: a noun phrase (a [`NOUN_PHRASE_DETERMINERS`] entry followed by noun candidates) whose
 /// head noun is a [`THING_OBJECT_WORDS`] entry, then any prepositional phrases
 /// ([`prepositional_phrases_end`]: each an [`OBJECT_PREPOSITIONS`] or [`TIME_PREPOSITIONS`] entry
@@ -2119,29 +2120,49 @@ fn verb_is_part_of_requested_task(
 /// prompt", "the order for the nudges"), and in whatever form: a modifier before the head must be
 /// a known thing or a [`NON_HEAD_WORDS`] entry too, and a possessive or plural is checked by its
 /// base ([`word_bases`]), so "the prompt's delivery", "the nudges' delivery", "the prompt
-/// delivery" and "the reminder's delivery" withdraw. "the order", "the gym", "the gas bill", "my
-/// library books", "the rented ladder", "the delivery of the parcel" and "the order at the shop"
-/// qualify; "that too", "this nonsense", "the above", "the reminder", "the whole business", "the
-/// query", "the beeping" and, after "call the roofer", "the phone call", "the callout", "the
-/// roofing job" and "the roofer's order" do not ([`is_noun_candidate`]).
+/// delivery" and "the reminder's delivery" withdraw. A quoted word anywhere in the span
+/// disqualifies it rather than being skipped ([`contains_quoted`]): the grammar cannot read what
+/// is inside quotation marks, so `the "reminder" order`, `the "prompt" delivery`, `the order
+/// "reminder"` and `the "call the roofer" order` are not known things either. "the order", "the
+/// gym", "the gas bill", "my library books", "the rented ladder", "the delivery of the parcel"
+/// and "the order at the shop" qualify; "that too", "this nonsense", "the above", "the
+/// reminder", "the whole business", "the query", "the beeping" and, after "call the roofer",
+/// "the phone call", "the callout", "the roofing job" and "the roofer's order" do not
+/// ([`is_noun_candidate`]).
 fn names_task_object(words: &[&IntentToken], request_words: &[&str]) -> bool {
+    if contains_quoted(words) {
+        return false;
+    }
     let texts = object_texts(words);
     noun_phrase_end(&texts, 0, request_words, &[THING_OBJECT_WORDS]).is_some_and(|end| {
         prepositional_phrases_end(&texts, end, request_words) == Some(texts.len())
     })
 }
 
-/// Whether `words` (unquoted, one clause) only say when: one or more prepositional phrases, the
-/// first opened by a [`TIME_PREPOSITIONS`] entry ("at the last minute", "by the weekend", "by the
-/// end of the week"), then at most [`REPEAT_ADVERBS`]. A complement object ("the booking", "the
-/// contractor", "him") or a phrase about a person or an unknown thing ("to the guy", "about it",
-/// "at the prompt") is not one ([`prepositional_phrases_end`]).
+/// Whether `words` (one clause) only say when: one or more prepositional phrases, the first
+/// opened by a [`TIME_PREPOSITIONS`] entry ("at the last minute", "by the weekend", "by the end
+/// of the week"), then at most [`REPEAT_ADVERBS`]. A complement object ("the booking", "the
+/// contractor", "him"), a phrase about a person or an unknown thing ("to the guy", "about it",
+/// "at the prompt") or a phrase with a quoted word (`at the "reminder" time`,
+/// [`contains_quoted`]) is not one ([`prepositional_phrases_end`]).
 fn names_time_phrase(words: &[&IntentToken], request_words: &[&str]) -> bool {
+    if contains_quoted(words) {
+        return false;
+    }
     let texts = object_texts(words);
     texts
         .first()
         .is_some_and(|first| TIME_PREPOSITIONS.contains(first))
         && prepositional_phrases_end(&texts, 0, request_words) == Some(texts.len())
+}
+
+/// Whether any token of an object span is inside quotation marks. Such a span is never a known
+/// thing or time: the quoted word could name the reminder, the request, the capture or the task
+/// itself (`the "reminder" order`, `the "call the roofer" order`), and dropping it would
+/// leave a phrase the allow-lists accept. Quoted words are still ignored when looking for the
+/// retraction word itself, so reported speech (`he said "never mind"`) does not withdraw.
+fn contains_quoted(words: &[&IntentToken]) -> bool {
+    words.iter().any(|word| word.quoted)
 }
 
 /// The words of an object span without politeness fillers ("please").

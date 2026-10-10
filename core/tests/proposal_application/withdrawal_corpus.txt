@@ -568,3 +568,39 @@ scheduled | remind me {time} to take the rented ladder back to the shop
 scheduled | remind me {time} about cancelling the gym membership
 scheduled | remind me to call the hotel {time}, so I don't need to cancel the dinner reservation
 scheduled | remind me to call the roofer {time}, so I don't need to chase the old gas bill
+
+# --- I05b round 6: a quoted word inside an object disqualifies it instead of being skipped ---
+# The grammar cannot read what is in quotation marks, so a quoted reminder, request, capture or
+# task word must not vanish and leave a phrase the allow-list accepts ("the delivery").
+unscheduled | remind me {time} to call the roofer and cancel the "reminder" order
+unscheduled | remind me {time} to call the roofer and cancel the “reminder” order
+unscheduled | remind me {time} to call the roofer and cancel the order "reminder"
+unscheduled | remind me {time} to call the roofer and cancel the "prompt" delivery
+unscheduled | remind me {time} to call the roofer and cancel the “prompt” delivery
+unscheduled | remind me {time} to call the roofer and cancel the delivery of the "prompt" order
+unscheduled | remind me {time} to call the roofer and cancel the "remind me" order
+unscheduled | remind me {time} to call the roofer and cancel the "the reminder" order
+unscheduled | remind me {time} to call the roofer and cancel the "call the roofer" order
+unscheduled | remind me {time} to call the roofer and cancel the "nudges" order please
+unscheduled | remind me {time} to call the roofer and cancel the order at the "reminder" shop
+unscheduled | remind me {time} to call the roofer and cancel the order "by the weekend"
+unscheduled | remind me {time} to call the roofer and then delete the "voice memo" order
+unscheduled | remind me {time} about cancelling the "reminder" order
+unscheduled | remind me {time} about cancelling the “reminder” gym
+unscheduled | remind me {time} about cancelling the "gym" "reminder"
+unscheduled | remind me {time} to take the "reminder" ladder back
+unscheduled | remind me {time} to take the ladder "reminder" back
+unscheduled | remind me {time} to take the ladder back to the "reminder" shop
+unscheduled | remind me {time} to call the shop and take the "alarm" ladder back
+unscheduled | remind me to call the roofer {time}, so I don't need to check the "reminder" quote
+unscheduled | remind me to call the roofer {time}, so I don't need to check the “reminder” quote
+unscheduled | remind me to call the roofer {time}, so I don't need to check the quote "reminder"
+unscheduled | remind me to call the roofer {time}, so I don't need to check "the quote"
+unscheduled | remind me to call the roofer {time}, so I don't need to cancel the "prompt" delivery
+unscheduled | remind me to call the hotel {time}, so I don't need to cancel the "reminder" booking
+unscheduled | remind me to call the roofer {time}, so I don't need to worry "about the reminder"
+unscheduled | remind me to call the roofer {time}, so I don't need to cancel at the "reminder" time
+# reported speech inside the object is not read as a thing, but reported speech elsewhere still
+# neither withdraws nor blocks a control
+scheduled | remind me {time} to call the roofer and cancel the order, he said "never mind" last time
+scheduled | remind me {time} about cancelling the gym, he said "ok" to that
