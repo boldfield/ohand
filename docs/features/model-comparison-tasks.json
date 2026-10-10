@@ -697,6 +697,10 @@
     {
       "date": "2026-10-09",
       "change": "XB04 allowance (one-time, recorded after PR #144 round 1): the XB02 diagnostic contract cannot carry provider-reported usage alongside a transport error (invoke_diagnostic returns Result<DiagnosticResponse, TransportError> and dispatch_diagnostic drops observations on Err), so refusal/content_filter usage is lost. XB04 may extend core/src/providers/contracts/ additively so a rejected diagnostic transport result carries CallObservations into DiagnosticFailure.usage while keeping the Rejected class; existing adapters, fakes and callers must compile unchanged (XB02 acceptance 2). XB04 may also update the Anthropic refusal path under core/src/providers/anthropic/ and core/tests/providers_anthropic/ to use the same carrier, since XB03 has landed. No other XB02 or XB03 ownership transfers."
+    },
+    {
+      "date": "2026-10-10",
+      "change": "XB06 allowance (one-time, recorded after PR #152 round 2): XB06 may carry the test-only fix in core/src/ffi/job_health/tests.rs that clears the event-callback registration (ohand_core_set_event_callback(handle, None, null)) before dropping the recorder, which repairs the pre-existing SIGSEGV flake that was the only failing required check on the PR and which no other board task touches. Not a transfer of FFI ownership; no non-test change is authorized."
     }
   ]
 }
