@@ -806,6 +806,151 @@ fn a_never_installed_reminder_past_its_due_time_becomes_unschedulable_without_an
     Ok(())
 }
 
+/// Delegates to the fake center, then dies right after a successful schedule call, before the
+/// caller can acknowledge it.
+struct CrashAfterInstall<'a> {
+    center: &'a mut FakeCenter,
+}
+
+impl NotificationEffects for CrashAfterInstall<'_> {
+    fn schedule(&mut self, request: &ScheduleRequest) -> Result<(), NotificationEffectError> {
+        self.center.schedule(request)?;
+        panic!("simulated crash after the OS accepted the request");
+    }
+
+    fn cancel(&mut self, notification_id: &str) -> Result<(), NotificationEffectError> {
+        self.center.cancel(notification_id)
+    }
+
+    fn list_pending(&mut self) -> Result<Vec<PendingRequest>, NotificationEffectError> {
+        self.center.list_pending()
+    }
+}
+
+fn assert_resolved_and_unconfirmed(db: &mut Database, id: &str, version: i64) -> Result<()> {
+    let after = reminder(db, "item-1")?;
+    assert_eq!(after.request_state, RequestState::Resolved);
+    assert_eq!(after.state_version, version);
+    assert_ne!(after.schedule_state, ScheduleState::Scheduled);
+    assert!(!operation_states(db, "item-1")?.contains(&(
+        OperationType::Schedule,
+        id.to_string(),
+        OperationState::Superseded
+    )));
+    Ok(())
+}
+
+#[test]
+fn a_crash_after_os_success_then_firing_then_relaunch_after_due_is_not_unschedulable() -> Result<()>
+{
+    let path = temp_db_path("crash_fired");
+    let mut db = open_db(&path)?;
+    let revision = insert_item(&mut db, "item-1", ROOFER_TEXT)?;
+    let record = create_reminder(&mut db, "item-1", revision)?;
+    let id = record.notification_id().unwrap();
+    let mut center = FakeCenter::default();
+    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut crashing = CrashAfterInstall {
+            center: &mut center,
+        };
+        let _ = reconcile(&mut db, &clock_at("2026-01-15T10:31:00Z"), &mut crashing);
+    }));
+    assert!(crashed.is_err());
+    drop(db);
+    assert!(center.pending.contains_key(&id));
+    // The request fired while the app was not running.
+    center.pending.clear();
+    center.clear_calls();
+
+    let mut relaunched = open_db(&path)?;
+    let report = reconcile_at(&mut relaunched, &mut center, "2026-01-16T09:30:00Z")?;
+
+    assert!(report.expired.is_empty());
+    assert_eq!(report.unconfirmed, vec![id.clone()]);
+    assert!(center.mutations().is_empty());
+    assert_resolved_and_unconfirmed(&mut relaunched, &id, record.state_version)?;
+    Ok(())
+}
+
+#[test]
+fn a_cancelled_caller_install_that_then_fires_is_not_unschedulable_after_due() -> Result<()> {
+    let mut db = open_db(&temp_db_path("cancelled_fired"))?;
+    let revision = insert_item(&mut db, "item-1", ROOFER_TEXT)?;
+    let record = create_reminder(&mut db, "item-1", revision)?;
+    let id = record.notification_id().unwrap();
+    let mut center = FakeCenter {
+        install_then_report_cancelled: true,
+        ..FakeCenter::default()
+    };
+    reconcile_now(&mut db, &mut center)?;
+    center.pending.clear();
+    center.clear_calls();
+
+    let report = reconcile_at(&mut db, &mut center, "2026-01-16T09:30:00Z")?;
+
+    assert!(report.expired.is_empty());
+    assert_eq!(report.unconfirmed, vec![id.clone()]);
+    assert!(center.mutations().is_empty());
+    assert_resolved_and_unconfirmed(&mut db, &id, record.state_version)?;
+    Ok(())
+}
+
+#[test]
+fn an_ambiguous_schedule_failure_leaves_the_attempt_recorded() -> Result<()> {
+    let mut db = open_db(&temp_db_path("ambiguous_failure"))?;
+    let revision = insert_item(&mut db, "item-1", ROOFER_TEXT)?;
+    let record = create_reminder(&mut db, "item-1", revision)?;
+    let id = record.notification_id().unwrap();
+    let mut center = FakeCenter {
+        fail_schedule: Some(transient("timeout")),
+        ..FakeCenter::default()
+    };
+    reconcile_now(&mut db, &mut center)?;
+
+    let report = reconcile_at(&mut db, &mut center, "2026-01-16T09:30:00Z")?;
+
+    assert!(report.expired.is_empty());
+    assert_eq!(report.unconfirmed, vec![id.clone()]);
+    assert_resolved_and_unconfirmed(&mut db, &id, record.state_version)?;
+    Ok(())
+}
+
+#[test]
+fn the_attempt_is_durable_before_the_os_call_returns() -> Result<()> {
+    let path = temp_db_path("attempt_durable");
+    let mut db = open_db(&path)?;
+    let revision = insert_item(&mut db, "item-1", ROOFER_TEXT)?;
+    let id = create_reminder(&mut db, "item-1", revision)?
+        .notification_id()
+        .unwrap();
+    let observed = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let observer_path = path.clone();
+    let observed_in_hook = observed.clone();
+    let mut center = FakeCenter {
+        on_schedule: Some(Box::new(move || {
+            let connection = Connection::open(&observer_path).unwrap();
+            let state: String = connection
+                .query_row(
+                    "SELECT operation_state FROM reminder_operations WHERE operation_type = 'schedule'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            *observed_in_hook.borrow_mut() = Some(state);
+        })),
+        ..FakeCenter::default()
+    };
+
+    reconcile_now(&mut db, &mut center)?;
+
+    assert_eq!(observed.borrow().as_deref(), Some("failed"));
+    assert_eq!(
+        operation_states(&mut db, "item-1")?,
+        vec![(OperationType::Schedule, id, OperationState::Acknowledged)]
+    );
+    Ok(())
+}
+
 #[test]
 fn an_installed_reminder_whose_request_has_fired_is_left_alone() -> Result<()> {
     let mut db = open_db(&temp_db_path("fired"))?;

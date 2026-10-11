@@ -28,9 +28,16 @@
 // - Acknowledged operations are terminal: duplicates and out-of-order failures report
 //   `AlreadyRecorded` and change nothing.
 //
+// Attempt marker: before every native `schedule` call the schedule operation is durably moved
+// from `pending` to `failed`, and committed before the call, meaning "attempted, outcome not
+// confirmed" until a completion acknowledges it. A crash, a cancelled caller or an ambiguous
+// error after the OS installed the request therefore leaves a trace. A pending operation was
+// never attempted. An attempted request that is absent from the OS after its due time may have
+// fired, so it is left unconfirmed rather than declared unschedulable.
+//
 // Native-side facts (`schedule_state`, operation states) do not bump the reminder's
 // `state_version`, which guards user intent. The one exception is a never-installed reminder
-// whose due time has passed: it becomes `Unschedulable(TimeInPast)` with its instant kept and
+// (operation still `pending`) whose due time has passed: it becomes `Unschedulable(TimeInPast)` with its instant kept and
 // no time adjustment. Delivery and acknowledgment facts are never touched here. Callers must
 // serialize reconciliations (the `&mut Database` borrow does so within a process); native
 // calls are made outside any open transaction.
@@ -44,7 +51,9 @@ use thiserror::Error;
 use crate::reminders::state::ReminderStateError;
 
 pub use completion::{apply_completion, CompletionOutcome, EffectCompletion, EffectOutcome};
-pub use effects::{NotificationEffectError, NotificationEffects, PendingRequest, ScheduleRequest};
+pub use effects::{
+    NotificationEffectError, NotificationEffects, PayloadKind, PendingRequest, ScheduleRequest,
+};
 pub use pass::{reconcile, EffectFailure, ReconcileReport};
 
 #[derive(Debug, Error)]

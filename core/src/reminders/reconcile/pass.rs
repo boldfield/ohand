@@ -5,13 +5,13 @@ use rusqlite::Transaction;
 
 use super::completion::{apply_completion, CompletionOutcome, EffectCompletion, EffectOutcome};
 use super::effects::{
-    NotificationEffectError, NotificationEffects, PendingRequest, ScheduleRequest,
+    NotificationEffectError, NotificationEffects, PayloadKind, PendingRequest, ScheduleRequest,
 };
 use super::ReconcileError;
 use crate::providers::contracts::ErrorClass;
 use crate::reminders::state::{
     desired_notifications, get_reminder, list_operations, reconcile_inactive_items,
-    DesiredNotification, OperationType, ScheduleState, UnschedulableReason,
+    DesiredNotification, OperationState, OperationType, UnschedulableReason,
 };
 use crate::store::schema::{Clock, Database};
 
@@ -35,8 +35,11 @@ pub struct ReconcileReport {
     pub removed: Vec<String>,
     /// Cancel operations whose request was already absent from the OS.
     pub already_absent: Vec<String>,
-    /// Never installed and past due: now `Unschedulable(TimeInPast)`.
+    /// Never attempted and past due: now `Unschedulable(TimeInPast)`.
     pub expired: Vec<String>,
+    /// Attempted, unconfirmed, absent from the OS and past due: it may have fired, so nothing
+    /// is concluded and no reminder state changes.
+    pub unconfirmed: Vec<String>,
     /// Installs that completed after their operation was superseded and were cancelled again.
     pub rolled_back: Vec<String>,
     pub failures: Vec<EffectFailure>,
@@ -123,13 +126,7 @@ pub fn reconcile(
     }
 
     for notification_id in &to_cancel {
-        cancel_in_os(database, clock, effects, notification_id, &mut report)?;
-        if report
-            .failures
-            .last()
-            .map(|failure| failure.notification_id.as_str())
-            != Some(notification_id.as_str())
-        {
+        if cancel_in_os(database, clock, effects, notification_id, &mut report)? {
             report.removed.push(notification_id.clone());
         }
     }
@@ -155,8 +152,12 @@ pub fn reconcile(
             continue;
         }
         if entry.fire_at <= now {
-            if expire_if_never_installed(database, clock, entry)? {
-                report.expired.push(entry.notification_id.clone());
+            match expire_if_never_attempted(database, clock, entry)? {
+                ExpiryOutcome::Expired => report.expired.push(entry.notification_id.clone()),
+                ExpiryOutcome::Unconfirmed => {
+                    report.unconfirmed.push(entry.notification_id.clone())
+                }
+                ExpiryOutcome::Untouched => {}
             }
             continue;
         }
@@ -241,9 +242,9 @@ fn cancel_in_os(
     effects: &mut dyn NotificationEffects,
     notification_id: &str,
     report: &mut ReconcileReport,
-) -> Result<(), ReconcileError> {
+) -> Result<bool, ReconcileError> {
     let Some(reminder_id) = reminder_id_of(notification_id) else {
-        return Ok(());
+        return Ok(false);
     };
     match effects.cancel(notification_id) {
         Ok(()) => {
@@ -255,6 +256,7 @@ fn cancel_in_os(
                 notification_id,
                 EffectOutcome::Succeeded,
             )?;
+            Ok(true)
         }
         Err(error) => {
             record_effect(
@@ -268,9 +270,9 @@ fn cancel_in_os(
             report
                 .failures
                 .push(failure(notification_id, OperationType::Cancel, error));
+            Ok(false)
         }
     }
-    Ok(())
 }
 
 fn schedule_in_os(
@@ -280,9 +282,11 @@ fn schedule_in_os(
     entry: &DesiredNotification,
     report: &mut ReconcileReport,
 ) -> Result<(), ReconcileError> {
+    mark_schedule_attempted(database, entry)?;
     let request = ScheduleRequest {
         notification_id: entry.notification_id.clone(),
         fire_at: entry.fire_at,
+        payload_kind: PayloadKind::Generic,
         opaque_target_id: entry.item_id.clone(),
     };
     match effects.schedule(&request) {
@@ -339,23 +343,59 @@ fn failure(
     }
 }
 
-/// A due time that has passed for a reminder whose installation was never confirmed cannot be
+/// Durably record, before the native call, that this schedule was attempted. Committed in its
+/// own transaction so it survives a crash anywhere after the OS call starts.
+fn mark_schedule_attempted(
+    database: &mut Database,
+    entry: &DesiredNotification,
+) -> Result<(), ReconcileError> {
+    let tx = database.immediate_transaction().map_err(database_error)?;
+    tx.execute(
+        "UPDATE reminder_operations SET operation_state = ?
+         WHERE reminder_id = ? AND effect_identity = ? AND operation_state = ?",
+        rusqlite::params![
+            OperationState::Failed.as_str(),
+            &entry.reminder_id,
+            effect_identity(OperationType::Schedule, &entry.notification_id),
+            OperationState::Pending.as_str(),
+        ],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+enum ExpiryOutcome {
+    Expired,
+    Unconfirmed,
+    Untouched,
+}
+
+/// A due time that has passed for a reminder whose schedule was never attempted cannot be
 /// installed any more: the opportunity is kept as `Unschedulable(TimeInPast)` with the instant
-/// preserved. A reminder already confirmed installed is left alone: its request left the
-/// pending set because it fired or was dismissed, which says nothing about delivery here.
-fn expire_if_never_installed(
+/// preserved. A schedule that was attempted or acknowledged may have installed a request that
+/// has since fired or been dismissed, so absence from the pending set proves nothing and no
+/// reminder state is changed.
+fn expire_if_never_attempted(
     database: &mut Database,
     clock: &dyn Clock,
     entry: &DesiredNotification,
-) -> Result<bool, ReconcileError> {
+) -> Result<ExpiryOutcome, ReconcileError> {
     let tx = database.immediate_transaction().map_err(database_error)?;
     let Some(reminder) = get_reminder(&tx, &entry.item_id)? else {
-        return Ok(false);
+        return Ok(ExpiryOutcome::Untouched);
     };
-    if reminder.schedule_state == ScheduleState::Scheduled
-        || reminder.notification_id().as_deref() != Some(entry.notification_id.as_str())
-    {
-        return Ok(false);
+    if reminder.notification_id().as_deref() != Some(entry.notification_id.as_str()) {
+        return Ok(ExpiryOutcome::Untouched);
+    }
+    let identity = effect_identity(OperationType::Schedule, &entry.notification_id);
+    let attempt_state = list_operations(&tx, &reminder.reminder_id)?
+        .iter()
+        .find(|operation| operation.effect_identity == identity)
+        .map(|operation| operation.operation_state);
+    match attempt_state {
+        Some(OperationState::Acknowledged) => return Ok(ExpiryOutcome::Untouched),
+        Some(OperationState::Failed) => return Ok(ExpiryOutcome::Unconfirmed),
+        _ => {}
     }
     let changed = tx.execute(
         "UPDATE reminders SET request_state = 'unschedulable', unschedulable_reason = ?,
@@ -371,14 +411,15 @@ fn expire_if_never_installed(
     )?;
     tx.execute(
         "UPDATE reminder_operations SET operation_state = 'superseded'
-         WHERE reminder_id = ? AND effect_identity = ? AND operation_state IN ('pending', 'failed')",
-        rusqlite::params![
-            &reminder.reminder_id,
-            effect_identity(OperationType::Schedule, &entry.notification_id)
-        ],
+         WHERE reminder_id = ? AND effect_identity = ? AND operation_state = 'pending'",
+        rusqlite::params![&reminder.reminder_id, identity],
     )?;
     tx.commit()?;
-    Ok(changed > 0)
+    Ok(if changed > 0 {
+        ExpiryOutcome::Expired
+    } else {
+        ExpiryOutcome::Untouched
+    })
 }
 
 fn format_instant(instant: DateTime<Utc>) -> String {

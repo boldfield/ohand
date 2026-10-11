@@ -25,12 +25,27 @@ impl std::fmt::Display for NotificationEffectError {
     }
 }
 
-/// Schedule request for the generic payload kind: fixed wording plus the opaque item
-/// identifier. Item-specific previews are produced by other tasks, never here.
+/// What a notification may say. Reconciliation only ever requests the generic payload;
+/// item-specific previews are produced by other tasks, never here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PayloadKind {
+    Generic,
+}
+
+impl PayloadKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PayloadKind::Generic => "generic",
+        }
+    }
+}
+
+/// Schedule request: fixed wording plus the opaque item identifier.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScheduleRequest {
     pub notification_id: String,
     pub fire_at: DateTime<Utc>,
+    pub payload_kind: PayloadKind,
     pub opaque_target_id: String,
 }
 
