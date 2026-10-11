@@ -1048,3 +1048,68 @@ fn failed_cancels_beyond_the_headroom_never_push_the_os_past_its_limit() -> Resu
     assert!(center.pending.len() <= budget());
     Ok(())
 }
+
+#[test]
+fn prompts_newly_deferred_after_failed_cancels_are_cancelled_or_reported() -> Result<()> {
+    let mut db = open_db("prompt_cancel_cascade")?;
+    seed_reminders(&mut db, budget() - 5)?;
+    let mut center = FakeCenter::default();
+    let prompts: Vec<PromptDemand> = (1..=MAX_PROMPT_REQUESTS as i64)
+        .map(|day| PromptDemand {
+            notification_id: format!("prompt-{day}"),
+            fire_at: instant(PASS_TIME) + Duration::days(day),
+        })
+        .collect();
+    for demand in &prompts {
+        center
+            .pending
+            .push((demand.notification_id.clone(), demand.fire_at));
+    }
+    center.fail_cancel_for.insert("prompt-6".to_string());
+    center.fail_cancel_for.insert("prompt-7".to_string());
+
+    let report = pass_at(&mut db, &mut center, &prompts, PASS_TIME)?;
+
+    assert!(!report.converged());
+    let failed: BTreeSet<&str> = report
+        .prompt_cancel_failures
+        .iter()
+        .map(|failure| failure.notification_id.as_str())
+        .collect();
+    assert_eq!(failed, BTreeSet::from(["prompt-6", "prompt-7"]));
+    for deferred in &report.allocation.deferred_prompts {
+        assert!(
+            !center.holds(&deferred.notification_id)
+                || failed.contains(deferred.notification_id.as_str()),
+            "{} is reported as unscheduled but still pending",
+            deferred.notification_id
+        );
+    }
+    for granted in &report.allocation.granted_prompts {
+        assert!(center.holds(granted));
+    }
+    let mut every_prompt: Vec<String> = report
+        .allocation
+        .granted_prompts
+        .iter()
+        .cloned()
+        .chain(
+            report
+                .allocation
+                .deferred_prompts
+                .iter()
+                .map(|deferred| deferred.notification_id.clone()),
+        )
+        .collect();
+    every_prompt.sort();
+    every_prompt.dedup();
+    assert_eq!(every_prompt.len(), MAX_PROMPT_REQUESTS);
+    assert!(center.evicted.is_empty());
+    assert!(center.pending.len() <= budget() + failed.len());
+
+    center.fail_cancel_for.clear();
+    let retry = pass_at(&mut db, &mut center, &prompts, PASS_TIME)?;
+    assert!(retry.converged());
+    assert!(center.evicted.is_empty());
+    Ok(())
+}

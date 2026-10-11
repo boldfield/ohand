@@ -51,8 +51,10 @@ impl CapacityReport {
 /// budget and the OS never has to evict silently.
 ///
 /// A prompt request whose cancel fails is still pending, so it is charged against the budget:
-/// the allocation is settled again with it counted as a request core cannot reclaim, and any
-/// reminder that no longer fits becomes `unschedulable(capacity_exceeded)`. As a last guard the
+/// the allocation is settled again with it counted as a request core cannot reclaim, any
+/// reminder that no longer fits becomes `unschedulable(capacity_exceeded)`, and any prompt the
+/// smaller budget newly defers is cancelled in turn, until every deferred prompt is either
+/// cancelled or reported in `prompt_cancel_failures`. As a last guard the
 /// effects handed to `reconcile` refuse to add a request while the pending set is at the OS
 /// limit (a transient failure, retried by the next pass), whatever other cancel failed.
 ///
@@ -70,54 +72,25 @@ pub fn reconcile_with_capacity(
         .list_pending()
         .map_err(ReconcileError::ListPending)?;
 
-    let mut report = CapacityReport::default();
-    report.allocation = settle(database, clock, policy, prompts, &pending, &mut report)?;
-
     let pending_ids: BTreeSet<&str> = pending
         .iter()
         .map(|request| request.notification_id.as_str())
         .collect();
-    let to_cancel: Vec<String> = report
-        .allocation
-        .deferred_prompts
-        .iter()
-        .filter(|prompt| pending_ids.contains(prompt.notification_id.as_str()))
-        .map(|prompt| prompt.notification_id.clone())
-        .collect();
-    for notification_id in to_cancel {
-        match effects.cancel(&notification_id) {
-            Ok(()) => report.prompts_cancelled.push(notification_id),
-            Err(error) => report.prompt_cancel_failures.push(EffectFailure {
-                notification_id,
-                operation_type: OperationType::Cancel,
-                class: error.class,
-                code: error.code,
-            }),
-        }
-    }
-
-    if !report.prompt_cancel_failures.is_empty() {
-        let still_pending: BTreeSet<&str> = report
-            .prompt_cancel_failures
-            .iter()
-            .map(|failure| failure.notification_id.as_str())
-            .collect();
+    let mut report = CapacityReport::default();
+    // Prompts whose cancel failed: still pending, so they stay out of the demands handed to
+    // `settle` and are counted with the requests core cannot reclaim. Each failure can shrink
+    // the budget and defer more prompts, so cancel and settle repeat until no new cancel fails.
+    // Every round that continues adds at least one failed prompt, so the loop terminates.
+    let mut failed_deferrals: BTreeMap<String, DeferredPrompt> = BTreeMap::new();
+    let mut cancelled: BTreeSet<String> = BTreeSet::new();
+    loop {
         let remaining_prompts: Vec<PromptDemand> = prompts
             .iter()
-            .filter(|prompt| !still_pending.contains(prompt.notification_id.as_str()))
+            .filter(|prompt| !failed_deferrals.contains_key(&prompt.notification_id))
             .cloned()
             .collect();
-        let first_deferrals: Vec<DeferredPrompt> = report
-            .allocation
-            .deferred_prompts
-            .iter()
-            .filter(|prompt| still_pending.contains(prompt.notification_id.as_str()))
-            .cloned()
-            .collect();
-        // The failed prompts are not among the prompts passed here, so the pending list counts
-        // them with the requests core cannot reclaim.
-        let first_demoted = report.demoted.len();
-        let mut resettled = settle(
+        let demoted_before = report.demoted.len();
+        let mut allocation = settle(
             database,
             clock,
             policy,
@@ -125,17 +98,66 @@ pub fn reconcile_with_capacity(
             &pending,
             &mut report,
         )?;
-        resettled.deferred_prompts.extend(first_deferrals);
-        report.allocation = resettled;
-        // A reminder refilled by the first settle and demoted again by the second never left
-        // `capacity_exceeded` as far as the caller can observe.
-        let second_demoted: Vec<String> = report.demoted.split_off(first_demoted);
-        for reminder_id in second_demoted {
-            if let Some(position) = report.refilled.iter().position(|id| id == &reminder_id) {
-                report.refilled.remove(position);
-            } else {
-                report.demoted.push(reminder_id);
+        if !failed_deferrals.is_empty() {
+            // A reminder refilled by an earlier settle and demoted again by this one never
+            // left `capacity_exceeded` as far as the caller can observe.
+            let demoted_again: Vec<String> = report.demoted.split_off(demoted_before);
+            for reminder_id in demoted_again {
+                if let Some(position) = report.refilled.iter().position(|id| id == &reminder_id) {
+                    report.refilled.remove(position);
+                } else {
+                    report.demoted.push(reminder_id);
+                }
             }
+        }
+
+        let to_cancel: Vec<String> = allocation
+            .deferred_prompts
+            .iter()
+            .filter(|prompt| {
+                pending_ids.contains(prompt.notification_id.as_str())
+                    && !cancelled.contains(&prompt.notification_id)
+            })
+            .map(|prompt| prompt.notification_id.clone())
+            .collect();
+        let mut new_failures = false;
+        for notification_id in to_cancel {
+            match effects.cancel(&notification_id) {
+                Ok(()) => {
+                    cancelled.insert(notification_id.clone());
+                    report.prompts_cancelled.push(notification_id);
+                }
+                Err(error) => {
+                    new_failures = true;
+                    if let Some(deferral) = allocation
+                        .deferred_prompts
+                        .iter()
+                        .find(|prompt| prompt.notification_id == notification_id)
+                    {
+                        failed_deferrals.insert(notification_id.clone(), deferral.clone());
+                    }
+                    report.prompt_cancel_failures.push(EffectFailure {
+                        notification_id,
+                        operation_type: OperationType::Cancel,
+                        class: error.class,
+                        code: error.code,
+                    });
+                }
+            }
+        }
+
+        for failed in failed_deferrals.values() {
+            if !allocation
+                .deferred_prompts
+                .iter()
+                .any(|prompt| prompt.notification_id == failed.notification_id)
+            {
+                allocation.deferred_prompts.push(failed.clone());
+            }
+        }
+        report.allocation = allocation;
+        if !new_failures {
+            break;
         }
     }
 
