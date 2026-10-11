@@ -265,6 +265,10 @@ fn counterbalanced(position: usize) -> [ArmLabel; 2] {
 
 /// Sides this run would send: those with no dispatched attempt and the explicit reruns.
 pub fn sides_to_send(view: &PlanView<'_>) -> u32 {
+    if !view.arm_a.blockers.is_empty() || !view.arm_b.blockers.is_empty() {
+        // A pair needs both arms eligible; otherwise both sides are recorded as skipped.
+        return 0;
+    }
     let mut count = 0;
     for planned in view.cases {
         for arm in [ArmLabel::A, ArmLabel::B] {
@@ -316,6 +320,21 @@ pub fn render_plan(view: &PlanView<'_>) -> String {
         "{}",
         profile_line("b", view.arm_b, &experiment.profile_b_version)
     );
+    for (label, arm) in [("a", view.arm_a), ("b", view.arm_b)] {
+        for blocker in &arm.blockers {
+            let _ = writeln!(
+                text,
+                "  not eligible, profile {label}: {}",
+                sanitize(blocker)
+            );
+        }
+    }
+    if !view.arm_a.blockers.is_empty() || !view.arm_b.blockers.is_empty() {
+        let _ = writeln!(
+            text,
+            "  a run records every case as not eligible and sends nothing, for either arm"
+        );
+    }
     let _ = writeln!(
         text,
         "attempts per side: {}   request cap: {}",
@@ -364,6 +383,7 @@ pub fn render_plan(view: &PlanView<'_>) -> String {
             .prior
             .and_then(|prior| prior.orders.get(planned.case_id()).copied())
             .unwrap_or_else(|| counterbalanced(position));
+        let blocked = !view.arm_a.blockers.is_empty() || !view.arm_b.blockers.is_empty();
         let describe = |arm: ArmLabel| -> String {
             let prior = view.prior.and_then(|p| p.side(planned.case_id(), arm));
             let rerun = view
@@ -371,6 +391,7 @@ pub fn render_plan(view: &PlanView<'_>) -> String {
                 .iter()
                 .any(|key| key.case_id == planned.case_id() && key.arm == arm);
             match (prior, rerun) {
+                (None, _) | (Some(_), true) if blocked => "not eligible".to_string(),
                 (None, _) => "to send".to_string(),
                 (Some(_), true) => "rerun (new allowance)".to_string(),
                 (Some("completed"), false) => "kept: completed".to_string(),

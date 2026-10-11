@@ -197,7 +197,7 @@ fn malformed_invocations_are_refused_with_no_output_on_stdout() {
             "--profile-b",
             "anthropic:m1",
         ],
-        // self-hosted is not supported
+        // a self-hosted profile needs its endpoint variable
         vec![
             "plan",
             "--corpus",
@@ -1604,6 +1604,401 @@ fn live_run_with_a_failing_provider_exits_incomplete_without_retrying_beyond_the
     assert!(journal.exists());
     for surface in [&outcome.out, &outcome.err] {
         assert!(!surface.contains(SECRET_A) && !surface.contains(SECRET_B));
+    }
+}
+
+// ---- self-hosted profiles ---------------------------------------------------------------------
+
+const ENDPOINT_VARIABLE: &str = "BENCH_TEST_SPARK_URL";
+const SPARK_BASE: &str = "https://spark.tailnet.example:8443/v1";
+const VERIFIED_MODEL_SPEC: &str = "deepseek-flash-iq3@latest";
+const UNVERIFIED_MODEL_SPEC: &str = "qwen3.8@27b";
+
+fn self_hosted_words<'a>(command: &'a str, model_spec: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
+    let mut words = vec![
+        command,
+        "--corpus",
+        CORPUS,
+        "--profile-a",
+        model_spec,
+        "--profile-b",
+        "anthropic:model-b:ref-b",
+        "--self-hosted-endpoint-env",
+        ENDPOINT_VARIABLE,
+        "--max-cases",
+        "2",
+    ];
+    words.extend_from_slice(extra);
+    words
+}
+
+fn spec(model: &str) -> String {
+    format!("self-hosted:{model}:ref-spark")
+}
+
+fn plan_text(model_spec: &str, base_url: &str, extra: &[&str]) -> Outcome {
+    let spec = spec(model_spec);
+    let words = self_hosted_words("plan", &spec, extra);
+    execute(&words, &services_with(&[(ENDPOINT_VARIABLE, base_url)]))
+}
+
+#[test]
+fn self_hosted_profile_arguments_are_validated_without_echoing_the_endpoint() {
+    let spec = spec(VERIFIED_MODEL_SPEC);
+    let with_endpoint_variable = |value: &'static str| {
+        let words = self_hosted_words("plan", &spec, &[]);
+        execute(&words, &services_with(&[(ENDPOINT_VARIABLE, value)]))
+    };
+
+    // a model tag is written with `@`; a literal `:` would be the credential separator
+    let outcome = plan_text(VERIFIED_MODEL_SPEC, SPARK_BASE, &[]);
+    assert_eq!(outcome.status, EXIT_COMPLETED, "{}", outcome.err);
+    assert!(outcome
+        .out
+        .contains("self-hosted / deepseek-flash-iq3:latest"));
+    assert!(!outcome.out.contains('@'));
+
+    // `@` is only a self-hosted model tag
+    let hosted_tag = execute(
+        &[
+            "plan",
+            "--corpus",
+            CORPUS,
+            "--profile-a",
+            "openai:model@tag",
+            "--profile-b",
+            "anthropic:model-b",
+        ],
+        &services_with(&[]),
+    );
+    assert_eq!(hosted_tag.status, EXIT_REFUSED);
+
+    // the variable is required, must be named rather than given, and must be set
+    let words = self_hosted_words("plan", &spec, &[]);
+    let without_variable: Vec<&str> = words
+        .iter()
+        .copied()
+        .filter(|word| *word != "--self-hosted-endpoint-env" && *word != ENDPOINT_VARIABLE)
+        .collect();
+    let outcome = execute(&without_variable, &services_with(&[]));
+    assert_eq!(outcome.status, EXIT_REFUSED);
+    assert!(outcome.err.contains("--self-hosted-endpoint-env"));
+
+    let by_value = execute(
+        &self_hosted_words("plan", &spec, &[])
+            .iter()
+            .map(|word| {
+                if *word == ENDPOINT_VARIABLE {
+                    SPARK_BASE
+                } else {
+                    word
+                }
+            })
+            .collect::<Vec<_>>(),
+        &services_with(&[]),
+    );
+    assert_eq!(by_value.status, EXIT_REFUSED);
+    assert!(!by_value.err.contains("tailnet"), "{}", by_value.err);
+
+    let unset = execute(&self_hosted_words("plan", &spec, &[]), &services_with(&[]));
+    assert_eq!(unset.status, EXIT_REFUSED);
+    let empty = with_endpoint_variable("");
+    assert_eq!(empty.status, EXIT_REFUSED);
+
+    for unsafe_value in [
+        "http://spark.tailnet.example/v1",
+        "https://user:pw-canary@spark.tailnet.example/v1",
+        "https://spark.tailnet.example/v1?token=canary",
+        "spark.tailnet.example",
+    ] {
+        let outcome = with_endpoint_variable(unsafe_value);
+        assert_eq!(outcome.status, EXIT_REFUSED, "{unsafe_value}");
+        assert!(outcome.out.is_empty());
+        for surface in [&outcome.out, &outcome.err] {
+            assert!(
+                !surface.contains("tailnet") && !surface.contains("canary"),
+                "{surface}"
+            );
+        }
+    }
+
+    // naming an endpoint variable without a self-hosted profile is refused, not ignored
+    let outcome = execute(
+        &[
+            "plan",
+            "--corpus",
+            CORPUS,
+            "--profile-a",
+            "openai:model-a",
+            "--profile-b",
+            "anthropic:model-b",
+            "--self-hosted-endpoint-env",
+            ENDPOINT_VARIABLE,
+        ],
+        &services_with(&[(ENDPOINT_VARIABLE, SPARK_BASE)]),
+    );
+    assert_eq!(outcome.status, EXIT_REFUSED);
+}
+
+#[test]
+fn the_plan_pins_model_and_endpoint_into_the_profile_version_and_never_prints_the_endpoint() {
+    let version_line = |outcome: &Outcome| -> String {
+        outcome
+            .out
+            .lines()
+            .find(|line| line.starts_with("profile a:"))
+            .unwrap_or_else(|| panic!("no profile line in {}", outcome.out))
+            .to_string()
+    };
+    let base = plan_text(VERIFIED_MODEL_SPEC, SPARK_BASE, &[]);
+    let other_endpoint = plan_text(
+        VERIFIED_MODEL_SPEC,
+        "https://other-spark.tailnet.example:8443/v1",
+        &[],
+    );
+    let other_path = plan_text(
+        VERIFIED_MODEL_SPEC,
+        "https://spark.tailnet.example:8443/v2",
+        &[],
+    );
+    let other_model = plan_text(UNVERIFIED_MODEL_SPEC, SPARK_BASE, &[]);
+    for outcome in [&base, &other_endpoint, &other_path, &other_model] {
+        assert_eq!(outcome.status, EXIT_COMPLETED, "{}", outcome.err);
+        assert!(!outcome.out.contains("tailnet") && !outcome.out.contains("8443"));
+    }
+    assert!(version_line(&base).contains("deepseek-flash-iq3:latest"));
+    assert!(version_line(&other_model).contains("qwen3.8:27b"));
+    let versions = [&base, &other_endpoint, &other_path, &other_model].map(|outcome| {
+        version_line(outcome)
+            .rsplit("version ")
+            .next()
+            .unwrap()
+            .to_string()
+    });
+    for (index, version) in versions.iter().enumerate() {
+        assert!(
+            !versions[..index].contains(version),
+            "every configured difference is a different profile version"
+        );
+    }
+    // the same configuration gives the same version, so a run can be resumed
+    assert_eq!(
+        version_line(&base),
+        version_line(&plan_text(VERIFIED_MODEL_SPEC, SPARK_BASE, &[]))
+    );
+}
+
+#[test]
+fn the_plan_names_why_an_unverified_model_cannot_be_paired_and_plans_no_request() {
+    let outcome = plan_text(UNVERIFIED_MODEL_SPEC, SPARK_BASE, &[]);
+    assert_eq!(outcome.status, EXIT_COMPLETED, "{}", outcome.err);
+    assert!(
+        outcome
+            .out
+            .contains("not eligible, profile a: text interpretation is not verified"),
+        "{}",
+        outcome.out
+    );
+    assert!(
+        outcome.out.contains("planned requests: 0"),
+        "{}",
+        outcome.out
+    );
+    assert!(outcome.out.contains("sends nothing, for either arm"));
+    assert!(!outcome.out.contains("to send"), "{}", outcome.out);
+    assert!(!outcome.out.contains("not eligible, profile b"));
+
+    let unlisted = plan_text("not-a-listed-model", SPARK_BASE, &[]);
+    assert!(
+        unlisted.out.contains("not eligible, profile a"),
+        "{}",
+        unlisted.out
+    );
+}
+
+#[test]
+fn a_verified_model_is_paired_only_as_far_as_the_adapter_declares_diagnostic_support() {
+    use crate::adapters::self_hosted::diagnostic_support;
+    let outcome = plan_text(VERIFIED_MODEL_SPEC, SPARK_BASE, &[]);
+    assert_eq!(outcome.status, EXIT_COMPLETED, "{}", outcome.err);
+    // the verified model is not blocked on evidence; any block is the adapter's own declaration
+    assert!(
+        !outcome.out.contains("is not verified for this model"),
+        "{}",
+        outcome.out
+    );
+    if diagnostic_support().is_supported() {
+        assert!(
+            !outcome.out.contains("not eligible, profile a"),
+            "{}",
+            outcome.out
+        );
+    } else {
+        assert!(
+            outcome.out.contains(
+                "not eligible, profile a: the adapter declares no support for diagnostic calls"
+            ),
+            "{}",
+            outcome.out
+        );
+        assert!(outcome.out.contains("planned requests: 0"));
+    }
+}
+
+#[test]
+fn fake_run_with_an_unverified_self_hosted_arm_skips_every_case_and_sends_nothing() {
+    let dir = TempDir::new().unwrap();
+    let (journal, journal_text) = journal_in(&dir);
+    let spec = spec(UNVERIFIED_MODEL_SPEC);
+    let words = self_hosted_words("run", &spec, &["--journal", &journal_text]);
+    let services = services_with(&[(ENDPOINT_VARIABLE, SPARK_BASE)]);
+
+    let outcome = execute(&words, &services);
+    assert_eq!(
+        outcome.status, EXIT_INCOMPLETE,
+        "{}\n{}",
+        outcome.out, outcome.err
+    );
+    assert_eq!(attempt_count(&journal), 0);
+    let journal_text_content = std::fs::read_to_string(&journal).unwrap();
+    assert!(
+        journal_text_content.contains("not_eligible"),
+        "{journal_text_content}"
+    );
+    assert!(
+        journal_text_content.contains("unverified"),
+        "{journal_text_content}"
+    );
+    for surface in [&outcome.out, &outcome.err, &journal_text_content] {
+        assert!(!surface.contains("tailnet") && !surface.contains("8443"));
+    }
+
+    // another endpoint is another profile: the pinned journal is not silently continued
+    let moved = services_with(&[(
+        ENDPOINT_VARIABLE,
+        "https://other-spark.tailnet.example:8443/v1",
+    )]);
+    let before = std::fs::read(&journal).unwrap();
+    let refused = execute(&words, &moved);
+    assert_eq!(refused.status, EXIT_REFUSED, "{}", refused.out);
+    assert!(
+        refused.err.contains("configuration changed"),
+        "{}",
+        refused.err
+    );
+    assert_eq!(std::fs::read(&journal).unwrap(), before);
+}
+
+fn live_self_hosted_words<'a>(journal: &'a str, spec: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
+    let mut words = self_hosted_words("run", spec, &["--journal", journal, "--mode", "live"]);
+    words.extend_from_slice(extra);
+    words
+}
+
+#[test]
+fn live_self_hosted_run_needs_its_own_grant_and_credential_and_never_falls_back() {
+    let authority = TestAuthority::new();
+    let cloud = silent_server(&authority);
+    let spark = silent_server(&authority);
+    let dir = TempDir::new().unwrap();
+    let (journal, journal_text) = journal_in(&dir);
+    let spec = spec(UNVERIFIED_MODEL_SPEC);
+    let spark_url = spark.url("/v1");
+    let both = [
+        (ENDPOINT_VARIABLE, spark_url.as_str()),
+        ("BENCH_TEST_KEY_A", SECRET_A),
+        ("BENCH_TEST_KEY_B", SECRET_B),
+    ];
+    let services = |variables: &[(&str, &str)]| {
+        let mut services = fixture_services(&authority, &cloud, variables);
+        services.extra_trust_roots = vec![authority.root_der()];
+        services
+    };
+    let granted = [
+        "--execute-network",
+        "--request-cap",
+        "4",
+        "--allow-destination",
+        "self-hosted",
+        "--allow-destination",
+        "anthropic",
+        "--credential-env",
+        "ref-spark=BENCH_TEST_KEY_A",
+        "--credential-env",
+        "ref-b=BENCH_TEST_KEY_B",
+    ];
+    let refuse = |extra: &[&str], variables: &[(&str, &str)]| {
+        let outcome = execute(
+            &live_self_hosted_words(&journal_text, &spec, extra),
+            &services(variables),
+        );
+        assert_eq!(outcome.status, EXIT_REFUSED, "{}", outcome.err);
+        assert!(outcome.out.is_empty());
+        assert!(outcome.err.contains("nothing was sent"));
+        assert!(!journal.exists(), "the journal is not opened on a refusal");
+        assert_eq!(spark.connections() + cloud.connections(), 0);
+        for surface in [&outcome.out, &outcome.err] {
+            assert!(!surface.contains(SECRET_A) && !surface.contains(SECRET_B));
+            assert!(!surface.contains(&spark_url));
+        }
+        outcome
+    };
+
+    // choosing a self-hosted profile grants nothing
+    let without_grant = [
+        "--execute-network",
+        "--request-cap",
+        "4",
+        "--allow-destination",
+        "anthropic",
+        "--credential-env",
+        "ref-spark=BENCH_TEST_KEY_A",
+        "--credential-env",
+        "ref-b=BENCH_TEST_KEY_B",
+    ];
+    let outcome = refuse(&without_grant, &both);
+    assert!(
+        outcome.err.contains("--allow-destination self-hosted"),
+        "{}",
+        outcome.err
+    );
+
+    // a missing or empty credential is refused, never replaced by the other arm's
+    let outcome = refuse(&granted, &[both[0], both[2]]);
+    assert!(outcome.err.contains("credential"), "{}", outcome.err);
+    refuse(&granted, &[both[0], both[2], ("BENCH_TEST_KEY_A", "")]);
+
+    // an unmapped reference is not resolved from the environment
+    let unmapped = [
+        "--execute-network",
+        "--request-cap",
+        "4",
+        "--allow-destination",
+        "self-hosted",
+        "--allow-destination",
+        "anthropic",
+        "--credential-env",
+        "ref-b=BENCH_TEST_KEY_B",
+    ];
+    refuse(&unmapped, &both);
+
+    // with everything granted, an arm that cannot be paired still sends nothing, on either side
+    let outcome = execute(
+        &live_self_hosted_words(&journal_text, &spec, &granted),
+        &services(&both),
+    );
+    assert_eq!(
+        outcome.status, EXIT_INCOMPLETE,
+        "{}\n{}",
+        outcome.out, outcome.err
+    );
+    assert_eq!(spark.connections(), 0);
+    assert_eq!(cloud.connections(), 0, "the hosted arm is not run alone");
+    assert_eq!(attempt_count(&journal), 0);
+    let recorded = std::fs::read_to_string(&journal).unwrap();
+    for surface in [&outcome.out, &outcome.err, &recorded] {
+        assert!(!surface.contains(SECRET_A) && !surface.contains(SECRET_B));
+        assert!(!surface.contains(&spark_url) && !surface.contains("localhost"));
     }
 }
 
