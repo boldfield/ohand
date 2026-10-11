@@ -123,6 +123,10 @@ impl PriorJournal {
         }))
     }
 
+    pub fn has_dispatched(&self, case_id: &str, arm: ArmLabel) -> bool {
+        self.side(case_id, arm).is_some()
+    }
+
     fn side(&self, case_id: &str, arm: ArmLabel) -> Option<&str> {
         self.dispatched
             .get(&(case_id.to_string(), arm_name(arm)))

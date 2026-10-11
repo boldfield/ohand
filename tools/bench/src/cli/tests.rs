@@ -109,13 +109,17 @@ fn attempt_count(path: &Path) -> usize {
 }
 
 fn first_case_id() -> String {
+    nth_case_id(0)
+}
+
+fn nth_case_id(index: usize) -> String {
     let corpus: Value = serde_json::from_str(&std::fs::read_to_string(CORPUS).unwrap()).unwrap();
     let fixtures = corpus
         .get("fixtures")
         .or_else(|| corpus.get("cases"))
         .and_then(Value::as_array)
         .expect("corpus lists fixtures");
-    fixtures[0]["id"].as_str().unwrap().to_string()
+    fixtures[index]["id"].as_str().unwrap().to_string()
 }
 
 // ---- help and argument handling -------------------------------------------------------------
@@ -596,6 +600,76 @@ fn explicit_rerun_sends_exactly_that_side_again() {
     let rerun = execute(&fake_words(&journal_text, &["--rerun", &target]), &services);
     assert_eq!(rerun.status, EXIT_COMPLETED, "{}", rerun.err);
     assert_eq!(attempt_count(&journal), 7);
+}
+
+#[test]
+fn refused_rerun_on_a_fresh_journal_creates_no_file_and_pins_nothing() {
+    let dir = TempDir::new().unwrap();
+    let (journal, journal_text) = journal_in(&dir);
+    let services = services_with(&[]);
+    let target = format!("{}:a", first_case_id());
+    let refused = execute(
+        &fake_words(
+            &journal_text,
+            &["--rerun", &target, "--build-revision", "build-1"],
+        ),
+        &services,
+    );
+    assert_eq!(refused.status, EXIT_REFUSED, "{}", refused.err);
+    assert!(
+        refused.err.contains("no dispatched attempt"),
+        "{}",
+        refused.err
+    );
+    assert!(
+        !journal.exists(),
+        "a refused run must not create the journal"
+    );
+
+    let corrected = execute(
+        &fake_words(&journal_text, &["--build-revision", "build-2"]),
+        &services,
+    );
+    assert_eq!(corrected.status, EXIT_COMPLETED, "{}", corrected.err);
+    assert_eq!(attempt_count(&journal), 6);
+}
+
+#[test]
+fn refused_rerun_leaves_an_existing_journal_byte_identical() {
+    let dir = TempDir::new().unwrap();
+    let (journal, journal_text) = journal_in(&dir);
+    let services = services_with(&[]);
+    assert_eq!(
+        execute(&fake_words(&journal_text, &["--max-cases", "2"]), &services).status,
+        EXIT_COMPLETED
+    );
+    let before = std::fs::read(&journal).unwrap();
+
+    let unplanned = execute(
+        &fake_words(
+            &journal_text,
+            &["--max-cases", "2", "--rerun", "no-such-case:a"],
+        ),
+        &services,
+    );
+    assert_eq!(unplanned.status, EXIT_REFUSED, "{}", unplanned.err);
+    assert!(
+        unplanned.err.contains("not in the plan"),
+        "{}",
+        unplanned.err
+    );
+    assert_eq!(std::fs::read(&journal).unwrap(), before);
+
+    // Planned by --max-cases 3 but never dispatched in the two-case run.
+    let target = format!("{}:a", nth_case_id(2));
+    let undispatched = execute(&fake_words(&journal_text, &["--rerun", &target]), &services);
+    assert_eq!(undispatched.status, EXIT_REFUSED, "{}", undispatched.err);
+    assert!(
+        undispatched.err.contains("no dispatched attempt"),
+        "{}",
+        undispatched.err
+    );
+    assert_eq!(std::fs::read(&journal).unwrap(), before);
 }
 
 #[test]

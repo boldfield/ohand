@@ -31,7 +31,7 @@ The mode, corpus version, instruction version, both profile versions and the bui
 
 ## Live runs and secret references
 
-Choosing a profile grants nothing. A live run is refused, with exit status 2 and before the journal is opened or any request is reserved, unless all of these are given:
+Choosing a profile grants nothing. A live run is refused, with exit status 2 and before the journal is created or written or any request is reserved, unless all of these are given:
 
 - `--execute-network`, the single switch that lets requests leave the machine;
 - `--request-cap <n>`, a hard cap on requests reserved by the run;

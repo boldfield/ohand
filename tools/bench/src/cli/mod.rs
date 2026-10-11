@@ -11,7 +11,8 @@
 //! - Network use needs `--mode live` and `--execute-network`. Each hosted destination also needs
 //!   its own `--allow-destination`, and each credential reference its own `--credential-env`:
 //!   selecting a profile never grants a destination or a secret.
-//! - Every refusal happens before the journal is opened or any request is reserved.
+//! - Every refusal, including a rerun naming a side that was never dispatched, happens before the
+//!   journal is created or written or any request is reserved.
 //! - Results are diagnostic: the executor holds no store or apply handle, and the mode, corpus,
 //!   instruction, profile and build revisions are pinned in the journal's experiment record.
 
@@ -26,6 +27,7 @@ mod tests;
 
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
+use std::path::Path;
 use std::sync::Arc;
 
 use ohand_core::providers::contracts::ProviderAdapter;
@@ -227,6 +229,42 @@ fn plan(options: &Options, services: &Services, out: &mut dyn Write) -> Result<i
     Ok(EXIT_COMPLETED)
 }
 
+/// Refuses a rerun that names a case outside the plan or a side with no dispatched attempt, before
+/// the journal is created or written, so an invalid invocation never pins a configuration.
+fn check_reruns_before_open(
+    options: &Options,
+    prepared: &Prepared,
+    journal: &Path,
+) -> Result<(), Refusal> {
+    if options.reruns.is_empty() {
+        return Ok(());
+    }
+    let prior = PriorJournal::read(journal)?;
+    for key in &options.reruns {
+        if !prepared
+            .corpus
+            .cases
+            .iter()
+            .any(|case| case.case_id() == key.case_id)
+        {
+            return Err(Refusal(format!(
+                "rerun target {} is not in the plan",
+                key.case_id
+            )));
+        }
+        let dispatched = prior
+            .as_ref()
+            .is_some_and(|prior| prior.has_dispatched(&key.case_id, key.arm));
+        if !dispatched {
+            return Err(Refusal(format!(
+                "rerun target {} has no dispatched attempt to rerun",
+                key.case_id
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// What a live run needs before a single request is reserved.
 struct LiveSetup {
     transport: HostTransport,
@@ -346,6 +384,7 @@ fn run(options: &Options, services: &Services, out: &mut dyn Write) -> Result<i3
     let adapter_a = adapter_for(&prepared.arm_a, "a");
     let adapter_b = adapter_for(&prepared.arm_b, "b");
 
+    check_reruns_before_open(options, &prepared, journal)?;
     let mut executor = Executor::open(journal, prepared.experiment.clone())
         .map_err(|error| Refusal(error.to_string()))?;
     let clock = SystemClock::new();
