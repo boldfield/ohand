@@ -5,6 +5,8 @@
 //! provenance is not synthetic), and each fixture becomes one frozen case. Nothing is discovered,
 //! and no store or capture is opened.
 
+use std::collections::HashMap;
+
 use evaluation::corpus::Corpus;
 use ohand_core::interpretation::instructions::{content_version, M1_INSTRUCTION_TEXT};
 use ohand_core::providers::contracts::{RequestedSettings, TextBasis};
@@ -22,6 +24,9 @@ pub struct PlannedCorpus {
     pub version: String,
     pub instruction_version: String,
     pub cases: Vec<PlannedCase>,
+    /// Text each selected case records in the journal, by case id, for the read-only check of an
+    /// existing journal before it is opened.
+    pub content_by_case: HashMap<String, String>,
     /// Number of fixtures in the corpus before selection.
     pub corpus_size: usize,
 }
@@ -49,6 +54,7 @@ pub fn load(options: &Options) -> Result<PlannedCorpus, String> {
     }
 
     let mut cases = Vec::new();
+    let mut content_by_case = HashMap::new();
     for fixture in &corpus.fixtures {
         if !options.case_ids.is_empty() && !options.case_ids.contains(&fixture.id) {
             continue;
@@ -85,8 +91,9 @@ pub fn load(options: &Options) -> Result<PlannedCorpus, String> {
             requested_settings(),
         )
         .map_err(|error| format!("fixture {}: {error}", fixture.id))?;
-        let planned = PlannedCase::new(fixture.id.clone(), text, source)
+        let planned = PlannedCase::new(fixture.id.clone(), text.clone(), source)
             .map_err(|error| format!("fixture {}: {error}", fixture.id))?;
+        content_by_case.insert(fixture.id.clone(), text);
         cases.push(planned);
     }
     if cases.is_empty() {
@@ -96,6 +103,7 @@ pub fn load(options: &Options) -> Result<PlannedCorpus, String> {
         version: corpus.version,
         instruction_version,
         cases,
+        content_by_case,
         corpus_size: corpus.fixtures.len(),
     })
 }

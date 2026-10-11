@@ -60,6 +60,13 @@ pub fn mode_note(mode: Mode) -> &'static str {
 /// What an existing journal already holds, read without opening it for writing.
 pub struct PriorJournal {
     pub experiment: Option<Experiment>,
+    /// Number of experiment records; anything but one, with other records present, makes the
+    /// executor refuse the journal as inconsistent.
+    pub experiment_count: usize,
+    /// Whether the journal holds any case or attempt record.
+    pub has_case_or_attempt: bool,
+    /// Journaled case text by corpus case id.
+    pub content_by_case: HashMap<String, String>,
     /// Phase of the latest dispatched attempt per side: `completed`, `failed` or `reserved`.
     dispatched: HashMap<(String, &'static str), String>,
     orders: HashMap<String, [ArmLabel; 2]>,
@@ -85,6 +92,12 @@ impl PriorJournal {
             .into_iter()
             .map(|case| (case.id.as_str(), case.case_id.as_str()))
             .collect();
+        let content_by_case = reader
+            .cases()
+            .into_iter()
+            .map(|case| (case.case_id.clone(), case.content.clone()))
+            .collect();
+        let has_case_or_attempt = !reader.cases().is_empty() || !reader.attempts().is_empty();
         let mut dispatched = HashMap::new();
         let mut orders = HashMap::new();
         for attempt in reader.attempts() {
@@ -118,6 +131,9 @@ impl PriorJournal {
             } else {
                 None
             },
+            experiment_count: experiments.len(),
+            has_case_or_attempt,
+            content_by_case,
             dispatched,
             orders,
         }))

@@ -816,6 +816,101 @@ fn changed_configuration_is_refused_and_leaves_the_journal_untouched() {
     assert_eq!(std::fs::read(&journal).unwrap(), before);
 }
 
+/// Drops the journal's final newline, leaving a torn tail that opening it for writing repairs.
+fn tear_tail(path: &Path) -> Vec<u8> {
+    let mut bytes = std::fs::read(path).unwrap();
+    assert_eq!(bytes.pop(), Some(b'\n'));
+    std::fs::write(path, &bytes).unwrap();
+    bytes
+}
+
+#[test]
+fn changed_configuration_leaves_a_torn_journal_byte_identical_and_resume_still_repairs_it() {
+    let dir = TempDir::new().unwrap();
+    let (journal, journal_text) = journal_in(&dir);
+    let services = services_with(&[]);
+    let first = ["--max-cases", "1", "--build-revision", "build-1"];
+    assert_eq!(
+        execute(&fake_words(&journal_text, &first), &services).status,
+        EXIT_COMPLETED
+    );
+    let torn = tear_tail(&journal);
+
+    let changed = execute(
+        &fake_words(
+            &journal_text,
+            &["--max-cases", "1", "--build-revision", "build-2"],
+        ),
+        &services,
+    );
+    assert_eq!(changed.status, EXIT_REFUSED, "{}", changed.err);
+    assert!(changed.err.contains("build_revision"), "{}", changed.err);
+    assert_eq!(std::fs::read(&journal).unwrap(), torn);
+
+    let mut words = fake_words(&journal_text, &first);
+    let position = words
+        .iter()
+        .position(|word| *word == "openai:model-b")
+        .unwrap();
+    words[position] = "openai:model-other";
+    let changed_model = execute(&words, &services);
+    assert_eq!(changed_model.status, EXIT_REFUSED, "{}", changed_model.err);
+    assert_eq!(std::fs::read(&journal).unwrap(), torn);
+
+    let resumed = execute(&fake_words(&journal_text, &first), &services);
+    assert_eq!(resumed.status, EXIT_COMPLETED, "{}", resumed.err);
+    assert_eq!(std::fs::read(&journal).unwrap().last(), Some(&b'\n'));
+    assert_eq!(attempt_count(&journal), 2);
+}
+
+#[test]
+fn a_journaled_case_that_differs_from_the_corpus_is_refused_before_the_journal_is_opened() {
+    let dir = TempDir::new().unwrap();
+    let (journal, journal_text) = journal_in(&dir);
+    let services = services_with(&[]);
+    let words = fake_words(&journal_text, &["--max-cases", "1"]);
+    assert_eq!(execute(&words, &services).status, EXIT_COMPLETED);
+    let original = std::fs::read_to_string(&journal).unwrap();
+    assert_eq!(original.matches("roof garden").count(), 1, "{original}");
+    std::fs::write(&journal, original.replace("roof garden", "roof terrace")).unwrap();
+    let torn = tear_tail(&journal);
+
+    let refused = execute(&words, &services);
+    assert_eq!(refused.status, EXIT_REFUSED, "{}", refused.err);
+    assert!(
+        refused.err.contains("changed since it was journaled"),
+        "{}",
+        refused.err
+    );
+    assert_eq!(std::fs::read(&journal).unwrap(), torn);
+}
+
+#[test]
+fn a_journal_with_records_but_no_experiment_is_refused_byte_identical() {
+    let dir = TempDir::new().unwrap();
+    let (journal, journal_text) = journal_in(&dir);
+    let services = services_with(&[]);
+    let words = fake_words(&journal_text, &["--max-cases", "1"]);
+    assert_eq!(execute(&words, &services).status, EXIT_COMPLETED);
+    let original = std::fs::read_to_string(&journal).unwrap();
+    let without_experiment: String = original
+        .lines()
+        .skip(1)
+        .map(|line| format!("{line}\n"))
+        .collect();
+    std::fs::write(&journal, &without_experiment).unwrap();
+    assert!(JournalReader::open(&journal)
+        .unwrap()
+        .experiments()
+        .is_empty());
+    let torn = tear_tail(&journal);
+
+    let refused = execute(&words, &services);
+    assert_eq!(refused.status, EXIT_REFUSED, "{}", refused.err);
+    assert!(refused.err.contains("use a new journal"), "{}", refused.err);
+    assert_eq!(std::fs::read(&journal).unwrap(), torn);
+}
+
 #[test]
 fn recorded_mode_is_refused_for_plan_and_run() {
     let dir = TempDir::new().unwrap();

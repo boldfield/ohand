@@ -12,8 +12,10 @@
 //! - Network use needs `--mode live` and `--execute-network`. Each hosted destination also needs
 //!   its own `--allow-destination`, and each credential reference its own `--credential-env`:
 //!   selecting a profile never grants a destination or a secret.
-//! - Every refusal, including a rerun naming a side that was never dispatched, happens before the
-//!   journal is created or written or any request is reserved.
+//! - Every refusal the command can decide from its inputs and a read-only view of the journal
+//!   (a changed configuration or case, an inconsistent journal, a rerun naming a side that was
+//!   never dispatched) happens before the journal is created, written or tail-repaired, and
+//!   before any request is reserved.
 //! - Results are diagnostic: the executor holds no store or apply handle, and the mode, corpus,
 //!   instruction, profile and build revisions are pinned in the journal's experiment record.
 
@@ -261,6 +263,51 @@ fn check_reruns(
     Ok(())
 }
 
+/// Refuses, from a read-only view of an existing journal, what `Executor::open` and the
+/// executor's case checks would refuse about it: a journal that is not one experiment, a changed
+/// experiment configuration, or a case whose journaled text differs from the corpus. Opening the
+/// journal for writing repairs a torn tail, so these refusals come first and a refused journal
+/// stays byte-identical.
+fn check_journal_before_open(
+    prepared: &Prepared,
+    prior: Option<&PriorJournal>,
+) -> Result<(), Refusal> {
+    let Some(prior) = prior else {
+        return Ok(());
+    };
+    match &prior.experiment {
+        None if prior.experiment_count == 0 && !prior.has_case_or_attempt => {}
+        None => {
+            return Err(Refusal(
+                "the journal holds more than one experiment, or records without one; use a new \
+                 journal"
+                    .to_string(),
+            ))
+        }
+        Some(stored) => {
+            let differing = output::configuration_differences(stored, &prepared.experiment);
+            if !differing.is_empty() {
+                return Err(Refusal(format!(
+                    "experiment configuration changed ({}); use a new journal",
+                    differing.join(", ")
+                )));
+            }
+        }
+    }
+    for (case_id, content) in &prepared.corpus.content_by_case {
+        if prior
+            .content_by_case
+            .get(case_id)
+            .is_some_and(|journaled| journaled != content)
+        {
+            return Err(Refusal(format!(
+                "case {case_id} changed since it was journaled; use a new journal"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// What a live run needs before a single request is reserved.
 struct LiveSetup {
     transport: HostTransport,
@@ -380,9 +427,9 @@ fn run(options: &Options, services: &Services, out: &mut dyn Write) -> Result<i3
     let adapter_a = adapter_for(&prepared.arm_a, "a");
     let adapter_b = adapter_for(&prepared.arm_b, "b");
 
-    if !options.reruns.is_empty() {
-        check_reruns(options, &prepared, PriorJournal::read(journal)?.as_ref())?;
-    }
+    let prior = PriorJournal::read(journal)?;
+    check_journal_before_open(&prepared, prior.as_ref())?;
+    check_reruns(options, &prepared, prior.as_ref())?;
     let mut executor = Executor::open(journal, prepared.experiment.clone())
         .map_err(|error| Refusal(error.to_string()))?;
     let clock = SystemClock::new();
