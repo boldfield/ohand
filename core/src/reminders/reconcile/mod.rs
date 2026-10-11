@@ -37,12 +37,12 @@
 //
 // Native-side facts (`schedule_state`, operation states) do not bump the reminder's
 // `state_version`, which guards user intent. The one exception is a never-installed reminder
-// (operation still `pending`) whose due time has passed: it becomes `Unschedulable(TimeInPast)` with its instant kept and
-// no time adjustment. Whatever the operation state, a past-due request still pending under the
-// same identifier but reporting another due instant is cancelled, since it can no longer be
-// replaced and would fire at the wrong time. Delivery and acknowledgment facts are never touched here. Callers must
-// serialize reconciliations (the `&mut Database` borrow does so within a process); native
-// calls are made outside any open transaction.
+// (operation still `pending`) whose due time has passed: it becomes `Unschedulable(TimeInPast)`
+// with its instant kept and no time adjustment. Whatever the operation state, a past-due request
+// still pending under the same identifier (at another or an unreported due instant) is cancelled,
+// since it can no longer be replaced and would fire at the wrong time. Delivery and acknowledgment
+// facts are never touched here. Callers must serialize reconciliations (the `&mut Database` borrow
+// does so within a process); native calls are made outside any open transaction.
 
 mod completion;
 mod effects;

@@ -154,14 +154,11 @@ pub fn reconcile(
             continue;
         }
         if entry.fire_at <= now {
-            // The desired instant has passed, so the request cannot be replaced; a same-ID
-            // request reporting another due instant would fire at the wrong time and is
-            // removed. One with an unreported instant may be the desired request about to be
-            // delivered, so it is left alone. The durable state is concluded below as usual.
-            let pending_at_another_due = pending_by_id
-                .get(&entry.notification_id)
-                .is_some_and(|request| request.fire_at.is_some());
-            if pending_at_another_due
+            // The desired instant has passed, so the request cannot be replaced. A request at
+            // that instant would already have left the pending set, so one still pending under
+            // the same identifier (at another or an unreported due instant) is not the desired
+            // request and is removed. The durable state is concluded below as usual.
+            if pending_by_id.contains_key(&entry.notification_id)
                 && cancel_in_os(
                     database,
                     clock,

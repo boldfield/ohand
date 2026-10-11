@@ -1000,7 +1000,7 @@ fn a_past_due_acknowledged_reminder_removes_a_request_pending_at_another_due_ins
 }
 
 #[test]
-fn a_past_due_request_whose_due_instant_is_unreported_is_left_to_deliver() -> Result<()> {
+fn a_past_due_request_whose_due_instant_is_unreported_is_removed() -> Result<()> {
     let mut db = open_db(&temp_db_path("past_due_unreported"))?;
     let revision = insert_item(&mut db, "item-1", ROOFER_TEXT)?;
     let id = create_reminder(&mut db, "item-1", revision)?
@@ -1008,14 +1008,15 @@ fn a_past_due_request_whose_due_instant_is_unreported_is_left_to_deliver() -> Re
         .unwrap();
     let mut center = FakeCenter::default();
     reconcile_now(&mut db, &mut center)?;
+    center.pending.insert(id.clone(), instant(DAY_LATE));
     center.hide_due_instants = true;
     center.clear_calls();
 
     let report = reconcile_at(&mut db, &mut center, PAST_DUE)?;
 
-    assert!(report.removed.is_empty());
-    assert!(center.mutations().is_empty());
-    assert_eq!(center.pending_ids(), vec![id]);
+    assert_eq!(report.removed, vec![id.clone()]);
+    assert_eq!(center.mutations(), vec![&Call::Cancel(id)]);
+    assert!(center.pending.is_empty());
     Ok(())
 }
 
