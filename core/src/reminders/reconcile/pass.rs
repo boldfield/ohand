@@ -42,6 +42,10 @@ pub struct ReconcileReport {
     pub unconfirmed: Vec<String>,
     /// Installs that completed after their operation was superseded and were cancelled again.
     pub rolled_back: Vec<String>,
+    /// Schedules the OS rejected definitively on an earlier pass (`permanent`, `unauthorized`
+    /// or `unsupported`): still desired and still surfaced as `schedule_failed`, but not
+    /// retried until an explicit recovery re-arms them. No OS call was made.
+    pub withheld: Vec<String>,
     pub failures: Vec<EffectFailure>,
 }
 
@@ -337,7 +341,10 @@ fn schedule_in_os(
     entry: &DesiredNotification,
     report: &mut ReconcileReport,
 ) -> Result<(), ReconcileError> {
-    mark_schedule_attempted(database, entry)?;
+    if !begin_schedule_attempt(database, entry)? {
+        report.withheld.push(entry.notification_id.clone());
+        return Ok(());
+    }
     let request = ScheduleRequest {
         notification_id: entry.notification_id.clone(),
         fire_at: entry.fire_at,
@@ -394,25 +401,38 @@ fn failure(
     }
 }
 
-/// Durably record, before the native call, that this schedule was attempted. Committed in its
-/// own transaction so it survives a crash anywhere after the OS call starts.
-fn mark_schedule_attempted(
+/// Decide whether this schedule may be attempted now and, if so, durably record the attempt
+/// before the native call. Committed in its own transaction so the attempt survives a crash
+/// anywhere after the OS call starts. Returns `false`, without touching anything, when the OS
+/// rejected the operation definitively on an earlier pass: a `Rejected` operation is retried
+/// only after an explicit recovery re-arms it (`retry_rejected_schedule`) or the reminder moves
+/// to a new generation. The state is read inside the same transaction, so a re-arm committed
+/// after the plan snapshot is honoured by this pass.
+fn begin_schedule_attempt(
     database: &mut Database,
     entry: &DesiredNotification,
-) -> Result<(), ReconcileError> {
+) -> Result<bool, ReconcileError> {
+    let identity = effect_identity(OperationType::Schedule, &entry.notification_id);
     let tx = database.immediate_transaction().map_err(database_error)?;
+    let state = list_operations(&tx, &entry.reminder_id)?
+        .iter()
+        .find(|operation| operation.effect_identity == identity)
+        .map(|operation| operation.operation_state);
+    if state == Some(OperationState::Rejected) {
+        return Ok(false);
+    }
     tx.execute(
         "UPDATE reminder_operations SET operation_state = ?
          WHERE reminder_id = ? AND effect_identity = ? AND operation_state = ?",
         rusqlite::params![
             OperationState::Failed.as_str(),
             &entry.reminder_id,
-            effect_identity(OperationType::Schedule, &entry.notification_id),
+            identity,
             OperationState::Pending.as_str(),
         ],
     )?;
     tx.commit()?;
-    Ok(())
+    Ok(true)
 }
 
 enum ExpiryOutcome {
@@ -421,11 +441,12 @@ enum ExpiryOutcome {
     Untouched,
 }
 
-/// A due time that has passed for a reminder whose schedule was never attempted cannot be
-/// installed any more: the opportunity is kept as `Unschedulable(TimeInPast)` with the instant
-/// preserved. A schedule that was attempted or acknowledged may have installed a request that
-/// has since fired or been dismissed, so absence from the pending set proves nothing and no
-/// reminder state is changed.
+/// A due time that has passed for a reminder whose schedule was never attempted, or that the
+/// OS rejected definitively (so nothing was ever installed), cannot be installed any more: the
+/// opportunity is kept as `Unschedulable(TimeInPast)` with the instant preserved. A schedule
+/// that was attempted without a confirmed outcome, or acknowledged, may have installed a
+/// request that has since fired or been dismissed, so absence from the pending set proves
+/// nothing and no reminder state is changed.
 fn expire_if_never_attempted(
     database: &mut Database,
     clock: &dyn Clock,
@@ -446,7 +467,8 @@ fn expire_if_never_attempted(
     match attempt_state {
         Some(OperationState::Acknowledged) => return Ok(ExpiryOutcome::Untouched),
         Some(OperationState::Failed) => return Ok(ExpiryOutcome::Unconfirmed),
-        _ => {}
+        Some(OperationState::Pending | OperationState::Rejected | OperationState::Superseded)
+        | None => {}
     }
     let changed = tx.execute(
         "UPDATE reminders SET request_state = 'unschedulable', unschedulable_reason = ?,
@@ -462,7 +484,8 @@ fn expire_if_never_attempted(
     )?;
     tx.execute(
         "UPDATE reminder_operations SET operation_state = 'superseded'
-         WHERE reminder_id = ? AND effect_identity = ? AND operation_state = 'pending'",
+         WHERE reminder_id = ? AND effect_identity = ?
+           AND operation_state IN ('pending', 'rejected')",
         rusqlite::params![&reminder.reminder_id, identity],
     )?;
     tx.commit()?;

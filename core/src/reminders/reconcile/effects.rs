@@ -19,6 +19,23 @@ impl NotificationEffectError {
     }
 }
 
+impl NotificationEffectError {
+    /// Whether the native layer refused the effect definitively. `permanent`, `unauthorized`
+    /// and `unsupported` are surfaced and not retried automatically (m1-contracts.md,
+    /// Normalized errors). `transient` is retried by the next reconciliation and `cancelled`
+    /// proves nothing, so the request is re-examined against the pending set instead.
+    pub fn is_definitive_rejection(&self) -> bool {
+        is_definitive_rejection(self.class)
+    }
+}
+
+pub fn is_definitive_rejection(class: ErrorClass) -> bool {
+    match class {
+        ErrorClass::Permanent | ErrorClass::Unauthorized | ErrorClass::Unsupported => true,
+        ErrorClass::Transient | ErrorClass::Cancelled => false,
+    }
+}
+
 impl std::fmt::Display for NotificationEffectError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "{:?}/{}", self.class, self.code)

@@ -35,6 +35,24 @@
 // never attempted. An attempted request that is absent from the OS after its due time may have
 // fired, so it is left unconfirmed rather than declared unschedulable.
 //
+// Failure disposition (m1-contracts.md, Normalized errors): the normalized class of a failed
+// schedule decides whether reconciliation may retry it.
+// - `transient`: the operation stays `failed` and the next pass retries it. Passes run after
+//   writes, on launch and on foreground activation, so that cadence is the backoff; no timer
+//   retries happen here.
+// - `cancelled`: proves nothing; the operation stays `failed` and the next pass re-examines the
+//   pending set rather than assuming either outcome.
+// - `permanent`, `unauthorized`, `unsupported`: the operation becomes `rejected` and the
+//   reminder is surfaced as `schedule_failed` (still `resolved`, still desired). An unchanged
+//   pass reports it as withheld and makes no OS call. Only an explicit recovery re-arms it:
+//   `retry_rejected_schedule` (a user retry, or a permission or configuration change handled by
+//   N04), or a user time correction, which starts a new generation. A rejected schedule
+//   installed nothing, so once its due time has passed it expires to `Unschedulable(TimeInPast)`
+//   exactly like a never-attempted one.
+// - Cancels are retried by every pass whatever the class: cancellation is idempotent, a request
+//   absent from the pending set is acknowledged without an OS call, and leaving a stale request
+//   live is the worse failure.
+//
 // Native-side facts (`schedule_state`, operation states) do not bump the reminder's
 // `state_version`, which guards user intent. The one exception is a never-installed reminder
 // (operation still `pending`) whose due time has passed: it becomes `Unschedulable(TimeInPast)`
@@ -52,9 +70,12 @@ use thiserror::Error;
 
 use crate::reminders::state::ReminderStateError;
 
-pub use completion::{apply_completion, CompletionOutcome, EffectCompletion, EffectOutcome};
+pub use completion::{
+    apply_completion, retry_rejected_schedule, CompletionOutcome, EffectCompletion, EffectOutcome,
+};
 pub use effects::{
-    NotificationEffectError, NotificationEffects, PayloadKind, PendingRequest, ScheduleRequest,
+    is_definitive_rejection, NotificationEffectError, NotificationEffects, PayloadKind,
+    PendingRequest, ScheduleRequest,
 };
 pub use pass::{reconcile, EffectFailure, ReconcileReport};
 

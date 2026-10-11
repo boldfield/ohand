@@ -1,5 +1,6 @@
 use rusqlite::{OptionalExtension, Transaction};
 
+use super::effects::is_definitive_rejection;
 use super::ReconcileError;
 use crate::providers::contracts::ErrorClass;
 use crate::reminders::state::{
@@ -95,7 +96,7 @@ fn schedule_completion(
     let succeeded = outcome == EffectOutcome::Succeeded;
     let current = matches!(
         operation.operation_state,
-        OperationState::Pending | OperationState::Failed
+        OperationState::Pending | OperationState::Failed | OperationState::Rejected
     ) && reminder.request_state == RequestState::Resolved
         && reminder.notification_id().as_deref() == Some(operation.notification_id.as_str());
 
@@ -114,17 +115,61 @@ fn schedule_completion(
             Ok(CompletionOutcome::Applied)
         }
         EffectOutcome::Failed(ErrorClass::Cancelled) => Ok(CompletionOutcome::NoChange),
-        EffectOutcome::Failed(_) => {
-            if operation.operation_state == OperationState::Failed
+        EffectOutcome::Failed(class) => {
+            // A definitive rejection is terminal for failures: a later or duplicate failure
+            // of any class cannot re-open it, only an explicit re-arm can.
+            if operation.operation_state == OperationState::Rejected {
+                return Ok(CompletionOutcome::AlreadyRecorded);
+            }
+            let disposition = if is_definitive_rejection(class) {
+                OperationState::Rejected
+            } else {
+                OperationState::Failed
+            };
+            if operation.operation_state == disposition
                 && reminder.schedule_state == ScheduleState::ScheduleFailed
             {
                 return Ok(CompletionOutcome::AlreadyRecorded);
             }
-            set_operation_state(tx, operation, OperationState::Failed)?;
+            set_operation_state(tx, operation, disposition)?;
             set_schedule_state(tx, clock, reminder, ScheduleState::ScheduleFailed)?;
             Ok(CompletionOutcome::Applied)
         }
     }
+}
+
+/// Explicit recovery for a schedule the native layer rejected definitively: re-arm the
+/// current generation's `Rejected` schedule operation as `Pending` so the next reconciliation
+/// attempts it again, and return the reminder to `pending_schedule`. Called by a user retry or
+/// a permission/configuration change (N04), never by reconciliation itself. Returns whether an
+/// operation was re-armed; a reminder without a rejected current schedule is left untouched.
+pub fn retry_rejected_schedule(
+    tx: &Transaction<'_>,
+    clock: &dyn Clock,
+    item_id: &str,
+) -> Result<bool, ReconcileError> {
+    let Some(reminder) = get_reminder(tx, item_id)? else {
+        return Ok(false);
+    };
+    let Some(notification_id) = reminder.notification_id() else {
+        return Ok(false);
+    };
+    if reminder.request_state != RequestState::Resolved {
+        return Ok(false);
+    }
+    let identity = format!("{}:{}", OperationType::Schedule.as_str(), notification_id);
+    let Some(operation) = list_operations(tx, &reminder.reminder_id)?
+        .into_iter()
+        .find(|operation| operation.effect_identity == identity)
+    else {
+        return Ok(false);
+    };
+    if operation.operation_state != OperationState::Rejected {
+        return Ok(false);
+    }
+    set_operation_state(tx, &operation, OperationState::Pending)?;
+    set_schedule_state(tx, clock, &reminder, ScheduleState::PendingSchedule)?;
+    Ok(true)
 }
 
 fn cancel_completion(
