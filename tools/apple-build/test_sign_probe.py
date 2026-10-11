@@ -799,6 +799,38 @@ class EmbeddedExtensionTests(SigningToolTestCase):
     def devicectl_steps(self):
         return [tuple(call["argv"][1:3]) for call in self.calls_of("devicectl", "device")]
 
+    def write_project_spec(self, extensions=(("OhAndCaptureControl", EXTENSION_BUNDLE_IDENTIFIER),), base_layout=False, extra_dependencies=(),
+                           embed=True, extension_type="app-extension", extension_settings=None):
+        def settings(identifier):
+            flat = {"PRODUCT_BUNDLE_IDENTIFIER": identifier}
+            return {"base": flat} if base_layout else flat
+
+        targets = {
+            "OhAndCoreBridge": {"type": "framework", "settings": settings("com.boldfield.ohand.corebridge")},
+            "OhAndApp": {
+                "type": "application",
+                "settings": settings(APP_BUNDLE_IDENTIFIER),
+                "dependencies": [{"target": "OhAndCoreBridge"}]
+                + [{"target": name, **({} if embed else {"embed": False})} for name, _ in extensions] + list(extra_dependencies),
+            },
+        }
+        for name, identifier in extensions:
+            targets[name] = {"type": extension_type, "settings": extension_settings if extension_settings is not None else settings(identifier)}
+        path = self.inputs / "project.json"
+        path.write_text(json.dumps({"name": "Synthetic", "targets": targets}))
+        return path
+
+    def spec_environment(self, **spec_options):
+        return {"OHAND_SIGNING_PROJECT_SPEC_PATH": str(self.write_project_spec(**spec_options))}
+
+    def assert_refused_before_generation(self, result, exit_code, message):
+        self.assertEqual(result.returncode, exit_code, result.stderr)
+        self.assertIn(message, result.stderr)
+        self.assertEqual(self.calls_of("mint", "run"), [])
+        self.assertEqual(self.calls_of("xcodebuild", "archive"), [])
+        self.assertEqual(self.calls_of("security", "create-keychain"), [])
+        self.assertEqual(self.calls_of("xcodebuild", "-exportArchive"), [])
+
     def test_extension_under_one_wildcard_profile_is_signed_installed_and_launched(self):
         result = self.sign_app("--install", OHAND_DEVICE_LABEL="phone-a")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -833,17 +865,64 @@ class EmbeddedExtensionTests(SigningToolTestCase):
         steps = [(call["tool"], call["argv"][0], *call["argv"][1:3]) for call in self.calls()]
         self.assertLess(names.index(("xcodebuild", "-exportArchive")), steps.index(("devicectl", "device", "install", "app")))
 
-    def test_the_embedded_bundles_are_read_from_the_archive_not_a_fixed_list(self):
-        extensions = f"{EXTENSION_BUNDLE_IDENTIFIER},{SECOND_EXTENSION_IDENTIFIER}"
-        self.assertEqual(self.sign_app(STUB_ARCHIVE_EXTENSIONS=extensions).returncode, 0)
+    def test_the_signed_bundles_follow_the_project_spec_and_the_archive_rather_than_a_fixed_list(self):
+        two = (("OhAndCaptureControl", EXTENSION_BUNDLE_IDENTIFIER), ("OhAndSecondExtension", SECOND_EXTENSION_IDENTIFIER))
+        result = self.sign_app(STUB_ARCHIVE_EXTENSIONS=f"{EXTENSION_BUNDLE_IDENTIFIER},{SECOND_EXTENSION_IDENTIFIER}", **self.spec_environment(extensions=two))
+        self.assertEqual(result.returncode, 0, result.stderr)
         options = json.loads((self.state / "export-options.json").read_text())
         self.assertEqual(set(options["provisioningProfiles"]),
                          {APP_BUNDLE_IDENTIFIER, EXTENSION_BUNDLE_IDENTIFIER, SECOND_EXTENSION_IDENTIFIER})
 
         self.state_reset()
-        self.assertEqual(self.sign_app(STUB_ARCHIVE_EXTENSIONS="").returncode, 0)
+        result = self.sign_app(STUB_ARCHIVE_EXTENSIONS="", **self.spec_environment(extensions=()))
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads((self.state / "export-options.json").read_text())["provisioningProfiles"],
                          {APP_BUNDLE_IDENTIFIER: SYNTHETIC_PROFILE_UUID})
+
+    def test_a_dependency_that_is_not_embedded_is_not_a_signed_bundle(self):
+        result = self.sign_app(STUB_ARCHIVE_EXTENSIONS="", **self.spec_environment(embed=False))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads((self.state / "export-options.json").read_text())["provisioningProfiles"],
+                         {APP_BUNDLE_IDENTIFIER: SYNTHETIC_PROFILE_UUID})
+
+    def test_the_standard_settings_base_layout_is_resolved_before_the_build(self):
+        self.write_profile(Entitlements=self.exact_entitlements(APP_BUNDLE_IDENTIFIER))
+        result = self.sign_app("--install", **self.spec_environment(base_layout=True))
+        self.assert_refused_before_keychain_and_export(
+            result, 3, f"no supplied provisioning profile covers bundle identifier {EXTENSION_BUNDLE_IDENTIFIER}")
+        self.assertEqual(self.calls_of("mint", "run"), [])
+
+        self.state_reset()
+        self.write_profile(Entitlements=self.wildcard_entitlements())
+        self.assertEqual(self.sign_app(**self.spec_environment(base_layout=True)).returncode, 0)
+
+    def test_a_project_spec_that_cannot_be_resolved_is_refused_before_generation_and_never_skipped(self):
+        broken = self.inputs / "broken.json"
+        broken.write_text("{not yaml or json: [")
+        cases = {
+            "unresolvable bundle identifier": dict(extension_settings={"PRODUCT_BUNDLE_IDENTIFIER": "$(INHERITED_IDENTIFIER)"}),
+            "missing bundle identifier": dict(extension_settings={}),
+            "ambiguous bundle identifier": dict(extension_settings={"PRODUCT_BUNDLE_IDENTIFIER": SECOND_EXTENSION_IDENTIFIER,
+                                                                    "base": {"PRODUCT_BUNDLE_IDENTIFIER": EXTENSION_BUNDLE_IDENTIFIER}}),
+            "unknown dependency target": dict(extra_dependencies=[{"target": "OhAndMissing"}]),
+            "dependency of unknown kind": dict(extra_dependencies=[{"mystery": "OhAndMystery"}]),
+            "dependency type that is not understood": dict(extension_type="application.watchapp2"),
+        }
+        for description, options in cases.items():
+            with self.subTest(description):
+                self.state_reset()
+                result = self.sign_app(**self.spec_environment(**options))
+                self.assert_refused_before_generation(result, 4, "")
+                self.assertEqual(self.only_evidence()["failed_stage"], "project-spec")
+                self.assertNotIn(SYNTHETIC_TEAM, result.stderr)
+        with self.subTest("unparseable spec"):
+            self.state_reset()
+            self.assert_refused_before_generation(self.sign_app(OHAND_SIGNING_PROJECT_SPEC_PATH=str(broken)), 4,
+                                                  "the project spec could not be read")
+        with self.subTest("missing spec"):
+            self.state_reset()
+            self.assert_refused_before_generation(self.sign_app(OHAND_SIGNING_PROJECT_SPEC_PATH=str(self.inputs / "absent.yml")), 4,
+                                                  "the project spec could not be read")
 
     def test_two_bundles_are_signed_under_a_per_bundle_profile_mapping(self):
         map_path = self.write_mapped_profiles({
@@ -877,15 +956,26 @@ class EmbeddedExtensionTests(SigningToolTestCase):
         self.assertEqual((evidence["status"], evidence["failed_stage"]), ("failed", "bundle-coverage"))
         self.assertFalse(evidence["install"]["performed"])
 
-    def test_extension_found_only_in_the_archive_is_refused_after_the_archive_and_before_keychain_work(self):
+    def test_an_archive_that_disagrees_with_the_project_spec_is_a_tooling_integrity_failure_not_a_profile_decision(self):
         map_path = self.write_mapped_profiles({APP_BUNDLE_IDENTIFIER: {}, EXTENSION_BUNDLE_IDENTIFIER: {"UUID": EXTENSION_PROFILE_UUID}})
-        result = self.sign_app(STUB_ARCHIVE_EXTENSIONS=f"{EXTENSION_BUNDLE_IDENTIFIER},{SECOND_EXTENSION_IDENTIFIER}",
-                               **self.mapped_environment(map_path))
-        self.assertEqual(result.returncode, 3, result.stderr)
-        self.assertIn(f"no supplied provisioning profile is mapped to bundle identifier {SECOND_EXTENSION_IDENTIFIER}", result.stderr)
-        self.assertEqual(len(self.calls_of("xcodebuild", "archive")), 1)
-        self.assertEqual(self.calls_of("security", "create-keychain"), [])
-        self.assertEqual(self.calls_of("xcodebuild", "-exportArchive"), [])
+        cases = {
+            f"archived but not declared by the project spec: {SECOND_EXTENSION_IDENTIFIER}":
+                f"{EXTENSION_BUNDLE_IDENTIFIER},{SECOND_EXTENSION_IDENTIFIER}",
+            f"declared by the project spec but not archived: {EXTENSION_BUNDLE_IDENTIFIER}": "",
+        }
+        for message, archived in cases.items():
+            with self.subTest(message):
+                self.state_reset()
+                result = self.sign_app(STUB_ARCHIVE_EXTENSIONS=archived, **self.mapped_environment(map_path))
+                self.assertEqual(result.returncode, 4, result.stderr)
+                self.assertIn(message, result.stderr)
+                self.assertNotIn("no supplied provisioning profile", result.stderr)
+                self.assertEqual(len(self.calls_of("xcodebuild", "archive")), 1)
+                self.assertEqual(self.calls_of("security", "create-keychain"), [])
+                self.assertEqual(self.calls_of("security", "import"), [])
+                self.assertEqual(self.calls_of("xcodebuild", "-exportArchive"), [])
+                self.assertEqual(self.installed_profile_files(), [])
+                self.assertEqual(self.only_evidence()["failed_stage"], "archive-mismatch")
 
     def test_covering_profile_that_cannot_sign_a_bundle_is_refused_with_a_distinct_exit_status(self):
         cases = {
@@ -964,10 +1054,13 @@ class EmbeddedExtensionTests(SigningToolTestCase):
         self.assertEqual(probe.returncode, 2)
         self.assertIn("only supported for schemes that embed extensions", probe.stderr)
 
-        stray = self.write_mapped_profiles({APP_BUNDLE_IDENTIFIER: {}, EXTENSION_BUNDLE_IDENTIFIER: {"UUID": EXTENSION_PROFILE_UUID}})
-        result = self.sign_app(STUB_ARCHIVE_EXTENSIONS="", **self.mapped_environment(stray))
+        stray = self.write_mapped_profiles({
+            APP_BUNDLE_IDENTIFIER: {}, EXTENSION_BUNDLE_IDENTIFIER: {"UUID": EXTENSION_PROFILE_UUID}, SECOND_EXTENSION_IDENTIFIER: {},
+        })
+        result = self.sign_app(**self.mapped_environment(stray))
         self.assertEqual(result.returncode, 2)
-        self.assertIn(f"names bundle identifier {EXTENSION_BUNDLE_IDENTIFIER}, which is not embedded in the archive", result.stderr)
+        self.assertIn(f"names bundle identifier {SECOND_EXTENSION_IDENTIFIER}, which is not an app or extension bundle of OhAndApp", result.stderr)
+        self.assertEqual(self.calls_of("xcodebuild", "archive"), [])
 
         inside = self.inputs / "inside.json"
         inside.write_text(json.dumps({APP_BUNDLE_IDENTIFIER: str(REPO_ROOT / "Makefile")}))

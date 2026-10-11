@@ -5,9 +5,10 @@ Route: Apple Development identity plus a Development provisioning profile that l
 The probe is archived unsigned, then `xcodebuild -exportArchive` signs it from an explicit export
 options file, so each bundle identifier gets its own profile and frameworks are never given one.
 
-Schemes that embed app extensions (OhAndApp) sign one profile per signed bundle: the bundle identifiers are read
-from the unsigned archive, each is matched to a supplied profile that covers it, and the export options map every
-signed bundle (application and extensions, never frameworks) to its profile UUID.
+Schemes that embed app extensions (OhAndApp) sign one profile per signed bundle. The signed bundles are read from
+the project spec and every one must be covered by a supplied, usable profile before the project is generated; the
+unsigned archive must then embed exactly those bundles, and the export options map every signed bundle (application
+and extensions, never frameworks) to its profile UUID. Reading the spec needs PyYAML.
 
 Signing inputs come only from the environment or injected files outside the repository:
   OHAND_SIGNING_PROFILE_PATH         required  .mobileprovision file (one profile may cover several bundles)
@@ -20,6 +21,7 @@ Signing inputs come only from the environment or injected files outside the repo
   OHAND_DEVICE_ID                    devicectl device identifier; required with --install
   OHAND_DEVICE_UDID                  optional; hardware identifier to check against the profiles when devicectl
                                                cannot report it (OhAndApp with --install)
+  OHAND_SIGNING_PROJECT_SPEC_PATH    optional (OhAndApp); XcodeGen spec to read the signed bundles from (default ios/project.yml)
   OHAND_DEVICE_LABEL                 optional content-free label for evidence (a-z, 0-9, '-')
   OHAND_PRIVATE_EVIDENCE_DIR         optional; raw redacted logs, must be outside the repository
 
@@ -27,7 +29,8 @@ Stdout and stderr carry only fixed messages. Child tool output goes to a redacte
 evidence directory. The sanitized evidence record contains fixed fields only.
 
 Exit status: 0 success, 1 build/signing/install/launch failure, 2 missing or invalid input, 3 a bundle in an
-embedding scheme has no usable covering profile (the message names only the bundle identifier).
+embedding scheme has no usable covering profile (the message names only the bundle identifier), 4 the project spec
+cannot be resolved to its signed bundles or the archive embeds different bundles than the spec (tooling integrity).
 """
 
 import argparse
@@ -55,6 +58,7 @@ EXIT_OK = 0
 EXIT_FAILURE = 1
 EXIT_INPUT = 2
 EXIT_BUNDLE_PROFILE = 3
+EXIT_TOOLING_INTEGRITY = 4
 
 EVIDENCE_SCHEMA = "ohand.apple-signing-evidence.v1"
 EMBEDDED_EVIDENCE_SCHEMA = "ohand.apple-signing-evidence.v2"
@@ -73,9 +77,14 @@ SUPPORTED_SCHEME_BUNDLE_IDENTIFIERS = {
 }
 EMBEDDING_SCHEMES = frozenset({"OhAndApp"})
 EXTENSION_DIRECTORY_NAMES = ("PlugIns", "Extensions")
+# Dependency target types of the application that are never signed with their own profile, and the dependency kinds
+# that name no project target. Anything else must be resolved or the run is refused before the project is generated.
+UNSIGNED_DEPENDENCY_TYPES = frozenset({"framework", "framework.static", "library.static", "library.dynamic", "bundle"})
+UNTARGETED_DEPENDENCY_KINDS = ("framework", "sdk", "package", "carthage", "bundle")
 
 PROFILE_PATH_VARIABLE = "OHAND_SIGNING_PROFILE_PATH"
 PROFILE_MAP_VARIABLE = "OHAND_SIGNING_PROFILE_MAP_PATH"
+PROJECT_SPEC_VARIABLE = "OHAND_SIGNING_PROJECT_SPEC_PATH"
 CERT_PATH_VARIABLE = "OHAND_SIGNING_CERT_PATH"
 CERT_PASSWORD_VARIABLE = "OHAND_SIGNING_CERT_PASSWORD"
 CERT_PASSWORD_FILE_VARIABLE = "OHAND_SIGNING_CERT_PASSWORD_FILE"
@@ -244,6 +253,10 @@ def bundle_profile_error(message: str) -> SigningError:
     return SigningError(message, EXIT_BUNDLE_PROFILE, "bundle-coverage")
 
 
+def integrity_error(message: str, stage: str) -> SigningError:
+    return SigningError(message, EXIT_TOOLING_INTEGRITY, stage)
+
+
 class SigningRun:
     def __init__(self, scheme: str, install: bool, evidence_dir: Path, environment: Dict[str, str]):
         self.scheme = scheme
@@ -256,6 +269,7 @@ class SigningRun:
         self.redactor = Redactor()
         self.started_at = datetime.datetime.now(datetime.timezone.utc)
 
+        self.project_spec_path = IOS_ROOT / "project.yml"
         self.profile_path: Optional[Path] = None
         self.profile_map: Dict[str, Path] = {}
         self.certificate_path: Optional[Path] = None
@@ -303,6 +317,9 @@ class SigningRun:
                               f"repository that covers every signed bundle), or {PROFILE_MAP_VARIABLE} for one profile per bundle")
         else:
             raise input_error(f"{PROFILE_PATH_VARIABLE} is required (path to a Development .mobileprovision outside the repository)")
+
+        if self.embedding and env.get(PROJECT_SPEC_VARIABLE):
+            self.project_spec_path = Path(env[PROJECT_SPEC_VARIABLE])
 
         certificate_value = env.get(CERT_PATH_VARIABLE)
         if certificate_value:
@@ -593,9 +610,17 @@ class SigningRun:
         applications = sorted((self.archive_path / "Products" / "Applications").glob("*.app"))
         if len(applications) != 1:
             raise SigningError("archive does not contain exactly one app", EXIT_FAILURE, "archive-inspect")
-        self.bundles = self._signed_bundles(applications[0])
-        if self.bundles[0].identifier != self.bundle_identifier:
+        archived = self._signed_bundles(applications[0])
+        if archived[0].identifier != self.bundle_identifier:
             raise SigningError("archived app does not have the scheme's bundle identifier", EXIT_FAILURE, "archive-inspect")
+        declared = {bundle.identifier for bundle in self.bundles}
+        found = {bundle.identifier for bundle in archived}
+        if declared != found:
+            details = [f"declared by the project spec but not archived: {identifier}" for identifier in sorted(declared - found)]
+            details += [f"archived but not declared by the project spec: {identifier}" for identifier in sorted(found - declared)]
+            raise integrity_error("archive embeds different bundles than the project spec; the profile coverage checked before the build "
+                                  "does not apply (" + "; ".join(details) + ")", "archive-mismatch")
+        self.bundles = archived
 
     @staticmethod
     def _signed_bundles(application: Path) -> List[EmbeddedBundle]:
@@ -620,53 +645,76 @@ class SigningRun:
 
     def preflight_embedded_bundles(self) -> None:
         self.bundles = self._project_signed_bundles()
-        self.assign_profiles(check_unknown_map_entries=False)
+        self.assign_profiles()
         self.check_target_device_listed()
 
     def _project_signed_bundles(self) -> List[EmbeddedBundle]:
-        targets: Dict[str, Dict[str, object]] = {}
-        current: Optional[Dict[str, object]] = None
-        in_targets = False
+        """The application and the app extensions it embeds, from the project spec; unresolvable input refuses the run."""
         try:
-            lines = (IOS_ROOT / "project.yml").read_text().splitlines()
-        except OSError:
-            lines = []
-        for line in lines:
-            if re.match(r"^\S", line):
-                in_targets = line.startswith("targets:")
+            import yaml
+        except ImportError:
+            raise input_error("PyYAML is required to read the project spec before the build (python3 -m pip install pyyaml)") from None
+        try:
+            spec = yaml.safe_load(self.project_spec_path.read_text())
+            targets = spec["targets"]
+        except (OSError, ValueError, KeyError, TypeError, yaml.YAMLError):
+            raise integrity_error("the project spec could not be read as a set of targets", "project-spec") from None
+        if not isinstance(targets, dict):
+            raise integrity_error("the project spec could not be read as a set of targets", "project-spec")
+
+        def bundle_identifier_of(name: str) -> str:
+            settings = targets[name].get("settings") if isinstance(targets[name], dict) else None
+            candidates = []
+            if isinstance(settings, dict):
+                candidates.append(settings.get("PRODUCT_BUNDLE_IDENTIFIER"))
+                for container in ("base", "configs"):
+                    if isinstance(settings.get(container), dict):
+                        candidates.append(settings[container].get("PRODUCT_BUNDLE_IDENTIFIER"))
+            candidates = [candidate for candidate in candidates if candidate is not None]
+            if len(candidates) != 1 or not isinstance(candidates[0], str) or not BUNDLE_IDENTIFIER_PATTERN.match(candidates[0]):
+                raise integrity_error(f"the bundle identifier of project target {name} cannot be resolved before the build", "project-spec")
+            return candidates[0]
+
+        if self.scheme not in targets or not isinstance(targets[self.scheme], dict):
+            raise integrity_error(f"the project spec does not define target {self.scheme}", "project-spec")
+        if bundle_identifier_of(self.scheme) != self.bundle_identifier:
+            raise integrity_error(f"project target {self.scheme} does not have the scheme's bundle identifier", "project-spec")
+        dependencies = targets[self.scheme].get("dependencies") or []
+        if not isinstance(dependencies, list):
+            raise integrity_error(f"the dependencies of project target {self.scheme} cannot be read before the build", "project-spec")
+        extensions: List[EmbeddedBundle] = []
+        for dependency in dependencies:
+            if not isinstance(dependency, dict):
+                raise integrity_error(f"a dependency of project target {self.scheme} cannot be read before the build", "project-spec")
+            name = dependency.get("target")
+            if name is None:
+                if any(kind in dependency for kind in UNTARGETED_DEPENDENCY_KINDS):
+                    continue
+                raise integrity_error(f"a dependency of project target {self.scheme} is of an unrecognized kind", "project-spec")
+            if name not in targets or not isinstance(targets[name], dict) or not isinstance(targets[name].get("type"), str):
+                raise integrity_error(f"dependency {name} of project target {self.scheme} has no resolvable type", "project-spec")
+            if dependency.get("embed") is False:
                 continue
-            if not in_targets:
+            dependency_type = targets[name]["type"]
+            if dependency_type in UNSIGNED_DEPENDENCY_TYPES:
                 continue
-            header = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line)
-            if header:
-                current = {"type": "", "identifier": "", "dependencies": []}
-                targets[header.group(1)] = current
-            elif current is not None:
-                for key, pattern in (("type", r"^    type:\s*(\S+)\s*$"), ("identifier", r"^      PRODUCT_BUNDLE_IDENTIFIER:\s*(\S+)\s*$")):
-                    match = re.match(pattern, line)
-                    if match:
-                        current[key] = match.group(1)
-                dependency = re.match(r"^      - target:\s*(\S+)\s*$", line)
-                if dependency:
-                    current["dependencies"].append(dependency.group(1))
-        application = targets.get(self.scheme)
-        if not application or application["identifier"] != self.bundle_identifier:
-            raise SigningError("ios/project.yml does not define the scheme's application bundle identifier", EXIT_FAILURE, "preflight")
-        bundles = [EmbeddedBundle(self.bundle_identifier, "application")]
-        for name in application["dependencies"]:
-            dependency = targets.get(name)
-            if dependency and dependency["type"] == "app-extension" and dependency["identifier"]:
-                bundles.append(EmbeddedBundle(dependency["identifier"], "app-extension"))
-        bundles[1:] = sorted(bundles[1:], key=lambda bundle: bundle.identifier)
+            if dependency_type.startswith("app-extension") or dependency_type == "extensionkit-extension":
+                extensions.append(EmbeddedBundle(bundle_identifier_of(name), "app-extension"))
+            else:
+                raise integrity_error(f"dependency {name} of project target {self.scheme} has a type this tool does not know how to sign",
+                                      "project-spec")
+        bundles = [EmbeddedBundle(self.bundle_identifier, "application")] + sorted(extensions, key=lambda bundle: bundle.identifier)
+        if len({bundle.identifier for bundle in bundles}) != len(bundles):
+            raise integrity_error("the project spec embeds two bundles with the same bundle identifier", "project-spec")
         return bundles
 
-    def assign_profiles(self, check_unknown_map_entries: bool = True) -> None:
+    def assign_profiles(self) -> None:
         now = datetime.datetime.now(datetime.timezone.utc)
         self.assignments = {}
-        if self.profile_map and check_unknown_map_entries:
+        if self.profile_map:
             unknown = sorted(set(self.profile_map) - {bundle.identifier for bundle in self.bundles})
             if unknown:
-                raise input_error(f"{PROFILE_MAP_VARIABLE} names bundle identifier {unknown[0]}, which is not embedded in the archive")
+                raise input_error(f"{PROFILE_MAP_VARIABLE} names bundle identifier {unknown[0]}, which is not an app or extension bundle of {self.scheme}")
         by_path = {info.source_path: info for info in self.profiles}
         for bundle in self.bundles:
             if self.profile_map:
@@ -862,13 +910,11 @@ def execute(run: SigningRun) -> int:
         reached_build = True
         run.record_toolchain()
         if run.embedding:
-            # Refuse from the project spec's signed bundles before project generation or the archive; the archive's
-            # bundles are authoritative and are checked again, still before any keychain work or signing.
+            # Profile coverage is decided from the project spec before project generation or the archive. The archive must
+            # then match the spec exactly; a difference is a tooling-integrity failure, never a profile decision.
             run.preflight_embedded_bundles()
             run.generate_and_archive()
             run.inspect_archive()
-            run.assign_profiles()
-            run.check_target_device_listed()
             run.prepare_identity()
             run.install_profiles()
         else:
