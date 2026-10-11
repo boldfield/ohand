@@ -10,7 +10,7 @@ use super::*;
 use crate::providers::contracts::ErrorClass;
 use crate::reminders::reconcile::{
     apply_completion, EffectCompletion, EffectOutcome, NotificationEffectError,
-    NotificationEffects, PendingRequest, ReconcileError, ScheduleRequest,
+    NotificationEffects, PayloadKind, PendingRequest, ReconcileError, ScheduleRequest,
 };
 use crate::reminders::state::{
     apply_user_time_correction, get_reminder, list_operations, AcknowledgmentState, DeliveryState,
@@ -1294,5 +1294,227 @@ fn a_write_while_prompts_are_cancelled_is_planned_again_before_anything_is_writt
 
     let repeat = pass_at(&mut db, &mut center, &prompts, PASS_TIME)?;
     assert_eq!(repeat.allocation, report.allocation);
+    Ok(())
+}
+
+fn week_of_prompts(count: i64) -> Vec<PromptDemand> {
+    (1..=count)
+        .map(|day| PromptDemand {
+            notification_id: format!("prompt-{day}"),
+            fire_at: instant(PASS_TIME) + Duration::days(day),
+        })
+        .collect()
+}
+
+/// What the prompt scheduler does with a report: install every granted prompt.
+fn install_granted_prompts(
+    center: &mut FakeCenter,
+    report: &CapacityReport,
+    prompts: &[PromptDemand],
+) {
+    for notification_id in &report.allocation.granted_prompts {
+        let demand = prompts
+            .iter()
+            .find(|prompt| &prompt.notification_id == notification_id)
+            .expect("granted prompts come from the demands");
+        center
+            .schedule(&ScheduleRequest {
+                notification_id: demand.notification_id.clone(),
+                fire_at: demand.fire_at,
+                payload_kind: PayloadKind::Generic,
+                opaque_target_id: demand.notification_id.clone(),
+            })
+            .expect("the fake center accepts every schedule");
+    }
+}
+
+/// Every prompt appears once; a deferred prompt is gone from the OS or its cancel failure is
+/// reported.
+fn assert_prompts_accounted_for(
+    report: &CapacityReport,
+    center: &FakeCenter,
+    prompts: &[PromptDemand],
+) {
+    let failed: BTreeSet<&str> = report
+        .prompt_cancel_failures
+        .iter()
+        .map(|failure| failure.notification_id.as_str())
+        .collect();
+    for deferred in &report.allocation.deferred_prompts {
+        assert!(
+            !center.holds(&deferred.notification_id)
+                || failed.contains(deferred.notification_id.as_str()),
+            "{} is reported as unscheduled but still pending",
+            deferred.notification_id
+        );
+    }
+    let mut every_prompt: Vec<&str> = report
+        .allocation
+        .granted_prompts
+        .iter()
+        .map(String::as_str)
+        .chain(
+            report
+                .allocation
+                .deferred_prompts
+                .iter()
+                .map(|deferred| deferred.notification_id.as_str()),
+        )
+        .collect();
+    let listed = every_prompt.len();
+    every_prompt.sort();
+    every_prompt.dedup();
+    assert_eq!(every_prompt.len(), listed, "a prompt is listed twice");
+    assert_eq!(every_prompt.len(), prompts.len());
+}
+
+#[test]
+fn failed_stale_generation_cancels_shrink_prompt_grants_so_installing_them_never_evicts(
+) -> Result<()> {
+    let mut db = open_db("stale_generation_prompts")?;
+    let installed = 55;
+    let records = seed_reminders(&mut db, installed)?;
+    let mut center = FakeCenter::default();
+    pass(&mut db, &mut center)?;
+    assert_eq!(center.pending.len(), installed);
+    let moved = REPLACEMENT_HEADROOM + 4;
+    for record in records.iter().take(moved) {
+        center
+            .fail_cancel_for
+            .insert(record.notification_id().unwrap());
+        set_reminder_time(
+            &mut db,
+            &record.item_id,
+            record.resolved_instant.unwrap() + Duration::minutes(5),
+        )?;
+    }
+    let prompts = week_of_prompts(5);
+
+    let report = pass_at(&mut db, &mut center, &prompts, PASS_TIME)?;
+
+    assert!(!report.converged());
+    assert_eq!(report.allocation.granted_reminders.len(), installed);
+    // 55 current reminders and 8 stale generations still pending leave no prompt room.
+    assert!(report.allocation.granted_prompts.is_empty());
+    assert!(report
+        .allocation
+        .deferred_prompts
+        .iter()
+        .all(|deferred| deferred.reason == PromptDeferral::CapacityExceeded));
+    assert_prompts_accounted_for(&report, &center, &prompts);
+
+    install_granted_prompts(&mut center, &report, &prompts);
+    assert!(
+        center.evicted.is_empty(),
+        "the OS evicted {:?}",
+        center.evicted
+    );
+    assert!(center.high_water <= OS_PENDING_LIMIT);
+
+    center.fail_cancel_for.clear();
+    let retry = pass_at(&mut db, &mut center, &prompts, PASS_TIME)?;
+    assert!(retry.converged());
+    assert_eq!(retry.allocation.granted_prompts.len(), budget() - installed);
+    install_granted_prompts(&mut center, &retry, &prompts);
+    assert!(center.evicted.is_empty());
+    assert!(center.pending.len() <= budget());
+    Ok(())
+}
+
+#[test]
+fn failed_cancels_of_completed_reminders_defer_prompts_instead_of_evicting_reminders() -> Result<()>
+{
+    let mut db = open_db("completed_item_prompts")?;
+    seed_reminders(&mut db, 52)?;
+    let mut center = FakeCenter::default();
+    pass(&mut db, &mut center)?;
+    let later = 8;
+    let mut later_items = Vec::new();
+    for index in 0..later {
+        let item_id = format!("item-later-{index}");
+        insert_item(&mut db, &item_id)?;
+        let record = set_reminder_time(&mut db, &item_id, base_due() + Duration::days(3))?;
+        later_items.push(record);
+    }
+    pass(&mut db, &mut center)?;
+    assert_eq!(center.pending.len(), budget());
+    for record in &later_items {
+        complete_item(&mut db, &record.item_id)?;
+        center
+            .fail_cancel_for
+            .insert(record.notification_id().unwrap());
+    }
+    let prompts = week_of_prompts(MAX_PROMPT_REQUESTS as i64);
+    let active_reminders: Vec<String> = center
+        .pending
+        .iter()
+        .map(|(id, _)| id.clone())
+        .filter(|id| !center.fail_cancel_for.contains(id))
+        .collect();
+
+    let report = pass_at(&mut db, &mut center, &prompts, PASS_TIME)?;
+
+    assert!(!report.converged());
+    assert_eq!(report.reconcile.failures.len(), later);
+    assert!(report.allocation.granted_prompts.is_empty());
+    assert_prompts_accounted_for(&report, &center, &prompts);
+
+    install_granted_prompts(&mut center, &report, &prompts);
+    assert!(
+        center.evicted.is_empty(),
+        "the OS evicted {:?}",
+        center.evicted
+    );
+    assert!(center.high_water <= OS_PENDING_LIMIT);
+    assert!(center.pending.len() <= budget());
+    for notification_id in &active_reminders {
+        assert!(center.holds(notification_id), "{notification_id} was lost");
+    }
+
+    center.fail_cancel_for.clear();
+    let retry = pass_at(&mut db, &mut center, &prompts, PASS_TIME)?;
+    assert!(retry.converged());
+    assert_eq!(retry.allocation.granted_prompts.len(), MAX_PROMPT_REQUESTS);
+    install_granted_prompts(&mut center, &retry, &prompts);
+    assert!(center.evicted.is_empty());
+    for notification_id in &active_reminders {
+        assert!(center.holds(notification_id));
+    }
+    Ok(())
+}
+
+#[test]
+fn a_failed_cancel_of_a_prompt_that_no_longer_fits_stays_charged_and_reported() -> Result<()> {
+    let mut db = open_db("prompt_refit_cancel_failure")?;
+    let installed = 55;
+    let records = seed_reminders(&mut db, installed)?;
+    let mut center = FakeCenter::default();
+    let prompts = week_of_prompts(5);
+    let first = pass_at(&mut db, &mut center, &prompts, PASS_TIME)?;
+    install_granted_prompts(&mut center, &first, &prompts);
+    assert_eq!(center.pending.len(), budget());
+    for record in records.iter().take(2) {
+        center
+            .fail_cancel_for
+            .insert(record.notification_id().unwrap());
+        set_reminder_time(
+            &mut db,
+            &record.item_id,
+            record.resolved_instant.unwrap() + Duration::minutes(5),
+        )?;
+    }
+    center.fail_cancel_for.insert("prompt-5".to_string());
+
+    let report = pass_at(&mut db, &mut center, &prompts, PASS_TIME)?;
+
+    assert!(!report.converged());
+    assert!(report
+        .prompt_cancel_failures
+        .iter()
+        .any(|failure| failure.notification_id == "prompt-5"));
+    assert_prompts_accounted_for(&report, &center, &prompts);
+    install_granted_prompts(&mut center, &report, &prompts);
+    assert!(center.evicted.is_empty());
+    assert!(center.high_water <= OS_PENDING_LIMIT);
     Ok(())
 }

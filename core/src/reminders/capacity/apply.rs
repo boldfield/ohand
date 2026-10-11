@@ -5,7 +5,8 @@ use rusqlite::Transaction;
 
 use super::allocation::ReminderDemand;
 use super::allocation::{
-    allocate, Allocation, AllocationInput, CapacityPolicy, DeferredPrompt, PromptDemand,
+    allocate, Allocation, AllocationInput, CapacityPolicy, DeferredPrompt, PromptDeferral,
+    PromptDemand,
 };
 use crate::providers::contracts::ErrorClass;
 use crate::reminders::reconcile::{
@@ -64,6 +65,12 @@ impl CapacityReport {
 /// report and elapsed in storage. `settle` re-validates the planned allocation inside its own
 /// transaction and writes it only if a fresh computation agrees; if a concurrent write changed
 /// the durable inputs, the cancel step runs again for the new plan.
+///
+/// `reconcile` may fail to cancel a request of a known reminder that is no longer desired.
+/// That request stays pending, so the prompt grants are finally checked against what is
+/// actually still pending: grants that no longer fit are deferred and their requests
+/// cancelled, so installing `report.allocation.granted_prompts` never pushes the OS past the
+/// usable budget and never evicts an explicit reminder.
 ///
 /// Safe to run after every write, on launch and on foreground activation; those events are the
 /// refill cadence and no timer is involved. A failure to list pending requests aborts the pass
@@ -162,9 +169,62 @@ pub fn reconcile_with_capacity(
         break;
     }
 
-    let mut guarded = PendingLimitGuard::new(effects, pending, policy.os_pending_limit);
+    let still_pending: Vec<PendingRequest> = pending
+        .into_iter()
+        .filter(|request| !cancelled.contains(&request.notification_id))
+        .collect();
+    let mut guarded = PendingLimitGuard::new(effects, still_pending, policy.os_pending_limit);
     report.reconcile = reconcile(database, &pass_clock, &mut guarded)?;
+    fit_prompt_grants_to_pending(&mut guarded, policy, &mut report);
     Ok(report)
+}
+
+/// The allocation assumed that `reconcile` would cancel every request of a known reminder
+/// outside the desired set (stale generations, completed or demoted reminders). When such a
+/// cancel fails, the request is still pending and the planned prompt grants may no longer
+/// fit: installing them would push the OS past its limit and evict explicit reminders
+/// silently. The grants are therefore checked against the requests actually still pending
+/// after `reconcile`, and only ever shrink, so prompts never take a slot the plan gave to a
+/// reminder. A grant that no longer fits is deferred as `CapacityExceeded`, lowest priority
+/// first, and its pending request is cancelled; a failed cancel keeps it pending and charged,
+/// so the check repeats until the granted prompts fit beside everything else still pending.
+fn fit_prompt_grants_to_pending(
+    guarded: &mut PendingLimitGuard<'_>,
+    policy: &CapacityPolicy,
+    report: &mut CapacityReport,
+) {
+    let usable_budget = policy.usable_budget();
+    loop {
+        let granted = &report.allocation.granted_prompts;
+        let held_by_others = guarded
+            .pending
+            .iter()
+            .filter(|notification_id| !granted.contains(notification_id))
+            .count();
+        let prompt_slots = usable_budget.saturating_sub(held_by_others);
+        if granted.len() <= prompt_slots {
+            return;
+        }
+        let no_longer_fit = report.allocation.granted_prompts.split_off(prompt_slots);
+        for notification_id in no_longer_fit {
+            report.allocation.deferred_prompts.push(DeferredPrompt {
+                notification_id: notification_id.clone(),
+                reason: PromptDeferral::CapacityExceeded,
+            });
+            if !guarded.pending.contains(&notification_id) {
+                continue;
+            }
+            match guarded.cancel(&notification_id) {
+                Ok(()) => report.prompts_cancelled.push(notification_id),
+                Err(error) => report.prompt_cancel_failures.push(EffectFailure {
+                    notification_id,
+                    operation_type: OperationType::Cancel,
+                    class: error.class,
+                    code: error.code,
+                }),
+            }
+        }
+    }
 }
 
 /// The single instant of one capacity pass.
