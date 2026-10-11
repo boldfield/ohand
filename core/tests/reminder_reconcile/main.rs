@@ -919,6 +919,106 @@ fn an_ambiguous_schedule_failure_leaves_the_attempt_recorded() -> Result<()> {
     Ok(())
 }
 
+const PAST_DUE: &str = "2026-01-16T09:30:00Z";
+const DAY_LATE: &str = "2026-01-17T09:00:00Z";
+
+#[test]
+fn a_past_due_never_attempted_reminder_removes_a_request_pending_at_another_due_instant(
+) -> Result<()> {
+    let mut db = open_db(&temp_db_path("past_due_mismatch_never"))?;
+    let revision = insert_item(&mut db, "item-1", ROOFER_TEXT)?;
+    let id = create_reminder(&mut db, "item-1", revision)?
+        .notification_id()
+        .unwrap();
+    let mut center = FakeCenter::default();
+    center.pending.insert(id.clone(), instant(DAY_LATE));
+
+    let report = reconcile_at(&mut db, &mut center, PAST_DUE)?;
+
+    assert_eq!(report.removed, vec![id.clone()]);
+    assert_eq!(report.expired, vec![id.clone()]);
+    assert_eq!(center.mutations(), vec![&Call::Cancel(id.clone())]);
+    assert!(center.pending.is_empty());
+    assert_eq!(
+        reminder(&mut db, "item-1")?.request_state,
+        RequestState::Unschedulable(UnschedulableReason::TimeInPast)
+    );
+    Ok(())
+}
+
+#[test]
+fn a_past_due_attempted_reminder_removes_a_request_pending_at_another_due_instant() -> Result<()> {
+    let mut db = open_db(&temp_db_path("past_due_mismatch_attempted"))?;
+    let revision = insert_item(&mut db, "item-1", ROOFER_TEXT)?;
+    let record = create_reminder(&mut db, "item-1", revision)?;
+    let id = record.notification_id().unwrap();
+    let mut center = FakeCenter {
+        fail_schedule: Some(transient("timeout")),
+        ..FakeCenter::default()
+    };
+    reconcile_now(&mut db, &mut center)?;
+    center.fail_schedule = None;
+    center.pending.insert(id.clone(), instant(DAY_LATE));
+    center.clear_calls();
+
+    let report = reconcile_at(&mut db, &mut center, PAST_DUE)?;
+
+    assert_eq!(report.removed, vec![id.clone()]);
+    assert_eq!(report.unconfirmed, vec![id.clone()]);
+    assert!(report.expired.is_empty());
+    assert_eq!(center.mutations(), vec![&Call::Cancel(id.clone())]);
+    assert!(center.pending.is_empty());
+    assert_resolved_and_unconfirmed(&mut db, &id, record.state_version)?;
+    Ok(())
+}
+
+#[test]
+fn a_past_due_acknowledged_reminder_removes_a_request_pending_at_another_due_instant() -> Result<()>
+{
+    let mut db = open_db(&temp_db_path("past_due_mismatch_acknowledged"))?;
+    let revision = insert_item(&mut db, "item-1", ROOFER_TEXT)?;
+    let id = create_reminder(&mut db, "item-1", revision)?
+        .notification_id()
+        .unwrap();
+    let mut center = FakeCenter::default();
+    reconcile_now(&mut db, &mut center)?;
+    let acknowledged = reminder(&mut db, "item-1")?;
+    assert_eq!(acknowledged.schedule_state, ScheduleState::Scheduled);
+    center.pending.insert(id.clone(), instant(DAY_LATE));
+    center.clear_calls();
+
+    let report = reconcile_at(&mut db, &mut center, PAST_DUE)?;
+
+    assert_eq!(report.removed, vec![id.clone()]);
+    assert!(report.expired.is_empty());
+    assert_eq!(center.mutations(), vec![&Call::Cancel(id.clone())]);
+    assert!(center.pending.is_empty());
+    let after = reminder(&mut db, "item-1")?;
+    assert_eq!(after.request_state, RequestState::Resolved);
+    assert_eq!(after.state_version, acknowledged.state_version);
+    Ok(())
+}
+
+#[test]
+fn a_past_due_request_whose_due_instant_is_unreported_is_left_to_deliver() -> Result<()> {
+    let mut db = open_db(&temp_db_path("past_due_unreported"))?;
+    let revision = insert_item(&mut db, "item-1", ROOFER_TEXT)?;
+    let id = create_reminder(&mut db, "item-1", revision)?
+        .notification_id()
+        .unwrap();
+    let mut center = FakeCenter::default();
+    reconcile_now(&mut db, &mut center)?;
+    center.hide_due_instants = true;
+    center.clear_calls();
+
+    let report = reconcile_at(&mut db, &mut center, PAST_DUE)?;
+
+    assert!(report.removed.is_empty());
+    assert!(center.mutations().is_empty());
+    assert_eq!(center.pending_ids(), vec![id]);
+    Ok(())
+}
+
 #[test]
 fn the_attempt_is_durable_before_the_os_call_returns() -> Result<()> {
     let path = temp_db_path("attempt_durable");

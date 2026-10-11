@@ -154,6 +154,24 @@ pub fn reconcile(
             continue;
         }
         if entry.fire_at <= now {
+            // The desired instant has passed, so the request cannot be replaced; a same-ID
+            // request reporting another due instant would fire at the wrong time and is
+            // removed. One with an unreported instant may be the desired request about to be
+            // delivered, so it is left alone. The durable state is concluded below as usual.
+            let pending_at_another_due = pending_by_id
+                .get(&entry.notification_id)
+                .is_some_and(|request| request.fire_at.is_some());
+            if pending_at_another_due
+                && cancel_in_os(
+                    database,
+                    clock,
+                    effects,
+                    &entry.notification_id,
+                    &mut report,
+                )?
+            {
+                report.removed.push(entry.notification_id.clone());
+            }
             match expire_if_never_attempted(database, clock, entry)? {
                 ExpiryOutcome::Expired => report.expired.push(entry.notification_id.clone()),
                 ExpiryOutcome::Unconfirmed => {
