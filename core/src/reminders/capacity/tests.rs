@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
@@ -207,6 +207,9 @@ struct FakeCenter {
     high_water: usize,
     fail_list: bool,
     fail_cancel_for: BTreeSet<String>,
+    /// Schedules that install the request and then report this error anyway, like a native
+    /// call that times out or is cancelled after the OS accepted it.
+    fail_after_install_for: BTreeMap<String, ErrorClass>,
     /// Runs after each successful cancel, standing in for another writer that commits while
     /// native effects are in flight.
     after_cancel: Option<AfterCancel>,
@@ -248,6 +251,12 @@ impl NotificationEffects for FakeCenter {
             self.evicted.push(evicted);
         }
         self.high_water = self.high_water.max(self.pending.len());
+        if let Some(class) = self.fail_after_install_for.get(&request.notification_id) {
+            return Err(NotificationEffectError::new(
+                *class,
+                "schedule_outcome_unknown",
+            ));
+        }
         Ok(())
     }
 
@@ -1080,6 +1089,74 @@ fn failed_cancels_beyond_the_headroom_never_push_the_os_past_its_limit() -> Resu
     assert!(retry.converged());
     assert!(center.evicted.is_empty());
     assert!(center.pending.len() <= budget());
+    Ok(())
+}
+
+#[test]
+fn schedules_that_fail_after_installing_are_charged_so_the_os_never_evicts() -> Result<()> {
+    let mut db = open_db("ambiguous_schedules")?;
+    let records = seed_reminders(&mut db, budget())?;
+    let mut center = FakeCenter::default();
+    pass(&mut db, &mut center)?;
+    let extra = REPLACEMENT_HEADROOM + 4;
+    let mut replacements = Vec::new();
+    for index in 0..extra {
+        let item_id = format!("item-sooner-{index}");
+        insert_item(&mut db, &item_id)?;
+        set_reminder_time(
+            &mut db,
+            &item_id,
+            base_due() - Duration::hours(index as i64 + 1),
+        )?;
+        let displaced = records[budget() - 1 - index].notification_id().unwrap();
+        center.fail_cancel_for.insert(displaced);
+        let replacement = reminder(&mut db, &item_id)?.notification_id().unwrap();
+        let class = if index % 2 == 0 {
+            ErrorClass::Cancelled
+        } else {
+            ErrorClass::Transient
+        };
+        center
+            .fail_after_install_for
+            .insert(replacement.clone(), class);
+        replacements.push(replacement);
+    }
+    let survivors: Vec<String> = records[..budget() - extra]
+        .iter()
+        .map(|record| record.notification_id().unwrap())
+        .collect();
+
+    let report = pass(&mut db, &mut center)?;
+
+    assert!(!report.converged());
+    assert!(
+        center.evicted.is_empty(),
+        "the OS evicted {:?}",
+        center.evicted
+    );
+    assert!(center.high_water <= OS_PENDING_LIMIT);
+    for notification_id in &survivors {
+        assert!(center.holds(notification_id), "{notification_id} was lost");
+    }
+    let attempted = center
+        .mutations()
+        .into_iter()
+        .filter(|call| matches!(call, Call::Schedule(id) if replacements.contains(id)))
+        .count();
+    assert!(
+        attempted <= REPLACEMENT_HEADROOM,
+        "an uncertain install consumed no capacity: {attempted} schedules reached the OS"
+    );
+
+    center.fail_cancel_for.clear();
+    center.fail_after_install_for.clear();
+    let retry = pass(&mut db, &mut center)?;
+    assert!(retry.converged());
+    assert!(center.evicted.is_empty());
+    assert!(center.pending.len() <= budget());
+    for notification_id in &replacements {
+        assert!(center.holds(notification_id));
+    }
     Ok(())
 }
 

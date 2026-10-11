@@ -332,7 +332,9 @@ fn settle(
 
 /// Wraps the effects handed to `reconcile` and never lets the pending set grow past the OS
 /// limit, which would make the OS evict a request silently. It follows the pending set from
-/// the listing it was given and from the effects that succeed; a schedule that would add a new
+/// the listing it was given and from the effects that may have taken effect: a successful
+/// cancel removes a request, and any schedule except a definitive rejection adds one, because
+/// a failed call may still have installed it. A schedule that would add a new
 /// request at the limit fails as transient without reaching the OS, so the reminder stays
 /// visibly unconfirmed and the next pass retries it.
 struct PendingLimitGuard<'a> {
@@ -366,9 +368,17 @@ impl NotificationEffects for PendingLimitGuard<'_> {
                 "pending_limit_reached",
             ));
         }
-        self.inner.schedule(request)?;
-        self.pending.insert(request.notification_id.clone());
-        Ok(())
+        let result = self.inner.schedule(request);
+        // A schedule that failed without a definitive rejection may still have installed the
+        // request (a timed-out or cancelled native call, for example), so it is charged as
+        // pending: the guard can only overcount until the next listing, never undercount.
+        match &result {
+            Err(error) if error.is_definitive_rejection() => {}
+            _ => {
+                self.pending.insert(request.notification_id.clone());
+            }
+        }
+        result
     }
 
     fn cancel(&mut self, notification_id: &str) -> Result<(), NotificationEffectError> {
