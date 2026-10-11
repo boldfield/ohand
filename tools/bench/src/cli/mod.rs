@@ -1,6 +1,7 @@
 //! Command-line interface for the developer-only paired model comparison.
 //!
-//! `bench plan` is the dry run and `bench run` executes; both compose the corpus loader, the two
+//! `bench report` reads a journal and prints a diagnostic report; it is read-only and sends
+//! nothing. `bench plan` is the dry run and `bench run` executes; both compose the corpus loader, the two
 //! arm profiles, the destination authorizer, the bounded resumable executor and (in live mode)
 //! the host transport. Nothing here is linked into the app.
 //!
@@ -27,6 +28,7 @@ mod interrupt;
 mod output;
 mod profiles;
 mod rehearsal;
+mod report;
 #[cfg(test)]
 mod tests;
 
@@ -124,6 +126,7 @@ pub fn main_with(
         }
         Command::Plan(options) => plan(&options, services, out),
         Command::Run(options) => run(&options, services, out),
+        Command::Report(options) => report::report(&options, out),
     };
     match result {
         Ok(status) => status,

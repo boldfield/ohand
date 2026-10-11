@@ -15,6 +15,7 @@ USAGE:
     bench help
     bench plan --corpus <file> --profile-a <spec> --profile-b <spec> [options]
     bench run  --corpus <file> --profile-a <spec> --profile-b <spec> --journal <file> [options]
+    bench report --corpus <file> --journal <file> [--format text|json] [--rates <file>]
 
 COMMANDS:
     help    Print this text. Needs no credentials and touches nothing.
@@ -25,6 +26,18 @@ COMMANDS:
             writes no file at all.
     run     Execute the plan and append every result to the journal. Resumable: sides that
             already have a dispatched attempt are kept, never silently sent again.
+    report  Read a finished or partial journal and print a diagnostic report: pair counts,
+            objective results per arm against the synthetic oracle, disagreement, requests,
+            latency, provider-reported tokens, an optional cost estimate and what the two
+            arms do not have in common. Read-only: it opens the journal for reading, never
+            creates or repairs it, sends nothing and chooses no winner.
+
+REPORT OPTIONS:
+    --format <text|json>   Output format (default `text`).
+    --rates <file>         Versioned price rates you supply (JSON: rates_version, currency,
+                           profiles[{profile_version, input_micros_per_million_tokens,
+                           output_micros_per_million_tokens}]). Without it every cost is
+                           unknown; with it costs are labeled estimates, never billed amounts.
 
 REQUIRED:
     --corpus <file>        Synthetic intent corpus (JSON). Nothing else is ever read as input.
@@ -175,6 +188,83 @@ pub enum Command {
     Help,
     Plan(Options),
     Run(Options),
+    Report(ReportOptions),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportFormat {
+    Text,
+    Json,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportOptions {
+    pub corpus: PathBuf,
+    pub journal: PathBuf,
+    pub format: ReportFormat,
+    pub rates: Option<PathBuf>,
+}
+
+fn parse_report(words: &[String]) -> Result<Command, String> {
+    let mut corpus = None;
+    let mut journal = None;
+    let mut format = None;
+    let mut rates = None;
+    let mut index = 0;
+    while index < words.len() {
+        let word = &words[index];
+        index += 1;
+        let (flag, inline) = match word.split_once('=') {
+            Some((flag, value)) if flag.starts_with("--") => (flag, Some(value.to_string())),
+            _ => (word.as_str(), None),
+        };
+        let slot = match flag {
+            "--corpus" => &mut corpus,
+            "--journal" => &mut journal,
+            "--format" => &mut format,
+            "--rates" => &mut rates,
+            _ if flag.starts_with("--") => {
+                return Err(format!(
+                    "unknown option {flag} for `report`; see `bench help`"
+                ))
+            }
+            _ => return Err("unexpected argument; see `bench help`".to_string()),
+        };
+        let value = match inline {
+            Some(value) => value,
+            None => {
+                let value = words
+                    .get(index)
+                    .ok_or_else(|| format!("{flag} needs a value"))?;
+                index += 1;
+                value.clone()
+            }
+        };
+        set_once(slot, flag, value)?;
+    }
+    let required = |slot: Option<String>, flag: &str| {
+        slot.filter(|value| !value.is_empty())
+            .ok_or_else(|| format!("{flag} is required for `report`"))
+    };
+    let format = match format.as_deref() {
+        None | Some("text") => ReportFormat::Text,
+        Some("json") => ReportFormat::Json,
+        Some(_) => return Err("--format must be `text` or `json`".to_string()),
+    };
+    Ok(Command::Report(ReportOptions {
+        corpus: PathBuf::from(required(corpus, "--corpus")?),
+        journal: PathBuf::from(required(journal, "--journal")?),
+        format,
+        rates: rates
+            .map(|value| {
+                if value.is_empty() {
+                    Err("--rates needs a file".to_string())
+                } else {
+                    Ok(PathBuf::from(value))
+                }
+            })
+            .transpose()?,
+    }))
 }
 
 #[derive(Default)]
@@ -323,7 +413,16 @@ pub fn parse(words: &[String]) -> Result<Command, String> {
     let is_run = match first.as_str() {
         "plan" => false,
         "run" => true,
-        _ => return Err("unknown command; expected `plan`, `run` or `help`".to_string()),
+        "report" => {
+            if words[1..]
+                .iter()
+                .any(|word| word == "--help" || word == "-h")
+            {
+                return Ok(Command::Help);
+            }
+            return parse_report(&words[1..]);
+        }
+        _ => return Err("unknown command; expected `plan`, `run`, `report` or `help`".to_string()),
     };
     if words[1..]
         .iter()
