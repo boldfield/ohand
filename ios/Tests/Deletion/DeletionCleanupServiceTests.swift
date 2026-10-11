@@ -300,6 +300,35 @@ final class DeletionCleanupServiceTests: DeletionTestCase {
         XCTAssertEqual(world.core.mutationCount, mutationsBefore)
     }
 
+    func testRepeatedCleanUpAfterATerminalFailureIsNeverSettled() async throws {
+        let world = try makeWorld()
+        try await world.seedItem(itemID, captureID: captureID, finalizedAudio: true)
+        world.core.addItem(itemID, captureID: captureID, audioReference: "Elsewhere/cap-1.m4a")
+        world.core.recordDeletion(itemID)
+
+        let service = world.makeService()
+        let first = await service.cleanUp(itemID: itemID)
+
+        XCTAssertFalse(first.isSettled)
+        XCTAssertEqual(first.terminalFailures, [.removeAudio])
+        XCTAssertEqual(world.core.status(itemID, .removeAudio), .failed)
+
+        let mutationsBefore = world.core.mutationCount
+        for attempt in ["same service", "reopened service"] {
+            let again = await (attempt == "same service" ? service : world.makeService()).cleanUp(itemID: itemID)
+            XCTAssertEqual(again.steps, [], "a terminal failure is not retried: \(attempt)")
+            XCTAssertEqual(again.terminalFailures, [.removeAudio], "the durable failure stays visible: \(attempt)")
+            XCTAssertFalse(again.isSettled, "a durable failure is never settled: \(attempt)")
+        }
+        XCTAssertEqual(world.core.mutationCount, mutationsBefore)
+
+        world.faults.arm("core.terminalFailures")
+        let unknown = await world.makeService().cleanUp(itemID: itemID)
+        XCTAssertEqual(world.faults.firedPoints, ["core.terminalFailures"])
+        XCTAssertEqual(unknown.listingFailure, .coreUnavailable)
+        XCTAssertFalse(unknown.isSettled, "an unreadable failure list is unknown, not empty")
+    }
+
     func testUnreadableTerminalFailureListingIsUnknownNeverConverged() async throws {
         let world = try makeWorld()
         try await seedFullItem(world)
@@ -436,6 +465,84 @@ final class DeletionCleanupServiceTests: DeletionTestCase {
         XCTAssertTrue(reopened.converged)
         XCTAssertFalse(world.exists(.ingressInProgressAudio, "opaque-take.m4a"))
         XCTAssertEqual(world.remnants(of: captureID), [])
+        XCTAssertTrue(world.exists(.ingressStagingRecords, "cap-2.json"))
+    }
+
+    func testUntrustedConflictingClaimKeepsIngressCleanupPendingAcrossReopens() async throws {
+        let context = """
+        "context":{"captureInstant":"2026-10-08T09:30:00Z","timezoneID":"UTC","utcOffsetMinutes":0,"locale":"en_US",\
+        "calendar":"gregorian","itemScope":"personal","routeID":"route-personal","entryLocked":false,\
+        "createdAt":"2026-10-08T09:30:01Z"}
+        """
+        let audio = """
+        "audio":{"inProgressFileName":"opaque-take.m4a","finalizedFileName":"cap-2.m4a"}
+        """
+        let untrustedClaims: [(label: String, entry: String, json: String)] = [
+            ("corrupt: body names another capture", "cap-2.json",
+             "{\"formatVersion\":1,\"captureID\":\"cap-3\",\(audio),\(context)}"),
+            ("unsupported version", "cap-2.json", "{\"formatVersion\":99,\"captureID\":\"cap-2\",\(audio),\(context)}"),
+            ("invalid: finalized name bound to another capture", "cap-2.json", """
+            {"formatVersion":1,"captureID":"cap-2","audio":{"inProgressFileName":"opaque-take.m4a",\
+            "finalizedFileName":"cap-1.m4a"},\(context)}
+            """),
+            ("missing context", "cap-2.json", "{\"formatVersion\":1,\"captureID\":\"cap-2\",\(audio)}"),
+            ("interrupted record write", "cap-2.json.incomplete",
+             "{\"formatVersion\":1,\"captureID\":\"cap-2\",\(audio),\(context)}"),
+        ]
+        for claim in untrustedClaims {
+            let world = try makeWorld()
+            try await world.seedItem(itemID, captureID: captureID, finalizedAudio: true)
+            let staging = IngressStagingStore(layout: world.layout, fileSystem: FileManagerIngressFileSystem())
+            _ = try staging.stage(IngressRecord(
+                captureID: captureID, text: nil,
+                audio: IngressAudioHandoff(inProgressFileName: "opaque-take.m4a", finalizedFileName: "cap-1.m4a"),
+                context: world.context))
+            try Data("synthetic audio".utf8).write(to: world.url(.ingressInProgressAudio, "opaque-take.m4a"))
+            try Data(claim.json.utf8).write(to: world.url(.ingressStagingRecords, claim.entry))
+            world.core.recordDeletion(itemID)
+
+            for attempt in ["first pass", "reopened"] {
+                let report = await world.makeService().reconcile()
+                let label = "\(claim.label), \(attempt)"
+
+                XCTAssertFalse(report.converged, label)
+                XCTAssertTrue(
+                    report.items.first?.steps.contains(
+                        DeletionStepResult(kind: .clearIngress, outcome: .retryLater(.ingressOwnershipUnresolved))) ?? false,
+                    label)
+                XCTAssertEqual(world.core.status(itemID, .clearIngress), .pending, label)
+                XCTAssertTrue(world.exists(.ingressInProgressAudio, "opaque-take.m4a"), "contested audio stays: \(label)")
+                XCTAssertTrue(
+                    world.exists(.ingressStagingRecords, "cap-1.json"), "the record still names the audio: \(label)")
+                XCTAssertTrue(world.exists(.ingressStagingRecords, claim.entry), label)
+                XCTAssertFalse(world.exists(.finalizedAudio, "cap-1.m4a"), "uncontested effects still finish: \(label)")
+                XCTAssertEqual(world.core.status(itemID, .removeAudio), .completed, label)
+            }
+
+            // Once the untrusted claim is resolved, a reopen removes the audio and converges.
+            try FileManager.default.removeItem(at: world.url(.ingressStagingRecords, claim.entry))
+            let resolved = await world.makeService().reconcile()
+
+            XCTAssertTrue(resolved.converged, claim.label)
+            XCTAssertFalse(world.exists(.ingressInProgressAudio, "opaque-take.m4a"), claim.label)
+            XCTAssertEqual(world.remnants(of: captureID), [], claim.label)
+        }
+    }
+
+    func testValidClaimByAnotherRecordKeepsItsAudio() async throws {
+        let world = try makeWorld()
+        try await world.seedItem(itemID, captureID: captureID, finalizedAudio: true)
+        try await world.seedItem("item-2", captureID: "cap-2", finalizedAudio: false, stagedRecord: .audio)
+        try Data("""
+        {"formatVersion":1,"captureID":"cap-1","audio":{"inProgressFileName":"cap-2-recording.m4a","finalizedFileName":"cap-1.m4a"}}
+        """.utf8).write(to: world.url(.ingressStagingRecords, "cap-1.json"))
+        world.core.recordDeletion(itemID)
+
+        let report = await world.makeService().reconcile()
+
+        XCTAssertTrue(report.converged)
+        XCTAssertEqual(world.remnants(of: captureID), [])
+        XCTAssertTrue(world.exists(.ingressInProgressAudio, "cap-2-recording.m4a"), "the live capture's audio survives")
         XCTAssertTrue(world.exists(.ingressStagingRecords, "cap-2.json"))
     }
 

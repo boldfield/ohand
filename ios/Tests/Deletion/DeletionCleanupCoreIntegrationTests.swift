@@ -58,6 +58,12 @@ final class DeletionCleanupCoreIntegrationTests: XCTestCase {
         return try session.run { await service.reconcile() }
     }
 
+    private func cleanUp(_ seeded: Seeded, on session: RealCoreSession) throws -> DeletionItemResult {
+        let service = seeded.world.makeService(on: session)
+        let itemID = seeded.itemID
+        return try session.run { await service.cleanUp(itemID: itemID) }
+    }
+
     private func assertConverged(_ seeded: Seeded, file: StaticString = #filePath, line: UInt = #line) throws {
         let world = seeded.world
         XCTAssertEqual(world.remnants(of: captureID), [], "no file of the deleted capture remains", file: file, line: line)
@@ -174,6 +180,28 @@ final class DeletionCleanupCoreIntegrationTests: XCTestCase {
             XCTAssertEqual(again.items, [], "a terminal failure is not retried")
             XCTAssertEqual(again.terminalFailures, first.terminalFailures, "the durable failure stays visible")
             XCTAssertFalse(again.converged, "a durable failure never reports convergence")
+            session.close()
+            session = try seeded.world.openCore()
+        }
+        session.close()
+    }
+
+    func testRepeatedCleanUpAfterATerminalFailureIsNeverSettledAcrossReopens() throws {
+        let seeded = try seedDeletedItem()
+        try seeded.world.setAudioReference(captureID: captureID, to: "Elsewhere/cap-1.m4a")
+        var session = try seeded.world.openCore()
+
+        let first = try cleanUp(seeded, on: session)
+
+        XCTAssertFalse(first.isSettled)
+        XCTAssertEqual(first.terminalFailures, [.removeAudio])
+        XCTAssertEqual(try seeded.world.workStatuses(itemID: seeded.itemID)["remove_audio"], "failed_no_retry")
+
+        for _ in 0..<2 {
+            let again = try cleanUp(seeded, on: session)
+            XCTAssertEqual(again.steps, [], "a terminal failure is not retried")
+            XCTAssertEqual(again.terminalFailures, [.removeAudio], "the durable failure stays visible")
+            XCTAssertFalse(again.isSettled, "a durable failure is never settled")
             session.close()
             session = try seeded.world.openCore()
         }

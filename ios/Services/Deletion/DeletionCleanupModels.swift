@@ -77,6 +77,9 @@ public enum DeletionRetryReason: String, Equatable, Sendable {
     case storageUnavailable = "storage_unavailable"
     case notificationUnavailable = "notification_unavailable"
     case notificationStillPending = "notification_still_pending"
+    /// Another staging record that cannot be trusted names audio the deleted capture's record also names, so who owns
+    /// it is unknown. The audio and the deleted capture's record stay until the other record is resolved.
+    case ingressOwnershipUnresolved = "ingress_ownership_unresolved"
     case cancelled = "cancelled"
 }
 
@@ -102,13 +105,29 @@ public struct DeletionStepResult: Equatable, Sendable {
 
 public struct DeletionItemResult: Equatable, Sendable {
     public let itemID: String
-    /// Set when the item's pending rows could not be read; nothing was attempted.
+    /// Set when the item's pending rows, or its terminally failed rows after the steps ran, could not be read. That is
+    /// "unknown", never "settled".
     public let listingFailure: DeletionRetryReason?
     public let steps: [DeletionStepResult]
+    /// The item's rows the core holds as terminally failed after the steps ran, including rows failed by earlier calls.
+    /// A failed row leaves the pending list, so without these a repeat call would read as settled.
+    public let terminalFailures: [DeletionCleanupKind]
 
-    /// True when no pending row remains for the item.
+    public init(
+        itemID: String,
+        listingFailure: DeletionRetryReason?,
+        steps: [DeletionStepResult],
+        terminalFailures: [DeletionCleanupKind] = []
+    ) {
+        self.itemID = itemID
+        self.listingFailure = listingFailure
+        self.steps = steps
+        self.terminalFailures = terminalFailures
+    }
+
+    /// True only when no row of the item is pending or terminally failed.
     public var isSettled: Bool {
-        listingFailure == nil && steps.allSatisfy { $0.outcome == .completed }
+        listingFailure == nil && terminalFailures.isEmpty && steps.allSatisfy { $0.outcome == .completed }
     }
 }
 

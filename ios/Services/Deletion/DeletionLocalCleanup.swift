@@ -8,6 +8,9 @@ enum DeletionLocalCleanupError: Error, Equatable {
     case audioReferenceUnresolvable
     /// A removal reported success but the file is still present.
     case stillPresent
+    /// Another staging record that cannot be trusted names audio this capture's record names. Nothing that record
+    /// could own was removed, and this capture's record stays so it still names the audio left to remove.
+    case ingressOwnershipUnresolved
 }
 
 /// Removes the files a deleted item's capture left in protected storage: the ingress staging record and the audio it
@@ -129,16 +132,33 @@ final class DeletionLocalCleanup {
         return try !isClaimedByAnotherRecord(inProgressName: name, recordURL: recordURL)
     }
 
+    /// True when another record that loads and validates names the file: as in ingress recovery, only such a record
+    /// claims audio, so the file stays that capture's and is never surfaced as unclaimed. Another entry that names the
+    /// file but cannot be trusted (a corrupt, unsupported or invalid record, or an interrupted record write) neither
+    /// proves nor rules out a claim, so it throws `ingressOwnershipUnresolved` and the step stays pending.
     private func isClaimedByAnotherRecord(inProgressName name: String, recordURL: URL) throws -> Bool {
         let ownNames: Set<String> = [
             recordURL.lastPathComponent, recordURL.lastPathComponent + IngressFileSystemNaming.incompleteWriteSuffix,
         ]
+        let recordSuffix = "." + IngressRecord.fileExtension
         let recordsDirectory = layout.directory(for: .ingressStagingRecords)
+        var untrustedClaim = false
         for entry in try fileSystem.entryNames(in: recordsDirectory).sorted()
         where !ownNames.contains(entry) && !entry.hasPrefix(".") {
+            if entry.hasSuffix(recordSuffix) {
+                do {
+                    let record = try staging.load(captureID: String(entry.dropLast(recordSuffix.count)))
+                    if record?.audio?.inProgressFileName == name { return true }
+                    continue
+                } catch IngressStagingFailure.corruptRecord {
+                } catch IngressStagingFailure.unsupportedRecordVersion {
+                } catch IngressStagingFailure.invalidRecord {
+                }
+            }
             let data = try fileSystem.read(from: recordsDirectory.appendingPathComponent(entry))
-            if Self.inProgressName(in: data) == name { return true }
+            if Self.inProgressName(in: data) == name { untrustedClaim = true }
         }
+        guard !untrustedClaim else { throw DeletionLocalCleanupError.ingressOwnershipUnresolved }
         return false
     }
 

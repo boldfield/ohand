@@ -53,18 +53,33 @@ actor DeletionCleanupService {
         // so without this an empty pending list would read as convergence.
         do {
             let failures = try await core.terminallyFailedCleanup()
-                .map { DeletionTerminalFailure(itemID: $0.itemID, kind: $0.kind) }
-            return DeletionReconcileReport(listingFailure: nil, items: results, terminalFailures: failures)
+            return DeletionReconcileReport(
+                listingFailure: nil,
+                items: results.map { Self.attaching(failures, to: $0) },
+                terminalFailures: failures.map { DeletionTerminalFailure(itemID: $0.itemID, kind: $0.kind) })
         } catch {
             return DeletionReconcileReport(listingFailure: Self.coreReason(error), items: results)
         }
     }
 
-    /// Completes the pending cleanup of one item, typically right after the core recorded its deletion.
+    /// Completes the pending cleanup of one item, typically right after the core recorded its deletion. The result
+    /// includes the item's terminally failed rows, so a repeat call after a terminal failure is never reported settled.
     func cleanUp(itemID: String) async -> DeletionItemResult {
         await acquire()
         defer { release() }
-        return await cleanUpLocked(itemID: itemID)
+        let result = await cleanUpLocked(itemID: itemID)
+        guard result.listingFailure == nil else { return result }
+        do {
+            return Self.attaching(try await core.terminallyFailedCleanup(), to: result)
+        } catch {
+            return DeletionItemResult(itemID: itemID, listingFailure: Self.coreReason(error), steps: result.steps)
+        }
+    }
+
+    private static func attaching(_ failures: [DeletionCleanupWork], to result: DeletionItemResult) -> DeletionItemResult {
+        DeletionItemResult(
+            itemID: result.itemID, listingFailure: result.listingFailure, steps: result.steps,
+            terminalFailures: failures.filter { $0.itemID == result.itemID }.map { $0.kind })
     }
 
     private func cleanUpLocked(itemID: String) async -> DeletionItemResult {
@@ -152,6 +167,8 @@ actor DeletionCleanupService {
                 try localCleanup.clearIngress(captureID: target.captureID)
             } catch DeletionLocalCleanupError.unsafeCaptureIdentifier {
                 return await recordFailure(work, .unsafeCaptureIdentifier)
+            } catch DeletionLocalCleanupError.ingressOwnershipUnresolved {
+                return .retryLater(.ingressOwnershipUnresolved)
             } catch {
                 return .retryLater(.storageUnavailable)
             }
