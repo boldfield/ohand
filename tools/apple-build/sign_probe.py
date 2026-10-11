@@ -618,9 +618,52 @@ class SigningRun:
             raise SigningError("archive embeds two bundles with the same bundle identifier", EXIT_FAILURE, "archive-inspect")
         return bundles
 
-    def assign_profiles(self) -> None:
+    def preflight_embedded_bundles(self) -> None:
+        self.bundles = self._project_signed_bundles()
+        self.assign_profiles(check_unknown_map_entries=False)
+        self.check_target_device_listed()
+
+    def _project_signed_bundles(self) -> List[EmbeddedBundle]:
+        targets: Dict[str, Dict[str, object]] = {}
+        current: Optional[Dict[str, object]] = None
+        in_targets = False
+        try:
+            lines = (IOS_ROOT / "project.yml").read_text().splitlines()
+        except OSError:
+            lines = []
+        for line in lines:
+            if re.match(r"^\S", line):
+                in_targets = line.startswith("targets:")
+                continue
+            if not in_targets:
+                continue
+            header = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line)
+            if header:
+                current = {"type": "", "identifier": "", "dependencies": []}
+                targets[header.group(1)] = current
+            elif current is not None:
+                for key, pattern in (("type", r"^    type:\s*(\S+)\s*$"), ("identifier", r"^      PRODUCT_BUNDLE_IDENTIFIER:\s*(\S+)\s*$")):
+                    match = re.match(pattern, line)
+                    if match:
+                        current[key] = match.group(1)
+                dependency = re.match(r"^      - target:\s*(\S+)\s*$", line)
+                if dependency:
+                    current["dependencies"].append(dependency.group(1))
+        application = targets.get(self.scheme)
+        if not application or application["identifier"] != self.bundle_identifier:
+            raise SigningError("ios/project.yml does not define the scheme's application bundle identifier", EXIT_FAILURE, "preflight")
+        bundles = [EmbeddedBundle(self.bundle_identifier, "application")]
+        for name in application["dependencies"]:
+            dependency = targets.get(name)
+            if dependency and dependency["type"] == "app-extension" and dependency["identifier"]:
+                bundles.append(EmbeddedBundle(dependency["identifier"], "app-extension"))
+        bundles[1:] = sorted(bundles[1:], key=lambda bundle: bundle.identifier)
+        return bundles
+
+    def assign_profiles(self, check_unknown_map_entries: bool = True) -> None:
         now = datetime.datetime.now(datetime.timezone.utc)
-        if self.profile_map:
+        self.assignments = {}
+        if self.profile_map and check_unknown_map_entries:
             unknown = sorted(set(self.profile_map) - {bundle.identifier for bundle in self.bundles})
             if unknown:
                 raise input_error(f"{PROFILE_MAP_VARIABLE} names bundle identifier {unknown[0]}, which is not embedded in the archive")
@@ -643,6 +686,7 @@ class SigningRun:
         if not self.install:
             return
         udid = self.device_udid or self._read_device_udid()
+        self.device_udid = udid
         self.redactor.register(udid, "device-udid")
         for bundle in self.bundles:
             listed = {device.lower() for device in self.assignments[bundle.identifier].provisioned_devices}
@@ -653,7 +697,8 @@ class SigningRun:
     def _read_device_udid(self) -> str:
         output_path = self.work_dir / "device-details.json"
         completed = self.run_tool("device-details", ["xcrun", "devicectl", "device", "info", "details", "--device", self.device_id,
-                                                     "--json-output", str(output_path)], allow_failure=True)
+                                                     "--json-output", str(output_path)],
+                                  capture_output_in_log=False, allow_failure=True)
         hint = f"could not read the target device's hardware identifier with devicectl; set {DEVICE_UDID_VARIABLE}"
         udid = None
         if completed.returncode == 0:
@@ -763,7 +808,7 @@ class SigningRun:
             "signing_style": "manual",
             "export_method": EXPORT_METHOD,
             "toolchain": dict(self.toolchain),
-            "profile": {"expires_at": profile_expiry, "device_scoped": bool(self.profiles)},
+            "profile": {"expires_at": profile_expiry, "device_scoped": bool(self.profiles) and not any(info.provisions_all_devices for info in self.profiles)},
             "device": {"label": self.device_label},
             "install": {
                 "requested": self.install,
@@ -817,8 +862,9 @@ def execute(run: SigningRun) -> int:
         reached_build = True
         run.record_toolchain()
         if run.embedding:
-            # Bundle identifiers exist only in the archive; the unsigned archive needs no keychain or profile, so every
-            # coverage refusal happens before any keychain work or signing.
+            # Refuse from the project spec's signed bundles before project generation or the archive; the archive's
+            # bundles are authoritative and are checked again, still before any keychain work or signing.
+            run.preflight_embedded_bundles()
             run.generate_and_archive()
             run.inspect_archive()
             run.assign_profiles()

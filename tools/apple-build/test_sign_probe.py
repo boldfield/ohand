@@ -786,6 +786,8 @@ class EmbeddedExtensionTests(SigningToolTestCase):
     def assert_refused_before_keychain_and_export(self, result, exit_code, message):
         self.assertEqual(result.returncode, exit_code, result.stderr)
         self.assertIn(message, result.stderr)
+        self.assertEqual(self.calls_of("mint", "run"), [])
+        self.assertEqual(self.calls_of("xcodebuild", "archive"), [])
         self.assertEqual(self.calls_of("security", "create-keychain"), [])
         self.assertEqual(self.calls_of("security", "import"), [])
         self.assertEqual(self.calls_of("xcodebuild", "-exportArchive"), [])
@@ -874,6 +876,16 @@ class EmbeddedExtensionTests(SigningToolTestCase):
         evidence = self.only_evidence()
         self.assertEqual((evidence["status"], evidence["failed_stage"]), ("failed", "bundle-coverage"))
         self.assertFalse(evidence["install"]["performed"])
+
+    def test_extension_found_only_in_the_archive_is_refused_after_the_archive_and_before_keychain_work(self):
+        map_path = self.write_mapped_profiles({APP_BUNDLE_IDENTIFIER: {}, EXTENSION_BUNDLE_IDENTIFIER: {"UUID": EXTENSION_PROFILE_UUID}})
+        result = self.sign_app(STUB_ARCHIVE_EXTENSIONS=f"{EXTENSION_BUNDLE_IDENTIFIER},{SECOND_EXTENSION_IDENTIFIER}",
+                               **self.mapped_environment(map_path))
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertIn(f"no supplied provisioning profile is mapped to bundle identifier {SECOND_EXTENSION_IDENTIFIER}", result.stderr)
+        self.assertEqual(len(self.calls_of("xcodebuild", "archive")), 1)
+        self.assertEqual(self.calls_of("security", "create-keychain"), [])
+        self.assertEqual(self.calls_of("xcodebuild", "-exportArchive"), [])
 
     def test_covering_profile_that_cannot_sign_a_bundle_is_refused_with_a_distinct_exit_status(self):
         cases = {
