@@ -1525,6 +1525,276 @@ fn a_past_due_request_whose_due_instant_is_unreported_is_removed() -> Result<()>
     Ok(())
 }
 
+// ---- Mismatched requests before due ------------------------------------------------------
+//
+// Before the due time a same-identifier request at another or an unreported instant is
+// normally replaced by the schedule call. When that call is refused, fails, or is withheld,
+// the wrong-time request must not stay live behind a `schedule_failed` reminder.
+
+const EARLY: &str = "2026-01-15T11:00:00Z";
+
+#[test]
+fn a_first_install_refused_definitively_over_a_mismatched_request_removes_it() -> Result<()> {
+    let mut db = open_db(&temp_db_path("mismatch_first_refused"))?;
+    let revision = insert_item(&mut db, "item-1", ROOFER_TEXT)?;
+    let record = create_reminder(&mut db, "item-1", revision)?;
+    let id = record.notification_id().unwrap();
+    let mut center = FakeCenter {
+        fail_schedule: Some(definitive(ErrorClass::Unauthorized)),
+        ..FakeCenter::default()
+    };
+    center.pending.insert(id.clone(), instant(DAY_LATE));
+
+    let refused = reconcile_now(&mut db, &mut center)?;
+
+    assert_eq!(
+        center.calls,
+        vec![
+            Call::List,
+            Call::Schedule(id.clone()),
+            Call::Cancel(id.clone())
+        ]
+    );
+    assert_eq!(refused.removed, vec![id.clone()]);
+    assert_eq!(refused.failures.len(), 1);
+    assert_eq!(refused.failures[0].class, ErrorClass::Unauthorized);
+    assert!(refused.installed.is_empty());
+    assert!(center.pending.is_empty());
+    let after = reminder(&mut db, "item-1")?;
+    assert_eq!(after.schedule_state, ScheduleState::ScheduleFailed);
+    assert_eq!(after.request_state, RequestState::Resolved);
+    assert_eq!(after.state_version, record.state_version);
+    assert_eq!(
+        operation_states(&mut db, "item-1")?,
+        vec![(
+            OperationType::Schedule,
+            id.clone(),
+            OperationState::Rejected
+        )]
+    );
+
+    center.fail_schedule = None;
+    center.clear_calls();
+    let withheld = reconcile_now(&mut db, &mut center)?;
+    assert_eq!(withheld.withheld, vec![id]);
+    assert!(withheld.removed.is_empty());
+    assert!(center.mutations().is_empty());
+    assert!(center.pending.is_empty());
+    Ok(())
+}
+
+#[test]
+fn a_definitive_failure_while_replacing_a_mismatched_reinstall_removes_it_before_withholding(
+) -> Result<()> {
+    let (mut db, mut center, record) = acknowledged_then_absent("mismatch_reinstall_refused")?;
+    let id = record.notification_id().unwrap();
+    center.pending.insert(id.clone(), instant(EARLY));
+    center.fail_schedule = Some(definitive(ErrorClass::Permanent));
+
+    let refused = reconcile_now(&mut db, &mut center)?;
+
+    assert_eq!(
+        center.calls,
+        vec![
+            Call::List,
+            Call::Schedule(id.clone()),
+            Call::Cancel(id.clone())
+        ]
+    );
+    assert_eq!(refused.removed, vec![id.clone()]);
+    assert_eq!(refused.failures.len(), 1);
+    assert!(center.pending.is_empty());
+    let after = reminder(&mut db, "item-1")?;
+    assert_eq!(after.schedule_state, ScheduleState::ScheduleFailed);
+    assert_eq!(after.state_version, record.state_version);
+    assert_eq!(
+        operation_states(&mut db, "item-1")?,
+        vec![(
+            OperationType::Schedule,
+            id.clone(),
+            OperationState::Rejected
+        )]
+    );
+
+    center.fail_schedule = None;
+    center.clear_calls();
+    for _ in 0..2 {
+        let withheld = reconcile_now(&mut db, &mut center)?;
+        assert!(withheld.converged());
+        assert_eq!(withheld.withheld, vec![id.clone()]);
+        assert!(withheld.removed.is_empty());
+    }
+    assert!(center.mutations().is_empty());
+    assert!(center.pending.is_empty());
+    assert_eq!(
+        reminder(&mut db, "item-1")?.schedule_state,
+        ScheduleState::ScheduleFailed
+    );
+    Ok(())
+}
+
+#[test]
+fn a_transient_failure_while_replacing_a_mismatched_request_removes_it_then_retries() -> Result<()>
+{
+    let (mut db, mut center, record) = acknowledged_then_absent("mismatch_reinstall_transient")?;
+    let id = record.notification_id().unwrap();
+    center.pending.insert(id.clone(), instant(EARLY));
+    center.fail_schedule = Some(transient("notification_center_busy"));
+
+    let failed = reconcile_now(&mut db, &mut center)?;
+
+    assert_eq!(
+        center.calls,
+        vec![
+            Call::List,
+            Call::Schedule(id.clone()),
+            Call::Cancel(id.clone())
+        ]
+    );
+    assert_eq!(failed.removed, vec![id.clone()]);
+    assert_eq!(failed.failures.len(), 1);
+    assert_eq!(failed.failures[0].class, ErrorClass::Transient);
+    assert!(center.pending.is_empty());
+    let after = reminder(&mut db, "item-1")?;
+    assert_eq!(after.schedule_state, ScheduleState::ScheduleFailed);
+    assert_eq!(after.state_version, record.state_version);
+    assert_eq!(
+        operation_states(&mut db, "item-1")?,
+        vec![(OperationType::Schedule, id.clone(), OperationState::Failed)]
+    );
+
+    center.fail_schedule = None;
+    center.clear_calls();
+    let retried = reconcile_now(&mut db, &mut center)?;
+
+    assert_eq!(retried.installed, vec![id.clone()]);
+    assert!(retried.removed.is_empty());
+    assert_eq!(center.calls, vec![Call::List, Call::Schedule(id.clone())]);
+    assert_eq!(center.pending.get(&id), Some(&instant(DUE)));
+    assert_eq!(
+        reminder(&mut db, "item-1")?.schedule_state,
+        ScheduleState::Scheduled
+    );
+    Ok(())
+}
+
+#[test]
+fn a_withheld_schedule_removes_a_mismatched_request_that_appears_later() -> Result<()> {
+    let mut db = open_db(&temp_db_path("mismatch_withheld"))?;
+    let revision = insert_item(&mut db, "item-1", ROOFER_TEXT)?;
+    let record = create_reminder(&mut db, "item-1", revision)?;
+    let id = record.notification_id().unwrap();
+    let mut center = FakeCenter {
+        fail_schedule: Some(definitive(ErrorClass::Unsupported)),
+        ..FakeCenter::default()
+    };
+    reconcile_now(&mut db, &mut center)?;
+    assert_eq!(
+        operation_states(&mut db, "item-1")?,
+        vec![(
+            OperationType::Schedule,
+            id.clone(),
+            OperationState::Rejected
+        )]
+    );
+    // A request under the rejected identifier turns up at the wrong instant (a restore, for
+    // example). The schedule stays withheld, but the request is not left to fire.
+    center.pending.insert(id.clone(), instant(EARLY));
+    center.fail_schedule = None;
+    center.clear_calls();
+
+    let report = reconcile_now(&mut db, &mut center)?;
+
+    assert_eq!(report.withheld, vec![id.clone()]);
+    assert_eq!(report.removed, vec![id.clone()]);
+    assert!(report.converged());
+    assert_eq!(center.mutations(), vec![&Call::Cancel(id.clone())]);
+    assert!(center.pending.is_empty());
+    let after = reminder(&mut db, "item-1")?;
+    assert_eq!(after.schedule_state, ScheduleState::ScheduleFailed);
+    assert_eq!(after.request_state, RequestState::Resolved);
+    assert_eq!(after.state_version, record.state_version);
+    assert_eq!(
+        operation_states(&mut db, "item-1")?,
+        vec![(
+            OperationType::Schedule,
+            id.clone(),
+            OperationState::Rejected
+        )]
+    );
+
+    center.clear_calls();
+    let again = reconcile_now(&mut db, &mut center)?;
+    assert_eq!(again.withheld, vec![id]);
+    assert!(again.removed.is_empty());
+    assert!(center.mutations().is_empty());
+    Ok(())
+}
+
+#[test]
+fn a_refused_replacement_of_a_request_with_an_unreported_due_instant_removes_it() -> Result<()> {
+    let mut db = open_db(&temp_db_path("mismatch_unreported_refused"))?;
+    let revision = insert_item(&mut db, "item-1", ROOFER_TEXT)?;
+    let id = create_reminder(&mut db, "item-1", revision)?
+        .notification_id()
+        .unwrap();
+    let mut center = FakeCenter {
+        fail_schedule: Some(definitive(ErrorClass::Permanent)),
+        hide_due_instants: true,
+        ..FakeCenter::default()
+    };
+    center.pending.insert(id.clone(), instant(EARLY));
+
+    let report = reconcile_now(&mut db, &mut center)?;
+
+    assert_eq!(report.removed, vec![id.clone()]);
+    assert_eq!(report.failures.len(), 1);
+    assert_eq!(
+        center.calls,
+        vec![Call::List, Call::Schedule(id.clone()), Call::Cancel(id)]
+    );
+    assert!(center.pending.is_empty());
+    assert_eq!(
+        reminder(&mut db, "item-1")?.schedule_state,
+        ScheduleState::ScheduleFailed
+    );
+    Ok(())
+}
+
+#[test]
+fn a_mismatched_request_whose_removal_fails_is_retried_by_the_next_withheld_pass() -> Result<()> {
+    let (mut db, mut center, record) = acknowledged_then_absent("mismatch_cancel_retry")?;
+    let id = record.notification_id().unwrap();
+    center.pending.insert(id.clone(), instant(EARLY));
+    center.fail_schedule = Some(definitive(ErrorClass::Permanent));
+    center.fail_cancel = Some(transient("notification_center_busy"));
+
+    let first = reconcile_now(&mut db, &mut center)?;
+
+    assert!(!first.converged());
+    assert_eq!(first.failures.len(), 2);
+    assert_eq!(first.failures[0].operation_type, OperationType::Schedule);
+    assert_eq!(first.failures[1].operation_type, OperationType::Cancel);
+    assert!(first.removed.is_empty());
+    assert!(center.pending.contains_key(&id));
+
+    center.fail_schedule = None;
+    center.fail_cancel = None;
+    center.clear_calls();
+    let second = reconcile_now(&mut db, &mut center)?;
+
+    assert!(second.converged());
+    assert_eq!(second.withheld, vec![id.clone()]);
+    assert_eq!(second.removed, vec![id.clone()]);
+    assert_eq!(center.mutations(), vec![&Call::Cancel(id.clone())]);
+    assert!(center.pending.is_empty());
+    assert_eq!(
+        operation_states(&mut db, "item-1")?,
+        vec![(OperationType::Schedule, id, OperationState::Rejected)]
+    );
+    Ok(())
+}
+
 #[test]
 fn a_rejected_install_past_its_due_time_becomes_unschedulable_without_an_os_call() -> Result<()> {
     let mut db = open_db(&temp_db_path("rejected_expired"))?;

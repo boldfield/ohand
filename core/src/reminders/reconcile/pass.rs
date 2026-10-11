@@ -11,7 +11,7 @@ use super::ReconcileError;
 use crate::providers::contracts::ErrorClass;
 use crate::reminders::state::{
     desired_notifications, get_reminder, list_operations, reconcile_inactive_items,
-    DesiredNotification, OperationState, OperationType, UnschedulableReason,
+    DesiredNotification, OperationState, OperationType, RequestState, UnschedulableReason,
 };
 use crate::store::schema::{Clock, Database};
 
@@ -182,7 +182,18 @@ pub fn reconcile(
             }
             continue;
         }
-        schedule_in_os(database, clock, effects, entry, &mut report)?;
+        // The request under this identifier, if any, is pending at another or an unreported
+        // due instant: it is replaced by the schedule call, or removed when that call cannot
+        // be made or fails.
+        let mismatched_pending = pending_by_id.contains_key(&entry.notification_id);
+        schedule_in_os(
+            database,
+            clock,
+            effects,
+            entry,
+            mismatched_pending,
+            &mut report,
+        )?;
     }
 
     Ok(report)
@@ -334,15 +345,25 @@ fn cancel_in_os(
     }
 }
 
+/// Install (or replace) the request for `entry`. Scheduling an identifier that is already
+/// pending replaces it, so a same-identifier request at another or an unreported due instant
+/// (`mismatched_pending`) is normally replaced by the call itself. When the call is withheld
+/// or fails, nothing replaced it, so that stale request is cancelled explicitly: a request at
+/// the wrong instant must not stay live behind a `schedule_failed` reminder, whatever the
+/// durable disposition of the attempt.
 fn schedule_in_os(
     database: &mut Database,
     clock: &dyn Clock,
     effects: &mut dyn NotificationEffects,
     entry: &DesiredNotification,
+    mismatched_pending: bool,
     report: &mut ReconcileReport,
 ) -> Result<(), ReconcileError> {
     if !begin_schedule_attempt(database, clock, entry)? {
         report.withheld.push(entry.notification_id.clone());
+        if mismatched_pending {
+            remove_mismatched_request(database, clock, effects, entry, report)?;
+        }
         return Ok(());
     }
     let request = ScheduleRequest {
@@ -382,8 +403,32 @@ fn schedule_in_os(
             // A failed call may still have installed the request (a cancelled caller, for
             // example). Cancel is idempotent, so a request that is no longer desired is
             // removed whatever the error class.
-            roll_back_if_stale(database, clock, effects, entry, outcome, report)?;
+            let rolled_back = roll_back_if_stale(database, clock, effects, entry, outcome, report)?;
+            // The stale request the call was meant to replace is otherwise still pending at
+            // the wrong instant, and a definitive failure would leave it there for every
+            // later (withheld) pass. Remove it now. Should the failed call in fact have
+            // installed the desired request, the attempt is recorded as unconfirmed and the
+            // next pass reinstalls it; that costs one extra call and never a stale firing.
+            if !rolled_back && mismatched_pending {
+                remove_mismatched_request(database, clock, effects, entry, report)?;
+            }
         }
+    }
+    Ok(())
+}
+
+/// Cancel the same-identifier request known to be pending at another or an unreported due
+/// instant, reporting it as removed. A cancel failure is recorded in the report (so the pass
+/// does not converge) and the next pass retries it.
+fn remove_mismatched_request(
+    database: &mut Database,
+    clock: &dyn Clock,
+    effects: &mut dyn NotificationEffects,
+    entry: &DesiredNotification,
+    report: &mut ReconcileReport,
+) -> Result<(), ReconcileError> {
+    if cancel_in_os(database, clock, effects, &entry.notification_id, report)? {
+        report.removed.push(entry.notification_id.clone());
     }
     Ok(())
 }
@@ -426,13 +471,20 @@ fn begin_schedule_attempt(
         .iter()
         .find(|operation| operation.effect_identity == identity)
         .map(|operation| operation.operation_state);
+    let mut reopenable = OperationState::Pending.as_str();
     match state {
         Some(OperationState::Rejected) => return Ok(false),
         Some(OperationState::Acknowledged) => {
+            // Reopen only while the entry still describes the reminder's current, resolved
+            // generation. The plan is a snapshot: after a change or cancel committed since,
+            // the old generation's acknowledgment is left as it was (the completion of the
+            // call below is classed stale and rolled back).
             let reopened = get_reminder(&tx, &entry.item_id)?.is_some_and(|reminder| {
-                reminder.notification_id().as_deref() == Some(entry.notification_id.as_str())
+                reminder.request_state == RequestState::Resolved
+                    && reminder.notification_id().as_deref() == Some(entry.notification_id.as_str())
             });
             if reopened {
+                reopenable = OperationState::Acknowledged.as_str();
                 tx.execute(
                     "UPDATE reminders SET schedule_state = 'pending_schedule', updated_at = ?
                      WHERE reminder_id = ? AND schedule_state = 'scheduled'",
@@ -451,7 +503,7 @@ fn begin_schedule_attempt(
             &entry.reminder_id,
             identity,
             OperationState::Pending.as_str(),
-            OperationState::Acknowledged.as_str(),
+            reopenable,
         ],
     )?;
     tx.commit()?;
