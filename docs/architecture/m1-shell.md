@@ -6,15 +6,15 @@ Status: decision recorded from P09 feasibility evidence on 2026-10-10.
 
 **Tauri 2 is selected as the M1 production management shell.**
 
-The native iPhone capture remains independent. Rust core, SQLite durable state, and native Swift capture/services are preserved. The management UI (settings, retrieval, reminders) runs in a Tauri webview accessed via deep-link handoff from the native capture surface.
+The native iPhone capture remains independent. Rust core, SQLite durable state, and native Swift capture/services are preserved. The management UI (settings, retrieval, reminders) runs in a Tauri webview within the same app.
 
 ### Production architecture model
 
-The M1 production app is a **single installed iPhone app** with two UI surfaces:
+The M1 production app is a **single installed iPhone app** (OhAndApp, as built by XcodeGen in `ios/project.yml`), composed of:
 1. **Native Swift capture surface** (built with App Intents): invoked via Control Center, Shortcuts, or Action button. Saves captures to SQLite via the Rust core.
-2. **Tauri webview management shell** (settings, retrieval, reminders): invoked via `ohand-tauri://` deep-link scheme from the native capture surface's "Review in management app" button.
+2. **Tauri webview management shell** (settings, retrieval, reminders): embedded as a view in the same app. Navigation from capture to management shell is in-app view switching, not inter-process communication.
 
-Both surfaces share the same app container, SQLite database, and Rust core backend. The handoff is internal to the app: a deep link from native UI to webview, not inter-process communication. The probes (CaptureProbe and TauriProbe as separate apps) use separate containers and demonstrate the viability of each component; production unifies them into one app bundle with both surfaces integrated.
+Both surfaces share the same app container, SQLite database, and Rust core backend. U01 will embed the Tauri webview into OhAndApp and wire the handoff from native capture UI to the webview view controller. The probes (CaptureProbe and TauriProbe as separate apps) used separate containers and a URL scheme to demonstrate that each component works independently; production unifies them into one app bundle with both surfaces integrated and no inter-app handoff.
 
 ## Evidence basis
 
@@ -22,10 +22,12 @@ P09 executed the documented probe matrix on the target device (iPhone 16 Pro, iO
 
 ### Handoff and identity preservation (P07)
 
-- **Cold handoff** (shell not running): Tauri probe launched and received the capture identifier. Record shows `webviewReady == false` and handoff interval 4.961 s. Shell remains responsive while capture saves independently. **Assessment**: The 4.961 s launch is within typical Tauri cold-launch bounds on iOS and acceptable for a user flow where the shell is not normally running; the user captures first (< 1 s) and then reviews the result. This is faster than opening Settings or Reminders from within the app.
-- **Warm handoff** (shell backgrounded): Second capture handed off; shell lists both identifiers. Record shows `webviewReady == true`.
-- **Hostile route rejection**: One invalid URL (`ohand-tauri://capture?captureId=not-a-uuid`) submitted while shell running; rejected and counter incremented ("Handoffs rejected: 1"), no entries added.
-- **Secret isolation**: Each handoff file contains only `captureId`, `receivedAtUnixMs`, and `webviewReady`. Capture text never appears in Tauri container. Native entry saves durably before "Review in management app" button is enabled, so shell absence does not block save.
+P07 measured URL-scheme handoff between two separate probe apps (CaptureProbe and TauriProbe) to verify that each component works independently:
+
+- **Cold handoff** (shell not running): TauriProbe launched and received the capture identifier via URL scheme. Record shows `webviewReady == false` (the URL arrived at scene connect before the webview was ready) and commit-to-receipt interval 4.961 s. Shell remained responsive while capture saved independently. This interval is not trigger-to-ready; it includes inter-app launch and webview initialization on a separate app's first run. Production in-app navigation will not use this inter-app path.
+- **Warm handoff** (shell backgrounded): Second capture handed off; shell listed both identifiers. Record shows `webviewReady == true`.
+- **Hostile route rejection**: One invalid URL (`ohand-tauri://capture?captureId=not-a-uuid`) submitted while shell running; rejected and counter incremented ("Handoffs rejected: 1"), no entries added. This validates scheme parsing and input validation.
+- **Secret isolation**: Each handoff file contained only `captureId`, `receivedAtUnixMs`, and `webviewReady`. Capture text never appeared in TauriProbe container. Native entry saved durably before "Review in management app" button was enabled, so shell absence did not block save.
 
 All evidence: `docs/validation/device-feasibility.md` P07 section and `p09-probe-matrix-sweep.json` cells for P07 (cold, warm, hostile route rejection, secret isolation, VoiceOver and large text; keyboard navigation deferred to U10).
 
@@ -56,7 +58,7 @@ Both hooks depend on private tao selectors (`TaoSceneDelegate.scene(_:willConnec
 
 **Remediation steps for production:**
 
-0. **Establish reproducible signed builds**: TauriProbe was hand-signed without a build-time signing record (`device-feasibility.md:49`), and its working-tree state was not recorded (`device-feasibility.md:210`). DESIGN.md:118 requires "reproducible signed builds". The U01 integration must establish a CI-integrated signing process that records the build input (source commit hash, Cargo.lock hash, Xcode version), the signing identity (team/certificate hash), the provisioning profile, and the resulting app bundle hash. This record is kept per release so builds can be audited and reproduced.
+0. **Establish reproducible signed builds** (owned by P08): TauriProbe was hand-signed without a build-time signing record (`device-feasibility.md:49`), and its working-tree state was not recorded (`device-feasibility.md:210`). DESIGN.md:118 requires "reproducible signed builds". P08 will establish a CI-integrated signing process that records the build input (source commit hash, Cargo.lock hash, Xcode version), the signing identity (team/certificate hash), the provisioning profile, and the resulting app bundle hash. This record is kept per release so builds can be audited and reproduced.
 
 1. **Verify tao upgrade compatibility**: Before updating tao or Tauri, verify that the selectors in `scene_urls.rs` still exist and are called at the expected points. CI verification requires `run-events.log` to contain `scene-hook installed=true`, `scene-connect urls=N` and `scene-open urls=N` lines; a missing scene hook fails the build. CI test `tauri-probe` in `.github/workflows/ios.yml` explicitly checks `scene-hook installed` in the logged event kinds.
 
@@ -64,26 +66,26 @@ Both hooks depend on private tao selectors (`TaoSceneDelegate.scene(_:willConnec
    - File issue with tao/Tauri for `UISceneConnectionOptions.URLContexts` delivery and URL normalisation.
    - If upstream does not fix by M2, document the Objective-C hook dependency and ensure any future tao maintenance includes a selector-existence check in CI.
 
-3. **Verify scene-hook in signed build CI**: The current `tauri-probe` job in `.github/workflows/ios.yml` is an unsigned simulator build. After U01 integration, add the same scene-hook resilience check (verifying `scene-hook installed=true` in run-events.log) to the production signed-build pipeline so every release verifies the hook is working.
+3. **Verify scene-hook in U01 integration**: The current `tauri-probe` job in `.github/workflows/ios.yml` is an unsigned simulator build and must verify `scene-hook installed=true`. During U01 integration, ensure the webview code in the embedded Tauri component includes the scene-hook workaround and that the unsigned simulator build verifies it. After P08 establishes signed-build CI (step 0), the signed pipeline will inherit this verification.
 
 ## Rust core and native boundary preservation
 
 The management shell choice does not affect the core architecture:
 
 - **Rust core** continues to own domain state (SQLite), provider adapters, orchestration, job execution, and deterministic state transitions. No Tauri or webview dependency is introduced to the core.
-- **Native (Swift) capture** remains the entry point. `CaptureProbe` (and the production equivalent in C03/C04) saves locally via native protection classes before any handoff. Silent and voice capture do not depend on the shell.
-- **Handoff boundary**: Only a stable identifier crosses the process boundary; capture content remains in the native capture container until explicitly retrieved via Rust-backed queries.
-- **Settings and retrieval** (management UI) run in Tauri and are reached via `ohand-tauri://` scheme registered in `probes/tauri/src-tauri/Info.ios.plist` (merged into the app plist by tauri-cli).
+- **Native (Swift) capture** remains the entry point. `CaptureProbe` (and the production equivalent in C03/C04) saves locally via native protection classes before any shell interaction. Silent and voice capture do not depend on the management shell.
+- **In-app handoff**: The native capture surface has a "Review in management app" button that navigates to the webview management shell within the same app. Only the stable capture identifier is passed; capture content is retrieved from SQLite on demand by the management UI via Rust-backed queries.
+- **Settings and retrieval** (management UI) run in Tauri and are presented as a view within the single OhAndApp. The `ohand-tauri://` scheme registered in the probe's plist is not used for production in-app navigation but may remain as an external entry point if another app links to Oh And.
 - **Native effect interfaces** (notification delivery, credential storage, audio playback) remain in Swift; Tauri calls them through native bindings if needed, or Rust handles scheduling/persistence and Swift executes effects.
 
 ## Integration steps for U01
 
-1. Move `probes/tauri/` to the production location `app/` and integrate into the signed build pipeline.
-2. Ensure the scene-hook workaround is in place and CI-verified as described in Remediation steps above.
-3. Wire the handoff receiver to production Rust services (item lookup, settings persistence).
-4. Remove or isolate probe stubs (dummy capture lists, test credentials) from the release target.
-5. Validate that the app launches to the native capture surface on first install (no management/settings list shown first; U01 requirement from m1-plan.md:19).
-6. Verify `ohand-tauri://` scheme is registered in the production app plist.
+1. Integrate the Tauri webview component from `probes/tauri/` into the OhAndApp host (as part of `app/` per U01's ownership in m1-plan.md). Embed it as a view/view controller within the existing Swift UIApplication composition.
+2. Ensure the scene-hook workaround (from `probes/tauri/src-tauri/src/scene_urls.rs`) is in place and CI-verified as described in Remediation step 1 and 3 above.
+3. Wire the in-app handoff from the native capture "Review in management app" button to the webview view controller, passing the stable capture identifier.
+4. Wire the handoff receiver to production Rust services (item lookup, settings persistence).
+5. Remove or isolate probe stubs (dummy capture lists, test credentials) from the release target.
+6. Validate that the app launches to the native capture surface on first install (no management/settings list shown first; U01 requirement from m1-plan.md:19).
 
 ## Deferred accessibility and edge cases
 
@@ -99,7 +101,13 @@ All three are accessibility checklist U10 concerns and do not block the shell se
 
 The DESIGN.md stated "Evaluate Tauri 2 with Swift integrations against the actual phone flow before choosing it. If necessary, use a SwiftUI phone shell and consider Tauri for Mac." P09 and P07 measured Tauri on the actual phone. The evidence supports Tauri for M1; no separate SwiftUI shell is built or maintained in parallel.
 
-**Tauri versus SwiftUI tradeoff:** Tauri requires private tao selector hooks (`scene_urls.rs`) for reliable URL reception on iOS, creating a maintenance dependency on tao's internal implementation. SwiftUI would avoid this dependency and use standard scene delegate APIs. However, Tauri's self-contained webview provides stronger separation between the management shell and native capture, avoids shipping Swift UI code as production correctness-critical, and offers faster feature velocity through web-based development. The 4.961 s cold-launch latency is acceptable given the user flow (capture happens first; shell is accessed afterwards). The hooks are explicitly verified in CI (remediation steps above), making the dependency visible and maintainable. This tradeoff is accepted for M1.
+**Tauri versus SwiftUI tradeoff:** Production ships the same Swift code either way: native capture (Control Center, Shortcuts, Action button entry points), App Intents, credential storage, notification delivery, and audio playback. Under the Tauri choice, the management UI (settings, retrieval, reminders) runs in an embedded webview with private tao selector hooks (`scene_urls.rs`), creating a maintenance dependency on tao's internal implementation. Under a SwiftUI choice, the management UI would extend the existing OhAndApp with new view controllers and SwiftUI screens.
+
+Tradeoffs:
+- **Tauri**: Requires tao selector hooks that depend on private APIs. Decouples the management UI codebase from the app's composition root. Offers web-based development velocity and potential code reuse on Mac.
+- **SwiftUI**: Avoids private API dependencies and uses standard scene delegate patterns. Requires building and maintaining management UI in Swift alongside the native capture code. Adds complexity to the app's composition and view hierarchy.
+
+The P07 probe evidence demonstrates that Tauri's core components (URL reception, webview rendering, accessibility) work on the actual device. The measured 4.961 s interval was inter-app cold launch; in-app view switching will be significantly faster and was not separately measured. The tao selector hooks are explicitly verified in CI (remediation steps above), making the dependency visible. This tradeoff is accepted for M1.
 
 A future Mac management shell (M2+) may use Tauri on macOS or another approach, but that is outside M1 scope.
 
