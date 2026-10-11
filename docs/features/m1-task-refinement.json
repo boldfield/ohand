@@ -740,6 +740,20 @@
         "docs/architecture/m1-contracts.md:555",
         "core/src/ingress/mod.rs:1",
         "core/src/store/captures/mod.rs:106"
+      ],
+      "ownership_allowances": [
+        "core/src/domain/items/ (transcript event type, TextState::Transcribed and its StateTransition; granted 2026-10-10 after PR #150 round 2; one PR, ordered before C05b)",
+        "core/src/store/schema/ and core/tests/migrations/ (schema v7: transcript provenance table keyed by item and source job; same grant)",
+        "core/src/lifecycle/delete_intent/ (redact transcript event text and delete provenance rows on deletion, with test; same grant)",
+        "core/src/store/events/ (EventType::Transcript with its own payload, never a corrections row; UUID transcript record identity, UUIDv5 over item and source job acceptable; extension granted 2026-10-10 after PR #150 round 3; same PR)",
+        "core/src/providers/contracts/request.rs and core/src/interpretation/contracts/ (additive TextBasis::Transcript { transcript_record_id, item_revision } with UUID validation and wire mirror; existing adapters, fakes and fixtures compile unchanged; same extension)",
+        "core/src/interpretation/dispatch/source.rs, core/src/ffi/provider_transport.rs and their tests (use the transcript with the Transcript basis when no user text correction exists; a correction still wins; same extension)",
+        "core/src/retrieval/index/ (Transcribed basis; projection prefers correction, then transcript, then captured text; same extension)",
+        "core/src/interpretation/apply/ (resolve a Transcript basis against the current transcript record; persist text_basis_kind 'transcript'; end-to-end apply tests; extension 2, 2026-10-10)",
+        "core/src/ffi/provider_transport/shadow_review.rs (transcript fallback like the primary transport; extension 2)",
+        "core/src/review/compare/source.rs (additive match arm only; extension 2)",
+        "core/src/store/events/ effective-text query for a text correction's old value (prefer transcript over captured text when no correction exists; extension 2)",
+        "any further site a new TextBasis variant makes non-exhaustive: additive arm only, listed by path in the PR description (extension 2)"
       ]
     },
     {
@@ -2273,6 +2287,34 @@
     {
       "date": "2026-10-09",
       "change": "B02 also depends on N02: its composition test must observe a scheduler request through the real native notification bridge, which did not exist when B02 was claimed."
+    },
+    {
+      "date": "2026-10-09",
+      "change": "P09 scope amendment, recorded by the coordinator on 2026-10-09 at the maintainer's direction: hardware keyboard navigation of the Tauri probe (docs/validation/tauri-handoff.md device procedure step 4) is deferred out of P09 to U10, which already owns keyboard and accessibility navigation of the real management UI with a documented actual-device pass. Reason: the maintainer has no Bluetooth or Smart Keyboard for the trial phone, and the probe is a feasibility shell, not the UI that ships. The checks that were run are recorded in docs/validation/evidence/device-feasibility/2026-10-09-device-matrix.json and 2026-10-10-latency-accessibility.json; each record lists its own not-tested and not-observable items, which remain unmet P09 checks unless a later amendment defers them. P09's acceptance is otherwise unchanged; it is graded against its own pinned criteria in docs/features/m1-plan.md#p09, not against docs/validation/m1-protocol.md, which is T08's two-week trial rubric."
+    },
+    {
+      "date": "2026-10-10",
+      "change": "C05a ownership allowance for transcript provenance: a transcript event type and TextState::Transcribed in core/src/domain/items/, schema v7 transcript provenance table with migration tests, and deletion redaction in core/src/lifecycle/delete_intent/. Granted after PR #150 showed criterion 1 cannot be met inside the owned paths without projecting machine text as a user correction or discarding the audio identity."
+    },
+    {
+      "date": "2026-10-10",
+      "change": "C05a allowance extension after PR #150 round 3: EventType lives in core/src/store/events/, not core/src/domain/items/, and interpretation dispatch, the FFI provider transport and the retrieval index all read any text correction as the user's correction, so the transcript reached interpretation as TextBasis::Correction with a non-UUID record id and the authorized interpretation request failed validation. C05a may add EventType::Transcript (store/events), an additive TextBasis::Transcript with a UUID record id (providers/contracts/request.rs, interpretation/contracts), transcript-basis reads in interpretation/dispatch/source.rs and ffi/provider_transport.rs, and a Transcribed basis in retrieval/index, with end-to-end attach-to-validated-request, transport, and retrieval tests. ios/ is not granted; fixtures/intent is unchanged."
+    },
+    {
+      "date": "2026-10-10",
+      "change": "P09 scope amendment 2, recorded by the coordinator at the maintainer's direction: the remaining not-tested/not-observable items in the P09 records are deferred to T05 (actual-device M1 functional exit matrix, production build, same phone): offline ASR with immediate screen lock (the probe fixture transcribes in ~0.3 s), before-first-unlock capture and termination between handoff and commit (P02), low-free-space refusal, Focus/Low Power/reboot/time-zone/provisional-ephemeral-auth/reinstall survival of notifications (P05), passcode removal (P11), and fixture survival after background revoke (P04). They are added to T05's matrix by name; T05's criteria are not lowered. The locked-capture check is closed by the Face-ID-covered lock-screen press in docs/validation/evidence/device-feasibility/2026-10-09-device-matrix.json rev 3 (passcode prompt, no capture while locked). The P03 permission-denied screenshot remains a required P09 artifact."
+    },
+    {
+      "date": "2026-10-10",
+      "change": "C05a allowance extension 2: the complete non-test list of TextBasis match/construct sites in core/src (grep at f67c4d1) adds interpretation/apply/mod.rs (resolve_basis_text and text_basis_kind persistence), ffi/provider_transport/shadow_review.rs and review/compare/source.rs; granted additively, plus the store/events effective-text query for a correction's old value, and any further non-exhaustive site as an additive arm listed in the PR. No ios/ grant."
+    },
+    {
+      "date": "2026-10-10",
+      "change": "P09 scope amendment 3: Shortcuts/Action-button cold and warm entry latency (capture-entry.md) is deferred to T05; the VoiceOver live-status announcement of the Tauri probe summary (tauri-handoff.md step 5) is deferred to U10; untimed voice Start / text-field trigger-to-ready to T05. Found by PR #151 round 2 as unmet and unnamed. T05 and U10 are not lowered. P09's unmet-checks list is now fully named across amendments 1-3."
+    },
+    {
+      "date": "2026-10-10",
+      "change": "P09 scope amendment 4: docs/validation/evidence/device-feasibility/p09-probe-matrix-sweep.json enumerates all 54 device cells the probe docs assign to P09 (observed / deferred / not observable). Newly deferred by name: speech model install path, size and network need (T07 docs, T05 observation); delivered/repeating notifications consuming pending slots (T05); authorization decision changes in Settings with pending requests, clock/date/DST changes (T05); interruption duration against interruption start (T05). Recorded not observable: P11 pre-first-unlock keychain cell; capture-entry write after first unlock while locked. Replaces amendment 3's closing sentence. T05, T07, U10 not lowered."
     }
   ]
 }

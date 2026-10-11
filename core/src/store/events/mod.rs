@@ -3,7 +3,7 @@
 
 use crate::store::schema::Database;
 use anyhow::{anyhow, Result};
-use rusqlite::{OptionalExtension, Transaction};
+use rusqlite::{Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -135,6 +135,10 @@ pub enum EventError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EventType {
     Correction,
+    /// An on-device transcript of the capture's audio was attached. Machine text, never a
+    /// correction: it writes no `corrections` row. Created only by the guarded transcript
+    /// attachment (`ingress::transcription`), never through `save_event`.
+    Transcript,
     Completion,
     Cancellation,
     SuggestionControl,
@@ -147,6 +151,7 @@ impl EventType {
     pub fn as_str(&self) -> &'static str {
         match self {
             EventType::Correction => "correction",
+            EventType::Transcript => "transcript",
             EventType::Completion => "completion",
             EventType::Cancellation => "cancellation",
             EventType::SuggestionControl => "suggestion_control",
@@ -161,6 +166,7 @@ impl FromStr for EventType {
     fn from_str(s: &str) -> Result<Self> {
         match s {
             "correction" => Ok(EventType::Correction),
+            "transcript" => Ok(EventType::Transcript),
             "completion" => Ok(EventType::Completion),
             "cancellation" => Ok(EventType::Cancellation),
             "suggestion_control" => Ok(EventType::SuggestionControl),
@@ -247,6 +253,9 @@ pub struct SuggestionControlPayload {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EventPayload {
     Correction(Correction),
+    /// The transcript text and its provenance live in `transcript_attachments` under the
+    /// event's id (the transcript record id), so deletion removes the text with that row.
+    Transcript,
     SuggestionControl(SuggestionControlPayload),
     Completion,
     Cancellation,
@@ -325,6 +334,7 @@ impl Event {
                 Ok(())
             }
             (EventType::SuggestionControl, EventPayload::SuggestionControl(_)) => Ok(()),
+            (EventType::Transcript, EventPayload::Transcript) => Ok(()),
             (EventType::Completion, EventPayload::Completion) => Ok(()),
             (EventType::Cancellation, EventPayload::Cancellation) => Ok(()),
             (EventType::Deletion, EventPayload::Deletion) => Ok(()),
@@ -400,6 +410,7 @@ fn event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Event> {
                 .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
             EventPayload::SuggestionControl(SuggestionControlPayload { kind })
         }
+        EventType::Transcript => EventPayload::Transcript,
         EventType::Completion => EventPayload::Completion,
         EventType::Cancellation => EventPayload::Cancellation,
         EventType::Deletion => EventPayload::Deletion,
@@ -481,7 +492,8 @@ pub fn item_can_carry_obligation(tx: &Transaction<'_>, item_id: &str) -> Result<
 
 /// The current effective value a correction of `kind` replaces. Scope and session topic fall
 /// back to the value recorded on the capture until the first correction; text resolves to the
-/// latest text correction, else the original capture text.
+/// latest text correction, else the attached transcript, else the original capture text, so a
+/// user correcting a transcript states the transcript as the value replaced.
 fn effective_value(
     tx: &Transaction<'_>,
     item_id: &str,
@@ -501,6 +513,7 @@ fn effective_value(
             "SELECT COALESCE(
                  (SELECT new_value FROM corrections
                   WHERE item_id = ?1 AND kind = 'text' ORDER BY revision DESC LIMIT 1),
+                 (SELECT text FROM transcript_attachments WHERE item_id = ?1),
                  c.text)
              FROM items i JOIN captures c ON c.capture_id = i.capture_id WHERE i.item_id = ?1"
         }
@@ -533,7 +546,54 @@ pub fn save_event_in_tx(
                 .to_string(),
         ));
     }
+    // Transcript events are created only with their provenance row by the guarded attachment.
+    if matches!(event.event_type, EventType::Transcript) {
+        return Err(EventError::Invalid(
+            "Transcript events must be created through the guarded transcript attachment, \
+             not save_event"
+                .to_string(),
+        ));
+    }
+    save_checked_event_in_tx(tx, event, expected_item_revision)
+}
 
+/// Save a transcript event within a caller-owned transaction. Crate-private: only the guarded
+/// transcript attachment calls it, after it has written the `transcript_attachments` row whose
+/// `transcript_record_id` is the event id. Revision, lifecycle and idempotency rules are those
+/// of a correction; the search index is resynchronised so the transcript becomes searchable.
+pub(crate) fn save_transcript_event_in_tx(
+    tx: &Transaction<'_>,
+    event: &Event,
+    expected_item_revision: i32,
+) -> Result<Event, EventError> {
+    event.validate()?;
+    if !matches!(event.event_type, EventType::Transcript) {
+        return Err(EventError::Invalid(
+            "save_transcript_event_in_tx must only be called with Transcript events".to_string(),
+        ));
+    }
+    let provenance_recorded: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM transcript_attachments
+                        WHERE transcript_record_id = ? AND item_id = ?)",
+        [event.event_id.as_str(), event.item_id.as_str()],
+        |row| row.get(0),
+    )?;
+    if !provenance_recorded {
+        return Err(EventError::Invalid(format!(
+            "transcript event {} has no transcript record for item {}",
+            event.event_id, event.item_id
+        )));
+    }
+    save_checked_event_in_tx(tx, event, expected_item_revision)
+}
+
+/// The shared compare-and-set write behind [`save_event_in_tx`] and
+/// [`save_transcript_event_in_tx`]; the callers have already checked the event type.
+fn save_checked_event_in_tx(
+    tx: &Transaction<'_>,
+    event: &Event,
+    expected_item_revision: i32,
+) -> Result<Event, EventError> {
     if event.revision != expected_item_revision {
         return Err(EventError::RevisionMismatch {
             event_revision: event.revision,
@@ -580,7 +640,10 @@ pub fn save_event_in_tx(
     // suggestion events.
     let allowed = match current.lifecycle_state.as_str() {
         "deleted" => false,
-        "completed" | "cancelled" => matches!(event.event_type, EventType::Correction),
+        "completed" | "cancelled" => matches!(
+            event.event_type,
+            EventType::Correction | EventType::Transcript
+        ),
         _ => true,
     };
     if !allowed {
@@ -612,6 +675,7 @@ pub fn save_event_in_tx(
                 None,
             ),
             EventPayload::SuggestionControl(s) => (None, None, None, Some(s.kind.as_str())),
+            EventPayload::Transcript => (None, None, None, None),
             EventPayload::Completion => (None, None, None, None),
             EventPayload::Cancellation => (None, None, None, None),
             EventPayload::Deletion => (None, None, None, None),
@@ -671,6 +735,10 @@ pub fn save_event_in_tx(
     }
 
     match event.event_type {
+        EventType::Transcript => {
+            crate::retrieval::index::sync_item_in_tx(tx, &event.item_id)
+                .map_err(EventError::Database)?;
+        }
         EventType::Completion => {
             tx.execute(
                 "UPDATE items SET lifecycle_state = 'completed' WHERE item_id = ?",
@@ -794,6 +862,40 @@ pub(crate) fn save_deletion_event_in_tx(
     )?;
 
     Ok(event.clone())
+}
+
+/// The on-device transcript attached to an item: machine text recognized from the capture's
+/// audio, distinct from any user correction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CurrentTranscript {
+    /// UUID of the transcript record; also the id of its `transcript` event.
+    pub transcript_record_id: String,
+    pub text: String,
+    /// When recognition succeeded (RFC 3339).
+    pub transcribed_at: String,
+}
+
+/// The transcript attached to the item, or `None` when there is none (no transcript yet, or the
+/// item was deleted, which removes it). A user text correction, when one exists, supersedes it
+/// as the item's effective text; callers check corrections first.
+pub fn current_transcript(
+    connection: &Connection,
+    item_id: &str,
+) -> rusqlite::Result<Option<CurrentTranscript>> {
+    connection
+        .query_row(
+            "SELECT transcript_record_id, text, transcribed_at
+               FROM transcript_attachments WHERE item_id = ?",
+            [item_id],
+            |row| {
+                Ok(CurrentTranscript {
+                    transcript_record_id: row.get(0)?,
+                    text: row.get(1)?,
+                    transcribed_at: row.get(2)?,
+                })
+            },
+        )
+        .optional()
 }
 
 /// Retrieve an event by ID.

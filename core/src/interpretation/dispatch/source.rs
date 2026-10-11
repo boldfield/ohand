@@ -3,6 +3,7 @@
 use super::RetireReason;
 use crate::jobs::queue::Job;
 use crate::providers::contracts::{ProviderProfile, TextBasis, PROFILE_SCHEMA_VERSION};
+use crate::store::events::current_transcript;
 use crate::time::TimeContext;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -38,8 +39,9 @@ type CaptureRow = (
     String,
 );
 
-/// Read the item's current effective text (the latest text correction, else the capture text)
-/// together with the capture's time context.
+/// Read the item's current effective text (the latest text correction, else the on-device
+/// transcript, else the capture text) together with the capture's time context. A transcript is
+/// machine text and is sent with the `Transcript` basis, never as a correction.
 pub(super) fn load_source(conn: &Connection, job: &Job) -> Result<SourceState> {
     let row: Option<CaptureRow> = conn
         .query_row(
@@ -95,8 +97,13 @@ pub(super) fn load_source(conn: &Connection, job: &Job) -> Result<SourceState> {
         .optional()
         .context("reading text correction")?;
     let item_revision = u64::try_from(revision).unwrap_or_default();
-    let (text, text_basis) = match (latest_correction, capture_text) {
-        (Some((correction_id, corrected_text)), _) => (
+    let transcript = if latest_correction.is_none() {
+        current_transcript(conn, &job.item_id).context("reading transcript")?
+    } else {
+        None
+    };
+    let (text, text_basis) = match (latest_correction, transcript, capture_text) {
+        (Some((correction_id, corrected_text)), _, _) => (
             corrected_text,
             TextBasis::Correction {
                 correction_record_id: correction_id
@@ -106,8 +113,15 @@ pub(super) fn load_source(conn: &Connection, job: &Job) -> Result<SourceState> {
                 item_revision,
             },
         ),
-        (None, Some(original_text)) => (original_text, TextBasis::Original { item_revision }),
-        (None, None) => return Ok(SourceState::NoText),
+        (None, Some(transcript), _) => (
+            transcript.text,
+            TextBasis::Transcript {
+                transcript_record_id: transcript.transcript_record_id,
+                item_revision,
+            },
+        ),
+        (None, None, Some(original_text)) => (original_text, TextBasis::Original { item_revision }),
+        (None, None, None) => return Ok(SourceState::NoText),
     };
 
     let reference_time = DateTime::parse_from_rfc3339(&capture_instant)

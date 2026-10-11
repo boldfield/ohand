@@ -940,6 +940,88 @@ mod proposal_tests {
     }
 
     #[test]
+    fn transcript_basis_keeps_revision_and_requires_uuid_and_matching_revision() {
+        let basis = TextBasis::Transcript {
+            transcript_record_id: OTHER_ITEM_ID.to_string(),
+            item_revision: 2,
+        };
+        let mut proposal = typed();
+        proposal.source_revision = 2;
+        proposal.text_basis = basis.clone();
+        assert_eq!(proposal.validate(TEXT), Ok(()));
+        assert_eq!(
+            serde_json::to_value(&proposal.text_basis).unwrap(),
+            json!({"kind": "transcript", "transcript_record_id": OTHER_ITEM_ID, "item_revision": 2})
+        );
+
+        for bad in ["", "transcript-attachment-item-job"] {
+            proposal.text_basis = TextBasis::Transcript {
+                transcript_record_id: bad.to_string(),
+                item_revision: 2,
+            };
+            assert_eq!(
+                proposal.validate(TEXT),
+                Err(ProposalError::InvalidIdentifier {
+                    field: "transcript_record_id"
+                })
+            );
+        }
+        proposal.text_basis = basis;
+        proposal.source_revision = 3;
+        assert_eq!(
+            proposal.validate(TEXT),
+            Err(ProposalError::BasisRevisionMismatch {
+                basis_revision: 2,
+                source_revision: 3
+            })
+        );
+    }
+
+    #[test]
+    fn transcript_basis_must_match_the_request_and_is_never_a_correction() {
+        let basis = TextBasis::Transcript {
+            transcript_record_id: OTHER_ITEM_ID.to_string(),
+            item_revision: 1,
+        };
+        let request = request_with(basis, 1);
+        let mut json = valid_json();
+        json["source_revision"] = json!(1);
+        json["text_basis"] = json!({
+            "kind": "transcript",
+            "transcript_record_id": OTHER_ITEM_ID,
+            "item_revision": 1
+        });
+        let output = output_for(&json, REQUEST_VERSION);
+        assert!(Proposal::from_output(&request, &output, ITEM_ID).is_ok());
+
+        // The same record id under the correction kind is not the basis the model saw.
+        json["text_basis"] = json!({
+            "kind": "correction",
+            "correction_record_id": OTHER_ITEM_ID,
+            "item_revision": 1
+        });
+        let output = output_for(&json, REQUEST_VERSION);
+        assert_eq!(
+            Proposal::from_output(&request, &output, ITEM_ID),
+            Err(ProposalError::ProvenanceMismatch {
+                field: "text_basis"
+            })
+        );
+
+        json["text_basis"] = json!({
+            "kind": "transcript",
+            "transcript_record_id": OTHER_ITEM_ID,
+            "item_revision": 1,
+            "x": 1
+        });
+        let output = output_for(&json, REQUEST_VERSION);
+        assert!(matches!(
+            Proposal::from_output(&request, &output, ITEM_ID),
+            Err(ProposalError::Malformed(_))
+        ));
+    }
+
+    #[test]
     fn correction_basis_and_revision_must_match_the_request() {
         let basis = TextBasis::Correction {
             correction_record_id: OTHER_ITEM_ID.to_string(),

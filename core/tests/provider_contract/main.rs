@@ -535,6 +535,27 @@ fn request_pins_profile_and_rejects_malformed_identity() {
         item_revision: 1,
     };
     assert!(build(&ok_id, "t", good_correction, &ok_id).is_ok());
+    let bad_transcript = TextBasis::Transcript {
+        transcript_record_id: "transcript-attachment-item-job".into(),
+        item_revision: 1,
+    };
+    assert_eq!(
+        build(&ok_id, "t", bad_transcript, &ok_id).unwrap_err(),
+        RequestValidationError::InvalidIdentifier("transcript_record_id")
+    );
+    let good_transcript = TextBasis::Transcript {
+        transcript_record_id: ok_id.clone(),
+        item_revision: 1,
+    };
+    let request = build(&ok_id, "t", good_transcript, &ok_id).unwrap();
+    assert_eq!(
+        serde_json::to_value(request.text_basis()).unwrap(),
+        serde_json::json!({
+            "kind": "transcript",
+            "transcript_record_id": ok_id,
+            "item_revision": 1
+        })
+    );
 }
 
 #[test]
@@ -564,6 +585,14 @@ fn request_rejects_inconsistent_revisions_and_profile_identity() {
     };
     assert_eq!(
         build(2, correction).unwrap_err(),
+        RequestValidationError::RevisionMismatch
+    );
+    let transcript = TextBasis::Transcript {
+        transcript_record_id: id.clone(),
+        item_revision: 3,
+    };
+    assert_eq!(
+        build(2, transcript).unwrap_err(),
         RequestValidationError::RevisionMismatch
     );
     assert!(build(2, TextBasis::Original { item_revision: 2 }).is_ok());

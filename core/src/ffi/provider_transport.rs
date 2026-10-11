@@ -45,6 +45,7 @@ use crate::providers::contracts::{
     TextBasis, TransportError, PROFILE_SCHEMA_VERSION,
 };
 use crate::providers::openai::{HttpTransport, OpenAiAdapter};
+use crate::store::events::current_transcript;
 use crate::time::TimeContext;
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension};
@@ -490,6 +491,7 @@ struct Prepared {
 
 struct JobRow {
     job_type: String,
+    item_id: String,
     source_revision: i64,
     request_version: Option<String>,
     item_revision: i64,
@@ -580,7 +582,8 @@ fn load_job_row(connection: &Connection, job_id: &str) -> Result<JobRow, AbiFail
         .query_row(
             "SELECT jobs.job_type, jobs.source_revision, jobs.request_version, items.revision, \
              captures.capture_id, captures.text, captures.capture_instant, captures.timezone_id, \
-             captures.utc_offset_minutes, captures.locale, captures.calendar, captures.route_id \
+             captures.utc_offset_minutes, captures.locale, captures.calendar, captures.route_id, \
+             jobs.item_id \
              FROM jobs JOIN items ON items.item_id = jobs.item_id \
              JOIN captures ON captures.capture_id = items.capture_id WHERE jobs.job_id = ?",
             [job_id],
@@ -598,6 +601,7 @@ fn load_job_row(connection: &Connection, job_id: &str) -> Result<JobRow, AbiFail
                     locale: row.get(9)?,
                     calendar: row.get(10)?,
                     route_id: row.get(11)?,
+                    item_id: row.get(12)?,
                 })
             },
         )
@@ -634,6 +638,44 @@ fn latest_text_correction(
         .transpose()
 }
 
+/// The job's item's effective text and its basis: the latest user text correction, else the
+/// on-device transcript, else the capture text. A transcript is machine text, so it is sent
+/// with the `Transcript` basis and never as a correction.
+fn effective_text(
+    connection: &Connection,
+    job_id: &str,
+    item_id: &str,
+    capture_text: Option<String>,
+    source_revision: u64,
+) -> Result<(String, TextBasis), AbiFailure> {
+    if let Some((correction_record_id, corrected_text)) =
+        latest_text_correction(connection, job_id)?
+    {
+        return Ok((
+            corrected_text,
+            TextBasis::Correction {
+                correction_record_id,
+                item_revision: source_revision,
+            },
+        ));
+    }
+    if let Some(transcript) = current_transcript(connection, item_id).map_err(storage_failure)? {
+        return Ok((
+            transcript.text,
+            TextBasis::Transcript {
+                transcript_record_id: transcript.transcript_record_id,
+                item_revision: source_revision,
+            },
+        ));
+    }
+    Ok((
+        capture_text.ok_or(failures::NO_TEXT)?,
+        TextBasis::Original {
+            item_revision: source_revision,
+        },
+    ))
+}
+
 /// Authorizes the job and builds the request, all from stored state. Nothing is sent and no
 /// credential is touched; the first denial wins.
 fn prepare(connection: &Connection, job_id: &str) -> Result<Prepared, AbiFailure> {
@@ -657,21 +699,8 @@ fn prepare(connection: &Connection, job_id: &str) -> Result<Prepared, AbiFailure
         return Err(failures::STALE_SOURCE);
     }
     let source_revision = u64::try_from(row.source_revision).map_err(|_| failures::INVALID_JOB)?;
-    let (text, text_basis) = match latest_text_correction(connection, job_id)? {
-        Some((correction_record_id, corrected_text)) => (
-            corrected_text,
-            TextBasis::Correction {
-                correction_record_id,
-                item_revision: source_revision,
-            },
-        ),
-        None => (
-            row.text.ok_or(failures::NO_TEXT)?,
-            TextBasis::Original {
-                item_revision: source_revision,
-            },
-        ),
-    };
+    let (text, text_basis) =
+        effective_text(connection, job_id, &row.item_id, row.text, source_revision)?;
     if text.trim().is_empty() {
         return Err(failures::NO_TEXT);
     }

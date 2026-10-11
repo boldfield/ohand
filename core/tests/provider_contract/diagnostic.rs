@@ -5,10 +5,11 @@ use super::{profile, request_for, text_capability, time_context, valid_builder, 
 use ohand_core::interpretation::instructions::content_version;
 use ohand_core::providers::contracts::fake::{FakeProvider, FakeStep};
 use ohand_core::providers::contracts::{
-    dispatch, dispatch_diagnostic, CallObservations, CancelToken, DiagnosticFailure,
-    DiagnosticFailureKind, DiagnosticMetadata, DiagnosticOutput, DiagnosticRequest,
-    DiagnosticRequestError, DiagnosticSetting, DiagnosticSupport, DispatchLimits, EffectiveSetting,
-    ErrorClass, FailureKind, InterpretationRequest, ManualClock, ProviderProfile,
+    dispatch, dispatch_diagnostic, CallObservations, CancelToken, DiagnosticAdapterCall,
+    DiagnosticFailure, DiagnosticFailureKind, DiagnosticMetadata, DiagnosticOutput,
+    DiagnosticRequest, DiagnosticRequestError, DiagnosticResponse, DiagnosticSetting,
+    DiagnosticSupport, DiagnosticTransportFailure, DispatchLimits, EffectiveSetting, ErrorClass,
+    FailureKind, InterpretationRequest, ManualClock, ProviderAdapter, ProviderProfile,
     ProviderProfileBuilder, ProviderProtocol, ReportedModel, RequestedSettings, SettingValue,
     TextBasis, TokenUsage, TransportError, UsageAvailability, MAX_DIAGNOSTIC_CONTEXT_BYTES,
     MAX_TEMPERATURE_MILLI,
@@ -597,6 +598,114 @@ fn usage_the_provider_did_report_survives_a_later_failure() {
     let cancelled = run.call(&fake, requested()).unwrap_err();
     assert_eq!(provider_failure_kind(&cancelled), FailureKind::Cancelled);
     assert_eq!(cancelled.usage, UsageAvailability::Reported { usage });
+}
+
+/// Adapter that fails every diagnostic call with a fixed transport error and observations.
+struct FailingWithObservations {
+    error: TransportError,
+    observations: Option<CallObservations>,
+}
+
+impl ProviderAdapter for FailingWithObservations {
+    fn invoke(
+        &self,
+        _call: &ohand_core::providers::contracts::AdapterCall<'_>,
+    ) -> Result<Vec<u8>, TransportError> {
+        Err(TransportError::Rejected)
+    }
+
+    fn diagnostic_support(&self) -> DiagnosticSupport {
+        all_settings()
+    }
+
+    fn invoke_diagnostic_observed(
+        &self,
+        _call: &DiagnosticAdapterCall<'_>,
+    ) -> Result<DiagnosticResponse, DiagnosticTransportFailure> {
+        Err(DiagnosticTransportFailure::with_observations(
+            self.error,
+            self.observations.clone(),
+        ))
+    }
+}
+
+fn call_failing(
+    run: &Run,
+    error: TransportError,
+    observations: Option<CallObservations>,
+) -> DiagnosticFailure {
+    let adapter = FailingWithObservations {
+        error,
+        observations,
+    };
+    dispatch_diagnostic(
+        &adapter,
+        &run.profile,
+        &diagnostic_request(&run.profile, requested()),
+        run.clock.as_ref(),
+        &run.cancel,
+        &DispatchLimits::default(),
+    )
+    .unwrap_err()
+}
+
+#[test]
+fn usage_reported_with_a_transport_rejection_survives_and_keeps_the_class() {
+    let run = Run::new();
+    let usage = TokenUsage {
+        input_tokens: Some(5),
+        output_tokens: Some(2),
+    };
+    let rejected = call_failing(
+        &run,
+        TransportError::Rejected,
+        Some(CallObservations {
+            usage: Some(usage),
+            ..CallObservations::default()
+        }),
+    );
+    assert_eq!(provider_failure_kind(&rejected), FailureKind::Rejected);
+    assert_eq!(rejected.class(), ErrorClass::Permanent);
+    assert_eq!(rejected.usage, UsageAvailability::Reported { usage });
+}
+
+#[test]
+fn transport_failures_without_or_with_empty_usage_stay_unknown() {
+    let run = Run::new();
+    let without = call_failing(&run, TransportError::Rejected, None);
+    assert_eq!(provider_failure_kind(&without), FailureKind::Rejected);
+    assert_eq!(without.usage, UsageAvailability::Unavailable);
+
+    let empty = call_failing(
+        &run,
+        TransportError::Rejected,
+        Some(CallObservations {
+            usage: Some(TokenUsage::default()),
+            ..CallObservations::default()
+        }),
+    );
+    assert_eq!(empty.usage, UsageAvailability::Unavailable);
+}
+
+#[test]
+fn cancellation_during_a_failure_with_usage_keeps_the_cancelled_class() {
+    let run = Run::new();
+    run.cancel.cancel();
+    // The cancel token is checked again after the adapter returns, but before it the dispatch
+    // refuses the call outright, so no usage can be attributed to a call that never happened.
+    let failure = call_failing(
+        &run,
+        TransportError::Rejected,
+        Some(CallObservations {
+            usage: Some(TokenUsage {
+                input_tokens: Some(1),
+                output_tokens: None,
+            }),
+            ..CallObservations::default()
+        }),
+    );
+    assert_eq!(provider_failure_kind(&failure), FailureKind::Cancelled);
+    assert_eq!(failure.usage, UsageAvailability::Unavailable);
 }
 
 #[test]

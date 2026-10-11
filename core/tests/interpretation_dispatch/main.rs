@@ -5,13 +5,20 @@
 
 use chrono::{DateTime, Duration, Utc};
 use ohand_core::domain::status::{ItemStatus, ProcessingJobStatus, ProcessingState};
+use ohand_core::ingress::transcription::transcript_provenance;
+use ohand_core::ingress::{
+    apply_transcription_outcome, InterpretationQueued, InterpretationRequest, RecognizedTranscript,
+    RecognizerResult, TranscriptionDisposition, TranscriptionOutcome,
+};
 use ohand_core::interpretation::apply::{ApplyError, ApplyOutcome};
 use ohand_core::interpretation::dispatch::{
     AdapterRegistry, DispatchError, DispatchOutcome, InterpretationDispatcher, InterpretationRoute,
     RetireReason, WaitReason,
 };
 use ohand_core::jobs::queue::{claim_job_with_lease, enqueue_job, Job};
-use ohand_core::privacy::routing::{DenialReason, JOB_TYPE_INTERPRET};
+use ohand_core::privacy::routing::{
+    DenialReason, JOB_TYPE_INTERPRET, JOB_TYPE_TRANSCRIPTION_ATTACHMENT,
+};
 use ohand_core::providers::anthropic::fake::{FakeAnthropicStep, FakeAnthropicTransport};
 use ohand_core::providers::anthropic::{
     AnthropicAdapter, AnthropicSettings, HttpRequest, INTERPRETATION_TOOL_NAME,
@@ -876,6 +883,133 @@ fn a_corrected_text_is_what_the_provider_sees_and_what_spans_refer_to() {
         )
         .unwrap();
     assert_eq!(basis, "correction");
+}
+
+#[test]
+fn an_attached_transcript_is_what_the_provider_sees_with_the_transcript_basis() {
+    let transcript = "call the roofer about the leak";
+    let mut fixture = Fixture::new("");
+    let audio_reference = "staging/synthetic-voice.m4a";
+    fixture
+        .db
+        .conn()
+        .execute(
+            "UPDATE captures SET text = NULL, audio_reference = ? WHERE capture_id = ?",
+            rusqlite::params![audio_reference, fixture.capture_id],
+        )
+        .unwrap();
+    fixture
+        .db
+        .conn()
+        .execute(
+            "UPDATE items SET transcription_state = 'audio_pending' WHERE item_id = ?",
+            [&fixture.item_id],
+        )
+        .unwrap();
+    let profile = anthropic_profile();
+    fixture.set_up_provider(&profile, ANTHROPIC_ORIGIN);
+
+    let transcription_job_id = Uuid::new_v4().to_string();
+    enqueue_job(
+        &mut fixture.db,
+        transcription_job_id.clone(),
+        fixture.item_id.clone(),
+        JOB_TYPE_TRANSCRIPTION_ATTACHMENT.to_string(),
+        0,
+        None,
+        None,
+        1,
+        now(),
+    )
+    .unwrap();
+    let transcription_job = fixture.claim(now());
+    assert_eq!(transcription_job.job_id, transcription_job_id);
+    let interpretation_job_id = Uuid::new_v4().to_string();
+    let acknowledgment = apply_transcription_outcome(
+        &mut fixture.db,
+        &TranscriptionOutcome {
+            job_id: transcription_job_id,
+            lease_attempt: transcription_job.attempt_count,
+            audio_reference: audio_reference.to_string(),
+            result: RecognizerResult::Transcript(RecognizedTranscript {
+                text: transcript.to_string(),
+                confidence: Some(0.8),
+                detected_language: Some("en-US".to_string()),
+                recognizer: "on-device-recognizer/1".to_string(),
+                audio_sha256: "a".repeat(64),
+            }),
+            interpretation: Some(InterpretationRequest {
+                job_id: interpretation_job_id.clone(),
+                profile_version: Some(profile.profile_version().to_string()),
+                request_version: Uuid::new_v4().to_string(),
+            }),
+        },
+        now(),
+    )
+    .unwrap();
+    assert_eq!(
+        acknowledgment.disposition,
+        TranscriptionDisposition::Attached {
+            revision: 1,
+            interpretation: InterpretationQueued::Queued {
+                job_id: interpretation_job_id.clone()
+            },
+        }
+    );
+    let record_id = transcript_provenance(fixture.db.conn(), &fixture.item_id)
+        .unwrap()
+        .unwrap()
+        .transcript_record_id;
+
+    let providers = Providers::anthropic(vec![anthropic_reply(annotate_action(
+        transcript,
+        "call the roofer",
+    ))]);
+    let job = fixture.claim(now());
+    assert_eq!(job.job_id, interpretation_job_id);
+    let outcome = providers.run(&mut fixture, &job, now());
+
+    assert!(
+        matches!(
+            outcome,
+            DispatchOutcome::Interpreted {
+                route: InterpretationRoute::Provider,
+                outcome: ApplyOutcome::Applied { .. },
+            }
+        ),
+        "{outcome:?}"
+    );
+    let calls = providers.calls_to_anthropic();
+    assert_eq!(calls.len(), 1);
+    let body = body_of(&calls[0]);
+    assert!(body.contains(transcript));
+    assert!(body.contains(&record_id));
+    assert!(!body.contains("correction_record_id"));
+    let basis: (String, Option<String>) = open(&fixture.path)
+        .conn()
+        .query_row(
+            "SELECT text_basis_kind, text_basis_id FROM proposals WHERE item_id = ?",
+            [&fixture.item_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(basis, ("transcript".to_string(), Some(record_id)));
+    let item: (Option<String>, String, String) = open(&fixture.path)
+        .conn()
+        .query_row(
+            "SELECT item_type, processing_state, transcription_state FROM items WHERE item_id = ?",
+            [&fixture.item_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        item,
+        (
+            Some("action".to_string()),
+            "processed".to_string(),
+            "transcribed".to_string()
+        )
+    );
 }
 
 // ---- Failure handling ----
