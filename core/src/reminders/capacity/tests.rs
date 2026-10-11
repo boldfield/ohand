@@ -1113,3 +1113,38 @@ fn prompts_newly_deferred_after_failed_cancels_are_cancelled_or_reported() -> Re
     assert!(center.evicted.is_empty());
     Ok(())
 }
+
+#[test]
+fn repeating_a_pass_with_failed_prompt_cancels_does_not_churn_state_versions() -> Result<()> {
+    let mut db = open_db("prompt_cancel_churn")?;
+    seed_reminders(&mut db, budget())?;
+    let mut center = FakeCenter::default();
+    let prompts: Vec<PromptDemand> = (1..=MAX_PROMPT_REQUESTS as i64)
+        .map(|day| PromptDemand {
+            notification_id: format!("prompt-{day}"),
+            fire_at: instant(PASS_TIME) + Duration::days(day),
+        })
+        .collect();
+    for demand in &prompts {
+        center
+            .pending
+            .push((demand.notification_id.clone(), demand.fire_at));
+        center
+            .fail_cancel_for
+            .insert(demand.notification_id.clone());
+    }
+    pass_at(&mut db, &mut center, &prompts, PASS_TIME)?;
+    let versions = |db: &mut Database| -> Result<Vec<i64>> {
+        (0..budget())
+            .map(|index| Ok(reminder(db, &format!("item-{index:03}"))?.state_version))
+            .collect()
+    };
+    let before = versions(&mut db)?;
+
+    let repeat = pass_at(&mut db, &mut center, &prompts, PASS_TIME)?;
+
+    assert!(repeat.demoted.is_empty() && repeat.refilled.is_empty());
+    assert_eq!(versions(&mut db)?, before);
+    assert!(center.evicted.is_empty());
+    Ok(())
+}

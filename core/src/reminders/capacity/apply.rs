@@ -51,11 +51,11 @@ impl CapacityReport {
 /// budget and the OS never has to evict silently.
 ///
 /// A prompt request whose cancel fails is still pending, so it is charged against the budget:
-/// the allocation is settled again with it counted as a request core cannot reclaim, any
+/// the allocation is planned again with it counted as a request core cannot reclaim, any
 /// reminder that no longer fits becomes `unschedulable(capacity_exceeded)`, and any prompt the
 /// smaller budget newly defers is cancelled in turn, until every deferred prompt is either
-/// cancelled or reported in `prompt_cancel_failures`. As a last guard the
-/// effects handed to `reconcile` refuse to add a request while the pending set is at the OS
+/// cancelled or reported in `prompt_cancel_failures`. Only the final allocation is written. As
+/// a last guard the effects handed to `reconcile` refuse to add a request while the pending set is at the OS
 /// limit (a transient failure, retried by the next pass), whatever other cancel failed.
 ///
 /// Safe to run after every write, on launch and on foreground activation; those events are the
@@ -78,38 +78,14 @@ pub fn reconcile_with_capacity(
         .collect();
     let mut report = CapacityReport::default();
     // Prompts whose cancel failed: still pending, so they stay out of the demands handed to
-    // `settle` and are counted with the requests core cannot reclaim. Each failure can shrink
-    // the budget and defer more prompts, so cancel and settle repeat until no new cancel fails.
+    // `plan` and are counted with the requests core cannot reclaim. Each failure can shrink
+    // the budget and defer more prompts, so cancel and plan repeat until no new cancel fails.
     // Every round that continues adds at least one failed prompt, so the loop terminates.
     let mut failed_deferrals: BTreeMap<String, DeferredPrompt> = BTreeMap::new();
     let mut cancelled: BTreeSet<String> = BTreeSet::new();
     loop {
-        let remaining_prompts: Vec<PromptDemand> = prompts
-            .iter()
-            .filter(|prompt| !failed_deferrals.contains_key(&prompt.notification_id))
-            .cloned()
-            .collect();
-        let demoted_before = report.demoted.len();
-        let mut allocation = settle(
-            database,
-            clock,
-            policy,
-            &remaining_prompts,
-            &pending,
-            &mut report,
-        )?;
-        if !failed_deferrals.is_empty() {
-            // A reminder refilled by an earlier settle and demoted again by this one never
-            // left `capacity_exceeded` as far as the caller can observe.
-            let demoted_again: Vec<String> = report.demoted.split_off(demoted_before);
-            for reminder_id in demoted_again {
-                if let Some(position) = report.refilled.iter().position(|id| id == &reminder_id) {
-                    report.refilled.remove(position);
-                } else {
-                    report.demoted.push(reminder_id);
-                }
-            }
-        }
+        let remaining_prompts = remaining_prompts_of(prompts, &failed_deferrals);
+        let mut allocation = plan(database, clock, policy, &remaining_prompts, &pending)?;
 
         let to_cancel: Vec<String> = allocation
             .deferred_prompts
@@ -146,42 +122,56 @@ pub fn reconcile_with_capacity(
             }
         }
 
-        for failed in failed_deferrals.values() {
-            if !allocation
-                .deferred_prompts
-                .iter()
-                .any(|prompt| prompt.notification_id == failed.notification_id)
-            {
+        if !new_failures {
+            for failed in failed_deferrals.values() {
                 allocation.deferred_prompts.push(failed.clone());
             }
-        }
-        report.allocation = allocation;
-        if !new_failures {
+            report.allocation = allocation;
             break;
         }
     }
+    // Only the final allocation is written, so a pass that changes nothing leaves every
+    // reminder's `state_version` alone however many cancels failed on the way.
+    settle(
+        database,
+        clock,
+        policy,
+        &remaining_prompts_of(prompts, &failed_deferrals),
+        &pending,
+        &mut report,
+    )?;
 
     let mut guarded = PendingLimitGuard::new(effects, pending, policy.os_pending_limit);
     report.reconcile = reconcile(database, clock, &mut guarded)?;
     Ok(report)
 }
 
-/// One transaction: compute the allocation from the durable reminders and apply it. Pending
-/// requests that are neither known reminders nor in `prompts` reduce the budget.
-fn settle(
-    database: &mut Database,
+fn remaining_prompts_of(
+    prompts: &[PromptDemand],
+    failed_deferrals: &BTreeMap<String, DeferredPrompt>,
+) -> Vec<PromptDemand> {
+    prompts
+        .iter()
+        .filter(|prompt| !failed_deferrals.contains_key(&prompt.notification_id))
+        .cloned()
+        .collect()
+}
+
+/// The allocation from the durable reminders and the pending list, plus the records it was
+/// computed from. Pending requests that are neither known reminders nor in `prompts` reduce the
+/// budget.
+fn compute_allocation(
+    tx: &Transaction<'_>,
     clock: &dyn Clock,
     policy: &CapacityPolicy,
     prompts: &[PromptDemand],
     pending: &[PendingRequest],
-    report: &mut CapacityReport,
-) -> Result<Allocation, ReconcileError> {
+) -> Result<(BTreeMap<String, ReminderRecord>, Allocation), ReconcileError> {
     let prompt_ids: BTreeSet<&str> = prompts
         .iter()
         .map(|prompt| prompt.notification_id.as_str())
         .collect();
-    let tx = database.immediate_transaction().map_err(database_error)?;
-    let known_reminders = known_reminder_ids(&tx)?;
+    let known_reminders = known_reminder_ids(tx)?;
     let foreign_pending = pending
         .iter()
         .filter(|request| {
@@ -190,7 +180,7 @@ fn settle(
                     .is_some_and(|reminder_id| known_reminders.contains(reminder_id))
         })
         .count();
-    let records = capacity_candidates(&tx)?;
+    let records = capacity_candidates(tx)?;
     let demands: Vec<ReminderDemand> = records
         .values()
         .filter_map(|record| {
@@ -210,6 +200,33 @@ fn settle(
             prompts,
         },
     );
+    Ok((records, allocation))
+}
+
+/// The allocation without writing anything.
+fn plan(
+    database: &mut Database,
+    clock: &dyn Clock,
+    policy: &CapacityPolicy,
+    prompts: &[PromptDemand],
+    pending: &[PendingRequest],
+) -> Result<Allocation, ReconcileError> {
+    let tx = database.immediate_transaction().map_err(database_error)?;
+    let (_, allocation) = compute_allocation(&tx, clock, policy, prompts, pending)?;
+    Ok(allocation)
+}
+
+/// One transaction: compute the allocation and apply it.
+fn settle(
+    database: &mut Database,
+    clock: &dyn Clock,
+    policy: &CapacityPolicy,
+    prompts: &[PromptDemand],
+    pending: &[PendingRequest],
+    report: &mut CapacityReport,
+) -> Result<Allocation, ReconcileError> {
+    let tx = database.immediate_transaction().map_err(database_error)?;
+    let (records, allocation) = compute_allocation(&tx, clock, policy, prompts, pending)?;
     apply_allocation(&tx, clock.now(), &records, &allocation, report)?;
     tx.commit()?;
     Ok(allocation)
