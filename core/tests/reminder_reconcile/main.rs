@@ -1387,3 +1387,40 @@ fn a_cancel_during_the_reinstall_of_an_acknowledged_request_rolls_the_reinstall_
     )));
     Ok(())
 }
+
+#[test]
+fn a_cancel_during_an_install_reported_as_cancelled_still_removes_the_request() -> Result<()> {
+    let path = temp_db_path("cancelled_caller_race");
+    let mut db = open_db(&path)?;
+    let revision = insert_item(&mut db, "item-1", ROOFER_TEXT)?;
+    let id = create_reminder(&mut db, "item-1", revision)?
+        .notification_id()
+        .unwrap();
+    // The OS installs the request but the caller sees a cancellation, and while the call is in
+    // flight the user cancels through another connection.
+    let mut center = FakeCenter {
+        install_then_report_cancelled: true,
+        ..FakeCenter::default()
+    };
+    let other_path = path.clone();
+    center.on_schedule = Some(Box::new(move || {
+        let mut other = open_db(&other_path).unwrap();
+        cancel_user_reminder(&mut other, "item-1", 1).unwrap();
+    }));
+
+    let report = reconcile_now(&mut db, &mut center)?;
+
+    assert_eq!(report.rolled_back, vec![id.clone()]);
+    assert!(report.installed.is_empty());
+    assert!(center.pending.is_empty());
+    assert_eq!(
+        reminder(&mut db, "item-1")?.request_state,
+        RequestState::Cancelled
+    );
+    assert!(operation_states(&mut db, "item-1")?.contains(&(
+        OperationType::Cancel,
+        id,
+        OperationState::Acknowledged
+    )));
+    Ok(())
+}

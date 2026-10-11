@@ -344,7 +344,7 @@ fn schedule_in_os(
             }
         }
         Err(error) => {
-            record_effect(
+            let outcome = record_effect(
                 database,
                 clock,
                 &entry.reminder_id,
@@ -357,6 +357,10 @@ fn schedule_in_os(
                 OperationType::Schedule,
                 error,
             ));
+            // A failed call may still have installed the request (a cancelled caller, for
+            // example). Cancel is idempotent, so a request that is no longer desired is
+            // removed whatever the error class.
+            roll_back_if_stale(database, clock, effects, entry, outcome, report)?;
         }
     }
     Ok(())
