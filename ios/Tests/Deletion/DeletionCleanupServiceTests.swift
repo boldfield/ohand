@@ -112,7 +112,6 @@ final class DeletionCleanupServiceTests: DeletionTestCase {
         "core.complete.clear_ingress",
         "fs.entryNames",
         "core.complete.remove_audio",
-        "core.terminalFailures",
     ]
 
     func testReopenAfterEachInterruptionConvergesWithoutRemnants() async throws {
@@ -299,6 +298,22 @@ final class DeletionCleanupServiceTests: DeletionTestCase {
             XCTAssertFalse(again.converged, "a durable failure never reports convergence: \(attempt)")
         }
         XCTAssertEqual(world.core.mutationCount, mutationsBefore)
+    }
+
+    func testUnreadableTerminalFailureListingIsUnknownNeverConverged() async throws {
+        let world = try makeWorld()
+        try await seedFullItem(world)
+        world.faults.arm("core.terminalFailures")
+
+        let interrupted = await world.makeService().reconcile()
+
+        XCTAssertEqual(world.faults.firedPoints, ["core.terminalFailures"])
+        XCTAssertEqual(interrupted.listingFailure, .coreUnavailable)
+        XCTAssertFalse(interrupted.converged, "an unreadable failure list is unknown, not empty")
+        XCTAssertTrue(world.core.isDeletionComplete(itemID), "every effect finished before the listing failed")
+
+        let reopened = await world.makeService().reconcile()
+        XCTAssertTrue(reopened.converged)
     }
 
     func testCorruptStagingRecordDoesNotHideItsInProgressAudio() async throws {
