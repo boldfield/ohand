@@ -2315,6 +2315,10 @@
     {
       "date": "2026-10-10",
       "change": "P09 scope amendment 4: docs/validation/evidence/device-feasibility/p09-probe-matrix-sweep.json enumerates all 54 device cells the probe docs assign to P09 (observed / deferred / not observable). Newly deferred by name: speech model install path, size and network need (T07 docs, T05 observation); delivered/repeating notifications consuming pending slots (T05); authorization decision changes in Settings with pending requests, clock/date/DST changes (T05); interruption duration against interruption start (T05). Recorded not observable: P11 pre-first-unlock keychain cell; capture-entry write after first unlock while locked. Replaces amendment 3's closing sentence. T05, T07, U10 not lowered."
+    },
+    {
+      "date": "2026-10-11",
+      "change": "N03 bounded interpretation after PR #166 auto-block: AC1 stated as identifier agreement (a same-identifier request at a mismatched or unreported instant is cancelled before any schedule decision, pre- or post-due, whatever the schedule outcome or withheld state); honest durable state restated; transient retry is per pass; post-re-read write races and pass serialization belong to B02/B03. Ownership allowance: additive OperationState::Rejected in core/src/reminders/state/mod.rs only."
     }
   ]
 }
