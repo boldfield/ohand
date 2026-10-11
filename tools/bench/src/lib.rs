@@ -8,6 +8,8 @@
 //! production capture data enter journal records.
 //!
 //! # Modules
+//! - `adapters`: Production provider adapters registered beyond the hosted protocols (verified
+//!   self-hosted), over the same host transport
 //! - `executor`: Bounded, resumable paired execution of cases through comparison arms
 //! - `transport`: Bounded, credential-safe host HTTP effect and its provider-trait bindings
 //! - `cli`: The `bench plan` / `bench run` / `bench report` commands composing corpus, profiles,
@@ -19,6 +21,7 @@ mod guard;
 mod journal;
 mod records;
 
+pub mod adapters;
 pub mod cli;
 pub mod executor;
 pub mod transport;

@@ -5,6 +5,7 @@
 //! profile pins. Changing the model, credential reference, destination or timeout therefore
 //! changes the version and the executor refuses to merge the results.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ohand_core::interpretation::instructions::content_version;
@@ -12,9 +13,10 @@ use ohand_core::providers::anthropic::{
     AnthropicAdapter, AnthropicSettings, ANTHROPIC_MESSAGES_ENDPOINT,
 };
 use ohand_core::providers::contracts::{
-    AdapterCall, CancelToken, CapabilityMetadata, Clock, DiagnosticAdapterCall, DiagnosticResponse,
-    DiagnosticSetting, DiagnosticSupport, ProviderAdapter, ProviderCapability, ProviderProfile,
-    ProviderProtocol, RetryPolicy, StructuredOutputMode, TransportError, PROFILE_SCHEMA_VERSION,
+    AdapterCall, CancelToken, CapabilityMetadata, CapabilitySupport, Clock, DiagnosticAdapterCall,
+    DiagnosticResponse, DiagnosticSetting, DiagnosticSupport, ProviderAdapter, ProviderCapability,
+    ProviderProfile, ProviderProtocol, RetryPolicy, StructuredOutputMode, TransportError,
+    PROFILE_SCHEMA_VERSION,
 };
 use ohand_core::providers::openai::{
     HttpTransport, OpenAiAdapter, OPENAI_CHAT_COMPLETIONS_ENDPOINT,
@@ -22,6 +24,8 @@ use ohand_core::providers::openai::{
 use url::Url;
 
 use super::args::{protocol_label, ProfileSpec};
+use super::corpus::requested_settings;
+use crate::adapters::self_hosted::{self, SelfHostedEndpoint};
 use crate::transport::HostTransport;
 
 const PROFILE_CREATED_AT: &str = "2026-01-01T00:00:00Z";
@@ -35,6 +39,9 @@ pub struct ArmProfile {
     /// Full request URL this arm contacts in live mode; the transport approves exactly it.
     pub endpoint: String,
     pub origin: String,
+    /// Why no case could be paired for this arm, from what the profile and its adapter declare.
+    /// Empty when nothing declared stands in the way.
+    pub blockers: Vec<String>,
 }
 
 /// 32 hex digits of the digest of `parts`, shaped like a UUID. Only the shape matters: core
@@ -60,11 +67,13 @@ fn origin_of(endpoint: &str) -> Result<String, String> {
     Ok(url.origin().ascii_serialization())
 }
 
-/// Endpoint replacements for fixture servers; `None` keeps the provider's real endpoint.
+/// Endpoint replacements for fixture servers; `None` keeps the provider's real endpoint. A
+/// self-hosted server has no real endpoint to default to, so its configured one goes here.
 #[derive(Clone, Copy, Default)]
 pub struct EndpointOverrides<'a> {
     pub anthropic: Option<&'a str>,
     pub openai: Option<&'a str>,
+    pub self_hosted: Option<&'a SelfHostedEndpoint>,
 }
 
 pub fn build_profile(
@@ -72,20 +81,33 @@ pub fn build_profile(
     timeout_seconds: u32,
     overrides: EndpointOverrides<'_>,
 ) -> Result<ArmProfile, String> {
-    let endpoint = match spec.protocol {
-        ProviderProtocol::Anthropic => overrides
-            .anthropic
-            .unwrap_or(ANTHROPIC_MESSAGES_ENDPOINT)
-            .to_string(),
-        ProviderProtocol::OpenAi => overrides
-            .openai
-            .unwrap_or(OPENAI_CHAT_COMPLETIONS_ENDPOINT)
-            .to_string(),
+    let (endpoint, origin, declared_endpoint, pinned_endpoint) = match spec.protocol {
+        ProviderProtocol::Anthropic | ProviderProtocol::OpenAi => {
+            let endpoint = match spec.protocol {
+                ProviderProtocol::Anthropic => {
+                    overrides.anthropic.unwrap_or(ANTHROPIC_MESSAGES_ENDPOINT)
+                }
+                _ => overrides.openai.unwrap_or(OPENAI_CHAT_COMPLETIONS_ENDPOINT),
+            }
+            .to_string();
+            let origin = origin_of(&endpoint)?;
+            (endpoint, origin.clone(), None, origin)
+        }
         ProviderProtocol::SelfHosted => {
-            return Err("self-hosted profiles are not supported by this command".to_string())
+            let configured = overrides.self_hosted.ok_or_else(|| {
+                "a self-hosted profile needs its endpoint: name the environment variable that \
+                 holds it with --self-hosted-endpoint-env"
+                    .to_string()
+            })?;
+            let base_url = configured.base_url().to_string();
+            (
+                base_url.clone(),
+                configured.origin().to_string(),
+                Some(base_url.clone()),
+                base_url,
+            )
         }
     };
-    let origin = origin_of(&endpoint)?;
     let protocol = protocol_label(spec.protocol);
     let profile_id = format!("{protocol}-{}", spec.model);
     let timeout = timeout_seconds.to_string();
@@ -94,15 +116,22 @@ pub fn build_profile(
         &profile_id,
         &spec.model,
         &spec.credential_ref,
-        &origin,
+        &pinned_endpoint,
         &timeout,
     ]);
-    let capability = CapabilityMetadata::supported(
-        ProviderCapability::TextInterpretation,
-        "bench-cli-synthetic-comparison",
-    )
-    .with_input_size_limit(INPUT_SIZE_LIMIT)
-    .with_structured_output(StructuredOutputMode::JsonSchema);
+    let declared: Vec<CapabilityMetadata> = match spec.protocol {
+        ProviderProtocol::SelfHosted => self_hosted::capabilities(&spec.model, INPUT_SIZE_LIMIT),
+        _ => vec![CapabilityMetadata::supported(
+            ProviderCapability::TextInterpretation,
+            "bench-cli-synthetic-comparison",
+        )
+        .with_input_size_limit(INPUT_SIZE_LIMIT)
+        .with_structured_output(StructuredOutputMode::JsonSchema)],
+    };
+    let capabilities: BTreeMap<ProviderCapability, CapabilityMetadata> = declared
+        .into_iter()
+        .map(|metadata| (metadata.capability, metadata))
+        .collect();
     // Core exposes profile contents only through serde, whose validation is the same as the
     // builder's; the builder alone would mint a random version.
     let record = serde_json::json!({
@@ -110,26 +139,67 @@ pub fn build_profile(
         "profile_version": profile_version,
         "profile_id": profile_id,
         "protocol": spec.protocol,
-        "endpoint": null,
+        "endpoint": declared_endpoint,
         "model": spec.model,
         "credential_ref": spec.credential_ref,
         "timeout_seconds": timeout_seconds,
         "retry_policy": RetryPolicy::default(),
         "authorized_destinations": [origin],
-        "capabilities": { "text_interpretation": capability },
+        "capabilities": capabilities,
         "created_at": PROFILE_CREATED_AT,
     });
     let profile: ProviderProfile =
         serde_json::from_value(record).map_err(|error| format!("profile is not valid: {error}"))?;
+    let blockers = pairing_blockers(&profile, spec.protocol);
     Ok(ArmProfile {
         spec: spec.clone(),
         profile,
         endpoint,
         origin,
+        blockers,
     })
 }
 
-/// Settings each hosted adapter can honor for a diagnostic request.
+/// What stands in the way of pairing a case through this arm, read from the profile's declared
+/// capability and the adapter's declared diagnostic support. The executor refuses on the same
+/// facts and records each case as not eligible; this names them before anything is journaled.
+fn pairing_blockers(profile: &ProviderProfile, protocol: ProviderProtocol) -> Vec<String> {
+    let mut blockers = Vec::new();
+    match profile.capability(ProviderCapability::TextInterpretation) {
+        Some(capability) => match capability.support {
+            CapabilitySupport::Supported => {}
+            CapabilitySupport::Unverified | CapabilitySupport::Unsupported => {
+                let reason = capability.reason.as_deref().unwrap_or("no reason declared");
+                blockers.push(format!(
+                    "text interpretation is not verified for this model: {reason}"
+                ));
+            }
+        },
+        None => blockers.push("text interpretation is not declared by the profile".to_string()),
+    }
+    let support = support_of(protocol);
+    if !support.is_supported() {
+        blockers.push("the adapter declares no support for diagnostic calls".to_string());
+    } else {
+        let unsupported: Vec<String> = requested_settings()
+            .values()
+            .iter()
+            .map(|value| value.setting())
+            .filter(|setting| !support.supports(*setting))
+            .map(|setting| format!("{setting:?}"))
+            .collect();
+        if !unsupported.is_empty() {
+            blockers.push(format!(
+                "the adapter cannot honor the requested settings: {}",
+                unsupported.join(", ")
+            ));
+        }
+    }
+    blockers
+}
+
+/// Settings each adapter can honor for a diagnostic request. The self-hosted answer is asked of
+/// the production adapter itself, so it follows core instead of the protocol label.
 fn support_of(protocol: ProviderProtocol) -> DiagnosticSupport {
     match protocol {
         ProviderProtocol::OpenAi => DiagnosticSupport::supporting([
@@ -137,6 +207,7 @@ fn support_of(protocol: ProviderProtocol) -> DiagnosticSupport {
             DiagnosticSetting::MaxOutputTokens,
             DiagnosticSetting::Seed,
         ]),
+        ProviderProtocol::SelfHosted => self_hosted::diagnostic_support(),
         _ => DiagnosticSupport::supporting([
             DiagnosticSetting::Temperature,
             DiagnosticSetting::MaxOutputTokens,
@@ -227,6 +298,7 @@ pub fn live_adapter(arm: &ArmProfile, transport: &HostTransport) -> Box<dyn Prov
             transport: transport.clone(),
             endpoint: arm.endpoint.clone(),
         })),
+        ProviderProtocol::SelfHosted => self_hosted::adapter(transport),
         _ => Box::new(AnthropicAdapter::new(
             Arc::new(transport.clone()),
             AnthropicSettings::default().with_endpoint(arm.endpoint.clone()),

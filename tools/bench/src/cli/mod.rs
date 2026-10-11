@@ -47,6 +47,7 @@ use crate::transport::{
     CredentialResolver, DestinationPolicy, EnvCredentialResolver, HostTransport,
 };
 
+use crate::adapters::self_hosted::SelfHostedEndpoint;
 use args::{Command, Mode, Options};
 use authority::ScratchAuthority;
 use output::{sanitize_to, PlanView, PriorJournal, ReportView};
@@ -146,6 +147,29 @@ struct Prepared {
     request_cap: Option<u32>,
 }
 
+/// The configured self-hosted base URL, read from the one variable the command line names. It
+/// is an endpoint, not a credential; errors describe its shape and never repeat it.
+fn self_hosted_endpoint(
+    options: &Options,
+    services: &Services,
+) -> Result<Option<SelfHostedEndpoint>, Refusal> {
+    let Some(variable) = &options.self_hosted_endpoint_env else {
+        return Ok(None);
+    };
+    let value = (services.environment)(OsStr::new(variable))
+        .and_then(|value| value.into_string().ok())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            Refusal(
+                "the variable named by --self-hosted-endpoint-env is not set to a non-empty value"
+                    .to_string(),
+            )
+        })?;
+    SelfHostedEndpoint::parse(&value)
+        .map(Some)
+        .map_err(|error| Refusal(format!("--self-hosted-endpoint-env: {error}")))
+}
+
 fn prepare(options: &Options, services: &Services) -> Result<Prepared, Refusal> {
     if options.mode == Mode::Recorded {
         return Err(Refusal(
@@ -155,9 +179,11 @@ fn prepare(options: &Options, services: &Services) -> Result<Prepared, Refusal> 
         ));
     }
     let corpus = corpus::load(options)?;
+    let self_hosted = self_hosted_endpoint(options, services)?;
     let overrides = EndpointOverrides {
         anthropic: services.anthropic_endpoint.as_deref(),
         openai: services.openai_endpoint.as_deref(),
+        self_hosted: self_hosted.as_ref(),
     };
     let arm_a = build_profile(&options.profile_a, options.timeout_seconds, overrides)
         .map_err(|error| format!("profile a: {error}"))?;

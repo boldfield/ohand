@@ -43,8 +43,11 @@ REQUIRED:
     --corpus <file>        Synthetic intent corpus (JSON). Nothing else is ever read as input.
     --profile-a <spec>     Exactly two profiles, a and b. A spec is
     --profile-b <spec>       <protocol>:<model>[:<credential-ref>]
-                           with protocol `anthropic` or `openai`. The credential reference is an
-                           opaque name (default `bench-<protocol>`), never the secret itself.
+                           with protocol `anthropic`, `openai` or `self-hosted`. The credential
+                           reference is an opaque name (default `bench-<protocol>`), never the
+                           secret itself. A self-hosted model tag is written with `@` where the
+                           name has `:` (`name@tag` is sent as `name:tag`), and its endpoint
+                           comes from --self-hosted-endpoint-env.
     --journal <file>       run only: the journal to create or resume. plan may name one to show
                            what a run would keep (it is read, never written; only a private
                            scratch copy is written and deleted).
@@ -62,6 +65,16 @@ OPTIONS:
                            planned maximum.
     --rerun <id>:<a|b>     Send this side again although it was attempted; repeatable. Uses
                            new allowance from --request-cap and records what it follows.
+    --self-hosted-endpoint-env <VAR>
+                           Required with a self-hosted profile and refused without one: the
+                           environment variable that holds the https base URL of the server.
+                           The URL is read from it (plan too, which opens no socket), pinned
+                           into the profile version, and never printed or journaled. A
+                           self-hosted arm is paired only where its model has run evidence and
+                           the production adapter declares diagnostic support; otherwise
+                           `plan` says so and `run` records each case as not eligible and
+                           sends nothing, for either arm. Nothing falls back to another
+                           profile or destination.
     --timeout-seconds <n>  Per-request timeout pinned into the profiles (1..=300, default 30).
     --build-revision <s>   Label recorded as the build revision (default: crate version).
 
@@ -116,10 +129,8 @@ fn parse_protocol(text: &str) -> Result<ProviderProtocol, String> {
     match text {
         "anthropic" => Ok(ProviderProtocol::Anthropic),
         "openai" => Ok(ProviderProtocol::OpenAi),
-        "self-hosted" | "self_hosted" => {
-            Err("self-hosted profiles are not supported by this command".to_string())
-        }
-        _ => Err("protocol must be `anthropic` or `openai`".to_string()),
+        "self-hosted" => Ok(ProviderProtocol::SelfHosted),
+        _ => Err("protocol must be `anthropic`, `openai` or `self-hosted`".to_string()),
     }
 }
 
@@ -139,11 +150,16 @@ impl ProfileSpec {
         }
         let protocol = parse_protocol(parts[0])?;
         let model = parts[1];
-        if !is_name(model, &['.', '_', '-'], 80) {
+        if !is_name(model, &['.', '_', '-', '@'], 80)
+            || (model.contains('@') && protocol != ProviderProtocol::SelfHosted)
+        {
             return Err(
-                "model must be 1-80 characters of letters, digits, `.`, `_` or `-`".to_string(),
+                "model must be 1-80 characters of letters, digits, `.`, `_` or `-` (a \
+                 self-hosted model tag is written with `@` where its name has `:`)"
+                    .to_string(),
             );
         }
+        let model = model.replace('@', ":");
         let credential_ref = match parts.get(2) {
             Some(reference) => (*reference).to_string(),
             None => format!("bench-{}", protocol_label(protocol)),
@@ -158,7 +174,7 @@ impl ProfileSpec {
         }
         Ok(ProfileSpec {
             protocol,
-            model: model.to_string(),
+            model,
             credential_ref,
         })
     }
@@ -179,6 +195,7 @@ pub struct Options {
     pub execute_network: bool,
     pub allow_destinations: Vec<ProviderProtocol>,
     pub credential_env: Vec<(String, String)>,
+    pub self_hosted_endpoint_env: Option<String>,
     pub timeout_seconds: u32,
     pub build_revision: Option<String>,
 }
@@ -282,6 +299,7 @@ struct Collected {
     execute_network: bool,
     allow_destinations: Vec<String>,
     credential_env: Vec<String>,
+    self_hosted_endpoint_env: Option<String>,
     timeout_seconds: Option<String>,
     build_revision: Option<String>,
 }
@@ -327,6 +345,7 @@ fn collect(words: &[String]) -> Result<Collected, String> {
             "--rerun",
             "--allow-destination",
             "--credential-env",
+            "--self-hosted-endpoint-env",
             "--timeout-seconds",
             "--build-revision",
         ];
@@ -352,6 +371,9 @@ fn collect(words: &[String]) -> Result<Collected, String> {
             "--max-cases" => set_once(&mut collected.max_cases, flag, value)?,
             "--attempts-per-side" => set_once(&mut collected.attempts_per_side, flag, value)?,
             "--request-cap" => set_once(&mut collected.request_cap, flag, value)?,
+            "--self-hosted-endpoint-env" => {
+                set_once(&mut collected.self_hosted_endpoint_env, flag, value)?
+            }
             "--timeout-seconds" => set_once(&mut collected.timeout_seconds, flag, value)?,
             "--build-revision" => set_once(&mut collected.build_revision, flag, value)?,
             "--case" => collected.case_ids.push(value),
@@ -512,6 +534,34 @@ fn build_options(collected: Collected, is_run: bool) -> Result<Options, String> 
         .iter()
         .map(|text| parse_credential_env(text))
         .collect::<Result<Vec<_>, _>>()?;
+    let self_hosted_endpoint_env = collected
+        .self_hosted_endpoint_env
+        .map(|variable| {
+            if is_name(&variable, &['_'], 128) {
+                Ok(variable)
+            } else {
+                Err(
+                    "--self-hosted-endpoint-env must be a variable name, never the endpoint \
+                     itself"
+                        .to_string(),
+                )
+            }
+        })
+        .transpose()?;
+    let self_hosted_arms = [&profile_a, &profile_b]
+        .iter()
+        .filter(|spec| spec.protocol == ProviderProtocol::SelfHosted)
+        .count();
+    if self_hosted_arms > 0 && self_hosted_endpoint_env.is_none() {
+        return Err(
+            "a self-hosted profile needs --self-hosted-endpoint-env <VAR>, the variable that \
+             holds its https base URL"
+                .to_string(),
+        );
+    }
+    if self_hosted_arms == 0 && self_hosted_endpoint_env.is_some() {
+        return Err("--self-hosted-endpoint-env names no self-hosted profile".to_string());
+    }
     if credential_env.iter().enumerate().any(|(index, pair)| {
         credential_env[..index]
             .iter()
@@ -561,6 +611,7 @@ fn build_options(collected: Collected, is_run: bool) -> Result<Options, String> 
         execute_network: collected.execute_network,
         allow_destinations,
         credential_env,
+        self_hosted_endpoint_env,
         timeout_seconds,
         build_revision: collected.build_revision,
     })
