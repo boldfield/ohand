@@ -12,6 +12,12 @@ Every call is appended to $STUB_STATE_DIR/calls.jsonl. Behaviour is selected thr
   STUB_LEAK_TEXT=<text>                     print this text to stderr on every call (simulates a tool echoing identifiers)
   STUB_EMPTY_KEYCHAIN_LIST=1                `security list-keychains -d user` prints nothing parseable
   STUB_FAIL_RESTORE_SEARCH_LIST=1           fail only the call that restores the original keychain search list
+  STUB_ARCHIVE_EXTENSIONS=<id>[,<id>...]    bundle identifiers of the app extensions embedded in an OhAndApp archive
+                                            (default: the capture-control extension; empty means none)
+  STUB_UNSIGNED_EXTENSION=1                 export an OhAndApp whose extensions lack _CodeSignature
+  STUB_DEVICECTL_FAIL=<step>[,...]          fail one devicectl step: install, details, launch or processes
+  STUB_NOT_RUNNING=1                        the launched process is absent from the device process list
+  STUB_DEVICE_UDID=<udid>                   hardware identifier `devicectl device info details` reports
 """
 
 import json
@@ -25,6 +31,19 @@ from pathlib import Path
 STATE_DIR = Path(os.environ["STUB_STATE_DIR"])
 DEFAULT_LOGIN_KEYCHAIN = "/synthetic/Library/Keychains/login.keychain-db"
 SYNTHETIC_IDENTITY_NAME = "Apple Development: Synthetic Person (SYNTHETIC1)"
+SCHEME_BUNDLE_IDENTIFIERS = {
+    "BridgeProbe": "com.boldfield.ohand.probes.bridge",
+    "AudioProbe": "com.boldfield.ohand.probes.audio",
+    "TranscriptionProbe": "com.boldfield.ohand.probes.transcription",
+    "NotificationProbe": "com.boldfield.ohand.probes.notification",
+    "OhAndApp": "com.boldfield.ohand.app",
+}
+DEFAULT_EXTENSION_IDENTIFIERS = "com.boldfield.ohand.app.capture-control"
+FRAMEWORK_IDENTIFIERS = {
+    "OhAndCoreBridge": "com.boldfield.ohand.core-bridge",
+    "OhAndServices": "com.boldfield.ohand.services",
+}
+LAUNCHED_PROCESS_IDENTIFIER = 4242
 
 
 def record_call(tool, arguments):
@@ -107,21 +126,62 @@ def xcodebuild(arguments):
         print("Xcode 26.6\nBuild version 17A000")
     elif arguments[0] == "archive":
         archive = Path(option_value(arguments, "-archivePath"))
-        (archive / "Products" / "Applications").mkdir(parents=True)
+        scheme = option_value(arguments, "-scheme")
+        application = archive / "Products" / "Applications" / f"{scheme}.app"
+        application.mkdir(parents=True)
+        write_bundle_info(application, SCHEME_BUNDLE_IDENTIFIERS[scheme])
+        if scheme == "OhAndApp":
+            for index, identifier in enumerate(split_names(os.environ.get("STUB_ARCHIVE_EXTENSIONS", DEFAULT_EXTENSION_IDENTIFIERS))):
+                extension = application / "PlugIns" / f"Extension{index}.appex"
+                extension.mkdir(parents=True)
+                write_bundle_info(extension, identifier)
+            for name, identifier in FRAMEWORK_IDENTIFIERS.items():
+                framework = application / "Frameworks" / f"{name}.framework"
+                framework.mkdir(parents=True)
+                write_bundle_info(framework, identifier)
         (archive / "Info.plist").write_bytes(plistlib.dumps({"Name": "Synthetic"}))
     elif arguments[0] == "-exportArchive":
         options = plistlib.loads(Path(option_value(arguments, "-exportOptionsPlist")).read_bytes())
         (STATE_DIR / "export-options.json").write_text(json.dumps(options))
         export_path = Path(option_value(arguments, "-exportPath"))
         export_path.mkdir(parents=True)
+        source = next((Path(option_value(arguments, "-archivePath")) / "Products" / "Applications").glob("*.app"))
         with zipfile.ZipFile(export_path / "Probe.ipa", "w") as archive:
-            archive.writestr("Payload/Probe.app/Info.plist", "synthetic")
+            for path in sorted(source.rglob("Info.plist")):
+                archive.write(path, "Payload/Probe.app/" + str(path.relative_to(source)))
             if os.environ.get("STUB_UNSIGNED_EXPORT") != "1":
                 archive.writestr("Payload/Probe.app/_CodeSignature/CodeResources", "synthetic")
+                if os.environ.get("STUB_UNSIGNED_EXTENSION") != "1":
+                    for extension in sorted(source.glob("PlugIns/*.appex")):
+                        relative = extension.relative_to(source)
+                        archive.writestr(f"Payload/Probe.app/{relative}/_CodeSignature/CodeResources", "synthetic")
+
+
+def write_bundle_info(bundle, identifier):
+    (bundle / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": identifier}, fmt=plistlib.FMT_BINARY))
+
+
+def write_json_output(arguments, payload):
+    Path(option_value(arguments, "--json-output")).write_text(json.dumps(payload))
 
 
 def devicectl(arguments):
-    print("Synthetic install complete")
+    step = {("info", "details"): "details", ("process", "launch"): "launch", ("info", "processes"): "processes"}.get(
+        tuple(arguments[1:3]), "install")
+    if step in os.environ.get("STUB_DEVICECTL_FAIL", "").split(","):
+        print(f"synthetic devicectl {step} failure", file=sys.stderr)
+        sys.exit(1)
+    if step == "details":
+        write_json_output(arguments, {"result": {"hardwareProperties": {"udid": os.environ.get("STUB_DEVICE_UDID", "synthetic-udid-a")}}})
+    elif step == "launch":
+        write_json_output(arguments, {"result": {"process": {"processIdentifier": LAUNCHED_PROCESS_IDENTIFIER}}})
+    elif step == "processes":
+        running = [{"processIdentifier": 1, "executable": "file:///sbin/launchd"}]
+        if os.environ.get("STUB_NOT_RUNNING") != "1":
+            running.append({"processIdentifier": LAUNCHED_PROCESS_IDENTIFIER, "executable": "file:///private/var/containers/Bundle/Application/X/OhAnd.app/OhAnd"})
+        write_json_output(arguments, {"result": {"runningProcesses": running}})
+    else:
+        print("Synthetic install complete")
 
 
 def main():
