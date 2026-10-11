@@ -197,7 +197,9 @@ Source pointers: `docs/features/m1-plan.md:722`, `core/src/interpretation/apply/
 
 Wire existing modules into a developer command for dry-run, explicit live execution and safe resume.
 
-Owned paths: `tools/bench/src/cli/`, `tools/bench/src/main.rs`, `tools/bench/src/lib.rs`, `docs/validation/model-benchmark.md`.
+Owned paths: `tools/bench/src/cli/`, `tools/bench/src/main.rs`, `tools/bench/src/lib.rs`, `docs/validation/model-benchmark.md`, `tools/bench/Cargo.toml`, `Cargo.lock`.
+
+The manifest and lockfile are listed only so the command can depend on the existing `evaluation` crate's corpus loader instead of copying a corpus parser into another layer; no other dependency is added.
 
 Acceptance:
 
