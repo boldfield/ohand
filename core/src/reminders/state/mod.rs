@@ -213,13 +213,18 @@ impl FromStr for OperationType {
     }
 }
 
-/// `Pending` until a native acknowledgment is recorded (N03); `Superseded` once a newer
+/// `Pending` until the native effect is attempted (N03); `Failed` once it was attempted
+/// without a confirmed outcome (an error the retry policy allows, or an attempt whose result
+/// was lost), so the next reconciliation retries it; `Rejected` once the native layer refused
+/// it definitively (`permanent`, `unauthorized` or `unsupported`), so it is not retried until
+/// an explicit recovery re-arms it; `Acknowledged` once confirmed; `Superseded` once a newer
 /// desired state made the operation obsolete before it was acknowledged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OperationState {
     Pending,
     Acknowledged,
     Failed,
+    Rejected,
     Superseded,
 }
 
@@ -229,6 +234,7 @@ impl OperationState {
             OperationState::Pending => "pending",
             OperationState::Acknowledged => "acknowledged",
             OperationState::Failed => "failed",
+            OperationState::Rejected => "rejected",
             OperationState::Superseded => "superseded",
         }
     }
@@ -241,6 +247,7 @@ impl FromStr for OperationState {
             "pending" => Ok(OperationState::Pending),
             "acknowledged" => Ok(OperationState::Acknowledged),
             "failed" => Ok(OperationState::Failed),
+            "rejected" => Ok(OperationState::Rejected),
             "superseded" => Ok(OperationState::Superseded),
             other => Err(corrupt("operation state", other)),
         }
