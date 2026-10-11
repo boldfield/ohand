@@ -650,6 +650,9 @@ fn private_host_shaped_labels_are_refused() {
         "10.0.0.5",
         "host-192.168.1.20",
         "svc.internal-v2",
+        "prod.10.0.0.5.v1",
+        "exp_v2.172.16.4.1.rerun",
+        "run.192.168.0.1",
     ] {
         assert!(Label::new(bad).is_err(), "label {bad:?}");
     }
@@ -661,6 +664,8 @@ fn private_host_shaped_labels_are_refused() {
         "model.localized",
         "claude-haiku-4-5-20251001",
         "gpt-6.1-sol",
+        "build.2026.10.11",
+        "schema.1.2.3",
     ] {
         assert!(Label::new(good).is_ok(), "label {good:?}");
     }

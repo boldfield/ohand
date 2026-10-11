@@ -70,7 +70,8 @@ const PRIVATE_HOST_SUFFIXES: &[&str] = &[
 ];
 
 /// True for `localhost`, a hostname under a private-network suffix (`db.corp.local`), or a
-/// dotted-quad address, whether it is the whole label or one delimited part of it.
+/// dotted-quad address: four consecutive dot-separated octets anywhere in the label, so an
+/// address embedded between other label parts (`prod.10.0.0.5.v1`) is caught too.
 fn looks_like_private_host(text: &str) -> bool {
     let lowered = text.to_ascii_lowercase();
     let is_boundary = |character: Option<char>| {
@@ -85,12 +86,12 @@ fn looks_like_private_host(text: &str) -> bool {
         is_boundary(lowered[..index].chars().next_back())
             && is_boundary(lowered[index + "localhost".len()..].chars().next())
     });
+    let is_octet = |token: &&str| {
+        (1..=3).contains(&token.len()) && token.bytes().all(|byte| byte.is_ascii_digit())
+    };
     let dotted_quad = lowered.split(['_', '-']).any(|part| {
-        let octets: Vec<&str> = part.split('.').collect();
-        octets.len() == 4
-            && octets
-                .iter()
-                .all(|octet| !octet.is_empty() && octet.bytes().all(|byte| byte.is_ascii_digit()))
+        let tokens: Vec<&str> = part.split('.').collect();
+        tokens.windows(4).any(|window| window.iter().all(is_octet))
     });
     suffixed || localhost || dotted_quad
 }
