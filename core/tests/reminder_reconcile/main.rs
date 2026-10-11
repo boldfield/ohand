@@ -224,6 +224,7 @@ struct FakeCenter {
     hide_due_instants: bool,
     targets: BTreeMap<String, String>,
     on_schedule: Option<Box<dyn FnMut()>>,
+    on_cancel: Option<Box<dyn FnMut()>>,
 }
 
 impl FakeCenter {
@@ -272,6 +273,9 @@ impl NotificationEffects for FakeCenter {
         self.calls.push(Call::Cancel(notification_id.to_string()));
         if let Some(error) = &self.fail_cancel {
             return Err(error.clone());
+        }
+        if let Some(hook) = self.on_cancel.as_mut() {
+            hook();
         }
         self.pending.remove(notification_id);
         Ok(())
@@ -1292,6 +1296,49 @@ fn an_install_that_completes_after_the_reminder_was_cancelled_is_rolled_back_in_
     assert!(operation_states(&mut db, "item-1")?.contains(&(
         OperationType::Cancel,
         id,
+        OperationState::Acknowledged
+    )));
+    Ok(())
+}
+
+#[test]
+fn a_cancel_committed_after_the_plan_snapshot_removes_an_already_pending_request() -> Result<()> {
+    let path = temp_db_path("snapshot_race");
+    let mut db = open_db(&path)?;
+    let revision_one = insert_item(&mut db, "item-1", ROOFER_TEXT)?;
+    let revision_two = insert_item(&mut db, "item-2", ROOFER_TEXT)?;
+    let id_one = create_reminder(&mut db, "item-1", revision_one)?
+        .notification_id()
+        .unwrap();
+    let id_two = create_reminder(&mut db, "item-2", revision_two)?
+        .notification_id()
+        .unwrap();
+    let mut center = FakeCenter::default();
+    reconcile_now(&mut db, &mut center)?;
+    assert_eq!(center.pending_ids().len(), 2);
+
+    // The user cancels item-2, so the next pass has a stale request to remove. While that
+    // removal is in flight, after the plan snapshot was taken, item-1 is cancelled elsewhere.
+    cancel_user_reminder(&mut db, "item-2", revision_two)?;
+    let other_path = path.clone();
+    let mut fired = false;
+    center.on_cancel = Some(Box::new(move || {
+        if !fired {
+            fired = true;
+            let mut other = open_db(&other_path).unwrap();
+            cancel_user_reminder(&mut other, "item-1", 1).unwrap();
+        }
+    }));
+
+    let report = reconcile_now(&mut db, &mut center)?;
+
+    assert!(report.rolled_back.contains(&id_one));
+    assert!(!report.already_installed.contains(&id_one));
+    assert!(report.removed.contains(&id_two));
+    assert!(center.pending.is_empty());
+    assert!(operation_states(&mut db, "item-1")?.contains(&(
+        OperationType::Cancel,
+        id_one,
         OperationState::Acknowledged
     )));
     Ok(())

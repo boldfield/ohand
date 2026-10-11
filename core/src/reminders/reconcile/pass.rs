@@ -140,7 +140,7 @@ pub fn reconcile(
                     request.fire_at.map(|due| due.timestamp()) == Some(entry.fire_at.timestamp())
                 });
         if installed_with_desired_due {
-            record_effect(
+            let outcome = record_effect(
                 database,
                 clock,
                 &entry.reminder_id,
@@ -148,7 +148,24 @@ pub fn reconcile(
                 &entry.notification_id,
                 EffectOutcome::Succeeded,
             )?;
-            report.already_installed.push(entry.notification_id.clone());
+            let stale_success = matches!(
+                outcome,
+                Some(CompletionOutcome::Stale {
+                    cancel_required: true
+                })
+            );
+            if stale_success || !is_still_desired(database, &entry.notification_id)? {
+                report.rolled_back.push(entry.notification_id.clone());
+                cancel_in_os(
+                    database,
+                    clock,
+                    effects,
+                    &entry.notification_id,
+                    &mut report,
+                )?;
+            } else {
+                report.already_installed.push(entry.notification_id.clone());
+            }
             continue;
         }
         if entry.fire_at <= now {
@@ -165,6 +182,18 @@ pub fn reconcile(
     }
 
     Ok(report)
+}
+
+/// Re-read the durable desired set. The plan is a snapshot, so a cancel, change or deletion
+/// committed after it was taken must still stop the request it describes from staying live.
+fn is_still_desired(
+    database: &mut Database,
+    notification_id: &str,
+) -> Result<bool, ReconcileError> {
+    let tx = database.transaction().map_err(database_error)?;
+    Ok(desired_notifications(&tx)?
+        .iter()
+        .any(|entry| entry.notification_id == notification_id))
 }
 
 fn load_plan(tx: &Transaction<'_>) -> Result<Plan, ReconcileError> {
