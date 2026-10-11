@@ -227,7 +227,9 @@
         "tools/bench/src/cli/",
         "tools/bench/src/main.rs",
         "tools/bench/src/lib.rs",
-        "docs/validation/model-benchmark.md"
+        "docs/validation/model-benchmark.md",
+        "tools/bench/Cargo.toml",
+        "Cargo.lock"
       ],
       "intent": "Wire existing modules into a developer command for dry-run, explicit live execution and safe resume.",
       "acceptance": [
