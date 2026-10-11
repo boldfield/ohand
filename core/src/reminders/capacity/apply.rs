@@ -58,6 +58,13 @@ impl CapacityReport {
 /// a last guard the effects handed to `reconcile` refuse to add a request while the pending set is at the OS
 /// limit (a transient failure, retried by the next pass), whatever other cancel failed.
 ///
+/// The pass reads the clock once. Planning, settling and `reconcile` all see that instant, so
+/// the allocation returned is the allocation written: a reminder or prompt whose time passes
+/// while native cancels run is judged by the pass instant everywhere, never granted in the
+/// report and elapsed in storage. `settle` re-validates the planned allocation inside its own
+/// transaction and writes it only if a fresh computation agrees; if a concurrent write changed
+/// the durable inputs, the cancel step runs again for the new plan.
+///
 /// Safe to run after every write, on launch and on foreground activation; those events are the
 /// refill cadence and no timer is involved. A failure to list pending requests aborts the pass
 /// before any mutation. A failed prompt cancel is reported and retried by the next pass.
@@ -76,16 +83,24 @@ pub fn reconcile_with_capacity(
         .iter()
         .map(|request| request.notification_id.as_str())
         .collect();
+    let pass_clock = PassClock { now: clock.now() };
     let mut report = CapacityReport::default();
     // Prompts whose cancel failed: still pending, so they stay out of the demands handed to
     // `plan` and are counted with the requests core cannot reclaim. Each failure can shrink
     // the budget and defer more prompts, so cancel and plan repeat until no new cancel fails.
-    // Every round that continues adds at least one failed prompt, so the loop terminates.
+    // Every round that continues adds at least one failed prompt, or follows a write another
+    // connection made between `plan` and `settle`, so the loop terminates.
     let mut failed_deferrals: BTreeMap<String, DeferredPrompt> = BTreeMap::new();
     let mut cancelled: BTreeSet<String> = BTreeSet::new();
     loop {
         let remaining_prompts = remaining_prompts_of(prompts, &failed_deferrals);
-        let mut allocation = plan(database, clock, policy, &remaining_prompts, &pending)?;
+        let mut allocation = plan(
+            database,
+            pass_clock.now,
+            policy,
+            &remaining_prompts,
+            &pending,
+        )?;
 
         let to_cancel: Vec<String> = allocation
             .deferred_prompts
@@ -122,28 +137,45 @@ pub fn reconcile_with_capacity(
             }
         }
 
-        if !new_failures {
-            for failed in failed_deferrals.values() {
-                allocation.deferred_prompts.push(failed.clone());
-            }
-            report.allocation = allocation;
-            break;
+        if new_failures {
+            continue;
         }
+        // Only the final allocation is written, so a pass that changes nothing leaves every
+        // reminder's `state_version` alone however many cancels failed on the way. If the
+        // durable inputs changed since `plan`, nothing is written and the cancel step runs
+        // again for the new plan.
+        if !settle(
+            database,
+            pass_clock.now,
+            policy,
+            &remaining_prompts,
+            &pending,
+            &allocation,
+            &mut report,
+        )? {
+            continue;
+        }
+        for failed in failed_deferrals.values() {
+            allocation.deferred_prompts.push(failed.clone());
+        }
+        report.allocation = allocation;
+        break;
     }
-    // Only the final allocation is written, so a pass that changes nothing leaves every
-    // reminder's `state_version` alone however many cancels failed on the way.
-    settle(
-        database,
-        clock,
-        policy,
-        &remaining_prompts_of(prompts, &failed_deferrals),
-        &pending,
-        &mut report,
-    )?;
 
     let mut guarded = PendingLimitGuard::new(effects, pending, policy.os_pending_limit);
-    report.reconcile = reconcile(database, clock, &mut guarded)?;
+    report.reconcile = reconcile(database, &pass_clock, &mut guarded)?;
     Ok(report)
+}
+
+/// The single instant of one capacity pass.
+struct PassClock {
+    now: DateTime<Utc>,
+}
+
+impl Clock for PassClock {
+    fn now(&self) -> DateTime<Utc> {
+        self.now
+    }
 }
 
 fn remaining_prompts_of(
@@ -162,7 +194,7 @@ fn remaining_prompts_of(
 /// budget.
 fn compute_allocation(
     tx: &Transaction<'_>,
-    clock: &dyn Clock,
+    now: DateTime<Utc>,
     policy: &CapacityPolicy,
     prompts: &[PromptDemand],
     pending: &[PendingRequest],
@@ -194,7 +226,7 @@ fn compute_allocation(
     let allocation = allocate(
         policy,
         &AllocationInput {
-            now: clock.now(),
+            now,
             foreign_pending,
             reminders: &demands,
             prompts,
@@ -206,30 +238,36 @@ fn compute_allocation(
 /// The allocation without writing anything.
 fn plan(
     database: &mut Database,
-    clock: &dyn Clock,
+    now: DateTime<Utc>,
     policy: &CapacityPolicy,
     prompts: &[PromptDemand],
     pending: &[PendingRequest],
 ) -> Result<Allocation, ReconcileError> {
     let tx = database.immediate_transaction().map_err(database_error)?;
-    let (_, allocation) = compute_allocation(&tx, clock, policy, prompts, pending)?;
+    let (_, allocation) = compute_allocation(&tx, now, policy, prompts, pending)?;
     Ok(allocation)
 }
 
-/// One transaction: compute the allocation and apply it.
+/// One transaction: write `planned` if the durable inputs still produce it, and report whether
+/// it was written. Native cancels ran between `plan` and here, so another writer may have
+/// changed the reminders; then nothing is written and the caller plans again.
 fn settle(
     database: &mut Database,
-    clock: &dyn Clock,
+    now: DateTime<Utc>,
     policy: &CapacityPolicy,
     prompts: &[PromptDemand],
     pending: &[PendingRequest],
+    planned: &Allocation,
     report: &mut CapacityReport,
-) -> Result<Allocation, ReconcileError> {
+) -> Result<bool, ReconcileError> {
     let tx = database.immediate_transaction().map_err(database_error)?;
-    let (records, allocation) = compute_allocation(&tx, clock, policy, prompts, pending)?;
-    apply_allocation(&tx, clock.now(), &records, &allocation, report)?;
+    let (records, current) = compute_allocation(&tx, now, policy, prompts, pending)?;
+    if &current != planned {
+        return Ok(false);
+    }
+    apply_allocation(&tx, now, &records, planned, report)?;
     tx.commit()?;
-    Ok(allocation)
+    Ok(true)
 }
 
 /// Wraps the effects handed to `reconcile` and never lets the pending set grow past the OS

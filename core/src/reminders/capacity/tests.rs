@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -50,15 +51,40 @@ fn base_due() -> DateTime<Utc> {
     instant("2026-02-01T09:00:00Z")
 }
 
-fn open_db(label: &str) -> Result<Database> {
-    let path = format!(
+fn db_path(label: &str) -> String {
+    format!(
         "{}/test_capacity_{}_{}.db",
         std::env::temp_dir().display(),
         label,
         uuid::Uuid::new_v4()
-    );
+    )
+}
+
+fn open_db_at(path: &str) -> Result<Database> {
     let clock: Arc<dyn Clock> = Arc::new(clock_at(CAPTURE_TIME));
-    Database::open(&path, clock)
+    Database::open(path, clock)
+}
+
+fn open_db(label: &str) -> Result<Database> {
+    open_db_at(&db_path(label))
+}
+
+/// Reads `before` on its first call and `after` on every later one, like a system clock that
+/// moves on while native effects run.
+struct AdvancingClock {
+    before: DateTime<Utc>,
+    after: DateTime<Utc>,
+    reads: AtomicUsize,
+}
+
+impl Clock for AdvancingClock {
+    fn now(&self) -> DateTime<Utc> {
+        if self.reads.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+            self.before
+        } else {
+            self.after
+        }
+    }
 }
 
 fn insert_item(db: &mut Database, item_id: &str) -> Result<()> {
@@ -169,6 +195,8 @@ enum Call {
     Cancel(String),
 }
 
+type AfterCancel = Box<dyn FnMut(&str)>;
+
 /// A stand-in for the OS pending set that behaves as observed on a device: more than 64
 /// requests are accepted without error and the oldest-added are silently evicted.
 #[derive(Default)]
@@ -179,6 +207,9 @@ struct FakeCenter {
     high_water: usize,
     fail_list: bool,
     fail_cancel_for: BTreeSet<String>,
+    /// Runs after each successful cancel, standing in for another writer that commits while
+    /// native effects are in flight.
+    after_cancel: Option<AfterCancel>,
 }
 
 impl FakeCenter {
@@ -229,6 +260,9 @@ impl NotificationEffects for FakeCenter {
             ));
         }
         self.pending.retain(|(id, _)| id != notification_id);
+        if let Some(after_cancel) = self.after_cancel.as_mut() {
+            after_cancel(notification_id);
+        }
         Ok(())
     }
 
@@ -1146,5 +1180,119 @@ fn repeating_a_pass_with_failed_prompt_cancels_does_not_churn_state_versions() -
     assert!(repeat.demoted.is_empty() && repeat.refilled.is_empty());
     assert_eq!(versions(&mut db)?, before);
     assert!(center.evicted.is_empty());
+    Ok(())
+}
+
+#[test]
+fn one_pass_reads_the_clock_once_so_the_report_matches_what_is_written() -> Result<()> {
+    let mut db = open_db("advancing_clock")?;
+    let records = seed_reminders(&mut db, 1)?;
+    let reminder_id = records[0].reminder_id.clone();
+    let mut center = FakeCenter::default();
+    // A slow prompt cancel runs while the reminder and the prompt become due.
+    center.add_foreign("prompt-cancelled");
+    let prompts = vec![
+        PromptDemand {
+            notification_id: "prompt-due".to_string(),
+            fire_at: base_due(),
+        },
+        PromptDemand {
+            notification_id: "prompt-cancelled".to_string(),
+            fire_at: base_due() + Duration::days(30),
+        },
+    ];
+    let clock = AdvancingClock {
+        before: base_due() - Duration::seconds(1),
+        after: base_due() + Duration::seconds(1),
+        reads: AtomicUsize::new(0),
+    };
+
+    let report = reconcile_with_capacity(
+        &mut db,
+        &clock,
+        &mut center,
+        &CapacityPolicy::default(),
+        &prompts,
+    )?;
+
+    assert_eq!(clock.reads.load(AtomicOrdering::SeqCst), 1);
+    assert_eq!(
+        report.prompts_cancelled,
+        vec!["prompt-cancelled".to_string()]
+    );
+    assert_eq!(
+        report.allocation.granted_reminders,
+        vec![reminder_id.clone()]
+    );
+    assert!(report.allocation.elapsed_reminders.is_empty());
+    assert_eq!(
+        report.allocation.granted_prompts,
+        vec!["prompt-due".to_string()]
+    );
+    let written = reminder(&mut db, "item-000")?;
+    assert_eq!(written.request_state, RequestState::Resolved);
+    assert!(center.holds(&written.notification_id().unwrap()));
+
+    // The next pass reads a later instant: the reminder and the prompt are elapsed in the
+    // report and in storage alike, and the passage of time is not delivery.
+    let later = reconcile_with_capacity(
+        &mut db,
+        &clock,
+        &mut center,
+        &CapacityPolicy::default(),
+        &prompts,
+    )?;
+    assert_eq!(later.allocation.elapsed_reminders, vec![reminder_id]);
+    assert!(later.allocation.granted_prompts.is_empty());
+    assert!(later
+        .allocation
+        .deferred_prompts
+        .iter()
+        .any(|deferred| deferred.notification_id == "prompt-due"
+            && deferred.reason == PromptDeferral::Elapsed));
+    let passed = reminder(&mut db, "item-000")?;
+    assert_eq!(passed.request_state, RequestState::Resolved);
+    assert_eq!(passed.delivery_state, DeliveryState::Unknown);
+    Ok(())
+}
+
+#[test]
+fn a_write_while_prompts_are_cancelled_is_planned_again_before_anything_is_written() -> Result<()> {
+    let path = db_path("concurrent_write");
+    let mut db = open_db_at(&path)?;
+    seed_reminders(&mut db, budget())?;
+    let mut center = FakeCenter::default();
+    center.add_foreign("prompt-1");
+    let prompts = [PromptDemand {
+        notification_id: "prompt-1".to_string(),
+        fire_at: instant(PASS_TIME) + Duration::days(1),
+    }];
+    // Another connection completes an item while the prompt cancel is in flight.
+    let writer_path = path.clone();
+    center.after_cancel = Some(Box::new(move |_| {
+        let mut writer = open_db_at(&writer_path).unwrap();
+        complete_item(&mut writer, "item-000").unwrap();
+    }));
+
+    let report = pass_at(&mut db, &mut center, &prompts, PASS_TIME)?;
+    center.after_cancel = None;
+
+    // The planned allocation, which still counted item-000, was not written. The pass planned
+    // again and returns the allocation it applied: item-000 holds no slot and the freed slot
+    // goes back to the prompt, which the prompt scheduler may install again.
+    assert_eq!(report.prompts_cancelled, vec!["prompt-1".to_string()]);
+    let item_000 = reminder(&mut db, "item-000")?.reminder_id;
+    assert!(!report.allocation.granted_reminders.contains(&item_000));
+    assert_eq!(report.allocation.granted_reminders.len(), budget() - 1);
+    assert_eq!(
+        report.allocation.granted_prompts,
+        vec!["prompt-1".to_string()]
+    );
+    assert!(report.demoted.is_empty());
+    assert!(center.evicted.is_empty());
+    assert!(center.high_water <= budget());
+
+    let repeat = pass_at(&mut db, &mut center, &prompts, PASS_TIME)?;
+    assert_eq!(repeat.allocation, report.allocation);
     Ok(())
 }
