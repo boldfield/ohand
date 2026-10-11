@@ -78,6 +78,12 @@ The run for the exact submitted commit, found with `gh run list --workflow ios.y
 
 `ForegroundIngressService` (`ios/Services/Ingress`) stages an `IngressRecord` durably, moves recorded audio from the in-progress to the finalized store, imports, and removes the record only after confirmation. It holds the single foreground writer lock; recovery re-imports leftover records, which converge by capture ID. `CoreIngressImporter` (the bridge adapter to the core import) lives in `ios/Services/Ingress`. When a staging record is unreadable the claimed audio names are unknown, so recovery sets `unclaimedAudioNotEvaluated` rather than reporting an empty orphan list. Lock-state behavior and a real kill are device evidence, not covered by the simulator tests, which simulate interruption by reopening the service and core from disk.
 
+## Deletion cleanup queue (L02)
+
+`ohand_core_start_deletion_cleanup` (`core/src/ffi/deletion_cleanup.rs`, bridged by `CoreHandle+DeletionCleanup.swift`) is one tagged-JSON export over the L01 deletion queue and the N03 reminder operations: `pending_items`, `pending_work`, `cleanup_target`, `reminder_notifications`, `record_notification_cancelled`, `complete_work` and `fail_work`. Reads change nothing. `deletion_work_refused` means core will not record that transition now (for example completing the notification row while a cancel is unrecorded), and the row stays pending. `CoreDeletionCleanupClient` (`ios/Services/Deletion`) is the production `DeletionCleanupCore`; it owns operation IDs from `1 << 52` and needs the event handler's owner to forward events to `handle(_:)`.
+
+`DeletionCleanupServiceTests` inject each fault point into a fake core that follows the L01 contract. `DeletionCleanupCoreIntegrationTests` run the same service through the production client into the real Rust core over a file store, and reopen the core and service after each injected interruption. The deletion intent is seeded by SQL in one test helper because no export records it yet; the tombstone and search removal are covered by the core's own tests, not here. Delete-all fencing and credential reset are not part of this export.
+
 ## Not covered
 
 - Physical device builds (`aarch64-apple-ios`) are scripted but not exercised here.

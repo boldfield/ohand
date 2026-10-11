@@ -67,7 +67,9 @@ final class DeletionLocalCleanup {
 
     /// The staging record, or nil when it is absent or cannot be parsed. A record that exists but cannot be read now
     /// (for example while the device is locked) throws, because treating it as absent would leave its audio behind.
-    /// A corrupt record is deleted regardless: its file name binds it to the deleted capture.
+    /// A corrupt record is deleted regardless: its file name binds it to the deleted capture. Its hand-off names are
+    /// unknown, so the in-progress audio it claimed is not removed here; ingress recovery reports that file as unclaimed
+    /// in-progress audio (`IngressRecoveryReport`) and leaves it to the recorder's own recovery.
     private func readableRecord(captureID: String) throws -> IngressRecord? {
         do {
             return try staging.load(captureID: captureID)

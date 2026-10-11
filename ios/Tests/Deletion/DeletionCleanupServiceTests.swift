@@ -3,9 +3,9 @@ import XCTest
 
 /// Behavior of per-item deletion cleanup against a durable fake core, real protected-storage files and the production
 /// `NotificationBridge` over a fake OS center. Each interruption is an injected failure at one step; "reopening" builds a
-/// new service and bridge over the same disk, core and notification state. The real Rust core boundary for the deletion
-/// queue is not exposed through the bridge yet, so these tests exercise `DeletionCleanupCore` through a fake that follows
-/// the L01 contract.
+/// new service and bridge over the same disk, core and notification state. These tests exercise `DeletionCleanupCore`
+/// through a fake that follows the L01 contract, so each fault point can be injected exactly; the production client over
+/// the real Rust core is covered by `DeletionCleanupCoreIntegrationTests`.
 final class DeletionCleanupServiceTests: DeletionTestCase {
     private let itemID = "item-1"
     private let captureID = "cap-1"
