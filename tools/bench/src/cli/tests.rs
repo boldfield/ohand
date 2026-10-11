@@ -1674,3 +1674,157 @@ fn cancelling_while_a_provider_hangs_ends_the_run_promptly_and_records_the_outco
         assert!(!surface.contains(SECRET_A) && !surface.contains(SECRET_B));
     }
 }
+
+// ---- report ---------------------------------------------------------------------------------
+
+#[test]
+fn report_renders_a_fake_run_as_text_and_json_without_touching_the_journal() {
+    let dir = TempDir::new().unwrap();
+    let (path, journal) = journal_in(&dir);
+    let services = services_with(&[]);
+    assert_eq!(
+        execute(&fake_words(&journal, &[]), &services).status,
+        EXIT_COMPLETED
+    );
+    let before = std::fs::read(&path).unwrap();
+
+    let text = execute(
+        &["report", "--corpus", CORPUS, "--journal", &journal],
+        &services,
+    );
+    assert_eq!(text.status, EXIT_COMPLETED, "{}", text.err);
+    assert!(text.out.starts_with("bench report (diagnostic only)"));
+    assert!(text.out.contains("matched 3  failed 0  missing 0"));
+    assert!(text.out.contains("[fake_execution]"));
+    assert!(text.out.contains("cost: unknown (no_rates_supplied)"));
+    assert!(text.err.is_empty());
+
+    let json = execute(
+        &[
+            "report",
+            "--corpus",
+            CORPUS,
+            "--journal",
+            &journal,
+            "--format",
+            "json",
+        ],
+        &services,
+    );
+    assert_eq!(json.status, EXIT_COMPLETED, "{}", json.err);
+    let parsed: Value = serde_json::from_str(&json.out).unwrap();
+    assert_eq!(parsed["pairs"]["matched"], json!(3));
+    assert_eq!(parsed["selection"]["winner"], Value::Null);
+    assert_eq!(parsed["experiment"]["execution"], json!("fake"));
+
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn report_costs_only_from_a_supplied_rates_file_and_never_invents_usage() {
+    let dir = TempDir::new().unwrap();
+    let (_, journal) = journal_in(&dir);
+    let services = services_with(&[]);
+    execute(&fake_words(&journal, &[]), &services);
+    let base = ["report", "--corpus", CORPUS, "--journal", &journal];
+
+    let mut json_words = base.to_vec();
+    json_words.extend(["--format", "json"]);
+    let unpriced: Value = serde_json::from_str(&execute(&json_words, &services).out).unwrap();
+    assert_eq!(
+        unpriced["operations"][0]["cost"]["reason"],
+        json!("no_rates_supplied")
+    );
+    let version = unpriced["experiment"]["profiles"][0]["profile_version"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let write_rates = |profiles: Value| {
+        let path = dir.path().join("rates.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "rates_version": "rates-test",
+                "currency": "USD",
+                "profiles": profiles,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        path.to_str().unwrap().to_string()
+    };
+
+    let rates = write_rates(json!([{
+        "profile_version": version,
+        "input_micros_per_million_tokens": 1,
+        "output_micros_per_million_tokens": 1,
+    }]));
+    let mut priced_words = json_words.clone();
+    priced_words.extend(["--rates", &rates]);
+    let priced = execute(&priced_words, &services);
+    assert_eq!(priced.status, EXIT_COMPLETED, "{}", priced.err);
+    let priced: Value = serde_json::from_str(&priced.out).unwrap();
+    // Fake replies report no usage, so even a supplied rate yields an unknown cost, not zero.
+    assert_eq!(priced["operations"][0]["cost"]["status"], json!("unknown"));
+    assert_eq!(
+        priced["operations"][0]["cost"]["reason"],
+        json!("no_usage_reported")
+    );
+    assert_eq!(
+        priced["operations"][1]["cost"]["reason"],
+        json!("no_rate_for_profile_version")
+    );
+
+    let invalid = write_rates(json!([]));
+    let mut invalid_words = base.to_vec();
+    invalid_words.extend(["--rates", &invalid]);
+    let outcome = execute(&invalid_words, &services);
+    assert_eq!(outcome.status, EXIT_REFUSED);
+    assert!(outcome.out.is_empty());
+    assert!(outcome.err.starts_with("bench: "));
+}
+
+#[test]
+fn report_refusals_exit_two_and_send_or_write_nothing() {
+    let dir = TempDir::new().unwrap();
+    let (path, journal) = journal_in(&dir);
+    let services = services_with(&[]);
+
+    for words in [
+        vec!["report", "--corpus", CORPUS],
+        vec!["report", "--journal", &journal],
+        vec![
+            "report",
+            "--corpus",
+            CORPUS,
+            "--journal",
+            &journal,
+            "--format",
+            "html",
+        ],
+        vec![
+            "report",
+            "--corpus",
+            CORPUS,
+            "--journal",
+            &journal,
+            "--surprise",
+        ],
+        vec!["report", "--corpus", CORPUS, "--journal", &journal],
+    ] {
+        let outcome = execute(&words, &services);
+        assert_eq!(outcome.status, EXIT_REFUSED, "{words:?}");
+        assert!(outcome.out.is_empty(), "{words:?}");
+        assert!(!outcome.err.is_empty(), "{words:?}");
+    }
+    assert!(!path.exists(), "reporting must never create a journal");
+}
+
+#[test]
+fn usage_lists_the_report_command() {
+    assert!(USAGE.contains("bench report"));
+    assert!(USAGE.contains("--rates"));
+    let help = execute(&["report", "--help"], &services_with(&[]));
+    assert_eq!(help.status, EXIT_COMPLETED);
+}
