@@ -1715,6 +1715,60 @@
         "core/tests/proposal_application/main.rs"
       ],
       "covers_parent_criteria": []
+    },
+    {
+      "key": "P11a",
+      "parent": null,
+      "title": "Sign applications that embed app extensions",
+      "file_scope": [
+        "tools/apple-build/",
+        "docs/validation/signing.md"
+      ],
+      "intent": "Extend the signing and device-build tooling from application-only probes to the production OhAndApp scheme with its embedded OhAndCaptureControl extension, provably on Linux with stubbed Apple tools.",
+      "acceptance": [
+        "OhAndApp is supported; embedded app and extension bundle identifiers are read from the archive; provisioningProfiles maps each signed bundle (never frameworks) to the UUID read from its profile; one covering wildcard or a per-bundle mapping via env/injected files.",
+        "Preflight refuses, with a distinct non-zero exit naming only the bundle identifier, any uncovered bundle or a covering profile that is expired, Xcode-managed or missing the device; keychain cleanup on every exit path.",
+        "Install then launch by bundle identifier and confirm running; failures exit non-zero; evidence schema bumped with embedded bundle identifiers, per-profile expiry and launch result, redaction rules unchanged.",
+        "Stub behaviour tests: one extension under wildcard, per-bundle mapping, uncovered extension, expired and Xcode-managed covering profile, launch failure, unchanged probe schemes, redaction; under make apple-build-test, no vacuous assertions.",
+        "signing.md documents the OhAndApp procedure for P11b and makes no unobserved validity claim."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "P08b"
+      ],
+      "source_pointers": [
+        "tools/apple-build/sign_probe.py:55",
+        "tools/apple-build/sign_probe.py:445",
+        "tools/apple-build/sign_probe.py:476",
+        "ios/project.yml:108",
+        "ios/Config/OhAndApp.entitlements",
+        "docs/validation/signing.md:19",
+        "docs/architecture/m1-shell.md"
+      ]
+    },
+    {
+      "key": "P11b",
+      "parent": null,
+      "title": "Record the signed production-app install with its embedded extension",
+      "file_scope": [
+        "docs/validation/signing.md",
+        "docs/validation/evidence/apple-signing/"
+      ],
+      "intent": "Fold the maintainer's signed OhAndApp build, install and launch evidence into the signing document so T10 and T06 start from a proven route for the production bundle layout.",
+      "acceptance": [
+        "signing.md cites the named artifact with build revision, collection time, embedded bundle identifiers, each profile's observed expiry and the install/launch result.",
+        "The extension is shown embedded and the app launches on device; control-gallery presence is recorded as observed or explicitly not checked.",
+        "Trial validity derives from the shortest observed profile expiry across signed bundles."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "P11a"
+      ],
+      "source_pointers": [
+        "docs/validation/signing.md",
+        "docs/features/m1-external-prerequisites.md"
+      ],
+      "starts_blocked": "maintainer signed OhAndApp build, install and launch evidence"
     }
   ],
   "effective_dependencies": {
@@ -2175,7 +2229,8 @@
     ],
     "T10": [
       "P08b",
-      "T09"
+      "T09",
+      "P11b"
     ],
     "T02a": [
       "C05b",
@@ -2245,6 +2300,12 @@
     ],
     "I05b": [
       "I05"
+    ],
+    "P11a": [
+      "P08b"
+    ],
+    "P11b": [
+      "P11a"
     ]
   },
   "retained_dependency_overrides": {
@@ -2319,6 +2380,10 @@
     {
       "date": "2026-10-11",
       "change": "N03 bounded interpretation after PR #166 auto-block: AC1 stated as identifier agreement (a same-identifier request at a mismatched or unreported instant is cancelled before any schedule decision, pre- or post-due, whatever the schedule outcome or withheld state); honest durable state restated; transient retry is per pass; post-re-read write races and pass serialization belong to B02/B03. Ownership allowance: additive OperationState::Rejected in core/src/reminders/state/mod.rs only."
+    },
+    {
+      "date": "2026-10-11",
+      "change": "Added P11a (tooling: sign OhAndApp with its embedded OhAndCaptureControl extension, per-bundle provisioningProfiles, launch check) and P11b (maintainer signed-install evidence, starts blocked). T10 also depends on P11b so the signed candidate route is proven before the device exit matrix."
     }
   ]
 }
