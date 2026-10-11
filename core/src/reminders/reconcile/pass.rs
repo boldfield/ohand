@@ -157,22 +157,22 @@ pub fn reconcile(
             }
             continue;
         }
+        // Identifier agreement first. A request still pending under this identifier is at
+        // another or an unreported due instant (the desired-instant case was handled above),
+        // so it is not the desired request and is cancelled before anything is decided about
+        // the schedule. Same-identifier replacement by the schedule call is never relied on to
+        // remove it: that would let the outcome of the call (success, failure, an ambiguous
+        // failure that did install, or withholding) decide whether a wrong-instant request
+        // stays live.
+        let mismatched_pending = pending_by_id.contains_key(&entry.notification_id);
+        let mismatch_removed = if mismatched_pending {
+            remove_mismatched_request(database, clock, effects, entry, &mut report)?
+        } else {
+            true
+        };
         if entry.fire_at <= now {
-            // The desired instant has passed, so the request cannot be replaced. A request at
-            // that instant would already have left the pending set, so one still pending under
-            // the same identifier (at another or an unreported due instant) is not the desired
-            // request and is removed. The durable state is concluded below as usual.
-            if pending_by_id.contains_key(&entry.notification_id)
-                && cancel_in_os(
-                    database,
-                    clock,
-                    effects,
-                    &entry.notification_id,
-                    &mut report,
-                )?
-            {
-                report.removed.push(entry.notification_id.clone());
-            }
+            // The desired instant has passed, so the request cannot be installed any more. The
+            // durable state is concluded from the recorded attempt alone.
             match expire_if_never_attempted(database, clock, entry)? {
                 ExpiryOutcome::Expired => report.expired.push(entry.notification_id.clone()),
                 ExpiryOutcome::Unconfirmed => {
@@ -182,18 +182,13 @@ pub fn reconcile(
             }
             continue;
         }
-        // The request under this identifier, if any, is pending at another or an unreported
-        // due instant: it is replaced by the schedule call, or removed when that call cannot
-        // be made or fails.
-        let mismatched_pending = pending_by_id.contains_key(&entry.notification_id);
-        schedule_in_os(
-            database,
-            clock,
-            effects,
-            entry,
-            mismatched_pending,
-            &mut report,
-        )?;
+        if !mismatch_removed {
+            // The cancel failed, so the wrong-instant request is still pending. The failure is
+            // in the report and the next pass retries the cancel; the schedule decision waits
+            // for it rather than scheduling over a request this pass could not remove.
+            continue;
+        }
+        schedule_in_os(database, clock, effects, entry, &mut report)?;
     }
 
     Ok(report)
@@ -345,25 +340,18 @@ fn cancel_in_os(
     }
 }
 
-/// Install (or replace) the request for `entry`. Scheduling an identifier that is already
-/// pending replaces it, so a same-identifier request at another or an unreported due instant
-/// (`mismatched_pending`) is normally replaced by the call itself. When the call is withheld
-/// or fails, nothing replaced it, so that stale request is cancelled explicitly: a request at
-/// the wrong instant must not stay live behind a `schedule_failed` reminder, whatever the
-/// durable disposition of the attempt.
+/// Install the request for `entry`. By the time this is called, no request is pending under
+/// the entry's identifier: a same-identifier request at another or an unreported due instant
+/// was cancelled first by `reconcile`, so nothing here depends on the call replacing one.
 fn schedule_in_os(
     database: &mut Database,
     clock: &dyn Clock,
     effects: &mut dyn NotificationEffects,
     entry: &DesiredNotification,
-    mismatched_pending: bool,
     report: &mut ReconcileReport,
 ) -> Result<(), ReconcileError> {
     if !begin_schedule_attempt(database, clock, entry)? {
         report.withheld.push(entry.notification_id.clone());
-        if mismatched_pending {
-            remove_mismatched_request(database, clock, effects, entry, report)?;
-        }
         return Ok(());
     }
     let request = ScheduleRequest {
@@ -402,16 +390,10 @@ fn schedule_in_os(
             ));
             // A failed call may still have installed the request (a cancelled caller, for
             // example). Cancel is idempotent, so a request that is no longer desired is
-            // removed whatever the error class.
-            let rolled_back = roll_back_if_stale(database, clock, effects, entry, outcome, report)?;
-            // The stale request the call was meant to replace is otherwise still pending at
-            // the wrong instant, and a definitive failure would leave it there for every
-            // later (withheld) pass. Remove it now. Should the failed call in fact have
-            // installed the desired request, the attempt is recorded as unconfirmed and the
-            // next pass reinstalls it; that costs one extra call and never a stale firing.
-            if !rolled_back && mismatched_pending {
-                remove_mismatched_request(database, clock, effects, entry, report)?;
-            }
+            // removed whatever the error class. A request that is still desired is left: it
+            // may be the desired one, installed by the very call that reported failure, and
+            // the attempt is recorded as unconfirmed until the next pass confirms it.
+            roll_back_if_stale(database, clock, effects, entry, outcome, report)?;
         }
     }
     Ok(())
@@ -419,18 +401,20 @@ fn schedule_in_os(
 
 /// Cancel the same-identifier request known to be pending at another or an unreported due
 /// instant, reporting it as removed. A cancel failure is recorded in the report (so the pass
-/// does not converge) and the next pass retries it.
+/// does not converge) and the next pass retries it, because the request is still pending and
+/// still mismatched. Returns whether the request was removed.
 fn remove_mismatched_request(
     database: &mut Database,
     clock: &dyn Clock,
     effects: &mut dyn NotificationEffects,
     entry: &DesiredNotification,
     report: &mut ReconcileReport,
-) -> Result<(), ReconcileError> {
-    if cancel_in_os(database, clock, effects, &entry.notification_id, report)? {
+) -> Result<bool, ReconcileError> {
+    let removed = cancel_in_os(database, clock, effects, &entry.notification_id, report)?;
+    if removed {
         report.removed.push(entry.notification_id.clone());
     }
-    Ok(())
+    Ok(removed)
 }
 
 fn failure(

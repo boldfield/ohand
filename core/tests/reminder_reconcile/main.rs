@@ -444,8 +444,11 @@ fn a_cancelled_caller_after_a_successful_install_is_confirmed_by_the_next_pass()
     Ok(())
 }
 
+/// A same-identifier request at another or an unreported due instant is cancelled before the
+/// schedule decision; the schedule call is never relied on to replace it.
 #[test]
-fn a_pending_request_with_a_different_or_unreported_due_instant_is_replaced() -> Result<()> {
+fn a_pending_request_with_a_different_or_unreported_due_instant_is_cancelled_then_reinstalled(
+) -> Result<()> {
     let mut db = open_db(&temp_db_path("replace"))?;
     let revision = insert_item(&mut db, "item-1", ROOFER_TEXT)?;
     let id = create_reminder(&mut db, "item-1", revision)?
@@ -457,6 +460,15 @@ fn a_pending_request_with_a_different_or_unreported_due_instant_is_replaced() ->
         .insert(id.clone(), instant("2026-01-16T10:00:00Z"));
 
     let report = reconcile_now(&mut db, &mut center)?;
+    assert_eq!(
+        center.calls,
+        vec![
+            Call::List,
+            Call::Cancel(id.clone()),
+            Call::Schedule(id.clone())
+        ]
+    );
+    assert_eq!(report.removed, vec![id.clone()]);
     assert_eq!(report.installed, vec![id.clone()]);
     assert_eq!(center.pending.get(&id), Some(&instant(DUE)));
 
@@ -466,6 +478,15 @@ fn a_pending_request_with_a_different_or_unreported_due_instant_is_replaced() ->
     };
     hidden.pending.insert(id.clone(), instant(DUE));
     let report = reconcile_now(&mut db, &mut hidden)?;
+    assert_eq!(
+        hidden.calls,
+        vec![
+            Call::List,
+            Call::Cancel(id.clone()),
+            Call::Schedule(id.clone())
+        ]
+    );
+    assert_eq!(report.removed, vec![id.clone()]);
     assert_eq!(report.installed, vec![id]);
     Ok(())
 }
@@ -1551,8 +1572,8 @@ fn a_first_install_refused_definitively_over_a_mismatched_request_removes_it() -
         center.calls,
         vec![
             Call::List,
-            Call::Schedule(id.clone()),
-            Call::Cancel(id.clone())
+            Call::Cancel(id.clone()),
+            Call::Schedule(id.clone())
         ]
     );
     assert_eq!(refused.removed, vec![id.clone()]);
@@ -1597,8 +1618,8 @@ fn a_definitive_failure_while_replacing_a_mismatched_reinstall_removes_it_before
         center.calls,
         vec![
             Call::List,
-            Call::Schedule(id.clone()),
-            Call::Cancel(id.clone())
+            Call::Cancel(id.clone()),
+            Call::Schedule(id.clone())
         ]
     );
     assert_eq!(refused.removed, vec![id.clone()]);
@@ -1647,8 +1668,8 @@ fn a_transient_failure_while_replacing_a_mismatched_request_removes_it_then_retr
         center.calls,
         vec![
             Call::List,
-            Call::Schedule(id.clone()),
-            Call::Cancel(id.clone())
+            Call::Cancel(id.clone()),
+            Call::Schedule(id.clone())
         ]
     );
     assert_eq!(failed.removed, vec![id.clone()]);
@@ -1708,7 +1729,7 @@ fn a_withheld_schedule_removes_a_mismatched_request_that_appears_later() -> Resu
     assert_eq!(report.withheld, vec![id.clone()]);
     assert_eq!(report.removed, vec![id.clone()]);
     assert!(report.converged());
-    assert_eq!(center.mutations(), vec![&Call::Cancel(id.clone())]);
+    assert_eq!(center.calls, vec![Call::List, Call::Cancel(id.clone())]);
     assert!(center.pending.is_empty());
     let after = reminder(&mut db, "item-1")?;
     assert_eq!(after.schedule_state, ScheduleState::ScheduleFailed);
@@ -1751,7 +1772,7 @@ fn a_refused_replacement_of_a_request_with_an_unreported_due_instant_removes_it(
     assert_eq!(report.failures.len(), 1);
     assert_eq!(
         center.calls,
-        vec![Call::List, Call::Schedule(id.clone()), Call::Cancel(id)]
+        vec![Call::List, Call::Cancel(id.clone()), Call::Schedule(id)]
     );
     assert!(center.pending.is_empty());
     assert_eq!(
@@ -1761,8 +1782,12 @@ fn a_refused_replacement_of_a_request_with_an_unreported_due_instant_removes_it(
     Ok(())
 }
 
+/// When the cancel of a mismatched request fails, the request is still pending and still
+/// mismatched. The failure is reported, no schedule decision is made for the entry on this
+/// pass (scheduling over it would rely on same-identifier replacement), and the next pass
+/// retries the cancel before deciding.
 #[test]
-fn a_mismatched_request_whose_removal_fails_is_retried_by_the_next_withheld_pass() -> Result<()> {
+fn a_failed_mismatch_removal_defers_the_schedule_decision_to_the_next_pass() -> Result<()> {
     let (mut db, mut center, record) = acknowledged_then_absent("mismatch_cancel_retry")?;
     let id = record.notification_id().unwrap();
     center.pending.insert(id.clone(), instant(EARLY));
@@ -1772,25 +1797,110 @@ fn a_mismatched_request_whose_removal_fails_is_retried_by_the_next_withheld_pass
     let first = reconcile_now(&mut db, &mut center)?;
 
     assert!(!first.converged());
-    assert_eq!(first.failures.len(), 2);
-    assert_eq!(first.failures[0].operation_type, OperationType::Schedule);
-    assert_eq!(first.failures[1].operation_type, OperationType::Cancel);
+    assert_eq!(center.calls, vec![Call::List, Call::Cancel(id.clone())]);
+    assert_eq!(first.failures.len(), 1);
+    assert_eq!(first.failures[0].operation_type, OperationType::Cancel);
     assert!(first.removed.is_empty());
-    assert!(center.pending.contains_key(&id));
+    assert!(first.installed.is_empty());
+    assert!(first.withheld.is_empty());
+    assert_eq!(center.pending.get(&id), Some(&instant(EARLY)));
+    // No attempt was begun, so the earlier acknowledgment is left as it was.
+    assert_eq!(
+        operation_states(&mut db, "item-1")?,
+        vec![(
+            OperationType::Schedule,
+            id.clone(),
+            OperationState::Acknowledged
+        )]
+    );
 
-    center.fail_schedule = None;
     center.fail_cancel = None;
     center.clear_calls();
     let second = reconcile_now(&mut db, &mut center)?;
 
-    assert!(second.converged());
-    assert_eq!(second.withheld, vec![id.clone()]);
+    assert_eq!(
+        center.calls,
+        vec![
+            Call::List,
+            Call::Cancel(id.clone()),
+            Call::Schedule(id.clone())
+        ]
+    );
     assert_eq!(second.removed, vec![id.clone()]);
-    assert_eq!(center.mutations(), vec![&Call::Cancel(id.clone())]);
+    assert_eq!(second.failures.len(), 1);
+    assert_eq!(second.failures[0].operation_type, OperationType::Schedule);
     assert!(center.pending.is_empty());
     assert_eq!(
+        reminder(&mut db, "item-1")?.schedule_state,
+        ScheduleState::ScheduleFailed
+    );
+    assert_eq!(
         operation_states(&mut db, "item-1")?,
-        vec![(OperationType::Schedule, id, OperationState::Rejected)]
+        vec![(
+            OperationType::Schedule,
+            id.clone(),
+            OperationState::Rejected
+        )]
+    );
+
+    center.fail_schedule = None;
+    center.clear_calls();
+    let third = reconcile_now(&mut db, &mut center)?;
+    assert!(third.converged());
+    assert_eq!(third.withheld, vec![id]);
+    assert!(third.removed.is_empty());
+    assert!(center.mutations().is_empty());
+    Ok(())
+}
+
+/// The ambiguous case the ordering exists for: the schedule call installs the desired request
+/// but reports a cancelled caller. Because the mismatched request was cancelled first, nothing
+/// is cancelled afterwards and the desired request stays pending for the next pass to confirm.
+#[test]
+fn a_cancelled_caller_over_a_mismatched_request_leaves_the_desired_request_pending() -> Result<()> {
+    let (mut db, mut center, record) = acknowledged_then_absent("mismatch_cancelled_caller")?;
+    let id = record.notification_id().unwrap();
+    center.pending.insert(id.clone(), instant(EARLY));
+    center.install_then_report_cancelled = true;
+
+    let report = reconcile_now(&mut db, &mut center)?;
+
+    assert_eq!(
+        center.calls,
+        vec![
+            Call::List,
+            Call::Cancel(id.clone()),
+            Call::Schedule(id.clone())
+        ]
+    );
+    assert_eq!(report.removed, vec![id.clone()]);
+    assert!(report.installed.is_empty());
+    assert!(report.rolled_back.is_empty());
+    assert_eq!(report.failures.len(), 1);
+    assert_eq!(report.failures[0].class, ErrorClass::Cancelled);
+    assert_eq!(center.pending.get(&id), Some(&instant(DUE)));
+    let after = reminder(&mut db, "item-1")?;
+    assert_eq!(after.schedule_state, ScheduleState::PendingSchedule);
+    assert_eq!(after.state_version, record.state_version);
+    assert_eq!(
+        operation_states(&mut db, "item-1")?,
+        vec![(OperationType::Schedule, id.clone(), OperationState::Failed)]
+    );
+
+    center.install_then_report_cancelled = false;
+    center.clear_calls();
+    let confirmed = reconcile_now(&mut db, &mut center)?;
+    assert!(confirmed.converged());
+    assert_eq!(confirmed.already_installed, vec![id.clone()]);
+    assert!(center.mutations().is_empty());
+    assert_eq!(center.pending.get(&id), Some(&instant(DUE)));
+    assert_eq!(
+        reminder(&mut db, "item-1")?.schedule_state,
+        ScheduleState::Scheduled
+    );
+    assert_eq!(
+        operation_states(&mut db, "item-1")?,
+        vec![(OperationType::Schedule, id, OperationState::Acknowledged)]
     );
     Ok(())
 }
