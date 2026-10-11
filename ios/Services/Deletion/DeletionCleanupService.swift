@@ -49,7 +49,15 @@ actor DeletionCleanupService {
             }
             results.append(await cleanUpLocked(itemID: itemID))
         }
-        return DeletionReconcileReport(listingFailure: nil, items: results)
+        // Read after the pass so a row this pass failed is included. A terminally failed row leaves the pending list,
+        // so without this an empty pending list would read as convergence.
+        do {
+            let failures = try await core.terminallyFailedCleanup()
+                .map { DeletionTerminalFailure(itemID: $0.itemID, kind: $0.kind) }
+            return DeletionReconcileReport(listingFailure: nil, items: results, terminalFailures: failures)
+        } catch {
+            return DeletionReconcileReport(listingFailure: Self.coreReason(error), items: results)
+        }
     }
 
     /// Completes the pending cleanup of one item, typically right after the core recorded its deletion.

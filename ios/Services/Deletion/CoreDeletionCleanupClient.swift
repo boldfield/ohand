@@ -33,11 +33,18 @@ public final class CoreDeletionCleanupClient: DeletionCleanupCore, @unchecked Se
     }
 
     public func pendingCleanup(itemID: String) async throws -> [DeletionCleanupWork] {
-        let answer = try await ask(.pendingWork(itemID: itemID), as: DeletionPendingWorkAnswer.self)
-        return try answer.work.map { row in
-            guard let kind = DeletionCleanupKind(rawValue: row.workType) else { throw Self.unreadableAnswer }
+        try Self.cleanupWork(from: try await ask(.pendingWork(itemID: itemID), as: DeletionPendingWorkAnswer.self))
+    }
+
+    private static func cleanupWork(from answer: DeletionPendingWorkAnswer) throws -> [DeletionCleanupWork] {
+        try answer.work.map { row in
+            guard let kind = DeletionCleanupKind(rawValue: row.workType) else { throw unreadableAnswer }
             return DeletionCleanupWork(workID: row.workID, itemID: row.itemID, kind: kind)
         }
+    }
+
+    public func terminallyFailedCleanup() async throws -> [DeletionCleanupWork] {
+        try Self.cleanupWork(from: try await ask(.failedWork, as: DeletionPendingWorkAnswer.self))
     }
 
     public func cleanupTarget(itemID: String) async throws -> DeletionCleanupTarget? {

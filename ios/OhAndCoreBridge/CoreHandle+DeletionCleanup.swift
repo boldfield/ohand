@@ -4,6 +4,7 @@ import OhandCoreC
 /// One deletion-cleanup request. The raw `command` values are the core's `ohand_core_start_deletion_cleanup` commands.
 public enum DeletionCleanupCommand: Equatable, Sendable {
     case pendingItems
+    case failedWork
     case pendingWork(itemID: String)
     case cleanupTarget(itemID: String)
     case reminderNotifications(itemID: String)
@@ -14,6 +15,7 @@ public enum DeletionCleanupCommand: Equatable, Sendable {
     fileprivate var fields: [String: String] {
         switch self {
         case .pendingItems: return ["command": "pending_items"]
+        case .failedWork: return ["command": "failed_work"]
         case .pendingWork(let itemID): return ["command": "pending_work", "item_id": itemID]
         case .cleanupTarget(let itemID): return ["command": "cleanup_target", "item_id": itemID]
         case .reminderNotifications(let itemID): return ["command": "reminder_notifications", "item_id": itemID]
@@ -45,7 +47,7 @@ public struct DeletionPendingWorkRow: Decodable, Equatable, Sendable {
     }
 }
 
-/// The answer to `pendingWork`.
+/// The answer to `pendingWork` and `failedWork`.
 public struct DeletionPendingWorkAnswer: Decodable, Equatable, Sendable {
     public let work: [DeletionPendingWorkRow]
 }

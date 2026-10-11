@@ -255,14 +255,28 @@ fn the_whole_queue_is_readable_and_completable_through_the_export() {
 }
 
 #[test]
-fn a_terminal_failure_is_recorded_and_leaves_the_queue() {
+fn a_terminal_failure_is_recorded_leaves_the_queue_and_stays_listed() {
     let _guard = serial();
     let (directory, path) = deleted_item_store("failed");
     let mut session = Session::over(open_file(&path));
     let work = work_ids(&session.succeed(&json!({"command": "pending_work", "item_id": ITEM_ID})));
 
+    assert_eq!(
+        session.succeed(&json!({"command": "failed_work"}))["work"],
+        json!([])
+    );
     session.succeed(&json!({"command": "fail_work", "work_id": work["remove_audio"]}));
     session.succeed(&json!({"command": "fail_work", "work_id": work["remove_audio"]}));
+    let failed = session.succeed(&json!({"command": "failed_work"}));
+    assert_eq!(
+        failed["work"],
+        json!([{
+            "work_id": work["remove_audio"],
+            "item_id": ITEM_ID,
+            "work_type": "remove_audio",
+        }]),
+        "a terminal failure stays readable after it leaves the pending queue"
+    );
     let remaining =
         work_ids(&session.succeed(&json!({"command": "pending_work", "item_id": ITEM_ID})));
     assert_eq!(
@@ -319,6 +333,7 @@ fn malformed_requests_are_refused_before_anything_is_queued() {
         json!({"command": "pending_work"}),
         json!({"command": "pending_work", "item_id": ""}),
         json!({"command": "pending_items", "extra": 1}),
+        json!({"command": "failed_work", "item_id": "item-1"}),
         json!({"command": "record_notification_cancelled", "notification_id": "x".repeat(MAX_IDENTIFIER_BYTES + 1)}),
         json!([]),
     ] {

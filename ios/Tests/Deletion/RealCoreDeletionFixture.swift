@@ -167,6 +167,11 @@ final class RealCoreDeletionWorld {
         }
     }
 
+    /// Replaces the audio reference the core holds for a capture. No core may be open.
+    func setAudioReference(captureID: String, to reference: String) throws {
+        try execute("UPDATE captures SET audio_reference = '\(reference)' WHERE capture_id = '\(captureID)'")
+    }
+
     // MARK: Inspection of the durable core state
 
     func workStatuses(itemID: String) throws -> [String: String] {
@@ -319,6 +324,11 @@ final class FaultingDeletionCleanupCore: DeletionCleanupCore, @unchecked Sendabl
         for row in work { kindsByWorkID[row.workID] = row.kind }
         lock.unlock()
         return work
+    }
+
+    func terminallyFailedCleanup() async throws -> [DeletionCleanupWork] {
+        try faults.check("core.terminalFailures")
+        return try await wrapped.terminallyFailedCleanup()
     }
 
     func cleanupTarget(itemID: String) async throws -> DeletionCleanupTarget? {

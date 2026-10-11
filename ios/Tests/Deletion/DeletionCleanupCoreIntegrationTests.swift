@@ -157,6 +157,29 @@ final class DeletionCleanupCoreIntegrationTests: XCTestCase {
         session.close()
     }
 
+    func testATerminalFailureStaysVisibleAcrossPassesAndReopens() throws {
+        let seeded = try seedDeletedItem()
+        try seeded.world.setAudioReference(captureID: captureID, to: "Elsewhere/cap-1.m4a")
+        var session = try seeded.world.openCore()
+
+        let first = try reconcile(seeded, on: session)
+
+        XCTAssertFalse(first.converged)
+        XCTAssertEqual(first.items.first?.steps.last, DeletionStepResult(kind: .removeAudio, outcome: .failedPermanently(.audioReferenceUnresolvable)))
+        XCTAssertEqual(first.terminalFailures, [DeletionTerminalFailure(itemID: seeded.itemID, kind: .removeAudio)])
+        XCTAssertEqual(try seeded.world.workStatuses(itemID: seeded.itemID)["remove_audio"], "failed_no_retry")
+
+        for _ in 0..<2 {
+            let again = try reconcile(seeded, on: session)
+            XCTAssertEqual(again.items, [], "a terminal failure is not retried")
+            XCTAssertEqual(again.terminalFailures, first.terminalFailures, "the durable failure stays visible")
+            XCTAssertFalse(again.converged, "a durable failure never reports convergence")
+            session.close()
+            session = try seeded.world.openCore()
+        }
+        session.close()
+    }
+
     private static let interruptionPoints = [
         "core.itemsWithPendingCleanup",
         "core.pendingCleanup",
@@ -179,6 +202,7 @@ final class DeletionCleanupCoreIntegrationTests: XCTestCase {
         "fs.entryNames",
         "core.complete.remove_audio",
         "core.complete.remove_audio.afterEffect",
+        "core.terminalFailures",
     ]
 
     func testReopeningTheCoreAfterEachInterruptionConvergesWithoutRemnants() throws {

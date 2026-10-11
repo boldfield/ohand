@@ -43,6 +43,10 @@ public protocol DeletionCleanupCore: Sendable {
 
     func pendingCleanup(itemID: String) async throws -> [DeletionCleanupWork]
 
+    /// Every row recorded as terminally failed. These are never retried, but they keep the deletion unfinished, so
+    /// reconciliation must keep reporting them rather than treat an empty pending list as convergence.
+    func terminallyFailedCleanup() async throws -> [DeletionCleanupWork]
+
     func cleanupTarget(itemID: String) async throws -> DeletionCleanupTarget?
 
     /// Every notification identifier, from any schedule generation, that the item's reminder may have installed.
@@ -108,12 +112,37 @@ public struct DeletionItemResult: Equatable, Sendable {
     }
 }
 
+/// A cleanup effect the core holds as terminally failed. It is not retried and the item's deletion stays unfinished.
+public struct DeletionTerminalFailure: Equatable, Sendable {
+    public let itemID: String
+    public let kind: DeletionCleanupKind
+
+    public init(itemID: String, kind: DeletionCleanupKind) {
+        self.itemID = itemID
+        self.kind = kind
+    }
+}
+
 public struct DeletionReconcileReport: Equatable, Sendable {
-    /// Set when the core could not list the items with pending cleanup. That is "unknown", never "nothing to do".
+    /// Set when the core could not list the items with pending cleanup or the terminally failed rows. That is
+    /// "unknown", never "nothing to do".
     public let listingFailure: DeletionRetryReason?
     public let items: [DeletionItemResult]
+    /// Every terminally failed row in the core after this pass, including rows failed by earlier passes.
+    public let terminalFailures: [DeletionTerminalFailure]
 
+    public init(
+        listingFailure: DeletionRetryReason?,
+        items: [DeletionItemResult],
+        terminalFailures: [DeletionTerminalFailure] = []
+    ) {
+        self.listingFailure = listingFailure
+        self.items = items
+        self.terminalFailures = terminalFailures
+    }
+
+    /// True only when nothing is pending and nothing is terminally failed.
     public var converged: Bool {
-        listingFailure == nil && items.allSatisfy { $0.isSettled }
+        listingFailure == nil && terminalFailures.isEmpty && items.allSatisfy { $0.isSettled }
     }
 }

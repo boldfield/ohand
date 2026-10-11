@@ -6,6 +6,9 @@
 //! event for `operation_id` is `{"operation_id", ...}`:
 //!
 //! * `pending_items` -> `item_ids`: deleted items that still have a pending cleanup row.
+//! * `failed_work` -> `work`: the same rows for every cleanup row recorded as terminally failed
+//!   (`failed_no_retry`). They are never retried, but stay readable so reconciliation can never
+//!   report them as converged.
 //! * `pending_work` (`item_id`) -> `work`: `{work_id, item_id, work_type}` rows, `work_type` being
 //!   `remove_audio`, `clear_ingress` or `cancel_notifications`.
 //! * `cleanup_target` (`item_id`) -> `target`: `{capture_id, audio_reference}` or null. The audio
@@ -45,6 +48,7 @@ const MAX_IDENTIFIER_BYTES: usize = 512;
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 enum Command {
     PendingItems {},
+    FailedWork {},
     PendingWork { item_id: String },
     CleanupTarget { item_id: String },
     ReminderNotifications { item_id: String },
@@ -56,7 +60,7 @@ enum Command {
 impl Command {
     fn validate(&self) -> Result<(), AbiFailure> {
         let identifier = match self {
-            Command::PendingItems {} => return Ok(()),
+            Command::PendingItems {} | Command::FailedWork {} => return Ok(()),
             Command::PendingWork { item_id }
             | Command::CleanupTarget { item_id }
             | Command::ReminderNotifications { item_id } => item_id,
@@ -125,6 +129,28 @@ fn pending_work(database: &Database, item_id: &str) -> Result<Value, AbiFailure>
             })
         })
         .collect();
+    Ok(json!({ "work": rows }))
+}
+
+fn failed_work(database: &Database) -> Result<Value, AbiFailure> {
+    let mut statement = database
+        .conn()
+        .prepare(
+            "SELECT deletion_work_id, item_id, work_type FROM deletion_work \
+             WHERE status = ? ORDER BY item_id, deletion_work_id",
+        )
+        .map_err(sqlite_failure)?;
+    let rows = statement
+        .query_map([DeletionWorkStatus::FailedNoRetry.as_str()], |row| {
+            Ok(json!({
+                "work_id": row.get::<_, String>(0)?,
+                "item_id": row.get::<_, String>(1)?,
+                "work_type": row.get::<_, String>(2)?,
+            }))
+        })
+        .map_err(sqlite_failure)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sqlite_failure)?;
     Ok(json!({ "work": rows }))
 }
 
@@ -197,6 +223,7 @@ fn record_notification_cancelled(
 fn run(database: &mut Database, command: &Command) -> Result<Value, AbiFailure> {
     match command {
         Command::PendingItems {} => pending_items(database),
+        Command::FailedWork {} => failed_work(database),
         Command::PendingWork { item_id } => pending_work(database, item_id),
         Command::CleanupTarget { item_id } => target(database, item_id),
         Command::ReminderNotifications { item_id } => reminder_notifications(database, item_id),

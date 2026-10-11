@@ -136,6 +136,15 @@ final class DurableDeletionCore: DeletionCleanupCore, @unchecked Sendable {
         }
     }
 
+    func terminallyFailedCleanup() async throws -> [DeletionCleanupWork] {
+        try faults.check("core.terminalFailures")
+        return locked {
+            works.filter { $0.status == .failed }
+                .sorted { ($0.itemID, $0.id) < ($1.itemID, $1.id) }
+                .map { DeletionCleanupWork(workID: $0.id, itemID: $0.itemID, kind: $0.kind) }
+        }
+    }
+
     func cleanupTarget(itemID: String) async throws -> DeletionCleanupTarget? {
         try faults.check("core.cleanupTarget")
         return locked {

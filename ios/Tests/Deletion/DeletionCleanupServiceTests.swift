@@ -112,6 +112,7 @@ final class DeletionCleanupServiceTests: DeletionTestCase {
         "core.complete.clear_ingress",
         "fs.entryNames",
         "core.complete.remove_audio",
+        "core.terminalFailures",
     ]
 
     func testReopenAfterEachInterruptionConvergesWithoutRemnants() async throws {
@@ -275,7 +276,8 @@ final class DeletionCleanupServiceTests: DeletionTestCase {
         world.core.addItem(itemID, captureID: captureID, audioReference: "Elsewhere/cap-1.m4a")
         world.core.recordDeletion(itemID)
 
-        let report = await world.makeService().reconcile()
+        let service = world.makeService()
+        let report = await service.reconcile()
 
         XCTAssertFalse(report.converged)
         XCTAssertEqual(
@@ -285,8 +287,68 @@ final class DeletionCleanupServiceTests: DeletionTestCase {
         XCTAssertEqual(world.core.status(itemID, .clearIngress), .completed)
         XCTAssertFalse(world.exists(.finalizedAudio, "cap-1.m4a"))
 
-        let again = await world.makeService().reconcile()
-        XCTAssertEqual(again, DeletionReconcileReport(listingFailure: nil, items: []), "a terminal failure is not retried")
+        XCTAssertEqual(report.terminalFailures, [DeletionTerminalFailure(itemID: itemID, kind: .removeAudio)])
+
+        let mutationsBefore = world.core.mutationCount
+        for attempt in ["same service", "reopened service"] {
+            let again = await (attempt == "same service" ? service : world.makeService()).reconcile()
+            XCTAssertEqual(again.items, [], "a terminal failure is not retried: \(attempt)")
+            XCTAssertEqual(
+                again.terminalFailures, [DeletionTerminalFailure(itemID: itemID, kind: .removeAudio)],
+                "a durable failure stays visible: \(attempt)")
+            XCTAssertFalse(again.converged, "a durable failure never reports convergence: \(attempt)")
+        }
+        XCTAssertEqual(world.core.mutationCount, mutationsBefore)
+    }
+
+    func testCorruptStagingRecordDoesNotHideItsInProgressAudio() async throws {
+        let world = try makeWorld()
+        try await world.seedItem(itemID, captureID: captureID, finalizedAudio: false)
+        try Data("not a record".utf8).write(to: world.url(.ingressStagingRecords, "cap-1.json"))
+        let audio = Data("synthetic audio".utf8)
+        for name in ["cap-1.wav", "cap-1-continued.wav", "cap-1-joined.wav", "cap-1-2.wav", "cap-10.wav"] {
+            try audio.write(to: world.url(.ingressInProgressAudio, name))
+        }
+        world.core.recordDeletion(itemID)
+
+        let report = await world.makeService().reconcile()
+
+        XCTAssertTrue(report.converged)
+        XCTAssertEqual(
+            world.remnants(of: captureID).filter { !$0.contains("cap-1-2") && !$0.contains("cap-10") }, [],
+            "the corrupt record and every in-progress file bound to the capture are gone")
+        XCTAssertTrue(world.exists(.ingressInProgressAudio, "cap-1-2.wav"), "another capture's recording is never matched")
+        XCTAssertTrue(world.exists(.ingressInProgressAudio, "cap-10.wav"), "another capture's recording is never matched")
+    }
+
+    func testAudioNamedOnlyByAnUnreadableRecordIsRemovedAcrossInterruptions() async throws {
+        let damagedRecords: [(label: String, json: String)] = [
+            ("missing context", """
+            {"formatVersion":1,"captureID":"cap-1","audio":{"inProgressFileName":"opaque-take.m4a","finalizedFileName":"cap-1.m4a"}}
+            """),
+            ("unsupported version", """
+            {"formatVersion":99,"captureID":"cap-1","audio":{"inProgressFileName":"opaque-take.m4a","finalizedFileName":"cap-1.m4a"},"context":{"captureInstant":"2026-10-08T09:30:00Z","timezoneID":"UTC","utcOffsetMinutes":0,"locale":"en_US","calendar":"gregorian","itemScope":"personal","routeID":"route-personal","entryLocked":false,"createdAt":"2026-10-08T09:30:01Z"}}
+            """),
+        ]
+        for damaged in damagedRecords {
+            for point in ["fs.remove:opaque-take.m4a", "fs.remove:cap-1.json"] {
+                let world = try makeWorld()
+                try await world.seedItem(itemID, captureID: captureID, finalizedAudio: false)
+                try Data(damaged.json.utf8).write(to: world.url(.ingressStagingRecords, "cap-1.json"))
+                try Data("synthetic audio".utf8).write(to: world.url(.ingressInProgressAudio, "opaque-take.m4a"))
+                world.core.recordDeletion(itemID)
+                world.faults.arm(point)
+
+                let interrupted = await world.makeService().reconcile()
+                XCTAssertFalse(interrupted.converged, "\(damaged.label) at \(point)")
+
+                let reopened = await world.makeService().reconcile()
+
+                XCTAssertTrue(reopened.converged, "\(damaged.label) at \(point)")
+                XCTAssertFalse(world.exists(.ingressInProgressAudio, "opaque-take.m4a"), "\(damaged.label) at \(point)")
+                XCTAssertEqual(world.remnants(of: captureID), [], "\(damaged.label) at \(point)")
+            }
+        }
     }
 
     func testCaptureIdentifierThatCouldNamePathIsNeverUsedForFileOperations() async throws {
