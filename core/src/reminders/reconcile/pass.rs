@@ -148,22 +148,7 @@ pub fn reconcile(
                 &entry.notification_id,
                 EffectOutcome::Succeeded,
             )?;
-            let stale_success = matches!(
-                outcome,
-                Some(CompletionOutcome::Stale {
-                    cancel_required: true
-                })
-            );
-            if stale_success || !is_still_desired(database, &entry.notification_id)? {
-                report.rolled_back.push(entry.notification_id.clone());
-                cancel_in_os(
-                    database,
-                    clock,
-                    effects,
-                    &entry.notification_id,
-                    &mut report,
-                )?;
-            } else {
+            if !roll_back_if_stale(database, clock, effects, entry, outcome, &mut report)? {
                 report.already_installed.push(entry.notification_id.clone());
             }
             continue;
@@ -182,6 +167,32 @@ pub fn reconcile(
     }
 
     Ok(report)
+}
+
+/// After a request is confirmed live in the OS, cancel it again if it is no longer desired.
+/// The completion outcome alone is not enough: an already-acknowledged operation reports
+/// `AlreadyRecorded` without consulting current state, and the plan is a snapshot. Returns
+/// whether the request was rolled back.
+fn roll_back_if_stale(
+    database: &mut Database,
+    clock: &dyn Clock,
+    effects: &mut dyn NotificationEffects,
+    entry: &DesiredNotification,
+    outcome: Option<CompletionOutcome>,
+    report: &mut ReconcileReport,
+) -> Result<bool, ReconcileError> {
+    let stale_success = matches!(
+        outcome,
+        Some(CompletionOutcome::Stale {
+            cancel_required: true
+        })
+    );
+    if !stale_success && is_still_desired(database, &entry.notification_id)? {
+        return Ok(false);
+    }
+    report.rolled_back.push(entry.notification_id.clone());
+    cancel_in_os(database, clock, effects, &entry.notification_id, report)?;
+    Ok(true)
 }
 
 /// Re-read the durable desired set. The plan is a snapshot, so a cancel, change or deletion
@@ -328,15 +339,7 @@ fn schedule_in_os(
                 &entry.notification_id,
                 EffectOutcome::Succeeded,
             )?;
-            if matches!(
-                outcome,
-                Some(CompletionOutcome::Stale {
-                    cancel_required: true
-                })
-            ) {
-                report.rolled_back.push(entry.notification_id.clone());
-                cancel_in_os(database, clock, effects, &entry.notification_id, report)?;
-            } else {
+            if !roll_back_if_stale(database, clock, effects, entry, outcome, report)? {
                 report.installed.push(entry.notification_id.clone());
             }
         }

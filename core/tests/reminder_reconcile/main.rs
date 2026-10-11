@@ -1343,3 +1343,47 @@ fn a_cancel_committed_after_the_plan_snapshot_removes_an_already_pending_request
     )));
     Ok(())
 }
+
+#[test]
+fn a_cancel_during_the_reinstall_of_an_acknowledged_request_rolls_the_reinstall_back() -> Result<()>
+{
+    let path = temp_db_path("acknowledged_reinstall_race");
+    let mut db = open_db(&path)?;
+    let revision = insert_item(&mut db, "item-1", ROOFER_TEXT)?;
+    let id = create_reminder(&mut db, "item-1", revision)?
+        .notification_id()
+        .unwrap();
+    let mut center = FakeCenter::default();
+    reconcile_now(&mut db, &mut center)?;
+    assert!(operation_states(&mut db, "item-1")?.contains(&(
+        OperationType::Schedule,
+        id.clone(),
+        OperationState::Acknowledged
+    )));
+
+    // The acknowledged request disappears from the OS, so the next pass re-issues it. While
+    // that reinstall is in flight, the user cancels through another connection.
+    center.pending.clear();
+    center.clear_calls();
+    let other_path = path.clone();
+    center.on_schedule = Some(Box::new(move || {
+        let mut other = open_db(&other_path).unwrap();
+        cancel_user_reminder(&mut other, "item-1", 1).unwrap();
+    }));
+
+    let report = reconcile_now(&mut db, &mut center)?;
+
+    assert_eq!(report.rolled_back, vec![id.clone()]);
+    assert!(report.installed.is_empty());
+    assert!(center.pending.is_empty());
+    assert_eq!(
+        reminder(&mut db, "item-1")?.request_state,
+        RequestState::Cancelled
+    );
+    assert!(operation_states(&mut db, "item-1")?.contains(&(
+        OperationType::Cancel,
+        id,
+        OperationState::Acknowledged
+    )));
+    Ok(())
+}
