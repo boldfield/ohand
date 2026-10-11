@@ -4,9 +4,13 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::Transaction;
 
 use super::allocation::ReminderDemand;
-use super::allocation::{allocate, Allocation, AllocationInput, CapacityPolicy, PromptDemand};
+use super::allocation::{
+    allocate, Allocation, AllocationInput, CapacityPolicy, DeferredPrompt, PromptDemand,
+};
+use crate::providers::contracts::ErrorClass;
 use crate::reminders::reconcile::{
-    reconcile, EffectFailure, NotificationEffects, ReconcileError, ReconcileReport,
+    reconcile, EffectFailure, NotificationEffectError, NotificationEffects, PendingRequest,
+    ReconcileError, ReconcileReport, ScheduleRequest,
 };
 use crate::reminders::state::{
     get_reminder, list_operations, OperationState, OperationType, ReminderRecord, RequestState,
@@ -46,10 +50,15 @@ impl CapacityReport {
 /// desired set before it installs anything, so the pending set never grows past the planned
 /// budget and the OS never has to evict silently.
 ///
+/// A prompt request whose cancel fails is still pending, so it is charged against the budget:
+/// the allocation is settled again with it counted as a request core cannot reclaim, and any
+/// reminder that no longer fits becomes `unschedulable(capacity_exceeded)`. As a last guard the
+/// effects handed to `reconcile` refuse to add a request while the pending set is at the OS
+/// limit (a transient failure, retried by the next pass), whatever other cancel failed.
+///
 /// Safe to run after every write, on launch and on foreground activation; those events are the
 /// refill cadence and no timer is involved. A failure to list pending requests aborts the pass
-/// before any mutation. A failed prompt cancel is reported and retried by the next pass; the
-/// replacement headroom is what keeps the pending set under the OS limit meanwhile.
+/// before any mutation. A failed prompt cancel is reported and retried by the next pass.
 pub fn reconcile_with_capacity(
     database: &mut Database,
     clock: &dyn Clock,
@@ -60,46 +69,9 @@ pub fn reconcile_with_capacity(
     let pending = effects
         .list_pending()
         .map_err(ReconcileError::ListPending)?;
-    let prompt_ids: BTreeSet<&str> = prompts
-        .iter()
-        .map(|prompt| prompt.notification_id.as_str())
-        .collect();
 
     let mut report = CapacityReport::default();
-    {
-        let tx = database.immediate_transaction().map_err(database_error)?;
-        let known_reminders = known_reminder_ids(&tx)?;
-        let foreign_pending = pending
-            .iter()
-            .filter(|request| {
-                !prompt_ids.contains(request.notification_id.as_str())
-                    && !reminder_id_of(&request.notification_id)
-                        .is_some_and(|reminder_id| known_reminders.contains(reminder_id))
-            })
-            .count();
-        let records = capacity_candidates(&tx)?;
-        let demands: Vec<ReminderDemand> = records
-            .values()
-            .filter_map(|record| {
-                Some(ReminderDemand {
-                    reminder_id: record.reminder_id.clone(),
-                    fire_at: record.resolved_instant?,
-                    created_at: record.created_at,
-                })
-            })
-            .collect();
-        report.allocation = allocate(
-            policy,
-            &AllocationInput {
-                now: clock.now(),
-                foreign_pending,
-                reminders: &demands,
-                prompts,
-            },
-        );
-        apply_allocation(&tx, clock.now(), &records, &mut report)?;
-        tx.commit()?;
-    }
+    report.allocation = settle(database, clock, policy, prompts, &pending, &mut report)?;
 
     let pending_ids: BTreeSet<&str> = pending
         .iter()
@@ -124,17 +96,167 @@ pub fn reconcile_with_capacity(
         }
     }
 
-    report.reconcile = reconcile(database, clock, effects)?;
+    if !report.prompt_cancel_failures.is_empty() {
+        let still_pending: BTreeSet<&str> = report
+            .prompt_cancel_failures
+            .iter()
+            .map(|failure| failure.notification_id.as_str())
+            .collect();
+        let remaining_prompts: Vec<PromptDemand> = prompts
+            .iter()
+            .filter(|prompt| !still_pending.contains(prompt.notification_id.as_str()))
+            .cloned()
+            .collect();
+        let first_deferrals: Vec<DeferredPrompt> = report
+            .allocation
+            .deferred_prompts
+            .iter()
+            .filter(|prompt| still_pending.contains(prompt.notification_id.as_str()))
+            .cloned()
+            .collect();
+        // The failed prompts are not among the prompts passed here, so the pending list counts
+        // them with the requests core cannot reclaim.
+        let first_demoted = report.demoted.len();
+        let mut resettled = settle(
+            database,
+            clock,
+            policy,
+            &remaining_prompts,
+            &pending,
+            &mut report,
+        )?;
+        resettled.deferred_prompts.extend(first_deferrals);
+        report.allocation = resettled;
+        // A reminder refilled by the first settle and demoted again by the second never left
+        // `capacity_exceeded` as far as the caller can observe.
+        let second_demoted: Vec<String> = report.demoted.split_off(first_demoted);
+        for reminder_id in second_demoted {
+            if let Some(position) = report.refilled.iter().position(|id| id == &reminder_id) {
+                report.refilled.remove(position);
+            } else {
+                report.demoted.push(reminder_id);
+            }
+        }
+    }
+
+    let mut guarded = PendingLimitGuard::new(effects, pending, policy.os_pending_limit);
+    report.reconcile = reconcile(database, clock, &mut guarded)?;
     Ok(report)
+}
+
+/// One transaction: compute the allocation from the durable reminders and apply it. Pending
+/// requests that are neither known reminders nor in `prompts` reduce the budget.
+fn settle(
+    database: &mut Database,
+    clock: &dyn Clock,
+    policy: &CapacityPolicy,
+    prompts: &[PromptDemand],
+    pending: &[PendingRequest],
+    report: &mut CapacityReport,
+) -> Result<Allocation, ReconcileError> {
+    let prompt_ids: BTreeSet<&str> = prompts
+        .iter()
+        .map(|prompt| prompt.notification_id.as_str())
+        .collect();
+    let tx = database.immediate_transaction().map_err(database_error)?;
+    let known_reminders = known_reminder_ids(&tx)?;
+    let foreign_pending = pending
+        .iter()
+        .filter(|request| {
+            !prompt_ids.contains(request.notification_id.as_str())
+                && !reminder_id_of(&request.notification_id)
+                    .is_some_and(|reminder_id| known_reminders.contains(reminder_id))
+        })
+        .count();
+    let records = capacity_candidates(&tx)?;
+    let demands: Vec<ReminderDemand> = records
+        .values()
+        .filter_map(|record| {
+            Some(ReminderDemand {
+                reminder_id: record.reminder_id.clone(),
+                fire_at: record.resolved_instant?,
+                created_at: record.created_at,
+            })
+        })
+        .collect();
+    let allocation = allocate(
+        policy,
+        &AllocationInput {
+            now: clock.now(),
+            foreign_pending,
+            reminders: &demands,
+            prompts,
+        },
+    );
+    apply_allocation(&tx, clock.now(), &records, &allocation, report)?;
+    tx.commit()?;
+    Ok(allocation)
+}
+
+/// Wraps the effects handed to `reconcile` and never lets the pending set grow past the OS
+/// limit, which would make the OS evict a request silently. It follows the pending set from
+/// the listing it was given and from the effects that succeed; a schedule that would add a new
+/// request at the limit fails as transient without reaching the OS, so the reminder stays
+/// visibly unconfirmed and the next pass retries it.
+struct PendingLimitGuard<'a> {
+    inner: &'a mut dyn NotificationEffects,
+    pending: BTreeSet<String>,
+    limit: usize,
+}
+
+impl<'a> PendingLimitGuard<'a> {
+    fn new(
+        inner: &'a mut dyn NotificationEffects,
+        pending: Vec<PendingRequest>,
+        limit: usize,
+    ) -> PendingLimitGuard<'a> {
+        PendingLimitGuard {
+            inner,
+            pending: pending
+                .into_iter()
+                .map(|request| request.notification_id)
+                .collect(),
+            limit,
+        }
+    }
+}
+
+impl NotificationEffects for PendingLimitGuard<'_> {
+    fn schedule(&mut self, request: &ScheduleRequest) -> Result<(), NotificationEffectError> {
+        if !self.pending.contains(&request.notification_id) && self.pending.len() >= self.limit {
+            return Err(NotificationEffectError::new(
+                ErrorClass::Transient,
+                "pending_limit_reached",
+            ));
+        }
+        self.inner.schedule(request)?;
+        self.pending.insert(request.notification_id.clone());
+        Ok(())
+    }
+
+    fn cancel(&mut self, notification_id: &str) -> Result<(), NotificationEffectError> {
+        self.inner.cancel(notification_id)?;
+        self.pending.remove(notification_id);
+        Ok(())
+    }
+
+    fn list_pending(&mut self) -> Result<Vec<PendingRequest>, NotificationEffectError> {
+        let listed = self.inner.list_pending()?;
+        self.pending = listed
+            .iter()
+            .map(|request| request.notification_id.clone())
+            .collect();
+        Ok(listed)
+    }
 }
 
 fn apply_allocation(
     tx: &Transaction<'_>,
     now: DateTime<Utc>,
     records: &BTreeMap<String, ReminderRecord>,
+    allocation: &Allocation,
     report: &mut CapacityReport,
 ) -> Result<(), ReconcileError> {
-    let allocation = &report.allocation;
     let overflow = allocation.overflow_reminders.clone();
     let granted = allocation.granted_reminders.clone();
     let elapsed = allocation.elapsed_reminders.clone();

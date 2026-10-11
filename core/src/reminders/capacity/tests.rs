@@ -932,3 +932,119 @@ fn a_failed_prompt_cancel_is_reported_and_retried() -> Result<()> {
     assert!(!center.holds("prompt-1"));
     Ok(())
 }
+
+#[test]
+fn many_failed_prompt_cancels_are_charged_to_the_budget_and_never_cause_eviction() -> Result<()> {
+    let mut db = open_db("prompt_cancel_many")?;
+    seed_reminders(&mut db, budget())?;
+    let mut center = FakeCenter::default();
+    let prompts: Vec<PromptDemand> = (1..=MAX_PROMPT_REQUESTS as i64)
+        .map(|day| PromptDemand {
+            notification_id: format!("prompt-{day}"),
+            fire_at: instant(PASS_TIME) + Duration::days(day),
+        })
+        .collect();
+    for demand in &prompts {
+        center
+            .pending
+            .push((demand.notification_id.clone(), demand.fire_at));
+        center
+            .fail_cancel_for
+            .insert(demand.notification_id.clone());
+    }
+
+    let report = pass_at(&mut db, &mut center, &prompts, PASS_TIME)?;
+
+    assert!(!report.converged());
+    assert_eq!(report.prompt_cancel_failures.len(), MAX_PROMPT_REQUESTS);
+    assert!(
+        center.evicted.is_empty(),
+        "the OS evicted {:?}",
+        center.evicted
+    );
+    assert!(center.high_water <= OS_PENDING_LIMIT);
+    assert_eq!(
+        report.allocation.reminder_budget,
+        budget() - MAX_PROMPT_REQUESTS
+    );
+    assert_eq!(
+        report.allocation.overflow_reminders.len(),
+        MAX_PROMPT_REQUESTS
+    );
+    assert_eq!(report.demoted.len(), MAX_PROMPT_REQUESTS);
+    for prompt in &prompts {
+        assert!(report
+            .allocation
+            .deferred_prompts
+            .iter()
+            .any(|deferred| deferred.notification_id == prompt.notification_id));
+    }
+    for index in 0..budget() {
+        let expected = if index >= budget() - MAX_PROMPT_REQUESTS {
+            capacity_exceeded()
+        } else {
+            RequestState::Resolved
+        };
+        assert_eq!(
+            reminder(&mut db, &format!("item-{index:03}"))?.request_state,
+            expected
+        );
+    }
+
+    center.fail_cancel_for.clear();
+    let retry = pass_at(&mut db, &mut center, &prompts, PASS_TIME)?;
+    assert!(retry.converged());
+    assert!(center.evicted.is_empty());
+    assert!(center.high_water <= OS_PENDING_LIMIT);
+    assert!(center
+        .pending
+        .iter()
+        .all(|(id, _)| !id.starts_with("prompt-")));
+    Ok(())
+}
+
+#[test]
+fn failed_cancels_beyond_the_headroom_never_push_the_os_past_its_limit() -> Result<()> {
+    let mut db = open_db("headroom_exceeded")?;
+    let records = seed_reminders(&mut db, budget())?;
+    let mut center = FakeCenter::default();
+    pass(&mut db, &mut center)?;
+    let extra = REPLACEMENT_HEADROOM + 4;
+    for index in 0..extra {
+        let item_id = format!("item-sooner-{index}");
+        insert_item(&mut db, &item_id)?;
+        set_reminder_time(
+            &mut db,
+            &item_id,
+            base_due() - Duration::hours(index as i64 + 1),
+        )?;
+        let displaced = records[budget() - 1 - index].notification_id().unwrap();
+        center.fail_cancel_for.insert(displaced);
+    }
+
+    let report = pass(&mut db, &mut center)?;
+
+    assert!(!report.converged());
+    assert!(
+        center.evicted.is_empty(),
+        "the OS evicted {:?}",
+        center.evicted
+    );
+    assert!(center.high_water <= OS_PENDING_LIMIT);
+    assert!(center.pending.len() <= OS_PENDING_LIMIT);
+    assert!(
+        report
+            .reconcile
+            .failures
+            .iter()
+            .any(|failure| failure.operation_type == OperationType::Schedule),
+        "work that cannot safely fit is reported, not installed"
+    );
+
+    center.fail_cancel_for.clear();
+    let retry = pass(&mut db, &mut center)?;
+    assert!(retry.converged());
+    assert!(center.evicted.is_empty());
+    assert!(center.pending.len() <= budget());
+    Ok(())
+}
