@@ -672,6 +672,95 @@ fn refused_rerun_leaves_an_existing_journal_byte_identical() {
     assert_eq!(std::fs::read(&journal).unwrap(), before);
 }
 
+fn plan_words<'a>(journal: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
+    let mut words = fake_words(journal, extra);
+    words[0] = "plan";
+    words
+}
+
+#[test]
+fn plan_refuses_a_rerun_on_a_fresh_journal_exactly_as_run_does() {
+    let dir = TempDir::new().unwrap();
+    let (journal, journal_text) = journal_in(&dir);
+    let services = services_with(&[]);
+    let target = format!("{}:a", first_case_id());
+    let extra = ["--max-cases", "1", "--rerun", &target];
+
+    let planned = execute(&plan_words(&journal_text, &extra), &services);
+    assert_eq!(planned.status, EXIT_REFUSED, "{}", planned.out);
+    assert!(
+        planned.err.contains("no dispatched attempt"),
+        "{}",
+        planned.err
+    );
+    assert!(!planned.out.contains("planned requests"), "{}", planned.out);
+    assert!(!journal.exists(), "plan must not create the journal");
+
+    let ran = execute(&fake_words(&journal_text, &extra), &services);
+    assert_eq!(ran.status, EXIT_REFUSED, "{}", ran.err);
+    assert!(ran.err.contains("no dispatched attempt"), "{}", ran.err);
+    assert!(!journal.exists());
+}
+
+#[test]
+fn plan_refuses_unplanned_and_undispatched_reruns_over_an_existing_journal() {
+    let dir = TempDir::new().unwrap();
+    let (journal, journal_text) = journal_in(&dir);
+    let services = services_with(&[]);
+    assert_eq!(
+        execute(&fake_words(&journal_text, &["--max-cases", "2"]), &services).status,
+        EXIT_COMPLETED
+    );
+    let before = std::fs::read(&journal).unwrap();
+
+    let unplanned = execute(
+        &plan_words(
+            &journal_text,
+            &["--max-cases", "2", "--rerun", "no-such-case:a"],
+        ),
+        &services,
+    );
+    assert_eq!(unplanned.status, EXIT_REFUSED, "{}", unplanned.out);
+    assert!(
+        unplanned.err.contains("not in the plan"),
+        "{}",
+        unplanned.err
+    );
+
+    // Planned by --max-cases 3 but never dispatched in the two-case run.
+    let undispatched_target = format!("{}:b", nth_case_id(2));
+    let undispatched = execute(
+        &plan_words(&journal_text, &["--rerun", &undispatched_target]),
+        &services,
+    );
+    assert_eq!(undispatched.status, EXIT_REFUSED, "{}", undispatched.out);
+    assert!(
+        undispatched.err.contains("no dispatched attempt"),
+        "{}",
+        undispatched.err
+    );
+    assert_eq!(std::fs::read(&journal).unwrap(), before);
+
+    // A dispatched side is accepted by plan, and run agrees.
+    let dispatched_target = format!("{}:a", first_case_id());
+    let accepted = execute(
+        &plan_words(&journal_text, &["--rerun", &dispatched_target]),
+        &services,
+    );
+    assert_eq!(accepted.status, EXIT_COMPLETED, "{}", accepted.err);
+    assert!(
+        accepted.out.contains("planned requests"),
+        "{}",
+        accepted.out
+    );
+    assert_eq!(std::fs::read(&journal).unwrap(), before);
+    let ran = execute(
+        &fake_words(&journal_text, &["--rerun", &dispatched_target]),
+        &services,
+    );
+    assert_eq!(ran.status, EXIT_COMPLETED, "{}", ran.err);
+}
+
 #[test]
 fn request_cap_stops_the_run_and_exits_incomplete() {
     let dir = TempDir::new().unwrap();

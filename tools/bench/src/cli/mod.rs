@@ -7,7 +7,8 @@
 //! Safety properties this module owns:
 //! - Exactly two profiles and one explicitly named synthetic corpus are required. The command
 //!   never discovers, opens or accepts production data, captures or stores.
-//! - `help` and `plan` read no credential and open no socket. `plan` writes nothing.
+//! - `help` and `plan` read no credential and open no socket. `plan` writes nothing, and refuses
+//!   an explicit rerun exactly as `run` would.
 //! - Network use needs `--mode live` and `--execute-network`. Each hosted destination also needs
 //!   its own `--allow-destination`, and each credential reference its own `--credential-env`:
 //!   selecting a profile never grants a destination or a secret.
@@ -27,7 +28,6 @@ mod tests;
 
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
-use std::path::Path;
 use std::sync::Arc;
 
 use ohand_core::providers::contracts::ProviderAdapter;
@@ -204,6 +204,7 @@ fn plan(options: &Options, services: &Services, out: &mut dyn Write) -> Result<i
         Some(path) => PriorJournal::read(path)?,
         None => None,
     };
+    check_reruns(options, &prepared, prior.as_ref())?;
     let maximum = (prepared.corpus.cases.len() as u64 * 2 * u64::from(options.attempts_per_side))
         .min(u64::from(MAX_REQUEST_CAP)) as u32;
     let view = PlanView {
@@ -229,17 +230,14 @@ fn plan(options: &Options, services: &Services, out: &mut dyn Write) -> Result<i
     Ok(EXIT_COMPLETED)
 }
 
-/// Refuses a rerun that names a case outside the plan or a side with no dispatched attempt, before
-/// the journal is created or written, so an invalid invocation never pins a configuration.
-fn check_reruns_before_open(
+/// Refuses a rerun that names a case outside the plan or a side with no dispatched attempt in
+/// `prior`. `run` calls it before the journal is created or written, so an invalid invocation
+/// never pins a configuration; `plan` calls it so the dry run refuses exactly what `run` would.
+fn check_reruns(
     options: &Options,
     prepared: &Prepared,
-    journal: &Path,
+    prior: Option<&PriorJournal>,
 ) -> Result<(), Refusal> {
-    if options.reruns.is_empty() {
-        return Ok(());
-    }
-    let prior = PriorJournal::read(journal)?;
     for key in &options.reruns {
         if !prepared
             .corpus
@@ -252,9 +250,7 @@ fn check_reruns_before_open(
                 key.case_id
             )));
         }
-        let dispatched = prior
-            .as_ref()
-            .is_some_and(|prior| prior.has_dispatched(&key.case_id, key.arm));
+        let dispatched = prior.is_some_and(|prior| prior.has_dispatched(&key.case_id, key.arm));
         if !dispatched {
             return Err(Refusal(format!(
                 "rerun target {} has no dispatched attempt to rerun",
@@ -384,7 +380,9 @@ fn run(options: &Options, services: &Services, out: &mut dyn Write) -> Result<i3
     let adapter_a = adapter_for(&prepared.arm_a, "a");
     let adapter_b = adapter_for(&prepared.arm_b, "b");
 
-    check_reruns_before_open(options, &prepared, journal)?;
+    if !options.reruns.is_empty() {
+        check_reruns(options, &prepared, PriorJournal::read(journal)?.as_ref())?;
+    }
     let mut executor = Executor::open(journal, prepared.experiment.clone())
         .map_err(|error| Refusal(error.to_string()))?;
     let clock = SystemClock::new();

@@ -55,7 +55,7 @@ Destinations are the providers' hosted origins; the command has no flag for anot
 
 ## Resume, rerun, cancellation
 
-- Re-running the same command against the same journal keeps every side that already has a dispatched attempt and sends only the rest. A side whose outcome is unknown is never sent again unless named with `--rerun <case-id>:<a|b>`, which spends new allowance from `--request-cap` and records what it follows.
+- Re-running the same command against the same journal keeps every side that already has a dispatched attempt and sends only the rest. A side whose outcome is unknown is never sent again unless named with `--rerun <case-id>:<a|b>`, which spends new allowance from `--request-cap` and records what it follows. `bench plan` checks the same rerun targets and refuses one that `run` would refuse, so the dry run never shows a plan that execution rejects.
 - Changing a profile, the corpus, the instructions or the build revision against an existing journal is refused with the journal untouched; use a new journal.
 - Ctrl-C ends the in-flight request promptly. The journal records what was and was not sent, and the next run resumes from it.
 
