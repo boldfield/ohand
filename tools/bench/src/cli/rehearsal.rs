@@ -102,3 +102,30 @@ pub(super) fn rehearse(
         .map_err(refused)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ScratchDirectory;
+
+    #[test]
+    fn scratch_directory_is_private_and_removed_with_its_contents_when_dropped() {
+        let scratch = ScratchDirectory::create()
+            .map_err(|refusal| refusal.0)
+            .unwrap();
+        let path = scratch.path.clone();
+        assert!(path.is_dir());
+        assert!(path.starts_with(std::env::temp_dir()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "scratch directory must be private");
+        }
+        std::fs::write(path.join(super::SCRATCH_JOURNAL), b"{}\n").unwrap();
+        drop(scratch);
+        assert!(
+            !path.exists(),
+            "scratch copy must be deleted with its directory"
+        );
+    }
+}

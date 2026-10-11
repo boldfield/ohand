@@ -19,7 +19,10 @@ USAGE:
 COMMANDS:
     help    Print this text. Needs no credentials and touches nothing.
     plan    Dry run: validate the corpus and both profiles, then list the planned requests.
-            Never reads a credential, never opens the network, never writes a file.
+            Never reads a credential, never opens the network, never writes the requested
+            journal. With --journal it rehearses the run on a private scratch copy in the
+            system temporary directory, deleted before it exits; without --journal it
+            writes no file at all.
     run     Execute the plan and append every result to the journal. Resumable: sides that
             already have a dispatched attempt are kept, never silently sent again.
 
@@ -30,7 +33,8 @@ REQUIRED:
                            with protocol `anthropic` or `openai`. The credential reference is an
                            opaque name (default `bench-<protocol>`), never the secret itself.
     --journal <file>       run only: the journal to create or resume. plan may name one to show
-                           what a run would keep (it is read, never written).
+                           what a run would keep (it is read, never written; only a private
+                           scratch copy is written and deleted).
 
 OPTIONS:
     --mode <mode>          `fake` (default): scripted synthetic replies, no network, no

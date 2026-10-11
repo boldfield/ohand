@@ -709,6 +709,31 @@ fn plan_refuses_a_rerun_on_a_fresh_journal_exactly_as_run_does() {
 }
 
 #[test]
+fn plan_with_a_fresh_journal_succeeds_without_creating_it() {
+    let dir = TempDir::new().unwrap();
+    let (journal, journal_text) = journal_in(&dir);
+    let services = services_with(&[]);
+
+    let planned = execute(&plan_words(&journal_text, &["--max-cases", "2"]), &services);
+    assert_eq!(planned.status, EXIT_COMPLETED, "{}", planned.err);
+    assert!(
+        planned.out.contains("planned requests: 4"),
+        "{}",
+        planned.out
+    );
+    assert!(planned.err.is_empty());
+    assert!(
+        !journal.exists(),
+        "plan must not create the requested journal"
+    );
+    assert_eq!(
+        std::fs::read_dir(dir.path()).unwrap().count(),
+        0,
+        "plan must write nothing beside the requested journal"
+    );
+}
+
+#[test]
 fn plan_refuses_unplanned_and_undispatched_reruns_over_an_existing_journal() {
     let dir = TempDir::new().unwrap();
     let (journal, journal_text) = journal_in(&dir);
