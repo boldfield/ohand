@@ -485,14 +485,15 @@ fn plan_against_an_existing_journal_shows_kept_sides_and_does_not_modify_it() {
 }
 
 #[test]
-fn plan_with_a_different_model_than_the_journal_reports_the_configuration_change() {
+fn plan_with_a_different_model_than_the_journal_refuses_with_the_configuration_change() {
     let dir = TempDir::new().unwrap();
-    let (_, journal_text) = journal_in(&dir);
+    let (journal, journal_text) = journal_in(&dir);
     let services = services_with(&[]);
     assert_eq!(
         execute(&fake_words(&journal_text, &[]), &services).status,
         EXIT_COMPLETED
     );
+    let before = std::fs::read(&journal).unwrap();
     let outcome = execute(
         &[
             "plan",
@@ -509,11 +510,16 @@ fn plan_with_a_different_model_than_the_journal_reports_the_configuration_change
         ],
         &services,
     );
+    assert_eq!(outcome.status, EXIT_REFUSED, "{}", outcome.out);
+    assert!(outcome.out.is_empty(), "{}", outcome.out);
     assert!(
-        outcome.out.contains("differs") || outcome.out.contains("change"),
+        outcome
+            .err
+            .contains("experiment configuration changed (profile_a_id, profile_a_version)"),
         "{}",
-        outcome.out
+        outcome.err
     );
+    assert_eq!(std::fs::read(&journal).unwrap(), before);
 }
 
 // ---- fake-mode runs -------------------------------------------------------------------------
@@ -909,6 +915,160 @@ fn a_journal_with_records_but_no_experiment_is_refused_byte_identical() {
     assert_eq!(refused.status, EXIT_REFUSED, "{}", refused.err);
     assert!(refused.err.contains("use a new journal"), "{}", refused.err);
     assert_eq!(std::fs::read(&journal).unwrap(), torn);
+}
+
+/// Runs a one-case fake journal, rewrites its records with `tamper`, tears its tail, and returns
+/// the refusal of `run` after checking that `plan` refuses the same way and that neither
+/// changed a byte of the journal.
+fn refusal_of_a_tampered_journal(tamper: impl FnOnce(Vec<Value>) -> Vec<Value>) -> String {
+    let dir = TempDir::new().unwrap();
+    let (journal, journal_text) = journal_in(&dir);
+    let services = services_with(&[]);
+    let extra = ["--max-cases", "1"];
+    assert_eq!(
+        execute(&fake_words(&journal_text, &extra), &services).status,
+        EXIT_COMPLETED
+    );
+    let records: Vec<Value> = std::fs::read_to_string(&journal)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let rewritten: String = tamper(records)
+        .iter()
+        .map(|record| format!("{record}\n"))
+        .collect();
+    std::fs::write(&journal, rewritten).unwrap();
+    let torn = tear_tail(&journal);
+
+    let planned = execute(&plan_words(&journal_text, &extra), &services);
+    assert_eq!(planned.status, EXIT_REFUSED, "{}", planned.out);
+    assert_eq!(std::fs::read(&journal).unwrap(), torn);
+    let refused = execute(&fake_words(&journal_text, &extra), &services);
+    assert_eq!(refused.status, EXIT_REFUSED, "{}", refused.out);
+    assert!(refused.err.contains("nothing was sent"), "{}", refused.err);
+    assert_eq!(std::fs::read(&journal).unwrap(), torn);
+    assert_eq!(planned.err, refused.err);
+    refused.err
+}
+
+fn is_case(record: &Value) -> bool {
+    record["record_type"] == "case"
+}
+
+fn first_attempt(records: &mut [Value]) -> &mut Value {
+    records
+        .iter_mut()
+        .find(|record| record["record_type"] == "attempt")
+        .unwrap()
+}
+
+#[test]
+fn plan_and_run_agree_on_refusing_a_changed_journaled_case_text() {
+    let refusal = refusal_of_a_tampered_journal(|mut records| {
+        let case = records.iter_mut().find(|record| is_case(record)).unwrap();
+        let text = case["content"]
+            .as_str()
+            .unwrap()
+            .replace("roof garden", "roof terrace");
+        case["content"] = json!(text);
+        records
+    });
+    let expected = format!("case {} changed since it was journaled", first_case_id());
+    assert!(refusal.contains(&expected), "{refusal}");
+}
+
+#[test]
+fn a_journal_recording_a_case_twice_is_refused_byte_identical() {
+    let refusal = refusal_of_a_tampered_journal(|mut records| {
+        let case = records
+            .iter()
+            .find(|record| is_case(record))
+            .unwrap()
+            .clone();
+        records.push(case);
+        records
+    });
+    let expected = format!(
+        "the journal records case {} more than once",
+        first_case_id()
+    );
+    assert!(refusal.contains(&expected), "{refusal}");
+}
+
+#[test]
+fn a_journal_case_of_another_experiment_is_refused_byte_identical() {
+    let refusal = refusal_of_a_tampered_journal(|mut records| {
+        let case = records.iter_mut().find(|record| is_case(record)).unwrap();
+        case["experiment_id"] = json!("00000000-0000-4000-8000-000000000000");
+        records
+    });
+    assert!(
+        refusal.contains("belongs to another experiment"),
+        "{refusal}"
+    );
+}
+
+#[test]
+fn a_journal_attempt_without_its_case_is_refused_byte_identical() {
+    let refusal = refusal_of_a_tampered_journal(|records| {
+        records
+            .into_iter()
+            .filter(|record| !is_case(record))
+            .collect()
+    });
+    assert!(
+        refusal.contains("an attempt for a case it does not record"),
+        "{refusal}"
+    );
+}
+
+#[test]
+fn a_journal_attempt_of_another_executor_version_is_refused_byte_identical() {
+    let refusal = refusal_of_a_tampered_journal(|mut records| {
+        first_attempt(&mut records)["provider_output"]["executor_record"] = json!(2);
+        records
+    });
+    assert!(
+        refusal.contains("an attempt this executor did not write"),
+        "{refusal}"
+    );
+}
+
+#[test]
+fn a_journal_attempt_for_an_unknown_arm_is_refused_byte_identical() {
+    refusal_of_a_tampered_journal(|mut records| {
+        first_attempt(&mut records)["arm"] = json!("c");
+        records
+    });
+}
+
+#[test]
+fn executor_refusals_the_read_only_checks_do_not_name_are_still_made_before_the_journal_is_opened()
+{
+    // An envelope of the supported version that the executor cannot read.
+    let unreadable = refusal_of_a_tampered_journal(|mut records| {
+        first_attempt(&mut records)["provider_output"]["phase"] = json!("unheard-of");
+        records
+    });
+    assert!(
+        unreadable.contains("records this executor did not write"),
+        "{unreadable}"
+    );
+    // A derived request that no longer matches the one journaled for the case. A later record of
+    // an attempt supersedes its reservation, so every record is changed.
+    let changed_request = refusal_of_a_tampered_journal(|mut records| {
+        for record in &mut records {
+            if record["record_type"] == "attempt" {
+                record["provider_output"]["pair_fingerprint"] = json!("0".repeat(64));
+            }
+        }
+        records
+    });
+    assert!(
+        changed_request.contains("configuration changed: Request"),
+        "{changed_request}"
+    );
 }
 
 #[test]

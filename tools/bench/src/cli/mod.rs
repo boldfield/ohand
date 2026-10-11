@@ -7,15 +7,16 @@
 //! Safety properties this module owns:
 //! - Exactly two profiles and one explicitly named synthetic corpus are required. The command
 //!   never discovers, opens or accepts production data, captures or stores.
-//! - `help` and `plan` read no credential and open no socket. `plan` writes nothing, and refuses
-//!   an explicit rerun exactly as `run` would.
+//! - `help` and `plan` read no credential and open no socket. `plan` leaves the journal as it is,
+//!   and refuses what `run` would refuse about the journal and its explicit reruns.
 //! - Network use needs `--mode live` and `--execute-network`. Each hosted destination also needs
 //!   its own `--allow-destination`, and each credential reference its own `--credential-env`:
 //!   selecting a profile never grants a destination or a secret.
 //! - Every refusal the command can decide from its inputs and a read-only view of the journal
 //!   (a changed configuration or case, an inconsistent journal, a rerun naming a side that was
 //!   never dispatched) happens before the journal is created, written or tail-repaired, and
-//!   before any request is reserved.
+//!   before any request is reserved. Read-only checks name the common cases; a rehearsal of the
+//!   executor on a private scratch copy (see `rehearsal`) catches the rest.
 //! - Results are diagnostic: the executor holds no store or apply handle, and the mode, corpus,
 //!   instruction, profile and build revisions are pinned in the journal's experiment record.
 
@@ -25,6 +26,7 @@ mod corpus;
 mod interrupt;
 mod output;
 mod profiles;
+mod rehearsal;
 #[cfg(test)]
 mod tests;
 
@@ -206,9 +208,26 @@ fn plan(options: &Options, services: &Services, out: &mut dyn Write) -> Result<i
         Some(path) => PriorJournal::read(path)?,
         None => None,
     };
+    check_journal_before_open(&prepared, prior.as_ref())?;
     check_reruns(options, &prepared, prior.as_ref())?;
     let maximum = (prepared.corpus.cases.len() as u64 * 2 * u64::from(options.attempts_per_side))
         .min(u64::from(MAX_REQUEST_CAP)) as u32;
+    if let Some(journal) = &options.journal {
+        // A live run is refused unless both destinations are granted, so these are the grants
+        // any run that gets as far as the journal has.
+        let granted = [prepared.arm_a.origin.clone(), prepared.arm_b.origin.clone()];
+        let authority = ScratchAuthority::new(
+            &granted,
+            prepared.arm_a.profile.clone(),
+            prepared.arm_b.profile.clone(),
+        )?;
+        let limits = ExecutorLimits::new(
+            options.attempts_per_side,
+            prepared.request_cap.unwrap_or(maximum),
+        )
+        .map_err(|error| Refusal(error.to_string()))?;
+        rehearsal::rehearse(journal, &prepared, &authority, limits, &options.reruns)?;
+    }
     let view = PlanView {
         mode: options.mode,
         experiment: &prepared.experiment,
@@ -277,11 +296,14 @@ fn check_journal_before_open(
     };
     match &prior.experiment {
         None if prior.experiment_count == 0 && !prior.has_case_or_attempt => {}
+        None if prior.experiment_count == 0 => {
+            return Err(Refusal(
+                "the journal holds records without an experiment; use a new journal".to_string(),
+            ))
+        }
         None => {
             return Err(Refusal(
-                "the journal holds more than one experiment, or records without one; use a new \
-                 journal"
-                    .to_string(),
+                "the journal holds more than one experiment; use a new journal".to_string(),
             ))
         }
         Some(stored) => {
@@ -293,6 +315,9 @@ fn check_journal_before_open(
                 )));
             }
         }
+    }
+    if let Some(reason) = &prior.inconsistency {
+        return Err(Refusal(format!("{reason}; use a new journal")));
     }
     for (case_id, content) in &prepared.corpus.content_by_case {
         if prior
@@ -430,6 +455,7 @@ fn run(options: &Options, services: &Services, out: &mut dyn Write) -> Result<i3
     let prior = PriorJournal::read(journal)?;
     check_journal_before_open(&prepared, prior.as_ref())?;
     check_reruns(options, &prepared, prior.as_ref())?;
+    rehearsal::rehearse(journal, &prepared, &authority, limits, &options.reruns)?;
     let mut executor = Executor::open(journal, prepared.experiment.clone())
         .map_err(|error| Refusal(error.to_string()))?;
     let clock = SystemClock::new();

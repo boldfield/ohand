@@ -65,6 +65,8 @@ pub struct PriorJournal {
     pub experiment_count: usize,
     /// Whether the journal holds any case or attempt record.
     pub has_case_or_attempt: bool,
+    /// Why the executor would refuse the journal's records when loading it, if it would.
+    pub inconsistency: Option<String>,
     /// Journaled case text by corpus case id.
     pub content_by_case: HashMap<String, String>,
     /// Phase of the latest dispatched attempt per side: `completed`, `failed` or `reserved`.
@@ -98,6 +100,10 @@ impl PriorJournal {
             .map(|case| (case.case_id.clone(), case.content.clone()))
             .collect();
         let has_case_or_attempt = !reader.cases().is_empty() || !reader.attempts().is_empty();
+        let inconsistency = match experiments.as_slice() {
+            [only] => load_inconsistency(&reader, only),
+            _ => None,
+        };
         let mut dispatched = HashMap::new();
         let mut orders = HashMap::new();
         for attempt in reader.attempts() {
@@ -133,6 +139,7 @@ impl PriorJournal {
             },
             experiment_count: experiments.len(),
             has_case_or_attempt,
+            inconsistency,
             content_by_case,
             dispatched,
             orders,
@@ -149,6 +156,47 @@ impl PriorJournal {
             .map(String::as_str)
     }
 }
+
+/// The first rule of the executor's journal load that `reader` breaks, in the order the executor
+/// applies them: each case belongs to `experiment` and is journaled once, then each attempt names
+/// a journaled case, carries an executor record of the supported version and a known arm. The
+/// executor refuses such a journal only after opening it for writing, so the CLI checks first.
+fn load_inconsistency(reader: &JournalReader, experiment: &Experiment) -> Option<String> {
+    let mut case_ids = std::collections::HashSet::new();
+    let mut record_ids = std::collections::HashSet::new();
+    for case in reader.cases() {
+        let case_id = sanitize(&case.case_id);
+        if case.experiment_id != experiment.id {
+            return Some(format!(
+                "the journal's case {case_id} belongs to another experiment"
+            ));
+        }
+        if !case_ids.insert(case.case_id.as_str()) {
+            return Some(format!("the journal records case {case_id} more than once"));
+        }
+        record_ids.insert(case.id.as_str());
+    }
+    for attempt in reader.attempts() {
+        if !record_ids.contains(attempt.case_id.as_str()) {
+            return Some("the journal holds an attempt for a case it does not record".to_string());
+        }
+        let supported = attempt
+            .provider_output
+            .as_ref()
+            .and_then(|envelope| envelope["executor_record"].as_u64())
+            == Some(EXECUTOR_RECORD_VERSION);
+        if !supported {
+            return Some("the journal holds an attempt this executor did not write".to_string());
+        }
+        if arm_of(&attempt.arm).is_none() {
+            return Some("the journal holds an attempt for an unknown arm".to_string());
+        }
+    }
+    None
+}
+
+/// The executor's record version inside `Attempt::provider_output`.
+const EXECUTOR_RECORD_VERSION: u64 = 1;
 
 /// Experiment fields that differ, by name; the run would be refused when any do.
 pub fn configuration_differences(stored: &Experiment, planned: &Experiment) -> Vec<&'static str> {
@@ -246,7 +294,7 @@ pub fn render_plan(view: &PlanView<'_>) -> String {
     let mut text = String::new();
     let _ = writeln!(
         text,
-        "bench plan (dry run: nothing is sent, no credential is read, no file is written)"
+        "bench plan (dry run: nothing is sent, no credential is read, the journal is not written)"
     );
     let _ = writeln!(text, "mode: {}", mode_note(view.mode));
     let _ = writeln!(
@@ -295,20 +343,12 @@ pub fn render_plan(view: &PlanView<'_>) -> String {
             None => {
                 let _ = writeln!(text, "journal: exists but holds no single experiment");
             }
-            Some(stored) => {
-                let differing = configuration_differences(stored, experiment);
-                if differing.is_empty() {
-                    let _ = writeln!(
-                        text,
-                        "journal: exists; configuration matches, a run resumes it"
-                    );
-                } else {
-                    let _ = writeln!(
-                        text,
-                        "journal: exists; a run would be refused, configuration differs in: {}",
-                        differing.join(", ")
-                    );
-                }
+            // `plan` refuses a journal a run would refuse before rendering anything.
+            Some(_) => {
+                let _ = writeln!(
+                    text,
+                    "journal: exists; configuration matches, a run resumes it"
+                );
             }
         },
     }
