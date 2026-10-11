@@ -3,8 +3,8 @@ import Foundation
 enum DeletionLocalCleanupError: Error, Equatable {
     /// The capture identifier could name a path, so no file operation is attempted for it.
     case unsafeCaptureIdentifier
-    /// The core's audio reference does not name a file inside the finalized audio store. Every file bound to the
-    /// capture was still removed first.
+    /// The core's audio reference does not name a file inside the finalized audio store that is bound to the capture.
+    /// The referenced file is left alone, and every file bound to the capture was still removed first.
     case audioReferenceUnresolvable
     /// A removal reported success but the file is still present.
     case stillPresent
@@ -64,14 +64,17 @@ final class DeletionLocalCleanup {
         try removeIfPresent(recordURL)
     }
 
-    /// Removes the finalized audio the core references and every finalized file bound to the capture.
+    /// Removes the finalized audio the core references and every finalized file bound to the capture. The reference is
+    /// trusted only as far as the capture owns the file it names (see `ownsFinalizedName`): a reference to another
+    /// capture's audio removes nothing of that capture's and is reported unresolvable.
     func removeAudio(captureID: String, audioReference: String?) throws {
         guard IngressRecord.isSafeCaptureID(captureID) else { throw DeletionLocalCleanupError.unsafeCaptureIdentifier }
 
         var urls: [URL] = []
         var referenceResolvable = true
         if let audioReference {
-            if let referenced = staging.finalizedAudioURL(forReference: audioReference) {
+            if let referenced = staging.finalizedAudioURL(forReference: audioReference),
+               Self.ownsFinalizedName(referenced.lastPathComponent, captureID: captureID) {
                 urls.append(referenced)
             } else {
                 referenceResolvable = false
@@ -114,8 +117,8 @@ final class DeletionLocalCleanup {
     }
 
     /// A finalized name is the capture's only when it is bound to the deletion target's capture ID, whatever the
-    /// record body claims. Any other name is left alone: `remove_audio` still removes this capture's finalized audio
-    /// through the core's reference.
+    /// record body or the core's audio reference claims. Any other name is left alone; the capture's own finalized
+    /// audio is still found by its bound name.
     private static func ownsFinalizedName(_ name: String, captureID: String) -> Bool {
         name.hasPrefix(captureID + ".")
     }

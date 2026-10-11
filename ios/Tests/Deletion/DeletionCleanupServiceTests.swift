@@ -300,6 +300,25 @@ final class DeletionCleanupServiceTests: DeletionTestCase {
         XCTAssertEqual(world.core.mutationCount, mutationsBefore)
     }
 
+    func testAudioReferenceToAnotherCapturesFileNeverRemovesIt() async throws {
+        let world = try makeWorld()
+        try await world.seedItem(itemID, captureID: captureID, finalizedAudio: true)
+        try await seedBystander(world)
+        world.core.addItem(itemID, captureID: captureID, audioReference: "FinalizedAudio/cap-2.m4a")
+        world.core.recordDeletion(itemID)
+
+        for attempt in ["first pass", "reopened service"] {
+            let report = await world.makeService().reconcile()
+
+            XCTAssertFalse(report.converged, attempt)
+            XCTAssertEqual(
+                report.terminalFailures, [DeletionTerminalFailure(itemID: itemID, kind: .removeAudio)], attempt)
+            XCTAssertEqual(world.remnants(of: captureID), [], "the capture's own audio is still removed: \(attempt)")
+            assertBystanderUntouched(world)
+        }
+        XCTAssertEqual(world.core.status(itemID, .removeAudio), .failed)
+    }
+
     func testRepeatedCleanUpAfterATerminalFailureIsNeverSettled() async throws {
         let world = try makeWorld()
         try await world.seedItem(itemID, captureID: captureID, finalizedAudio: true)

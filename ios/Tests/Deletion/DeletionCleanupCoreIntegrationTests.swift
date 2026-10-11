@@ -186,6 +186,25 @@ final class DeletionCleanupCoreIntegrationTests: XCTestCase {
         session.close()
     }
 
+    func testAnAudioReferenceToAnotherCapturesFileNeverRemovesIt() throws {
+        let seeded = try seedDeletedItem()
+        try seeded.world.setAudioReference(captureID: captureID, to: "FinalizedAudio/cap-2.m4a")
+        var session = try seeded.world.openCore()
+
+        for _ in 0..<2 {
+            let report = try reconcile(seeded, on: session)
+
+            XCTAssertFalse(report.converged)
+            XCTAssertEqual(report.terminalFailures, [DeletionTerminalFailure(itemID: seeded.itemID, kind: .removeAudio)])
+            XCTAssertEqual(seeded.world.remnants(of: captureID), [], "the capture's own audio is still removed")
+            XCTAssertTrue(seeded.world.exists(.finalizedAudio, "cap-2.m4a"), "another capture's audio survives")
+            session.close()
+            session = try seeded.world.openCore()
+        }
+        XCTAssertEqual(try seeded.world.workStatuses(itemID: seeded.itemID)["remove_audio"], "failed_no_retry")
+        session.close()
+    }
+
     func testRepeatedCleanUpAfterATerminalFailureIsNeverSettledAcrossReopens() throws {
         let seeded = try seedDeletedItem()
         try seeded.world.setAudioReference(captureID: captureID, to: "Elsewhere/cap-1.m4a")
