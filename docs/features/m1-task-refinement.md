@@ -60,6 +60,8 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
   - (4) Bounds. A transient failure is retried by the next pass. Pass frequency (writes, launch and foreground through B03) is the backoff the contract's "retry with backoff" requires of N03; no timer-based backoff is required. A desired-state write committed on another connection after the pass's last per-entry re-read is closed by the next pass, not by N03. Triggering a pass after desired-state writes, and serializing overlapping passes, belong to composition (B02/B03). Explicit payload kinds beyond `generic` are N02/preview work.
   - (5) Round-3 regressions required in `core/tests/reminder_reconcile/`, each over a same-identifier request pending at a mismatched instant before the due time: a definitive replacement failure (the request is removed; the next pass withholds with no OS call and nothing is pending); a transient replacement failure (removed, `schedule_failed`, then retried); a never-attempted first install refused (removed); and an already `Rejected` entry (removed, with no schedule call). Also guard the `Acknowledged`→`Failed` update in `begin_schedule_attempt` with the same current-generation check as the reminder update. No other paths are added.
 
+- P11a and P11b added (coordinator, 2026-10-11): the production app cannot yet be signed. `tools/apple-build/sign_probe.py` supports only application-only probe schemes (`SUPPORTED_SCHEME_BUNDLE_IDENTIFIERS`) and maps a single bundle identifier in `provisioningProfiles`. `OhAndApp` embeds the `OhAndCaptureControl` app extension (`com.boldfield.ohand.app.capture-control`), so its export needs a profile per bundle identifier (`docs/architecture/m1-shell.md`, Remediation 3; `docs/validation/signing.md`, Route). T10 must produce the signed candidate for T05, and T10 sits about twenty serial steps away, so the gap would surface only immediately before the trial. P11a extends the tooling now, and P11b records the maintainer's signed install of `OhAndApp` with the embedded extension. T10 now also depends on P11b. `OhAndApp` requests only `keychain-access-groups` under its own prefix, with no App Groups or restricted capabilities, so the maintainer's existing wildcard Development profile is expected to cover both bundle identifiers. P11a must still support a per-bundle profile mapping, because a later capability can require explicit App IDs. P11a co-owns `tools/apple-build/` with P08a, which is done, and does not touch `tools/apple-build/trial/`, which belongs to T06.
+
 - V06 and V07 now depend on V01 alone: they implement Rust adapters against its transport interface using fixtures. V05 is the native effect implementation and remains required by app composition/integration, not by independent protocol adapter implementation. This is an explicit dependency override for those retained tasks.
 
 ## Why some tasks stay together
@@ -346,6 +348,52 @@ Acceptance:
 Source pointers (baseline above): `docs/features/m1-external-prerequisites.md`, `docs/validation/m1-protocol.md:122`.
 
 Contributes to original P08 criteria: 2, 4, 5.
+
+### P11a
+
+Sign applications that embed app extensions
+
+Extend the signing and device-build tooling from application-only probes to the production `OhAndApp` scheme with its embedded `OhAndCaptureControl` extension, provably on Linux with stubbed Apple tools, so the maintainer can run it unchanged on a Mac.
+
+Owned paths: `tools/apple-build/` (except `tools/apple-build/trial/`, which belongs to T06), `docs/validation/signing.md` (Route, Prerequisites, Inputs and procedure sections; the evidence and validity sections belong to P11b).
+
+Dependencies: P08b.
+
+Context: P08a built `tools/apple-build/sign_probe.py`. It archives unsigned and signs at export with manual signing and an explicit export options file, maps one bundle identifier to the profile UUID read from the profile, and refuses Xcode-managed profiles. The four application-only probes are its only supported schemes. `OhAndApp` (`ios/project.yml`, bundle `com.boldfield.ohand.app`) embeds `OhAndCaptureControl` (`com.boldfield.ohand.app.capture-control`) plus the `OhAndCoreBridge` and `OhAndServices` frameworks, which take no profile. Its entitlements are only `keychain-access-groups` under its own prefix. Keep the existing probe behaviour, exit codes and evidence fields unchanged. Renaming the script is not required.
+
+Acceptance:
+
+1. `OhAndApp` is a supported scheme. The tool reads every embedded application and app-extension bundle identifier from the unsigned archive, not from a hard-coded list, and writes `provisioningProfiles` with one entry per signed bundle (application and extensions, never frameworks), each mapped to the UUID read from its profile. One supplied profile may cover several bundles when its application identifier covers each of them (wildcard or exact). A per-bundle mapping of several profiles is also accepted, through environment or injected-file inputs only.
+2. Before any build or keychain work, the tool refuses, with a distinct non-zero exit and a message naming the bundle identifier (never profile contents or the team identifier), when a bundle is not covered by any supplied profile or when a covering profile is expired, Xcode-managed, or does not list the target device. Keychain cleanup still runs on every exit path.
+3. Install with `devicectl` installs the exported app, then launches it by bundle identifier and confirms it is running. A failed install, launch or running check exits non-zero. The sanitized evidence record gains the embedded bundle identifiers, the expiry of each profile used and the launch result. Its schema version is bumped, and the no-team-ID, no-UUID, no-raw-device-ID rules still hold.
+4. Behaviour tests against `stub_apple_tools.py` cover: an archive with one extension under one wildcard profile; two bundles under a per-bundle mapping; an uncovered extension; an expired and an Xcode-managed covering profile; launch failure; unchanged results for every existing probe scheme; and redaction of the new fields. They run under `make apple-build-test` with no vacuous assertions.
+5. `docs/validation/signing.md` replaces the "only application-only probes" limitation with the procedure for `OhAndApp`, including the maintainer steps P11b follows, and makes no validity claim that was not observed.
+
+Source pointers (baseline above): `tools/apple-build/sign_probe.py:55`, `tools/apple-build/sign_probe.py:129`, `tools/apple-build/sign_probe.py:445`, `tools/apple-build/sign_probe.py:476`, `tools/apple-build/sign_probe.py:495`, `ios/project.yml:60`, `ios/project.yml:108`, `ios/Config/OhAndApp.entitlements`, `docs/validation/signing.md:19`, `docs/architecture/m1-shell.md` (Remediation 3).
+
+Contributes to T10's signed-candidate criterion and T06's signed route. Neither is satisfied here.
+
+### P11b
+
+Record the signed production-app install with its embedded extension
+
+Fold the maintainer's signed `OhAndApp` build, install and launch evidence into the signing document, so T10 and T06 start from a proven signing route for the production bundle layout.
+
+Owned paths: `docs/validation/signing.md` (evidence and validity sections), `docs/validation/evidence/apple-signing/`.
+
+Dependencies: P11a.
+
+Context: this task starts blocked on an external input. The maintainer runs the P11a tooling for the `OhAndApp` scheme on the Mac with the pinned Xcode, the Apple Development identity and a Development profile covering both bundle identifiers and the registered iPhone, following the procedure P11a writes in `docs/validation/signing.md`. The maintainer commits the sanitized record under `docs/validation/evidence/apple-signing/` on main and unblocks this task with a note naming that file. `OhAndApp` may still be a pre-U01 shell. This task proves the signing route and the embedded-extension layout, not app features. A worker claimed without such a file must re-block naming that exact missing prerequisite and must not substitute simulator results.
+
+Acceptance:
+
+1. `docs/validation/signing.md` cites the named artifact with build revision, collection time, the embedded bundle identifiers, each profile's observed expiry, and the install and launch result.
+2. The record shows the control extension is embedded and the app launches on the device. Whether the control appears in the system control gallery is recorded as observed or explicitly as not checked, never inferred.
+3. The trial validity statement is updated from the shortest observed profile expiry across the signed bundles.
+
+Source pointers (baseline above): `docs/validation/signing.md`, `docs/features/m1-external-prerequisites.md`.
+
+Contributes to T10's signed-candidate criterion. Records evidence only and does not modify the tooling.
 
 ### F08
 
