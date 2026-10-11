@@ -962,7 +962,72 @@ fn comparability_flags_what_the_arms_do_not_share() {
     assert_eq!(count("small_sample"), Some(2));
     assert_eq!(count("requested_settings_differ"), None);
     assert_eq!(count("effective_settings_differ"), None);
+    assert_eq!(count("settings_evidence_missing"), Some(2));
+    assert_eq!(count("protocol_unverified"), None);
+    assert_eq!(comparability.arms[0].attempts_without_metadata, 1);
+    assert_eq!(comparability.arms[1].attempts_without_metadata, 1);
     assert!(report.to_text().contains("[different_protocols] x1"));
+}
+
+#[test]
+fn an_arm_without_metadata_is_flagged_rather_than_silently_skipped() {
+    let mut journal = write_journal(Setup::new(&[BROAD, UNDATED]));
+    journal.put(
+        BROAD,
+        "a",
+        Att::completed(conforming(BROAD), 10).meta(Meta::new(ProviderProtocol::Anthropic)),
+    );
+    journal.put(BROAD, "b", Att::failed("timed_out"));
+    journal.put(UNDATED, "a", Att::completed(conforming(UNDATED), 10));
+    journal.put(UNDATED, "b", Att::failed("rate_limited"));
+    let report = journal.report_ok();
+    let comparability = &report.comparability;
+
+    assert_eq!(comparability.arms[0].attempts_with_metadata, 1);
+    assert_eq!(comparability.arms[0].attempts_without_metadata, 1);
+    assert_eq!(comparability.arms[1].attempts_with_metadata, 0);
+    assert_eq!(comparability.arms[1].attempts_without_metadata, 2);
+    assert_eq!(comparability.arms[1].protocol, None);
+
+    let count = |code: &str| flag(&report, code).map(|flag| flag.count);
+    assert_eq!(count("settings_evidence_missing"), Some(3));
+    assert_eq!(count("protocol_unverified"), Some(1));
+    assert_eq!(count("different_protocols"), None);
+    assert_eq!(count("requested_settings_differ"), None);
+
+    let json: Value = serde_json::from_str(&report.to_json()).unwrap();
+    let flags = json["comparability"]["flags"].as_array().unwrap();
+    let missing = flags
+        .iter()
+        .find(|flag| flag["code"] == "settings_evidence_missing")
+        .unwrap();
+    assert_eq!(missing["count"], 3);
+    let text = report.to_text();
+    assert!(text.contains("[settings_evidence_missing] x3"));
+    assert!(text.contains("[protocol_unverified] x1"));
+}
+
+#[test]
+fn complete_metadata_on_both_arms_raises_no_missing_evidence_flags() {
+    let mut journal = write_journal(Setup::new(&[BROAD]));
+    journal.put(
+        BROAD,
+        "a",
+        Att::completed(conforming(BROAD), 10).meta(Meta::new(ProviderProtocol::Anthropic)),
+    );
+    journal.put(
+        BROAD,
+        "b",
+        Att::completed(conforming(BROAD), 10).meta(Meta {
+            default_seed: true,
+            ..Meta::new(ProviderProtocol::Anthropic)
+        }),
+    );
+    let report = journal.report_ok();
+    let count = |code: &str| flag(&report, code).map(|flag| flag.count);
+    assert_eq!(count("settings_evidence_missing"), None);
+    assert_eq!(count("protocol_unverified"), None);
+    assert_eq!(count("provider_defaults_in_use"), Some(1));
 }
 
 #[test]

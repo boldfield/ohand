@@ -26,6 +26,9 @@ pub struct ArmSettings {
     pub protocol: Option<String>,
     /// Attempts that reported diagnostic metadata (completed attempts only).
     pub attempts_with_metadata: u64,
+    /// Dispatched attempts with no diagnostic metadata (failed, timed out or not reported):
+    /// their protocol, requested and effective settings are unverified.
+    pub attempts_without_metadata: u64,
     /// The settings the attempts requested, as `name=value`.
     pub requested: Vec<String>,
     pub effective_confirmed: u64,
@@ -76,6 +79,7 @@ fn arm_settings(journal: &Journal, arm: usize) -> ArmSettings {
     let mut protocols = BTreeSet::new();
     for attempt in journal.dispatched_attempts(arm) {
         let Some(metadata) = &attempt.envelope.metadata else {
+            settings.attempts_without_metadata += 1;
             continue;
         };
         settings.attempts_with_metadata += 1;
@@ -159,10 +163,24 @@ pub(super) fn assess(
         "the arms use different provider protocols, whose request wording and structured-output handling are adapter-specific",
     );
     flag(
+        "protocol_unverified",
+        arms.iter()
+            .zip([0, 1])
+            .filter(|(arm, index)| {
+                arm.protocol.is_none() && journal.dispatched_attempts(*index).next().is_some()
+            })
+            .count() as u64,
+        "arms that dispatched requests but reported no provider protocol, so protocol comparability is unverified",
+    );
+    flag(
+        "settings_evidence_missing",
+        arms.iter().map(|arm| arm.attempts_without_metadata).sum(),
+        "dispatched attempts without diagnostic metadata: their requested and effective settings are unverified and the arms' settings cannot be compared",
+    );
+    flag(
         "requested_settings_differ",
         u64::from(
-            !arms[0].requested.is_empty()
-                && !arms[1].requested.is_empty()
+            arms.iter().all(|arm| arm.attempts_with_metadata > 0)
                 && arms[0].requested != arms[1].requested,
         ),
         "the arms requested different settings",
