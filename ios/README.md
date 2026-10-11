@@ -27,6 +27,7 @@ ios/
     Credentials/        # Keychain storage (V04)
     ProviderTransport/  # Native HTTP and TLS validation (V05)
     Notifications/      # Schedule/cancel/list, event ingestion (N02)
+    NotificationPermission/ # Permission reads and reconciliation on launch/foreground (N04b)
     Ingress/            # Durable capture import (C02)
     Transcription/      # On-device transcript attachment (C05)
     ShadowReview/       # Optional shadow-review feature (E03)
