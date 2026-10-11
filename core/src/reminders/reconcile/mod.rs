@@ -35,6 +35,14 @@
 // never attempted. An attempted request that is absent from the OS after its due time may have
 // fired, so it is left unconfirmed rather than declared unschedulable.
 //
+// Reinstalls: an `acknowledged` schedule whose request is no longer pending with the desired
+// instant before its due time (after a restore or app reinstall, for example) is reissued. The
+// operation is first reopened in the same way (`acknowledged` to `failed`, with the reminder
+// back in `pending_schedule`, committed before the call), so the reinstall's success, transient
+// failure, definitive rejection or lost acknowledgment is recorded with the same disposition as
+// a first attempt. An acknowledgment is terminal only for completions of the request it
+// confirmed; it does not make a later reinstall's failure a duplicate.
+//
 // Failure disposition (m1-contracts.md, Normalized errors): the normalized class of a failed
 // schedule decides whether reconciliation may retry it.
 // - `transient`: the operation stays `failed` and the next pass retries it. Passes run after

@@ -878,6 +878,234 @@ fn a_rejected_schedule_stays_withheld_across_a_relaunch() -> Result<()> {
     Ok(())
 }
 
+// ---- Reinstalling an acknowledged request ---------------------------------------------
+
+/// Install and acknowledge once; then the request is gone from the OS before its due time (a
+/// restore or app reinstall, for example), so the next pass must reissue it.
+fn acknowledged_then_absent(label: &str) -> Result<(Database, FakeCenter, ReminderRecord)> {
+    let mut db = open_db(&temp_db_path(label))?;
+    let revision = insert_item(&mut db, "item-1", ROOFER_TEXT)?;
+    let record = create_reminder(&mut db, "item-1", revision)?;
+    let id = record.notification_id().unwrap();
+    let mut center = FakeCenter::default();
+    reconcile_now(&mut db, &mut center)?;
+    assert_eq!(
+        operation_states(&mut db, "item-1")?,
+        vec![(OperationType::Schedule, id, OperationState::Acknowledged)]
+    );
+    assert_eq!(
+        reminder(&mut db, "item-1")?.schedule_state,
+        ScheduleState::Scheduled
+    );
+    center.pending.clear();
+    center.clear_calls();
+    Ok((db, center, record))
+}
+
+/// A reinstall the OS refuses definitively gets the same disposition as a refused first
+/// attempt: surfaced once as `schedule_failed`, then withheld without further OS calls until an
+/// explicit recovery re-arms it. The earlier acknowledgment must not swallow the failure.
+fn assert_reinstall_rejection_is_withheld(label: &str, class: ErrorClass) -> Result<()> {
+    let (mut db, mut center, record) = acknowledged_then_absent(label)?;
+    let id = record.notification_id().unwrap();
+    center.fail_schedule = Some(definitive(class));
+
+    let failed = reconcile_now(&mut db, &mut center)?;
+
+    assert_eq!(center.calls, vec![Call::List, Call::Schedule(id.clone())]);
+    assert_eq!(failed.failures.len(), 1);
+    assert_eq!(failed.failures[0].class, class);
+    assert!(failed.installed.is_empty());
+    let after = reminder(&mut db, "item-1")?;
+    assert_eq!(after.schedule_state, ScheduleState::ScheduleFailed);
+    assert_eq!(after.request_state, RequestState::Resolved);
+    assert_eq!(after.state_version, record.state_version);
+    assert_eq!(
+        operation_states(&mut db, "item-1")?,
+        vec![(
+            OperationType::Schedule,
+            id.clone(),
+            OperationState::Rejected
+        )]
+    );
+
+    center.fail_schedule = None;
+    center.clear_calls();
+    for _ in 0..2 {
+        let withheld = reconcile_now(&mut db, &mut center)?;
+        assert!(withheld.converged());
+        assert_eq!(withheld.withheld, vec![id.clone()]);
+        assert!(withheld.installed.is_empty());
+    }
+    assert!(center.mutations().is_empty());
+    assert!(center.pending.is_empty());
+    assert_eq!(
+        reminder(&mut db, "item-1")?.schedule_state,
+        ScheduleState::ScheduleFailed
+    );
+
+    // Explicit recovery re-arms the reinstall exactly like a rejected first attempt.
+    let clock = clock_at("2026-01-15T10:40:00Z");
+    let tx = db.immediate_transaction()?;
+    assert!(retry_rejected_schedule(&tx, &clock, "item-1")?);
+    tx.commit()?;
+    let rearmed = reconcile_now(&mut db, &mut center)?;
+    assert_eq!(rearmed.installed, vec![id.clone()]);
+    assert_eq!(center.pending.get(&id), Some(&instant(DUE)));
+    let recovered = reminder(&mut db, "item-1")?;
+    assert_eq!(recovered.schedule_state, ScheduleState::Scheduled);
+    assert_eq!(recovered.state_version, record.state_version);
+    assert_eq!(
+        operation_states(&mut db, "item-1")?,
+        vec![(OperationType::Schedule, id, OperationState::Acknowledged)]
+    );
+    Ok(())
+}
+
+#[test]
+fn a_permanent_failure_while_reinstalling_an_acknowledged_request_is_withheld() -> Result<()> {
+    assert_reinstall_rejection_is_withheld("reinstall_permanent", ErrorClass::Permanent)
+}
+
+#[test]
+fn an_unauthorized_failure_while_reinstalling_an_acknowledged_request_is_withheld() -> Result<()> {
+    assert_reinstall_rejection_is_withheld("reinstall_unauthorized", ErrorClass::Unauthorized)
+}
+
+#[test]
+fn an_unsupported_failure_while_reinstalling_an_acknowledged_request_is_withheld() -> Result<()> {
+    assert_reinstall_rejection_is_withheld("reinstall_unsupported", ErrorClass::Unsupported)
+}
+
+#[test]
+fn a_transient_failure_while_reinstalling_an_acknowledged_request_is_surfaced_then_retried(
+) -> Result<()> {
+    let (mut db, mut center, record) = acknowledged_then_absent("reinstall_transient")?;
+    let id = record.notification_id().unwrap();
+    center.fail_schedule = Some(transient("notification_center_busy"));
+
+    let failed = reconcile_now(&mut db, &mut center)?;
+
+    assert_eq!(center.calls, vec![Call::List, Call::Schedule(id.clone())]);
+    assert_eq!(failed.failures.len(), 1);
+    assert_eq!(failed.failures[0].class, ErrorClass::Transient);
+    let after = reminder(&mut db, "item-1")?;
+    assert_eq!(after.schedule_state, ScheduleState::ScheduleFailed);
+    assert_eq!(after.request_state, RequestState::Resolved);
+    assert_eq!(after.state_version, record.state_version);
+    assert_eq!(
+        operation_states(&mut db, "item-1")?,
+        vec![(OperationType::Schedule, id.clone(), OperationState::Failed)]
+    );
+
+    center.fail_schedule = None;
+    center.clear_calls();
+    let retried = reconcile_now(&mut db, &mut center)?;
+
+    assert_eq!(retried.installed, vec![id.clone()]);
+    assert_eq!(center.calls, vec![Call::List, Call::Schedule(id.clone())]);
+    assert_eq!(center.pending.get(&id), Some(&instant(DUE)));
+    let recovered = reminder(&mut db, "item-1")?;
+    assert_eq!(recovered.schedule_state, ScheduleState::Scheduled);
+    assert_eq!(recovered.state_version, record.state_version);
+    assert_eq!(
+        operation_states(&mut db, "item-1")?,
+        vec![(OperationType::Schedule, id, OperationState::Acknowledged)]
+    );
+    Ok(())
+}
+
+#[test]
+fn a_reinstall_is_reopened_durably_before_the_os_call_returns() -> Result<()> {
+    let path = temp_db_path("reinstall_reopened");
+    let mut db = open_db(&path)?;
+    let revision = insert_item(&mut db, "item-1", ROOFER_TEXT)?;
+    let id = create_reminder(&mut db, "item-1", revision)?
+        .notification_id()
+        .unwrap();
+    let mut center = FakeCenter::default();
+    reconcile_now(&mut db, &mut center)?;
+    center.pending.clear();
+    center.clear_calls();
+    let observed = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let observer_path = path.clone();
+    let observed_in_hook = observed.clone();
+    center.on_schedule = Some(Box::new(move || {
+        let connection = Connection::open(&observer_path).unwrap();
+        let states: (String, String) = connection
+            .query_row(
+                "SELECT o.operation_state, r.schedule_state
+                 FROM reminder_operations o JOIN reminders r ON r.reminder_id = o.reminder_id
+                 WHERE o.operation_type = 'schedule'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        *observed_in_hook.borrow_mut() = Some(states);
+    }));
+
+    let report = reconcile_now(&mut db, &mut center)?;
+
+    assert_eq!(
+        observed.borrow().clone(),
+        Some(("failed".to_string(), "pending_schedule".to_string()))
+    );
+    assert_eq!(report.installed, vec![id.clone()]);
+    assert_eq!(
+        reminder(&mut db, "item-1")?.schedule_state,
+        ScheduleState::Scheduled
+    );
+    assert_eq!(
+        operation_states(&mut db, "item-1")?,
+        vec![(OperationType::Schedule, id, OperationState::Acknowledged)]
+    );
+    Ok(())
+}
+
+#[test]
+fn a_reinstall_whose_acknowledgment_was_lost_then_fired_is_unconfirmed_after_due() -> Result<()> {
+    let path = temp_db_path("reinstall_crash_fired");
+    let mut db = open_db(&path)?;
+    let revision = insert_item(&mut db, "item-1", ROOFER_TEXT)?;
+    let record = create_reminder(&mut db, "item-1", revision)?;
+    let id = record.notification_id().unwrap();
+    let mut center = FakeCenter::default();
+    reconcile_now(&mut db, &mut center)?;
+    center.pending.clear();
+    center.clear_calls();
+
+    // The reinstall reaches the OS, then the app crashes before the acknowledgment is written.
+    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut crashing = CrashAfterInstall {
+            center: &mut center,
+        };
+        let _ = reconcile(&mut db, &clock_at("2026-01-15T10:32:00Z"), &mut crashing);
+    }));
+    assert!(crashed.is_err());
+    drop(db);
+    assert_eq!(center.pending.get(&id), Some(&instant(DUE)));
+    // The reinstalled request fired while the app was not running.
+    center.pending.clear();
+    center.clear_calls();
+
+    let mut relaunched = open_db(&path)?;
+    let report = reconcile_at(&mut relaunched, &mut center, "2026-01-16T09:30:00Z")?;
+
+    assert!(report.expired.is_empty());
+    assert_eq!(report.unconfirmed, vec![id.clone()]);
+    assert!(center.mutations().is_empty());
+    assert_resolved_and_unconfirmed(&mut relaunched, &id, record.state_version)?;
+    assert_eq!(
+        reminder(&mut relaunched, "item-1")?.schedule_state,
+        ScheduleState::PendingSchedule
+    );
+    assert_eq!(
+        operation_states(&mut relaunched, "item-1")?,
+        vec![(OperationType::Schedule, id, OperationState::Failed)]
+    );
+    Ok(())
+}
+
 #[test]
 fn an_explicit_retry_re_arms_a_rejected_schedule_for_the_next_pass() -> Result<()> {
     let mut db = open_db(&temp_db_path("rejected_rearm"))?;

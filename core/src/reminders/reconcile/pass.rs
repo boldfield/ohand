@@ -341,7 +341,7 @@ fn schedule_in_os(
     entry: &DesiredNotification,
     report: &mut ReconcileReport,
 ) -> Result<(), ReconcileError> {
-    if !begin_schedule_attempt(database, entry)? {
+    if !begin_schedule_attempt(database, clock, entry)? {
         report.withheld.push(entry.notification_id.clone());
         return Ok(());
     }
@@ -408,8 +408,16 @@ fn failure(
 /// only after an explicit recovery re-arms it (`retry_rejected_schedule`) or the reminder moves
 /// to a new generation. The state is read inside the same transaction, so a re-arm committed
 /// after the plan snapshot is honoured by this pass.
+///
+/// An `Acknowledged` operation reaches here only because the request it confirmed is no longer
+/// pending in the OS with the desired instant (after a restore or reinstall, for example). It is
+/// reopened as an attempt and the reminder returns to `pending_schedule`: the OS holds no usable
+/// request, installation is not confirmed, and the reinstall's outcome (success, transient or
+/// definitive failure, lost acknowledgment) must be recorded like any first attempt instead of
+/// being discarded as a duplicate of the earlier acknowledgment.
 fn begin_schedule_attempt(
     database: &mut Database,
+    clock: &dyn Clock,
     entry: &DesiredNotification,
 ) -> Result<bool, ReconcileError> {
     let identity = effect_identity(OperationType::Schedule, &entry.notification_id);
@@ -418,17 +426,32 @@ fn begin_schedule_attempt(
         .iter()
         .find(|operation| operation.effect_identity == identity)
         .map(|operation| operation.operation_state);
-    if state == Some(OperationState::Rejected) {
-        return Ok(false);
+    match state {
+        Some(OperationState::Rejected) => return Ok(false),
+        Some(OperationState::Acknowledged) => {
+            let reopened = get_reminder(&tx, &entry.item_id)?.is_some_and(|reminder| {
+                reminder.notification_id().as_deref() == Some(entry.notification_id.as_str())
+            });
+            if reopened {
+                tx.execute(
+                    "UPDATE reminders SET schedule_state = 'pending_schedule', updated_at = ?
+                     WHERE reminder_id = ? AND schedule_state = 'scheduled'",
+                    rusqlite::params![format_instant(clock.now()), &entry.reminder_id],
+                )?;
+            }
+        }
+        Some(OperationState::Pending | OperationState::Failed | OperationState::Superseded)
+        | None => {}
     }
     tx.execute(
         "UPDATE reminder_operations SET operation_state = ?
-         WHERE reminder_id = ? AND effect_identity = ? AND operation_state = ?",
+         WHERE reminder_id = ? AND effect_identity = ? AND operation_state IN (?, ?)",
         rusqlite::params![
             OperationState::Failed.as_str(),
             &entry.reminder_id,
             identity,
             OperationState::Pending.as_str(),
+            OperationState::Acknowledged.as_str(),
         ],
     )?;
     tx.commit()?;
