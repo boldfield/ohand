@@ -366,6 +366,79 @@ final class DeletionCleanupServiceTests: DeletionTestCase {
         }
     }
 
+    func testDamagedRecordNeverPointsCleanupAtAnotherCapturesAudio() async throws {
+        let context = """
+        "context":{"captureInstant":"2026-10-08T09:30:00Z","timezoneID":"UTC","utcOffsetMinutes":0,"locale":"en_US",\
+        "calendar":"gregorian","itemScope":"personal","routeID":"route-personal","entryLocked":false,\
+        "createdAt":"2026-10-08T09:30:01Z"}
+        """
+        let damagedRecords: [(label: String, json: (String) -> String)] = [
+            ("invalid: finalized name bound to another capture", { inProgress in """
+            {"formatVersion":1,"captureID":"cap-1","audio":{"inProgressFileName":"\(inProgress)",\
+            "finalizedFileName":"cap-2.m4a"},\(context)}
+            """ }),
+            ("corrupt: body names another capture", { inProgress in """
+            {"formatVersion":1,"captureID":"cap-2","audio":{"inProgressFileName":"\(inProgress)",\
+            "finalizedFileName":"cap-2.m4a"},\(context)}
+            """ }),
+            ("missing context", { inProgress in """
+            {"formatVersion":1,"captureID":"cap-1","audio":{"inProgressFileName":"\(inProgress)",\
+            "finalizedFileName":"cap-2.m4a"}}
+            """ }),
+        ]
+        // A live recording bound to cap-2, the audio cap-2's own record claims, and a recording voice recovery
+        // attributes to another capture.
+        let bystanderInProgress = ["cap-2.wav", "cap-2-recording.m4a", "opaque-take.wav"]
+        for damaged in damagedRecords {
+            for named in bystanderInProgress {
+                let label = "\(damaged.label) naming \(named)"
+                let world = try makeWorld()
+                try await world.seedItem(itemID, captureID: captureID, finalizedAudio: false)
+                try await world.seedItem("item-2", captureID: "cap-2", finalizedAudio: true, stagedRecord: .audio)
+                for name in ["cap-2.wav", "opaque-take.wav"] {
+                    try Data("synthetic audio".utf8).write(to: world.url(.ingressInProgressAudio, name))
+                }
+                try Data(damaged.json(named).utf8).write(to: world.url(.ingressStagingRecords, "cap-1.json"))
+                world.core.recordDeletion(itemID)
+
+                let report = await world.makeService().reconcile()
+
+                XCTAssertTrue(report.converged, label)
+                XCTAssertEqual(world.remnants(of: captureID), [], label)
+                XCTAssertTrue(world.exists(.finalizedAudio, "cap-2.m4a"), "another capture's finalized audio: \(label)")
+                XCTAssertTrue(world.exists(.ingressStagingRecords, "cap-2.json"), label)
+                for name in bystanderInProgress {
+                    XCTAssertTrue(world.exists(.ingressInProgressAudio, name), "\(name) survives: \(label)")
+                }
+            }
+        }
+    }
+
+    func testUnreadableOtherRecordKeepsAnUnboundNameUntilItsClaimIsKnown() async throws {
+        let world = try makeWorld()
+        try await world.seedItem(itemID, captureID: captureID, finalizedAudio: false)
+        try await world.seedItem("item-2", captureID: "cap-2", finalizedAudio: false, stagedRecord: .text)
+        try Data("""
+        {"formatVersion":1,"captureID":"cap-1","audio":{"inProgressFileName":"opaque-take.m4a","finalizedFileName":"cap-1.m4a"}}
+        """.utf8).write(to: world.url(.ingressStagingRecords, "cap-1.json"))
+        try Data("synthetic audio".utf8).write(to: world.url(.ingressInProgressAudio, "opaque-take.m4a"))
+        world.core.recordDeletion(itemID)
+        world.faults.arm("fs.read:cap-2.json")
+
+        let interrupted = await world.makeService().reconcile()
+
+        XCTAssertFalse(interrupted.converged, "an unknown claim is not treated as no claim")
+        XCTAssertTrue(world.exists(.ingressInProgressAudio, "opaque-take.m4a"))
+        XCTAssertTrue(world.exists(.ingressStagingRecords, "cap-1.json"), "the record still names the audio left to remove")
+
+        let reopened = await world.makeService().reconcile()
+
+        XCTAssertTrue(reopened.converged)
+        XCTAssertFalse(world.exists(.ingressInProgressAudio, "opaque-take.m4a"))
+        XCTAssertEqual(world.remnants(of: captureID), [])
+        XCTAssertTrue(world.exists(.ingressStagingRecords, "cap-2.json"))
+    }
+
     func testCaptureIdentifierThatCouldNamePathIsNeverUsedForFileOperations() async throws {
         let world = try makeWorld()
         let sentinel = world.layout.rootDirectory.appendingPathComponent("x.json")

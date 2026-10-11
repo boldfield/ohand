@@ -15,7 +15,8 @@ enum DeletionLocalCleanupError: Error, Equatable {
 /// interruption converges instead of failing on what an earlier attempt already removed.
 ///
 /// A finalized audio name is bound to its capture (`<captureID>.<extension>`) and capture identifiers contain no dots,
-/// so a prefix match can never touch another capture's file.
+/// so a prefix match can never touch another capture's file. A name a staging record gives is removed only when the
+/// deleted capture owns it, so a damaged or tampered record can never point cleanup at another capture's audio.
 final class DeletionLocalCleanup {
     private let layout: ProtectedStorageLayout
     private let fileSystem: IngressFileSystem
@@ -34,6 +35,8 @@ final class DeletionLocalCleanup {
     /// The audio names come from three sources, so a record that cannot be parsed never hides audio: the hand-off
     /// names in the record, the names salvaged from a corrupt or unsupported record, and the names the voice recorder
     /// binds to the capture ID (`<captureID>.<extension>`, `<captureID>-continued.wav`, `<captureID>-joined.wav`).
+    /// Names from the record are kept only when the capture owns them (see `ownsInProgressName` and
+    /// `ownsFinalizedName`); a name it cannot be shown to own is left in place for its owner.
     func clearIngress(captureID: String) throws {
         guard IngressRecord.isSafeCaptureID(captureID) else { throw DeletionLocalCleanupError.unsafeCaptureIdentifier }
 
@@ -41,8 +44,12 @@ final class DeletionLocalCleanup {
         var inProgressNames = Set(try boundInProgressNames(captureID: captureID))
         var finalizedNames = Set<String>()
         if let handoff = try recordedAudio(captureID: captureID, recordURL: recordURL) {
-            inProgressNames.insert(handoff.inProgressFileName)
-            finalizedNames.insert(handoff.finalizedFileName)
+            if try ownsInProgressName(handoff.inProgressFileName, captureID: captureID, recordURL: recordURL) {
+                inProgressNames.insert(handoff.inProgressFileName)
+            }
+            if Self.ownsFinalizedName(handoff.finalizedFileName, captureID: captureID) {
+                finalizedNames.insert(handoff.finalizedFileName)
+            }
         }
         for name in inProgressNames.sorted() {
             try removeIfPresent(staging.inProgressAudioURL(fileName: name))
@@ -81,7 +88,8 @@ final class DeletionLocalCleanup {
     /// The audio hand-off the staging record names, or nil when there is no record or it names none. A record that
     /// exists but cannot be read now (for example while the device is locked) throws, because treating it as absent
     /// would leave its audio behind. A record that is corrupt, unsupported or invalid is parsed leniently for the same
-    /// two names, since its file name already binds it to the deleted capture.
+    /// two names. The record's file name ties it to the deleted capture, but its body does not prove the names it
+    /// gives belong to that capture, so the caller checks ownership of each before removing anything.
     private func recordedAudio(captureID: String, recordURL: URL) throws -> IngressAudioHandoff? {
         do {
             return try staging.load(captureID: captureID)?.audio
@@ -102,10 +110,51 @@ final class DeletionLocalCleanup {
         return IngressAudioHandoff(inProgressFileName: inProgress, finalizedFileName: finalized)
     }
 
+    /// A finalized name is the capture's only when it is bound to the deletion target's capture ID, whatever the
+    /// record body claims. Any other name is left alone: `remove_audio` still removes this capture's finalized audio
+    /// through the core's reference.
+    private static func ownsFinalizedName(_ name: String, captureID: String) -> Bool {
+        name.hasPrefix(captureID + ".")
+    }
+
+    /// An in-progress name the record gives is the capture's when the voice recorder binds it to the capture ID, or
+    /// when nothing else can claim it. The recorder names every recording `<id>.wav`, `<id>-continued.wav` or
+    /// `<id>-joined.wav`, and voice recovery attributes a `.wav` file to the capture its name binds, so a `.wav` name
+    /// bound to another ID belongs to that capture. Any other name is claimed only through a staging record, so it
+    /// is the capture's when no other record or interrupted record write names it. A record that cannot be read now
+    /// throws, because its claim is unknown.
+    private func ownsInProgressName(_ name: String, captureID: String, recordURL: URL) throws -> Bool {
+        if Self.isBoundInProgressName(name, captureID: captureID) { return true }
+        guard !name.hasSuffix(".wav") else { return false }
+        return try !isClaimedByAnotherRecord(inProgressName: name, recordURL: recordURL)
+    }
+
+    private func isClaimedByAnotherRecord(inProgressName name: String, recordURL: URL) throws -> Bool {
+        let ownNames: Set<String> = [
+            recordURL.lastPathComponent, recordURL.lastPathComponent + IngressFileSystemNaming.incompleteWriteSuffix,
+        ]
+        let recordsDirectory = layout.directory(for: .ingressStagingRecords)
+        for entry in try fileSystem.entryNames(in: recordsDirectory).sorted()
+        where !ownNames.contains(entry) && !entry.hasPrefix(".") {
+            let data = try fileSystem.read(from: recordsDirectory.appendingPathComponent(entry))
+            if Self.inProgressName(in: data) == name { return true }
+        }
+        return false
+    }
+
+    private static func inProgressName(in data: Data) -> String? {
+        guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let audio = object["audio"] as? [String: Any] else { return nil }
+        return audio["inProgressFileName"] as? String
+    }
+
+    private static func isBoundInProgressName(_ name: String, captureID: String) -> Bool {
+        name.hasPrefix(captureID + ".") || name == captureID + "-continued.wav" || name == captureID + "-joined.wav"
+    }
+
     private func boundInProgressNames(captureID: String) throws -> [String] {
-        let continuationNames: Set<String> = [captureID + "-continued.wav", captureID + "-joined.wav"]
-        return try fileSystem.entryNames(in: layout.directory(for: .ingressInProgressAudio))
-            .filter { $0.hasPrefix(captureID + ".") || continuationNames.contains($0) }
+        try fileSystem.entryNames(in: layout.directory(for: .ingressInProgressAudio))
+            .filter { Self.isBoundInProgressName($0, captureID: captureID) }
             .sorted()
     }
 
