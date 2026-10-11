@@ -60,14 +60,29 @@ Destinations are the providers' hosted origins; the command has no flag for anot
 - As a backstop for anything else the executor would refuse (for example a derived request that no longer matches the one journaled), `plan` and `run` first rehearse the executor on a private scratch copy of the journal (mode 0700 directory in the system temporary directory) with an already cancelled run and synthetic adapters. Cancellation is checked before any request is reserved, so the rehearsal sends nothing; the copy is deleted when it ends, and the real journal is opened only if it succeeds.
 - Ctrl-C ends the in-flight request promptly. The journal records what was and was not sent, and the next run resumes from it.
 
+## Reading a journal: `bench report`
+
+```
+bench report --corpus <corpus.json> --journal <run.ndjson> [--format text|json] [--rates <rates.json>]
+```
+
+`report` reads a journal (read-only: it never writes, repairs or creates one, sends nothing and reads no credential), checks it against the corpus like `run` does, scores matched pairs with the XB08 comparison scorer, and prints a readable diagnostic report. It chooses no winner and ranks nothing; `selection.winner` is always null.
+
+- **Denominators first.** Every figure sits next to its count: eligible cases; pairs matched, failed (an arm produced no response) and missing (including cases with no attempt at all); responses per arm by completed, failed, timed out, cancelled, unknown, skipped and missing. A side without a response is never an abstention and is never dropped.
+- **Objective results** per arm against the synthetic oracle (defects, abstention, forbidden mutations, invalid outputs), a paired view (both clean, only A, only B, neither) and disagreement between valid proposals. Agreement is not accuracy. Preference is not collected here.
+- **Operations**: request counts (dispatched, completed, failed, outcome unknown, retries, reruns), client-measured latency (min, lower median, max, total) and provider-reported token totals, each both over matched pairs and over everything. Missing latency or usage is unknown and is reported with the number of attempts that lacked it, never as zero.
+- **Cost** is unknown unless `--rates` supplies a versioned rates file (`rates_version`, `currency`, `profiles[]` of `profile_version`, `input_micros_per_million_tokens`, `output_micros_per_million_tokens`; at most 64 KiB and 16 profiles). The result is labeled an estimate from those rates, rounded down, a lower bound when some attempts reported no tokens, and never a billed cost. No built-in price exists, and a profile without a rate or without reported usage stays unknown.
+- **Comparability** states `model_identity_only_variable: not_established` and lists flags for what weakens a comparison: fake execution, small sample, incomplete pairs, different protocols, differing or unconfirmed effective settings, provider defaults, a served model that differs from or is not named against the pin, profile-version mismatch, missing or conflicting request fingerprints, reruns, unknown experiment metadata, a torn journal tail and outcome-unknown attempts.
+- **Safety.** Per-case rows hold counts and fixed vocabulary only: no model output, defect text or provider error text. Journal strings are flattened of control, bidirectional and zero-width characters, text that looks like a credential or private endpoint is withheld, and refusals never echo journal or rates content. The case list is bounded.
+
 ## Exit status
 
 | Status | Meaning |
 | --- | --- |
-| 0 | Every side completed (or `help` / `plan` succeeded). |
+| 0 | Every side completed (or `help` / `plan` / `report` succeeded). |
 | 1 | The run finished or stopped (budget, cancel, provider failure) with sides not completed. |
 | 2 | Usage error or refusal. Nothing was sent. |
 
 ## Verification
 
-`tools/bench/src/cli/tests.rs` drives the whole command in-process: argument failures, the dry run (no environment reads; the requested journal is never written, without `--journal` no file at all, and the private scratch copy is deleted), fake runs with resume, rerun, cap and configuration-change refusal, every inconsistent-journal refusal with a torn journal left byte-identical by both `plan` and `run`, every live refusal (no switch, no cap, missing grant, unmapped or empty credential) with zero connections, a live run against a local TLS fixture server that checks the credential reaches only the granted origin and appears nowhere in output or journal, and cancellation before a run and while a provider hangs.
+`tools/bench/src/report/tests.rs` builds synthetic journals by hand and checks pair counts, latency, usage and cost arithmetic, comparability flags, incomplete journals, reruns, refusals, a byte-identical torn journal and output escaping. `tools/bench/src/cli/tests.rs` drives the whole command in-process: argument failures, the dry run (no environment reads; the requested journal is never written, without `--journal` no file at all, and the private scratch copy is deleted), fake runs with resume, rerun, cap and configuration-change refusal, every inconsistent-journal refusal with a torn journal left byte-identical by both `plan` and `run`, every live refusal (no switch, no cap, missing grant, unmapped or empty credential) with zero connections, a live run against a local TLS fixture server that checks the credential reaches only the granted origin and appears nowhere in output or journal, and cancellation before a run and while a provider hangs.
