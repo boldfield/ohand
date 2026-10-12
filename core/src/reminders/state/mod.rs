@@ -1393,13 +1393,15 @@ fn commit_outcome(
 
     let (schedule_generation, schedule_state) = match request_state {
         RequestState::Resolved => (previous_generation + 1, ScheduleState::PendingSchedule),
-        _ if retired => (previous_generation, previous_schedule_state),
+        // Replacing a requested notification with a request that installs nothing still
+        // advances the identity, so callbacks for the retired notification stay history only.
+        _ if retired => (previous_generation + 1, previous_schedule_state),
         _ => (previous_generation, ScheduleState::NotScheduled),
     };
 
-    // A new generation is a new native notification: delivery and acknowledgment facts about
-    // the previous one do not carry over to it.
-    let new_notification = request_state == RequestState::Resolved;
+    // A new generation is a new native request: delivery and acknowledgment facts about the
+    // previous one do not carry over to it.
+    let new_notification = schedule_generation != previous_generation;
 
     if existing.is_none() {
         tx.execute(

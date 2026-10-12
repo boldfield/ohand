@@ -761,6 +761,88 @@ fn a_new_generation_starts_unknown_and_old_evidence_stays_in_history() -> Result
 }
 
 #[test]
+fn editing_to_an_already_past_time_drops_old_facts_and_fences_late_callbacks() -> Result<()> {
+    let mut db = open_db("past_edit")?;
+    let revision = insert_action(&mut db, "item-1", "call the roofer")?;
+    let mut center = FakeCenter::default();
+    let first = set_time(
+        &mut db,
+        "item-1",
+        revision,
+        DUE_TIME,
+        "2026-01-15T11:00:00Z",
+    )?;
+    settle(&mut db, &mut center, "2026-01-15T11:01:00Z")?;
+    record_evidence(
+        &mut db,
+        &evidence(
+            &first,
+            1,
+            DeliveryEvidenceKind::Delivered,
+            "2026-01-16T09:00:05Z",
+        ),
+        "2026-01-16T09:01:00Z",
+    )?;
+    acknowledge(
+        &mut db,
+        "item-1",
+        &format!("{}#1", first.reminder_id),
+        "2026-01-16T09:02:00Z",
+    )?;
+
+    let replacement = set_time(
+        &mut db,
+        "item-1",
+        revision,
+        "2026-01-16T08:00:00Z",
+        "2026-01-16T10:00:00Z",
+    )?;
+    assert_eq!(
+        replacement.request_state,
+        RequestState::Unschedulable(ohand_core::reminders::state::UnschedulableReason::TimeInPast)
+    );
+    assert_eq!(replacement.schedule_generation, 2);
+    assert_eq!(replacement.delivery_state, DeliveryState::Unknown);
+    assert_eq!(
+        replacement.acknowledgment_state,
+        AcknowledgmentState::NotAcknowledged
+    );
+
+    // The native cancel of the retired notification still settles the schedule state.
+    settle(&mut db, &mut center, "2026-01-16T10:01:00Z")?;
+    assert!(center.pending.is_empty());
+    assert_eq!(
+        stored(&mut db, "item-1")?.schedule_state,
+        ohand_core::reminders::state::ScheduleState::NotScheduled
+    );
+
+    // A late callback for the retired notification is history only.
+    let late = evidence(
+        &first,
+        1,
+        DeliveryEvidenceKind::Opened,
+        "2026-01-16T09:30:00Z",
+    );
+    assert_eq!(
+        record_evidence(&mut db, &late, "2026-01-16T11:00:00Z")?,
+        RecordOutcome::Recorded {
+            current_generation: false
+        }
+    );
+    let after_late = stored(&mut db, "item-1")?;
+    assert_eq!(after_late.delivery_state, DeliveryState::Unknown);
+    assert_eq!(
+        after_late.acknowledgment_state,
+        AcknowledgmentState::NotAcknowledged
+    );
+
+    let view = history(&mut db, "item-1", "2026-01-16T11:01:00Z")?;
+    assert!(view.summary.elapsed_without_delivery_evidence());
+    assert!(kinds(&view).contains(&HistoryEntryKind::Delivered { generation: 1 }));
+    Ok(())
+}
+
+#[test]
 fn returning_after_a_lapse_replays_nothing() -> Result<()> {
     let mut db = open_db("lapse")?;
     let revision = insert_action(&mut db, "item-1", "call the roofer")?;
