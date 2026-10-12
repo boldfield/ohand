@@ -258,17 +258,70 @@ pub fn mark_deletion_intent(
         ));
     }
 
+    let intent = record_deletion_in_tx(&tx, item_id, current_state.revision, now)?;
+    tx.commit()?;
+    Ok(intent)
+}
+
+/// Tombstone an item at whatever revision it currently has, inside the caller's transaction,
+/// with exactly the effects of [`mark_deletion_intent`]. Used by global reset, which fences
+/// every live item and has no per-item revision to present. An already deleted item returns its
+/// existing intent, so a replay is a no-op.
+pub(crate) fn tombstone_at_current_revision(
+    tx: &Transaction<'_>,
+    item_id: &str,
+    now: DateTime<Utc>,
+) -> Result<DeletionIntent> {
+    let current_state = load_item_state(tx, item_id)
+        .map_err(|e| anyhow!("Failed to load item state: {}", e))?
+        .ok_or_else(|| anyhow!("Item {} not found", item_id))?;
+    if current_state.lifecycle_state == LifecycleState::Deleted {
+        return existing_intent_in_tx(tx, item_id);
+    }
+    record_deletion_in_tx(tx, item_id, current_state.revision, now)
+}
+
+fn existing_intent_in_tx(tx: &Transaction<'_>, item_id: &str) -> Result<DeletionIntent> {
+    let deletion_revision: i32 = tx
+        .query_row(
+            "SELECT revision FROM events WHERE item_id = ? AND event_type = 'deletion'",
+            [item_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| anyhow!("Item {} is deleted but has no deletion event", item_id))?;
+    let work = list_deletion_work_in_tx(tx, item_id)?;
+    if work.is_empty() {
+        return Err(anyhow!(
+            "Item {} is deleted but has no cleanup work recorded",
+            item_id
+        ));
+    }
+    Ok(DeletionIntent {
+        item_id: item_id.to_string(),
+        deletion_revision,
+        work,
+    })
+}
+
+/// Write the tombstone event and every deletion effect for a live item at `revision`.
+fn record_deletion_in_tx(
+    tx: &Transaction<'_>,
+    item_id: &str,
+    revision: i32,
+    now: DateTime<Utc>,
+) -> Result<DeletionIntent> {
     let deletion_event = Event::new(
-        unused_deletion_event_id(&tx, item_id, current_state.revision)?,
+        unused_deletion_event_id(tx, item_id, revision)?,
         item_id.to_string(),
-        current_state.revision,
+        revision,
         EventType::Deletion,
         EventPayload::Deletion,
         now.to_rfc3339(),
     )
     .map_err(|e| anyhow!("Failed to create deletion event: {}", e))?;
 
-    crate::store::events::save_deletion_event_in_tx(&tx, &deletion_event, expected_revision)
+    crate::store::events::save_deletion_event_in_tx(tx, &deletion_event, revision)
         .map_err(|e| anyhow!("Failed to save deletion event: {}", e))?;
 
     let has_audio: bool = tx
@@ -281,14 +334,14 @@ pub fn mark_deletion_intent(
         .optional()?
         .unwrap_or(false);
 
-    remove_readable_content_in_tx(&tx, item_id)
+    remove_readable_content_in_tx(tx, item_id)
         .map_err(|e| anyhow!("Failed to remove readable content: {}", e))?;
-    index::remove_item_from_index(&tx, item_id)
+    index::remove_item_from_index(tx, item_id)
         .map_err(|e| anyhow!("Failed to remove item from search index: {}", e))?;
-    cancel_item_jobs_in_tx(&tx, item_id).map_err(|e| anyhow!("Failed to cancel jobs: {}", e))?;
-    cancel_item_reminders_in_tx(&tx, item_id, &now)
+    cancel_item_jobs_in_tx(tx, item_id).map_err(|e| anyhow!("Failed to cancel jobs: {}", e))?;
+    cancel_item_reminders_in_tx(tx, item_id, &now)
         .map_err(|e| anyhow!("Failed to cancel reminders: {}", e))?;
-    retry_failed_notification_cancels_in_tx(&tx, item_id)
+    retry_failed_notification_cancels_in_tx(tx, item_id)
         .map_err(|e| anyhow!("Failed to retry notification cancels: {}", e))?;
 
     let mut required_work = Vec::new();
@@ -298,16 +351,15 @@ pub fn mark_deletion_intent(
     required_work.push(DeletionWorkType::ClearIngress);
     required_work.push(DeletionWorkType::CancelNotifications);
     for work_type in required_work {
-        enqueue_deletion_work_in_tx(&tx, item_id, work_type, now)
+        enqueue_deletion_work_in_tx(tx, item_id, work_type, now)
             .map_err(|e| anyhow!("Failed to enqueue deletion cleanup: {}", e))?;
     }
 
-    let work = list_deletion_work_in_tx(&tx, item_id)?;
-    tx.commit()?;
+    let work = list_deletion_work_in_tx(tx, item_id)?;
 
     Ok(DeletionIntent {
         item_id: item_id.to_string(),
-        deletion_revision: expected_revision,
+        deletion_revision: revision,
         work,
     })
 }
