@@ -12,7 +12,9 @@
 //!   time and must return promptly: start the OS call and return. Native answers each command
 //!   exactly once with `ohand_core_complete_notification_effect`; the core refuses an answer
 //!   whose shape does not fit the command (a listing for a schedule or cancel, a completion for
-//!   a listing), so no other answer can stand in for an installed or cancelled request. A command that is not answered
+//!   a listing), so no other answer can stand in for an installed or cancelled request. An
+//!   answer field is either omitted or carries its value: an explicit `null` is malformed, never
+//!   read as omitted, so `{"pending":null}` or `{"error":null}` cannot pass for `{}`. A command that is not answered
 //!   within `EFFECT_DEADLINE` is abandoned (`OHAND_NOTIFICATION_COMMAND_ABANDON`) and counts as a
 //!   transient failure, which the next pass retries; a late answer is `not_found` and ignored.
 //! * `ohand_core_start_reconcile_reminders` queues one pass. The request is
@@ -50,7 +52,7 @@ use crate::reminders::reconcile::{
 };
 use crate::store::schema::{Database, SystemClock};
 use chrono::{DateTime, SecondsFormat, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::ffi::c_void;
@@ -311,19 +313,33 @@ struct ErrorAnswer {
 #[serde(deny_unknown_fields)]
 struct PendingAnswer {
     notification_id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present")]
     fire_at: Option<String>,
 }
 
+/// An answer field is either omitted or carries a value of its type. Serde would otherwise read
+/// an explicit `null` exactly like an omitted field, so `{"pending":null}` or `{"error":null}`
+/// would pass for the completion `{}` and could record a schedule or cancel that native never
+/// confirmed. This deserializer accepts only a value, so a `null` field is a malformed answer.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AnswerJson {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present")]
     error: Option<ErrorAnswer>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present")]
     pending: Option<Vec<PendingAnswer>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present")]
     unattributable: Option<usize>,
+}
+
+/// Deserializes a field that is present as its value; `null` is refused (the field type, not
+/// `Option`, is read), and an omitted field takes the `default` of the attribute.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 /// The placeholder identifier of the `index`th unattributable pending request. It is longer than
@@ -767,8 +783,9 @@ pub unsafe extern "C" fn ohand_core_start_reconcile_reminders(
 /// `{"pending":[{"notification_id","fire_at"}],"unattributable":n}` for a listing (`n` optional,
 /// see the module documentation). A failure carries nothing else. The answer must fit the
 /// command: a schedule or cancel accepts only `{}` or a failure, a listing only a listing or a
-/// failure. A malformed or mismatched answer is `invalid_request` and leaves the command waiting
-/// for a valid one. An answer for a command that has ended is `not_found`.
+/// failure. Every field is optional but, when present, must carry its value: a `null` field is
+/// malformed, not omitted. A malformed or mismatched answer is `invalid_request` and leaves the
+/// command waiting for a valid one. An answer for a command that has ended is `not_found`.
 ///
 /// # Safety
 /// `answer` must point at `answer_len` readable bytes (it may be null only when `answer_len` is

@@ -178,13 +178,16 @@ fn answer(native: &NativeSide, effect_id: u64, body: Value) {
     assert_eq!(outcome.status, OHAND_CORE_STATUS_OK, "answer accepted");
 }
 
-/// Answers that do not fit `command`, or mix a failure with a listing.
+/// Answers that do not fit `command`, mix a failure with a listing, or carry a `null` field in
+/// place of a value (which must not be read as an omitted field, so none of them can pass for
+/// the completion `{}` or for a listing).
 fn mismatched_answers(command: u32) -> Vec<Value> {
     let failure = json!({"class": "transient", "code": "notification_center_failed"});
     let mut bodies = vec![
         json!({"error": failure, "pending": []}),
         json!({"error": failure, "unattributable": 1}),
     ];
+    bodies.extend(null_field_answers());
     if command == OHAND_NOTIFICATION_COMMAND_LIST_PENDING {
         bodies.push(json!({}));
     } else {
@@ -192,6 +195,19 @@ fn mismatched_answers(command: u32) -> Vec<Value> {
         bodies.push(json!({"pending": [], "unattributable": 2}));
     }
     bodies
+}
+
+/// Answers with an explicit `null` where a value or an omitted field is required.
+fn null_field_answers() -> Vec<Value> {
+    vec![
+        json!({"pending": null}),
+        json!({"error": null}),
+        json!({"unattributable": null}),
+        json!({"error": null, "pending": []}),
+        json!({"pending": [], "unattributable": null}),
+        json!({"pending": [{"notification_id": "p", "fire_at": null}]}),
+        json!({"error": null, "pending": null, "unattributable": null}),
+    ]
 }
 
 unsafe extern "C" fn native_command(
@@ -760,11 +776,21 @@ fn bad_requests_and_answers_are_refused_with_normalized_failures() {
         br#"{"pending":[],"unattributable":-1}"#,
         br#"{"error":{"class":"transient","code":"x"},"pending":[]}"#,
         br#"{"error":{"class":"transient","code":"x"},"unattributable":1}"#,
+        br#"{"pending":null}"#,
+        br#"{"error":null}"#,
+        br#"{"unattributable":null}"#,
+        br#"{"error":null,"pending":[]}"#,
+        br#"{"pending":[{"notification_id":"p","fire_at":null}]}"#,
     ] {
         let outcome = consume(unsafe {
             ohand_core_complete_notification_effect(session.handle, 1, bytes.as_ptr(), bytes.len())
         });
-        assert_eq!(outcome.code(), "invalid_request");
+        assert_eq!(
+            outcome.code(),
+            "invalid_request",
+            "{}",
+            String::from_utf8_lossy(bytes)
+        );
     }
     let unknown = consume(unsafe {
         ohand_core_complete_notification_effect(session.handle, u64::MAX, b"{}".as_ptr(), 2)
@@ -815,8 +841,11 @@ fn answers_that_do_not_fit_the_command_are_refused_and_the_command_waits_for_a_v
     session.close();
 }
 
+/// Every mismatched answer, including the `null`-field ones, is sent while each schedule
+/// waits; the schedule is then left unanswered, so the pass can only record it as scheduled if
+/// one of those answers was wrongly accepted as the completion `{}`.
 #[test]
-fn a_schedule_answered_with_a_listing_is_never_recorded_as_scheduled() {
+fn a_schedule_answered_with_a_listing_or_null_fields_is_never_recorded_as_scheduled() {
     let _guard = serial();
     let mut session = Session::open("mismatch-schedule", 2);
     {
@@ -849,6 +878,28 @@ fn a_schedule_answered_with_a_listing_is_never_recorded_as_scheduled() {
     assert_eq!(states(&recovered, "schedule_state"), ["scheduled"; 2]);
     assert_eq!(session.native.center().schedules.len(), 2);
     session.close();
+}
+
+#[test]
+fn null_answer_fields_are_malformed_rather_than_omitted() {
+    for body in null_field_answers() {
+        let text = body.to_string();
+        assert!(
+            serde_json::from_str::<AnswerJson>(&text).is_err(),
+            "{text} must not parse"
+        );
+    }
+    for (text, done) in [
+        ("{}", true),
+        (r#"{"pending":[]}"#, false),
+        (r#"{"pending":[{"notification_id":"p"}]}"#, false),
+        (r#"{"pending":[],"unattributable":0}"#, false),
+        (r#"{"error":{"class":"transient","code":"x"}}"#, false),
+    ] {
+        let parsed = serde_json::from_str::<AnswerJson>(text).unwrap();
+        let answer = parse_answer(parsed).unwrap_or_else(|_| panic!("{text} parses"));
+        assert_eq!(matches!(answer, Answer::Done), done, "{text}");
+    }
 }
 
 #[test]
