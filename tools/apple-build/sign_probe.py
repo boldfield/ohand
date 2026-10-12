@@ -86,6 +86,14 @@ UNTARGETED_DEPENDENCY_KINDS = ("framework", "sdk", "package", "carthage", "bundl
 MODELED_TARGET_KEYS = frozenset({"type", "platform", "deploymentTarget", "sources", "settings", "dependencies", "preBuildScripts",
                                  "postCompileScripts", "postBuildScripts", "buildRules", "attributes"})
 MODELED_TARGET_DEPENDENCY_KEYS = frozenset({"target", "embed", "link", "codeSign", "removeHeaders", "weak"})
+# Executable build phases can create or rewrite bundles while the archive is built, so the application and its resolved
+# dependency targets must not use them. Source entries may only name files compiled or copied by their file type: an
+# explicit build phase (copyFiles into PlugIns, for one) or a path that is itself a signed bundle refuses the run.
+EXECUTABLE_BUILD_PHASE_KEYS = ("preBuildScripts", "postCompileScripts", "postBuildScripts", "buildRules")
+MODELED_SOURCE_KEYS = frozenset({"path", "name", "group", "createIntermediateGroups", "excludes", "includes", "optional",
+                                 "compilerFlags", "headerVisibility"})
+SIGNED_BUNDLE_SUFFIXES = (".app", ".appex", ".xpc", ".framework")
+BUNDLE_IDENTIFIER_REFERENCES = ("$(PRODUCT_BUNDLE_IDENTIFIER)", "${PRODUCT_BUNDLE_IDENTIFIER}")
 STRUCTURED_SETTINGS_KEYS = ("base", "configs", "groups")
 
 PROFILE_PATH_VARIABLE = "OHAND_SIGNING_PROFILE_PATH"
@@ -683,6 +691,18 @@ class SigningRun:
             raise integrity_error("the options of the project spec cannot be read before the build", "project-spec")
         if isinstance(options, dict) and options.get("transitivelyLinkDependencies") not in (None, False):
             raise unmodeled("options.transitivelyLinkDependencies")
+        spec_directory = self.project_spec_path.parent
+        # A declared scheme may only build its own target: scheme actions are executable and other build targets
+        # could place further bundles beside the application.
+        schemes = spec.get("schemes")
+        if schemes is not None and not isinstance(schemes, dict):
+            raise integrity_error("the schemes of the project spec cannot be read before the build", "project-spec")
+        if isinstance(schemes, dict) and self.scheme in schemes:
+            declared = schemes[self.scheme]
+            build = declared.get("build") if isinstance(declared, dict) else None
+            if not isinstance(declared, dict) or set(declared) != {"build"} or not isinstance(build, dict) or set(build) != {"targets"} \
+                    or not isinstance(build["targets"], dict) or set(build["targets"]) != {self.scheme}:
+                raise unmodeled(f"scheme {self.scheme} with actions or targets beyond building {self.scheme}")
 
         def target_of(name: str, role: str) -> dict:
             if not isinstance(name, str) or name not in targets or not isinstance(targets[name], dict) \
@@ -694,7 +714,53 @@ class SigningRun:
                 raise unmodeled(f"key {unknown[0]} in target {name}")
             if "platform" in target and not isinstance(target["platform"], str):
                 raise unmodeled(f"a platform list in target {name}")
+            for phase in EXECUTABLE_BUILD_PHASE_KEYS:
+                if target.get(phase) not in (None, []):
+                    raise unmodeled(f"executable build phase {phase} in target {name}")
+            check_sources_of(name, target.get("sources"))
             return target
+
+        def check_sources_of(name: str, sources) -> None:
+            if sources is None:
+                return
+            entries = sources if isinstance(sources, list) else [sources]
+            for entry in entries:
+                if isinstance(entry, dict):
+                    unknown = sorted(str(key) for key in entry if key not in MODELED_SOURCE_KEYS)
+                    if unknown:
+                        raise unmodeled(f"key {unknown[0]} in a source of target {name}")
+                    path = entry.get("path")
+                else:
+                    path = entry
+                if not isinstance(path, str) or not path:
+                    raise integrity_error(f"a source of project target {name} cannot be read before the build", "project-spec")
+                # A signed bundle among the sources, named directly or found inside a source directory, would be
+                # copied into the application unsigned by this tool.
+                source = spec_directory / path
+                found = [source] if source.name.endswith(SIGNED_BUNDLE_SUFFIXES) or any(
+                    part.endswith(SIGNED_BUNDLE_SUFFIXES) for part in Path(path).parts) else []
+                if not found and source.is_dir():
+                    found = [nested for nested in source.rglob("*") if nested.name.endswith(SIGNED_BUNDLE_SUFFIXES)]
+                if found:
+                    raise integrity_error(f"a source of project target {name} is a signed bundle, which this tool does not sign", "project-spec")
+
+        def check_info_plists_of(name: str, configured_settings: List[dict]) -> None:
+            # A literal CFBundleIdentifier in the Info.plist would override PRODUCT_BUNDLE_IDENTIFIER in the archive.
+            for values in configured_settings:
+                plist_path = values.get("INFOPLIST_FILE")
+                if plist_path is None:
+                    continue
+                unreadable = integrity_error(f"the Info.plist of project target {name} cannot be read before the build", "project-spec")
+                if not isinstance(plist_path, str) or "$" in plist_path:
+                    raise unreadable
+                try:
+                    info = plistlib.loads((spec_directory / plist_path).read_bytes())
+                except (OSError, ValueError, plistlib.InvalidFileException):
+                    raise unreadable from None
+                if not isinstance(info, dict):
+                    raise unreadable
+                if info.get("CFBundleIdentifier", BUNDLE_IDENTIFIER_REFERENCES[0]) not in BUNDLE_IDENTIFIER_REFERENCES:
+                    raise integrity_error(f"the Info.plist of project target {name} sets its own bundle identifier", "project-spec")
 
         def bundle_identifier_of(name: str) -> str:
             settings = targets[name].get("settings")
@@ -722,6 +788,7 @@ class SigningRun:
             for values in configurations.values():
                 if "PRODUCT_BUNDLE_IDENTIFIER" in values and values["PRODUCT_BUNDLE_IDENTIFIER"] != identifier:
                     raise integrity_error(f"the bundle identifier of project target {name} differs between configurations", "project-spec")
+            check_info_plists_of(name, [base, *configurations.values()])
             return identifier
 
         def dependencies_of(name: str) -> list:

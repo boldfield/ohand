@@ -984,6 +984,28 @@ class EmbeddedExtensionTests(SigningToolTestCase):
             "transitive linking": (dict(edit=lambda spec: spec.update(options={"transitivelyLinkDependencies": True})),
                                    "uses options.transitivelyLinkDependencies"),
             "extension embedding a signed bundle": (dict(edit=nested_signed_bundle), "app extension OhAndCaptureControl embeds a signed bundle"),
+            "post-build script that creates an extension": (dict(edit=lambda spec: spec["targets"]["OhAndApp"].update(postBuildScripts=[
+                {"name": "Extra", "script": 'mkdir -p "$TARGET_BUILD_DIR/$PLUGINS_FOLDER_PATH/Extra.appex"'}])),
+                "executable build phase postBuildScripts in target OhAndApp"),
+            "pre-build script on the extension": (dict(edit=lambda spec: spec["targets"]["OhAndCaptureControl"].update(
+                preBuildScripts=[{"script": "true"}])), "executable build phase preBuildScripts in target OhAndCaptureControl"),
+            "post-compile script on a framework dependency": (dict(edit=lambda spec: spec["targets"]["OhAndCoreBridge"].update(
+                postCompileScripts=[{"script": "true"}])), "executable build phase postCompileScripts in target OhAndCoreBridge"),
+            "build rule": (dict(edit=lambda spec: spec["targets"]["OhAndApp"].update(buildRules=[{"fileType": "*.x", "script": "true"}])),
+                           "executable build phase buildRules in target OhAndApp"),
+            "source copied into PlugIns": (dict(edit=lambda spec: spec["targets"]["OhAndApp"].update(sources=[
+                {"path": "Prebuilt/Extra.appex", "buildPhase": {"copyFiles": {"destination": "plugins"}}}])),
+                "key buildPhase in a source of target OhAndApp"),
+            "source of another type": (dict(edit=lambda spec: spec["targets"]["OhAndApp"].update(sources=[{"path": "Bundles", "type": "folder"}])),
+                                       "key type in a source of target OhAndApp"),
+            "source that is a signed bundle": (dict(edit=lambda spec: spec["targets"]["OhAndApp"].update(sources=["Prebuilt/Extra.appex"])),
+                                               "a source of project target OhAndApp is a signed bundle"),
+            "scheme with a pre-action": (dict(edit=lambda spec: spec.update(schemes={"OhAndApp": {
+                "build": {"targets": {"OhAndApp": "all"}, "preActions": [{"script": "true"}]}}})),
+                "scheme OhAndApp with actions or targets beyond building OhAndApp"),
+            "scheme building another target": (dict(edit=lambda spec: spec.update(schemes={"OhAndApp": {
+                "build": {"targets": {"OhAndApp": "all", "OhAndCoreBridge": "all"}}}})),
+                "scheme OhAndApp with actions or targets beyond building OhAndApp"),
         }
         for description, (options, message) in cases.items():
             with self.subTest(description):
@@ -994,6 +1016,50 @@ class EmbeddedExtensionTests(SigningToolTestCase):
                 self.assertEqual(self.calls_of("security", "import"), [])
                 self.assertEqual(self.installed_profile_files(), [])
                 self.assertEqual(self.only_evidence()["failed_stage"], "project-spec")
+
+    def test_signed_bundles_and_bundle_identifiers_found_on_disk_are_refused_before_generation(self):
+        (self.inputs / "Sources" / "Vendor" / "Extra.appex").mkdir(parents=True)
+        (self.inputs / "Plain").mkdir()
+        (self.inputs / "Plain" / "main.swift").write_text("")
+
+        def with_sources(path):
+            return lambda spec: spec["targets"]["OhAndApp"].update(sources=[{"path": path, "createIntermediateGroups": True}])
+
+        def with_info_plist(name, identifier):
+            def edit(spec):
+                plist = self.inputs / f"{name}.plist"
+                plist.write_bytes(plistlib.dumps({"CFBundleIdentifier": identifier, "CFBundleName": name}))
+                spec["targets"][name]["settings"]["INFOPLIST_FILE"] = plist.name
+            return edit
+
+        refused = {
+            "source directory containing an extension": (with_sources("Sources"), "a source of project target OhAndApp is a signed bundle"),
+            "literal extension identifier": (with_info_plist("OhAndCaptureControl", SECOND_EXTENSION_IDENTIFIER),
+                                             "the Info.plist of project target OhAndCaptureControl sets its own bundle identifier"),
+            "literal application identifier": (with_info_plist("OhAndApp", APP_BUNDLE_IDENTIFIER),
+                                               "the Info.plist of project target OhAndApp sets its own bundle identifier"),
+            "missing Info.plist": (lambda spec: spec["targets"]["OhAndApp"]["settings"].update(INFOPLIST_FILE="Absent.plist"),
+                                   "the Info.plist of project target OhAndApp cannot be read"),
+        }
+        for description, (edit, message) in refused.items():
+            with self.subTest(description):
+                self.state_reset()
+                self.write_profile(Entitlements=self.wildcard_entitlements())
+                self.assert_refused_before_generation(self.sign_app(**self.spec_environment(edit=edit)), 4, message)
+                self.assertEqual(self.only_evidence()["failed_stage"], "project-spec")
+
+        accepted = {
+            "plain source directory": with_sources("Plain"),
+            "Info.plist referring to the build setting": with_info_plist("OhAndCaptureControl", "$(PRODUCT_BUNDLE_IDENTIFIER)"),
+            "scheme building only the application": lambda spec: spec.update(schemes={"OhAndApp": {"build": {"targets": {"OhAndApp": "all"}}}}),
+        }
+        for description, edit in accepted.items():
+            with self.subTest(description):
+                self.state_reset()
+                self.write_profile(Entitlements=self.wildcard_entitlements())
+                result = self.sign_app(**self.spec_environment(edit=edit))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(len(self.calls_of("xcodebuild", "archive")), 1)
 
     def test_the_repository_project_spec_is_within_the_modeled_subset(self):
         result = self.sign_app()
