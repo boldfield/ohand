@@ -57,12 +57,15 @@ final class NotificationPermissionCoreIntegrationTests: XCTestCase {
     private final class Session {
         let core: CoreHandle
         private(set) var events: [CoreEvent] = []
+        /// The operation identifier of every event the core delivered, claimed by a consumer or not.
+        private(set) var observedOperationIDs: [UInt64] = []
         private var nextOperationID: UInt64 = 1
         var consumer: ((CoreEvent) -> Bool)?
 
         init(path: String) throws {
             core = try CoreHandle(path: path)
             try core.setEventHandler { [unowned self] event in
+                self.observedOperationIDs.append(event.operationID)
                 if self.consumer?(event) == true { return }
                 self.events.append(event)
             }
@@ -140,6 +143,33 @@ final class NotificationPermissionCoreIntegrationTests: XCTestCase {
         }
     }
 
+    /// The fake center with every pending-list read held at `gate` until it is released. The pass that asked
+    /// stays inside the core, waiting on its native effect, for as long as a test needs.
+    private final class GatedPendingListCenter: NotificationCenterProviding, @unchecked Sendable {
+        private let base: FakeNotificationCenter
+        private let gate: SuspensionGate
+
+        init(base: FakeNotificationCenter, gate: SuspensionGate) {
+            self.base = base
+            self.gate = gate
+        }
+
+        func authorization() async -> NotificationAuthorization { await base.authorization() }
+
+        func add(_ request: NotificationCenterRequest) async throws { try await base.add(request) }
+
+        func pendingRequests() async throws -> [NotificationCenterPendingRequest] {
+            await gate.wait()
+            return try await base.pendingRequests()
+        }
+
+        func removePending(identifiers: [String]) async { await base.removePending(identifiers: identifiers) }
+
+        func deliveredNotifications() async -> [NotificationCenterDeliveredNotification] {
+            await base.deliveredNotifications()
+        }
+    }
+
     private struct Rig {
         let session: Session
         let center: FakeNotificationCenter
@@ -150,13 +180,20 @@ final class NotificationPermissionCoreIntegrationTests: XCTestCase {
 
     private func makeRig(
         authorization: NotificationAuthorization,
-        prompts: [OptionalPromptCandidate] = []
+        prompts: [OptionalPromptCandidate] = [],
+        pendingListGate: SuspensionGate? = nil
     ) throws -> Rig {
         let session = try Session(path: storePath)
         let center = FakeNotificationCenter()
         center.authorizationStatus = authorization
-        let bridge = NotificationBridge(center: center, ingestor: NotificationEventIngestor(handler: { _ in }))
-        let core = try CoreReminderReconciler(core: session.core, bridge: bridge, center: center)
+        let effectsCenter: NotificationCenterProviding
+        if let pendingListGate {
+            effectsCenter = GatedPendingListCenter(base: center, gate: pendingListGate)
+        } else {
+            effectsCenter = center
+        }
+        let bridge = NotificationBridge(center: effectsCenter, ingestor: NotificationEventIngestor(handler: { _ in }))
+        let core = try CoreReminderReconciler(core: session.core, bridge: bridge, center: effectsCenter)
         session.consumer = { core.handle($0) }
         let observations = InMemoryNotificationPermissionObservationStore()
         let reconciler = NotificationPermissionReconciler(
@@ -186,17 +223,33 @@ final class NotificationPermissionCoreIntegrationTests: XCTestCase {
         }
     }
 
-    private func runAsync<Value>(timeout: TimeInterval = 20, _ body: @escaping () async throws -> Value) throws -> Value {
+    private func startAsync<Value>(_ body: @escaping () async throws -> Value) -> AsyncResultBox<Value> {
         let box = AsyncResultBox<Value>()
         Task {
             do { box.set(.success(try await body())) } catch { box.set(.failure(error)) }
         }
+        return box
+    }
+
+    /// Pumps the main run loop, where the core delivers events, until `condition` holds or `timeout` passes.
+    private func pump(until condition: () -> Bool, timeout: TimeInterval = 20) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if let outcome = box.result { return try outcome.get() }
+            if condition() { return true }
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
         }
-        throw CoreFailure(errorClass: .transient, code: "test_timeout", message: "async work did not finish")
+        return condition()
+    }
+
+    private func outcome<Value>(of box: AsyncResultBox<Value>, timeout: TimeInterval = 20) throws -> Value {
+        guard pump(until: { box.result != nil }, timeout: timeout), let outcome = box.result else {
+            throw CoreFailure(errorClass: .transient, code: "test_timeout", message: "async work did not finish")
+        }
+        return try outcome.get()
+    }
+
+    private func runAsync<Value>(timeout: TimeInterval = 20, _ body: @escaping () async throws -> Value) throws -> Value {
+        try outcome(of: startAsync(body), timeout: timeout)
     }
 
     func testDenialRevocationAndRegainDriveTheRealCoreWithoutDuplicateInstallsOrDeliveryFacts() throws {
@@ -261,6 +314,64 @@ final class NotificationPermissionCoreIntegrationTests: XCTestCase {
         XCTAssertEqual(reports.map(\.readiness.scheduledCount), [3, 3])
         XCTAssertEqual(rig.center.addedRequests.count, 3)
         XCTAssertEqual(rig.center.pendingIdentifiers.count, 3)
+    }
+
+    /// An assembly routes one core handle's events to every service on it, and the core accepts a duplicate
+    /// operation identifier without reservation. The reconciler therefore takes its identifiers from a range
+    /// no other client uses, so a reminder pass and a shadow review read that are in flight together each
+    /// reach only their owner.
+    func testAReminderPassOverlappingAShadowReviewReadOnOneCoreReachesOnlyItsOwner() throws {
+        let seeded = reminders(count: 2)
+        try prepareStore(seeded)
+        let gate = SuspensionGate()
+        let rig = try makeRig(authorization: .authorized, pendingListGate: gate)
+        defer { finish(rig) }
+        let reconciler = rig.reconciler
+        let shadow = ShadowReviewService(core: rig.session.core, configuration: .off)
+        var claims: [UInt64: (shadow: Bool, reminders: Bool)] = [:]
+        rig.session.consumer = { event in
+            // Both services are asked, so an event two of them would take is visible as a double claim.
+            let claimedByShadow = shadow.handle(event)
+            let claimedByReminders = rig.core.handle(event)
+            claims[event.operationID] = (shadow: claimedByShadow, reminders: claimedByReminders)
+            return claimedByShadow || claimedByReminders
+        }
+
+        // The pass is inside the core, waiting on the OS pending list, when the shadow read is submitted. The
+        // read queues behind it on the core's single worker, so both answers are outstanding at once.
+        let pass = startAsync { try await reconciler.refresh(trigger: .launch) }
+        XCTAssertTrue(pump(until: { gate.arrivals >= 1 }), "the pass asked for the pending list")
+        var shadowResult: ShadowReviewReadResult?
+        shadow.record(jobID: "no-such-case") { shadowResult = $0 }
+        XCTAssertNil(pass.result, "the pass is held while the read is submitted")
+        gate.release()
+
+        let report = try outcome(of: pass)
+        XCTAssertTrue(pump(until: { shadowResult != nil }), "the shadow read answers its owner")
+        XCTAssertEqual(shadowResult, .failed(code: "not_found"))
+        XCTAssertNil(report.reconciliationFailure)
+        XCTAssertEqual(report.readiness.scheduledCount, 2)
+        XCTAssertTrue(report.converged)
+        XCTAssertEqual(rig.center.addedRequests.count, 2)
+
+        let repeated = try runAsync { try await reconciler.refresh(trigger: .foreground) }
+        XCTAssertEqual(repeated.readiness.scheduledCount, 2)
+        XCTAssertEqual(rig.center.addedRequests.count, 2, "the overlap caused no second install")
+
+        let observed = rig.session.observedOperationIDs
+        XCTAssertEqual(observed.count, 3, "one shadow read and two reminder passes")
+        XCTAssertEqual(Set(observed).count, observed.count, "no two operations shared an identifier")
+        for operationID in observed {
+            let claim = try XCTUnwrap(claims[operationID])
+            XCTAssertNotEqual(claim.shadow, claim.reminders, "exactly one service owns operation \(operationID)")
+        }
+        let reminderIDs = observed.filter { claims[$0]?.reminders == true }
+        let shadowIDs = observed.filter { claims[$0]?.shadow == true }
+        XCTAssertEqual(reminderIDs.count, 2)
+        XCTAssertEqual(shadowIDs.count, 1)
+        XCTAssertTrue(reminderIDs.allSatisfy { $0 >= CoreReminderReconciler.firstOperationID })
+        XCTAssertTrue(shadowIDs.allSatisfy { $0 < CoreReminderReconciler.firstOperationID })
+        XCTAssertTrue(rig.session.events.isEmpty, "no event went unclaimed")
     }
 
     func testCapacityHoldsOverflowRemindersAndOptionalPromptsNeverTakeTheirSlots() throws {

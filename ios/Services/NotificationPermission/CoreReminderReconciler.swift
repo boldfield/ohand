@@ -41,8 +41,14 @@ public struct ReminderReconciliationFailure: Error, Equatable, Sendable {
 ///
 /// It owns the core's event handler through `claimEventHandler()`, or an assembly that needs other event
 /// consumers forwards each event to `handle(_:)` and keeps the handler. Operation identifiers start at
-/// `firstOperationID`, which an assembly sharing the handle sets apart from its other consumers.
+/// `firstOperationID`, a range of its own: the core accepts a duplicate operation identifier without complaint,
+/// so two services sharing one handle and one range would each take the other's event and fail to read it.
 public final class CoreReminderReconciler: ReminderReconciling, @unchecked Sendable {
+    /// The first operation identifier this reconciler submits. Every core client sharing a handle owns a
+    /// distinct range: shadow review starts at `1 << 48`, transcription at `1 << 50`, deletion cleanup at
+    /// `1 << 52`, export at `1 << 54`, processing health at `1 << 61` and the job runner at `1 << 62`.
+    public static let firstOperationID: UInt64 = 1 << 56
+
     private let core: CoreHandle
     private let lock = NSLock()
     private var waiting: [UInt64: CheckedContinuation<Result<Data, CoreFailure>, Never>] = [:]
@@ -55,7 +61,7 @@ public final class CoreReminderReconciler: ReminderReconciling, @unchecked Senda
     public init(
         core: CoreHandle, bridge: NotificationBridge, center: NotificationCenterProviding,
         effectTimeout: TimeInterval = 10, removalPollInterval: TimeInterval = 0.05, maximumRemovalPolls: Int = 20,
-        firstOperationID: UInt64 = 1 << 48
+        firstOperationID: UInt64 = CoreReminderReconciler.firstOperationID
     ) throws {
         self.core = core
         self.nextOperationID = firstOperationID
