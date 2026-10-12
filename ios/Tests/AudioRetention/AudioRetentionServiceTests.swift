@@ -148,6 +148,82 @@ final class AudioRetentionServiceTests: XCTestCase {
         XCTAssertEqual(try storage.ledgerEntries().map(\.state), [.failing])
     }
 
+    // MARK: Unknown presence is never absence
+
+    func testALookupThatFailsBeforeTheUnlinkLeavesTheAudioAndIsNotSuccess() async throws {
+        try expire("item-1", audio: "a.m4a")
+        fileSystem.failPresenceLookups(of: "a.m4a")
+        let service = makeService()
+
+        let failed = await service.sweep()
+        XCTAssertEqual(outcome(failed, "item-1"), .retryLater(.storageUnavailable))
+        XCTAssertFalse(failed.converged)
+        XCTAssertTrue(storage.audioExists("a.m4a"), "a file that could not be looked up is not skipped as absent")
+        XCTAssertEqual(try storage.ledgerEntries().map(\.state), [.failing], "no removal is recorded")
+
+        let next = await service.sweep()
+        XCTAssertEqual(outcome(next, "item-1"), .removed)
+        XCTAssertFalse(storage.audioExists("a.m4a"))
+        XCTAssertEqual(try storage.ledgerEntries().map(\.state), [.removed])
+    }
+
+    func testALookupThatFailsAfterTheUnlinkIsNotReportedAsRemoved() async throws {
+        try expire("item-1", audio: "a.m4a")
+        fileSystem.failPresenceLookups(of: "a.m4a", afterPassing: 1)
+        let service = makeService()
+
+        let failed = await service.sweep()
+        XCTAssertFalse(storage.audioExists("a.m4a"), "the unlink ran")
+        XCTAssertEqual(outcome(failed, "item-1"), .retryLater(.storageUnavailable))
+        XCTAssertFalse(failed.converged, "an unverified removal is not a success")
+        XCTAssertEqual(try storage.ledgerEntries().map(\.state), [.failing])
+
+        let next = await service.sweep()
+        XCTAssertEqual(outcome(next, "item-1"), .alreadyRemoved)
+        XCTAssertTrue(next.converged)
+        XCTAssertEqual(try storage.ledgerEntries().map(\.state), [.removed])
+    }
+
+    func testALookupThatFailsWhenTheResultIsCheckedIsNotReportedAsRemoved() async throws {
+        try expire("item-1", audio: "a.m4a")
+        fileSystem.failPresenceLookups(of: "a.m4a", afterPassing: 2)
+
+        let report = await makeService().sweep()
+        XCTAssertFalse(storage.audioExists("a.m4a"))
+        XCTAssertEqual(outcome(report, "item-1"), .retryLater(.storageUnavailable))
+        XCTAssertFalse(report.converged)
+        XCTAssertEqual(try storage.ledgerEntries().map(\.state), [.failing])
+    }
+
+    func testARecordedRemovalWhoseFileCannotBeLookedUpIsNotReportedAndFailsWithinTheBound() async throws {
+        try expire("item-1", audio: "a.m4a")
+        let service = makeService(maximumAttempts: 2)
+        _ = await service.sweep()
+        try storage.writeAudio("a.m4a")
+        fileSystem.failPresenceLookups(of: "a.m4a", times: .max)
+
+        let first = await service.sweep()
+        XCTAssertEqual(outcome(first, "item-1"), .retryLater(.storageUnavailable))
+        XCTAssertFalse(first.converged, "a recorded removal is not trusted while the file cannot be looked up")
+        XCTAssertTrue(storage.audioExists("a.m4a"))
+
+        let second = await service.sweep()
+        XCTAssertEqual(outcome(second, "item-1"), .failedPermanently(.attemptsExhausted))
+        XCTAssertFalse(second.converged)
+        XCTAssertTrue(storage.audioExists("a.m4a"))
+        XCTAssertEqual(try storage.ledgerEntries().map(\.state), [.failed])
+    }
+
+    func testALedgerThatCannotBeLookedUpBlocksRemovalInsteadOfBeingTreatedAsEmpty() async throws {
+        try expire("item-1", audio: "a.m4a")
+        fileSystem.failPresenceLookups(of: AudioRetentionLedger.fileName)
+
+        let report = await makeService().sweep()
+        XCTAssertEqual(outcome(report, "item-1"), .retryLater(.ledgerUnavailable))
+        XCTAssertTrue(storage.audioExists("a.m4a"))
+        XCTAssertEqual(core.removalRequests, [])
+    }
+
     // MARK: Authority stays with the core
 
     func testALeaseThatExpiresBeforeTheEffectRemovesNothingAndConvergesOnTheNextSweep() async throws {

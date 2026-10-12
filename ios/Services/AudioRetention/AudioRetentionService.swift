@@ -167,12 +167,18 @@ actor AudioRetentionService {
     // MARK: Removal
 
     /// True only when the ledger holds the completion and the file is verified absent. Throws when the ledger cannot be
-    /// read, which is "unknown", not "not removed".
+    /// read, which is "unknown", not "not removed". A file whose presence cannot be determined is not verified absent,
+    /// so the removal is attempted again and its failure is counted.
     private func isRecordedRemoved(itemID: String, audioReference: String) throws -> Bool {
         guard let recorded = try ledger.entry(itemID: itemID, audioReference: audioReference),
               recorded.state == .removed,
               let url = staging.finalizedAudioURL(forReference: audioReference) else { return false }
-        return !fileSystem.fileExists(at: url)
+        return isVerifiedAbsent(url)
+    }
+
+    /// False when the file is there or its presence cannot be determined.
+    private func isVerifiedAbsent(_ url: URL) -> Bool {
+        (try? fileSystem.isPresent(at: url)) == false
     }
 
     private func remove(itemID: String, audioReference: String) async -> AudioRemovalOutcome {
@@ -202,12 +208,14 @@ actor AudioRetentionService {
         // The core re-decides for this exact audio and, only if it approves, holds its store-wide fence while the closure
         // removes the file here: no write can make the audio protected between the approval and the removal.
         let fileSystem = self.fileSystem
+        // A lookup that fails is a failed effect, never an absent file.
         let removeFile: () -> AudioRemovalEffect = {
-            let wasPresent = fileSystem.fileExists(at: url)
+            let wasPresent: Bool
+            do { wasPresent = try fileSystem.isPresent(at: url) } catch { return .failed }
             if wasPresent {
                 do { try fileSystem.remove(at: url) } catch { return .failed }
             }
-            if fileSystem.fileExists(at: url) { return .failed }
+            guard (try? fileSystem.isPresent(at: url)) == false else { return .failed }
             return wasPresent ? .removed : .alreadyAbsent
         }
         let result: AudioRemovalResult
@@ -225,8 +233,8 @@ actor AudioRetentionService {
         case .approved(let approvedEffect):
             effect = approvedEffect
         }
-        // The result is checked: a file that is still there is never reported gone.
-        guard effect != .failed, !fileSystem.fileExists(at: url) else {
+        // The result is checked: a file that is still there, or that cannot be looked up, is never reported gone.
+        guard effect != .failed, isVerifiedAbsent(url) else {
             return recordFailure(
                 itemID: itemID, audioReference: audioReference,
                 code: AudioRetentionRetryReason.storageUnavailable.rawValue, permanent: false)

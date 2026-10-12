@@ -1,10 +1,14 @@
 import Darwin
 import Foundation
 
-/// The file operations the retention service needs: the ingress operations plus an atomic replace for the ledger.
-/// Tests inject a wrapper that fails selected operations to prove an interruption never loses audio or reports a
-/// removal that was not recorded.
+/// The file operations the retention service needs: the ingress operations plus an atomic replace for the ledger and a
+/// presence check that cannot mistake a failed lookup for absence. Tests inject a wrapper that fails selected operations
+/// to prove an interruption never loses audio or reports a removal that was not recorded.
 protocol AudioRetentionFileSystem: IngressFileSystem {
+    /// True when something is at `url`, false only when the lookup verifies nothing is there. Throws when presence
+    /// cannot be determined (access, protection or I/O failure), because "unknown" must never read as "absent".
+    func isPresent(at url: URL) throws -> Bool
+
     /// Writes `data` so that either the complete new content or the previous content is at `url`, never a mix. The data
     /// is flushed to storage before it becomes visible.
     func replaceDurably(_ data: Data, at url: URL) throws
@@ -20,6 +24,14 @@ struct FileManagerAudioRetentionFileSystem: AudioRetentionFileSystem {
     func writeDurably(_ data: Data, to url: URL) throws { try base.writeDurably(data, to: url) }
     func move(from source: URL, to destination: URL) throws { try base.move(from: source, to: destination) }
     func remove(at url: URL) throws { try base.remove(at: url) }
+
+    func isPresent(at url: URL) throws -> Bool {
+        var status = stat()
+        if Darwin.lstat(url.path, &status) == 0 { return true }
+        let failure = errno
+        if failure == ENOENT { return false }
+        throw POSIXError(POSIXErrorCode(rawValue: failure) ?? .EIO)
+    }
 
     func replaceDurably(_ data: Data, at url: URL) throws {
         let replacement = URL(fileURLWithPath: url.path + ".replacing")
@@ -164,7 +176,7 @@ final class AudioRetentionLedger {
     }
 
     private func load() throws -> Document {
-        guard fileSystem.fileExists(at: fileURL) else { return Document(formatVersion: Self.currentFormatVersion, entries: []) }
+        guard try fileSystem.isPresent(at: fileURL) else { return Document(formatVersion: Self.currentFormatVersion, entries: []) }
         let data = try fileSystem.read(from: fileURL)
         guard let document = try? JSONDecoder().decode(Document.self, from: data),
               document.formatVersion == Self.currentFormatVersion else {

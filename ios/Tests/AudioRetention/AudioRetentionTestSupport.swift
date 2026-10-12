@@ -117,12 +117,20 @@ struct FixedPressureProbe: AudioStoragePressureProbing {
 }
 
 /// Wraps the real file system and fails selected operations once, by point name: `fs.read:<file name>` and
-/// `fs.replace`. It also records every read, to prove how often the ledger is read.
+/// `fs.replace`. Presence lookups of a file can be made to fail after a number of successful ones, as a data protection
+/// or I/O failure would, whether or not the file is there. It also records every read, to prove how often the ledger is
+/// read.
 final class FaultingRetentionFileSystem: AudioRetentionFileSystem, @unchecked Sendable {
+    private struct PresenceFault {
+        var passing: Int
+        var failures: Int
+    }
+
     private let wrapped = FileManagerAudioRetentionFileSystem()
     private let faults: FaultPlan
     private let lock = NSLock()
     private var reads: [String] = []
+    private var presenceFaults: [String: PresenceFault] = [:]
 
     init(faults: FaultPlan) {
         self.faults = faults
@@ -132,6 +140,32 @@ final class FaultingRetentionFileSystem: AudioRetentionFileSystem, @unchecked Se
         lock.lock()
         defer { lock.unlock() }
         return reads.filter { $0 == fileName }.count
+    }
+
+    /// Lets `passing` lookups of `fileName` through, then fails the next `times` lookups.
+    func failPresenceLookups(of fileName: String, afterPassing passing: Int = 0, times: Int = 1) {
+        lock.lock()
+        defer { lock.unlock() }
+        presenceFaults[fileName] = PresenceFault(passing: passing, failures: times)
+    }
+
+    func isPresent(at url: URL) throws -> Bool {
+        let fileName = url.lastPathComponent
+        let fails: Bool = {
+            lock.lock()
+            defer { lock.unlock() }
+            guard var fault = presenceFaults[fileName], fault.failures > 0 else { return false }
+            if fault.passing > 0 {
+                fault.passing -= 1
+                presenceFaults[fileName] = fault
+                return false
+            }
+            fault.failures -= 1
+            presenceFaults[fileName] = fault
+            return true
+        }()
+        if fails { throw POSIXError(.EIO) }
+        return try wrapped.isPresent(at: url)
     }
 
     func fileExists(at url: URL) -> Bool { wrapped.fileExists(at: url) }

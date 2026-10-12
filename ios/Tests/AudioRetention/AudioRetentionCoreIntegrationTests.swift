@@ -232,6 +232,33 @@ final class AudioRetentionCoreIntegrationTests: XCTestCase {
         secondSession.close()
     }
 
+    func testLookupFailuresAroundTheUnlinkAreNeverReportedAsCleanupAndConverge() async throws {
+        let world = try makeWorld()
+        let beforeUnlink = try await world.seedVoice(captureID: "cap-before", transcribedDaysAgo: 10)
+        let afterUnlink = try await world.seedVoice(captureID: "cap-after", transcribedDaysAgo: 10)
+        let fileSystem = FaultingRetentionFileSystem(faults: FaultPlan())
+        fileSystem.failPresenceLookups(of: beforeUnlink.fileName)
+        fileSystem.failPresenceLookups(of: afterUnlink.fileName, afterPassing: 1)
+        let session = try world.openCore()
+        let service = world.makeService(on: session, fileSystem: fileSystem)
+
+        let failed = await service.sweep()
+        XCTAssertEqual(outcome(failed, beforeUnlink.itemID), .retryLater(.storageUnavailable))
+        XCTAssertEqual(outcome(failed, afterUnlink.itemID), .retryLater(.storageUnavailable))
+        XCTAssertFalse(failed.converged)
+        XCTAssertTrue(world.audioExists(beforeUnlink.fileName), "an unknown file is not skipped as absent")
+        XCTAssertFalse(world.audioExists(afterUnlink.fileName), "the unlink ran but could not be verified")
+        XCTAssertEqual(try world.ledgerEntries().map(\.state), [.failing, .failing], "no removal is recorded")
+
+        let converged = await service.sweep()
+        XCTAssertEqual(outcome(converged, beforeUnlink.itemID), .removed)
+        XCTAssertEqual(outcome(converged, afterUnlink.itemID), .alreadyRemoved)
+        XCTAssertTrue(converged.converged)
+        XCTAssertFalse(world.audioExists(beforeUnlink.fileName))
+        XCTAssertEqual(try world.ledgerEntries().map(\.state), [.removed, .removed])
+        session.close()
+    }
+
     func testAShutDownCoreIsReportedAsUnknownAndRemovesNothing() async throws {
         let world = try makeWorld()
         let expired = try await world.seedVoice(captureID: "cap-expired", transcribedDaysAgo: 10)
