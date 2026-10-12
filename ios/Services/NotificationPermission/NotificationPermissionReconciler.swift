@@ -6,14 +6,15 @@ public struct NotificationPermissionReport: Equatable, Sendable {
     public let transition: NotificationPermissionTransition
     public let trigger: NotificationReconcileTrigger
     /// Reminder status under the permission just read. When the core pass failed it is built
-    /// from the facts of the last pass that succeeded, so a revoked permission is still reported
-    /// as undeliverable during a core outage.
+    /// from the core's stored facts if they can still be read, else from the last pass that
+    /// succeeded, so a revoked permission is still reported as undeliverable during an outage.
     public let readiness: NotificationReadinessReport
-    public let promptsInstalled: Int
+    public let promptsGranted: Int
     public let promptsDeferred: Int
+    public let promptsWithheld: Int
     /// Set when the core pass did not complete. The permission transition stays unrecorded, so
     /// the next pass repeats it, including re-arming.
-    public let reconciliationFailure: NotificationBridgeError?
+    public let reconciliationFailure: ReminderReconciliationFailure?
     public let converged: Bool
 }
 
@@ -34,17 +35,20 @@ public actor NotificationPermissionReconciler {
     private let center: NotificationCenterProviding
     private let reconciliation: ReminderReconciling
     private let observations: NotificationPermissionObservationStore
+    private let promptCandidates: @Sendable () -> [OptionalPromptCandidate]
     private var inFlight: (id: UUID, task: Task<NotificationPermissionReport, Error>)?
     private var lastKnownReminders: [ReminderFacts] = []
 
     public init(
         center: NotificationCenterProviding,
         reconciliation: ReminderReconciling,
-        observations: NotificationPermissionObservationStore
+        observations: NotificationPermissionObservationStore,
+        promptCandidates: @escaping @Sendable () -> [OptionalPromptCandidate] = { [] }
     ) {
         self.center = center
         self.reconciliation = reconciliation
         self.observations = observations
+        self.promptCandidates = promptCandidates
     }
 
     @discardableResult
@@ -86,7 +90,8 @@ public actor NotificationPermissionReconciler {
             transition: transition,
             trigger: trigger,
             rearmRejectedSchedules: permission.canAlert && (transition == .regained || transition == .firstObservation),
-            allowOptionalPrompts: permission.canAlert
+            allowOptionalPrompts: permission.canAlert,
+            promptCandidates: promptCandidates()
         )
         do {
             let outcome = try await reconciliation.reconcile(request)
@@ -97,24 +102,37 @@ public actor NotificationPermissionReconciler {
                 transition: transition,
                 trigger: trigger,
                 readiness: NotificationReadiness.evaluate(permission: permission, reminders: outcome.reminders),
-                promptsInstalled: outcome.promptsInstalled,
+                promptsGranted: outcome.promptsGranted,
                 promptsDeferred: outcome.promptsDeferred,
+                promptsWithheld: outcome.promptsWithheld,
                 reconciliationFailure: nil,
                 converged: outcome.converged
             )
         } catch is CancellationError {
             throw CancellationError()
         } catch {
+            let reportedReminders = await factsAfterFailedPass()
             return NotificationPermissionReport(
                 permission: permission,
                 transition: transition,
                 trigger: trigger,
-                readiness: NotificationReadiness.evaluate(permission: permission, reminders: lastKnownReminders),
-                promptsInstalled: 0,
+                readiness: NotificationReadiness.evaluate(permission: permission, reminders: reportedReminders),
+                promptsGranted: 0,
                 promptsDeferred: 0,
-                reconciliationFailure: NotificationBridgeError.normalized(error),
+                promptsWithheld: 0,
+                reconciliationFailure: ReminderReconciliationFailure.normalized(error),
                 converged: false
             )
         }
+    }
+
+    /// The core's stored facts when it can still be read, else the facts of the last pass that
+    /// succeeded, so a revoked permission is reported even before any pass has completed.
+    private func factsAfterFailedPass() async -> [ReminderFacts] {
+        if let stored = try? await reconciliation.storedFacts() {
+            lastKnownReminders = stored
+            return stored
+        }
+        return lastKnownReminders
     }
 }

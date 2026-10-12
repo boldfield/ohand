@@ -1,19 +1,32 @@
 import Foundation
 @testable import OhAndServices
 
-/// Stands in for the core's capacity and reconciliation pass. It records every request it is given
-/// and answers with scripted reminder facts, so tests can see exactly which effects a permission
-/// change asks for.
+/// A scripted `ReminderReconciling` for the reconciler's own unit tests: it records every request it is
+/// given and answers with scripted reminder facts. The real-core behavior is covered by
+/// `NotificationPermissionCoreIntegrationTests`, which runs `CoreReminderReconciler`.
 final class RecordingReconciliation: ReminderReconciling, @unchecked Sendable {
     private let lock = NSLock()
     private var recordedRequests: [ReminderReconciliationRequest] = []
     private var scriptedOutcomes: [Result<ReminderReconciliationOutcome, Error>] = []
     private var fallback: ReminderReconciliationOutcome
+    private var stored: Result<[ReminderFacts], Error> = .failure(ReminderReconciliationFailure.coreUnavailable)
     var gate: SuspensionGate?
 
-    init(facts: [ReminderFacts] = [], promptsInstalled: Int = 0, promptsDeferred: Int = 0) {
+    init(facts: [ReminderFacts] = [], promptsGranted: Int = 0, promptsDeferred: Int = 0) {
         fallback = ReminderReconciliationOutcome(
-            reminders: facts, promptsInstalled: promptsInstalled, promptsDeferred: promptsDeferred, converged: true)
+            reminders: facts, promptsGranted: promptsGranted, promptsDeferred: promptsDeferred, converged: true)
+    }
+
+    func setStoredFacts(_ result: Result<[ReminderFacts], Error>) {
+        lock.lock()
+        defer { lock.unlock() }
+        stored = result
+    }
+
+    func storedFacts() async throws -> [ReminderFacts] {
+        lock.lock()
+        defer { lock.unlock() }
+        return try stored.get()
     }
 
     var requests: [ReminderReconciliationRequest] {

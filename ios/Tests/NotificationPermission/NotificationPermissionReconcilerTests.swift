@@ -33,7 +33,7 @@ final class NotificationPermissionReconcilerTests: XCTestCase {
     func testRevocationReportsUndeliverableAndWithholdsOptionalPromptsWithoutTouchingDelivery() async throws {
         core.setOutcome(ReminderReconciliationOutcome(
             reminders: [ReminderFixtures.resolved("a"), ReminderFixtures.unschedulable("b", reason: "capacity_exceeded")],
-            promptsInstalled: 2, promptsDeferred: 1, converged: true))
+            promptsGranted: 2, promptsDeferred: 1, converged: true))
         let reconciler = makeReconciler()
         try await reconciler.refresh(trigger: .launch)
 
@@ -81,14 +81,16 @@ final class NotificationPermissionReconcilerTests: XCTestCase {
     func testFailedPassIsNotRecordedSoTheRegainIsRepeatedAndOutageKeepsTheLastKnownStatus() async throws {
         let reconciler = makeReconciler()
         core.setOutcome(ReminderReconciliationOutcome(
-            reminders: [ReminderFixtures.resolved("a")], promptsInstalled: 0, promptsDeferred: 0, converged: true))
+            reminders: [ReminderFixtures.resolved("a")], promptsGranted: 0, promptsDeferred: 0, converged: true))
         center.authorizationStatus = .denied
         try await reconciler.refresh(trigger: .launch)
 
         center.authorizationStatus = .authorized
         core.script(.failure(NotificationBridgeError.centerFailed))
         let failed = try await reconciler.refresh(trigger: .foreground)
-        XCTAssertEqual(failed.reconciliationFailure, .centerFailed)
+        XCTAssertEqual(
+            failed.reconciliationFailure,
+            ReminderReconciliationFailure(errorClass: .transient, code: NotificationBridgeError.centerFailed.code))
         XCTAssertFalse(failed.converged)
         XCTAssertEqual(failed.readiness.reminders.count, 1, "last known facts survive a core failure")
         XCTAssertEqual(observations.lastObserved(), .denied, "the transition is not recorded until a pass succeeds")
@@ -102,6 +104,27 @@ final class NotificationPermissionReconcilerTests: XCTestCase {
         XCTAssertEqual(recovered.transition, .regained)
         XCTAssertEqual(core.requests.map(\.rearmRejectedSchedules), [false, true, false, true])
         XCTAssertEqual(observations.lastObserved(), .usable)
+    }
+
+    func testRevocationDuringAnOutageBeforeAnySuccessfulPassReportsTheCoresStoredReminders() async throws {
+        core.script(.failure(ReminderReconciliationFailure.coreUnavailable))
+        core.setStoredFacts(.success([ReminderFixtures.resolved("a"), ReminderFixtures.resolved("b")]))
+        center.authorizationStatus = .denied
+
+        let report = try await makeReconciler().refresh(trigger: .launch)
+
+        XCTAssertEqual(report.reconciliationFailure, .coreUnavailable)
+        XCTAssertEqual(report.readiness.undeliverableCount, 2, "stored facts are read even though the pass failed")
+        XCTAssertNil(observations.lastObserved())
+    }
+
+    func testPromptCandidatesAreOfferedOnlyAsTheAssemblySuppliesThem() async throws {
+        let candidate = OptionalPromptCandidate(notificationID: "prompt-1", fireAt: Date(timeIntervalSince1970: 1_900_000_000))
+        let candidates = [candidate]
+        let reconciler = NotificationPermissionReconciler(
+            center: center, reconciliation: core, observations: observations, promptCandidates: { candidates })
+        try await reconciler.refresh(trigger: .launch)
+        XCTAssertEqual(core.requests.first?.promptCandidates, [candidate])
     }
 
     func testCancellationIsNotReportedAsAFailureAndRecordsNothing() async throws {
@@ -155,7 +178,7 @@ final class NotificationPermissionReconcilerTests: XCTestCase {
     func testElapsedDueTimesAndAbsentDeliveryEvidenceNeverBecomeDeliveryOrAttention() async throws {
         let pastDue = ReminderFixtures.resolved("a", schedule: "scheduled", delivery: "unknown")
         core.setOutcome(ReminderReconciliationOutcome(
-            reminders: [pastDue], promptsInstalled: 0, promptsDeferred: 0, converged: true))
+            reminders: [pastDue], promptsGranted: 0, promptsDeferred: 0, converged: true))
         center.delivered = []
         let reconciler = makeReconciler()
         let report = try await reconciler.refresh(trigger: .foreground)
@@ -169,10 +192,10 @@ final class NotificationPermissionReconcilerTests: XCTestCase {
     func testPromptCapacityOutcomeIsReportedAsTheCoreReturnedIt() async throws {
         core.setOutcome(ReminderReconciliationOutcome(
             reminders: [ReminderFixtures.unschedulable("late", reason: "capacity_exceeded")],
-            promptsInstalled: 0, promptsDeferred: 7, converged: true))
+            promptsGranted: 0, promptsDeferred: 7, converged: true))
         let report = try await makeReconciler().refresh(trigger: .launch)
         XCTAssertEqual(report.promptsDeferred, 7)
-        XCTAssertEqual(report.promptsInstalled, 0)
+        XCTAssertEqual(report.promptsGranted, 0)
         XCTAssertEqual(report.readiness.unscheduledCount, 1)
     }
 

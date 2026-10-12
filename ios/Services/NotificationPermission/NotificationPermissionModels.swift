@@ -131,6 +131,18 @@ public struct ReminderFacts: Equatable, Sendable {
     }
 }
 
+/// An optional prompt that wants an OS slot. The core grants it only after every explicit
+/// reminder, within its prompt limit and horizon.
+public struct OptionalPromptCandidate: Equatable, Sendable {
+    public let notificationID: String
+    public let fireAt: Date
+
+    public init(notificationID: String, fireAt: Date) {
+        self.notificationID = notificationID
+        self.fireAt = fireAt
+    }
+}
+
 /// The input of one core pass after a permission read. The pass is the core's existing capacity
 /// and reconciliation contract (reminders before optional prompts, stable identifiers); this
 /// module only says what the permission now is.
@@ -143,26 +155,41 @@ public struct ReminderReconciliationRequest: Equatable, Sendable {
     public let rearmRejectedSchedules: Bool
     /// Whether optional prompts may be given capacity. Explicit reminders never depend on it.
     public let allowOptionalPrompts: Bool
+    public let promptCandidates: [OptionalPromptCandidate]
 }
 
 public struct ReminderReconciliationOutcome: Equatable, Sendable {
     public let reminders: [ReminderFacts]
-    public let promptsInstalled: Int
+    /// Prompt candidates the core gave capacity to. Installing them belongs to the prompt scheduler.
+    public let promptsGranted: Int
+    /// Prompt candidates the core could not fit, which a later pass considers again.
     public let promptsDeferred: Int
+    /// Prompt candidates held back from the pass because the permission cannot alert.
+    public let promptsWithheld: Int
     public let converged: Bool
 
-    public init(reminders: [ReminderFacts], promptsInstalled: Int, promptsDeferred: Int, converged: Bool) {
+    public init(
+        reminders: [ReminderFacts],
+        promptsGranted: Int,
+        promptsDeferred: Int,
+        promptsWithheld: Int = 0,
+        converged: Bool
+    ) {
         self.reminders = reminders
-        self.promptsInstalled = promptsInstalled
+        self.promptsGranted = promptsGranted
         self.promptsDeferred = promptsDeferred
+        self.promptsWithheld = promptsWithheld
         self.converged = converged
     }
 }
 
-/// The core's reconciliation, injected. Implementations run the core's capacity pass and
-/// reconciliation against the native bridge and return the reminders' stored facts afterwards.
-/// A pass is idempotent: repeating it with the same request changes nothing and installs nothing
-/// twice.
+/// The core's reconciliation, injected. `CoreReminderReconciler` is the production adapter: it runs the
+/// core's capacity pass and reconciliation against the native bridge and returns the reminders' stored
+/// facts afterwards. A pass is idempotent: repeating it with the same request changes nothing and installs
+/// nothing twice.
 public protocol ReminderReconciling: Sendable {
     func reconcile(_ request: ReminderReconciliationRequest) async throws -> ReminderReconciliationOutcome
+
+    /// The reminders' stored facts without a pass, so status stays readable while a pass cannot run.
+    func storedFacts() async throws -> [ReminderFacts]
 }
