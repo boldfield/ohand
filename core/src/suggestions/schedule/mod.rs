@@ -14,7 +14,11 @@
 //   cancelled for explicit reminders are kept and come back when a slot frees; a capacity pass
 //   run outside `reconcile_prompts` with these demands must report back through
 //   `PromptSchedule::record_capacity_pass`. A fired prompt keeps that evidence while capacity
-//   withholds its slot, so it is never replayed when the slot frees.
+//   withholds its slot, so it is never replayed when the slot frees. Never-installed
+//   occurrences an app open planned ahead of a fired one (a multi-day rollback) are retired
+//   with it.
+// - One prompt per local date: once a date's occurrence has passed or fired, no later time on
+//   that date is planned, even if the user moves the time later.
 // - Disable: cancels every pending prompt and nothing else. No capacity pass runs, so reminders
 //   keep their state and their OS requests.
 // - Payload: always `PayloadKind::Generic`; the opaque target is the prompt's own identifier

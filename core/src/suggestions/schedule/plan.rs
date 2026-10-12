@@ -131,14 +131,16 @@ pub struct PlannedPrompt {
 ///   either by the clock or because an installed request vanished from the OS before its
 ///   instant (it fired and the clock was moved back). No occurrence at or before it is planned
 ///   again, so rolling the clock back cannot replay a prompt that already fired. It is bounded
-///   by the horizon, never by the clock reading itself.
+///   by the horizon, never by the clock reading itself. The local date of that occurrence is
+///   fenced too: each local date has at most one prompt, so choosing a later time on a day
+///   whose prompt has passed starts from the next day.
 /// - Absence from the OS is taken for delivery only when core did not cause it. A prompt that
 ///   core's capacity rule cancelled for explicit reminders is never fenced: the reconcile pass
 ///   clears the mark of every prompt it cancels, and a capacity pass run elsewhere reports its
 ///   cancellations through [`PromptSchedule::record_capacity_pass`]. A prompt that vanished on
 ///   its own keeps its mark while capacity withholds its slot, so it is fenced as soon as it is
-///   seen and is not replayed when the slot frees. Only the leading run of
-///   vanished occurrences counts, so the fence never passes a prompt the OS still holds. A
+///   seen and is not replayed when the slot frees. Only vanished occurrences before the first
+///   prompt the OS still holds count, so the fence never passes a pending prompt. A
 ///   cancellation core cannot see (a permission toggle, an OS purge) can thus cost at most the
 ///   planned horizon of prompts, which is acceptable for an optional feature; it never cancels a
 ///   pending one.
@@ -152,6 +154,11 @@ pub struct PromptSchedule {
     planned: Vec<PlannedPrompt>,
     #[serde(default)]
     last_elapsed: Option<DateTime<Utc>>,
+    /// The latest local date whose occurrence has passed. No later time on that date is
+    /// planned, so moving the time later on a day that already had its prompt adds no second
+    /// one.
+    #[serde(default)]
+    last_elapsed_date: Option<NaiveDate>,
 }
 
 impl PromptSchedule {
@@ -190,7 +197,13 @@ impl PromptSchedule {
     /// instant keeps its `installed` mark, so a refill that is the first observation after a
     /// clock rollback can still tell that the OS fired it.
     fn rebuild(&mut self, now: DateTime<Utc>, zone: Tz) {
-        let mut planned = fill(self.settings, now, zone, self.last_elapsed);
+        let mut planned = fill(
+            self.settings,
+            now,
+            zone,
+            self.last_elapsed,
+            self.last_elapsed_date,
+        );
         for prompt in &mut planned {
             prompt.installed = self.planned.iter().any(|previous| {
                 previous.installed
@@ -206,33 +219,51 @@ impl PromptSchedule {
         self.retire_where(|prompt| prompt.fire_at <= now);
     }
 
-    /// Retire the leading run of installed occurrences that the OS no longer holds: they fired
-    /// before the clock was moved back. `installed` is cleared only when core itself cancels a
-    /// request, so a prompt core displaced for explicit reminders is never taken for a delivery,
-    /// while a fired prompt keeps its evidence for as long as capacity withholds its slot. The
-    /// run stops at the first occurrence still pending (or never installed), so the refill floor
-    /// never passes a prompt that is still valid. Called by the reconcile pass, before capacity
+    /// Retire installed occurrences that the OS no longer holds: they fired before the clock
+    /// was moved back. `installed` is cleared only when core itself cancels a request, so a
+    /// prompt core displaced for explicit reminders is never taken for a delivery, while a fired
+    /// prompt keeps its evidence for as long as capacity withholds its slot. Only occurrences
+    /// before the first one the OS still holds are considered, so the refill floor never passes
+    /// a prompt that is still valid. Within that span, everything up to the latest vanished
+    /// occurrence is retired, including never-installed occurrences ahead of it: an app open
+    /// after a multi-day rollback plans dates earlier than the fired one, and those lie before
+    /// a prompt that has already been delivered. Called by the reconcile pass, before capacity
     /// is allocated, with the identifiers the OS currently holds.
     pub(super) fn retire_fired(&mut self, now: DateTime<Utc>, pending: &BTreeSet<&str>) {
         self.planned.sort_by_key(|prompt| prompt.fire_at);
-        let mut run_open = true;
-        self.retire_where(|prompt| {
-            let vanished = prompt.installed && !pending.contains(prompt.notification_id.as_str());
-            run_open = run_open && (prompt.fire_at <= now || vanished);
-            run_open
+        let still_held = |prompt: &PlannedPrompt| pending.contains(prompt.notification_id.as_str());
+        let first_held = self
+            .planned
+            .iter()
+            .position(|prompt| prompt.fire_at > now && still_held(prompt))
+            .unwrap_or(self.planned.len());
+        let Some(latest_vanished) = self.planned[..first_held]
+            .iter()
+            .rposition(|prompt| prompt.fire_at <= now || (prompt.installed && !still_held(prompt)))
+        else {
+            return;
+        };
+        let mut position = 0;
+        self.retire_where(|_| {
+            let retire = position <= latest_vanished;
+            position += 1;
+            retire
         });
     }
 
     fn retire_where(&mut self, mut has_fired: impl FnMut(&PlannedPrompt) -> bool) {
         let mut latest = self.last_elapsed;
+        let mut latest_date = self.last_elapsed_date;
         self.planned.retain(|prompt| {
             if !has_fired(prompt) {
                 return true;
             }
             latest = latest.max(Some(prompt.fire_at));
+            latest_date = latest_date.max(Some(prompt.local_date));
             false
         });
         self.last_elapsed = latest;
+        self.last_elapsed_date = latest_date;
     }
 
     /// Record which planned prompts the OS holds after a reconcile pass. A prompt core
@@ -309,6 +340,7 @@ fn fill(
     now: DateTime<Utc>,
     zone: Tz,
     last_elapsed: Option<DateTime<Utc>>,
+    last_elapsed_date: Option<NaiveDate>,
 ) -> Vec<PlannedPrompt> {
     let PromptSettings::Daily { time } = settings else {
         return Vec::new();
@@ -323,7 +355,7 @@ fn fill(
             break;
         }
         if let Some(fire_at) = local_fire_instant(local_date, time, zone) {
-            if fire_at > floor {
+            if fire_at > floor && last_elapsed_date.is_none_or(|elapsed| local_date > elapsed) {
                 planned.push(PlannedPrompt {
                     notification_id: prompt_notification_id(local_date),
                     local_date,

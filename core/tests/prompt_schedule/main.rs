@@ -623,13 +623,13 @@ fn a_rollback_then_an_app_open_or_time_change_still_skips_the_fired_occurrence()
         ]
     );
 
-    // Choosing the same time again in the rolled-back clock does not bring today's back,
-    // while a later time today is still a new, future occurrence.
+    // Choosing the same time again in the rolled-back clock does not bring today's back, and
+    // neither does a later time today: the 15th has had its prompt.
     schedule.configure(daily(nine_am()), rolled_back, UTC_ZONE);
     assert_eq!(fire_instants(&schedule)[0], instant("2026-01-16T09:00:00Z"));
     let two_pm = PromptTime::new(14, 0).unwrap();
     schedule.configure(daily(two_pm), rolled_back, UTC_ZONE);
-    assert_eq!(fire_instants(&schedule)[0], instant("2026-01-15T14:00:00Z"));
+    assert_eq!(fire_instants(&schedule)[0], instant("2026-01-16T14:00:00Z"));
 
     let restored: PromptSchedule = serde_json::from_str(&serde_json::to_string(&schedule)?)?;
     assert_eq!(restored, schedule);
@@ -688,6 +688,128 @@ fn an_app_open_that_is_the_first_look_after_a_rollback_does_not_replay_the_fired
         .filter(|request| request.notification_id == "prompt:2026-01-15")
         .count();
     assert_eq!(installs_of_fired, 1);
+    Ok(())
+}
+
+fn installs_of(center: &FakeCenter, notification_id: &str) -> usize {
+    center
+        .requests
+        .iter()
+        .filter(|request| request.notification_id == notification_id)
+        .count()
+}
+
+#[test]
+fn an_app_open_after_a_multi_day_rollback_does_not_replay_the_fired_prompt() -> Result<()> {
+    let mut db = open_db("multi-day-rollback-open")?;
+    let mut schedule = PromptSchedule::default();
+    schedule.configure(daily(nine_am()), instant("2026-01-15T07:00:00Z"), UTC_ZONE);
+    let mut center = FakeCenter::default();
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T07:00:00Z")?;
+    assert_eq!(
+        center.prompt_ids(),
+        [
+            "prompt:2026-01-15",
+            "prompt:2026-01-16",
+            "prompt:2026-01-17"
+        ]
+    );
+
+    // The 15th fires; the clock is then moved back almost two days and the app is opened
+    // before any pass has seen the delivery. The refill plans the 14th, ahead of the 15th.
+    center.fire_due(instant("2026-01-15T10:00:00Z"));
+    let rolled_back = "2026-01-13T20:00:00Z";
+    schedule.refresh(RefreshTrigger::AppOpen, instant(rolled_back), UTC_ZONE);
+    assert_eq!(schedule.planned()[0].local_date, date("2026-01-14"));
+    pass(&mut db, &mut center, &mut schedule, rolled_back)?;
+
+    assert_eq!(installs_of(&center, "prompt:2026-01-15"), 1);
+    assert!(!center.pending.contains_key("prompt:2026-01-15"));
+    // Nothing on or before the delivered date comes back: not the 14th, not the 15th.
+    assert!(!center.pending.contains_key("prompt:2026-01-14"));
+    assert!(center.pending.contains_key("prompt:2026-01-16"));
+    assert!(schedule
+        .planned()
+        .iter()
+        .all(|prompt| prompt.local_date > date("2026-01-15")));
+
+    // Later looks at the rolled-back clock, including another app open, still skip it.
+    schedule.refresh(RefreshTrigger::AppOpen, instant(rolled_back), UTC_ZONE);
+    pass(&mut db, &mut center, &mut schedule, rolled_back)?;
+    assert_eq!(installs_of(&center, "prompt:2026-01-15"), 1);
+    assert_eq!(
+        center.prompt_ids(),
+        [
+            "prompt:2026-01-16",
+            "prompt:2026-01-17",
+            "prompt:2026-01-18"
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn a_time_change_after_a_multi_day_rollback_does_not_replay_the_fired_prompt() -> Result<()> {
+    let mut db = open_db("multi-day-rollback-clock")?;
+    let mut schedule = PromptSchedule::default();
+    schedule.configure(daily(nine_am()), instant("2026-01-15T07:00:00Z"), UTC_ZONE);
+    let mut center = FakeCenter::default();
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T07:00:00Z")?;
+
+    center.fire_due(instant("2026-01-15T10:00:00Z"));
+    let rolled_back = "2026-01-13T20:00:00Z";
+    schedule.refresh(
+        RefreshTrigger::ClockOrZoneChange,
+        instant(rolled_back),
+        UTC_ZONE,
+    );
+    pass(&mut db, &mut center, &mut schedule, rolled_back)?;
+    assert_eq!(installs_of(&center, "prompt:2026-01-15"), 1);
+    // The fence never passes a prompt the OS still holds.
+    assert_eq!(
+        center.prompt_ids(),
+        ["prompt:2026-01-16", "prompt:2026-01-17"]
+    );
+
+    // The next app open, still on the rolled-back clock, refills after the fired date only.
+    schedule.refresh(RefreshTrigger::AppOpen, instant(rolled_back), UTC_ZONE);
+    pass(&mut db, &mut center, &mut schedule, rolled_back)?;
+    assert_eq!(installs_of(&center, "prompt:2026-01-15"), 1);
+    assert_eq!(installs_of(&center, "prompt:2026-01-14"), 0);
+    assert_eq!(
+        center.prompt_ids(),
+        [
+            "prompt:2026-01-16",
+            "prompt:2026-01-17",
+            "prompt:2026-01-18"
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn a_later_time_on_a_day_whose_prompt_already_fired_adds_no_second_prompt() -> Result<()> {
+    let mut db = open_db("one-per-day")?;
+    let mut schedule = PromptSchedule::default();
+    schedule.configure(daily(nine_am()), instant("2026-01-15T07:00:00Z"), UTC_ZONE);
+    let mut center = FakeCenter::default();
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T07:00:00Z")?;
+
+    // The 09:00 prompt fires; at 10:00 the user moves the prompt to 11:00.
+    center.fire_due(instant("2026-01-15T10:00:00Z"));
+    let now = instant("2026-01-15T10:00:00Z");
+    schedule.configure(daily(PromptTime::new(11, 0).unwrap()), now, UTC_ZONE);
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T10:00:00Z")?;
+
+    assert_eq!(
+        fire_instants(&schedule),
+        vec![
+            instant("2026-01-16T11:00:00Z"),
+            instant("2026-01-17T11:00:00Z"),
+            instant("2026-01-18T11:00:00Z"),
+        ]
+    );
+    assert_eq!(installs_of(&center, "prompt:2026-01-15"), 1);
     Ok(())
 }
 
