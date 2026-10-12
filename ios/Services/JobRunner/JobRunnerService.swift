@@ -51,6 +51,7 @@ public final class JobRunnerService: @unchecked Sendable {
     private var rerunRequested = false
     private var interruptedReruns = 0
     private var isForeground = false
+    private var isCompletionWindowOpen = false
     private var isReachable: Bool
     private var isShutDown = false
     private var retryTask: Task<Void, Never>?
@@ -196,10 +197,16 @@ public final class JobRunnerService: @unchecked Sendable {
         }
     }
 
-    /// The app is entering the background: stop at a checkpoint and start nothing until `activate()`.
+    /// The app is entering the background: stop at a checkpoint and start nothing until `activate()`. While a
+    /// completion window is open (`beginCompletionWindow()`), the drain in flight is left to finish instead; the
+    /// window's owner ends it by `endCompletionWindow()`, which takes the checkpoint.
     public func suspend() {
         stateLock.lock()
         isForeground = false
+        if isCompletionWindowOpen {
+            stateLock.unlock()
+            return
+        }
         rerunRequested = false
         retryTask?.cancel()
         retryTask = nil
@@ -207,9 +214,47 @@ public final class JobRunnerService: @unchecked Sendable {
         cancelRunningDrain()
     }
 
-    /// The app is about to be terminated: same checkpoint as `suspend()`.
+    /// The app is about to be terminated: the same checkpoint as `suspend()`, even inside a completion window.
     public func terminate() {
+        stateLock.lock()
+        isCompletionWindowOpen = false
+        stateLock.unlock()
         suspend()
+    }
+
+    /// Lets drains run, and the one in flight finish, while the app is in the background, and asks for a drain now.
+    /// The caller must hold a finite background-execution grant for as long as the window is open and must call
+    /// `endCompletionWindow()` before that grant ends or is taken back. Idempotent.
+    public func beginCompletionWindow() {
+        stateLock.lock()
+        guard !isShutDown else {
+            stateLock.unlock()
+            return
+        }
+        isCompletionWindowOpen = true
+        stateLock.unlock()
+        requestDrain()
+    }
+
+    /// Closes the window. When the app is not in the foreground the running drain is stopped at a checkpoint (its
+    /// job is put back without spending retry budget) and nothing further starts until `activate()`; a foreground
+    /// app keeps draining as usual. Idempotent.
+    public func endCompletionWindow() {
+        stateLock.lock()
+        guard isCompletionWindowOpen else {
+            stateLock.unlock()
+            return
+        }
+        isCompletionWindowOpen = false
+        if isForeground || isShutDown {
+            stateLock.unlock()
+            return
+        }
+        rerunRequested = false
+        retryTask?.cancel()
+        retryTask = nil
+        stateLock.unlock()
+        cancelRunningDrain()
     }
 
     /// Stops the drain, ends every native request and unregisters from the core. Idempotent. Must not be called
@@ -222,6 +267,7 @@ public final class JobRunnerService: @unchecked Sendable {
         }
         isShutDown = true
         isForeground = false
+        isCompletionWindowOpen = false
         rerunRequested = false
         retryTask?.cancel()
         retryTask = nil
@@ -323,10 +369,12 @@ public final class JobRunnerService: @unchecked Sendable {
     private static let providerJobType = "interpret"
 
     private var canDrainLocked: Bool {
-        isForeground && !isShutDown
+        (isForeground || isCompletionWindowOpen) && !isShutDown
     }
 
-    private func requestDrain() {
+    /// Asks for one drain now, or one more after the running drain, when the service may drain at all (foreground,
+    /// or inside a completion window). Otherwise does nothing.
+    public func requestDrain() {
         stateLock.lock()
         guard canDrainLocked else {
             stateLock.unlock()
