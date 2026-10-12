@@ -46,7 +46,7 @@ public final class CoreReminderReconciler: ReminderReconciling, @unchecked Senda
     private let core: CoreHandle
     private let bridge: NotificationBridge
     private let lock = NSLock()
-    private var waiting: [UInt64: CheckedContinuation<CoreEvent, Never>] = [:]
+    private var waiting: [UInt64: CheckedContinuation<Result<Data, CoreFailure>, Never>] = [:]
     private var nextOperationID: UInt64
     private var registration: NotificationEffectsRegistration?
 
@@ -73,7 +73,7 @@ public final class CoreReminderReconciler: ReminderReconciling, @unchecked Senda
         let continuation = waiting.removeValue(forKey: event.operationID)
         lock.unlock()
         guard let continuation else { return false }
-        continuation.resume(returning: event)
+        continuation.resume(returning: event.outcome)
         return true
     }
 
@@ -87,8 +87,8 @@ public final class CoreReminderReconciler: ReminderReconciling, @unchecked Senda
         waiting = [:]
         lock.unlock()
         registration?.invalidate()
-        for (operationID, continuation) in abandoned {
-            continuation.resume(returning: CoreEvent(operationID: operationID, outcome: .failure(.handleClosed)))
+        for continuation in abandoned.values {
+            continuation.resume(returning: .failure(.handleClosed))
         }
     }
 
@@ -116,7 +116,7 @@ public final class CoreReminderReconciler: ReminderReconciling, @unchecked Senda
     }
 
     private func run(_ request: CoreReminderReconcileRequest) async throws -> CoreReminderReconcileOutcome {
-        let event = await withCheckedContinuation { (continuation: CheckedContinuation<CoreEvent, Never>) in
+        let outcome = await withCheckedContinuation { (continuation: CheckedContinuation<Result<Data, CoreFailure>, Never>) in
             lock.lock()
             let operationID = nextOperationID
             nextOperationID += 1
@@ -128,11 +128,11 @@ public final class CoreReminderReconciler: ReminderReconciling, @unchecked Senda
                 lock.lock()
                 let claimed = waiting.removeValue(forKey: operationID)
                 lock.unlock()
-                claimed?.resume(returning: CoreEvent(operationID: operationID, outcome: .failure(Self.failure(error))))
+                claimed?.resume(returning: .failure(Self.failure(error)))
             }
         }
-        switch event.outcome {
-        case .success: return try event.decode(CoreReminderReconcileOutcome.self)
+        switch outcome {
+        case .success(let data): return try JSONDecoder().decode(CoreReminderReconcileOutcome.self, from: data)
         case .failure(let failure): throw ReminderReconciliationFailure.normalized(failure)
         }
     }
