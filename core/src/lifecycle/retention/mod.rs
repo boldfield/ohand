@@ -22,7 +22,8 @@
 //!   attached and no transcription job is queued or running. That covers failed, unsupported and
 //!   pending states, including the no-speech outcome, which settles its job as failed and leaves
 //!   the item `audio_pending`, and a `transcribed` item whose transcript record is missing,
-//!   inconsistent or blank.
+//!   inconsistent, blank or attached to a different audio reference. A transcript produced from
+//!   another audio identity is not a recoverable source for this recording.
 //! * "Text exists" follows the item's current text: the latest text correction. Clearing a
 //!   correction to empty makes audio with no transcript a sole source again (and retry is
 //!   offered). Once a transcript is attached, the transcript stays recoverable, so clearing a
@@ -338,7 +339,7 @@ fn assess_row(
         .parse::<TranscriptionState>()
         .map_err(|error| anyhow!("stored transcription state is invalid: {}", error.0))?;
     let transcript_recoverable = transcription_state == TranscriptionState::Transcribed
-        && row.transcript_audio_reference.is_some()
+        && row.transcript_audio_reference.as_deref() == Some(row.audio_reference.as_str())
         && row.transcript_text_present;
     let text_present = row.capture_text_present || row.user_text_present || transcript_recoverable;
 

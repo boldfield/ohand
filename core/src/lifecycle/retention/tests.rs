@@ -614,6 +614,25 @@ fn absent_or_unusable_transcription_times_never_expire_audio() {
         unresolved(UnresolvedReason::TranscriptAudioMismatch)
     );
     assert_eq!(mismatched.cleanup, CleanupIntent::None);
+    assert!(
+        mismatched.sole_source,
+        "a transcript of other audio is not a recoverable source for this recording"
+    );
+    assert_eq!(
+        mismatched.options,
+        vec![
+            RetentionOption::RetryTranscription,
+            RetentionOption::DeleteAudio
+        ]
+    );
+    let mismatched_under_pressure = store
+        .assess(&item_id, far_future, StoragePressure::Low)
+        .unwrap();
+    assert_eq!(
+        mismatched_under_pressure.storage_pressure_notice,
+        Some(StoragePressureNotice::SoleSourceRetained)
+    );
+    assert_eq!(mismatched_under_pressure.cleanup, CleanupIntent::None);
 }
 
 #[test]
