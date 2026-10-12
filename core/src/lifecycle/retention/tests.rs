@@ -617,6 +617,73 @@ fn absent_or_unusable_transcription_times_never_expire_audio() {
 }
 
 #[test]
+fn a_blank_transcript_never_expires_the_only_source() {
+    let far_future = transcribed_at() + Duration::days(3650);
+
+    for blank in ["", "   ", "\t\n "] {
+        let store = Store::new();
+        let item_id = store.voice_item();
+        store.transcribe(&item_id, FIRST_AUDIO, transcribed_at());
+        store
+            .open()
+            .conn()
+            .execute("UPDATE transcript_attachments SET text = ?", [blank])
+            .unwrap();
+        let assessment = store
+            .assess(&item_id, far_future, StoragePressure::Low)
+            .unwrap();
+        assert_eq!(
+            assessment.state,
+            unresolved(UnresolvedReason::TranscriptEmpty),
+            "blank transcript {blank:?}"
+        );
+        assert!(assessment.sole_source, "a blank transcript is not text");
+        assert_eq!(
+            assessment.options,
+            vec![
+                RetentionOption::RetryTranscription,
+                RetentionOption::DeleteAudio
+            ]
+        );
+        assert_eq!(assessment.cleanup, CleanupIntent::None);
+        assert_eq!(
+            assessment.storage_pressure_notice,
+            Some(StoragePressureNotice::SoleSourceRetained)
+        );
+        assert_eq!(
+            authorize_audio_removal(
+                store.open().conn(),
+                &FixedClock(far_future),
+                &RetentionPolicy::default(),
+                &item_id,
+                FIRST_AUDIO,
+            )
+            .unwrap(),
+            RemovalDecision::Denied(RemovalDenial::Unresolved {
+                reason: UnresolvedReason::TranscriptEmpty
+            })
+        );
+    }
+
+    // Captured or user text beside a blank transcript keeps the audio from being a sole source,
+    // but a blank transcript still starts no clock.
+    let store = Store::new();
+    let item_id = store.voice_item();
+    store.transcribe(&item_id, FIRST_AUDIO, transcribed_at());
+    store.correct_text(&item_id, 1, Some("water the ferns"), "water the ferns");
+    store.execute("UPDATE transcript_attachments SET text = ' '");
+    let with_text = store
+        .assess(&item_id, far_future, StoragePressure::Normal)
+        .unwrap();
+    assert_eq!(
+        with_text.state,
+        unresolved(UnresolvedReason::TranscriptEmpty)
+    );
+    assert!(!with_text.sole_source);
+    assert_eq!(with_text.cleanup, CleanupIntent::None);
+}
+
+#[test]
 fn deleted_items_are_not_assessed_and_removal_is_denied() {
     let store = Store::new();
     let item_id = store.voice_item();

@@ -12,8 +12,8 @@
 //!   by default). A later user correction neither restarts nor shortens the clock.
 //! * Audio with no usable transcription-success timestamp never expires automatically: pending,
 //!   unsupported and failed transcription, audio kept next to user-written or captured text but
-//!   without a transcript, and records that are missing, inconsistent or carry an unreadable
-//!   timestamp. Each is a visible [`RetentionState::Unresolved`] with its reason.
+//!   without a transcript, a transcript whose text is empty or whitespace only, and records that
+//!   are missing, inconsistent or carry an unreadable timestamp. Each is a visible [`RetentionState::Unresolved`] with its reason.
 //! * Audio that is the item's only source (no captured text, no user text correction, no usable
 //!   transcript) is flagged `sole_source`. Storage pressure never changes eligibility: it only adds
 //!   a [`StoragePressureNotice`] so the surface can say that nothing was or will be freed
@@ -21,8 +21,8 @@
 //!   [`RetentionOption::RetryTranscription`] whenever no text exists, no usable transcript is
 //!   attached and no transcription job is queued or running. That covers failed, unsupported and
 //!   pending states, including the no-speech outcome, which settles its job as failed and leaves
-//!   the item `audio_pending`, and a `transcribed` item whose transcript record is missing or
-//!   inconsistent.
+//!   the item `audio_pending`, and a `transcribed` item whose transcript record is missing,
+//!   inconsistent or blank.
 //! * "Text exists" follows the item's current text: the latest text correction. Clearing a
 //!   correction to empty makes audio with no transcript a sole source again (and retry is
 //!   offered). Once a transcript is attached, the transcript stays recoverable, so clearing a
@@ -95,6 +95,9 @@ pub enum UnresolvedReason {
     TextWithoutTranscript,
     /// The item claims a transcript that is absent, or a transcript exists the state ignores.
     TranscriptRecordInconsistent,
+    /// The transcript record exists but its text is empty or whitespace only, so nothing is
+    /// recoverable from it.
+    TranscriptEmpty,
     /// The transcript was made from different audio than the capture's.
     TranscriptAudioMismatch,
     /// The recorded transcription time cannot be read, so the expiry cannot be computed.
@@ -184,13 +187,14 @@ struct AudioItemRow {
     user_text_present: bool,
     transcription_in_flight: bool,
     transcript_audio_reference: Option<String>,
+    transcript_text_present: bool,
     transcribed_at: Option<String>,
 }
 
 /// SQLite's one-argument `TRIM` strips only spaces; this also strips tabs and line breaks.
 const WHITESPACE: &str = "' ' || char(9, 10, 11, 12, 13)";
 
-/// Both text and in-flight flags read current state: user text is the item's latest text
+/// Text, transcript and in-flight flags read current state: user text is the item's latest text
 /// correction (the same one the domain projection resolves), not any correction ever made.
 fn audio_item_select() -> String {
     format!(
@@ -203,7 +207,9 @@ fn audio_item_select() -> String {
         EXISTS(SELECT 1 FROM jobs
                WHERE jobs.item_id = items.item_id AND jobs.job_type = '{JOB_TYPE_TRANSCRIPTION_ATTACHMENT}'
                  AND jobs.status IN ('queued', 'running')),
-        transcript_attachments.audio_reference, transcript_attachments.transcribed_at
+        transcript_attachments.audio_reference,
+        COALESCE(TRIM(transcript_attachments.text, {WHITESPACE}) <> '', 0),
+        transcript_attachments.transcribed_at
     FROM items
     JOIN captures ON captures.capture_id = items.capture_id
     LEFT JOIN transcript_attachments ON transcript_attachments.item_id = items.item_id
@@ -221,7 +227,8 @@ fn audio_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AudioItemRow
         user_text_present: row.get(5)?,
         transcription_in_flight: row.get(6)?,
         transcript_audio_reference: row.get(7)?,
-        transcribed_at: row.get(8)?,
+        transcript_text_present: row.get(8)?,
+        transcribed_at: row.get(9)?,
     })
 }
 
@@ -331,7 +338,8 @@ fn assess_row(
         .parse::<TranscriptionState>()
         .map_err(|error| anyhow!("stored transcription state is invalid: {}", error.0))?;
     let transcript_recoverable = transcription_state == TranscriptionState::Transcribed
-        && row.transcript_audio_reference.is_some();
+        && row.transcript_audio_reference.is_some()
+        && row.transcript_text_present;
     let text_present = row.capture_text_present || row.user_text_present || transcript_recoverable;
 
     let state = match retention_clock(row, transcription_state, text_present) {
@@ -392,6 +400,9 @@ fn retention_clock(
         (TranscriptionState::Transcribed, Some(transcript_audio)) => {
             if transcript_audio != &row.audio_reference {
                 return RetentionClock::Unresolved(UnresolvedReason::TranscriptAudioMismatch);
+            }
+            if !row.transcript_text_present {
+                return RetentionClock::Unresolved(UnresolvedReason::TranscriptEmpty);
             }
             match row
                 .transcribed_at
