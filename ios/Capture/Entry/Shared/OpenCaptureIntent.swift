@@ -14,16 +14,32 @@ struct OpenCaptureIntent: OpenIntent {
         self.target = target
     }
 
+    // Runs in the foreground app process, before or after the scene reaches the foreground. It only registers a
+    // request for a native capture surface; the scene presents it. Nothing is persisted or awaited here.
     func perform() async throws -> some IntentResult {
-        .result()
+        CaptureEntryHandoff.live.registerAndAnnounce(source: .controlIntent, requestedMode: target.requestedMode)
+        return .result()
     }
 }
 
 enum CaptureDestination: String, AppEnum {
+    /// The user's configured default capture mode.
     case capture
+    case voice
+    case silent
 
     static let typeDisplayRepresentation: TypeDisplayRepresentation = "Oh And Screen"
     static let caseDisplayRepresentations: [CaptureDestination: DisplayRepresentation] = [
         .capture: "Capture",
+        .voice: "Voice capture",
+        .silent: "Silent capture",
     ]
+
+    var requestedMode: CaptureEntryMode? {
+        switch self {
+        case .capture: return nil
+        case .voice: return .voice
+        case .silent: return .silent
+        }
+    }
 }
