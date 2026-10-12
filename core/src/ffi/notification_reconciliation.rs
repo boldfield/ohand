@@ -10,7 +10,9 @@
 //!   clears it; a null callback with a non-null context clears it only if that context is still
 //!   the registered one). The callback is invoked on the worker thread with one command at a
 //!   time and must return promptly: start the OS call and return. Native answers each command
-//!   exactly once with `ohand_core_complete_notification_effect`. A command that is not answered
+//!   exactly once with `ohand_core_complete_notification_effect`; the core refuses an answer
+//!   whose shape does not fit the command (a listing for a schedule or cancel, a completion for
+//!   a listing), so no other answer can stand in for an installed or cancelled request. A command that is not answered
 //!   within `EFFECT_DEADLINE` is abandoned (`OHAND_NOTIFICATION_COMMAND_ABANDON`) and counts as a
 //!   transient failure, which the next pass retries; a late answer is `not_found` and ignored.
 //! * `ohand_core_start_reconcile_reminders` queues one pass. The request is
@@ -138,8 +140,33 @@ enum Answer {
     Pending(Vec<PendingRequest>),
 }
 
+/// The answer shape a waiting command accepts besides a failure: a schedule or cancel completes,
+/// a listing lists. Any other answer is refused, so a listing cannot pass for an installed or
+/// cancelled request.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Reply {
+    Completion,
+    Listing,
+}
+
+impl Reply {
+    fn accepts(self, answer: &Answer) -> bool {
+        matches!(
+            (self, answer),
+            (_, Answer::Failed(_))
+                | (Reply::Completion, Answer::Done)
+                | (Reply::Listing, Answer::Pending(_))
+        )
+    }
+}
+
+struct Waiting {
+    reply: Reply,
+    sender: Sender<Answer>,
+}
+
 static REGISTRATIONS: Mutex<BTreeMap<u64, Arc<Registration>>> = Mutex::new(BTreeMap::new());
-static WAITING: Mutex<BTreeMap<(u64, u64), Sender<Answer>>> = Mutex::new(BTreeMap::new());
+static WAITING: Mutex<BTreeMap<(u64, u64), Waiting>> = Mutex::new(BTreeMap::new());
 static NEXT_EFFECT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Removes the waiting slot when the command ends, however it ends.
@@ -325,6 +352,9 @@ fn sanitized_code(code: &str) -> String {
 
 fn parse_answer(answer: AnswerJson) -> Result<Answer, AbiFailure> {
     if let Some(error) = answer.error {
+        if answer.pending.is_some() || answer.unattributable.is_some() {
+            return Err(AbiFailure::INVALID_REQUEST);
+        }
         return Ok(Answer::Failed(NotificationEffectError::new(
             error.class,
             sanitized_code(&error.code),
@@ -373,11 +403,16 @@ struct NativeEffects {
 }
 
 impl NativeEffects {
-    fn command(&self, command: u32, payload: &dyn Fn(u64) -> Vec<u8>) -> AnswerResult {
+    fn command(
+        &self,
+        command: u32,
+        reply: Reply,
+        payload: &dyn Fn(u64) -> Vec<u8>,
+    ) -> AnswerResult {
         let effect_id = NEXT_EFFECT_ID.fetch_add(1, Ordering::SeqCst);
         let (sender, receiver) = channel();
         let key = (self.handle, effect_id);
-        lock(&WAITING).insert(key, sender);
+        lock(&WAITING).insert(key, Waiting { reply, sender });
         let _slot = SlotGuard { key };
         let data = payload(effect_id);
         if !self.registration.invoke(effect_id, command, &data) {
@@ -422,40 +457,59 @@ impl NativeEffects {
 
 type AnswerResult = Result<Answer, NotificationEffectError>;
 
+fn malformed_answer() -> NotificationEffectError {
+    NotificationEffectError::new(ErrorClass::Transient, "malformed_native_answer")
+}
+
+/// A schedule or cancel succeeded only if native answered that it completed.
+fn completed(answer: AnswerResult) -> Result<(), NotificationEffectError> {
+    match answer? {
+        Answer::Done => Ok(()),
+        Answer::Pending(_) | Answer::Failed(_) => Err(malformed_answer()),
+    }
+}
+
 impl NotificationEffects for NativeEffects {
     fn schedule(&mut self, request: &ScheduleRequest) -> Result<(), NotificationEffectError> {
         let fire_at = request.fire_at.to_rfc3339_opts(SecondsFormat::Secs, true);
-        self.command(OHAND_NOTIFICATION_COMMAND_SCHEDULE, &|effect_id| {
-            serde_json::to_vec(&ScheduleCommand {
-                effect_id,
-                notification_id: &request.notification_id,
-                fire_at: fire_at.clone(),
-                payload_kind: request.payload_kind.as_str(),
-                opaque_target_id: &request.opaque_target_id,
-            })
-            .unwrap_or_default()
-        })
-        .map(|_| ())
+        completed(self.command(
+            OHAND_NOTIFICATION_COMMAND_SCHEDULE,
+            Reply::Completion,
+            &|effect_id| {
+                serde_json::to_vec(&ScheduleCommand {
+                    effect_id,
+                    notification_id: &request.notification_id,
+                    fire_at: fire_at.clone(),
+                    payload_kind: request.payload_kind.as_str(),
+                    opaque_target_id: &request.opaque_target_id,
+                })
+                .unwrap_or_default()
+            },
+        ))
     }
 
     fn cancel(&mut self, notification_id: &str) -> Result<(), NotificationEffectError> {
-        self.command(OHAND_NOTIFICATION_COMMAND_CANCEL, &|effect_id| {
-            serde_json::to_vec(&CancelCommand {
-                effect_id,
-                notification_id,
-            })
-            .unwrap_or_default()
-        })
-        .map(|_| ())
+        completed(self.command(
+            OHAND_NOTIFICATION_COMMAND_CANCEL,
+            Reply::Completion,
+            &|effect_id| {
+                serde_json::to_vec(&CancelCommand {
+                    effect_id,
+                    notification_id,
+                })
+                .unwrap_or_default()
+            },
+        ))
     }
 
     fn list_pending(&mut self) -> Result<Vec<PendingRequest>, NotificationEffectError> {
-        match self.command(OHAND_NOTIFICATION_COMMAND_LIST_PENDING, &|_| Vec::new())? {
+        match self.command(
+            OHAND_NOTIFICATION_COMMAND_LIST_PENDING,
+            Reply::Listing,
+            &|_| Vec::new(),
+        )? {
             Answer::Pending(requests) => Ok(requests),
-            Answer::Done | Answer::Failed(_) => Err(NotificationEffectError::new(
-                ErrorClass::Transient,
-                "malformed_native_answer",
-            )),
+            Answer::Done | Answer::Failed(_) => Err(malformed_answer()),
         }
     }
 }
@@ -711,8 +765,10 @@ pub unsafe extern "C" fn ohand_core_start_reconcile_reminders(
 /// completed schedule or cancel, `{"error":{"class","code"}}` for a failure (`class` is one of
 /// the normalized classes, `code` lowercase letters, digits and underscores), or
 /// `{"pending":[{"notification_id","fire_at"}],"unattributable":n}` for a listing (`n` optional,
-/// see the module documentation). An answer for a command that has
-/// ended is `not_found`.
+/// see the module documentation). A failure carries nothing else. The answer must fit the
+/// command: a schedule or cancel accepts only `{}` or a failure, a listing only a listing or a
+/// failure. A malformed or mismatched answer is `invalid_request` and leaves the command waiting
+/// for a valid one. An answer for a command that has ended is `not_found`.
 ///
 /// # Safety
 /// `answer` must point at `answer_len` readable bytes (it may be null only when `answer_len` is
@@ -738,10 +794,13 @@ pub unsafe extern "C" fn ohand_core_complete_notification_effect(
             serde_json::from_slice(std::slice::from_raw_parts(answer, answer_len))
                 .map_err(|_| AbiFailure::INVALID_REQUEST)?;
         let parsed = parse_answer(parsed)?;
-        let sender = lock(&WAITING)
+        let (reply, sender) = lock(&WAITING)
             .get(&(handle, effect_id))
-            .cloned()
+            .map(|waiting| (waiting.reply, waiting.sender.clone()))
             .ok_or(AbiFailure::NOT_FOUND)?;
+        if !reply.accepts(&parsed) {
+            return Err(AbiFailure::INVALID_REQUEST);
+        }
         sender.send(parsed).map_err(|_| AbiFailure::NOT_FOUND)
     })
 }

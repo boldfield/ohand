@@ -45,6 +45,8 @@ public struct PendingNotificationAnswer: Equatable, Sendable {
 }
 
 /// The native answer to one `NotificationEffectCommand`. `code` is lowercase letters, digits and underscores.
+/// The answer must fit the command: `schedule` and `cancel` take `done` or `failed`, `listPending` takes `pending` or
+/// `failed`. The core refuses any other pairing with `invalid_request` and keeps waiting for a valid answer.
 public enum NotificationEffectAnswer: Equatable, Sendable {
     case done
     case failed(errorClass: CoreErrorClass, code: String)

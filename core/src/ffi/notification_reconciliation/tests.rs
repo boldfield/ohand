@@ -134,6 +134,9 @@ struct Center {
     silent: bool,
     unanswered: Vec<u64>,
     unattributable: usize,
+    mismatch: bool,
+    silent_completions: bool,
+    refused: usize,
 }
 
 struct NativeSide {
@@ -158,17 +161,37 @@ impl NativeSide {
     }
 }
 
-fn answer(native: &NativeSide, effect_id: u64, body: Value) {
-    let bytes = serde_json::to_vec(&body).unwrap();
-    let outcome = consume(unsafe {
+fn send_answer(native: &NativeSide, effect_id: u64, body: &Value) -> Outcome {
+    let bytes = serde_json::to_vec(body).unwrap();
+    consume(unsafe {
         ohand_core_complete_notification_effect(
             native.handle.load(Ordering::SeqCst),
             effect_id,
             bytes.as_ptr(),
             bytes.len(),
         )
-    });
+    })
+}
+
+fn answer(native: &NativeSide, effect_id: u64, body: Value) {
+    let outcome = send_answer(native, effect_id, &body);
     assert_eq!(outcome.status, OHAND_CORE_STATUS_OK, "answer accepted");
+}
+
+/// Answers that do not fit `command`, or mix a failure with a listing.
+fn mismatched_answers(command: u32) -> Vec<Value> {
+    let failure = json!({"class": "transient", "code": "notification_center_failed"});
+    let mut bodies = vec![
+        json!({"error": failure, "pending": []}),
+        json!({"error": failure, "unattributable": 1}),
+    ];
+    if command == OHAND_NOTIFICATION_COMMAND_LIST_PENDING {
+        bodies.push(json!({}));
+    } else {
+        bodies.push(json!({"pending": []}));
+        bodies.push(json!({"pending": [], "unattributable": 2}));
+    }
+    bodies
 }
 
 unsafe extern "C" fn native_command(
@@ -184,11 +207,29 @@ unsafe extern "C" fn native_command(
     } else {
         serde_json::from_slice(std::slice::from_raw_parts(data, len)).unwrap()
     };
+    let (mismatch, silent_completion) = {
+        let center = native.center();
+        (
+            center.mismatch && command != OHAND_NOTIFICATION_COMMAND_ABANDON,
+            center.silent_completions && command != OHAND_NOTIFICATION_COMMAND_LIST_PENDING,
+        )
+    };
+    if mismatch {
+        for body in mismatched_answers(command) {
+            let outcome = send_answer(native, effect_id, &body);
+            assert_eq!(outcome.code(), "invalid_request", "{command}: {body}");
+            native.center().refused += 1;
+        }
+    }
     let reply = {
         let mut center = native.center();
         match command {
             OHAND_NOTIFICATION_COMMAND_ABANDON => {
                 center.abandoned += 1;
+                return;
+            }
+            _ if silent_completion => {
+                center.unanswered.push(effect_id);
                 return;
             }
             _ if center.silent => {
@@ -322,10 +363,37 @@ impl Session {
         )
     }
 
+    /// Runs one pass whose native commands are abandoned after `deadline`.
+    fn pass_within(&mut self, request: ValidatedRequest, deadline: Duration) -> Event {
+        let operation_id = self.next_operation;
+        self.next_operation += 1;
+        let job = reconcile_job(
+            self.handle,
+            operation_id,
+            request,
+            lock(&REGISTRATIONS).get(&self.handle).cloned(),
+            deadline,
+        );
+        instance::lookup(self.handle)
+            .unwrap()
+            .submit(operation_id, job)
+            .unwrap();
+        self.event(operation_id)
+    }
+
     fn close(self) {
         assert_eq!(consume(ohand_core_close(self.handle)).status, 0);
         let _ = ohand_core_set_notification_effects(self.handle, None, std::ptr::null_mut());
         let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
+fn unprompted() -> ValidatedRequest {
+    ValidatedRequest {
+        rearm_rejected_schedules: false,
+        allow_optional_prompts: true,
+        prompts: Vec::new(),
+        facts_only: false,
     }
 }
 
@@ -636,25 +704,7 @@ fn an_unanswered_command_is_abandoned_and_a_late_answer_is_ignored() {
     let mut session = Session::open("deadline", 1);
     session.native.center().silent = true;
 
-    let operation_id = session.next_operation;
-    session.next_operation += 1;
-    let job = reconcile_job(
-        session.handle,
-        operation_id,
-        ValidatedRequest {
-            rearm_rejected_schedules: false,
-            allow_optional_prompts: true,
-            prompts: Vec::new(),
-            facts_only: false,
-        },
-        lock(&REGISTRATIONS).get(&session.handle).cloned(),
-        Duration::from_millis(100),
-    );
-    instance::lookup(session.handle)
-        .unwrap()
-        .submit(operation_id, job)
-        .unwrap();
-    let event = session.event(operation_id);
+    let event = session.pass_within(unprompted(), Duration::from_millis(100));
     assert_eq!(event.status, OHAND_CORE_STATUS_TRANSIENT);
     let failure: Value = serde_json::from_slice(&event.payload).unwrap();
     assert_eq!(failure["code"], "pending_list_unavailable");
@@ -708,6 +758,8 @@ fn bad_requests_and_answers_are_refused_with_normalized_failures() {
         br#"{"pending":[{"notification_id":""}]}"#,
         br#"{"unattributable":1}"#,
         br#"{"pending":[],"unattributable":-1}"#,
+        br#"{"error":{"class":"transient","code":"x"},"pending":[]}"#,
+        br#"{"error":{"class":"transient","code":"x"},"unattributable":1}"#,
     ] {
         let outcome = consume(unsafe {
             ohand_core_complete_notification_effect(session.handle, 1, bytes.as_ptr(), bytes.len())
@@ -719,6 +771,102 @@ fn bad_requests_and_answers_are_refused_with_normalized_failures() {
     });
     assert_eq!(unknown.code(), "not_found");
     session.close();
+}
+
+#[test]
+fn answers_that_do_not_fit_the_command_are_refused_and_the_command_waits_for_a_valid_one() {
+    let _guard = serial();
+    let mut session = Session::open("mismatch", 60);
+    let offered = prompts(1);
+    {
+        let mut center = session.native.center();
+        center.mismatch = true;
+        center.pending.push((
+            "prompt-0".to_string(),
+            Utc::now() + ChronoDuration::hours(1),
+        ));
+    }
+
+    let request = json!({"allow_optional_prompts": true, "prompts": offered});
+    let outcome = session.pass(request.clone());
+    assert_eq!(count(&outcome, "installed"), 60);
+    assert_eq!(count(&outcome, "failures"), 0);
+    assert_eq!(states(&outcome, "schedule_state"), ["scheduled"; 60]);
+    {
+        let center = session.native.center();
+        assert_eq!(
+            center.cancels,
+            ["prompt-0"],
+            "the pending prompt yields once"
+        );
+        let listing_refusals =
+            center.lists * mismatched_answers(OHAND_NOTIFICATION_COMMAND_LIST_PENDING).len();
+        let completion_refusals = (center.schedules.len() + center.cancels.len())
+            * mismatched_answers(OHAND_NOTIFICATION_COMMAND_SCHEDULE).len();
+        assert_eq!(center.refused, listing_refusals + completion_refusals);
+    }
+
+    let repeat = session.pass(request);
+    assert_eq!(count(&repeat, "installed"), 0);
+    let center = session.native.center();
+    assert_eq!(center.schedules.len(), 60, "nothing is installed twice");
+    assert_eq!(center.cancels.len(), 1, "nothing is cancelled twice");
+    drop(center);
+    session.close();
+}
+
+#[test]
+fn a_schedule_answered_with_a_listing_is_never_recorded_as_scheduled() {
+    let _guard = serial();
+    let mut session = Session::open("mismatch-schedule", 2);
+    {
+        let mut center = session.native.center();
+        center.mismatch = true;
+        center.silent_completions = true;
+    }
+
+    let event = session.pass_within(unprompted(), Duration::from_millis(100));
+    assert_eq!(event.status, OHAND_CORE_STATUS_OK);
+    let outcome: Value = serde_json::from_slice(&event.payload).unwrap();
+    assert_eq!(count(&outcome, "installed"), 0);
+    assert_eq!(count(&outcome, "failures"), 2);
+    assert!(states(&outcome, "schedule_state")
+        .iter()
+        .all(|state| state != "scheduled"));
+    {
+        let center = session.native.center();
+        assert!(center.schedules.is_empty());
+        assert_eq!(center.abandoned, 2, "each refused schedule timed out");
+    }
+
+    {
+        let mut center = session.native.center();
+        center.mismatch = false;
+        center.silent_completions = false;
+    }
+    let recovered = session.pass(plain());
+    assert_eq!(count(&recovered, "installed"), 2);
+    assert_eq!(states(&recovered, "schedule_state"), ["scheduled"; 2]);
+    assert_eq!(session.native.center().schedules.len(), 2);
+    session.close();
+}
+
+#[test]
+fn completions_and_listings_accept_only_their_own_answer_shapes() {
+    let failure = Answer::Failed(NotificationEffectError::new(
+        ErrorClass::Transient,
+        "native_failure",
+    ));
+    assert!(Reply::Completion.accepts(&Answer::Done));
+    assert!(Reply::Completion.accepts(&failure));
+    assert!(!Reply::Completion.accepts(&Answer::Pending(Vec::new())));
+    assert!(Reply::Listing.accepts(&Answer::Pending(Vec::new())));
+    assert!(Reply::Listing.accepts(&failure));
+    assert!(!Reply::Listing.accepts(&Answer::Done));
+
+    assert!(completed(Ok(Answer::Done)).is_ok());
+    let listed = completed(Ok(Answer::Pending(Vec::new()))).unwrap_err();
+    assert_eq!(listed.code, "malformed_native_answer");
 }
 
 #[test]
