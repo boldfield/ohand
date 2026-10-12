@@ -2398,6 +2398,14 @@
     {
       "date": "2026-10-12",
       "change": "UI chain restructured at the maintainer's direction: removed ordering-only links U03b->U04a, U04b->U05a, U06b->U07a, U07c->U08a; U09 depends on U01/J03/D05/N04b/U11; T09, U10 and T03 depend on every UI branch end. Standing one-entry shared-host allowance for U01's settings/navigation host and U02b's source-detail host. Critical path 30 -> 20."
+    },
+    {
+      "date": "2026-10-12",
+      "change": "Standing test-target registration allowance: T02a, T02b, T03, T04a and T04b may each add one name/path-only [[test]] entry to core/Cargo.toml for a Rust suite in their owned directory; siblings sharing a directory share one entry."
+    },
+    {
+      "date": "2026-10-12",
+      "change": "P11a criterion 2 amended: bundle coverage is decided from the unsigned archive before any keychain, profile-installation, signing or export work, instead of from a project-spec prediction before the build. Same refusals, distinct exit, fail-closed archive enumeration; a spec parser is advisory and off the review surface."
     }
   ]
 }
