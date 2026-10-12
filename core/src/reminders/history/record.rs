@@ -2,7 +2,7 @@ use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use rusqlite::{OptionalExtension, Transaction};
 
 use super::HistoryError;
-use crate::reminders::state::notification_identifier;
+use crate::reminders::state::{notification_identifier, OperationState};
 use crate::store::schema::Clock;
 
 /// How far ahead of core's clock a reported observation may lie before it is refused as
@@ -125,14 +125,30 @@ fn record_fact(
     }
 
     // Only a request core actually made can have been delivered, opened or acknowledged.
-    let requested: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM reminder_operations
-                       WHERE reminder_id = ? AND effect_identity = ?)",
-        rusqlite::params![reminder_id, format!("schedule:{notification_id}")],
-        |row| row.get(0),
-    )?;
-    if !requested || notification_identifier(reminder_id, generation) != notification_id {
+    let schedule_state: Option<String> = tx
+        .query_row(
+            "SELECT operation_state FROM reminder_operations
+             WHERE reminder_id = ? AND effect_identity = ?",
+            rusqlite::params![reminder_id, format!("schedule:{notification_id}")],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(schedule_state) = schedule_state else {
         return Err(unknown());
+    };
+    if notification_identifier(reminder_id, generation) != notification_id {
+        return Err(unknown());
+    }
+    // ... and only one it actually handed to the OS. The attempt marker (`reminders::reconcile`)
+    // moves a schedule from `pending` to `failed` before every native call, so `failed` and
+    // `acknowledged` are the only states in which the OS may hold the request. `pending` and
+    // `superseded` were never attempted; `rejected` was refused by the OS and installed nothing.
+    let schedule_state: OperationState = schedule_state.parse()?;
+    if !matches!(
+        schedule_state,
+        OperationState::Failed | OperationState::Acknowledged
+    ) {
+        return Err(HistoryError::NotInstalled(notification_id.to_string()));
     }
 
     let now = clock.now();

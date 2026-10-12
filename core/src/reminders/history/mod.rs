@@ -7,7 +7,8 @@
 //   nothing (repeat, ambiguous or unschedulable time, cancellation with nothing to cancel) come
 //   from the request events kept per transition, so a later request never erases them;
 //   delivery and opening come from OS events (`record_delivery_evidence`); acknowledgment comes
-//   from an explicit user action (`acknowledge_reminder`). The clock is read for exactly one thing: whether the due time lies
+//   from an explicit user action (`acknowledge_reminder`). Both are refused for a request core
+//   never handed to the OS (never attempted, superseded unattempted, or rejected). The clock is read for exactly one thing: whether the due time lies
 //   in the past (`DueStatus`). It never produces a delivered, opened, missed, seen or
 //   acknowledged fact, and never completes the item.
 // - An elapsed reminder with no OS evidence is `DueStatus::Elapsed` with `DeliveryState::Unknown`
@@ -48,6 +49,10 @@ pub use view::{
 pub enum HistoryError {
     #[error("notification identifier {0} does not name a schedule core requested")]
     UnknownNotification(String),
+    #[error(
+        "notification {0} was never handed to the OS; no delivery or acknowledgment is possible"
+    )]
+    NotInstalled(String),
     #[error("notification {notification_id} belongs to another item than {item_id}")]
     ItemMismatch {
         notification_id: String,

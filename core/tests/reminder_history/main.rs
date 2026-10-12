@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ohand_core::lifecycle::delete_intent::mark_deletion_intent;
+use ohand_core::providers::contracts::ErrorClass;
 use ohand_core::reminders::history::{
     acknowledge_reminder, record_delivery_evidence, reminder_history, DeliveryEvidence,
     DeliveryEvidenceKind, DueStatus, HistoryEntryKind, HistoryError, NativeEffectStatus,
@@ -48,14 +49,19 @@ const CAPTURE_TIME: &str = "2026-01-15T10:30:00Z";
 const DUE_TIME: &str = "2026-01-16T09:00:00Z";
 const LATER_DUE_TIME: &str = "2026-01-18T09:00:00Z";
 
-/// The OS pending set; installs whatever it is asked to.
+/// The OS pending set; installs whatever it is asked to unless `refuse_with` is set, in which
+/// case every schedule fails with that class and installs nothing.
 #[derive(Default)]
 struct FakeCenter {
     pending: BTreeMap<String, DateTime<Utc>>,
+    refuse_with: Option<ErrorClass>,
 }
 
 impl NotificationEffects for FakeCenter {
     fn schedule(&mut self, request: &ScheduleRequest) -> Result<(), NotificationEffectError> {
+        if let Some(class) = self.refuse_with {
+            return Err(NotificationEffectError::new(class, "refused"));
+        }
         self.pending
             .insert(request.notification_id.clone(), request.fire_at);
         Ok(())
@@ -1354,5 +1360,152 @@ fn cancelling_an_ambiguous_request_is_one_entry() -> Result<()> {
         ]
     );
     assert_eq!(view.summary.request_state, RequestState::Cancelled);
+    Ok(())
+}
+
+/// Facts about a request core never handed to the OS (not yet attempted, or refused outright)
+/// are refused: such a request cannot have been delivered, opened or acknowledged.
+#[test]
+fn facts_for_a_request_never_handed_to_the_os_are_refused() -> Result<()> {
+    let mut db = open_db("never_installed")?;
+    let revision = insert_action(&mut db, "item-1", "call the roofer")?;
+    let record = set_time(
+        &mut db,
+        "item-1",
+        revision,
+        DUE_TIME,
+        "2026-01-15T11:00:00Z",
+    )?;
+    let notification_id = format!("{}#1", record.reminder_id);
+
+    // Requested but not reconciled: the schedule operation is still pending (never attempted).
+    let delivered = evidence(
+        &record,
+        1,
+        DeliveryEvidenceKind::Delivered,
+        "2026-01-16T09:00:00Z",
+    );
+    let opened = evidence(
+        &record,
+        1,
+        DeliveryEvidenceKind::Opened,
+        "2026-01-16T09:00:05Z",
+    );
+    let refused = |db: &mut Database, now: &str| {
+        for attempt in [&delivered, &opened] {
+            assert!(matches!(
+                record_evidence(db, attempt, now),
+                Err(HistoryError::NotInstalled(_))
+            ));
+        }
+        assert!(matches!(
+            acknowledge(db, "item-1", &notification_id, now),
+            Err(HistoryError::NotInstalled(_))
+        ));
+    };
+    refused(&mut db, "2026-01-16T09:01:00Z");
+
+    let assert_nothing_recorded = |db: &mut Database| -> Result<()> {
+        let events: i64 =
+            db.conn()
+                .query_row("SELECT COUNT(*) FROM reminder_history_events", [], |row| {
+                    row.get(0)
+                })?;
+        assert_eq!(events, 0, "refused facts leave no trace");
+        let reminder = stored(db, "item-1")?;
+        assert_eq!(reminder.delivery_state, DeliveryState::Unknown);
+        assert_eq!(
+            reminder.acknowledgment_state,
+            AcknowledgmentState::NotAcknowledged
+        );
+        let entries = kinds(&history(db, "item-1", "2026-01-16T09:02:00Z")?);
+        assert_eq!(
+            entries,
+            vec![HistoryEntryKind::TimeRequested {
+                generation: 1,
+                due_at: instant(DUE_TIME),
+                installation: NativeEffectStatus::NotAttempted,
+            }]
+        );
+        Ok(())
+    };
+    assert_nothing_recorded(&mut db)?;
+
+    // The OS refuses the schedule definitively: it was attempted but installed nothing.
+    let mut center = FakeCenter {
+        refuse_with: Some(ErrorClass::Unauthorized),
+        ..FakeCenter::default()
+    };
+    settle(&mut db, &mut center, "2026-01-15T11:01:00Z")?;
+    assert!(center.pending.is_empty());
+    refused(&mut db, "2026-01-16T09:01:00Z");
+    let events: i64 =
+        db.conn()
+            .query_row("SELECT COUNT(*) FROM reminder_history_events", [], |row| {
+                row.get(0)
+            })?;
+    assert_eq!(events, 0, "refused facts leave no trace");
+    let reminder = stored(&mut db, "item-1")?;
+    assert_eq!(reminder.delivery_state, DeliveryState::Unknown);
+    assert_eq!(
+        reminder.acknowledgment_state,
+        AcknowledgmentState::NotAcknowledged
+    );
+    let entries = kinds(&history(&mut db, "item-1", "2026-01-15T11:02:00Z")?);
+    assert_eq!(
+        entries,
+        vec![HistoryEntryKind::TimeRequested {
+            generation: 1,
+            due_at: instant(DUE_TIME),
+            installation: NativeEffectStatus::Rejected,
+        }]
+    );
+    Ok(())
+}
+
+/// An attempt whose outcome was never confirmed may have installed the request, so OS evidence
+/// for it is accepted.
+#[test]
+fn facts_for_an_attempted_but_unconfirmed_request_are_recorded() -> Result<()> {
+    let mut db = open_db("attempted_unconfirmed")?;
+    let revision = insert_action(&mut db, "item-1", "call the roofer")?;
+    let record = set_time(
+        &mut db,
+        "item-1",
+        revision,
+        DUE_TIME,
+        "2026-01-15T11:00:00Z",
+    )?;
+    let mut center = FakeCenter {
+        refuse_with: Some(ErrorClass::Transient),
+        ..FakeCenter::default()
+    };
+    settle(&mut db, &mut center, "2026-01-15T11:01:00Z")?;
+
+    let delivered = evidence(
+        &record,
+        1,
+        DeliveryEvidenceKind::Delivered,
+        "2026-01-16T09:00:00Z",
+    );
+    assert_eq!(
+        record_evidence(&mut db, &delivered, "2026-01-16T09:01:00Z")?,
+        RecordOutcome::Recorded {
+            current_generation: true
+        }
+    );
+    assert_eq!(
+        stored(&mut db, "item-1")?.delivery_state,
+        DeliveryState::Delivered
+    );
+    let entries = kinds(&history(&mut db, "item-1", "2026-01-16T09:02:00Z")?);
+    assert!(matches!(
+        entries.first(),
+        Some(HistoryEntryKind::TimeRequested {
+            installation: NativeEffectStatus::AttemptedUnconfirmed,
+            ..
+        })
+    ));
+    assert!(entries.contains(&HistoryEntryKind::Delivered { generation: 1 }));
     Ok(())
 }
