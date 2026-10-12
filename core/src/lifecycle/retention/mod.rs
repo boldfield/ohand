@@ -18,10 +18,11 @@
 //!   transcript) is flagged `sole_source`. Storage pressure never changes eligibility: it only adds
 //!   a [`StoragePressureNotice`] so the surface can say that nothing was or will be freed
 //!   automatically. The user's explicit options are always [`RetentionOption::DeleteAudio`], plus
-//!   [`RetentionOption::RetryTranscription`] whenever no text exists, no transcript was attached
-//!   and no transcription job is queued or running. That covers failed, unsupported and
+//!   [`RetentionOption::RetryTranscription`] whenever no text exists, no usable transcript is
+//!   attached and no transcription job is queued or running. That covers failed, unsupported and
 //!   pending states, including the no-speech outcome, which settles its job as failed and leaves
-//!   the item `audio_pending`.
+//!   the item `audio_pending`, and a `transcribed` item whose transcript record is missing or
+//!   inconsistent.
 //! * "Text exists" follows the item's current text: the latest text correction. Clearing a
 //!   correction to empty makes audio with no transcript a sole source again (and retry is
 //!   offered). Once a transcript is attached, the transcript stays recoverable, so clearing a
@@ -349,10 +350,7 @@ fn assess_row(
     };
 
     let mut options = Vec::new();
-    if !text_present
-        && !row.transcription_in_flight
-        && transcription_state != TranscriptionState::Transcribed
-    {
+    if !text_present && !row.transcription_in_flight {
         options.push(RetentionOption::RetryTranscription);
     }
     options.push(RetentionOption::DeleteAudio);

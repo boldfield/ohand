@@ -592,6 +592,14 @@ fn absent_or_unusable_transcription_times_never_expire_audio() {
         unresolved(UnresolvedReason::TranscriptRecordInconsistent)
     );
     assert!(missing.sole_source, "no usable text remains");
+    assert_eq!(
+        missing.options,
+        vec![
+            RetentionOption::RetryTranscription,
+            RetentionOption::DeleteAudio
+        ],
+        "a transcribed item whose transcript record is missing can be retried or deleted"
+    );
     assert_eq!(missing.cleanup, CleanupIntent::None);
 
     let store = Store::new();
