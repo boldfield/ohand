@@ -272,4 +272,108 @@ final class AudioRetentionCoreIntegrationTests: XCTestCase {
         XCTAssertTrue(world.audioExists(expired.fileName))
         session.close()
     }
+
+    func testEveryCoreClientSharingAHandleStartsItsOperationsInADistinctRange() {
+        let starts: [UInt64] = [
+            TranscriptionCoreClient.firstOperationID, CoreDeletionCleanupClient.firstOperationID,
+            CoreExportClient.firstOperationID, CoreReminderReconciler.firstOperationID,
+            CoreAudioRetentionClient.firstOperationID, ProcessingHealthService.firstOperationID,
+            JobRunnerService.firstOperationID,
+        ]
+        XCTAssertEqual(Set(starts).count, starts.count, "no two clients start at the same operation identifier")
+        let following = starts.filter { $0 > CoreAudioRetentionClient.firstOperationID }.min()
+        XCTAssertEqual(following, ProcessingHealthService.firstOperationID, "retention's range ends where health's starts")
+        XCTAssertGreaterThan(CoreAudioRetentionClient.firstOperationID, CoreReminderReconciler.firstOperationID)
+    }
+
+    /// One core handle with a single event handler that asks both the retention client and the reminder reconciler
+    /// about every event, so an event both would take shows up as a double claim.
+    private final class SharedCoreRouter: @unchecked Sendable {
+        struct Claim: Equatable {
+            let retention: Bool
+            let reminders: Bool
+        }
+
+        private let lock = NSLock()
+        private var claimsByOperation: [(operationID: UInt64, claim: Claim)] = []
+
+        func route(_ event: CoreEvent, retention: CoreAudioRetentionClient, reminders: CoreReminderReconciler) {
+            let claimedByRetention = retention.handle(event)
+            let claimedByReminders = reminders.handle(event)
+            lock.lock()
+            claimsByOperation.append(
+                (event.operationID, Claim(retention: claimedByRetention, reminders: claimedByReminders)))
+            lock.unlock()
+        }
+
+        var claims: [(operationID: UInt64, claim: Claim)] {
+            lock.lock()
+            defer { lock.unlock() }
+            return claimsByOperation
+        }
+    }
+
+    private func waitUntil(_ condition: () -> Bool, timeout: TimeInterval = 20) async throws -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return condition()
+    }
+
+    func testARetentionSweepOverlappingAReminderPassOnOneCoreReachesOnlyItsOwner() async throws {
+        let world = try makeWorld()
+        let expired = try await world.seedVoice(captureID: "cap-expired", transcribedDaysAgo: 10)
+        let core = try CoreHandle(path: world.databasePath)
+        defer { core.close() }
+        let retention = CoreAudioRetentionClient(core: core)
+        defer { retention.shutDown() }
+        let center = FakeNotificationCenter()
+        let gatedCenter = SuspendingNotificationCenter(inner: center)
+        let gate = SuspensionGate()
+        gatedCenter.pendingGate = gate
+        let bridge = NotificationBridge(center: gatedCenter, ingestor: NotificationEventIngestor(handler: { _ in }))
+        let reminders = try CoreReminderReconciler(core: core, bridge: bridge, center: gatedCenter)
+        defer { reminders.invalidate() }
+        let router = SharedCoreRouter()
+        try core.setEventHandler { event in router.route(event, retention: retention, reminders: reminders) }
+        let permission = NotificationPermissionReconciler(
+            center: center, reconciliation: reminders,
+            observations: InMemoryNotificationPermissionObservationStore(), promptCandidates: { [] })
+        let service = AudioRetentionService(
+            core: retention, layout: world.layout, fileSystem: FileManagerAudioRetentionFileSystem(),
+            pressureProbe: FixedPressureProbe(pressure: .normal), retentionPeriodSeconds: 0)
+
+        // The reminder pass is inside the core, waiting on the OS pending list, when the sweep is submitted. The sweep
+        // queues behind it on the core's single worker, so both first operations are outstanding at once.
+        let pass = Task { try await permission.refresh(trigger: .launch) }
+        let passHeld = try await waitUntil { gate.arrivals >= 1 }
+        XCTAssertTrue(passHeld, "the pass asked for the pending list")
+        let sweep = Task { await service.sweep() }
+        let sweepSubmitted = try await waitUntil { retention.outstandingOperationCount == 1 }
+        XCTAssertTrue(sweepSubmitted, "the sweep is waiting on the core")
+        gate.release()
+
+        let passReport = try await pass.value
+        let report = await sweep.value
+        XCTAssertNil(passReport.reconciliationFailure, "the pass got its own answer")
+        XCTAssertTrue(passReport.converged)
+        XCTAssertNil(report.listingFailure, "the sweep got its own answer")
+        XCTAssertEqual(outcome(report, expired.itemID), .removed)
+        XCTAssertTrue(report.converged)
+        XCTAssertFalse(world.audioExists(expired.fileName))
+
+        let claims = router.claims
+        XCTAssertEqual(Set(claims.map(\.operationID)).count, claims.count, "no two operations shared an identifier")
+        for (operationID, claim) in claims {
+            XCTAssertNotEqual(claim.retention, claim.reminders, "exactly one client owns operation \(operationID)")
+        }
+        let retentionIDs = claims.filter(\.claim.retention).map(\.operationID)
+        let reminderIDs = claims.filter(\.claim.reminders).map(\.operationID)
+        XCTAssertEqual(retentionIDs.count, 2, "one sweep and one fenced removal")
+        XCTAssertEqual(reminderIDs.count, 1)
+        XCTAssertTrue(retentionIDs.allSatisfy { $0 >= CoreAudioRetentionClient.firstOperationID })
+        XCTAssertTrue(reminderIDs.allSatisfy { $0 < CoreAudioRetentionClient.firstOperationID })
+    }
 }
