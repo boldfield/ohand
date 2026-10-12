@@ -128,7 +128,11 @@ pub struct PlannedPrompt {
 ///   either by the clock or because an installed request vanished from the OS before its
 ///   instant (it fired and the clock was moved back). No occurrence at or before it is planned
 ///   again, so rolling the clock back cannot replay a prompt that already fired. It is bounded
-///   by the horizon, never by the clock reading itself.
+///   by the horizon, never by the clock reading itself. Absence from the OS cannot tell a
+///   delivery from a cancellation (capacity displacement, a permission toggle, an OS purge), so
+///   only the leading run of vanished occurrences counts: the fence never passes a prompt the OS
+///   still holds. A purge that empties the OS can thus cost at most the planned horizon of
+///   prompts, which is acceptable for an optional feature; it never cancels a pending one.
 /// - The identifier of an occurrence is `prompt:<local date>`: stable, so a re-plan replaces
 ///   rather than duplicates, and it carries no item content.
 /// - Local-time semantics: a skipped local time (DST gap) fires at the first valid minute after
@@ -159,7 +163,7 @@ impl PromptSchedule {
     pub fn configure(&mut self, settings: PromptSettings, now: DateTime<Utc>, zone: Tz) {
         self.retire_elapsed(now);
         self.settings = settings;
-        self.planned = fill(settings, now, zone, self.last_elapsed);
+        self.rebuild(now, zone);
     }
 
     pub fn refresh(&mut self, trigger: RefreshTrigger, now: DateTime<Utc>, zone: Tz) {
@@ -169,8 +173,23 @@ impl PromptSchedule {
         }
         self.retire_elapsed(now);
         if trigger == RefreshTrigger::AppOpen {
-            self.planned = fill(self.settings, now, zone, self.last_elapsed);
+            self.rebuild(now, zone);
         }
+    }
+
+    /// Replace the plan with a fresh fill. An occurrence that was already planned at the same
+    /// instant keeps its `installed` mark, so a refill that is the first observation after a
+    /// clock rollback can still tell that the OS fired it.
+    fn rebuild(&mut self, now: DateTime<Utc>, zone: Tz) {
+        let mut planned = fill(self.settings, now, zone, self.last_elapsed);
+        for prompt in &mut planned {
+            prompt.installed = self.planned.iter().any(|previous| {
+                previous.installed
+                    && previous.notification_id == prompt.notification_id
+                    && previous.fire_at == prompt.fire_at
+            });
+        }
+        self.planned = planned;
     }
 
     /// Drop occurrences whose instant has passed by the clock and remember the latest.
@@ -178,17 +197,24 @@ impl PromptSchedule {
         self.retire_where(|prompt| prompt.fire_at <= now);
     }
 
-    /// Retire occurrences the clock says have passed, and installed ones the OS no longer
-    /// holds: those fired before the clock was moved back. Called by the reconcile pass with
-    /// the identifiers the OS currently holds.
+    /// Retire occurrences the clock says have passed, and the leading run of installed ones the
+    /// OS no longer holds: those fired before the clock was moved back. The run stops at the first
+    /// occurrence still pending (or never installed), so a prompt displaced by the reminder
+    /// capacity pass behind an earlier pending one is not mistaken for a delivery and never moves
+    /// the refill floor past a prompt that is still valid. Called by the reconcile pass with the
+    /// identifiers the OS currently holds.
     pub(super) fn retire_fired(&mut self, now: DateTime<Utc>, pending: &BTreeSet<&str>) {
+        self.planned.sort_by_key(|prompt| prompt.fire_at);
+        let mut run_open = true;
         self.retire_where(|prompt| {
-            prompt.fire_at <= now
-                || (prompt.installed && !pending.contains(prompt.notification_id.as_str()))
+            let fired = prompt.fire_at <= now
+                || (prompt.installed && !pending.contains(prompt.notification_id.as_str()));
+            run_open = run_open && fired;
+            run_open
         });
     }
 
-    fn retire_where(&mut self, has_fired: impl Fn(&PlannedPrompt) -> bool) {
+    fn retire_where(&mut self, mut has_fired: impl FnMut(&PlannedPrompt) -> bool) {
         let mut latest = self.last_elapsed;
         self.planned.retain(|prompt| {
             if !has_fired(prompt) {

@@ -8,7 +8,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ohand_core::providers::contracts::ErrorClass;
-use ohand_core::reminders::capacity::{CapacityPolicy, MAX_PROMPT_REQUESTS};
+use ohand_core::reminders::capacity::{
+    reconcile_with_capacity, CapacityPolicy, MAX_PROMPT_REQUESTS,
+};
 use ohand_core::reminders::reconcile::{
     reconcile, NotificationEffectError, NotificationEffects, PayloadKind, PendingRequest,
     ScheduleRequest,
@@ -613,6 +615,99 @@ fn a_prompt_deferred_by_capacity_is_not_mistaken_for_one_that_fired() -> Result<
     reconcile_prompts(&mut db, &clock, &mut center, &mut schedule, &policy)?;
     assert_eq!(fire_instants(&schedule), planned_before);
     assert_eq!(planned_before.len(), PROMPT_HORIZON_DAYS);
+    Ok(())
+}
+
+#[test]
+fn an_app_open_that_is_the_first_look_after_a_rollback_does_not_replay_the_fired_prompt(
+) -> Result<()> {
+    let mut db = open_db("rollback-first-open")?;
+    let mut schedule = PromptSchedule::default();
+    schedule.configure(daily(nine_am()), instant("2026-01-15T07:00:00Z"), UTC_ZONE);
+    let mut center = FakeCenter::default();
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T07:00:00Z")?;
+    assert!(center.pending.contains_key("prompt:2026-01-15"));
+
+    center.fire_due(instant("2026-01-15T10:00:00Z"));
+    schedule.refresh(
+        RefreshTrigger::AppOpen,
+        instant("2026-01-15T08:00:00Z"),
+        UTC_ZONE,
+    );
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T08:00:00Z")?;
+
+    assert_eq!(
+        center.prompt_ids(),
+        ["prompt:2026-01-16", "prompt:2026-01-17"]
+    );
+    let installs_of_fired = center
+        .requests
+        .iter()
+        .filter(|request| request.notification_id == "prompt:2026-01-15")
+        .count();
+    assert_eq!(installs_of_fired, 1);
+    Ok(())
+}
+
+#[test]
+fn a_prompt_cancelled_by_the_reminder_capacity_pass_never_costs_an_earlier_pending_prompt(
+) -> Result<()> {
+    let mut db = open_db("reminder-side-capacity")?;
+    let policy = CapacityPolicy {
+        os_pending_limit: 8,
+        replacement_headroom: 4,
+        ..CapacityPolicy::default()
+    };
+    let mut schedule = PromptSchedule::default();
+    let moment = "2026-01-15T10:30:00Z";
+    let now = instant(moment);
+    schedule.configure(daily(nine_am()), now, UTC_ZONE);
+    let mut center = FakeCenter::default();
+    let clock = clock_at(moment);
+    reconcile_prompts(&mut db, &clock, &mut center, &mut schedule, &policy)?;
+    assert_eq!(
+        center.prompt_ids(),
+        [
+            "prompt:2026-01-16",
+            "prompt:2026-01-17",
+            "prompt:2026-01-18"
+        ]
+    );
+
+    // The reminder side makes room itself and cancels the latest prompt behind the schedule's back.
+    create_reminder(&mut db, "item-0", "water plants")?;
+    create_reminder(&mut db, "item-1", "call the dentist")?;
+    reconcile_with_capacity(
+        &mut db,
+        &clock,
+        &mut center,
+        &policy,
+        &schedule.demands(now),
+    )?;
+    assert_eq!(
+        center.prompt_ids(),
+        ["prompt:2026-01-16", "prompt:2026-01-17"]
+    );
+
+    reconcile_prompts(&mut db, &clock, &mut center, &mut schedule, &policy)?;
+    schedule.refresh(RefreshTrigger::AppOpen, now, UTC_ZONE);
+    reconcile_prompts(&mut db, &clock, &mut center, &mut schedule, &policy)?;
+
+    assert_eq!(
+        fire_instants(&schedule)[..2],
+        [
+            instant("2026-01-16T09:00:00Z"),
+            instant("2026-01-17T09:00:00Z")
+        ]
+    );
+    assert_eq!(
+        center.prompt_ids(),
+        ["prompt:2026-01-16", "prompt:2026-01-17"]
+    );
+    assert!(!center
+        .cancel_calls
+        .iter()
+        .any(|id| id == "prompt:2026-01-16" || id == "prompt:2026-01-17"));
     Ok(())
 }
 
