@@ -904,6 +904,43 @@ class EmbeddedExtensionTests(SigningToolTestCase):
                 self.assertEqual(self.devicectl_steps(), [])
                 self.assertEqual(self.only_evidence()["failed_stage"], "archive-inspect")
 
+    def test_symbolic_links_anywhere_in_the_archived_app_are_refused_before_keychain_and_export_work(self):
+        # Each layout hides a bundle, or could, behind a link the walk does not follow. Before this rule, a linked
+        # framework carrying PlugIns/Hidden.appex and a linked top-level app were both accepted and the hidden
+        # extension never reached provisioningProfiles. Every case is now exit 4 with no keychain or export work.
+        outside = self.inputs / "outside"
+        hidden_framework = outside / "Carrier.framework"
+        hidden_plugins = outside / "PlugIns"
+        for bundle in (hidden_framework / "PlugIns" / "Hidden.appex", hidden_plugins / "Hidden.appex"):
+            bundle.mkdir(parents=True)
+            (bundle / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": SECOND_EXTENSION_IDENTIFIER}))
+        (outside / "notes.txt").write_text("synthetic")
+        cases = {
+            "top-level application is a link": (dict(STUB_ARCHIVE_APP_SYMLINK="1"),
+                                                "archived app OhAndApp.app is not a plain bundle directory"),
+            "linked framework hiding an extension": (dict(STUB_ARCHIVE_SYMLINK=f"Frameworks/Carrier.framework={hidden_framework}"),
+                                                     "archived app contains a symbolic link at Frameworks/Carrier.framework"),
+            "linked PlugIns directory hiding an extension": (
+                dict(STUB_ARCHIVE_EXTENSIONS="", STUB_ARCHIVE_SYMLINK=f"PlugIns={hidden_plugins}"),
+                "archived app contains a symbolic link at PlugIns"),
+            "link inside the app to another of its directories": (
+                dict(STUB_ARCHIVE_SYMLINK="Frameworks/Alias.framework=OhAndServices.framework"),
+                "archived app contains a symbolic link at Frameworks/Alias.framework"),
+            "linked file inside an extension": (dict(STUB_ARCHIVE_SYMLINK=f"PlugIns/Extension0.appex/notes.txt={outside / 'notes.txt'}"),
+                                                "archived app contains a symbolic link at PlugIns/Extension0.appex/notes.txt"),
+            "dangling link": (dict(STUB_ARCHIVE_SYMLINK=f"Resources/Dangling={outside / 'missing'}"),
+                              "archived app contains a symbolic link at Resources/Dangling"),
+        }
+        for description, (environment, message) in cases.items():
+            with self.subTest(description):
+                self.state_reset()
+                result = self.sign_app("--install", **environment)
+                self.assert_refused_before_keychain_and_export(result, 4, message)
+                self.assertEqual(self.devicectl_steps(), [])
+                self.assertEqual(self.only_evidence()["failed_stage"], "archive-inspect")
+                self.assertNotIn(SECOND_EXTENSION_IDENTIFIER, result.stdout + result.stderr)
+                self.assertFalse((self.state / "export-options.json").exists())
+
     def test_two_bundles_are_signed_under_a_per_bundle_profile_mapping(self):
         map_path = self.write_mapped_profiles({
             APP_BUNDLE_IDENTIFIER: {"Name": SYNTHETIC_PROFILE_NAME},
@@ -1206,6 +1243,60 @@ class ProfileParsingTests(unittest.TestCase):
         with self.assertRaises(sign_probe.SigningError) as context:
             sign_probe.normalize_expiry(parsed)
         self.assertEqual(context.exception.exit_code, sign_probe.EXIT_INPUT)
+
+
+class ArchiveEnumerationTests(unittest.TestCase):
+    """Direct checks of the archive walk, for conditions a stub archive cannot express portably."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.application = Path(self.temporary.name) / "OhAnd.app"
+        self.plugins = self.application / "PlugIns"
+        extension = self.plugins / "Extension.appex"
+        extension.mkdir(parents=True)
+        (self.application / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": APP_BUNDLE_IDENTIFIER}))
+        (extension / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": EXTENSION_BUNDLE_IDENTIFIER}))
+
+    def assert_refused(self, message):
+        with self.assertRaises(sign_probe.SigningError) as context:
+            sign_probe.SigningRun._signed_bundle_paths(self.application)
+        self.assertEqual((context.exception.exit_code, context.exception.stage), (sign_probe.EXIT_TOOLING_INTEGRITY, "archive-inspect"))
+        self.assertIn(message, context.exception.message)
+
+    def test_a_readable_app_enumerates_the_application_and_its_extension(self):
+        found = sign_probe.SigningRun._signed_bundle_paths(self.application)
+        self.assertEqual(found, [(self.application, "application"), (self.plugins / "Extension.appex", "app-extension")])
+
+    def test_a_walk_error_refuses_instead_of_skipping_the_directory(self):
+        # os.walk ignores an unreadable directory unless onerror is given; the walk must turn that into a refusal.
+        real_walk = os.walk
+
+        def walk_reporting_an_unreadable_plugins_directory(top, **keywords):
+            keywords["onerror"](PermissionError(13, "Permission denied", str(self.plugins)))
+            return real_walk(top, **keywords)
+
+        with mock.patch.object(sign_probe.os, "walk", walk_reporting_an_unreadable_plugins_directory):
+            self.assert_refused("archived app directory PlugIns could not be read")
+
+    @unittest.skipIf(os.geteuid() == 0, "a superuser can read a directory with no permission bits")
+    def test_a_directory_without_read_permission_refuses(self):
+        self.plugins.chmod(0o000)
+        self.addCleanup(self.plugins.chmod, 0o700)
+        self.assert_refused("archived app directory PlugIns could not be read")
+
+    def test_an_application_that_is_a_link_or_a_file_is_refused(self):
+        linked = Path(self.temporary.name) / "Linked.app"
+        linked.symlink_to(self.application)
+        with self.assertRaises(sign_probe.SigningError) as context:
+            sign_probe.SigningRun._signed_bundle_paths(linked)
+        self.assertEqual(context.exception.exit_code, sign_probe.EXIT_TOOLING_INTEGRITY)
+        self.assertIn("archived app Linked.app is not a plain bundle directory", context.exception.message)
+        plain_file = Path(self.temporary.name) / "File.app"
+        plain_file.write_text("not a directory")
+        with self.assertRaises(sign_probe.SigningError) as context:
+            sign_probe.SigningRun._signed_bundle_paths(plain_file)
+        self.assertIn("archived app File.app is not a plain bundle directory", context.exception.message)
 
 
 class SimulatorPathTests(unittest.TestCase):

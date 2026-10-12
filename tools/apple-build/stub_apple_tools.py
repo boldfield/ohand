@@ -18,6 +18,7 @@ Every call is appended to $STUB_STATE_DIR/calls.jsonl. Behaviour is selected thr
                                             (e.g. Frameworks/X.framework/PlugIns/Y.appex=<id>); an empty <id> writes no
                                             Info.plist and the id "unreadable" writes an Info.plist that does not parse
   STUB_ARCHIVE_SYMLINK=<path>=<target>     a symbolic link at a path relative to an OhAndApp archive's app
+  STUB_ARCHIVE_APP_SYMLINK=1                the archive's Products/Applications/<scheme>.app is a symbolic link to the real app
   STUB_UNSIGNED_EXTENSION=1                 export an OhAndApp whose extensions lack _CodeSignature
   STUB_DEVICECTL_FAIL=<step>[,...]          fail one devicectl step: install, details, launch or processes
   STUB_NOT_RUNNING=1                        the launched process is absent from the device process list
@@ -131,7 +132,12 @@ def xcodebuild(arguments):
     elif arguments[0] == "archive":
         archive = Path(option_value(arguments, "-archivePath"))
         scheme = option_value(arguments, "-scheme")
-        application = archive / "Products" / "Applications" / f"{scheme}.app"
+        applications = archive / "Products" / "Applications"
+        application = applications / f"{scheme}.app"
+        if os.environ.get("STUB_ARCHIVE_APP_SYMLINK") == "1":
+            application = archive / "Products" / "Linked" / f"{scheme}.app"
+            applications.mkdir(parents=True)
+            (applications / f"{scheme}.app").symlink_to(application)
         application.mkdir(parents=True)
         write_bundle_info(application, SCHEME_BUNDLE_IDENTIFIERS[scheme])
         if scheme == "OhAndApp":

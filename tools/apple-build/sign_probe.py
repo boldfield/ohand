@@ -613,20 +613,38 @@ class SigningRun:
 
     @staticmethod
     def _signed_bundle_paths(application: Path) -> List[tuple]:
-        """The application and every nested bundle that takes a profile, at any depth. Enumeration fails closed."""
+        """The application and every nested bundle that takes a profile, at any depth.
+
+        Enumeration fails closed: the application must be a plain directory, every directory under it is walked
+        (the walk never follows a symbolic link, so any symbolic link, to a file or a directory, inside or outside
+        the app, is refused rather than left unwalked), and a directory that cannot be read refuses instead of
+        being skipped.
+        """
+        if application.is_symlink() or not application.is_dir():
+            raise integrity_error(f"archived app {application.name} is not a plain bundle directory", "archive-inspect")
+
+        def refuse_unreadable_directory(error: OSError) -> None:
+            where = Path(error.filename) if error.filename else application
+            try:
+                name = where.relative_to(application) if where != application else where.name
+            except ValueError:
+                name = where.name
+            raise integrity_error(f"archived app directory {name} could not be read", "archive-inspect") from None
+
         found = [(application, "application")]
-        for directory, subdirectories, files in os.walk(application):
+        for directory, subdirectories, files in os.walk(application, onerror=refuse_unreadable_directory):
             for name in sorted(subdirectories + files):
                 path = Path(directory) / name
                 relative = path.relative_to(application)
                 if name.endswith(UNSIGNED_SERVICE_SUFFIX):
                     raise integrity_error(f"archived app embeds XPC service {relative}, which this tool does not sign", "archive-inspect")
                 kind = next((kind for suffix, kind in SIGNED_BUNDLE_KINDS.items() if name.endswith(suffix)), None)
-                if kind is None:
-                    continue
-                if path.is_symlink() or not path.is_dir():
+                if kind is not None and (path.is_symlink() or not path.is_dir()):
                     raise integrity_error(f"archived bundle {relative} is not a plain bundle directory", "archive-inspect")
-                found.append((path, kind))
+                if path.is_symlink():
+                    raise integrity_error(f"archived app contains a symbolic link at {relative}", "archive-inspect")
+                if kind is not None:
+                    found.append((path, kind))
         return found
 
     @classmethod
