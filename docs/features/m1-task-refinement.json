@@ -2440,6 +2440,10 @@
     {
       "date": "2026-10-12",
       "change": "Added F09 after P11b's first device run: OhAndApp crashed at launch with OhAndCoreBridge.framework not embedded (linked only through OhAndServices). F09 embeds it, adds an OhAndApp simulator launch smoke and a config check for transitive frameworks. P11b depends on F09."
+    },
+    {
+      "date": "2026-10-12",
+      "change": "S02 bounded interpretation after 14 rejections over PRs #188/#193/#197, all one root cause (fired-prompt evidence stored on mutable plan entries): append-only spent-date ledger plus wall-clock high-water mark, settled at one chokepoint before any rebuild/cancel; ambiguity fails toward suppression; capacity displacement before the high-water reaches the instant does not spend a date; property-style interleaving test is the review surface."
     }
   ]
 }

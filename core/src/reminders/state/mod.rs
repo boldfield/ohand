@@ -879,6 +879,70 @@ pub fn list_operations(
     rows.into_iter().map(decode_operation).collect()
 }
 
+/// A request the user made that core installed no notification for: a repeat, an ambiguous or
+/// unschedulable time, or a cancellation. Kept per transition, so later requests do not erase
+/// earlier ones. `native_cancel` says whether the cancellation retired a native request (whose
+/// cancel operation then describes it).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequestEvent {
+    pub schedule_generation: i64,
+    pub request_state: RequestState,
+    pub resolved_instant: Option<DateTime<Utc>>,
+    pub unsupported_reason: Option<String>,
+    pub native_cancel: bool,
+    pub recorded_at: DateTime<Utc>,
+}
+
+/// Request events for a reminder in the order they were recorded.
+pub fn list_request_events(
+    tx: &Transaction<'_>,
+    reminder_id: &str,
+) -> Result<Vec<RequestEvent>, ReminderStateError> {
+    let mut statement = tx.prepare(
+        "SELECT schedule_generation, request_state, unschedulable_reason, resolved_instant,
+                unsupported_reason, native_cancel, recorded_at
+         FROM reminder_request_events WHERE reminder_id = ? ORDER BY event_id",
+    )?;
+    let rows = statement
+        .query_map([reminder_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, bool>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    rows.into_iter()
+        .map(
+            |(
+                schedule_generation,
+                request_state,
+                unschedulable_reason,
+                resolved_instant,
+                unsupported_reason,
+                native_cancel,
+                recorded_at,
+            )| {
+                Ok(RequestEvent {
+                    schedule_generation,
+                    request_state: RequestState::decode(
+                        &request_state,
+                        unschedulable_reason.as_deref(),
+                    )?,
+                    resolved_instant: resolved_instant.as_deref().map(parse_instant).transpose()?,
+                    unsupported_reason,
+                    native_cancel,
+                    recorded_at: parse_instant(&recorded_at)?,
+                })
+            },
+        )
+        .collect()
+}
+
 /// The native set core wants installed: every `Resolved` reminder of an active item at its
 /// current generation.
 pub fn desired_notifications(
@@ -1237,6 +1301,35 @@ fn record_operation(
     })
 }
 
+/// Append a request that installs no notification to the reminder's request history.
+fn record_request_event(
+    tx: &Transaction<'_>,
+    reminder_id: &str,
+    event: &RequestEvent,
+) -> Result<(), ReminderStateError> {
+    let unschedulable_reason = match event.request_state {
+        RequestState::Unschedulable(reason) => Some(reason.as_str()),
+        _ => None,
+    };
+    tx.execute(
+        "INSERT INTO reminder_request_events
+            (reminder_id, schedule_generation, request_state, unschedulable_reason,
+             resolved_instant, unsupported_reason, native_cancel, recorded_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        rusqlite::params![
+            reminder_id,
+            event.schedule_generation,
+            event.request_state.column_value(),
+            unschedulable_reason,
+            event.resolved_instant.map(format_instant),
+            &event.unsupported_reason,
+            event.native_cancel,
+            format_instant(event.recorded_at),
+        ],
+    )?;
+    Ok(())
+}
+
 /// Retire the schedule of `generation` if one was ever requested: mark an unacknowledged
 /// schedule operation superseded and record a cancel for its native identifier. Returns
 /// whether a schedule existed.
@@ -1297,7 +1390,20 @@ fn cancel_existing(
     if record.request_state == RequestState::Cancelled {
         return Ok(Some(record));
     }
-    retire_generation(tx, &record.reminder_id, record.schedule_generation, now)?;
+    let native_cancel =
+        retire_generation(tx, &record.reminder_id, record.schedule_generation, now)?;
+    record_request_event(
+        tx,
+        &record.reminder_id,
+        &RequestEvent {
+            schedule_generation: record.schedule_generation,
+            request_state: RequestState::Cancelled,
+            resolved_instant: None,
+            unsupported_reason: None,
+            native_cancel,
+            recorded_at: now,
+        },
+    )?;
     tx.execute(
         "UPDATE reminders SET request_state = 'cancelled', unschedulable_reason = NULL,
                 state_version = state_version + 1, updated_at = ? WHERE reminder_id = ?",
@@ -1393,9 +1499,15 @@ fn commit_outcome(
 
     let (schedule_generation, schedule_state) = match request_state {
         RequestState::Resolved => (previous_generation + 1, ScheduleState::PendingSchedule),
-        _ if retired => (previous_generation, previous_schedule_state),
+        // Replacing a requested notification with a request that installs nothing still
+        // advances the identity, so callbacks for the retired notification stay history only.
+        _ if retired => (previous_generation + 1, previous_schedule_state),
         _ => (previous_generation, ScheduleState::NotScheduled),
     };
+
+    // A new generation is a new native request: delivery and acknowledgment facts about the
+    // previous one do not carry over to it.
+    let new_notification = schedule_generation != previous_generation;
 
     if existing.is_none() {
         tx.execute(
@@ -1426,6 +1538,9 @@ fn commit_outcome(
             "UPDATE reminders SET request_state = ?, schedule_state = ?, resolved_instant = ?,
                 timezone_id = ?, ambiguity_reason = ?, unsupported_reason = ?,
                 unschedulable_reason = ?, source_phrase = ?, schedule_generation = ?,
+                delivery_state = CASE WHEN ? THEN 'unknown' ELSE delivery_state END,
+                acknowledgment_state =
+                    CASE WHEN ? THEN 'not_acknowledged' ELSE acknowledgment_state END,
                 state_version = state_version + 1, updated_at = ?
              WHERE reminder_id = ?",
             rusqlite::params![
@@ -1438,13 +1553,28 @@ fn commit_outcome(
                 &unschedulable_reason,
                 &source_phrase,
                 schedule_generation,
+                new_notification,
+                new_notification,
                 format_instant(now),
                 &reminder_id,
             ],
         )?;
     }
 
-    if request_state == RequestState::Resolved {
+    if request_state != RequestState::Resolved {
+        record_request_event(
+            tx,
+            &reminder_id,
+            &RequestEvent {
+                schedule_generation,
+                request_state,
+                resolved_instant,
+                unsupported_reason: unsupported_reason.clone(),
+                native_cancel: false,
+                recorded_at: now,
+            },
+        )?;
+    } else {
         record_operation(
             tx,
             &reminder_id,
