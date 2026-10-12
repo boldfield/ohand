@@ -40,6 +40,10 @@ struct FileManagerAudioRetentionFileSystem: AudioRetentionFileSystem {
 /// at the cost of repeating idempotent work; one that cannot be read at all fails the operation instead, because
 /// "unknown" must not read as "empty". Entries hold identifiers and fixed codes only.
 ///
+/// The document is read from disk by `refresh()`, once per sweep, and held in memory in between: lookups never touch the
+/// disk, and every write replaces the file and then the held copy. The file stays bounded because `prune(keeping:)`
+/// drops entries whose audio the core no longer lists.
+///
 /// Not thread safe: the retention service serializes every call.
 final class AudioRetentionLedger {
     static let fileName = "audio-retention-ledger.json"
@@ -68,20 +72,40 @@ final class AudioRetentionLedger {
         var entries: [Entry]
     }
 
+    struct Key: Hashable {
+        let itemID: String
+        let audioReference: String
+    }
+
     private let fileURL: URL
     private let fileSystem: AudioRetentionFileSystem
+    private var held: Document?
 
     init(layout: ProtectedStorageLayout, fileSystem: AudioRetentionFileSystem) {
         fileURL = layout.directory(for: .configuration).appendingPathComponent(Self.fileName)
         self.fileSystem = fileSystem
     }
 
+    /// Reads the file again, replacing the held copy. Throws when the file exists but cannot be read.
+    func refresh() throws {
+        held = try load()
+    }
+
     func entry(itemID: String, audioReference: String) throws -> Entry? {
-        try load().entries.first { $0.itemID == itemID && $0.audioReference == audioReference }
+        try document().entries.first { $0.itemID == itemID && $0.audioReference == audioReference }
     }
 
     func allEntries() throws -> [Entry] {
-        try load().entries
+        try document().entries
+    }
+
+    /// Forgets every entry whose item and audio are not in `keys`, writing only when something changed. Entries that
+    /// are kept are never altered.
+    func prune(keeping keys: Set<Key>) throws {
+        var current = try document()
+        let before = current.entries.count
+        current.entries.removeAll { !keys.contains(Key(itemID: $0.itemID, audioReference: $0.audioReference)) }
+        if current.entries.count != before { try save(current) }
     }
 
     func recordRemoved(itemID: String, audioReference: String) throws {
@@ -112,24 +136,31 @@ final class AudioRetentionLedger {
         guard let existing = try entry(itemID: itemID, audioReference: audioReference), existing.state != .removed else {
             return
         }
-        var document = try load()
-        document.entries.removeAll { $0.itemID == itemID && $0.audioReference == audioReference }
-        try save(document)
+        var current = try document()
+        current.entries.removeAll { $0.itemID == itemID && $0.audioReference == audioReference }
+        try save(current)
     }
 
     // MARK: private
 
     private func update(itemID: String, audioReference: String, _ change: (inout Entry) -> Void) throws {
-        var document = try load()
-        if let index = document.entries.firstIndex(where: { $0.itemID == itemID && $0.audioReference == audioReference }) {
-            change(&document.entries[index])
+        var current = try document()
+        if let index = current.entries.firstIndex(where: { $0.itemID == itemID && $0.audioReference == audioReference }) {
+            change(&current.entries[index])
         } else {
             var entry = Entry(
                 itemID: itemID, audioReference: audioReference, state: .failing, failedAttempts: 0, lastFailure: nil)
             change(&entry)
-            document.entries.append(entry)
+            current.entries.append(entry)
         }
-        try save(document)
+        try save(current)
+    }
+
+    private func document() throws -> Document {
+        if let held { return held }
+        let loaded = try load()
+        held = loaded
+        return loaded
     }
 
     private func load() throws -> Document {
@@ -148,5 +179,6 @@ final class AudioRetentionLedger {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         try fileSystem.replaceDurably(try encoder.encode(sorted), at: fileURL)
+        held = sorted
     }
 }

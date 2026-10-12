@@ -30,13 +30,19 @@ enum RetentionFixtures {
 }
 
 /// A core whose sweep listing and removal-time decisions a test scripts separately, so a listing can be made stale.
+/// `removeAudio` behaves like the real core: it denies what the script denies, and otherwise removes the real file.
 final class ScriptedRetentionCore: AudioRetentionCore, @unchecked Sendable {
     private let lock = NSLock()
     private var listing: [AudioRetentionItem] = []
     private var decisions: [String: AudioRemovalDecision] = [:]
     private var sweepFailure: Error?
     private var decisionFailure: Error?
+    private var removalFailures: Set<String> = []
+    private var failedEffects: Set<String> = []
+    private var silentlyKept: Set<String> = []
     private(set) var authorizedRequests: [String] = []
+    private(set) var removalRequests: [String] = []
+    private(set) var removedFileNames: [String] = []
     private(set) var sweepPressures: [CoreRetentionPressure] = []
 
     func setListing(_ items: [AudioRetentionItem]) { locked { listing = items } }
@@ -44,6 +50,12 @@ final class ScriptedRetentionCore: AudioRetentionCore, @unchecked Sendable {
     func setDecision(_ decision: AudioRemovalDecision, itemID: String) { locked { decisions[itemID] = decision } }
     func failSweep(_ error: Error?) { locked { sweepFailure = error } }
     func failDecisions(_ error: Error?) { locked { decisionFailure = error } }
+    /// The next removal of this file never reaches the core: nothing is touched.
+    func interruptRemoval(of fileName: String) { locked { _ = removalFailures.insert(fileName) } }
+    /// The next removal of this file is approved but the core reports it could not remove it.
+    func failEffect(of fileName: String) { locked { _ = failedEffects.insert(fileName) } }
+    /// Removals of this file are reported as done although the file stays.
+    func keepSilently(_ fileName: String) { locked { _ = silentlyKept.insert(fileName) } }
 
     func sweep(pressure: CoreRetentionPressure, periodSeconds: UInt64) async throws -> [AudioRetentionItem] {
         try locked {
@@ -63,6 +75,26 @@ final class ScriptedRetentionCore: AudioRetentionCore, @unchecked Sendable {
         }
     }
 
+    func removeAudio(itemID: String, audioReference: String, fileURL: URL, periodSeconds: UInt64) async throws
+        -> AudioRemovalResult
+    {
+        try locked {
+            removalRequests.append(itemID)
+            let fileName = fileURL.lastPathComponent
+            if removalFailures.remove(fileName) != nil { throw RetentionFixtureError() }
+            if let decisionFailure { throw decisionFailure }
+            if case .denied(let denial)? = decisions[itemID] { return .denied(denial) }
+            if failedEffects.remove(fileName) != nil { return .approved(.failed) }
+            if silentlyKept.contains(fileName) { return .approved(.removed) }
+            let existed = FileManager.default.fileExists(atPath: fileURL.path)
+            if existed {
+                try FileManager.default.removeItem(at: fileURL)
+                removedFileNames.append(fileName)
+            }
+            return .approved(existed ? .removed : .alreadyAbsent)
+        }
+    }
+
     private func locked<Value>(_ body: () throws -> Value) rethrows -> Value {
         lock.lock()
         defer { lock.unlock() }
@@ -75,44 +107,37 @@ struct FixedPressureProbe: AudioStoragePressureProbing {
     func currentPressure() -> CoreRetentionPressure { pressure }
 }
 
-/// Wraps the real file system and fails selected operations once, by point name: `fs.remove:<file name>`,
-/// `fs.read:<file name>` and `fs.replace`. Removal can also be made to "succeed" without removing, to prove a surviving file is not reported gone.
+/// Wraps the real file system and fails selected operations once, by point name: `fs.read:<file name>` and
+/// `fs.replace`. It also records every read, to prove how often the ledger is read.
 final class FaultingRetentionFileSystem: AudioRetentionFileSystem, @unchecked Sendable {
     private let wrapped = FileManagerAudioRetentionFileSystem()
     private let faults: FaultPlan
     private let lock = NSLock()
-    private var silentlyKept: Set<String> = []
-    private(set) var removedFileNames: [String] = []
+    private var reads: [String] = []
 
     init(faults: FaultPlan) {
         self.faults = faults
     }
 
-    func keepSilently(_ fileName: String) {
+    func readCount(of fileName: String) -> Int {
         lock.lock()
-        silentlyKept.insert(fileName)
-        lock.unlock()
+        defer { lock.unlock() }
+        return reads.filter { $0 == fileName }.count
     }
 
     func fileExists(at url: URL) -> Bool { wrapped.fileExists(at: url) }
     func fileSize(at url: URL) throws -> Int { try wrapped.fileSize(at: url) }
     func entryNames(in directory: URL) throws -> [String] { try wrapped.entryNames(in: directory) }
     func read(from url: URL) throws -> Data {
+        lock.lock()
+        reads.append(url.lastPathComponent)
+        lock.unlock()
         try faults.check("fs.read:\(url.lastPathComponent)")
         return try wrapped.read(from: url)
     }
     func writeDurably(_ data: Data, to url: URL) throws { try wrapped.writeDurably(data, to: url) }
     func move(from source: URL, to destination: URL) throws { try wrapped.move(from: source, to: destination) }
-
-    func remove(at url: URL) throws {
-        try faults.check("fs.remove:\(url.lastPathComponent)")
-        lock.lock()
-        let keep = silentlyKept.contains(url.lastPathComponent)
-        if !keep { removedFileNames.append(url.lastPathComponent) }
-        lock.unlock()
-        if keep { return }
-        try wrapped.remove(at: url)
-    }
+    func remove(at url: URL) throws { try wrapped.remove(at: url) }
 
     func replaceDurably(_ data: Data, at url: URL) throws {
         try faults.check("fs.replace")

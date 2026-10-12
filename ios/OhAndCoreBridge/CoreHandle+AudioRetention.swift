@@ -7,11 +7,15 @@ public enum CoreRetentionPressure: String, Equatable, Sendable {
     case low
 }
 
-/// One audio-retention request. The core reads and decides; neither command changes anything.
+/// One audio-retention request. `sweep` and `authorizeRemoval` only read; `removeAudio` approves and removes the one
+/// file in a single step on the core's worker, so nothing can change between the approval and the removal.
 public enum AudioRetentionCommand: Equatable, Sendable {
     /// `periodSeconds` 0 selects the core's default retention period.
     case sweep(pressure: CoreRetentionPressure, periodSeconds: UInt64)
     case authorizeRemoval(itemID: String, audioReference: String, periodSeconds: UInt64)
+    /// `audioPath` is the absolute path of the file `audioReference` names; the core refuses a path that does not end
+    /// with the reference.
+    case removeAudio(itemID: String, audioReference: String, audioPath: String, periodSeconds: UInt64)
 
     fileprivate var request: Request {
         switch self {
@@ -21,6 +25,10 @@ public enum AudioRetentionCommand: Equatable, Sendable {
             return Request(
                 command: "authorize_removal", itemID: itemID, audioReference: audioReference,
                 periodSeconds: periodSeconds)
+        case .removeAudio(let itemID, let audioReference, let audioPath, let periodSeconds):
+            return Request(
+                command: "remove_audio", itemID: itemID, audioReference: audioReference, audioPath: audioPath,
+                periodSeconds: periodSeconds)
         }
     }
 
@@ -29,6 +37,7 @@ public enum AudioRetentionCommand: Equatable, Sendable {
         var pressure: String?
         var itemID: String?
         var audioReference: String?
+        var audioPath: String?
         var periodSeconds: UInt64
 
         enum CodingKeys: String, CodingKey {
@@ -36,6 +45,7 @@ public enum AudioRetentionCommand: Equatable, Sendable {
             case pressure
             case itemID = "item_id"
             case audioReference = "audio_reference"
+            case audioPath = "audio_path"
             case periodSeconds = "period_seconds"
         }
     }
@@ -96,13 +106,15 @@ public struct CoreRetentionSweepAnswer: Decodable, Equatable, Sendable {
     public let assessments: [CoreRetentionAssessment]
 }
 
-/// The answer to `authorizeRemoval`. `decision` is `approved` or `denied`; a denial carries its `reason`.
+/// The answer to `authorizeRemoval` and `removeAudio`. `decision` is `approved` or `denied`; a denial carries its
+/// `reason`. `effect` (`removed`, `already_absent` or `failed`) is present only on an approved `removeAudio`.
 public struct CoreRetentionDecisionAnswer: Decodable, Equatable, Sendable {
     public let decision: String
     public let expiredAt: String?
     public let reason: String?
     public let expiresAt: String?
     public let unresolvedReason: String?
+    public let effect: String?
 
     enum CodingKeys: String, CodingKey {
         case decision
@@ -110,6 +122,7 @@ public struct CoreRetentionDecisionAnswer: Decodable, Equatable, Sendable {
         case reason
         case expiresAt = "expires_at"
         case unresolvedReason = "unresolved_reason"
+        case effect
     }
 }
 

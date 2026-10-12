@@ -2,16 +2,26 @@
 //!
 //! `ohand_core_start_audio_retention` exposes the read-only L03a retention policy
 //! (`lifecycle::retention`) to the native cleanup service as one tagged JSON command per call. The
-//! clock is the system clock; nothing here writes a row or removes a file. Each command runs on
+//! clock is the system clock; nothing here writes a row, and only `remove_audio` removes a file. Each command runs on
 //! the handle's worker thread and its outcome event for `operation_id` is `{"operation_id", ...}`:
 //!
 //! * `sweep` (`pressure`: `normal` or `low`, optional `period_seconds`) -> `assessments`: one entry
 //!   per live item that holds audio, with `state`, `sole_source`, the explicit `options`, the
 //!   `cleanup` intent and any `storage_pressure_notice`.
 //! * `authorize_removal` (`item_id`, `audio_reference`, optional `period_seconds`) -> `decision`:
-//!   `approved` (with `expired_at`) or `denied` (with `reason`). Native code asks this immediately
-//!   before it removes a file, so a sweep result that has gone stale cannot remove audio that has
-//!   since become protected.
+//!   `approved` (with `expired_at`) or `denied` (with `reason`). A read-only question; it does not
+//!   permit a removal, which only `remove_audio` carries out.
+//!
+//! * `remove_audio` (`item_id`, `audio_reference`, `audio_path`, optional `period_seconds`) ->
+//!   the same `decision` as `authorize_removal`, and, when it is `approved`, `effect`:
+//!   `removed`, `already_absent` or `failed`. The decision and the file removal happen in one job
+//!   on the handle's worker thread, which serializes every core mutation, so no other write can
+//!   land between the approval and the unlink: audio that became protected, deleted or changed
+//!   earlier is denied and kept, and a later change finds the file already gone. `audio_path`
+//!   must be absolute and end with the approved `audio_reference` (exactly two plain path
+//!   components), so a removal can only ever name the one file the policy approved. Core never
+//!   reads the file. `failed` means the file may still exist; `removed` is reported only after
+//!   it was verified absent.
 //!
 //! `period_seconds` is the configured retention period; absent or 0 selects the default of seven
 //! days, and a value outside the policy's bounds is refused as `invalid_request`. Failures are
@@ -31,10 +41,13 @@ use crate::store::schema::{Database, SystemClock};
 use chrono::Duration;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::path::{Component, Path};
 use std::sync::Mutex;
 
 /// Longest identifier or audio reference accepted in a command, in bytes.
 const MAX_IDENTIFIER_BYTES: usize = 512;
+/// Longest audio path accepted in a command, in bytes.
+const MAX_PATH_BYTES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -57,13 +70,21 @@ enum Command {
         #[serde(default)]
         period_seconds: u64,
     },
+    RemoveAudio {
+        item_id: String,
+        audio_reference: String,
+        audio_path: String,
+        #[serde(default)]
+        period_seconds: u64,
+    },
 }
 
 impl Command {
     fn policy(&self) -> Result<RetentionPolicy, AbiFailure> {
         let period_seconds = match self {
             Command::Sweep { period_seconds, .. }
-            | Command::AuthorizeRemoval { period_seconds, .. } => *period_seconds,
+            | Command::AuthorizeRemoval { period_seconds, .. }
+            | Command::RemoveAudio { period_seconds, .. } => *period_seconds,
         };
         if period_seconds == 0 {
             return Ok(RetentionPolicy::default());
@@ -74,19 +95,58 @@ impl Command {
     }
 
     fn validate(&self) -> Result<(), AbiFailure> {
-        if let Command::AuthorizeRemoval {
-            item_id,
-            audio_reference,
-            ..
-        } = self
-        {
-            for value in [item_id, audio_reference] {
-                if value.is_empty() || value.len() > MAX_IDENTIFIER_BYTES {
-                    return Err(AbiFailure::INVALID_REQUEST);
-                }
+        match self {
+            Command::Sweep { .. } => {}
+            Command::AuthorizeRemoval {
+                item_id,
+                audio_reference,
+                ..
+            } => validate_identifiers(item_id, audio_reference)?,
+            Command::RemoveAudio {
+                item_id,
+                audio_reference,
+                audio_path,
+                ..
+            } => {
+                validate_identifiers(item_id, audio_reference)?;
+                validate_audio_path(audio_reference, audio_path)?;
             }
         }
         self.policy().map(|_| ())
+    }
+}
+
+fn validate_identifiers(item_id: &str, audio_reference: &str) -> Result<(), AbiFailure> {
+    for value in [item_id, audio_reference] {
+        if value.is_empty() || value.len() > MAX_IDENTIFIER_BYTES {
+            return Err(AbiFailure::INVALID_REQUEST);
+        }
+    }
+    Ok(())
+}
+
+/// A removal may only name the file the reference points at: the reference is exactly two plain
+/// components (directory and file name), and the absolute path ends with them and has no `..`
+/// component.
+fn validate_audio_path(audio_reference: &str, audio_path: &str) -> Result<(), AbiFailure> {
+    let reference = Path::new(audio_reference);
+    let path = Path::new(audio_path);
+    let plain_reference = reference.components().count() == 2
+        && reference
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)));
+    let plain_path = path.is_absolute()
+        && audio_path.len() <= MAX_PATH_BYTES
+        && path.components().all(|component| {
+            matches!(
+                component,
+                Component::Normal(_) | Component::RootDir | Component::Prefix(_)
+            )
+        });
+    if plain_reference && plain_path && path.ends_with(reference) {
+        Ok(())
+    } else {
+        Err(AbiFailure::INVALID_REQUEST)
     }
 }
 
@@ -187,6 +247,25 @@ fn decision_json(decision: &RemovalDecision) -> Value {
     }
 }
 
+/// Removes the file and verifies it is gone. A file that is already absent is not a failure.
+fn remove_audio_file(path: &Path) -> &'static str {
+    let was_present = match std::fs::remove_file(path) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => return "failed",
+    };
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if was_present {
+                "removed"
+            } else {
+                "already_absent"
+            }
+        }
+        _ => "failed",
+    }
+}
+
 fn run(database: &Database, command: &Command) -> Result<Value, AbiFailure> {
     let policy = command.policy()?;
     match command {
@@ -217,6 +296,26 @@ fn run(database: &Database, command: &Command) -> Result<Value, AbiFailure> {
             .map_err(|error| store_failure(&error))?;
             Ok(decision_json(&decision))
         }
+        Command::RemoveAudio {
+            item_id,
+            audio_reference,
+            audio_path,
+            ..
+        } => {
+            let decision = authorize_audio_removal(
+                database.conn(),
+                &SystemClock,
+                &policy,
+                item_id,
+                audio_reference,
+            )
+            .map_err(|error| store_failure(&error))?;
+            let mut body = decision_json(&decision);
+            if matches!(decision, RemovalDecision::Approved { .. }) {
+                body["effect"] = json!(remove_audio_file(Path::new(audio_path)));
+            }
+            Ok(body)
+        }
     }
 }
 
@@ -234,8 +333,8 @@ fn retention_job(command: Command, operation_id: u64) -> JobFn {
 /// Queues one audio-retention command described by the `request_len` JSON bytes at `request`
 /// (`{"command": "...", ...}`; unknown commands, fields and out-of-range periods are refused as
 /// `invalid_request` before anything is queued). The outcome event for `operation_id` is the JSON
-/// documented in the module documentation, or a normalized failure. Neither command changes
-/// anything.
+/// documented in the module documentation, or a normalized failure. Only `remove_audio` changes
+/// anything, and only the one approved file.
 ///
 /// # Safety
 /// `request` must point at `request_len` readable bytes (it may be null only when

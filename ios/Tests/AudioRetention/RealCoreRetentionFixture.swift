@@ -44,14 +44,9 @@ final class RealCoreRetentionWorld {
         on session: RealCoreRetentionSession,
         fileSystem: AudioRetentionFileSystem = FileManagerAudioRetentionFileSystem(),
         retentionPeriodSeconds: UInt64 = 0,
-        beforeAuthorize: (@Sendable (String) -> Void)? = nil
+        core: AudioRetentionCore? = nil
     ) -> AudioRetentionService {
-        let core: AudioRetentionCore
-        if let beforeAuthorize {
-            core = HookedRetentionCore(wrapped: session.client, hook: beforeAuthorize)
-        } else {
-            core = session.client
-        }
+        let core = core ?? session.client
         return AudioRetentionService(
             core: core, layout: layout, fileSystem: fileSystem,
             pressureProbe: FixedPressureProbe(pressure: .normal), retentionPeriodSeconds: retentionPeriodSeconds)
@@ -176,11 +171,25 @@ final class RealCoreRetentionSession {
     }
 }
 
-/// The production client with a hook that runs just before each removal-time authorization, so a test can change the
-/// core's state after the sweep listed the audio and before the service acts on it.
-struct HookedRetentionCore: AudioRetentionCore {
-    let wrapped: AudioRetentionCore
-    let hook: @Sendable (String) -> Void
+/// The production client with test hooks around the removal: `beforeRemoval` runs just before the removal request is
+/// sent, so a test can change the core's state after the sweep listed the audio and before the core acts on it, and
+/// `interruptNextRemoval` makes the next removal fail before it reaches the core, as a process that dies there would.
+final class HookedRetentionCore: AudioRetentionCore, @unchecked Sendable {
+    private let wrapped: AudioRetentionCore
+    private let beforeRemoval: (@Sendable (String) -> Void)?
+    private let lock = NSLock()
+    private var interruptions = 0
+
+    init(wrapped: AudioRetentionCore, beforeRemoval: (@Sendable (String) -> Void)? = nil) {
+        self.wrapped = wrapped
+        self.beforeRemoval = beforeRemoval
+    }
+
+    func interruptNextRemoval() {
+        lock.lock()
+        interruptions += 1
+        lock.unlock()
+    }
 
     func sweep(pressure: CoreRetentionPressure, periodSeconds: UInt64) async throws -> [AudioRetentionItem] {
         try await wrapped.sweep(pressure: pressure, periodSeconds: periodSeconds)
@@ -189,8 +198,20 @@ struct HookedRetentionCore: AudioRetentionCore {
     func authorizeRemoval(itemID: String, audioReference: String, periodSeconds: UInt64) async throws
         -> AudioRemovalDecision
     {
-        hook(itemID)
-        return try await wrapped.authorizeRemoval(
+        try await wrapped.authorizeRemoval(
             itemID: itemID, audioReference: audioReference, periodSeconds: periodSeconds)
+    }
+
+    func removeAudio(itemID: String, audioReference: String, fileURL: URL, periodSeconds: UInt64) async throws
+        -> AudioRemovalResult
+    {
+        beforeRemoval?(itemID)
+        lock.lock()
+        let interrupted = interruptions > 0
+        if interrupted { interruptions -= 1 }
+        lock.unlock()
+        if interrupted { throw CoreAudioRetentionClient.unreadableAnswer }
+        return try await wrapped.removeAudio(
+            itemID: itemID, audioReference: audioReference, fileURL: fileURL, periodSeconds: periodSeconds)
     }
 }

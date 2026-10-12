@@ -2,8 +2,8 @@ import XCTest
 @testable import OhAndCoreBridge
 @testable import OhAndServices
 
-/// `AudioRetentionService` against real files in a temporary protected-storage tree, with a scripted core and a file
-/// system that fails selected steps once. The real core boundary is covered by `AudioRetentionCoreIntegrationTests`.
+/// `AudioRetentionService` against real files in a temporary protected-storage tree, with a scripted core that removes
+/// the real file when it approves, and a file system that fails ledger steps once. The real core boundary is covered by `AudioRetentionCoreIntegrationTests`.
 final class AudioRetentionServiceTests: XCTestCase {
     private var storage: RetentionStorage!
     private let faults = FaultPlan()
@@ -57,13 +57,12 @@ final class AudioRetentionServiceTests: XCTestCase {
         try expire("item-1", audio: "a.m4a")
         let service = makeService()
         _ = await service.sweep()
-        let removedBefore = fileSystem.removedFileNames
 
         let report = await service.sweep()
         XCTAssertEqual(outcome(report, "item-1"), .alreadyRemoved)
         XCTAssertTrue(report.converged)
-        XCTAssertEqual(fileSystem.removedFileNames, removedBefore)
-        XCTAssertEqual(core.authorizedRequests, ["item-1"], "finished removals are not authorized again")
+        XCTAssertEqual(core.removedFileNames, ["a.m4a"])
+        XCTAssertEqual(core.removalRequests, ["item-1"], "finished removals are not asked of the core again")
     }
 
     func testOnlyTheApprovedFileIsRemoved() async throws {
@@ -79,19 +78,35 @@ final class AudioRetentionServiceTests: XCTestCase {
 
     func testInterruptionBeforeRemovalConvergesOnTheNextSweep() async throws {
         try expire("item-1", audio: "a.m4a")
-        faults.arm("fs.remove:a.m4a")
+        core.interruptRemoval(of: "a.m4a")
         let service = makeService()
 
         let interrupted = await service.sweep()
-        XCTAssertEqual(outcome(interrupted, "item-1"), .retryLater(.storageUnavailable))
+        XCTAssertEqual(outcome(interrupted, "item-1"), .retryLater(.coreUnavailable))
         XCTAssertFalse(interrupted.converged)
-        XCTAssertTrue(storage.audioExists("a.m4a"), "a failed removal leaves the audio in place")
-        XCTAssertEqual(try storage.ledgerEntries().map(\.state), [.failing])
+        XCTAssertTrue(storage.audioExists("a.m4a"), "an interrupted removal leaves the audio in place")
+        XCTAssertEqual(try storage.ledgerEntries(), [])
 
         let next = await service.sweep()
         XCTAssertEqual(outcome(next, "item-1"), .removed)
         XCTAssertTrue(next.converged)
         XCTAssertFalse(storage.audioExists("a.m4a"))
+        XCTAssertEqual(try storage.ledgerEntries().map(\.state), [.removed])
+    }
+
+    func testARemovalTheCoreCannotCarryOutIsRetriedAndLeavesTheAudio() async throws {
+        try expire("item-1", audio: "a.m4a")
+        core.failEffect(of: "a.m4a")
+        let service = makeService()
+
+        let failed = await service.sweep()
+        XCTAssertEqual(outcome(failed, "item-1"), .retryLater(.storageUnavailable))
+        XCTAssertFalse(failed.converged)
+        XCTAssertTrue(storage.audioExists("a.m4a"))
+        XCTAssertEqual(try storage.ledgerEntries().map(\.state), [.failing])
+
+        let next = await service.sweep()
+        XCTAssertEqual(outcome(next, "item-1"), .removed)
         XCTAssertEqual(try storage.ledgerEntries().map(\.state), [.removed])
     }
 
@@ -107,7 +122,7 @@ final class AudioRetentionServiceTests: XCTestCase {
         XCTAssertEqual(try storage.ledgerEntries(), [])
 
         let next = await service.sweep()
-        XCTAssertEqual(outcome(next, "item-1"), .removed)
+        XCTAssertEqual(outcome(next, "item-1"), .alreadyRemoved, "the file was already absent")
         XCTAssertTrue(next.converged)
         XCTAssertEqual(try storage.ledgerEntries().map(\.state), [.removed])
     }
@@ -118,13 +133,13 @@ final class AudioRetentionServiceTests: XCTestCase {
         _ = await makeService().sweep()
 
         let afterRestart = await makeService().sweep()
-        XCTAssertEqual(outcome(afterRestart, "item-1"), .removed)
+        XCTAssertEqual(outcome(afterRestart, "item-1"), .alreadyRemoved)
         XCTAssertTrue(afterRestart.converged)
     }
 
     func testAFileThatSurvivesRemovalIsNeverReportedRemoved() async throws {
         try expire("item-1", audio: "a.m4a")
-        fileSystem.keepSilently("a.m4a")
+        core.keepSilently("a.m4a")
 
         let report = await makeService().sweep()
         XCTAssertEqual(outcome(report, "item-1"), .retryLater(.storageUnavailable))
@@ -143,7 +158,7 @@ final class AudioRetentionServiceTests: XCTestCase {
         XCTAssertEqual(outcome(report, "item-1"), .denied(.unresolved(.transcriptionPending)))
         XCTAssertTrue(report.converged, "a refusal is settled, not a failure")
         XCTAssertTrue(storage.audioExists("a.m4a"))
-        XCTAssertEqual(core.authorizedRequests, ["item-1"], "the core was asked again at removal time")
+        XCTAssertEqual(core.removalRequests, ["item-1"], "the core was asked again at removal time")
         XCTAssertEqual(try storage.ledgerEntries(), [])
     }
 
@@ -166,7 +181,7 @@ final class AudioRetentionServiceTests: XCTestCase {
 
     func testAnApprovalFromAnEarlierSweepIsNotTrustedAfterTheAudioBecomesProtected() async throws {
         try expire("item-1", audio: "a.m4a")
-        faults.arm("fs.remove:a.m4a")
+        core.failEffect(of: "a.m4a")
         let service = makeService()
         _ = await service.sweep()
 
@@ -191,9 +206,9 @@ final class AudioRetentionServiceTests: XCTestCase {
         let report = await makeService().sweep()
         XCTAssertTrue(report.converged)
         XCTAssertTrue(report.items.allSatisfy { $0.removal == nil })
-        XCTAssertEqual(core.authorizedRequests, [])
+        XCTAssertEqual(core.removalRequests, [])
         XCTAssertTrue(["sole.m4a", "pending.m4a", "fresh.m4a"].allSatisfy(storage.audioExists))
-        XCTAssertEqual(fileSystem.removedFileNames, [])
+        XCTAssertEqual(core.removedFileNames, [])
     }
 
     // MARK: Core and ledger failures
@@ -235,6 +250,17 @@ final class AudioRetentionServiceTests: XCTestCase {
         XCTAssertEqual(try storage.ledgerEntries().map(\.state), [.removed])
     }
 
+    func testAFileThatWasAlreadyAbsentIsAlreadyRemovedWhateverTheLedgerSays() async throws {
+        try expire("item-1", audio: "a.m4a")
+        _ = await makeService().sweep()
+        try Data("{not json".utf8).write(to: storage.ledgerURL)
+
+        let report = await makeService().sweep()
+        XCTAssertEqual(outcome(report, "item-1"), .alreadyRemoved)
+        XCTAssertTrue(report.converged)
+        XCTAssertEqual(try storage.ledgerEntries().map(\.state), [.removed], "the ledger is repaired")
+    }
+
     func testAnUnreadableLedgerBlocksRemovalInsteadOfBeingTreatedAsEmpty() async throws {
         try expire("item-1", audio: "a.m4a")
         try Data("{}".utf8).write(to: storage.ledgerURL)
@@ -243,13 +269,14 @@ final class AudioRetentionServiceTests: XCTestCase {
         let report = await makeService().sweep()
         XCTAssertEqual(outcome(report, "item-1"), .retryLater(.ledgerUnavailable))
         XCTAssertTrue(storage.audioExists("a.m4a"))
+        XCTAssertEqual(core.removalRequests, [], "nothing is removed without a place to record it")
     }
 
     // MARK: Bounded failure
 
     func testRepeatedFailuresBecomePermanentAndStayVisible() async throws {
         try expire("item-1", audio: "a.m4a")
-        fileSystem.keepSilently("a.m4a")
+        core.keepSilently("a.m4a")
         let service = makeService(maximumAttempts: 3)
 
         let first = await service.sweep()
@@ -259,18 +286,31 @@ final class AudioRetentionServiceTests: XCTestCase {
         XCTAssertEqual(outcome(second, "item-1"), .retryLater(.storageUnavailable))
         XCTAssertEqual(outcome(third, "item-1"), .failedPermanently(.attemptsExhausted))
 
-        let removalsBefore = fileSystem.removedFileNames.count
         let later = await service.sweep()
         XCTAssertEqual(outcome(later, "item-1"), .failedPermanently(.attemptsExhausted), "still visible")
         XCTAssertFalse(later.converged)
-        XCTAssertEqual(core.authorizedRequests.count, 3, "no further attempt is made")
-        XCTAssertEqual(fileSystem.removedFileNames.count, removalsBefore)
+        XCTAssertEqual(core.removalRequests.count, 3, "no further attempt is made")
+        XCTAssertEqual(core.authorizedRequests, ["item-1"], "the core is only asked whether it still approves")
         XCTAssertTrue(storage.audioExists("a.m4a"))
+    }
+
+    func testAPermanentFailureIsNotReportedOnceTheCoreNoLongerApprovesTheRemoval() async throws {
+        try expire("item-1", audio: "a.m4a")
+        core.failEffect(of: "a.m4a")
+        let service = makeService(maximumAttempts: 1)
+        let failed = await service.sweep()
+        XCTAssertEqual(outcome(failed, "item-1"), .failedPermanently(.attemptsExhausted))
+
+        core.setDecision(.denied(.deletionOwnsCleanup), itemID: "item-1")
+        let later = await service.sweep()
+        XCTAssertEqual(outcome(later, "item-1"), .denied(.deletionOwnsCleanup))
+        XCTAssertTrue(later.converged)
+        XCTAssertEqual(core.removalRequests.count, 1)
     }
 
     func testAResetFailureRearmsTheRemoval() async throws {
         try expire("item-1", audio: "a.m4a")
-        faults.arm("fs.remove:a.m4a")
+        core.failEffect(of: "a.m4a")
         let service = makeService(maximumAttempts: 1)
         let failed = await service.sweep()
         XCTAssertEqual(outcome(failed, "item-1"), .failedPermanently(.attemptsExhausted))
@@ -304,7 +344,8 @@ final class AudioRetentionServiceTests: XCTestCase {
         let report = await makeService().sweep()
         XCTAssertEqual(outcome(report, "item-1"), .failedPermanently(.audioReferenceUnresolvable))
         XCTAssertTrue(storage.audioExists("keep.m4a"))
-        XCTAssertEqual(fileSystem.removedFileNames, [])
+        XCTAssertEqual(core.removalRequests, [])
+        XCTAssertEqual(core.removedFileNames, [])
     }
 
     // MARK: Bounded sweep
@@ -330,7 +371,7 @@ final class AudioRetentionServiceTests: XCTestCase {
     func testOneFailureDoesNotStopTheOtherItems() async throws {
         try expire("item-1", audio: "a.m4a")
         try expire("item-2", audio: "b.m4a")
-        faults.arm("fs.remove:a.m4a")
+        core.failEffect(of: "a.m4a")
 
         let report = await makeService().sweep()
         XCTAssertEqual(outcome(report, "item-1"), .retryLater(.storageUnavailable))
@@ -351,7 +392,45 @@ final class AudioRetentionServiceTests: XCTestCase {
         XCTAssertEqual(report.pressure, .low)
         XCTAssertEqual(core.sweepPressures, [.low])
         XCTAssertTrue(storage.audioExists("fresh.m4a"))
-        XCTAssertEqual(core.authorizedRequests, [])
+        XCTAssertEqual(core.removalRequests, [])
+    }
+
+    // MARK: Ledger size and reads
+
+    func testASweepReadsTheLedgerOnceHoweverManyRemovalsAreFinished() async throws {
+        for index in 0..<40 { try expire("item-\(index)", audio: "a\(index).m4a") }
+        let service = makeService()
+        _ = await service.sweep()
+        XCTAssertEqual(try storage.ledgerEntries().count, 40)
+        let readsBefore = fileSystem.readCount(of: AudioRetentionLedger.fileName)
+
+        let repeated = await service.sweep()
+        XCTAssertTrue(repeated.converged)
+        XCTAssertEqual(repeated.items.compactMap(\.removal).filter { $0 == .alreadyRemoved }.count, 40)
+        XCTAssertEqual(fileSystem.readCount(of: AudioRetentionLedger.fileName) - readsBefore, 1)
+    }
+
+    func testEntriesForAudioTheCoreNoLongerListsAreForgotten() async throws {
+        try expire("item-1", audio: "a.m4a")
+        try expire("item-2", audio: "b.m4a")
+        let service = makeService()
+        _ = await service.sweep()
+        XCTAssertEqual(try storage.ledgerEntries().map(\.itemID), ["item-1", "item-2"])
+
+        core.setListing([RetentionFixtures.item("item-2", audio: "b.m4a")])
+        let report = await service.sweep()
+        XCTAssertEqual(outcome(report, "item-2"), .alreadyRemoved)
+        XCTAssertEqual(try storage.ledgerEntries().map(\.itemID), ["item-2"])
+    }
+
+    func testNothingIsForgottenWhenTheCoreCouldNotBeRead() async throws {
+        try expire("item-1", audio: "a.m4a")
+        let service = makeService()
+        _ = await service.sweep()
+
+        core.failSweep(RetentionFixtureError())
+        _ = await service.sweep()
+        XCTAssertEqual(try storage.ledgerEntries().map(\.itemID), ["item-1"])
     }
 
     // MARK: Serialization
@@ -364,7 +443,7 @@ final class AudioRetentionServiceTests: XCTestCase {
         async let second = service.sweep()
         let reports = await [first, second]
 
-        XCTAssertEqual(fileSystem.removedFileNames.sorted(), (0..<10).map { "a\($0).m4a" }.sorted())
+        XCTAssertEqual(core.removedFileNames.sorted(), (0..<10).map { "a\($0).m4a" }.sorted())
         XCTAssertTrue(reports.allSatisfy(\.converged))
         let outcomes = reports.flatMap { $0.items.compactMap(\.removal) }
         XCTAssertEqual(outcomes.filter { $0 == .removed }.count, 10)

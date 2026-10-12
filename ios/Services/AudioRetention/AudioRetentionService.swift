@@ -29,17 +29,19 @@ struct VolumeStoragePressureProbe: AudioStoragePressureProbing {
 
 /// Removes audio the core's retention policy has approved, and records each completed removal durably.
 ///
-/// The core decides; this service only carries out. Per item the order is fixed: ask the core to authorize removal of
-/// the exact audio reference (never trusting the sweep that listed it, which may be stale), remove the finalized file,
-/// verify it is absent, then record the completion in the ledger. Every step is idempotent, so an interruption anywhere
-/// converges on the next sweep:
+/// The core decides and removes; this service only asks and records. Per item the order is fixed: ask the core to
+/// remove the finalized file the exact audio reference names, which approves and unlinks it in one step on the core's
+/// worker (never trusting the sweep that listed it, which may be stale, and leaving no gap between approval and effect
+/// for newly protected, deleted or changed audio to be lost in), verify the file is absent, then record the completion
+/// in the ledger. Every step is idempotent, so an interruption anywhere converges on the next sweep:
 ///
-/// * before the file is removed, the core is asked again and the removal is repeated, or refused if the audio has since
-///   become protected, deleted or changed;
+/// * before the core acts, the removal is repeated, or refused if the audio has since become protected, deleted or
+///   changed;
 /// * after the file is removed but before the ledger write, the file is already absent, the ledger write is made and
 ///   the removal is reported then, never earlier.
 ///
-/// A removal is reported as `removed` only when the file is verified absent and the ledger holds the completion.
+/// A removal is reported as `removed` or `alreadyRemoved` only when the file is verified absent and the ledger holds the
+/// completion.
 /// Failures carry a fixed code and are counted per audio: after `maximumAttempts` failed attempts, or at once when the
 /// reference can never resolve, the removal is `failedPermanently` and is neither attempted again nor hidden until
 /// `resetFailure` re-arms it. Sole-source, pending and otherwise unresolved audio is never offered by the core, so it is
@@ -98,6 +100,15 @@ actor AudioRetentionService {
                 listingFailure: Self.coreReason(error), pressure: pressure, items: [])
         }
 
+        // One read of the ledger per sweep. Unreadable is "unknown": nothing is removed without a place to record it.
+        let ledgerReadable: Bool
+        do {
+            try ledger.refresh()
+            ledgerReadable = true
+        } catch {
+            ledgerReadable = false
+        }
+
         var reports: [AudioRetentionItemReport] = []
         var attempted = 0
         var deferred = 0
@@ -108,6 +119,10 @@ actor AudioRetentionService {
             }
             if Task.isCancelled {
                 reports.append(AudioRetentionItemReport(item: item, removal: .retryLater(.cancelled)))
+                continue
+            }
+            guard ledgerReadable else {
+                reports.append(AudioRetentionItemReport(item: item, removal: .retryLater(.ledgerUnavailable)))
                 continue
             }
             // The core keeps offering audio it already approved, so finished removals must not use up the limit.
@@ -129,6 +144,11 @@ actor AudioRetentionService {
             let outcome = await remove(itemID: item.itemID, audioReference: audioReference)
             reports.append(AudioRetentionItemReport(item: item, removal: outcome))
         }
+        if ledgerReadable {
+            // Entries for audio the core no longer lists are done with. Failing to forget them costs only space.
+            let listed = Set(items.map { AudioRetentionLedger.Key(itemID: $0.itemID, audioReference: $0.audioReference) })
+            try? ledger.prune(keeping: listed)
+        }
         return AudioRetentionSweepReport(
             listingFailure: nil, pressure: pressure, items: reports, deferredRemovals: deferred)
     }
@@ -137,6 +157,7 @@ actor AudioRetentionService {
     func resetFailure(itemID: String, audioReference: String) async throws {
         await acquire()
         defer { release() }
+        try ledger.refresh()
         try ledger.resetFailure(itemID: itemID, audioReference: audioReference)
     }
 
@@ -159,46 +180,64 @@ actor AudioRetentionService {
             return .retryLater(.ledgerUnavailable)
         }
         if let recorded, recorded.state == .failed {
+            // The failure stays visible only while the core still offers this audio for removal.
+            if let outcome = await outcomeUnlessStillApproved(itemID: itemID, audioReference: audioReference) {
+                return outcome
+            }
             return .failedPermanently(Self.permanentFailure(from: recorded.lastFailure))
         }
 
-        // Asked again here, immediately before the effect: the sweep that listed this audio may be stale.
-        let decision: AudioRemovalDecision
-        do {
-            decision = try await core.authorizeRemoval(
-                itemID: itemID, audioReference: audioReference, periodSeconds: retentionPeriodSeconds)
-        } catch {
-            return .retryLater(Self.coreReason(error))
-        }
-        if case .denied(let denial) = decision { return .denied(denial) }
-
         guard let url = staging.finalizedAudioURL(forReference: audioReference) else {
+            if let outcome = await outcomeUnlessStillApproved(itemID: itemID, audioReference: audioReference) {
+                return outcome
+            }
             return recordFailure(
                 itemID: itemID, audioReference: audioReference,
                 code: AudioRetentionPermanentFailure.audioReferenceUnresolvable.rawValue, permanent: true)
         }
 
-        let wasPresent = fileSystem.fileExists(at: url)
+        // The core re-decides for this exact audio and, only if it approves, removes the file in the same step.
+        let result: AudioRemovalResult
         do {
-            if wasPresent { try fileSystem.remove(at: url) }
+            result = try await core.removeAudio(
+                itemID: itemID, audioReference: audioReference, fileURL: url, periodSeconds: retentionPeriodSeconds)
         } catch {
-            return recordFailure(
-                itemID: itemID, audioReference: audioReference,
-                code: AudioRetentionRetryReason.storageUnavailable.rawValue, permanent: false)
+            return .retryLater(Self.coreReason(error))
         }
-        guard !fileSystem.fileExists(at: url) else {
+        let effect: AudioRemovalEffect
+        switch result {
+        case .denied(let denial):
+            return .denied(denial)
+        case .approved(let approvedEffect):
+            effect = approvedEffect
+        }
+        // The core's word is checked: a file that is still there is never reported gone.
+        guard effect != .failed, !fileSystem.fileExists(at: url) else {
             return recordFailure(
                 itemID: itemID, audioReference: audioReference,
                 code: AudioRetentionRetryReason.storageUnavailable.rawValue, permanent: false)
         }
 
-        if recorded?.state == .removed && !wasPresent { return .alreadyRemoved }
-        do {
-            try ledger.recordRemoved(itemID: itemID, audioReference: audioReference)
-        } catch {
-            return .retryLater(.ledgerUnavailable)
+        if recorded?.state != .removed {
+            do {
+                try ledger.recordRemoved(itemID: itemID, audioReference: audioReference)
+            } catch {
+                return .retryLater(.ledgerUnavailable)
+            }
         }
-        return .removed
+        return effect == .removed ? .removed : .alreadyRemoved
+    }
+
+    /// Nil when the core still approves removing this audio; otherwise the outcome to report instead of a failure.
+    private func outcomeUnlessStillApproved(itemID: String, audioReference: String) async -> AudioRemovalOutcome? {
+        do {
+            let decision = try await core.authorizeRemoval(
+                itemID: itemID, audioReference: audioReference, periodSeconds: retentionPeriodSeconds)
+            if case .denied(let denial) = decision { return .denied(denial) }
+            return nil
+        } catch {
+            return .retryLater(Self.coreReason(error))
+        }
     }
 
     private func recordFailure(itemID: String, audioReference: String, code: String, permanent: Bool)

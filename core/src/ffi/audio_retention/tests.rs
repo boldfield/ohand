@@ -314,9 +314,26 @@ fn malformed_requests_are_refused_before_anything_is_queued() {
         json!({"command": "authorize_removal", "item_id": "x".repeat(MAX_IDENTIFIER_BYTES + 1),
                "audio_reference": "a"}),
         json!([]),
+        json!({"command": "remove_audio", "item_id": "item", "audio_reference": "FinalizedAudio/a.m4a"}),
     ] {
         let outcome = start(handle, 1, &request);
         assert_eq!(outcome.status, OHAND_CORE_STATUS_PERMANENT, "{request}");
+        assert_eq!(outcome.code(), "invalid_request", "{request}");
+    }
+    let reference = "FinalizedAudio/a.m4a";
+    for (audio_reference, audio_path) in [
+        (reference, ""),
+        (reference, "relative/FinalizedAudio/a.m4a"),
+        (reference, "/tmp/FinalizedAudio/b.m4a"),
+        (reference, "/tmp/Other/a.m4a"),
+        (reference, "/tmp/../FinalizedAudio/a.m4a"),
+        ("a.m4a", "/tmp/a.m4a"),
+        ("FinalizedAudio/../a.m4a", "/tmp/FinalizedAudio/../a.m4a"),
+        ("/FinalizedAudio/a.m4a", "/tmp/FinalizedAudio/a.m4a"),
+    ] {
+        let request = json!({"command": "remove_audio", "item_id": "item",
+            "audio_reference": audio_reference, "audio_path": audio_path});
+        let outcome = start(handle, 1, &request);
         assert_eq!(outcome.code(), "invalid_request", "{request}");
     }
     let empty = consume(unsafe { ohand_core_start_audio_retention(handle, 2, [].as_ptr(), 0) });
@@ -325,5 +342,136 @@ fn malformed_requests_are_refused_before_anything_is_queued() {
     assert_eq!(null.code(), "null_argument");
 
     assert_eq!(consume(ohand_core_close(handle)).status, 0);
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+fn audio_file(directory: &std::path::Path, reference: &str) -> std::path::PathBuf {
+    let path = directory.join(reference);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"synthetic audio").unwrap();
+    path
+}
+
+fn remove_request(item_id: &str, reference: &str, path: &std::path::Path) -> Value {
+    json!({
+        "command": "remove_audio", "item_id": item_id, "audio_reference": reference,
+        "audio_path": path.to_string_lossy(),
+    })
+}
+
+#[test]
+fn removal_deletes_exactly_the_approved_file_and_is_idempotent() {
+    let _guard = serial();
+    let (directory, path, items) = store("remove");
+    let expired = audio_file(&directory, EXPIRED_AUDIO);
+    let retained = audio_file(&directory, RETAINED_AUDIO);
+    let sole = audio_file(&directory, SOLE_SOURCE_AUDIO);
+    let mut session = Session::over(open_file(&path));
+
+    let removed = session.succeed(&remove_request(&items.expired, EXPIRED_AUDIO, &expired));
+    assert_eq!(removed["decision"], "approved");
+    assert_eq!(removed["effect"], "removed");
+    assert!(!expired.exists());
+    assert!(retained.exists() && sole.exists());
+
+    let again = session.succeed(&remove_request(&items.expired, EXPIRED_AUDIO, &expired));
+    assert_eq!(again["decision"], "approved");
+    assert_eq!(again["effect"], "already_absent");
+
+    session.close();
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn a_denied_removal_keeps_the_file() {
+    let _guard = serial();
+    let (directory, path, items) = store("denied");
+    let expired = audio_file(&directory, EXPIRED_AUDIO);
+    let retained = audio_file(&directory, RETAINED_AUDIO);
+    let sole = audio_file(&directory, SOLE_SOURCE_AUDIO);
+    let mut session = Session::over(open_file(&path));
+
+    let recent = session.succeed(&remove_request(&items.retained, RETAINED_AUDIO, &retained));
+    assert_eq!(recent["reason"], "not_yet_expired");
+    assert_eq!(recent["effect"], Value::Null);
+    let pending = session.succeed(&remove_request(
+        &items.sole_source,
+        SOLE_SOURCE_AUDIO,
+        &sole,
+    ));
+    assert_eq!(pending["reason"], "unresolved");
+    let mismatch = session.succeed(&remove_request(&items.expired, RETAINED_AUDIO, &retained));
+    assert_eq!(mismatch["reason"], "audio_reference_mismatch");
+    let lengthened = session.succeed(&json!({
+        "command": "remove_audio", "item_id": items.expired, "audio_reference": EXPIRED_AUDIO,
+        "audio_path": expired.to_string_lossy(), "period_seconds": 30 * 24 * 60 * 60,
+    }));
+    assert_eq!(lengthened["reason"], "not_yet_expired");
+    assert!(expired.exists() && retained.exists() && sole.exists());
+
+    session.close();
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn a_change_queued_ahead_of_the_removal_is_seen_by_its_approval() {
+    let _guard = serial();
+    let (directory, path, items) = store("fence");
+    let expired = audio_file(&directory, EXPIRED_AUDIO);
+    let handle = open_file(&path);
+    let (recorder, events) = recorder();
+    register(handle, &recorder);
+    let core = instance::lookup(handle).unwrap();
+
+    // Both are queued before either runs: the change that protects the audio executes on the same
+    // worker, strictly before the removal's approval and unlink, with nothing in between.
+    let deleted_item = items.expired.clone();
+    core.submit(
+        1,
+        Box::new(move |database: &Mutex<Database>| {
+            lock(database)
+                .conn()
+                .execute(
+                    "UPDATE items SET lifecycle_state = 'deleted' WHERE item_id = ?",
+                    [&deleted_item],
+                )
+                .map_err(|_| AbiFailure::INTERNAL)?;
+            Ok(b"{}".to_vec())
+        }),
+    )
+    .unwrap();
+    let request =
+        serde_json::to_vec(&remove_request(&items.expired, EXPIRED_AUDIO, &expired)).unwrap();
+    let queued = consume(unsafe {
+        ohand_core_start_audio_retention(handle, 2, request.as_ptr(), request.len())
+    });
+    assert_eq!(queued.status, OHAND_CORE_STATUS_OK);
+
+    let change = events.recv_timeout(WAIT).unwrap();
+    assert_eq!(change.operation_id, 1);
+    let removal = events.recv_timeout(WAIT).unwrap();
+    assert_eq!(removal.operation_id, 2);
+    let body: Value = serde_json::from_slice(&removal.payload).unwrap();
+    assert_eq!(body["reason"], "deletion_owns_cleanup");
+    assert!(expired.exists(), "audio that became protected is kept");
+
+    assert_eq!(consume(ohand_core_close(handle)).status, 0);
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn a_removal_that_cannot_delete_the_file_reports_failure() {
+    let _guard = serial();
+    let (directory, path, items) = store("failed");
+    let blocked = directory.join(EXPIRED_AUDIO);
+    std::fs::create_dir_all(&blocked).unwrap();
+    let mut session = Session::over(open_file(&path));
+
+    let body = session.succeed(&remove_request(&items.expired, EXPIRED_AUDIO, &blocked));
+    assert_eq!(body["decision"], "approved");
+    assert_eq!(body["effect"], "failed");
+    assert!(blocked.exists());
+
+    session.close();
     let _ = std::fs::remove_dir_all(directory);
 }

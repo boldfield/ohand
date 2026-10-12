@@ -81,9 +81,11 @@ final class AudioRetentionCoreIntegrationTests: XCTestCase {
         let world = try makeWorld()
         let expired = try await world.seedVoice(captureID: "cap-expired", transcribedDaysAgo: 10)
         let session = try world.openCore()
-        let service = world.makeService(on: session, beforeAuthorize: { itemID in
-            world.markDeleted(itemID: itemID)
-        })
+        let service = world.makeService(
+            on: session,
+            core: HookedRetentionCore(wrapped: session.client, beforeRemoval: { itemID in
+                world.markDeleted(itemID: itemID)
+            }))
 
         let report = await service.sweep()
         XCTAssertEqual(outcome(report, expired.itemID), .denied(.deletionOwnsCleanup))
@@ -97,9 +99,11 @@ final class AudioRetentionCoreIntegrationTests: XCTestCase {
         let expired = try await world.seedVoice(captureID: "cap-expired", transcribedDaysAgo: 10)
         let session = try world.openCore()
         let replacement = RetentionFixtures.audioReference("cap-expired-replacement.m4a")
-        let service = world.makeService(on: session, beforeAuthorize: { _ in
-            world.setCaptureAudioReference(captureID: "cap-expired", to: replacement)
-        })
+        let service = world.makeService(
+            on: session,
+            core: HookedRetentionCore(wrapped: session.client, beforeRemoval: { _ in
+                world.setCaptureAudioReference(captureID: "cap-expired", to: replacement)
+            }))
 
         let report = await service.sweep()
         XCTAssertEqual(outcome(report, expired.itemID), .denied(.audioReferenceMismatch))
@@ -110,13 +114,12 @@ final class AudioRetentionCoreIntegrationTests: XCTestCase {
     func testInterruptionBeforeRemovalConvergesAfterReopeningTheCore() async throws {
         let world = try makeWorld()
         let expired = try await world.seedVoice(captureID: "cap-expired", transcribedDaysAgo: 10)
-        let faults = FaultPlan()
-        faults.arm("fs.remove:\(expired.fileName)")
 
         let firstSession = try world.openCore()
-        let interrupted = await world.makeService(
-            on: firstSession, fileSystem: FaultingRetentionFileSystem(faults: faults)).sweep()
-        XCTAssertEqual(outcome(interrupted, expired.itemID), .retryLater(.storageUnavailable))
+        let interrupting = HookedRetentionCore(wrapped: firstSession.client)
+        interrupting.interruptNextRemoval()
+        let interrupted = await world.makeService(on: firstSession, core: interrupting).sweep()
+        XCTAssertEqual(outcome(interrupted, expired.itemID), .retryLater(.coreUnavailable))
         XCTAssertFalse(interrupted.converged)
         XCTAssertTrue(world.audioExists(expired.fileName))
         firstSession.close()
@@ -145,7 +148,7 @@ final class AudioRetentionCoreIntegrationTests: XCTestCase {
 
         let secondSession = try world.openCore()
         let converged = await world.makeService(on: secondSession).sweep()
-        XCTAssertEqual(outcome(converged, expired.itemID), .removed)
+        XCTAssertEqual(outcome(converged, expired.itemID), .alreadyRemoved, "the core found the file already gone")
         XCTAssertTrue(converged.converged)
         XCTAssertEqual(try world.ledgerEntries().map(\.state), [.removed])
 

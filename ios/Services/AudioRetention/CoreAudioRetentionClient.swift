@@ -43,6 +43,16 @@ public final class CoreAudioRetentionClient: AudioRetentionCore, @unchecked Send
         return try Self.decision(from: answer)
     }
 
+    public func removeAudio(itemID: String, audioReference: String, fileURL: URL, periodSeconds: UInt64) async throws
+        -> AudioRemovalResult
+    {
+        let answer = try await ask(
+            .removeAudio(
+                itemID: itemID, audioReference: audioReference, audioPath: fileURL.path, periodSeconds: periodSeconds),
+            as: CoreRetentionDecisionAnswer.self)
+        return try Self.result(from: answer)
+    }
+
     // MARK: Answer mapping
 
     static func item(from assessment: CoreRetentionAssessment) throws -> AudioRetentionItem {
@@ -90,6 +100,20 @@ public final class CoreAudioRetentionClient: AudioRetentionCore, @unchecked Send
             return .removeAudio(audioReference: reference, expiredAt: expiredAt)
         default:
             throw unreadableAnswer
+        }
+    }
+
+    static func result(from answer: CoreRetentionDecisionAnswer) throws -> AudioRemovalResult {
+        switch try decision(from: answer) {
+        case .denied(let denial):
+            return .denied(denial)
+        case .approved:
+            switch answer.effect {
+            case "removed": return .approved(.removed)
+            case "already_absent": return .approved(.alreadyAbsent)
+            case "failed": return .approved(.failed)
+            default: throw unreadableAnswer
+            }
         }
     }
 

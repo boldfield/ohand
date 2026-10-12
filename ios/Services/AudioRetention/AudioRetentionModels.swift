@@ -81,16 +81,39 @@ public enum AudioRemovalDecision: Equatable, Sendable {
     case denied(AudioRemovalDenial)
 }
 
+/// What happened to the file after the core approved its removal.
+public enum AudioRemovalEffect: Equatable, Sendable {
+    /// The file existed, was removed and is verified absent.
+    case removed
+    /// The file was not there; it is verified absent.
+    case alreadyAbsent
+    /// The file may still exist.
+    case failed
+}
+
+/// The core's answer to `removeAudio`: refused with nothing touched, or approved with the effect it carried out.
+public enum AudioRemovalResult: Equatable, Sendable {
+    case denied(AudioRemovalDenial)
+    case approved(AudioRemovalEffect)
+}
+
 /// The retention policy as native code uses it (`core/src/lifecycle/retention`). The core stays the only authority on
 /// what may be removed: it decides eligibility from the successful-transcription time and the item's authoritative
-/// source state, and re-decides for the exact audio reference immediately before a file is removed. Native code never
-/// derives eligibility itself.
+/// source state. Native code never derives eligibility itself, and never removes a retention file on its own: the core
+/// approves and removes in one step, so audio that became protected after a sweep, or between an approval and the
+/// removal, cannot be lost.
 public protocol AudioRetentionCore: Sendable {
     /// Every live item that holds audio, with the core's retention state and cleanup intent.
     func sweep(pressure: CoreRetentionPressure, periodSeconds: UInt64) async throws -> [AudioRetentionItem]
 
+    /// Read-only: whether the core would approve removing this audio now. It permits nothing.
     func authorizeRemoval(itemID: String, audioReference: String, periodSeconds: UInt64) async throws
         -> AudioRemovalDecision
+
+    /// Re-decides the removal of the exact audio reference and, only when approved, removes `fileURL` (the file that
+    /// reference names) and verifies it absent, as one step that no other core write can interleave with.
+    func removeAudio(itemID: String, audioReference: String, fileURL: URL, periodSeconds: UInt64) async throws
+        -> AudioRemovalResult
 }
 
 /// Why a removal was left for the next sweep. Fixed codes only: a result never reports identifiers, paths or error text.
