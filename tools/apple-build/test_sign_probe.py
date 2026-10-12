@@ -1061,6 +1061,59 @@ class EmbeddedExtensionTests(SigningToolTestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(len(self.calls_of("xcodebuild", "archive")), 1)
 
+    def test_targets_reached_through_a_framework_are_checked_before_generation(self):
+        rust_core_build = {"name": "Build Rust core bindings", "script": '"${SRCROOT}/../core/bindings/build-ios.sh"',
+                           "basedOnDependencyAnalysis": False}
+
+        def through_services(**core_bridge):
+            # OhAndApp -> OhAndServices -> OhAndCoreBridge, as in ios/project.yml: the core bridge is not a direct dependency.
+            def edit(spec):
+                targets = spec["targets"]
+                targets["OhAndServices"] = {"type": "framework", "settings": {"PRODUCT_BUNDLE_IDENTIFIER": "com.boldfield.ohand.services"},
+                                            "dependencies": [{"target": "OhAndCoreBridge"}]}
+                targets["OhAndApp"]["dependencies"] = [{"target": "OhAndServices"} if dependency["target"] == "OhAndCoreBridge" else dependency
+                                                       for dependency in targets["OhAndApp"]["dependencies"]]
+                targets["OhAndCoreBridge"].update(core_bridge)
+            return edit
+
+        def extension_behind_a_framework(spec):
+            through_services()(spec)
+            spec["targets"]["OhAndHidden"] = {"type": "app-extension", "settings": {"PRODUCT_BUNDLE_IDENTIFIER": SECOND_EXTENSION_IDENTIFIER}}
+            spec["targets"]["OhAndCoreBridge"]["dependencies"] = [{"target": "OhAndHidden"}]
+
+        (self.inputs / "Vendor" / "Extra.appex").mkdir(parents=True)
+        refused = {
+            "unreviewed post-build script that creates an extension": (
+                through_services(postBuildScripts=[{"script": 'mkdir -p "$BUILT_PRODUCTS_DIR/OhAnd.app/PlugIns/Extra.appex"'}]),
+                "executable build phase postBuildScripts in target OhAndCoreBridge"),
+            "changed Rust core build": (through_services(preBuildScripts=[dict(rust_core_build, script='"${SRCROOT}/other.sh"')]),
+                                        "executable build phase preBuildScripts in target OhAndCoreBridge"),
+            "Rust core build beside another script": (through_services(preBuildScripts=[rust_core_build, {"script": "true"}]),
+                                                      "executable build phase preBuildScripts in target OhAndCoreBridge"),
+            "reviewed Rust core build on the application": (
+                lambda spec: spec["targets"]["OhAndApp"].update(preBuildScripts=[rust_core_build]),
+                "executable build phase preBuildScripts in target OhAndApp"),
+            "signed bundle among transitive sources": (through_services(sources=["Vendor"]),
+                                                       "a source of project target OhAndCoreBridge is a signed bundle"),
+            "unmodeled key on a transitive target": (through_services(info={"path": "Info.plist"}), "key info in target OhAndCoreBridge"),
+            "extension reached through a framework": (extension_behind_a_framework,
+                                                      "project target OhAndHidden is reached from OhAndApp through another target"),
+        }
+        for description, (edit, message) in refused.items():
+            with self.subTest(description):
+                self.state_reset()
+                self.write_profile(Entitlements=self.wildcard_entitlements())
+                self.assert_refused_before_generation(self.sign_app("--install", **self.spec_environment(edit=edit)), 4, message)
+                self.assertEqual(self.only_evidence()["failed_stage"], "project-spec")
+
+        self.state_reset()
+        self.write_profile(Entitlements=self.wildcard_entitlements())
+        result = self.sign_app(**self.spec_environment(edit=through_services(preBuildScripts=[rust_core_build])))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.calls_of("xcodebuild", "archive")), 1)
+        self.assertEqual(json.loads((self.state / "export-options.json").read_text())["provisioningProfiles"],
+                         {APP_BUNDLE_IDENTIFIER: SYNTHETIC_PROFILE_UUID, EXTENSION_BUNDLE_IDENTIFIER: SYNTHETIC_PROFILE_UUID})
+
     def test_the_repository_project_spec_is_within_the_modeled_subset(self):
         result = self.sign_app()
         self.assertEqual(result.returncode, 0, result.stderr)

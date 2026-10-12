@@ -92,6 +92,13 @@ MODELED_TARGET_DEPENDENCY_KEYS = frozenset({"target", "embed", "link", "codeSign
 EXECUTABLE_BUILD_PHASE_KEYS = ("preBuildScripts", "postCompileScripts", "postBuildScripts", "buildRules")
 MODELED_SOURCE_KEYS = frozenset({"path", "name", "group", "createIntermediateGroups", "excludes", "includes", "optional",
                                  "compilerFlags", "headerVisibility"})
+# The one reviewed executable phase: the repository's Rust core build, which writes a static library and a C header to
+# $OHAND_RUST_OUTPUT_DIR for the OhAndCoreBridge framework and places nothing in a bundle. It is accepted only on a
+# framework target and only exactly as written here; any other phase, or this one changed, refuses the run.
+REVIEWED_FRAMEWORK_BUILD_PHASES = {
+    "preBuildScripts": ({"name": "Build Rust core bindings", "script": '"${SRCROOT}/../core/bindings/build-ios.sh"',
+                         "basedOnDependencyAnalysis": False},),
+}
 SIGNED_BUNDLE_SUFFIXES = (".app", ".appex", ".xpc", ".framework")
 BUNDLE_IDENTIFIER_REFERENCES = ("$(PRODUCT_BUNDLE_IDENTIFIER)", "${PRODUCT_BUNDLE_IDENTIFIER}")
 STRUCTURED_SETTINGS_KEYS = ("base", "configs", "groups")
@@ -715,7 +722,11 @@ class SigningRun:
             if "platform" in target and not isinstance(target["platform"], str):
                 raise unmodeled(f"a platform list in target {name}")
             for phase in EXECUTABLE_BUILD_PHASE_KEYS:
-                if target.get(phase) not in (None, []):
+                entries = target.get(phase)
+                if entries in (None, []):
+                    continue
+                reviewed = REVIEWED_FRAMEWORK_BUILD_PHASES.get(phase, ()) if target["type"] == "framework" else ()
+                if not isinstance(entries, list) or not all(entry in reviewed for entry in entries):
                     raise unmodeled(f"executable build phase {phase} in target {name}")
             check_sources_of(name, target.get("sources"))
             return target
@@ -823,6 +834,22 @@ class SigningRun:
                 if nested.get("embed") is not False and nested_type not in UNSIGNED_DEPENDENCY_TYPES:
                     raise integrity_error(f"app extension {name} embeds a signed bundle, which this tool does not sign", "project-spec")
             extensions.append(EmbeddedBundle(bundle_identifier_of(name), "app-extension"))
+        # Every target the build reaches is checked, not only direct dependencies: a target reached through a framework
+        # runs its build phases during the archive too. Beyond the direct dependencies handled above, only unsigned
+        # types may appear.
+        direct = {dependency["target"] for dependency in dependencies_of(self.scheme)}
+        reached, pending = {self.scheme}, [self.scheme]
+        while pending:
+            for dependency in dependencies_of(pending.pop()):
+                name = dependency["target"]
+                if name in reached:
+                    continue
+                reached.add(name)
+                reached_type = target_of(name, "project target reached from " + self.scheme)["type"]
+                if name not in direct and reached_type not in UNSIGNED_DEPENDENCY_TYPES:
+                    raise integrity_error(f"project target {name} is reached from {self.scheme} through another target "
+                                          "and is of a type this tool does not know how to sign", "project-spec")
+                pending.append(name)
         bundles = [EmbeddedBundle(self.bundle_identifier, "application")] + sorted(extensions, key=lambda bundle: bundle.identifier)
         if len({bundle.identifier for bundle in bundles}) != len(bundles):
             raise integrity_error("the project spec embeds two bundles with the same bundle identifier", "project-spec")
