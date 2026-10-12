@@ -63,6 +63,8 @@ final class CaptureEntryIngressIntegrationTests: IngressStorageTestCase {
     func testAStagingFailureKeepsTheTextAndAcknowledgesNothingSaved() throws {
         let failingFileSystem = FailingIngressFileSystem()
         failingFileSystem.failing = [.write]
+        model = nil
+        service = nil
         service = try makeService(importer: importer, fileSystem: failingFileSystem)
         let adapter = ForegroundIngressTextCaptureAdapter(service: service, context: { [unowned self] _ in context })
         model = CaptureEntryModel(
