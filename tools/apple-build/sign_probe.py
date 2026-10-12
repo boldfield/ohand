@@ -81,6 +81,12 @@ EXTENSION_DIRECTORY_NAMES = ("PlugIns", "Extensions")
 # that name no project target. Anything else must be resolved or the run is refused before the project is generated.
 UNSIGNED_DEPENDENCY_TYPES = frozenset({"framework", "framework.static", "library.static", "library.dynamic", "bundle"})
 UNTARGETED_DEPENDENCY_KINDS = ("framework", "sdk", "package", "carthage", "bundle")
+# The subset of XcodeGen the pre-build reader models for the application and its dependency targets. Any other target
+# key (templates, info, configFiles, scheme, ...) or dependency key (copy, platformFilter, ...) refuses the run.
+MODELED_TARGET_KEYS = frozenset({"type", "platform", "deploymentTarget", "sources", "settings", "dependencies", "preBuildScripts",
+                                 "postCompileScripts", "postBuildScripts", "buildRules", "attributes"})
+MODELED_TARGET_DEPENDENCY_KEYS = frozenset({"target", "embed", "link", "codeSign", "removeHeaders", "weak"})
+STRUCTURED_SETTINGS_KEYS = ("base", "configs", "groups")
 
 PROFILE_PATH_VARIABLE = "OHAND_SIGNING_PROFILE_PATH"
 PROFILE_MAP_VARIABLE = "OHAND_SIGNING_PROFILE_MAP_PATH"
@@ -649,7 +655,12 @@ class SigningRun:
         self.check_target_device_listed()
 
     def _project_signed_bundles(self) -> List[EmbeddedBundle]:
-        """The application and the app extensions it embeds, from the project spec; unresolvable input refuses the run."""
+        """The application and the app extensions it embeds, from the project spec.
+
+        The reader models a strict subset of XcodeGen. Any construct outside it (includes, templates, setting groups,
+        multi-platform targets, unknown target or dependency keys) refuses the run rather than being skipped, because an
+        unmodeled construct could add or rename a signed bundle that would then escape the pre-build profile checks.
+        """
         try:
             import yaml
         except ImportError:
@@ -662,47 +673,89 @@ class SigningRun:
         if not isinstance(targets, dict):
             raise integrity_error("the project spec could not be read as a set of targets", "project-spec")
 
-        def bundle_identifier_of(name: str) -> str:
-            settings = targets[name].get("settings") if isinstance(targets[name], dict) else None
-            candidates = []
-            if isinstance(settings, dict):
-                candidates.append(settings.get("PRODUCT_BUNDLE_IDENTIFIER"))
-                for container in ("base", "configs"):
-                    if isinstance(settings.get(container), dict):
-                        candidates.append(settings[container].get("PRODUCT_BUNDLE_IDENTIFIER"))
-            candidates = [candidate for candidate in candidates if candidate is not None]
-            if len(candidates) != 1 or not isinstance(candidates[0], str) or not BUNDLE_IDENTIFIER_PATTERN.match(candidates[0]):
-                raise integrity_error(f"the bundle identifier of project target {name} cannot be resolved before the build", "project-spec")
-            return candidates[0]
+        def unmodeled(construct: str) -> SigningError:
+            return integrity_error(f"the project spec uses {construct}, which this tool cannot resolve before the build", "project-spec")
 
-        if self.scheme not in targets or not isinstance(targets[self.scheme], dict):
-            raise integrity_error(f"the project spec does not define target {self.scheme}", "project-spec")
+        if "include" in spec:
+            raise unmodeled("include")
+        options = spec.get("options")
+        if options is not None and not isinstance(options, dict):
+            raise integrity_error("the options of the project spec cannot be read before the build", "project-spec")
+        if isinstance(options, dict) and options.get("transitivelyLinkDependencies") not in (None, False):
+            raise unmodeled("options.transitivelyLinkDependencies")
+
+        def target_of(name: str, role: str) -> dict:
+            if not isinstance(name, str) or name not in targets or not isinstance(targets[name], dict) \
+                    or not isinstance(targets[name].get("type"), str):
+                raise integrity_error(f"{role} {name} has no resolvable type", "project-spec")
+            target = targets[name]
+            unknown = sorted(str(key) for key in target if key not in MODELED_TARGET_KEYS)
+            if unknown:
+                raise unmodeled(f"key {unknown[0]} in target {name}")
+            if "platform" in target and not isinstance(target["platform"], str):
+                raise unmodeled(f"a platform list in target {name}")
+            return target
+
+        def bundle_identifier_of(name: str) -> str:
+            settings = targets[name].get("settings")
+            unresolvable = integrity_error(f"the bundle identifier of project target {name} cannot be resolved before the build", "project-spec")
+            if not isinstance(settings, dict):
+                raise unresolvable
+            if any(key in settings for key in STRUCTURED_SETTINGS_KEYS):
+                if "groups" in settings:
+                    raise unmodeled(f"settings.groups in target {name}")
+                unknown = sorted(str(key) for key in settings if key not in STRUCTURED_SETTINGS_KEYS)
+                if unknown:
+                    raise unmodeled(f"key {unknown[0]} beside settings.base or settings.configs in target {name}")
+                base = settings.get("base", {})
+                configurations = settings.get("configs", {})
+                if not isinstance(base, dict) or not isinstance(configurations, dict) \
+                        or not all(isinstance(values, dict) for values in configurations.values()):
+                    raise unresolvable
+            else:
+                base, configurations = settings, {}
+            identifier = base.get("PRODUCT_BUNDLE_IDENTIFIER")
+            if not isinstance(identifier, str) or not BUNDLE_IDENTIFIER_PATTERN.match(identifier):
+                raise unresolvable
+            # Per-configuration overrides are keyed by configuration name. Any override that differs from the base
+            # identifier would make the archived identifier depend on configuration matching, so it is refused.
+            for values in configurations.values():
+                if "PRODUCT_BUNDLE_IDENTIFIER" in values and values["PRODUCT_BUNDLE_IDENTIFIER"] != identifier:
+                    raise integrity_error(f"the bundle identifier of project target {name} differs between configurations", "project-spec")
+            return identifier
+
+        def dependencies_of(name: str) -> list:
+            dependencies = targets[name].get("dependencies") or []
+            if not isinstance(dependencies, list) or not all(isinstance(dependency, dict) for dependency in dependencies):
+                raise integrity_error(f"the dependencies of project target {name} cannot be read before the build", "project-spec")
+            for dependency in dependencies:
+                if "target" not in dependency:
+                    if not any(kind in dependency for kind in UNTARGETED_DEPENDENCY_KINDS):
+                        raise integrity_error(f"a dependency of project target {name} is of an unrecognized kind", "project-spec")
+                    continue
+                unknown = sorted(str(key) for key in dependency if key not in MODELED_TARGET_DEPENDENCY_KEYS)
+                if unknown:
+                    raise unmodeled(f"key {unknown[0]} in a dependency of target {name}")
+            return [dependency for dependency in dependencies if "target" in dependency]
+
+        target_of(self.scheme, "project target")
         if bundle_identifier_of(self.scheme) != self.bundle_identifier:
             raise integrity_error(f"project target {self.scheme} does not have the scheme's bundle identifier", "project-spec")
-        dependencies = targets[self.scheme].get("dependencies") or []
-        if not isinstance(dependencies, list):
-            raise integrity_error(f"the dependencies of project target {self.scheme} cannot be read before the build", "project-spec")
         extensions: List[EmbeddedBundle] = []
-        for dependency in dependencies:
-            if not isinstance(dependency, dict):
-                raise integrity_error(f"a dependency of project target {self.scheme} cannot be read before the build", "project-spec")
-            name = dependency.get("target")
-            if name is None:
-                if any(kind in dependency for kind in UNTARGETED_DEPENDENCY_KINDS):
-                    continue
-                raise integrity_error(f"a dependency of project target {self.scheme} is of an unrecognized kind", "project-spec")
-            if name not in targets or not isinstance(targets[name], dict) or not isinstance(targets[name].get("type"), str):
-                raise integrity_error(f"dependency {name} of project target {self.scheme} has no resolvable type", "project-spec")
-            if dependency.get("embed") is False:
+        for dependency in dependencies_of(self.scheme):
+            name = dependency["target"]
+            dependency_type = target_of(name, f"dependency of project target {self.scheme}")["type"]
+            if dependency.get("embed") is False or dependency_type in UNSIGNED_DEPENDENCY_TYPES:
                 continue
-            dependency_type = targets[name]["type"]
-            if dependency_type in UNSIGNED_DEPENDENCY_TYPES:
-                continue
-            if dependency_type.startswith("app-extension") or dependency_type == "extensionkit-extension":
-                extensions.append(EmbeddedBundle(bundle_identifier_of(name), "app-extension"))
-            else:
+            if not (dependency_type.startswith("app-extension") or dependency_type == "extensionkit-extension"):
                 raise integrity_error(f"dependency {name} of project target {self.scheme} has a type this tool does not know how to sign",
                                       "project-spec")
+            # An extension's own signed dependencies would be nested bundles this tool does not sign.
+            for nested in dependencies_of(name):
+                nested_type = target_of(nested["target"], f"dependency of project target {name}")["type"]
+                if nested.get("embed") is not False and nested_type not in UNSIGNED_DEPENDENCY_TYPES:
+                    raise integrity_error(f"app extension {name} embeds a signed bundle, which this tool does not sign", "project-spec")
+            extensions.append(EmbeddedBundle(bundle_identifier_of(name), "app-extension"))
         bundles = [EmbeddedBundle(self.bundle_identifier, "application")] + sorted(extensions, key=lambda bundle: bundle.identifier)
         if len({bundle.identifier for bundle in bundles}) != len(bundles):
             raise integrity_error("the project spec embeds two bundles with the same bundle identifier", "project-spec")

@@ -800,7 +800,7 @@ class EmbeddedExtensionTests(SigningToolTestCase):
         return [tuple(call["argv"][1:3]) for call in self.calls_of("devicectl", "device")]
 
     def write_project_spec(self, extensions=(("OhAndCaptureControl", EXTENSION_BUNDLE_IDENTIFIER),), base_layout=False, extra_dependencies=(),
-                           embed=True, extension_type="app-extension", extension_settings=None):
+                           embed=True, extension_type="app-extension", extension_settings=None, edit=None):
         def settings(identifier):
             flat = {"PRODUCT_BUNDLE_IDENTIFIER": identifier}
             return {"base": flat} if base_layout else flat
@@ -816,8 +816,11 @@ class EmbeddedExtensionTests(SigningToolTestCase):
         }
         for name, identifier in extensions:
             targets[name] = {"type": extension_type, "settings": extension_settings if extension_settings is not None else settings(identifier)}
+        spec = {"name": "Synthetic", "targets": targets}
+        if edit:
+            edit(spec)
         path = self.inputs / "project.json"
-        path.write_text(json.dumps({"name": "Synthetic", "targets": targets}))
+        path.write_text(json.dumps(spec))
         return path
 
     def spec_environment(self, **spec_options):
@@ -923,6 +926,80 @@ class EmbeddedExtensionTests(SigningToolTestCase):
             self.state_reset()
             self.assert_refused_before_generation(self.sign_app(OHAND_SIGNING_PROJECT_SPEC_PATH=str(self.inputs / "absent.yml")), 4,
                                                   "the project spec could not be read")
+
+    def test_per_configuration_bundle_identifiers_are_read_by_configuration_name(self):
+        def release_override(identifier):
+            def edit(spec):
+                spec["targets"]["OhAndCaptureControl"]["settings"]["configs"] = {"Release": {"PRODUCT_BUNDLE_IDENTIFIER": identifier}}
+            return edit
+
+        self.write_profile(Entitlements=self.wildcard_entitlements())
+        result = self.sign_app(**self.spec_environment(base_layout=True, edit=release_override(EXTENSION_BUNDLE_IDENTIFIER)))
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        # An exact profile for the base identifier must not pass when the Release configuration archives another identifier.
+        self.state_reset()
+        map_path = self.write_mapped_profiles({APP_BUNDLE_IDENTIFIER: {}, EXTENSION_BUNDLE_IDENTIFIER: {}})
+        result = self.sign_app(**self.mapped_environment(map_path, **self.spec_environment(
+            base_layout=True, edit=release_override("com.boldfield.ohand.release-capture-control"))))
+        self.assert_refused_before_generation(result, 4, "the bundle identifier of project target OhAndCaptureControl differs between configurations")
+        self.assertEqual(self.only_evidence()["failed_stage"], "project-spec")
+
+        self.state_reset()
+        result = self.sign_app(**self.spec_environment(
+            base_layout=True, edit=lambda spec: spec["targets"]["OhAndApp"]["settings"].update(
+                configs={"Release": {"PRODUCT_BUNDLE_IDENTIFIER": "com.boldfield.ohand.release-app"}})))
+        self.assert_refused_before_generation(result, 4, "the bundle identifier of project target OhAndApp differs between configurations")
+
+    def test_project_spec_constructs_the_reader_does_not_model_are_refused_before_generation(self):
+        def move_dependencies_into_a_template(spec):
+            application = spec["targets"]["OhAndApp"]
+            spec["targetTemplates"] = {"Embedding": {"dependencies": application.pop("dependencies")}}
+            application["templates"] = ["Embedding"]
+
+        def template_on_the_extension(spec):
+            spec["targetTemplates"] = {"Renamed": {"settings": {"PRODUCT_BUNDLE_IDENTIFIER": SECOND_EXTENSION_IDENTIFIER}}}
+            spec["targets"]["OhAndCaptureControl"]["templates"] = ["Renamed"]
+
+        def setting_groups(spec):
+            spec["settingGroups"] = {"Identifiers": {"PRODUCT_BUNDLE_IDENTIFIER": SECOND_EXTENSION_IDENTIFIER}}
+            spec["targets"]["OhAndCaptureControl"]["settings"]["groups"] = ["Identifiers"]
+
+        def nested_signed_bundle(spec):
+            spec["targets"]["OhAndNested"] = {"type": "app-extension", "settings": {"PRODUCT_BUNDLE_IDENTIFIER": SECOND_EXTENSION_IDENTIFIER}}
+            spec["targets"]["OhAndCaptureControl"]["dependencies"] = [{"target": "OhAndNested"}]
+
+        cases = {
+            "top-level include": (dict(edit=lambda spec: spec.update(include=["more.yml"])), "uses include"),
+            "dependencies from a target template": (dict(edit=move_dependencies_into_a_template), "key templates in target OhAndApp"),
+            "template on an extension": (dict(edit=template_on_the_extension), "key templates in target OhAndCaptureControl"),
+            "setting groups": (dict(base_layout=True, edit=setting_groups), "settings.groups in target OhAndCaptureControl"),
+            "generated Info.plist properties": (dict(edit=lambda spec: spec["targets"]["OhAndCaptureControl"].update(
+                info={"path": "Info.plist", "properties": {"CFBundleIdentifier": SECOND_EXTENSION_IDENTIFIER}})),
+                "key info in target OhAndCaptureControl"),
+            "multi-platform target": (dict(edit=lambda spec: spec["targets"]["OhAndCaptureControl"].update(platform=["iOS", "tvOS"])),
+                                      "a platform list in target OhAndCaptureControl"),
+            "unmodeled dependency key": (dict(edit=lambda spec: spec["targets"]["OhAndApp"]["dependencies"][1].update(
+                copy={"destination": "resources"})), "key copy in a dependency of target OhAndApp"),
+            "transitive linking": (dict(edit=lambda spec: spec.update(options={"transitivelyLinkDependencies": True})),
+                                   "uses options.transitivelyLinkDependencies"),
+            "extension embedding a signed bundle": (dict(edit=nested_signed_bundle), "app extension OhAndCaptureControl embeds a signed bundle"),
+        }
+        for description, (options, message) in cases.items():
+            with self.subTest(description):
+                self.state_reset()
+                self.write_profile(Entitlements=self.wildcard_entitlements())
+                result = self.sign_app("--install", **self.spec_environment(**options))
+                self.assert_refused_before_generation(result, 4, message)
+                self.assertEqual(self.calls_of("security", "import"), [])
+                self.assertEqual(self.installed_profile_files(), [])
+                self.assertEqual(self.only_evidence()["failed_stage"], "project-spec")
+
+    def test_the_repository_project_spec_is_within_the_modeled_subset(self):
+        result = self.sign_app()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads((self.state / "export-options.json").read_text())["provisioningProfiles"],
+                         {APP_BUNDLE_IDENTIFIER: SYNTHETIC_PROFILE_UUID, EXTENSION_BUNDLE_IDENTIFIER: SYNTHETIC_PROFILE_UUID})
 
     def test_two_bundles_are_signed_under_a_per_bundle_profile_mapping(self):
         map_path = self.write_mapped_profiles({
