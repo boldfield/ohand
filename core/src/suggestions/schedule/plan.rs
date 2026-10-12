@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use chrono::{DateTime, Duration, LocalResult, NaiveDate, NaiveTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
@@ -104,6 +106,10 @@ pub struct PlannedPrompt {
     pub notification_id: String,
     pub local_date: NaiveDate,
     pub fire_at: DateTime<Utc>,
+    /// The OS was last seen holding this request at `fire_at`. If it is later absent while
+    /// `fire_at` still looks ahead of the clock, it fired and the clock moved back.
+    #[serde(default)]
+    pub installed: bool,
 }
 
 /// The bounded optional daily prompt schedule: the user's setting and the occurrences planned
@@ -118,6 +124,11 @@ pub struct PlannedPrompt {
 ///   occurrences that have passed; they never add one.
 /// - A passed occurrence is never replayed or made up, so nonuse leaves nothing queued and the
 ///   next open starts from the next future occurrence.
+/// - Passing is remembered: `last_elapsed` is the latest planned instant seen to have passed,
+///   either by the clock or because an installed request vanished from the OS before its
+///   instant (it fired and the clock was moved back). No occurrence at or before it is planned
+///   again, so rolling the clock back cannot replay a prompt that already fired. It is bounded
+///   by the horizon, never by the clock reading itself.
 /// - The identifier of an occurrence is `prompt:<local date>`: stable, so a re-plan replaces
 ///   rather than duplicates, and it carries no item content.
 /// - Local-time semantics: a skipped local time (DST gap) fires at the first valid minute after
@@ -126,6 +137,8 @@ pub struct PlannedPrompt {
 pub struct PromptSchedule {
     settings: PromptSettings,
     planned: Vec<PlannedPrompt>,
+    #[serde(default)]
+    last_elapsed: Option<DateTime<Utc>>,
 }
 
 impl PromptSchedule {
@@ -144,8 +157,9 @@ impl PromptSchedule {
     /// Apply the user's choice. Off clears every planned prompt; a time rebuilds the horizon
     /// from `now`, so an earlier time today that has already passed is not replayed.
     pub fn configure(&mut self, settings: PromptSettings, now: DateTime<Utc>, zone: Tz) {
+        self.retire_elapsed(now);
         self.settings = settings;
-        self.planned = fill(settings, now, zone);
+        self.planned = fill(settings, now, zone, self.last_elapsed);
     }
 
     pub fn refresh(&mut self, trigger: RefreshTrigger, now: DateTime<Utc>, zone: Tz) {
@@ -153,11 +167,43 @@ impl PromptSchedule {
             self.planned.clear();
             return;
         }
-        match trigger {
-            RefreshTrigger::AppOpen => self.planned = fill(self.settings, now, zone),
-            RefreshTrigger::Reentry | RefreshTrigger::ClockOrZoneChange => {
-                self.planned.retain(|prompt| prompt.fire_at > now)
+        self.retire_elapsed(now);
+        if trigger == RefreshTrigger::AppOpen {
+            self.planned = fill(self.settings, now, zone, self.last_elapsed);
+        }
+    }
+
+    /// Drop occurrences whose instant has passed by the clock and remember the latest.
+    fn retire_elapsed(&mut self, now: DateTime<Utc>) {
+        self.retire_where(|prompt| prompt.fire_at <= now);
+    }
+
+    /// Retire occurrences the clock says have passed, and installed ones the OS no longer
+    /// holds: those fired before the clock was moved back. Called by the reconcile pass with
+    /// the identifiers the OS currently holds.
+    pub(super) fn retire_fired(&mut self, now: DateTime<Utc>, pending: &BTreeSet<&str>) {
+        self.retire_where(|prompt| {
+            prompt.fire_at <= now
+                || (prompt.installed && !pending.contains(prompt.notification_id.as_str()))
+        });
+    }
+
+    fn retire_where(&mut self, has_fired: impl Fn(&PlannedPrompt) -> bool) {
+        let mut latest = self.last_elapsed;
+        self.planned.retain(|prompt| {
+            if !has_fired(prompt) {
+                return true;
             }
+            latest = latest.max(Some(prompt.fire_at));
+            false
+        });
+        self.last_elapsed = latest;
+    }
+
+    /// Record which planned prompts the OS holds after a reconcile pass.
+    pub(super) fn record_installed(&mut self, held: &BTreeSet<&str>) {
+        for prompt in &mut self.planned {
+            prompt.installed = held.contains(prompt.notification_id.as_str());
         }
     }
 
@@ -199,12 +245,18 @@ pub fn is_prompt_notification_id(notification_id: &str) -> bool {
     notification_id.starts_with(PROMPT_ID_PREFIX) && !notification_id.contains('#')
 }
 
-fn fill(settings: PromptSettings, now: DateTime<Utc>, zone: Tz) -> Vec<PlannedPrompt> {
+fn fill(
+    settings: PromptSettings,
+    now: DateTime<Utc>,
+    zone: Tz,
+    last_elapsed: Option<DateTime<Utc>>,
+) -> Vec<PlannedPrompt> {
     let PromptSettings::Daily { time } = settings else {
         return Vec::new();
     };
     let mut planned = Vec::with_capacity(PROMPT_HORIZON_DAYS);
-    let mut local_date = now.with_timezone(&zone).date_naive();
+    let floor = last_elapsed.map_or(now, |elapsed| elapsed.max(now));
+    let mut local_date = floor.with_timezone(&zone).date_naive();
     // Today's occurrence may already be past, and a gap can push one past `now` again, so scan
     // a couple of extra dates rather than assuming the first `PROMPT_HORIZON_DAYS` qualify.
     for _ in 0..PROMPT_HORIZON_DAYS + 2 {
@@ -212,11 +264,12 @@ fn fill(settings: PromptSettings, now: DateTime<Utc>, zone: Tz) -> Vec<PlannedPr
             break;
         }
         if let Some(fire_at) = local_fire_instant(local_date, time, zone) {
-            if fire_at > now {
+            if fire_at > floor {
                 planned.push(PlannedPrompt {
                     notification_id: prompt_notification_id(local_date),
                     local_date,
                     fire_at,
+                    installed: false,
                 });
             }
         }

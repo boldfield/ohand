@@ -66,27 +66,34 @@ pub fn cancel_prompts(
 /// the OS does not already hold at the planned instant are installed with the generic payload
 /// and their own opaque identifier as target. A failed install is reported and retried by any
 /// later pass; it is never recorded as delivery. This function never extends the horizon:
-/// only the schedule's own refresh rules do.
+/// only the schedule's own refresh rules do. It does retire occurrences the OS held at the
+/// previous pass but no longer holds, so a prompt that fired is not reinstalled if the clock
+/// is moved back, and it records which prompts the OS now holds for the next pass.
 pub fn reconcile_prompts(
     database: &mut Database,
     clock: &dyn Clock,
     effects: &mut dyn NotificationEffects,
-    schedule: &PromptSchedule,
+    schedule: &mut PromptSchedule,
     policy: &CapacityPolicy,
 ) -> Result<PromptPassReport, ReconcileError> {
     if !schedule.is_enabled() {
         return cancel_prompts(effects);
     }
     let pass_clock = PassClock { now: clock.now() };
+    let pending = effects
+        .list_pending()
+        .map_err(ReconcileError::ListPending)?;
+    let pending_ids: BTreeSet<&str> = pending
+        .iter()
+        .map(|request| request.notification_id.as_str())
+        .collect();
+    schedule.retire_fired(pass_clock.now, &pending_ids);
     let demands = schedule.demands(pass_clock.now);
     let offered: BTreeSet<&str> = demands
         .iter()
         .map(|demand| demand.notification_id.as_str())
         .collect();
 
-    let pending = effects
-        .list_pending()
-        .map_err(ReconcileError::ListPending)?;
     let mut report = PromptPassReport::default();
     cancel_where(effects, &pending, &mut report, |notification_id| {
         !offered.contains(notification_id)
@@ -139,6 +146,13 @@ pub fn reconcile_prompts(
             }),
         }
     }
+    let held_now: BTreeSet<&str> = report
+        .installed
+        .iter()
+        .chain(&report.already_installed)
+        .map(String::as_str)
+        .collect();
+    schedule.record_installed(&held_now);
     report.capacity = Some(capacity);
     Ok(report)
 }

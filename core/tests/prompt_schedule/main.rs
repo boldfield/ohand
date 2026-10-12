@@ -198,7 +198,7 @@ impl NotificationEffects for FakeCenter {
 fn pass(
     db: &mut Database,
     center: &mut FakeCenter,
-    schedule: &PromptSchedule,
+    schedule: &mut PromptSchedule,
     now: &str,
 ) -> Result<ohand_core::suggestions::schedule::PromptPassReport> {
     Ok(reconcile_prompts(
@@ -222,7 +222,7 @@ fn fire_instants(schedule: &PromptSchedule) -> Vec<DateTime<Utc>> {
 
 #[test]
 fn prompting_is_off_by_default_and_plans_and_installs_nothing() -> Result<()> {
-    let schedule = PromptSchedule::default();
+    let mut schedule = PromptSchedule::default();
     let now = instant("2026-01-15T10:30:00Z");
 
     assert!(!schedule.is_enabled());
@@ -232,7 +232,7 @@ fn prompting_is_off_by_default_and_plans_and_installs_nothing() -> Result<()> {
 
     let mut db = open_db("off_default")?;
     let mut center = FakeCenter::default();
-    let report = pass(&mut db, &mut center, &schedule, "2026-01-15T10:30:00Z")?;
+    let report = pass(&mut db, &mut center, &mut schedule, "2026-01-15T10:30:00Z")?;
 
     assert_eq!(center.mutations(), 0);
     assert!(report.capacity.is_none() && report.converged());
@@ -306,7 +306,7 @@ fn choosing_a_time_plans_only_the_next_few_future_occurrences() -> Result<()> {
 
     let mut db = open_db("horizon")?;
     let mut center = FakeCenter::default();
-    let report = pass(&mut db, &mut center, &schedule, "2026-01-15T10:30:00Z")?;
+    let report = pass(&mut db, &mut center, &mut schedule, "2026-01-15T10:30:00Z")?;
     assert_eq!(report.installed.len(), PROMPT_HORIZON_DAYS);
     assert_eq!(center.prompt_ids().len(), PROMPT_HORIZON_DAYS);
     assert!(report.converged());
@@ -353,7 +353,7 @@ fn explicit_reminders_keep_their_slots_and_prompts_take_only_what_is_left() -> R
         &mut db,
         &clock_at("2026-01-15T10:30:00Z"),
         &mut center,
-        &schedule,
+        &mut schedule,
         &policy,
     )?;
 
@@ -385,11 +385,11 @@ fn a_new_reminder_displaces_a_prompt_before_it_displaces_any_reminder() -> Resul
     schedule.configure(daily(nine_am()), instant("2026-01-15T10:30:00Z"), UTC_ZONE);
     let mut center = FakeCenter::default();
     let now = clock_at("2026-01-15T10:30:00Z");
-    reconcile_prompts(&mut db, &now, &mut center, &schedule, &policy)?;
+    reconcile_prompts(&mut db, &now, &mut center, &mut schedule, &policy)?;
     assert_eq!(center.prompt_ids().len(), 3);
 
     let second = create_reminder(&mut db, "item-1", "call the dentist")?;
-    reconcile_prompts(&mut db, &now, &mut center, &schedule, &policy)?;
+    reconcile_prompts(&mut db, &now, &mut center, &mut schedule, &policy)?;
 
     assert!(center.pending.contains_key(&first) && center.pending.contains_key(&second));
     assert_eq!(center.prompt_ids().len(), 2);
@@ -411,13 +411,13 @@ fn disabling_cancels_every_prompt_and_leaves_reminders_and_other_requests_alone(
         "other-feature-request".to_string(),
         instant("2026-01-20T09:00:00Z"),
     );
-    pass(&mut db, &mut center, &schedule, "2026-01-15T10:30:00Z")?;
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T10:30:00Z")?;
     assert_eq!(center.prompt_ids().len(), PROMPT_HORIZON_DAYS);
     let before = get_reminder_row(&mut db, "item-1")?;
     center.reset_calls();
 
     schedule.configure(PromptSettings::Off, now, UTC_ZONE);
-    let report = pass(&mut db, &mut center, &schedule, "2026-01-15T10:30:00Z")?;
+    let report = pass(&mut db, &mut center, &mut schedule, "2026-01-15T10:30:00Z")?;
 
     assert!(center.prompt_ids().is_empty());
     assert_eq!(report.cancelled.len(), PROMPT_HORIZON_DAYS);
@@ -471,11 +471,11 @@ fn a_failed_prompt_cancel_is_reported_and_retried_by_the_next_pass() -> Result<(
     let now = instant("2026-01-15T10:30:00Z");
     schedule.configure(daily(nine_am()), now, UTC_ZONE);
     let mut center = FakeCenter::default();
-    pass(&mut db, &mut center, &schedule, "2026-01-15T10:30:00Z")?;
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T10:30:00Z")?;
     schedule.configure(PromptSettings::Off, now, UTC_ZONE);
     center.fail_cancel_for = vec!["prompt:2026-01-17".to_string()];
 
-    let report = pass(&mut db, &mut center, &schedule, "2026-01-15T10:30:00Z")?;
+    let report = pass(&mut db, &mut center, &mut schedule, "2026-01-15T10:30:00Z")?;
 
     assert!(!report.converged());
     assert_eq!(
@@ -488,7 +488,7 @@ fn a_failed_prompt_cancel_is_reported_and_retried_by_the_next_pass() -> Result<(
         }]
     );
     center.fail_cancel_for.clear();
-    let retry = pass(&mut db, &mut center, &schedule, "2026-01-15T10:31:00Z")?;
+    let retry = pass(&mut db, &mut center, &mut schedule, "2026-01-15T10:31:00Z")?;
     assert!(retry.converged());
     assert!(center.prompt_ids().is_empty());
     Ok(())
@@ -502,7 +502,7 @@ fn only_an_app_open_refills_the_horizon() -> Result<()> {
     let mut schedule = PromptSchedule::default();
     schedule.configure(daily(nine_am()), instant("2026-01-15T10:30:00Z"), UTC_ZONE);
     let mut center = FakeCenter::default();
-    pass(&mut db, &mut center, &schedule, "2026-01-15T10:30:00Z")?;
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T10:30:00Z")?;
 
     // Two prompts fire. Returning to the app and a clock change add nothing.
     let later = instant("2026-01-17T12:00:00Z");
@@ -513,11 +513,11 @@ fn only_an_app_open_refills_the_horizon() -> Result<()> {
         fire_instants(&schedule),
         vec![instant("2026-01-18T09:00:00Z")]
     );
-    pass(&mut db, &mut center, &schedule, "2026-01-17T12:00:00Z")?;
+    pass(&mut db, &mut center, &mut schedule, "2026-01-17T12:00:00Z")?;
     assert_eq!(center.prompt_ids(), vec!["prompt:2026-01-18".to_string()]);
 
     schedule.refresh(RefreshTrigger::AppOpen, later, UTC_ZONE);
-    pass(&mut db, &mut center, &schedule, "2026-01-17T12:00:00Z")?;
+    pass(&mut db, &mut center, &mut schedule, "2026-01-17T12:00:00Z")?;
 
     assert_eq!(
         center.prompt_ids(),
@@ -527,6 +527,92 @@ fn only_an_app_open_refills_the_horizon() -> Result<()> {
             "prompt:2026-01-20"
         ]
     );
+    Ok(())
+}
+
+#[test]
+fn rolling_the_clock_back_does_not_replay_a_prompt_that_already_fired() -> Result<()> {
+    let mut db = open_db("rollback")?;
+    let mut schedule = PromptSchedule::default();
+    schedule.configure(daily(nine_am()), instant("2026-01-15T07:00:00Z"), UTC_ZONE);
+    let mut center = FakeCenter::default();
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T07:00:00Z")?;
+    assert!(center.pending.contains_key("prompt:2026-01-15"));
+
+    // The OS delivers the 09:00 prompt; the clock is then moved back to 08:00.
+    center.fire_due(instant("2026-01-15T10:00:00Z"));
+    let rolled_back = instant("2026-01-15T08:00:00Z");
+    schedule.refresh(RefreshTrigger::ClockOrZoneChange, rolled_back, UTC_ZONE);
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T08:00:00Z")?;
+
+    assert_eq!(
+        center.prompt_ids(),
+        ["prompt:2026-01-16", "prompt:2026-01-17"]
+    );
+    let installs_of_fired = center
+        .requests
+        .iter()
+        .filter(|request| request.notification_id == "prompt:2026-01-15")
+        .count();
+    assert_eq!(installs_of_fired, 1);
+    Ok(())
+}
+
+#[test]
+fn a_rollback_then_an_app_open_or_time_change_still_skips_the_fired_occurrence() -> Result<()> {
+    let mut db = open_db("rollback-open")?;
+    let mut schedule = PromptSchedule::default();
+    schedule.configure(daily(nine_am()), instant("2026-01-15T07:00:00Z"), UTC_ZONE);
+    let mut center = FakeCenter::default();
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T07:00:00Z")?;
+    center.fire_due(instant("2026-01-15T10:00:00Z"));
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T10:00:00Z")?;
+
+    let rolled_back = instant("2026-01-15T08:00:00Z");
+    schedule.refresh(RefreshTrigger::AppOpen, rolled_back, UTC_ZONE);
+    assert_eq!(
+        fire_instants(&schedule),
+        vec![
+            instant("2026-01-16T09:00:00Z"),
+            instant("2026-01-17T09:00:00Z"),
+            instant("2026-01-18T09:00:00Z"),
+        ]
+    );
+
+    // Choosing the same time again in the rolled-back clock does not bring today's back,
+    // while a later time today is still a new, future occurrence.
+    schedule.configure(daily(nine_am()), rolled_back, UTC_ZONE);
+    assert_eq!(fire_instants(&schedule)[0], instant("2026-01-16T09:00:00Z"));
+    let two_pm = PromptTime::new(14, 0).unwrap();
+    schedule.configure(daily(two_pm), rolled_back, UTC_ZONE);
+    assert_eq!(fire_instants(&schedule)[0], instant("2026-01-15T14:00:00Z"));
+
+    let restored: PromptSchedule = serde_json::from_str(&serde_json::to_string(&schedule)?)?;
+    assert_eq!(restored, schedule);
+    Ok(())
+}
+
+#[test]
+fn a_prompt_deferred_by_capacity_is_not_mistaken_for_one_that_fired() -> Result<()> {
+    let mut db = open_db("deferred-not-fired")?;
+    let policy = CapacityPolicy {
+        replacement_headroom: 4,
+        ..CapacityPolicy::default()
+    };
+    let mut schedule = PromptSchedule::default();
+    let now = instant("2026-01-15T10:30:00Z");
+    schedule.configure(daily(nine_am()), now, UTC_ZONE);
+    let mut center = FakeCenter::default();
+    let clock = clock_at("2026-01-15T10:30:00Z");
+    reconcile_prompts(&mut db, &clock, &mut center, &mut schedule, &policy)?;
+    create_reminder(&mut db, "item-0", "water plants")?;
+    create_reminder(&mut db, "item-1", "call the dentist")?;
+    reconcile_prompts(&mut db, &clock, &mut center, &mut schedule, &policy)?;
+    let planned_before = fire_instants(&schedule);
+
+    reconcile_prompts(&mut db, &clock, &mut center, &mut schedule, &policy)?;
+    assert_eq!(fire_instants(&schedule), planned_before);
+    assert_eq!(planned_before.len(), PROMPT_HORIZON_DAYS);
     Ok(())
 }
 
@@ -550,7 +636,7 @@ fn multi_day_nonuse_leaves_no_backlog_and_the_next_open_starts_in_the_future() -
     let mut schedule = PromptSchedule::default();
     schedule.configure(daily(nine_am()), instant("2026-01-15T10:30:00Z"), UTC_ZONE);
     let mut center = FakeCenter::default();
-    pass(&mut db, &mut center, &schedule, "2026-01-15T10:30:00Z")?;
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T10:30:00Z")?;
 
     // Ten days pass without opening the app.
     let returned = instant("2026-01-25T14:00:00Z");
@@ -560,7 +646,7 @@ fn multi_day_nonuse_leaves_no_backlog_and_the_next_open_starts_in_the_future() -
         "nothing is left queued after the horizon"
     );
     center.reset_calls();
-    pass(&mut db, &mut center, &schedule, "2026-01-25T14:00:00Z")?;
+    pass(&mut db, &mut center, &mut schedule, "2026-01-25T14:00:00Z")?;
     assert_eq!(
         center.mutations(),
         0,
@@ -568,7 +654,7 @@ fn multi_day_nonuse_leaves_no_backlog_and_the_next_open_starts_in_the_future() -
     );
 
     schedule.refresh(RefreshTrigger::AppOpen, returned, UTC_ZONE);
-    let report = pass(&mut db, &mut center, &schedule, "2026-01-25T14:00:00Z")?;
+    let report = pass(&mut db, &mut center, &mut schedule, "2026-01-25T14:00:00Z")?;
 
     assert_eq!(
         fire_instants(&schedule),
@@ -589,7 +675,7 @@ fn changing_the_time_does_not_replay_a_passed_time_and_replaces_stale_requests()
     let mut schedule = PromptSchedule::default();
     schedule.configure(daily(nine_am()), instant("2026-01-15T07:00:00Z"), UTC_ZONE);
     let mut center = FakeCenter::default();
-    pass(&mut db, &mut center, &schedule, "2026-01-15T07:00:00Z")?;
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T07:00:00Z")?;
     assert_eq!(
         center.pending.get("prompt:2026-01-15"),
         Some(&instant("2026-01-15T09:00:00Z"))
@@ -599,7 +685,7 @@ fn changing_the_time_does_not_replay_a_passed_time_and_replaces_stale_requests()
     let now = instant("2026-01-15T10:30:00Z");
     center.fire_due(now);
     schedule.configure(daily(PromptTime::new(8, 0).unwrap()), now, UTC_ZONE);
-    let report = pass(&mut db, &mut center, &schedule, "2026-01-15T10:30:00Z")?;
+    let report = pass(&mut db, &mut center, &mut schedule, "2026-01-15T10:30:00Z")?;
 
     assert_eq!(
         fire_instants(&schedule),
@@ -628,7 +714,7 @@ fn a_zone_change_at_the_next_open_cancels_requests_outside_the_new_plan() -> Res
     let now = instant("2026-01-15T15:00:00Z");
     schedule.configure(daily(nine_am()), now, new_york);
     let mut center = FakeCenter::default();
-    pass(&mut db, &mut center, &schedule, "2026-01-15T15:00:00Z")?;
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T15:00:00Z")?;
     assert_eq!(
         center.pending.get("prompt:2026-01-16"),
         Some(&instant("2026-01-16T14:00:00Z"))
@@ -645,7 +731,7 @@ fn a_zone_change_at_the_next_open_cancels_requests_outside_the_new_plan() -> Res
 
     // The next open plans for the local morning in the new zone.
     schedule.refresh(RefreshTrigger::AppOpen, landed, tokyo);
-    let report = pass(&mut db, &mut center, &schedule, "2026-01-15T23:00:00Z")?;
+    let report = pass(&mut db, &mut center, &mut schedule, "2026-01-15T23:00:00Z")?;
 
     assert_eq!(
         schedule.planned()[0].fire_at,
@@ -716,7 +802,7 @@ fn repeating_a_pass_changes_nothing_and_a_failed_install_is_retried() -> Result<
         ..FakeCenter::default()
     };
 
-    let failed = pass(&mut db, &mut center, &schedule, "2026-01-15T10:30:00Z")?;
+    let failed = pass(&mut db, &mut center, &mut schedule, "2026-01-15T10:30:00Z")?;
     assert!(!failed.converged());
     assert_eq!(failed.failures.len(), PROMPT_HORIZON_DAYS);
     assert!(failed
@@ -726,12 +812,12 @@ fn repeating_a_pass_changes_nothing_and_a_failed_install_is_retried() -> Result<
     assert!(center.prompt_ids().is_empty());
 
     center.fail_schedule = None;
-    let retried = pass(&mut db, &mut center, &schedule, "2026-01-15T10:31:00Z")?;
+    let retried = pass(&mut db, &mut center, &mut schedule, "2026-01-15T10:31:00Z")?;
     assert!(retried.converged());
     assert_eq!(center.prompt_ids().len(), PROMPT_HORIZON_DAYS);
 
     center.reset_calls();
-    let repeat = pass(&mut db, &mut center, &schedule, "2026-01-15T10:32:00Z")?;
+    let repeat = pass(&mut db, &mut center, &mut schedule, "2026-01-15T10:32:00Z")?;
     assert_eq!(center.mutations(), 0);
     assert_eq!(repeat.already_installed.len(), PROMPT_HORIZON_DAYS);
     assert!(repeat.installed.is_empty() && repeat.cancelled.is_empty());
@@ -746,7 +832,7 @@ fn a_prompt_pass_leaves_explicit_reminders_installed_for_the_reminder_reconciler
     schedule.configure(daily(nine_am()), instant("2026-01-15T10:30:00Z"), UTC_ZONE);
     let mut center = FakeCenter::default();
 
-    pass(&mut db, &mut center, &schedule, "2026-01-15T10:30:00Z")?;
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T10:30:00Z")?;
     let reminder_report = reconcile(&mut db, &clock_at("2026-01-15T10:30:00Z"), &mut center)?;
 
     assert!(center.pending.contains_key(&reminder_id));
@@ -773,7 +859,7 @@ fn prompt_requests_are_generic_and_carry_no_item_content() -> Result<()> {
     schedule.configure(daily(nine_am()), instant("2026-01-15T10:30:00Z"), UTC_ZONE);
     let mut center = FakeCenter::default();
 
-    pass(&mut db, &mut center, &schedule, "2026-01-15T10:30:00Z")?;
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T10:30:00Z")?;
 
     let prompt_requests: Vec<&ScheduleRequest> = center
         .requests
