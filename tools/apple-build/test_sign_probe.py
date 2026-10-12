@@ -801,12 +801,15 @@ class EmbeddedExtensionTests(SigningToolTestCase):
 
     def write_project_spec(self, extensions=(("OhAndCaptureControl", EXTENSION_BUNDLE_IDENTIFIER),), base_layout=False, extra_dependencies=(),
                            embed=True, extension_type="app-extension", extension_settings=None, edit=None):
-        def settings(identifier):
-            flat = {"PRODUCT_BUNDLE_IDENTIFIER": identifier}
+        # Signed targets name their Info.plist explicitly, referring to the build setting, as ios/project.yml does.
+        (self.inputs / "Signed-Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "$(PRODUCT_BUNDLE_IDENTIFIER)"}))
+
+        def settings(identifier, signed=True):
+            flat = {"PRODUCT_BUNDLE_IDENTIFIER": identifier, **({"INFOPLIST_FILE": "Signed-Info.plist"} if signed else {})}
             return {"base": flat} if base_layout else flat
 
         targets = {
-            "OhAndCoreBridge": {"type": "framework", "settings": settings("com.boldfield.ohand.corebridge")},
+            "OhAndCoreBridge": {"type": "framework", "settings": settings("com.boldfield.ohand.corebridge", signed=False)},
             "OhAndApp": {
                 "type": "application",
                 "settings": settings(APP_BUNDLE_IDENTIFIER),
@@ -981,6 +984,13 @@ class EmbeddedExtensionTests(SigningToolTestCase):
                                       "a platform list in target OhAndCaptureControl"),
             "unmodeled dependency key": (dict(edit=lambda spec: spec["targets"]["OhAndApp"]["dependencies"][1].update(
                 copy={"destination": "resources"})), "key copy in a dependency of target OhAndApp"),
+            "prebuilt extension copied into PlugIns by a framework dependency": (dict(extra_dependencies=[
+                {"framework": "Prebuilt/Extra.appex", "embed": True, "link": False, "copy": {"destination": "plugins"}}]),
+                "a dependency of target OhAndApp that names no project target"),
+            "package dependency": (dict(extra_dependencies=[{"package": "Vendor", "product": "VendorKit"}]),
+                                   "a dependency of target OhAndApp that names no project target"),
+            "SDK dependency on the extension": (dict(edit=lambda spec: spec["targets"]["OhAndCaptureControl"].update(
+                dependencies=[{"sdk": "WidgetKit.framework"}])), "a dependency of target OhAndCaptureControl that names no project target"),
             "transitive linking": (dict(edit=lambda spec: spec.update(options={"transitivelyLinkDependencies": True})),
                                    "uses options.transitivelyLinkDependencies"),
             "extension embedding a signed bundle": (dict(edit=nested_signed_bundle), "app extension OhAndCaptureControl embeds a signed bundle"),
@@ -1032,6 +1042,15 @@ class EmbeddedExtensionTests(SigningToolTestCase):
                 spec["targets"][name]["settings"]["INFOPLIST_FILE"] = plist.name
             return edit
 
+        def without_info_plist_setting(name):
+            def edit(spec):
+                sources = self.inputs / f"{name}Sources"
+                sources.mkdir(exist_ok=True)
+                (sources / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "com.example.uncovered"}))
+                spec["targets"][name]["settings"].pop("INFOPLIST_FILE")
+                spec["targets"][name]["sources"] = [{"path": sources.name, "createIntermediateGroups": True}]
+            return edit
+
         refused = {
             "source directory containing an extension": (with_sources("Sources"), "a source of project target OhAndApp is a signed bundle"),
             "literal extension identifier": (with_info_plist("OhAndCaptureControl", SECOND_EXTENSION_IDENTIFIER),
@@ -1040,6 +1059,16 @@ class EmbeddedExtensionTests(SigningToolTestCase):
                                                "the Info.plist of project target OhAndApp sets its own bundle identifier"),
             "missing Info.plist": (lambda spec: spec["targets"]["OhAndApp"]["settings"].update(INFOPLIST_FILE="Absent.plist"),
                                    "the Info.plist of project target OhAndApp cannot be read"),
+            # XcodeGen would pick the Info.plist among the sources itself, and its literal identifier would be archived.
+            "extension Info.plist found among the sources": (without_info_plist_setting("OhAndCaptureControl"),
+                                                             "project target OhAndCaptureControl does not set INFOPLIST_FILE explicitly"),
+            "application Info.plist found among the sources": (without_info_plist_setting("OhAndApp"),
+                                                               "project target OhAndApp does not set INFOPLIST_FILE explicitly"),
+            "Info.plist set only for one configuration": (
+                lambda spec: spec["targets"]["OhAndCaptureControl"].update(settings={
+                    "base": {"PRODUCT_BUNDLE_IDENTIFIER": EXTENSION_BUNDLE_IDENTIFIER},
+                    "configs": {"Release": {"INFOPLIST_FILE": "Signed-Info.plist"}}}),
+                "project target OhAndCaptureControl does not set INFOPLIST_FILE explicitly"),
         }
         for description, (edit, message) in refused.items():
             with self.subTest(description):

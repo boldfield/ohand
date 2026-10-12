@@ -77,12 +77,13 @@ SUPPORTED_SCHEME_BUNDLE_IDENTIFIERS = {
 }
 EMBEDDING_SCHEMES = frozenset({"OhAndApp"})
 EXTENSION_DIRECTORY_NAMES = ("PlugIns", "Extensions")
-# Dependency target types of the application that are never signed with their own profile, and the dependency kinds
-# that name no project target. Anything else must be resolved or the run is refused before the project is generated.
+# Dependency target types of the application that are never signed with their own profile. Anything else must be
+# resolved or the run is refused before the project is generated.
 UNSIGNED_DEPENDENCY_TYPES = frozenset({"framework", "framework.static", "library.static", "library.dynamic", "bundle"})
-UNTARGETED_DEPENDENCY_KINDS = ("framework", "sdk", "package", "carthage", "bundle")
 # The subset of XcodeGen the pre-build reader models for the application and its dependency targets. Any other target
-# key (templates, info, configFiles, scheme, ...) or dependency key (copy, platformFilter, ...) refuses the run.
+# key (templates, info, configFiles, scheme, ...) or dependency key (copy, platformFilter, ...) refuses the run, as does
+# any dependency that names no project target (framework, sdk, package, carthage or bundle): such a dependency can copy
+# a prebuilt bundle into the application or, for a package, run build-tool plugins during the archive.
 MODELED_TARGET_KEYS = frozenset({"type", "platform", "deploymentTarget", "sources", "settings", "dependencies", "preBuildScripts",
                                  "postCompileScripts", "postBuildScripts", "buildRules", "attributes"})
 MODELED_TARGET_DEPENDENCY_KEYS = frozenset({"target", "embed", "link", "codeSign", "removeHeaders", "weak"})
@@ -757,6 +758,10 @@ class SigningRun:
 
         def check_info_plists_of(name: str, configured_settings: List[dict]) -> None:
             # A literal CFBundleIdentifier in the Info.plist would override PRODUCT_BUNDLE_IDENTIFIER in the archive.
+            # Without an explicit INFOPLIST_FILE, XcodeGen picks any Info.plist it finds among the target's sources,
+            # which this reader would not see, so the setting is required for every signed target.
+            if not isinstance(configured_settings[0].get("INFOPLIST_FILE"), str):
+                raise integrity_error(f"project target {name} does not set INFOPLIST_FILE explicitly", "project-spec")
             for values in configured_settings:
                 plist_path = values.get("INFOPLIST_FILE")
                 if plist_path is None:
@@ -808,9 +813,7 @@ class SigningRun:
                 raise integrity_error(f"the dependencies of project target {name} cannot be read before the build", "project-spec")
             for dependency in dependencies:
                 if "target" not in dependency:
-                    if not any(kind in dependency for kind in UNTARGETED_DEPENDENCY_KINDS):
-                        raise integrity_error(f"a dependency of project target {name} is of an unrecognized kind", "project-spec")
-                    continue
+                    raise unmodeled(f"a dependency of target {name} that names no project target")
                 unknown = sorted(str(key) for key in dependency if key not in MODELED_TARGET_DEPENDENCY_KEYS)
                 if unknown:
                     raise unmodeled(f"key {unknown[0]} in a dependency of target {name}")
