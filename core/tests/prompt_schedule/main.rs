@@ -24,10 +24,10 @@ use ohand_core::store::events::{
 };
 use ohand_core::store::schema::{Clock, Database};
 use ohand_core::suggestions::schedule::{
-    cancel_prompts, is_prompt_notification_id, local_fire_instant, prompt_notification_id,
-    reconcile_prompts, PromptFailure, PromptOperation, PromptSchedule, PromptScheduleError,
-    PromptSettings, PromptTime, RefreshTrigger, PROMPT_HORIZON_DAYS, PROMPT_ID_PREFIX,
-    SPENT_DATE_RETENTION_DAYS,
+    cancel_prompts, is_prompt_notification_id, local_fire_instant, prompt_local_date,
+    prompt_notification_id, reconcile_prompts, PromptFailure, PromptOperation, PromptSchedule,
+    PromptScheduleError, PromptSettings, PromptTime, RefreshTrigger, PROMPT_HORIZON_DAYS,
+    PROMPT_ID_PREFIX, SPENT_DATE_RETENTION_DAYS,
 };
 
 struct FixedClock {
@@ -172,7 +172,12 @@ struct FakeCenter {
     requests: Vec<ScheduleRequest>,
     schedule_calls: usize,
     cancel_calls: Vec<String>,
+    /// `schedule` installs nothing and returns this error (a definitive rejection, or a
+    /// transient failure before the OS accepted anything).
     fail_schedule: Option<NotificationEffectError>,
+    /// `schedule` installs the request and then returns this error: the OS accepted it, but
+    /// the acknowledgment was lost (a timeout, a cancelled caller).
+    fail_after_install: Option<NotificationEffectError>,
     fail_cancel_for: Vec<String>,
     /// Identifiers the OS has delivered (and dropped) so far, in delivery order.
     delivered: Vec<String>,
@@ -226,6 +231,9 @@ impl NotificationEffects for FakeCenter {
         self.requests.push(request.clone());
         self.pending
             .insert(request.notification_id.clone(), request.fire_at);
+        if let Some(error) = &self.fail_after_install {
+            return Err(error.clone());
+        }
         Ok(())
     }
 
@@ -1491,15 +1499,20 @@ fn the_local_time_is_kept_across_a_dst_change_inside_the_horizon() {
 // ---- Idempotency and failure --------------------------------------------------------------
 
 #[test]
-fn repeating_a_pass_changes_nothing_and_a_failed_install_is_retried() -> Result<()> {
+fn repeating_a_pass_changes_nothing_and_a_definitively_rejected_install_is_retried() -> Result<()> {
     let mut db = open_db("idempotent")?;
     let mut schedule = PromptSchedule::default();
     schedule.configure(daily(nine_am()), instant("2026-01-15T10:30:00Z"), UTC_ZONE);
     let mut center = FakeCenter {
-        fail_schedule: Some(NotificationEffectError::new(ErrorClass::Transient, "busy")),
+        fail_schedule: Some(NotificationEffectError::new(
+            ErrorClass::Permanent,
+            "rejected",
+        )),
         ..FakeCenter::default()
     };
 
+    // A definitive rejection installed nothing: the attempt is released, so the dates are not
+    // spent and the next pass tries again.
     let failed = pass(&mut db, &mut center, &mut schedule, "2026-01-15T10:30:00Z")?;
     assert!(!failed.converged());
     assert_eq!(failed.failures.len(), PROMPT_HORIZON_DAYS);
@@ -1508,17 +1521,181 @@ fn repeating_a_pass_changes_nothing_and_a_failed_install_is_retried() -> Result<
         .iter()
         .all(|f| f.operation == PromptOperation::Schedule));
     assert!(center.prompt_ids().is_empty());
+    for day in NEXT_THREE {
+        assert!(!schedule.is_spent(prompt_local_date(day).unwrap()), "{day}");
+    }
 
     center.fail_schedule = None;
     let retried = pass(&mut db, &mut center, &mut schedule, "2026-01-15T10:31:00Z")?;
     assert!(retried.converged());
-    assert_eq!(center.prompt_ids().len(), PROMPT_HORIZON_DAYS);
+    assert_eq!(center.prompt_ids(), NEXT_THREE);
 
     center.reset_calls();
     let repeat = pass(&mut db, &mut center, &mut schedule, "2026-01-15T10:32:00Z")?;
     assert_eq!(center.mutations(), 0);
     assert_eq!(repeat.already_installed.len(), PROMPT_HORIZON_DAYS);
     assert!(repeat.installed.is_empty() && repeat.cancelled.is_empty());
+    Ok(())
+}
+
+#[test]
+fn a_lost_acknowledgment_on_install_does_not_replay_the_prompt_after_a_rollback() -> Result<()> {
+    for class in [ErrorClass::Transient, ErrorClass::Cancelled] {
+        let mut db = open_db(&format!("lost-ack-{class:?}"))?;
+        let mut schedule = PromptSchedule::default();
+        schedule.configure(daily(nine_am()), instant("2026-01-15T07:00:00Z"), UTC_ZONE);
+        let mut center = FakeCenter {
+            fail_after_install: Some(NotificationEffectError::new(class, "timed out")),
+            ..FakeCenter::default()
+        };
+
+        // The OS accepts every request, but each call reports an ambiguous failure.
+        let ambiguous = pass(&mut db, &mut center, &mut schedule, "2026-01-15T07:00:00Z")?;
+        assert!(!ambiguous.converged());
+        assert_eq!(ambiguous.failures.len(), PROMPT_HORIZON_DAYS);
+        assert!(ambiguous.installed.is_empty());
+        assert_eq!(
+            center.prompt_ids(),
+            [
+                "prompt:2026-01-15",
+                "prompt:2026-01-16",
+                "prompt:2026-01-17"
+            ]
+        );
+
+        // The 09:00 prompt fires with no pass in between; the clock is then moved back.
+        center.fire_due(instant("2026-01-15T10:00:00Z"));
+        center.fail_after_install = None;
+        let settled = pass(&mut db, &mut center, &mut schedule, "2026-01-15T08:00:00Z")?;
+
+        assert!(settled.converged(), "{class:?}");
+        assert!(schedule.is_spent(date("2026-01-15")), "{class:?}");
+        assert_eq!(installs_of(&center, "prompt:2026-01-15"), 1, "{class:?}");
+        assert_eq!(
+            center.prompt_ids(),
+            ["prompt:2026-01-16", "prompt:2026-01-17"],
+            "{class:?}"
+        );
+        // The requests the OS did accept are confirmed by the listing, not installed again.
+        assert_eq!(settled.already_installed.len(), 2, "{class:?}");
+        assert_eq!(installs_of(&center, "prompt:2026-01-16"), 1, "{class:?}");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_lost_acknowledgment_is_confirmed_by_the_next_listing_in_the_ordinary_path() -> Result<()> {
+    let mut db = open_db("lost-ack-ordinary")?;
+    let mut schedule = PromptSchedule::default();
+    schedule.configure(daily(nine_am()), instant("2026-01-15T07:00:00Z"), UTC_ZONE);
+    let mut center = FakeCenter {
+        fail_after_install: Some(NotificationEffectError::new(
+            ErrorClass::Transient,
+            "timed out",
+        )),
+        ..FakeCenter::default()
+    };
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T07:00:00Z")?;
+
+    // No rollback, no fire: the next pass sees the requests held and spends nothing, so every
+    // chosen day still gets its one prompt.
+    center.fail_after_install = None;
+    center.reset_calls();
+    let confirmed = pass(&mut db, &mut center, &mut schedule, "2026-01-15T07:05:00Z")?;
+    assert!(confirmed.converged());
+    assert_eq!(center.mutations(), 0);
+    assert_eq!(confirmed.already_installed.len(), PROMPT_HORIZON_DAYS);
+    for day in ["2026-01-15", "2026-01-16", "2026-01-17"] {
+        assert!(!schedule.is_spent(date(day)), "{day}");
+    }
+    center.fire_due(instant("2026-01-15T09:00:00Z"));
+    assert_eq!(center.delivered, ["prompt:2026-01-15"]);
+    Ok(())
+}
+
+#[test]
+fn an_ambiguous_failure_that_installed_nothing_skips_the_date_rather_than_risk_a_replay(
+) -> Result<()> {
+    let mut db = open_db("ambiguous-nothing")?;
+    let mut schedule = PromptSchedule::default();
+    let now = instant("2026-01-15T10:30:00Z");
+    schedule.configure(daily(nine_am()), now, UTC_ZONE);
+    let mut center = FakeCenter {
+        fail_schedule: Some(NotificationEffectError::new(ErrorClass::Transient, "busy")),
+        ..FakeCenter::default()
+    };
+
+    // Core cannot tell this failure from a lost acknowledgment, so the attempts stay held.
+    let failed = pass(&mut db, &mut center, &mut schedule, "2026-01-15T10:30:00Z")?;
+    assert_eq!(failed.failures.len(), PROMPT_HORIZON_DAYS);
+    assert!(center.prompt_ids().is_empty());
+
+    // The next listing does not show them: the dates are spent, not retried. The suppression
+    // side of the ambiguity rule, and the horizon moves on at the next open.
+    center.fail_schedule = None;
+    let settled = pass(&mut db, &mut center, &mut schedule, "2026-01-15T10:31:00Z")?;
+    assert!(settled.converged());
+    assert!(settled.installed.is_empty());
+    assert!(center.prompt_ids().is_empty());
+    for day in NEXT_THREE {
+        assert!(schedule.is_spent(prompt_local_date(day).unwrap()), "{day}");
+    }
+    schedule.refresh(RefreshTrigger::AppOpen, now, UTC_ZONE);
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T10:31:00Z")?;
+    assert_eq!(
+        center.prompt_ids(),
+        [
+            "prompt:2026-01-19",
+            "prompt:2026-01-20",
+            "prompt:2026-01-21"
+        ]
+    );
+    for day in NEXT_THREE {
+        assert_eq!(installs_of(&center, day), 0, "{day}");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_definitive_rejection_of_a_replacement_keeps_the_evidence_of_the_request_the_os_holds(
+) -> Result<()> {
+    let (mut db, mut center, mut schedule) = configure_and_install_from_seven("reject-replace")?;
+
+    // The user moves the time to 11:00. The OS rejects every replacement outright and keeps
+    // holding the 09:00 requests.
+    schedule.configure(
+        daily(PromptTime::new(11, 0).unwrap()),
+        instant("2026-01-15T08:00:00Z"),
+        UTC_ZONE,
+    );
+    center.fail_schedule = Some(NotificationEffectError::new(
+        ErrorClass::Permanent,
+        "rejected",
+    ));
+    let rejected = pass(&mut db, &mut center, &mut schedule, "2026-01-15T08:00:00Z")?;
+    assert!(!rejected.converged());
+    assert!(rejected
+        .failures
+        .iter()
+        .all(|f| f.operation == PromptOperation::Schedule));
+    let still_held = center.pending.get("prompt:2026-01-15").copied();
+    assert_eq!(still_held, Some(instant("2026-01-15T09:00:00Z")));
+
+    // The 09:00 request the OS kept fires; the clock is moved back; the OS recovers.
+    center.fire_due(instant("2026-01-15T10:00:00Z"));
+    center.fail_schedule = None;
+    let settled = pass(&mut db, &mut center, &mut schedule, "2026-01-15T08:30:00Z")?;
+    assert!(settled.converged());
+    assert!(schedule.is_spent(date("2026-01-15")));
+    assert_eq!(installs_of(&center, "prompt:2026-01-15"), 1);
+    assert_eq!(
+        center.prompt_ids(),
+        ["prompt:2026-01-16", "prompt:2026-01-17"]
+    );
+    assert_eq!(
+        center.pending["prompt:2026-01-16"],
+        instant("2026-01-16T11:00:00Z")
+    );
     Ok(())
 }
 
@@ -1931,9 +2108,21 @@ fn the_ordinary_path_installs_every_chosen_day_exactly_once() -> Result<()> {
 //
 // A seeded deterministic generator drives random interleavings of time changes, disable and
 // re-enable, every refresh trigger, clock jumps forward and back (within the retention), zone
-// changes, reminder-side capacity passes, OS deliveries and OS losses, and reconcile passes.
+// changes, reminder-side capacity passes, OS deliveries and OS losses, and reconcile passes,
+// some of whose install calls fail: definitively, ambiguously with nothing installed, or
+// ambiguously after the OS accepted the request (a lost acknowledgment).
 // The invariant: once the OS has delivered or dropped a date's request, that identifier is
 // never installed again. Replay is the only defect; suppression is allowed.
+
+/// Error classes a lost acknowledgment surfaces as: the OS may have accepted the request.
+const AMBIGUOUS: [ErrorClass; 2] = [ErrorClass::Transient, ErrorClass::Cancelled];
+
+/// Error classes that are definitive rejections: the OS installed nothing.
+const DEFINITIVE: [ErrorClass; 3] = [
+    ErrorClass::Permanent,
+    ErrorClass::Unauthorized,
+    ErrorClass::Unsupported,
+];
 
 struct SplitMix(u64);
 
@@ -1967,6 +2156,8 @@ struct Interleaving {
     gone: std::collections::BTreeSet<String>,
     /// Prompt requests the reminder-side capacity pass cancelled.
     displaced: usize,
+    /// Install calls the OS accepted and then reported as failed.
+    lost_acknowledgments: usize,
     checked_requests: usize,
     log: Vec<String>,
 }
@@ -1989,6 +2180,7 @@ impl Interleaving {
             next_item: 0,
             gone: std::collections::BTreeSet::new(),
             displaced: 0,
+            lost_acknowledgments: 0,
             checked_requests: 0,
             log: Vec::new(),
         })
@@ -1999,7 +2191,7 @@ impl Interleaving {
     }
 
     fn step(&mut self, rng: &mut SplitMix) -> Result<()> {
-        match rng.below(24) {
+        match rng.below(28) {
             0..=5 => {
                 let minutes = i64::try_from(rng.below(60 * 48) + 1)?;
                 self.now += chrono::Duration::minutes(minutes);
@@ -2084,20 +2276,76 @@ impl Interleaving {
                     self.log.push(format!("os drops {victim}"));
                 }
             }
+            24 => {
+                // Lost acknowledgment: the OS accepts each request but the call reports an
+                // ambiguous failure.
+                let class = AMBIGUOUS[usize::try_from(rng.below(2))?];
+                self.center.fail_after_install =
+                    Some(NotificationEffectError::new(class, "timed out"));
+                let installs_before = self.center.requests.len();
+                self.reconcile_prompts("reconcile prompts (lost acknowledgment)")?;
+                self.center.fail_after_install = None;
+                self.lost_acknowledgments += self.center.requests.len() - installs_before;
+            }
+            25 => {
+                // Definitive rejection: nothing is installed and the attempt is released.
+                let class = DEFINITIVE[usize::try_from(rng.below(3))?];
+                self.center.fail_schedule = Some(NotificationEffectError::new(class, "rejected"));
+                self.reconcile_prompts("reconcile prompts (definitive rejection)")?;
+                self.center.fail_schedule = None;
+            }
+            26 => {
+                // Ambiguous failure that installed nothing: indistinguishable from a lost
+                // acknowledgment, so the attempt stays held and the date may be skipped.
+                let class = AMBIGUOUS[usize::try_from(rng.below(2))?];
+                self.center.fail_schedule = Some(NotificationEffectError::new(class, "busy"));
+                self.reconcile_prompts("reconcile prompts (ambiguous, nothing installed)")?;
+                self.center.fail_schedule = None;
+            }
+            27 => {
+                // The next prompt fires while core is not looking, and the clock is then moved
+                // back to before it with no observation in between: the AC2 scenario in its
+                // primitive form, applied to whatever state the other steps left behind.
+                let next_due = self
+                    .center
+                    .pending
+                    .iter()
+                    .filter(|(id, _)| is_prompt_notification_id(id))
+                    .map(|(_, due)| *due)
+                    .min();
+                if let Some(due) = next_due.filter(|due| *due > self.now) {
+                    self.now = due;
+                    self.peak = self.peak.max(self.now);
+                    self.center.fire_due(self.now);
+                    self.note_gone();
+                    let minutes = i64::try_from(rng.below(60 * 24) + 1)?;
+                    let floor = self.peak - chrono::Duration::days(SPENT_DATE_RETENTION_DAYS - 1);
+                    self.now = (due - chrono::Duration::minutes(minutes)).max(floor);
+                    self.log.push(format!(
+                        "fire at {due} unobserved, rollback to {}",
+                        self.now
+                    ));
+                }
+            }
             _ => {
-                let clock = self.clock();
-                reconcile_prompts(
-                    &mut self.db,
-                    &clock,
-                    &mut self.center,
-                    &mut self.schedule,
-                    &self.policy,
-                )?;
-                self.log.push("reconcile prompts".to_string());
-                self.check_pass_bounds();
+                self.reconcile_prompts("reconcile prompts")?;
             }
         }
         self.check_no_replay();
+        Ok(())
+    }
+
+    fn reconcile_prompts(&mut self, label: &str) -> Result<()> {
+        let clock = self.clock();
+        reconcile_prompts(
+            &mut self.db,
+            &clock,
+            &mut self.center,
+            &mut self.schedule,
+            &self.policy,
+        )?;
+        self.log.push(label.to_string());
+        self.check_pass_bounds();
         Ok(())
     }
 
@@ -2174,6 +2422,7 @@ fn random_interleavings_never_install_a_prompt_after_the_os_delivered_or_dropped
     let mut total_installs = 0;
     let mut total_gone = 0;
     let mut total_displaced = 0;
+    let mut total_lost_acknowledgments = 0;
     for seed in 1..=48 {
         let mut rng = SplitMix(seed);
         let mut run = Interleaving::new(seed)?;
@@ -2183,6 +2432,7 @@ fn random_interleavings_never_install_a_prompt_after_the_os_delivered_or_dropped
         total_installs += run.center.schedule_calls;
         total_gone += run.gone.len();
         total_displaced += run.displaced;
+        total_lost_acknowledgments += run.lost_acknowledgments;
         // Finish with a pass at the clock's furthest reading, then one more look back.
         run.now = run.peak;
         let clock = run.clock();
@@ -2196,11 +2446,15 @@ fn random_interleavings_never_install_a_prompt_after_the_os_delivered_or_dropped
         run.check_pass_bounds();
         run.check_no_replay();
     }
-    // The generator is not vacuous: prompts were installed, delivered or dropped, and
-    // displaced by reminders across the runs.
+    // The generator is not vacuous: prompts were installed, delivered or dropped, displaced by
+    // reminders, and installed under a lost acknowledgment across the runs.
     assert!(
-        total_installs > 250 && total_gone > 100 && total_displaced > 12,
-        "{total_installs} installs, {total_gone} delivered or dropped, {total_displaced} displaced"
+        total_installs > 250
+            && total_gone > 100
+            && total_displaced > 12
+            && total_lost_acknowledgments > 24,
+        "{total_installs} installs, {total_gone} delivered or dropped, {total_displaced} \
+         displaced, {total_lost_acknowledgments} lost acknowledgments"
     );
     Ok(())
 }

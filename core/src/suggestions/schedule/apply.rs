@@ -85,9 +85,23 @@ pub fn cancel_prompts(
 /// request cancelled this way was seen pending in this same listing, so its date is released
 /// rather than spent and comes back when a slot frees. Last, the granted prompts that the OS
 /// does not already hold at the planned instant are installed with the generic payload and
-/// their own opaque identifier as target, and each is recorded as held. A failed install is
-/// reported and retried by any later pass; it is never recorded as held. This function never
-/// extends the horizon: only the schedule's own refresh rules do.
+/// their own opaque identifier as target.
+///
+/// Each install attempt is recorded as held *before* the native call. A call that fails after
+/// the OS accepted the request (a lost acknowledgment, which surfaces as `Transient` or
+/// `Cancelled`) therefore still leaves the evidence that spends the date once the clock reaches
+/// its instant or a listing no longer shows it, so it is never installed again after a
+/// rollback. The same evidence means an ambiguous failure that in fact installed nothing costs
+/// that date its prompt: the next listing does not show the request, the date is spent, and the
+/// horizon moves on at the next open. That is the suppression side of the ledger's ambiguity
+/// rule, not a defect. A definitive rejection (`Permanent`, `Unauthorized`, `Unsupported`, the
+/// classes the reminder side treats as having installed nothing) releases the attempt, or
+/// restores the evidence of a request the OS already held under that identifier, and the
+/// next pass retries it. Every failure is reported either way. This function never extends
+/// the horizon: only the schedule's own refresh rules do.
+///
+/// The ledger lives in `schedule`, a caller-held value: persist it after every pass. See the
+/// module documentation for the crash window this leaves.
 pub fn reconcile_prompts(
     database: &mut Database,
     clock: &dyn Clock,
@@ -139,6 +153,9 @@ pub fn reconcile_prompts(
             schedule.record_held(local_date, demand.fire_at);
             continue;
         }
+        // The attempt marker: held before the call, so a lost acknowledgment leaves evidence.
+        let previously_pending = held.get(notification_id.as_str()).copied();
+        schedule.record_held(local_date, demand.fire_at);
         let request = ScheduleRequest {
             notification_id: notification_id.clone(),
             fire_at: demand.fire_at,
@@ -146,16 +163,26 @@ pub fn reconcile_prompts(
             opaque_target_id: notification_id.clone(),
         };
         match effects.schedule(&request) {
-            Ok(()) => {
-                report.installed.push(notification_id.clone());
-                schedule.record_held(local_date, demand.fire_at);
+            Ok(()) => report.installed.push(notification_id.clone()),
+            Err(error) => {
+                if installs_nothing(error.class) {
+                    match previously_pending {
+                        // The OS still holds the request this call meant to replace; its
+                        // evidence stands at the instant the listing reported.
+                        Some(Some(instant)) => schedule.record_held(local_date, instant),
+                        // Held at an unreported instant: keep the attempted one, which the
+                        // next listing or the clock settles.
+                        Some(None) => {}
+                        None => schedule.release([notification_id.as_str()]),
+                    }
+                }
+                report.failures.push(PromptFailure {
+                    notification_id: notification_id.clone(),
+                    operation: PromptOperation::Schedule,
+                    class: error.class,
+                    code: error.code,
+                });
             }
-            Err(error) => report.failures.push(PromptFailure {
-                notification_id: notification_id.clone(),
-                operation: PromptOperation::Schedule,
-                class: error.class,
-                code: error.code,
-            }),
         }
     }
     report.capacity = Some(capacity);
@@ -221,6 +248,17 @@ fn cancel_where(
             }),
         }
     }
+}
+
+/// Whether a failed `schedule` call with this class is a definitive rejection that installed
+/// nothing, following the reminder side's failure disposition (`reminders::reconcile`).
+/// `Transient` and `Cancelled` prove nothing: the OS may have accepted the request before the
+/// acknowledgment was lost, so an attempt that fails with them stays held.
+fn installs_nothing(class: ErrorClass) -> bool {
+    matches!(
+        class,
+        ErrorClass::Permanent | ErrorClass::Unauthorized | ErrorClass::Unsupported
+    )
 }
 
 /// One instant for the whole pass, so the demands and the capacity pass agree on what is past.

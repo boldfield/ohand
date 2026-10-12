@@ -137,8 +137,10 @@ pub struct PlannedPrompt {
 /// - `high_water` is the latest `now` any entry point has observed. The plan never holds an
 ///   instant at or before it, so a backward clock change cannot plan a date the user has
 ///   already lived through, whatever the plan looked like when the clock moved.
-/// - `held` records, per local date, the instant of the request core handed to the OS and has
-///   not since cancelled. It is the only evidence that a prompt may have been delivered.
+/// - `held` records, per local date, the instant of the request core attempted to hand to the
+///   OS (recorded before the native call, so the outcome may be unknown) and has not since
+///   cancelled or seen definitively rejected. It is the only evidence that a prompt may have
+///   been delivered.
 /// - `spent` is the append-only set of local dates whose prompt has been delivered, or may have
 ///   been. No date is planned again while it is in the set. A date is spent when it is held and
 ///   (a) the high-water mark has reached its instant, or (b) an OS listing no longer shows its
@@ -166,8 +168,9 @@ pub struct PromptSchedule {
     /// The latest clock reading any entry point has observed.
     #[serde(default)]
     high_water: Option<DateTime<Utc>>,
-    /// Local dates whose request core handed to the OS and has not cancelled since, with the
-    /// instant of that request. Independent of the plan.
+    /// Local dates whose request core attempted to hand to the OS, outcome known or unknown,
+    /// and has not cancelled or seen definitively rejected since, with the instant of that
+    /// request. Independent of the plan.
     #[serde(default)]
     held: BTreeMap<NaiveDate, DateTime<Utc>>,
     /// Local dates that have had their prompt, or may have. Append-only apart from age pruning.
@@ -261,16 +264,18 @@ impl PromptSchedule {
         self.settle_plan();
     }
 
-    /// Core handed the OS a request for `local_date` at `fire_at`, or saw the OS holding one.
+    /// Core is about to hand the OS a request for `local_date` at `fire_at`, or saw the OS
+    /// holding one. Recorded before the native call so that an attempt whose outcome is lost
+    /// still leaves evidence.
     pub(super) fn record_held(&mut self, local_date: NaiveDate, fire_at: DateTime<Utc>) {
         if !self.spent.contains(&local_date) {
             self.held.insert(local_date, fire_at);
         }
     }
 
-    /// Core cancelled these requests after seeing them pending in the same pass. The OS had
-    /// not fired them, so their dates are released, not spent, and are planned again when a slot
-    /// frees or the plan holds them.
+    /// Core cancelled these requests after seeing them pending in the same pass, or the OS
+    /// definitively rejected their install. The OS had not fired them, so their dates are
+    /// released, not spent, and are planned again when a slot frees or the plan holds them.
     pub(super) fn release<'a>(&mut self, cancelled: impl IntoIterator<Item = &'a str>) {
         for notification_id in cancelled {
             if let Some(local_date) = prompt_local_date(notification_id) {
