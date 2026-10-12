@@ -479,7 +479,9 @@ fn a_user_text_without_a_transcript_keeps_the_audio_with_delete_only() {
 
 #[test]
 fn a_text_correction_cleared_to_empty_returns_a_transcriptless_item_to_sole_source() {
-    for cleared in ["", "  \n"] {
+    // Blankness is Unicode-aware: a non-breaking space (U+00A0) or an ideographic space
+    // (U+3000) is as blank as an ASCII space, so a correction holding only those is cleared too.
+    for cleared in ["", "  \n", "\u{00A0}", "\u{3000}\u{2003}\u{00A0}"] {
         let store = Store::new();
         let item_id = store.voice_item();
         store.transcription_result(
@@ -504,20 +506,23 @@ fn a_text_correction_cleared_to_empty_returns_a_transcriptless_item_to_sole_sour
             .unwrap();
         assert_eq!(
             assessment.state,
-            unresolved(UnresolvedReason::TranscriptionFailed)
+            unresolved(UnresolvedReason::TranscriptionFailed),
+            "cleared to {cleared:?}"
         );
-        assert!(assessment.sole_source);
+        assert!(assessment.sole_source, "cleared to {cleared:?}");
         assert_eq!(
             assessment.options,
             vec![
                 RetentionOption::RetryTranscription,
                 RetentionOption::DeleteAudio
-            ]
+            ],
+            "cleared to {cleared:?}"
         );
         assert_eq!(assessment.cleanup, CleanupIntent::None);
         assert_eq!(
             assessment.storage_pressure_notice,
-            Some(StoragePressureNotice::SoleSourceRetained)
+            Some(StoragePressureNotice::SoleSourceRetained),
+            "cleared to {cleared:?}"
         );
     }
 }
@@ -560,6 +565,45 @@ fn captured_text_beside_audio_starts_no_clock() {
         unresolved(UnresolvedReason::TextWithoutTranscript)
     );
     assert!(!assessment.sole_source);
+}
+
+#[test]
+fn blank_captured_text_beside_audio_is_not_text() {
+    // Ingress accepts whitespace-only captured text and, seeing text, marks transcription not
+    // applicable without queuing any. Retention does not count that text: the audio is a sole
+    // source whose transcription state does not match its content, kept with retry and delete.
+    for blank in [" ", "\u{00A0}", "\u{2009}\u{3000}\n"] {
+        let store = Store::new();
+        let item_id = store.import(FIRST_CAPTURE_ID, Some(FIRST_AUDIO), Some(blank));
+
+        let assessment = store
+            .assess(
+                &item_id,
+                captured_at() + Duration::days(400),
+                StoragePressure::Low,
+            )
+            .unwrap();
+        assert_eq!(
+            assessment.state,
+            unresolved(UnresolvedReason::TranscriptRecordInconsistent),
+            "captured text {blank:?}"
+        );
+        assert_eq!(assessment.cleanup, CleanupIntent::None);
+        assert!(assessment.sole_source, "captured text {blank:?}");
+        assert_eq!(
+            assessment.options,
+            vec![
+                RetentionOption::RetryTranscription,
+                RetentionOption::DeleteAudio
+            ],
+            "captured text {blank:?}"
+        );
+        assert_eq!(
+            assessment.storage_pressure_notice,
+            Some(StoragePressureNotice::SoleSourceRetained),
+            "captured text {blank:?}"
+        );
+    }
 }
 
 #[test]
@@ -639,7 +683,16 @@ fn absent_or_unusable_transcription_times_never_expire_audio() {
 fn a_blank_transcript_never_expires_the_only_source() {
     let far_future = transcribed_at() + Duration::days(3650);
 
-    for blank in ["", "   ", "\t\n "] {
+    // The schema permits any text, including Unicode whitespace SQLite's TRIM does not know:
+    // a transcript of only non-breaking spaces (U+00A0) must not pass for recoverable text.
+    for blank in [
+        "",
+        "   ",
+        "\t\n ",
+        "\u{00A0}",
+        "\u{00A0}\u{00A0}",
+        "\u{3000}\u{2003}\u{2009}\n",
+    ] {
         let store = Store::new();
         let item_id = store.voice_item();
         store.transcribe(&item_id, FIRST_AUDIO, transcribed_at());
@@ -656,19 +709,32 @@ fn a_blank_transcript_never_expires_the_only_source() {
             unresolved(UnresolvedReason::TranscriptEmpty),
             "blank transcript {blank:?}"
         );
-        assert!(assessment.sole_source, "a blank transcript is not text");
+        assert!(
+            assessment.sole_source,
+            "a blank transcript {blank:?} is not text"
+        );
         assert_eq!(
             assessment.options,
             vec![
                 RetentionOption::RetryTranscription,
                 RetentionOption::DeleteAudio
-            ]
+            ],
+            "blank transcript {blank:?}"
         );
         assert_eq!(assessment.cleanup, CleanupIntent::None);
         assert_eq!(
             assessment.storage_pressure_notice,
-            Some(StoragePressureNotice::SoleSourceRetained)
+            Some(StoragePressureNotice::SoleSourceRetained),
+            "blank transcript {blank:?}"
         );
+        for later in [transcribed_at() + Duration::days(30), far_future] {
+            let state = store.state(&item_id, later);
+            assert_eq!(
+                state,
+                unresolved(UnresolvedReason::TranscriptEmpty),
+                "blank transcript {blank:?} at {later}"
+            );
+        }
         assert_eq!(
             authorize_audio_removal(
                 store.open().conn(),
@@ -700,6 +766,33 @@ fn a_blank_transcript_never_expires_the_only_source() {
     );
     assert!(!with_text.sole_source);
     assert_eq!(with_text.cleanup, CleanupIntent::None);
+
+    // A Unicode-blank correction beside a Unicode-blank transcript is a sole source: neither
+    // value is text, whichever whitespace it is made of.
+    let store = Store::new();
+    let item_id = store.voice_item();
+    store.transcribe(&item_id, FIRST_AUDIO, transcribed_at());
+    store.correct_text(&item_id, 1, Some("water the ferns"), "\u{00A0}");
+    store.execute("UPDATE transcript_attachments SET text = '\u{00A0}'");
+    let both_blank = store
+        .assess(&item_id, far_future, StoragePressure::Low)
+        .unwrap();
+    assert_eq!(
+        both_blank.state,
+        unresolved(UnresolvedReason::TranscriptEmpty)
+    );
+    assert!(both_blank.sole_source);
+    assert_eq!(
+        both_blank.options,
+        vec![
+            RetentionOption::RetryTranscription,
+            RetentionOption::DeleteAudio
+        ]
+    );
+    assert_eq!(
+        both_blank.storage_pressure_notice,
+        Some(StoragePressureNotice::SoleSourceRetained)
+    );
 }
 
 #[test]

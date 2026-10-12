@@ -14,6 +14,9 @@
 //!   unsupported and failed transcription, audio kept next to user-written or captured text but
 //!   without a transcript, a transcript whose text is empty or whitespace only, and records that
 //!   are missing, inconsistent or carry an unreadable timestamp. Each is a visible [`RetentionState::Unresolved`] with its reason.
+//! * "Blank" means empty after Unicode-aware trimming (`str::trim`), for captured text, text
+//!   corrections and transcript text alike, matching the transcription path's own blank check.
+//!   SQL trimming is not used because it only knows ASCII whitespace.
 //! * Audio that is the item's only source (no captured text, no user text correction, no usable
 //!   transcript) is flagged `sole_source`. Storage pressure never changes eligibility: it only adds
 //!   a [`StoragePressureNotice`] so the surface can say that nothing was or will be freed
@@ -192,24 +195,30 @@ struct AudioItemRow {
     transcribed_at: Option<String>,
 }
 
-/// SQLite's one-argument `TRIM` strips only spaces; this also strips tabs and line breaks.
-const WHITESPACE: &str = "' ' || char(9, 10, 11, 12, 13)";
+/// Whether stored text holds anything beyond whitespace. Blankness is decided here, not in SQL:
+/// SQLite's `TRIM` knows only the characters it is given, while this uses the same Unicode
+/// `White_Space` semantics (`str::trim`) as the transcription path, so a value made only of, for
+/// example, non-breaking spaces (U+00A0) or ideographic spaces is blank everywhere.
+fn text_present(text: Option<&str>) -> bool {
+    text.is_some_and(|value| !value.trim().is_empty())
+}
 
 /// Text, transcript and in-flight flags read current state: user text is the item's latest text
-/// correction (the same one the domain projection resolves), not any correction ever made.
+/// correction (the same one the domain projection resolves), not any correction ever made. Raw
+/// text values are selected so that blankness is classified by [`text_present`].
 fn audio_item_select() -> String {
     format!(
         "SELECT items.item_id, items.lifecycle_state,
         items.transcription_state, captures.audio_reference,
-        COALESCE(TRIM(captures.text, {WHITESPACE}) <> '', 0),
-        COALESCE((SELECT TRIM(corrections.new_value, {WHITESPACE}) <> '' FROM corrections
-                  WHERE corrections.item_id = items.item_id AND corrections.kind = 'text'
-                  ORDER BY corrections.revision DESC LIMIT 1), 0),
+        captures.text,
+        (SELECT corrections.new_value FROM corrections
+         WHERE corrections.item_id = items.item_id AND corrections.kind = 'text'
+         ORDER BY corrections.revision DESC LIMIT 1),
         EXISTS(SELECT 1 FROM jobs
                WHERE jobs.item_id = items.item_id AND jobs.job_type = '{JOB_TYPE_TRANSCRIPTION_ATTACHMENT}'
                  AND jobs.status IN ('queued', 'running')),
         transcript_attachments.audio_reference,
-        COALESCE(TRIM(transcript_attachments.text, {WHITESPACE}) <> '', 0),
+        transcript_attachments.text,
         transcript_attachments.transcribed_at
     FROM items
     JOIN captures ON captures.capture_id = items.capture_id
@@ -219,16 +228,19 @@ fn audio_item_select() -> String {
 }
 
 fn audio_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AudioItemRow> {
+    let capture_text: Option<String> = row.get(4)?;
+    let user_text: Option<String> = row.get(5)?;
+    let transcript_text: Option<String> = row.get(8)?;
     Ok(AudioItemRow {
         item_id: row.get(0)?,
         lifecycle_state: row.get(1)?,
         transcription_state: row.get(2)?,
         audio_reference: row.get(3)?,
-        capture_text_present: row.get(4)?,
-        user_text_present: row.get(5)?,
+        capture_text_present: text_present(capture_text.as_deref()),
+        user_text_present: text_present(user_text.as_deref()),
         transcription_in_flight: row.get(6)?,
         transcript_audio_reference: row.get(7)?,
-        transcript_text_present: row.get(8)?,
+        transcript_text_present: text_present(transcript_text.as_deref()),
         transcribed_at: row.get(9)?,
     })
 }
