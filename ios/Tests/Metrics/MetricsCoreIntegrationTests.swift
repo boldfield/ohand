@@ -3,7 +3,7 @@ import XCTest
 @testable import OhAndCoreBridge
 @testable import OhAndServices
 
-private final class AnswerBox<Value>: @unchecked Sendable {
+private final class MetricsAnswerBox<Value>: @unchecked Sendable {
     private let lock = NSLock()
     private var stored: Result<Value, Error>?
 
@@ -56,7 +56,7 @@ final class MetricsCoreIntegrationTests: XCTestCase {
     }
 
     private func run<Value>(_ operation: @escaping @Sendable () async throws -> Value) throws -> Value {
-        let box = AnswerBox<Value>()
+        let box = MetricsAnswerBox<Value>()
         Task {
             do { box.set(.success(try await operation())) } catch { box.set(.failure(error)) }
         }

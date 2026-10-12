@@ -46,7 +46,7 @@ private final class FakeMetricsCore: MetricsCore, @unchecked Sendable {
     }
 }
 
-private final class ResultBox: @unchecked Sendable {
+private final class MetricsResultBox: @unchecked Sendable {
     private let lock = NSLock()
     private var stored: Result<CoreMetricsAnswer, CoreFailure>?
 
@@ -265,7 +265,7 @@ final class MetricsServiceTests: XCTestCase {
         let client = CoreMetricsClient(core: core)
         XCTAssertFalse(client.handle(CoreEvent(operationID: 1, outcome: .success(Data()))))
         client.shutDown()
-        let box = ResultBox()
+        let box = MetricsResultBox()
         client.submit(.clear) { box.set($0) }
         XCTAssertEqual(box.value, .failure(CoreMetricsClient.shutDownFailure))
     }
