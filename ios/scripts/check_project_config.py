@@ -91,6 +91,7 @@ def check_project(project, root=IOS_ROOT):
     if "OhAndControl" in targets:
         errors.append("OhAndControl must not be a second application; controls are app extensions")
     errors += check_control_extensions(project, root)
+    errors += check_embedded_frameworks(project)
 
     flattened = yaml.safe_dump(project)
     for forbidden in ("CODE_SIGN_IDENTITY", "DEVELOPMENT_TEAM", "PROVISIONING_PROFILE"):
@@ -98,6 +99,42 @@ def check_project(project, root=IOS_ROOT):
             errors.append(f"project.yml must not set {forbidden}; signing is supplied at build time")
     if project.get("configFiles") != {"Debug": "Config/Base.xcconfig", "Release": "Config/Base.xcconfig"}:
         errors.append("project configFiles must point at Config/Base.xcconfig")
+    return errors
+
+
+def target_dependencies(target):
+    return [d["target"] for d in target.get("dependencies", []) if isinstance(d, dict) and "target" in d]
+
+
+def check_embedded_frameworks(project):
+    """XcodeGen embeds only an application's direct framework dependencies, so a framework reached
+    through another framework is linked but missing from the app bundle and dyld kills the launch."""
+    errors = []
+    targets = project["targets"]
+    for app_name, app in targets.items():
+        if app.get("type") != "application":
+            continue
+        embedded = {
+            d["target"]
+            for d in app.get("dependencies", [])
+            if isinstance(d, dict) and "target" in d and d.get("embed") is not False
+        }
+        reached = set()
+        pending = [name for name in target_dependencies(app) if targets.get(name, {}).get("type") == "framework"]
+        while pending:
+            framework_name = pending.pop()
+            if framework_name in reached:
+                continue
+            reached.add(framework_name)
+            pending += [
+                name for name in target_dependencies(targets.get(framework_name, {}))
+                if targets.get(name, {}).get("type") == "framework"
+            ]
+        for framework_name in sorted(reached - embedded):
+            errors.append(
+                f"{app_name} links framework {framework_name} (directly or through another framework) but does not embed it; "
+                f"add '- target: {framework_name}' to {app_name}.dependencies"
+            )
     return errors
 
 

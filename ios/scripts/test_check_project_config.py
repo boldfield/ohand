@@ -10,6 +10,33 @@ class ProjectConfigChecks(unittest.TestCase):
     def test_committed_configuration_passes(self):
         self.assertEqual(checks.run_all_checks(), [])
 
+    def test_transitive_framework_must_be_embedded_in_app(self):
+        project = checks.load_project()
+        app = project["targets"]["OhAndApp"]
+        app["dependencies"] = [d for d in app["dependencies"] if d["target"] != "OhAndCoreBridge"]
+        errors = checks.check_embedded_frameworks(project)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("OhAndCoreBridge", errors[0])
+        self.assertTrue(any("OhAndCoreBridge" in e for e in checks.check_project(project)))
+
+    def test_transitive_framework_with_embed_disabled_is_reported(self):
+        project = checks.load_project()
+        for dependency in project["targets"]["OhAndApp"]["dependencies"]:
+            if dependency["target"] == "OhAndCoreBridge":
+                dependency["embed"] = False
+        self.assertTrue(any("OhAndCoreBridge" in e for e in checks.check_embedded_frameworks(project)))
+
+    def test_deeper_transitive_framework_is_reported(self):
+        project = checks.load_project()
+        project["targets"]["OhAndCoreBridge"]["dependencies"] = [{"target": "OhAndExtra"}]
+        project["targets"]["OhAndExtra"] = {"type": "framework"}
+        errors = [e for e in checks.check_embedded_frameworks(project) if e.startswith("OhAndApp ")]
+        self.assertEqual(len(errors), 1)
+        self.assertIn("OhAndExtra", errors[0])
+
+    def test_directly_embedded_frameworks_pass(self):
+        self.assertEqual(checks.check_embedded_frameworks(checks.load_project()), [])
+
     def test_removing_owned_root_from_target_is_reported(self):
         project = checks.load_project()
         project["targets"]["OhAndServices"]["sources"] = []
