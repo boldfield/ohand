@@ -44,19 +44,26 @@ public struct ReminderReconciliationFailure: Error, Equatable, Sendable {
 /// `firstOperationID`, which an assembly sharing the handle sets apart from its other consumers.
 public final class CoreReminderReconciler: ReminderReconciling, @unchecked Sendable {
     private let core: CoreHandle
-    private let bridge: NotificationBridge
     private let lock = NSLock()
     private var waiting: [UInt64: CheckedContinuation<Result<Data, CoreFailure>, Never>] = [:]
     private var nextOperationID: UInt64
     private var registration: NotificationEffectsRegistration?
 
-    public init(core: CoreHandle, bridge: NotificationBridge, firstOperationID: UInt64 = 1 << 48) throws {
+    /// `center` must be the center `bridge` was built on: the bridge installs and cancels reminder requests, and
+    /// the same center is read and cancelled directly for optional-prompt requests, whose identifiers the
+    /// bridge does not carry.
+    public init(
+        core: CoreHandle, bridge: NotificationBridge, center: NotificationCenterProviding,
+        effectTimeout: TimeInterval = 10, removalPollInterval: TimeInterval = 0.05, maximumRemovalPolls: Int = 20,
+        firstOperationID: UInt64 = 1 << 48
+    ) throws {
         self.core = core
-        self.bridge = bridge
         self.nextOperationID = firstOperationID
-        let bridge = bridge
+        let effects = ReminderNativeEffects(
+            bridge: bridge, center: center, effectTimeout: effectTimeout,
+            removalPollInterval: removalPollInterval, maximumRemovalPolls: maximumRemovalPolls)
         registration = try core.registerNotificationEffects { [weak core] effectID, command in
-            Self.perform(core: core, bridge: bridge, effectID: effectID, command: command)
+            Self.perform(core: core, effects: effects, effectID: effectID, command: command)
         }
     }
 
@@ -158,15 +165,15 @@ public final class CoreReminderReconciler: ReminderReconciling, @unchecked Senda
 
     /// Runs on the core worker thread, which waits for the answer: start the OS work and return. An abandoned
     /// effect needs nothing here; the bridge bounds its own work, and its late answer is `not_found`.
-    private static func perform(core: CoreHandle?, bridge: NotificationBridge, effectID: UInt64, command: NotificationEffectCommand) {
+    private static func perform(core: CoreHandle?, effects: ReminderNativeEffects, effectID: UInt64, command: NotificationEffectCommand) {
         if command == .abandon { return }
         Task {
-            let reply = await answer(for: command, bridge: bridge)
+            let reply = await answer(for: command, effects: effects)
             try? core?.completeNotificationEffect(effectID: effectID, answer: reply)
         }
     }
 
-    private static func answer(for command: NotificationEffectCommand, bridge: NotificationBridge) async -> NotificationEffectAnswer {
+    private static func answer(for command: NotificationEffectCommand, effects: ReminderNativeEffects) async -> NotificationEffectAnswer {
         let invalidPayload = NotificationEffectAnswer.failed(errorClass: .permanent, code: NotificationBridgeError.invalidPayload.code)
         let formatter = makeFormatter()
         do {
@@ -177,17 +184,18 @@ public final class CoreReminderReconciler: ReminderReconciling, @unchecked Senda
                       schedule.payloadKind == NotificationPayloadKind.generic.rawValue,
                       let target = OpaqueIdentifier(schedule.opaqueTargetID)
                 else { return invalidPayload }
-                _ = try await bridge.schedule(.generic(identifier: identifier, dueInstant: dueInstant, opaqueTargetID: target))
+                _ = try await effects.bridge.schedule(.generic(identifier: identifier, dueInstant: dueInstant, opaqueTargetID: target))
                 return .done
             case .cancel(let notificationID):
-                guard let identifier = NotificationIdentifier(rawValue: notificationID) else { return invalidPayload }
-                try await bridge.cancel(identifier)
+                try await effects.cancel(notificationID)
                 return .done
             case .listPending:
-                let pending = try await bridge.pendingNotifications()
-                return .pending(pending.map {
-                    PendingNotificationAnswer(
-                        notificationID: $0.identifier.rawValue, fireAt: $0.dueInstant.map { formatter.string(from: $0) })
+                let pending = try await effects.pending()
+                return .pending(pending.compactMap { request -> PendingNotificationAnswer? in
+                    let size = request.identifier.utf8.count
+                    guard size > 0, size <= ReminderNativeEffects.maximumIdentifierBytes else { return nil }
+                    return PendingNotificationAnswer(
+                        notificationID: request.identifier, fireAt: request.dueInstant.map { formatter.string(from: $0) })
                 })
             case .abandon:
                 return .done
