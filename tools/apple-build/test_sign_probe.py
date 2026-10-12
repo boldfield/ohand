@@ -738,6 +738,636 @@ class RedactionAndEvidenceTests(SigningToolTestCase):
         self.assert_keychain_cleaned_up()
 
 
+APP_BUNDLE_IDENTIFIER = "com.boldfield.ohand.app"
+EXTENSION_BUNDLE_IDENTIFIER = "com.boldfield.ohand.app.capture-control"
+SECOND_EXTENSION_IDENTIFIER = "com.boldfield.ohand.app.second-extension"
+NESTED_APPLICATION_IDENTIFIER = "com.boldfield.ohand.app.companion"
+FRAMEWORK_BUNDLE_IDENTIFIERS = ("com.boldfield.ohand.core-bridge", "com.boldfield.ohand.services")
+EXTENSION_PROFILE_UUID = "66666666-7777-8888-9999-000000000000"
+EXTENSION_PROFILE_NAME = "Synthetic Extension Profile Name"
+SHORTER_EXPIRY = datetime.datetime(2098, 6, 7, 8, 9, 10)
+EMBEDDED_EVIDENCE_KEYS = EVIDENCE_KEYS | {"embedded_bundles", "launch"}
+PROBE_SCHEMES = {
+    "BridgeProbe": "com.boldfield.ohand.probes.bridge",
+    "AudioProbe": "com.boldfield.ohand.probes.audio",
+    "TranscriptionProbe": "com.boldfield.ohand.probes.transcription",
+    "NotificationProbe": "com.boldfield.ohand.probes.notification",
+}
+
+
+class EmbeddedExtensionTests(SigningToolTestCase):
+    def wildcard_entitlements(self):
+        return {"application-identifier": f"{SYNTHETIC_TEAM}.com.boldfield.ohand.*", "get-task-allow": True}
+
+    def exact_entitlements(self, bundle_identifier):
+        return {"application-identifier": f"{SYNTHETIC_TEAM}.{bundle_identifier}", "get-task-allow": True}
+
+    def setUp(self):
+        super().setUp()
+        self.write_profile(Entitlements=self.wildcard_entitlements())
+
+    def sign_app(self, *extra, **environment_overrides):
+        return self.sign("--scheme", "OhAndApp", *extra, **environment_overrides)
+
+    def write_mapped_profiles(self, mapping):
+        entries = {}
+        for index, (bundle_identifier, overrides) in enumerate(mapping.items()):
+            path = self.inputs / f"mapped-{index}.mobileprovision"
+            fields = {"Entitlements": self.exact_entitlements(bundle_identifier), "UUID": f"0000000{index}-2222-3333-4444-555555555555"}
+            fields.update(overrides)
+            path.write_bytes(plistlib.dumps(profile_plist(**fields)))
+            entries[bundle_identifier] = str(path)
+        map_path = self.inputs / "profile-map.json"
+        map_path.write_text(json.dumps(entries))
+        return map_path
+
+    def mapped_environment(self, map_path, **extra):
+        return dict(OHAND_SIGNING_PROFILE_PATH=None, OHAND_SIGNING_PROFILE_MAP_PATH=str(map_path), **extra)
+
+    def assert_refused_before_keychain_and_export(self, result, exit_code, message):
+        # Coverage is decided from the unsigned archive, so the archive is built once. Nothing touches the keychain,
+        # installs a profile, signs, exports or installs on the device before the refusal.
+        self.assertEqual(result.returncode, exit_code, result.stderr)
+        self.assertIn(message, result.stderr)
+        self.assertEqual(len(self.calls_of("xcodebuild", "archive")), 1)
+        self.assertEqual(self.calls_of("security", "create-keychain"), [])
+        self.assertEqual(self.calls_of("security", "import"), [])
+        self.assertEqual([call for call in self.calls_of("security", "list-keychains") if "-s" in call["argv"]], [])
+        self.assertEqual(self.calls_of("xcodebuild", "-exportArchive"), [])
+        self.assertLessEqual(set(self.devicectl_steps()), {("info", "details")})
+        self.assertEqual(self.installed_profile_files(), [])
+        for sensitive in (SYNTHETIC_TEAM, SYNTHETIC_PROFILE_UUID, EXTENSION_PROFILE_UUID, PROFILE_CONTENT_SENTINEL):
+            self.assertNotIn(sensitive, result.stderr + result.stdout)
+
+    def devicectl_steps(self):
+        return [tuple(call["argv"][1:3]) for call in self.calls_of("devicectl", "device")]
+
+    def test_extension_under_one_wildcard_profile_is_signed_installed_and_launched(self):
+        result = self.sign_app("--install", OHAND_DEVICE_LABEL="phone-a")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("signed build complete; installed on device", result.stdout)
+
+        options = json.loads((self.state / "export-options.json").read_text())
+        self.assertEqual(options["provisioningProfiles"],
+                         {APP_BUNDLE_IDENTIFIER: SYNTHETIC_PROFILE_UUID, EXTENSION_BUNDLE_IDENTIFIER: SYNTHETIC_PROFILE_UUID})
+        self.assertEqual((options["method"], options["signingStyle"], options["teamID"]), ("debugging", "manual", SYNTHETIC_TEAM))
+        for framework_identifier in FRAMEWORK_BUNDLE_IDENTIFIERS:
+            self.assertNotIn(framework_identifier, json.dumps(options))
+        archive_arguments = self.calls_of("xcodebuild", "archive")[0]["argv"]
+        self.assertEqual(archive_arguments[archive_arguments.index("-scheme") + 1], "OhAndApp")
+        self.assertIn("CODE_SIGNING_ALLOWED=NO", archive_arguments)
+
+        export_call = self.calls_of("xcodebuild", "-exportArchive")[0]
+        self.assertEqual(export_call["installed_profiles_at_call"],
+                         [f"{USER_DATA_PROFILE_DIRECTORY}/{SYNTHETIC_PROFILE_UUID}.mobileprovision"])
+        self.assertEqual(self.installed_profile_files(), [])
+        self.assert_keychain_cleaned_up()
+
+    def test_install_is_followed_by_launch_by_bundle_identifier_and_a_running_check(self):
+        self.assertEqual(self.sign_app("--install").returncode, 0)
+        self.assertEqual(self.devicectl_steps(), [("info", "details"), ("install", "app"), ("process", "launch"), ("info", "processes")])
+        calls = {tuple(call["argv"][1:3]): call["argv"] for call in self.calls_of("devicectl", "device")}
+        launch_arguments = calls[("process", "launch")]
+        self.assertEqual(launch_arguments[-1], APP_BUNDLE_IDENTIFIER)
+        for step in (("process", "launch"), ("info", "processes"), ("install", "app")):
+            self.assertEqual(calls[step][calls[step].index("--device") + 1], SYNTHETIC_DEVICE_ID)
+        names = self.call_names()
+        self.assertLess(names.index(("xcodebuild", "archive")), names.index(("security", "create-keychain")))
+        steps = [(call["tool"], call["argv"][0], *call["argv"][1:3]) for call in self.calls()]
+        self.assertLess(names.index(("xcodebuild", "-exportArchive")), steps.index(("devicectl", "device", "install", "app")))
+
+    def test_the_signed_bundles_follow_the_archive_rather_than_a_fixed_list(self):
+        result = self.sign_app(STUB_ARCHIVE_EXTENSIONS=f"{EXTENSION_BUNDLE_IDENTIFIER},{SECOND_EXTENSION_IDENTIFIER}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        options = json.loads((self.state / "export-options.json").read_text())
+        self.assertEqual(set(options["provisioningProfiles"]),
+                         {APP_BUNDLE_IDENTIFIER, EXTENSION_BUNDLE_IDENTIFIER, SECOND_EXTENSION_IDENTIFIER})
+
+        self.state_reset()
+        result = self.sign_app(STUB_ARCHIVE_EXTENSIONS="")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads((self.state / "export-options.json").read_text())["provisioningProfiles"],
+                         {APP_BUNDLE_IDENTIFIER: SYNTHETIC_PROFILE_UUID})
+
+    def test_bundles_nested_at_any_depth_including_inside_frameworks_need_a_covering_profile(self):
+        nested = (f"Frameworks/OhAndServices.framework/PlugIns/Hidden.appex={SECOND_EXTENSION_IDENTIFIER},"
+                  f"Watch/Companion.app={NESTED_APPLICATION_IDENTIFIER}")
+        result = self.sign_app("--install", STUB_ARCHIVE_NESTED=nested)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads((self.state / "export-options.json").read_text())["provisioningProfiles"], {
+            identifier: SYNTHETIC_PROFILE_UUID
+            for identifier in (APP_BUNDLE_IDENTIFIER, EXTENSION_BUNDLE_IDENTIFIER, SECOND_EXTENSION_IDENTIFIER, NESTED_APPLICATION_IDENTIFIER)})
+        self.assertEqual([(bundle["bundle_identifier"], bundle["kind"]) for bundle in self.only_evidence()["embedded_bundles"]], [
+            (APP_BUNDLE_IDENTIFIER, "application"), (EXTENSION_BUNDLE_IDENTIFIER, "app-extension"),
+            (NESTED_APPLICATION_IDENTIFIER, "nested-application"), (SECOND_EXTENSION_IDENTIFIER, "app-extension")])
+        for framework_identifier in FRAMEWORK_BUNDLE_IDENTIFIERS:
+            self.assertNotIn(framework_identifier, (self.state / "export-options.json").read_text())
+
+        # An exact mapping that leaves the extension hidden inside a framework uncovered is refused from the archive.
+        self.state_reset()
+        map_path = self.write_mapped_profiles({APP_BUNDLE_IDENTIFIER: {}, EXTENSION_BUNDLE_IDENTIFIER: {"UUID": EXTENSION_PROFILE_UUID}})
+        result = self.sign_app("--install", STUB_ARCHIVE_NESTED=f"Frameworks/OhAndServices.framework/PlugIns/Hidden.appex={SECOND_EXTENSION_IDENTIFIER}",
+                               **self.mapped_environment(map_path))
+        self.assert_refused_before_keychain_and_export(
+            result, 3, f"no supplied provisioning profile is mapped to bundle identifier {SECOND_EXTENSION_IDENTIFIER}")
+        self.assertEqual(self.only_evidence()["failed_stage"], "bundle-coverage")
+
+        self.state_reset()
+        self.write_profile(Entitlements=self.exact_entitlements(APP_BUNDLE_IDENTIFIER))
+        result = self.sign_app(STUB_ARCHIVE_EXTENSIONS="", STUB_ARCHIVE_NESTED=f"Watch/Companion.app={NESTED_APPLICATION_IDENTIFIER}")
+        self.assert_refused_before_keychain_and_export(
+            result, 3, f"no supplied provisioning profile covers bundle identifier {NESTED_APPLICATION_IDENTIFIER}")
+
+    def test_archive_enumeration_fails_closed_before_keychain_and_export_work(self):
+        (self.inputs / "Elsewhere.appex").mkdir()
+        cases = {
+            "XPC service": (dict(STUB_ARCHIVE_NESTED=f"XPCServices/Helper.xpc={SECOND_EXTENSION_IDENTIFIER}"),
+                            "archived app embeds XPC service XPCServices/Helper.xpc, which this tool does not sign"),
+            "XPC service inside a framework": (
+                dict(STUB_ARCHIVE_NESTED=f"Frameworks/OhAndServices.framework/XPCServices/Helper.xpc={SECOND_EXTENSION_IDENTIFIER}"),
+                "archived app embeds XPC service Frameworks/OhAndServices.framework/XPCServices/Helper.xpc"),
+            "missing Info.plist": (dict(STUB_ARCHIVE_NESTED="PlugIns/Bare.appex="),
+                                   "archived bundle PlugIns/Bare.appex has no readable bundle identifier"),
+            "unreadable Info.plist": (dict(STUB_ARCHIVE_NESTED="Frameworks/OhAndServices.framework/PlugIns/Broken.appex=unreadable"),
+                                      "archived bundle Frameworks/OhAndServices.framework/PlugIns/Broken.appex has no readable bundle identifier"),
+            "invalid identifier": (dict(STUB_ARCHIVE_EXTENSIONS="bad identifier!"), "has an invalid bundle identifier"),
+            "duplicate identifier": (dict(STUB_ARCHIVE_NESTED=f"Frameworks/OhAndServices.framework/PlugIns/Copy.appex={EXTENSION_BUNDLE_IDENTIFIER}"),
+                                     "archive embeds two bundles with the same bundle identifier"),
+            "symbolic link to a bundle": (dict(STUB_ARCHIVE_SYMLINK=f"PlugIns/Linked.appex={self.inputs / 'Elsewhere.appex'}"),
+                                          "archived bundle PlugIns/Linked.appex is not a plain bundle directory"),
+        }
+        for description, (environment, message) in cases.items():
+            with self.subTest(description):
+                self.state_reset()
+                result = self.sign_app("--install", **environment)
+                self.assert_refused_before_keychain_and_export(result, 4, message)
+                self.assertEqual(self.devicectl_steps(), [])
+                self.assertEqual(self.only_evidence()["failed_stage"], "archive-inspect")
+
+    def test_symbolic_links_anywhere_in_the_archived_app_are_refused_before_keychain_and_export_work(self):
+        # Each layout hides a bundle, or could, behind a link the walk does not follow. Before this rule, a linked
+        # framework carrying PlugIns/Hidden.appex and a linked top-level app were both accepted and the hidden
+        # extension never reached provisioningProfiles. Every case is now exit 4 with no keychain or export work.
+        outside = self.inputs / "outside"
+        hidden_framework = outside / "Carrier.framework"
+        hidden_plugins = outside / "PlugIns"
+        for bundle in (hidden_framework / "PlugIns" / "Hidden.appex", hidden_plugins / "Hidden.appex"):
+            bundle.mkdir(parents=True)
+            (bundle / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": SECOND_EXTENSION_IDENTIFIER}))
+        (outside / "notes.txt").write_text("synthetic")
+        cases = {
+            "top-level application is a link": (dict(STUB_ARCHIVE_APP_SYMLINK="1"),
+                                                "archived app OhAndApp.app is not a plain bundle directory"),
+            "linked framework hiding an extension": (dict(STUB_ARCHIVE_SYMLINK=f"Frameworks/Carrier.framework={hidden_framework}"),
+                                                     "archived app contains a symbolic link at Frameworks/Carrier.framework"),
+            "linked PlugIns directory hiding an extension": (
+                dict(STUB_ARCHIVE_EXTENSIONS="", STUB_ARCHIVE_SYMLINK=f"PlugIns={hidden_plugins}"),
+                "archived app contains a symbolic link at PlugIns"),
+            "link inside the app to another of its directories": (
+                dict(STUB_ARCHIVE_SYMLINK="Frameworks/Alias.framework=OhAndServices.framework"),
+                "archived app contains a symbolic link at Frameworks/Alias.framework"),
+            "linked file inside an extension": (dict(STUB_ARCHIVE_SYMLINK=f"PlugIns/Extension0.appex/notes.txt={outside / 'notes.txt'}"),
+                                                "archived app contains a symbolic link at PlugIns/Extension0.appex/notes.txt"),
+            "dangling link": (dict(STUB_ARCHIVE_SYMLINK=f"Resources/Dangling={outside / 'missing'}"),
+                              "archived app contains a symbolic link at Resources/Dangling"),
+        }
+        for description, (environment, message) in cases.items():
+            with self.subTest(description):
+                self.state_reset()
+                result = self.sign_app("--install", **environment)
+                self.assert_refused_before_keychain_and_export(result, 4, message)
+                self.assertEqual(self.devicectl_steps(), [])
+                self.assertEqual(self.only_evidence()["failed_stage"], "archive-inspect")
+                self.assertNotIn(SECOND_EXTENSION_IDENTIFIER, result.stdout + result.stderr)
+                self.assertFalse((self.state / "export-options.json").exists())
+
+    def test_two_bundles_are_signed_under_a_per_bundle_profile_mapping(self):
+        map_path = self.write_mapped_profiles({
+            APP_BUNDLE_IDENTIFIER: {"Name": SYNTHETIC_PROFILE_NAME},
+            EXTENSION_BUNDLE_IDENTIFIER: {"UUID": EXTENSION_PROFILE_UUID, "Name": EXTENSION_PROFILE_NAME, "ExpirationDate": SHORTER_EXPIRY},
+        })
+        result = self.sign_app("--install", **self.mapped_environment(map_path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        options = json.loads((self.state / "export-options.json").read_text())
+        self.assertEqual(options["provisioningProfiles"],
+                         {APP_BUNDLE_IDENTIFIER: "00000000-2222-3333-4444-555555555555", EXTENSION_BUNDLE_IDENTIFIER: EXTENSION_PROFILE_UUID})
+        self.assertEqual(
+            self.calls_of("xcodebuild", "-exportArchive")[0]["installed_profiles_at_call"],
+            sorted(f"{USER_DATA_PROFILE_DIRECTORY}/{uuid}.mobileprovision" for uuid in ("00000000-2222-3333-4444-555555555555", EXTENSION_PROFILE_UUID)))
+        self.assertEqual(self.installed_profile_files(), [])
+        self.assert_keychain_cleaned_up()
+
+        evidence = self.only_evidence()
+        self.assertEqual(evidence["embedded_bundles"], [
+            {"bundle_identifier": APP_BUNDLE_IDENTIFIER, "kind": "application", "profile_expires_at": "2099-01-02T03:04:05Z"},
+            {"bundle_identifier": EXTENSION_BUNDLE_IDENTIFIER, "kind": "app-extension", "profile_expires_at": "2098-06-07T08:09:10Z"},
+        ])
+        self.assertEqual(evidence["profile"]["expires_at"], "2098-06-07T08:09:10Z")
+
+    def test_different_profiles_declaring_one_uuid_are_refused_before_any_build_or_keychain_work(self):
+        # Two exact per-bundle profiles with different contents that declare the same UUID. Only one file can be
+        # installed under that UUID, so accepting the pair would sign with a profile covering one bundle while the
+        # export options and evidence report both as covered.
+        map_path = self.write_mapped_profiles({
+            APP_BUNDLE_IDENTIFIER: {},
+            EXTENSION_BUNDLE_IDENTIFIER: {"UUID": "00000000-2222-3333-4444-555555555555"},
+        })
+        result = self.sign_app("--install", **self.mapped_environment(map_path))
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("two supplied provisioning profiles declare the same UUID but have different contents", result.stderr)
+        self.assertNotIn("signed build complete", result.stdout)
+        # Only the two profile reads happened: no project generation, archive, keychain, profile install or export.
+        self.assertEqual(self.call_names(), [("security", "cms"), ("security", "cms")])
+        self.assertEqual(self.installed_profile_files(), [])
+        self.assertEqual(self.evidence_files(), [])
+        for sensitive in ("00000000-2222-3333-4444-555555555555", SYNTHETIC_TEAM, PROFILE_CONTENT_SENTINEL):
+            self.assertNotIn(sensitive, result.stdout + result.stderr)
+
+    def test_byte_identical_copies_of_one_profile_may_be_mapped_to_several_bundles(self):
+        content = plistlib.dumps(profile_plist(Entitlements=self.wildcard_entitlements()))
+        entries = {}
+        for index, bundle_identifier in enumerate((APP_BUNDLE_IDENTIFIER, EXTENSION_BUNDLE_IDENTIFIER)):
+            path = self.inputs / f"copy-{index}.mobileprovision"
+            path.write_bytes(content)
+            entries[bundle_identifier] = str(path)
+        map_path = self.inputs / "profile-map.json"
+        map_path.write_text(json.dumps(entries))
+        result = self.sign_app("--install", **self.mapped_environment(map_path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        options = json.loads((self.state / "export-options.json").read_text())
+        self.assertEqual(options["provisioningProfiles"],
+                         {APP_BUNDLE_IDENTIFIER: SYNTHETIC_PROFILE_UUID, EXTENSION_BUNDLE_IDENTIFIER: SYNTHETIC_PROFILE_UUID})
+        self.assertEqual(self.calls_of("xcodebuild", "-exportArchive")[0]["installed_profiles_at_call"],
+                         [f"{USER_DATA_PROFILE_DIRECTORY}/{SYNTHETIC_PROFILE_UUID}.mobileprovision"])
+        self.assertEqual(self.installed_profile_files(), [])
+        self.assert_keychain_cleaned_up()
+
+    def test_extension_not_covered_by_the_supplied_profile_is_refused_before_keychain_work(self):
+        self.write_profile(Entitlements=self.exact_entitlements(APP_BUNDLE_IDENTIFIER))
+        result = self.sign_app("--install")
+        self.assert_refused_before_keychain_and_export(
+            result, 3, f"no supplied provisioning profile covers bundle identifier {EXTENSION_BUNDLE_IDENTIFIER}")
+        evidence = self.only_evidence()
+        self.assertEqual((evidence["status"], evidence["failed_stage"]), ("failed", "bundle-coverage"))
+        self.assertFalse(evidence["install"]["performed"])
+
+    def test_covering_profile_that_cannot_sign_a_bundle_is_refused_with_a_distinct_exit_status(self):
+        cases = {
+            "has expired": {"ExpirationDate": datetime.datetime(2001, 1, 1)},
+            "is Xcode managed": {"IsXcodeManaged": True, "Name": "iOS Team Provisioning Profile: *"},
+            "lists no devices": {"ProvisionedDevices": []},
+            "is not a Development profile": {"Entitlements": {**self.wildcard_entitlements(), "get-task-allow": False}},
+            "is an enterprise profile": {"ProvisionsAllDevices": True},
+        }
+        for fragment, overrides in cases.items():
+            with self.subTest(fragment):
+                self.state_reset()
+                self.write_profile(**{"Entitlements": self.wildcard_entitlements(), **overrides})
+                result = self.sign_app("--install")
+                self.assert_refused_before_keychain_and_export(
+                    result, 3, f"provisioning profile covering bundle identifier {APP_BUNDLE_IDENTIFIER} {fragment}")
+                self.assertNotEqual(result.returncode, 1)
+                self.assertNotEqual(result.returncode, 2)
+
+    def test_covering_profile_that_does_not_list_the_target_device_is_refused(self):
+        result = self.sign_app("--install", STUB_DEVICE_UDID="some-other-udid")
+        self.assert_refused_before_keychain_and_export(
+            result, 3, f"provisioning profile covering bundle identifier {APP_BUNDLE_IDENTIFIER} does not list the target device")
+        self.assertEqual(self.devicectl_steps(), [("info", "details")])
+        self.assertNotIn("some-other-udid", result.stderr + result.stdout)
+
+    def test_target_device_check_accepts_an_injected_hardware_identifier_without_asking_devicectl(self):
+        self.assertEqual(self.sign_app("--install", OHAND_DEVICE_UDID=SYNTHETIC_HARDWARE_UDIDS[1], STUB_DEVICE_UDID="ignored").returncode, 0)
+        self.assertNotIn(("info", "details"), self.devicectl_steps())
+        self.state_reset()
+        result = self.sign_app("--install", OHAND_DEVICE_UDID="not-listed")
+        self.assert_refused_before_keychain_and_export(result, 3, "does not list the target device")
+
+    def test_unreadable_target_device_is_an_input_error_before_keychain_work(self):
+        result = self.sign_app("--install", STUB_DEVICECTL_FAIL="details")
+        self.assert_refused_before_keychain_and_export(result, 2, "set OHAND_DEVICE_UDID")
+
+    def test_device_listing_is_not_checked_without_install(self):
+        result = self.sign_app(OHAND_DEVICE_ID=None, STUB_DEVICE_UDID="some-other-udid")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls_of("devicectl", "device"), [])
+        evidence = self.only_evidence()
+        self.assertEqual(evidence["launch"], {"requested": False, "performed": False, "launched": False, "running_confirmed": False})
+
+    def test_mapping_refusals_name_only_the_bundle_identifier(self):
+        app_only = self.write_mapped_profiles({APP_BUNDLE_IDENTIFIER: {}})
+        result = self.sign_app(**self.mapped_environment(app_only))
+        self.assert_refused_before_keychain_and_export(
+            result, 3, f"no supplied provisioning profile is mapped to bundle identifier {EXTENSION_BUNDLE_IDENTIFIER}")
+
+        self.state_reset()
+        wrong_profile = self.write_mapped_profiles({
+            APP_BUNDLE_IDENTIFIER: {},
+            EXTENSION_BUNDLE_IDENTIFIER: {"Entitlements": self.exact_entitlements(APP_BUNDLE_IDENTIFIER), "UUID": EXTENSION_PROFILE_UUID},
+        })
+        result = self.sign_app(**self.mapped_environment(wrong_profile))
+        self.assert_refused_before_keychain_and_export(
+            result, 3, f"no supplied provisioning profile covers bundle identifier {EXTENSION_BUNDLE_IDENTIFIER}")
+
+        self.state_reset()
+        expired = self.write_mapped_profiles({
+            APP_BUNDLE_IDENTIFIER: {},
+            EXTENSION_BUNDLE_IDENTIFIER: {"UUID": EXTENSION_PROFILE_UUID, "ExpirationDate": datetime.datetime(2001, 1, 1)},
+        })
+        result = self.sign_app(**self.mapped_environment(expired))
+        self.assert_refused_before_keychain_and_export(
+            result, 3, f"provisioning profile covering bundle identifier {EXTENSION_BUNDLE_IDENTIFIER} has expired")
+
+    def test_mapping_inputs_are_validated(self):
+        map_path = self.write_mapped_profiles({APP_BUNDLE_IDENTIFIER: {}, EXTENSION_BUNDLE_IDENTIFIER: {"UUID": EXTENSION_PROFILE_UUID}})
+        both = self.sign_app(OHAND_SIGNING_PROFILE_MAP_PATH=str(map_path))
+        self.assertEqual(both.returncode, 2)
+        self.assertIn("set only one of OHAND_SIGNING_PROFILE_PATH and OHAND_SIGNING_PROFILE_MAP_PATH", both.stderr)
+
+        probe = self.sign("--scheme", "BridgeProbe", **self.mapped_environment(map_path))
+        self.assertEqual(probe.returncode, 2)
+        self.assertIn("only supported for schemes that embed extensions", probe.stderr)
+
+        stray = self.write_mapped_profiles({
+            APP_BUNDLE_IDENTIFIER: {}, EXTENSION_BUNDLE_IDENTIFIER: {"UUID": EXTENSION_PROFILE_UUID}, SECOND_EXTENSION_IDENTIFIER: {},
+        })
+        result = self.sign_app(**self.mapped_environment(stray))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(f"names bundle identifier {SECOND_EXTENSION_IDENTIFIER}, which is not an app or extension bundle of OhAndApp", result.stderr)
+        self.assertEqual(self.calls_of("security", "create-keychain"), [])
+        self.assertEqual(self.installed_profile_files(), [])
+
+        inside = self.inputs / "inside.json"
+        inside.write_text(json.dumps({APP_BUNDLE_IDENTIFIER: str(REPO_ROOT / "Makefile")}))
+        result = self.sign_app(**self.mapped_environment(inside))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("must point outside the repository", result.stderr)
+
+        malformed = self.inputs / "malformed.json"
+        malformed.write_text("[1, 2]")
+        result = self.sign_app(**self.mapped_environment(malformed))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("must hold a JSON object", result.stderr)
+
+        self.assertEqual(self.calls_of("security", "create-keychain"), [])
+        self.assertEqual(self.calls_of("xcodebuild", "-exportArchive"), [])
+
+    def test_profiles_from_different_teams_are_refused(self):
+        map_path = self.write_mapped_profiles({
+            APP_BUNDLE_IDENTIFIER: {},
+            EXTENSION_BUNDLE_IDENTIFIER: {"UUID": EXTENSION_PROFILE_UUID, "TeamIdentifier": ["OTHERTEAM1"]},
+        })
+        result = self.sign_app(**self.mapped_environment(map_path))
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("belong to different teams", result.stderr)
+        self.assertNotIn("OTHERTEAM1", result.stderr)
+        self.assertEqual(self.calls_of("xcodebuild", "archive"), [])
+
+    def test_missing_profile_input_names_both_variables(self):
+        result = self.sign_app(OHAND_SIGNING_PROFILE_PATH=None)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("OHAND_SIGNING_PROFILE_PATH is required", result.stderr)
+        self.assertIn("OHAND_SIGNING_PROFILE_MAP_PATH", result.stderr)
+
+    def test_cleanup_runs_after_a_failure_once_the_keychain_exists(self):
+        stages = [("security:set-key-partition-list", "key-partition-list"), ("xcodebuild:-exportArchive", "export")]
+        for failing_call, stage in stages:
+            with self.subTest(failing_call):
+                self.state_reset()
+                result = self.sign_app("--install", STUB_FAIL=failing_call)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(f"{stage} failed (exit status 1)", result.stderr)
+                self.assert_keychain_cleaned_up()
+                self.assertEqual(self.installed_profile_files(), [])
+                self.assertEqual(self.only_evidence()["failed_stage"], stage)
+
+    def test_failed_install_does_not_launch(self):
+        result = self.sign_app("--install", STUB_DEVICECTL_FAIL="install")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("install failed (exit status 1)", result.stderr)
+        self.assertEqual(self.devicectl_steps(), [("info", "details"), ("install", "app")])
+        evidence = self.only_evidence()
+        self.assertEqual(evidence["install"], {"requested": True, "performed": True, "succeeded": False})
+        self.assertEqual(evidence["launch"], {"requested": True, "performed": False, "launched": False, "running_confirmed": False})
+        self.assert_keychain_cleaned_up()
+
+    def test_failed_launch_exits_non_zero_and_is_recorded(self):
+        result = self.sign_app("--install", STUB_DEVICECTL_FAIL="launch")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("launch failed (exit status 1)", result.stderr)
+        self.assertNotIn("signed build complete", result.stdout)
+        self.assertNotIn(("info", "processes"), self.devicectl_steps())
+        evidence = self.only_evidence()
+        self.assertEqual((evidence["status"], evidence["failed_stage"]), ("failed", "launch"))
+        self.assertEqual(evidence["install"], {"requested": True, "performed": True, "succeeded": True})
+        self.assertEqual(evidence["launch"], {"requested": True, "performed": True, "launched": False, "running_confirmed": False})
+        self.assert_keychain_cleaned_up()
+        self.assertEqual(self.installed_profile_files(), [])
+
+    def test_app_that_is_not_running_after_launch_exits_non_zero(self):
+        for variable, value, stage in [("STUB_NOT_RUNNING", "1", "running-check"), ("STUB_DEVICECTL_FAIL", "processes", "running-check")]:
+            with self.subTest(variable):
+                self.state_reset()
+                result = self.sign_app("--install", **{variable: value})
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertNotIn("signed build complete", result.stdout)
+                evidence = self.only_evidence()
+                self.assertEqual((evidence["status"], evidence["failed_stage"]), ("failed", stage))
+                self.assertEqual(evidence["launch"], {"requested": True, "performed": True, "launched": True, "running_confirmed": False})
+
+    def test_unsigned_extension_in_the_export_is_a_failure(self):
+        result = self.sign_app("--install", STUB_UNSIGNED_EXTENSION="1")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("an exported embedded bundle is not code-signed", result.stderr)
+        self.assertEqual(self.devicectl_steps(), [("info", "details")])
+        self.assert_keychain_cleaned_up()
+
+    def test_evidence_record_is_schema_v2_with_bundles_expiry_and_launch_result(self):
+        result = self.sign_app("--install", OHAND_DEVICE_LABEL="phone-a")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        evidence = self.only_evidence()
+        self.assertEqual(set(evidence), EMBEDDED_EVIDENCE_KEYS)
+        self.assertEqual(evidence["schema"], "ohand.apple-signing-evidence.v2")
+        self.assertEqual((evidence["scheme"], evidence["bundle_identifier"]), ("OhAndApp", APP_BUNDLE_IDENTIFIER))
+        self.assertEqual(evidence["embedded_bundles"], [
+            {"bundle_identifier": APP_BUNDLE_IDENTIFIER, "kind": "application", "profile_expires_at": "2099-01-02T03:04:05Z"},
+            {"bundle_identifier": EXTENSION_BUNDLE_IDENTIFIER, "kind": "app-extension", "profile_expires_at": "2099-01-02T03:04:05Z"},
+        ])
+        self.assertEqual(evidence["profile"], {"expires_at": "2099-01-02T03:04:05Z", "device_scoped": True})
+        self.assertEqual(evidence["install"], {"requested": True, "performed": True, "succeeded": True})
+        self.assertEqual(evidence["launch"], {"requested": True, "performed": True, "launched": True, "running_confirmed": True})
+        self.assertEqual(evidence["status"], "succeeded")
+        self.assertIsNone(evidence["failed_stage"])
+
+    def test_new_fields_and_inputs_never_leak_sensitive_values(self):
+        map_path = self.write_mapped_profiles({
+            APP_BUNDLE_IDENTIFIER: {"Name": SYNTHETIC_PROFILE_NAME},
+            EXTENSION_BUNDLE_IDENTIFIER: {"UUID": EXTENSION_PROFILE_UUID, "Name": EXTENSION_PROFILE_NAME},
+        })
+        udid_text = " and ".join(SYNTHETIC_HARDWARE_UDIDS)
+        result = self.sign_app("--install", OHAND_DEVICE_UDID=SYNTHETIC_HARDWARE_UDIDS[0], STUB_ECHO_ARGS="1",
+                               STUB_LEAK_TEXT="stub error naming " + udid_text, **self.mapped_environment(map_path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        sensitive_values = RedactionAndEvidenceTests.SENSITIVE_VALUES + (
+            EXTENSION_PROFILE_UUID, "00000000-2222-3333-4444-555555555555", EXTENSION_PROFILE_NAME, "mapped-0", "mapped-1")
+        for surface in self.all_text_surfaces(result):
+            for sensitive in sensitive_values:
+                self.assertNotIn(sensitive, surface)
+        log = next(self.private.glob("*/run.log")).read_text()
+        self.assertIn("<ohand-signing-profile-map-entry>", log)
+
+    def test_refusal_messages_for_a_failed_run_still_exclude_the_team_and_device_identifiers(self):
+        self.write_profile(Entitlements=self.exact_entitlements(APP_BUNDLE_IDENTIFIER), ExpirationDate=datetime.datetime(2001, 1, 1))
+        result = self.sign_app("--install", STUB_ECHO_ARGS="1")
+        self.assert_refused_before_keychain_and_export(
+            result, 3, f"provisioning profile covering bundle identifier {APP_BUNDLE_IDENTIFIER} has expired")
+        for surface in self.all_text_surfaces(result):
+            for sensitive in (SYNTHETIC_TEAM, SYNTHETIC_PROFILE_UUID, SYNTHETIC_DEVICE_ID, *SYNTHETIC_HARDWARE_UDIDS):
+                self.assertNotIn(sensitive, surface)
+
+
+class ProbeSchemesUnchangedTests(SigningToolTestCase):
+    def test_every_probe_scheme_still_signs_one_bundle_installs_without_launching_and_writes_a_v1_record(self):
+        for scheme, bundle_identifier in PROBE_SCHEMES.items():
+            with self.subTest(scheme):
+                self.state_reset()
+                self.write_profile(Entitlements={"application-identifier": f"{SYNTHETIC_TEAM}.{bundle_identifier}", "get-task-allow": True})
+                result = self.sign("--scheme", scheme, "--install", OHAND_DEVICE_LABEL="phone-a")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("signed build complete; installed on device", result.stdout)
+                options = json.loads((self.state / "export-options.json").read_text())
+                self.assertEqual(options, {
+                    "method": "debugging", "signingStyle": "manual", "signingCertificate": "Apple Development",
+                    "teamID": SYNTHETIC_TEAM, "provisioningProfiles": {bundle_identifier: SYNTHETIC_PROFILE_UUID}})
+                device_steps = [tuple(call["argv"][1:3]) for call in self.calls_of("devicectl", "device")]
+                self.assertEqual(device_steps, [("install", "app")])
+                evidence = self.only_evidence()
+                self.assertEqual(set(evidence), EVIDENCE_KEYS)
+                self.assertEqual(evidence["schema"], "ohand.apple-signing-evidence.v1")
+                self.assertEqual((evidence["scheme"], evidence["bundle_identifier"]), (scheme, bundle_identifier))
+                self.assertEqual(evidence["install"], {"requested": True, "performed": True, "succeeded": True})
+                self.assertEqual(evidence["profile"], {"expires_at": "2099-01-02T03:04:05Z", "device_scoped": True})
+                names = self.call_names()
+                self.assertLess(names.index(("security", "set-key-partition-list")), names.index(("xcodebuild", "archive")))
+                self.assert_keychain_cleaned_up()
+
+    def test_probe_refuses_a_profile_for_another_bundle_with_the_original_exit_status_and_message(self):
+        self.write_profile(Entitlements={"application-identifier": f"{SYNTHETIC_TEAM}.com.boldfield.ohand.probes.audio", "get-task-allow": True})
+        result = self.sign("--scheme", "BridgeProbe")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("provisioning profile does not cover the probe's bundle identifier", result.stderr)
+        self.assertEqual(self.calls_of("xcodebuild", "archive"), [])
+
+
+class ProfileParsingTests(unittest.TestCase):
+    def test_covering_profile_problem_reports_each_unusable_state_and_none_for_a_usable_profile(self):
+        now = datetime.datetime(2026, 10, 11, tzinfo=datetime.timezone.utc)
+
+        def info(**overrides):
+            fields = profile_plist(Entitlements={"application-identifier": f"{SYNTHETIC_TEAM}.*", "get-task-allow": True}, **overrides)
+            parsed = sign_probe.read_profile_basics(fields)
+            sign_probe.normalize_expiry(parsed)
+            return parsed
+
+        self.assertIsNone(sign_probe.covering_profile_problem(info(), now))
+        self.assertIn("Xcode managed", sign_probe.covering_profile_problem(info(IsXcodeManaged=True), now))
+        self.assertIn("has expired", sign_probe.covering_profile_problem(info(ExpirationDate=datetime.datetime(2020, 1, 1)), now))
+        self.assertIn("lists no devices", sign_probe.covering_profile_problem(info(ProvisionedDevices=[]), now))
+        self.assertTrue(info().covers(EXTENSION_BUNDLE_IDENTIFIER))
+        self.assertFalse(info(TeamIdentifier=["OTHER"]).covers(EXTENSION_BUNDLE_IDENTIFIER))
+
+    def test_non_date_expiry_is_an_input_error_for_embedding_profiles(self):
+        parsed = sign_probe.read_profile_basics(profile_plist(ExpirationDate="tomorrow"))
+        with self.assertRaises(sign_probe.SigningError) as context:
+            sign_probe.normalize_expiry(parsed)
+        self.assertEqual(context.exception.exit_code, sign_probe.EXIT_INPUT)
+
+
+class ArchiveEnumerationTests(unittest.TestCase):
+    """Direct checks of the archive walk, for conditions a stub archive cannot express portably."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.application = Path(self.temporary.name) / "OhAnd.app"
+        self.plugins = self.application / "PlugIns"
+        extension = self.plugins / "Extension.appex"
+        extension.mkdir(parents=True)
+        (self.application / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": APP_BUNDLE_IDENTIFIER}))
+        (extension / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": EXTENSION_BUNDLE_IDENTIFIER}))
+
+    def assert_refused(self, message):
+        with self.assertRaises(sign_probe.SigningError) as context:
+            sign_probe.SigningRun._signed_bundle_paths(self.application)
+        self.assertEqual((context.exception.exit_code, context.exception.stage), (sign_probe.EXIT_TOOLING_INTEGRITY, "archive-inspect"))
+        self.assertIn(message, context.exception.message)
+
+    def test_a_readable_app_enumerates_the_application_and_its_extension(self):
+        found = sign_probe.SigningRun._signed_bundle_paths(self.application)
+        self.assertEqual(found, [(self.application, "application"), (self.plugins / "Extension.appex", "app-extension")])
+
+    def test_a_walk_error_refuses_instead_of_skipping_the_directory(self):
+        # os.walk ignores an unreadable directory unless onerror is given; the walk must turn that into a refusal.
+        real_walk = os.walk
+
+        def walk_reporting_an_unreadable_plugins_directory(top, **keywords):
+            keywords["onerror"](PermissionError(13, "Permission denied", str(self.plugins)))
+            return real_walk(top, **keywords)
+
+        with mock.patch.object(sign_probe.os, "walk", walk_reporting_an_unreadable_plugins_directory):
+            self.assert_refused("archived app directory PlugIns could not be read")
+
+    @unittest.skipIf(os.geteuid() == 0, "a superuser can read a directory with no permission bits")
+    def test_a_directory_without_read_permission_refuses(self):
+        self.plugins.chmod(0o000)
+        self.addCleanup(self.plugins.chmod, 0o700)
+        self.assert_refused("archived app directory PlugIns could not be read")
+
+    def test_an_application_that_is_a_link_or_a_file_is_refused(self):
+        linked = Path(self.temporary.name) / "Linked.app"
+        linked.symlink_to(self.application)
+        with self.assertRaises(sign_probe.SigningError) as context:
+            sign_probe.SigningRun._signed_bundle_paths(linked)
+        self.assertEqual(context.exception.exit_code, sign_probe.EXIT_TOOLING_INTEGRITY)
+        self.assertIn("archived app Linked.app is not a plain bundle directory", context.exception.message)
+        plain_file = Path(self.temporary.name) / "File.app"
+        plain_file.write_text("not a directory")
+        with self.assertRaises(sign_probe.SigningError) as context:
+            sign_probe.SigningRun._signed_bundle_paths(plain_file)
+        self.assertIn("archived app File.app is not a plain bundle directory", context.exception.message)
+
+
+class StubExportFidelityTests(SigningToolTestCase):
+    """The synthetic xcodebuild must not report a successful export that real manual signing would refuse."""
+
+    def export(self, bundle_identifier, label):
+        archive = self.elsewhere / f"{label}.xcarchive"
+        application = archive / "Products" / "Applications" / "Probe.app"
+        application.mkdir(parents=True)
+        (application / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": bundle_identifier}))
+        options = self.elsewhere / f"{label}-options.plist"
+        options.write_bytes(plistlib.dumps({"provisioningProfiles": {bundle_identifier: SYNTHETIC_PROFILE_UUID}}))
+        return subprocess.run([str(self.binaries / "xcodebuild"), "-exportArchive", "-archivePath", str(archive),
+                               "-exportOptionsPlist", str(options), "-exportPath", str(self.elsewhere / f"{label}-export")],
+                              capture_output=True, text=True, env=self.environment(), timeout=60)
+
+    def test_export_fails_unless_every_mapped_uuid_is_an_installed_profile_covering_its_bundle(self):
+        missing = self.export(BUNDLE_IDENTIFIER, "missing")
+        self.assertEqual(missing.returncode, 1)
+        self.assertIn(f"no installed provisioning profile for {BUNDLE_IDENTIFIER}", missing.stderr)
+
+        directory = self.home / USER_DATA_PROFILE_DIRECTORY
+        directory.mkdir(parents=True)
+        (directory / f"{SYNTHETIC_PROFILE_UUID}.mobileprovision").write_bytes(self.profile_path.read_bytes())
+        not_covered = self.export(APP_BUNDLE_IDENTIFIER, "not-covered")
+        self.assertEqual(not_covered.returncode, 1)
+        self.assertIn(f"the installed provisioning profile does not cover {APP_BUNDLE_IDENTIFIER}", not_covered.stderr)
+
+        covered = self.export(BUNDLE_IDENTIFIER, "covered")
+        self.assertEqual(covered.returncode, 0, covered.stderr)
+        self.assertTrue((self.elsewhere / "covered-export" / "Probe.ipa").is_file())
+
+
 class SimulatorPathTests(unittest.TestCase):
     def test_unsigned_simulator_build_ignores_signing_inputs_and_uses_no_signing_tools(self):
         with tempfile.TemporaryDirectory() as temporary:

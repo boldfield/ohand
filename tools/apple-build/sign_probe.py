@@ -5,20 +5,32 @@ Route: Apple Development identity plus a Development provisioning profile that l
 The probe is archived unsigned, then `xcodebuild -exportArchive` signs it from an explicit export
 options file, so each bundle identifier gets its own profile and frameworks are never given one.
 
+Schemes that embed app extensions (OhAndApp) sign one profile per signed bundle. The signed bundles are enumerated
+from the unsigned archive: the application and every nested .app or .appex at any depth, including inside frameworks.
+Every one must be covered by a supplied, usable profile before any keychain, profile-installation, signing or export
+work, and the export options map each of them (never frameworks or resource bundles) to its profile UUID.
+
 Signing inputs come only from the environment or injected files outside the repository:
-  OHAND_SIGNING_PROFILE_PATH         required  .mobileprovision file
+  OHAND_SIGNING_PROFILE_PATH         required  .mobileprovision file (one profile may cover several bundles)
+  OHAND_SIGNING_PROFILE_MAP_PATH     alternative to the above for OhAndApp: JSON file outside the repository mapping
+                                               each bundle identifier to its own .mobileprovision file
   OHAND_SIGNING_CERT_PATH            optional  .p12 identity; imported into a per-run temporary keychain.
                                                Without it, exactly one Apple Development identity must
                                                already be in the user's keychains.
   OHAND_SIGNING_CERT_PASSWORD        .p12 password (or OHAND_SIGNING_CERT_PASSWORD_FILE)
   OHAND_DEVICE_ID                    devicectl device identifier; required with --install
+  OHAND_DEVICE_UDID                  optional; hardware identifier to check against the profiles when devicectl
+                                               cannot report it (OhAndApp with --install)
   OHAND_DEVICE_LABEL                 optional content-free label for evidence (a-z, 0-9, '-')
   OHAND_PRIVATE_EVIDENCE_DIR         optional; raw redacted logs, must be outside the repository
 
 Stdout and stderr carry only fixed messages. Child tool output goes to a redacted log in the private
 evidence directory. The sanitized evidence record contains fixed fields only.
 
-Exit status: 0 success, 1 build/signing/install failure, 2 missing or invalid input.
+Exit status: 0 success, 1 build/signing/install/launch failure, 2 missing or invalid input, 3 a bundle in an
+embedding scheme has no usable covering profile (the message names only the bundle identifier), 4 the archive's
+signed bundles cannot be enumerated (an XPC service, a missing or unreadable bundle identifier, a duplicate identifier
+or a bundle that is not a plain directory).
 """
 
 import argparse
@@ -45,26 +57,38 @@ DEFAULT_EVIDENCE_DIR = REPO_ROOT / "docs" / "validation" / "evidence" / "apple-s
 EXIT_OK = 0
 EXIT_FAILURE = 1
 EXIT_INPUT = 2
+EXIT_BUNDLE_PROFILE = 3
+EXIT_TOOLING_INTEGRITY = 4
 
 EVIDENCE_SCHEMA = "ohand.apple-signing-evidence.v1"
+EMBEDDED_EVIDENCE_SCHEMA = "ohand.apple-signing-evidence.v2"
 ROUTE = "development"
 IDENTITY_CLASS = "Apple Development"
 EXPORT_METHOD = "debugging"
 DEFAULT_SCHEME = "BridgeProbe"
-# Single-application probes only: schemes with embedded extensions would need one profile per bundle identifier.
+# Application identifier of each supported scheme. The single-application probes keep one profile and the
+# schema v1 record; schemes in EMBEDDING_SCHEMES embed extensions and sign one entry per bundle found in the archive.
 SUPPORTED_SCHEME_BUNDLE_IDENTIFIERS = {
     "BridgeProbe": "com.boldfield.ohand.probes.bridge",
     "AudioProbe": "com.boldfield.ohand.probes.audio",
     "TranscriptionProbe": "com.boldfield.ohand.probes.transcription",
     "NotificationProbe": "com.boldfield.ohand.probes.notification",
+    "OhAndApp": "com.boldfield.ohand.app",
 }
+EMBEDDING_SCHEMES = frozenset({"OhAndApp"})
+# Nested bundles that take a profile of their own. XPC services are refused: this tool does not sign them.
+# Frameworks and resource bundles take no profile.
+SIGNED_BUNDLE_KINDS = {".appex": "app-extension", ".app": "nested-application"}
+UNSIGNED_SERVICE_SUFFIX = ".xpc"
 
 PROFILE_PATH_VARIABLE = "OHAND_SIGNING_PROFILE_PATH"
+PROFILE_MAP_VARIABLE = "OHAND_SIGNING_PROFILE_MAP_PATH"
 CERT_PATH_VARIABLE = "OHAND_SIGNING_CERT_PATH"
 CERT_PASSWORD_VARIABLE = "OHAND_SIGNING_CERT_PASSWORD"
 CERT_PASSWORD_FILE_VARIABLE = "OHAND_SIGNING_CERT_PASSWORD_FILE"
 DEVICE_ID_VARIABLE = "OHAND_DEVICE_ID"
 DEVICE_LABEL_VARIABLE = "OHAND_DEVICE_LABEL"
+DEVICE_UDID_VARIABLE = "OHAND_DEVICE_UDID"
 PRIVATE_EVIDENCE_VARIABLE = "OHAND_PRIVATE_EVIDENCE_DIR"
 INJECTED_VARIABLE_PREFIXES = ("OHAND_SIGNING_", "OHAND_DEVICE_")
 
@@ -72,6 +96,8 @@ DEVICE_LABEL_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 XCODE_VERSION_PATTERN = re.compile(r"^Xcode \d+(\.\d+){0,2}$")
 XCODE_BUILD_PATTERN = re.compile(r"^Build version [0-9A-Za-z]+$")
 CODESIGNING_IDENTITY_PATTERN = re.compile(r'^\s*\d+\)\s+[0-9A-Fa-f]{40}\s+"([^"]*)"')
+BUNDLE_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,254}$")
+MAXIMUM_MAPPED_BUNDLES = 16
 KEYCHAIN_PATH_PATTERN = re.compile(r'^\s*"(.*)"\s*$')
 # The profile UUID names the installed file, so only the canonical 8-4-4-4-12 hex form is accepted.
 PROFILE_UUID_PATTERN = re.compile(r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}")
@@ -117,13 +143,32 @@ class Redactor:
 
 
 class ProfileInfo:
-    def __init__(self, name: str, uuid: str, team_identifier: str, expires_at: datetime.datetime,
-                 provisioned_devices: List[str]):
+    def __init__(self, name: str, uuid: str, team_identifier: str, expires_at, provisioned_devices: List[str],
+                 application_identifier: str = "", xcode_managed: bool = False, provisions_all_devices: bool = False,
+                 has_devices: bool = True, development: bool = True):
         self.name = name
         self.uuid = uuid
         self.team_identifier = team_identifier
         self.expires_at = expires_at
         self.provisioned_devices = provisioned_devices
+        self.application_identifier = application_identifier
+        self.xcode_managed = xcode_managed
+        self.provisions_all_devices = provisions_all_devices
+        self.has_devices = has_devices
+        self.development = development
+        self.source_path: Optional[Path] = None
+
+    def covers(self, bundle_identifier: str) -> bool:
+        return profile_covers_bundle(self.application_identifier, self.team_identifier, bundle_identifier)
+
+    def expires_text(self) -> str:
+        return self.expires_at.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class EmbeddedBundle:
+    def __init__(self, identifier: str, kind: str):
+        self.identifier = identifier
+        self.kind = kind
 
 
 def profile_covers_bundle(application_identifier: str, team_identifier: str, bundle_identifier: str) -> bool:
@@ -138,7 +183,7 @@ def profile_covers_bundle(application_identifier: str, team_identifier: str, bun
     return pattern == bundle_identifier
 
 
-def parse_profile(profile: dict, bundle_identifier: str, now: datetime.datetime) -> ProfileInfo:
+def read_profile_basics(profile: dict) -> ProfileInfo:
     required_fields = ("Name", "UUID", "TeamIdentifier", "ExpirationDate", "Entitlements")
     missing = [field for field in required_fields if not profile.get(field)]
     if missing:
@@ -151,32 +196,70 @@ def parse_profile(profile: dict, bundle_identifier: str, now: datetime.datetime)
     if not isinstance(team_identifiers, list) or not team_identifiers or not isinstance(team_identifiers[0], str):
         raise input_error("provisioning profile has no usable TeamIdentifier")
     entitlements = profile["Entitlements"]
-    if profile.get("IsXcodeManaged"):
-        raise input_error("provisioning profile is Xcode managed; export signs manually, so create a manual Development "
-                          "profile in the developer portal for the bundle identifier and device")
-    if profile.get("ProvisionsAllDevices"):
-        raise input_error("provisioning profile is an enterprise profile; the development route needs a device-scoped profile")
-    if not profile.get("ProvisionedDevices"):
-        raise input_error("provisioning profile lists no devices; the development route needs a Development profile")
-    if entitlements.get("get-task-allow") is not True:
-        raise input_error("provisioning profile is not a Development profile (get-task-allow is not true)")
-    if not profile_covers_bundle(entitlements.get("application-identifier", ""), team_identifiers[0], bundle_identifier):
-        raise input_error("provisioning profile does not cover the probe's bundle identifier")
-    expires_at = profile["ExpirationDate"]
+    provisioned = profile.get("ProvisionedDevices")
+    devices = [device for device in provisioned if isinstance(device, str)] if isinstance(provisioned, list) else []
+    return ProfileInfo(profile["Name"], profile["UUID"], team_identifiers[0], profile["ExpirationDate"], devices,
+                       application_identifier=entitlements.get("application-identifier", ""),
+                       xcode_managed=bool(profile.get("IsXcodeManaged")),
+                       provisions_all_devices=bool(profile.get("ProvisionsAllDevices")),
+                       has_devices=bool(provisioned), development=entitlements.get("get-task-allow") is True)
+
+
+def normalize_expiry(info: ProfileInfo) -> None:
+    expires_at = info.expires_at
     if not isinstance(expires_at, datetime.datetime):
         raise input_error("provisioning profile ExpirationDate is not a date")
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=datetime.timezone.utc)
-    if expires_at <= now:
+    info.expires_at = expires_at
+
+
+def parse_profile(profile: dict, bundle_identifier: str, now: datetime.datetime) -> ProfileInfo:
+    info = read_profile_basics(profile)
+    if info.xcode_managed:
+        raise input_error("provisioning profile is Xcode managed; export signs manually, so create a manual Development "
+                          "profile in the developer portal for the bundle identifier and device")
+    if info.provisions_all_devices:
+        raise input_error("provisioning profile is an enterprise profile; the development route needs a device-scoped profile")
+    if not info.has_devices:
+        raise input_error("provisioning profile lists no devices; the development route needs a Development profile")
+    if not info.development:
+        raise input_error("provisioning profile is not a Development profile (get-task-allow is not true)")
+    if not info.covers(bundle_identifier):
+        raise input_error("provisioning profile does not cover the probe's bundle identifier")
+    normalize_expiry(info)
+    if info.expires_at <= now:
         raise input_error("provisioning profile has expired")
-    devices = [device for device in profile["ProvisionedDevices"] if isinstance(device, str)]
-    return ProfileInfo(profile["Name"], profile["UUID"], team_identifiers[0], expires_at, devices)
+    return info
+
+
+def covering_profile_problem(info: ProfileInfo, now: datetime.datetime) -> Optional[str]:
+    if info.xcode_managed:
+        return "is Xcode managed; export signs manually, so create a manual Development profile in the developer portal"
+    if info.provisions_all_devices:
+        return "is an enterprise profile; the development route needs a device-scoped profile"
+    if not info.has_devices:
+        return "lists no devices; the development route needs a Development profile"
+    if not info.development:
+        return "is not a Development profile (get-task-allow is not true)"
+    if info.expires_at <= now:
+        return "has expired"
+    return None
+
+
+def bundle_profile_error(message: str) -> SigningError:
+    return SigningError(message, EXIT_BUNDLE_PROFILE, "bundle-coverage")
+
+
+def integrity_error(message: str, stage: str) -> SigningError:
+    return SigningError(message, EXIT_TOOLING_INTEGRITY, stage)
 
 
 class SigningRun:
     def __init__(self, scheme: str, install: bool, evidence_dir: Path, environment: Dict[str, str]):
         self.scheme = scheme
         self.bundle_identifier = SUPPORTED_SCHEME_BUNDLE_IDENTIFIERS[scheme]
+        self.embedding = scheme in EMBEDDING_SCHEMES
         self.install = install
         self.evidence_dir = evidence_dir
         self.environment = environment
@@ -185,9 +268,11 @@ class SigningRun:
         self.started_at = datetime.datetime.now(datetime.timezone.utc)
 
         self.profile_path: Optional[Path] = None
+        self.profile_map: Dict[str, Path] = {}
         self.certificate_path: Optional[Path] = None
         self.certificate_password: Optional[str] = None
         self.device_id: Optional[str] = None
+        self.device_udid: Optional[str] = None
         self.device_label: Optional[str] = None
         self.private_run_dir: Optional[Path] = None
         self.log_path: Optional[Path] = None
@@ -195,12 +280,18 @@ class SigningRun:
         self.work_dir: Optional[Path] = None
         self.keychain_path: Optional[Path] = None
         self.original_keychains: Optional[List[str]] = None
-        self.installed_profile_path: Optional[Path] = None
-        self.partial_profile_path: Optional[Path] = None
-        self.profile_info: Optional[ProfileInfo] = None
+        self.installed_profile_paths: List[Path] = []
+        self.partial_profile_paths: List[Path] = []
+        self.profiles: List[ProfileInfo] = []
+        self.bundles: List[EmbeddedBundle] = []
+        self.assignments: Dict[str, ProfileInfo] = {}
+        self.archive_path: Optional[Path] = None
         self.toolchain: Dict[str, str] = {"xcode_version": "unknown", "xcode_build": "unknown"}
         self.install_performed = False
         self.install_succeeded = False
+        self.launch_performed = False
+        self.launched = False
+        self.running_confirmed = False
         self.failed_stage: Optional[str] = None
 
     # ----- inputs -----
@@ -208,9 +299,21 @@ class SigningRun:
     def read_inputs(self) -> None:
         env = self.environment
         profile_value = env.get(PROFILE_PATH_VARIABLE)
-        if not profile_value:
+        map_value = env.get(PROFILE_MAP_VARIABLE)
+        if map_value and not self.embedding:
+            raise input_error(f"{PROFILE_MAP_VARIABLE} is only supported for schemes that embed extensions; "
+                              f"{self.scheme} takes one profile in {PROFILE_PATH_VARIABLE}")
+        if profile_value and map_value:
+            raise input_error(f"set only one of {PROFILE_PATH_VARIABLE} and {PROFILE_MAP_VARIABLE}")
+        if map_value:
+            self.profile_map = self._read_profile_map(map_value)
+        elif profile_value:
+            self.profile_path = self._outside_repository_file(profile_value, PROFILE_PATH_VARIABLE)
+        elif self.embedding:
+            raise input_error(f"{PROFILE_PATH_VARIABLE} is required (path to a Development .mobileprovision outside the "
+                              f"repository that covers every signed bundle), or {PROFILE_MAP_VARIABLE} for one profile per bundle")
+        else:
             raise input_error(f"{PROFILE_PATH_VARIABLE} is required (path to a Development .mobileprovision outside the repository)")
-        self.profile_path = self._outside_repository_file(profile_value, PROFILE_PATH_VARIABLE)
 
         certificate_value = env.get(CERT_PATH_VARIABLE)
         if certificate_value:
@@ -223,18 +326,37 @@ class SigningRun:
             if not self.device_id:
                 raise input_error(f"--install requires {DEVICE_ID_VARIABLE} (the devicectl device identifier)")
             self.redactor.register(self.device_id, "device-id")
+            if self.embedding:
+                self.device_udid = env.get(DEVICE_UDID_VARIABLE) or None
+                self.redactor.register(self.device_udid, "device-udid")
         label = env.get(DEVICE_LABEL_VARIABLE) or f"device-{secrets.token_hex(4)}"
         if not DEVICE_LABEL_PATTERN.match(label):
             raise input_error(f"{DEVICE_LABEL_VARIABLE} must be 1-32 characters from a-z, 0-9 and '-'")
         self.device_label = label
 
-    def _outside_repository_file(self, value: str, variable: str) -> Path:
+    def _read_profile_map(self, map_value: str) -> Dict[str, Path]:
+        map_path = self._outside_repository_file(map_value, PROFILE_MAP_VARIABLE)
+        try:
+            entries = json.loads(map_path.read_text())
+        except (OSError, ValueError):
+            raise input_error(f"{PROFILE_MAP_VARIABLE} must hold a JSON object mapping bundle identifiers to profile files") from None
+        if not isinstance(entries, dict) or not entries or len(entries) > MAXIMUM_MAPPED_BUNDLES:
+            raise input_error(f"{PROFILE_MAP_VARIABLE} must hold a JSON object of 1-{MAXIMUM_MAPPED_BUNDLES} bundle identifier to profile file entries")
+        mapping: Dict[str, Path] = {}
+        for bundle_identifier, profile_value in entries.items():
+            if not BUNDLE_IDENTIFIER_PATTERN.match(bundle_identifier) or not isinstance(profile_value, str) or not profile_value:
+                raise input_error(f"{PROFILE_MAP_VARIABLE} has an entry that is not a bundle identifier mapped to a profile file path")
+            mapping[bundle_identifier] = self._outside_repository_file(
+                profile_value, f"{PROFILE_MAP_VARIABLE} entry for {bundle_identifier}", "ohand-signing-profile-map-entry")
+        return mapping
+
+    def _outside_repository_file(self, value: str, variable: str, label: Optional[str] = None) -> Path:
         path = Path(value).expanduser().resolve()
         if not path.is_file():
             raise input_error(f"{variable} does not point to a readable file")
         if path == REPO_ROOT or REPO_ROOT in path.parents:
             raise input_error(f"{variable} must point outside the repository")
-        label = f"{variable.lower().replace('_', '-')}"
+        label = label or f"{variable.lower().replace('_', '-')}"
         self.redactor.register(value, label)
         self.redactor.register(str(path), label)
         self.redactor.register(path.name, f"{label}-file-name", forbid_in_evidence=False)
@@ -292,41 +414,77 @@ class SigningRun:
 
     # ----- profile -----
 
-    def load_profile(self) -> None:
-        completed = self.run_tool("read-profile", ["security", "cms", "-D", "-i", str(self.profile_path)],
-                                  capture_output_in_log=False)
-        try:
-            profile = plistlib.loads(completed.stdout.encode("utf-8"))
-        except Exception:
-            raise input_error("provisioning profile could not be decoded")
-        self.profile_info = parse_profile(profile, self.bundle_identifier, datetime.datetime.now(datetime.timezone.utc))
-        self.redactor.register(self.profile_info.name, "profile-name", forbid_in_evidence=False)
-        self.redactor.register(self.profile_info.uuid, "profile-uuid")
-        self.redactor.register(self.profile_info.team_identifier, "team-id")
-        for device in self.profile_info.provisioned_devices:
-            self.redactor.register(device, "device-udid")
+    def load_profiles(self) -> None:
+        paths = [self.profile_path] if self.profile_path is not None else list(dict.fromkeys(self.profile_map.values()))
+        now = datetime.datetime.now(datetime.timezone.utc)
+        for path in paths:
+            completed = self.run_tool("read-profile", ["security", "cms", "-D", "-i", str(path)], capture_output_in_log=False)
+            try:
+                profile = plistlib.loads(completed.stdout.encode("utf-8"))
+            except Exception:
+                raise input_error("provisioning profile could not be decoded")
+            if self.embedding:
+                info = read_profile_basics(profile)
+                normalize_expiry(info)
+            else:
+                info = parse_profile(profile, self.bundle_identifier, now)
+            info.source_path = path
+            self.profiles.append(info)
+            self.redactor.register(info.name, "profile-name", forbid_in_evidence=False)
+            self.redactor.register(info.uuid, "profile-uuid")
+            self.redactor.register(info.team_identifier, "team-id")
+            for device in info.provisioned_devices:
+                self.redactor.register(device, "device-udid")
+        self._refuse_different_profiles_sharing_a_uuid()
+        if len({info.team_identifier for info in self.profiles}) > 1:
+            raise input_error("the supplied provisioning profiles belong to different teams; export signs with one team")
+
+    def _refuse_different_profiles_sharing_a_uuid(self) -> None:
+        """Supplied profile files that declare one UUID must be byte-identical copies.
+
+        The UUID names the single file installed in Xcode's profile directory and the export options map bundles
+        to UUIDs, so two different profiles under one UUID would install only one of them while every mapped bundle
+        is reported as covered. This runs when the profiles are read, before any build, keychain or export work.
+        """
+        first_by_uuid: Dict[str, ProfileInfo] = {}
+        for info in self.profiles:
+            first = first_by_uuid.setdefault(info.uuid, info)
+            if first is not info and first.source_path.read_bytes() != info.source_path.read_bytes():
+                raise input_error("two supplied provisioning profiles declare the same UUID but have different contents; "
+                                  "a UUID identifies one profile, so supply one file per profile")
 
     def profiles_directory(self) -> Path:
         return Path.home() / "Library" / "Developer" / "Xcode" / "UserData" / "Provisioning Profiles"
 
-    def install_profile(self) -> None:
+    def profiles_to_install(self) -> List[ProfileInfo]:
+        # Profiles that share a UUID are byte-identical copies (checked when they were read), so one install per UUID
+        # serves every bundle mapped to it.
+        used = list(self.assignments.values()) if self.embedding else self.profiles
+        return list({info.uuid: info for info in used}.values())
+
+    def install_profiles(self) -> None:
+        for info in self.profiles_to_install():
+            self._install_profile(info)
+
+    def _install_profile(self, info: ProfileInfo) -> None:
         directory = self.profiles_directory()
         directory.mkdir(parents=True, exist_ok=True)
-        destination = directory / f"{self.profile_info.uuid}.mobileprovision"
+        destination = directory / f"{info.uuid}.mobileprovision"
         if destination.parent != directory:
             raise input_error("provisioning profile UUID does not name a file in Xcode's profile directory")
         if destination.exists():
-            if destination.read_bytes() != self.profile_path.read_bytes():
+            if destination.read_bytes() != info.source_path.read_bytes():
                 raise input_error("a different provisioning profile with the same UUID is already installed in Xcode's "
                                   "profile directory; remove it or replace it with the supplied profile")
             return
         # Copy to a run-specific partial file and rename it onto the UUID name, so that the UUID name never holds a
         # truncated profile. Both paths are tracked before the copy starts so cleanup removes whatever was created.
-        self.partial_profile_path = directory / f".ohand-signing-{self.run_identifier}.partial"
-        self.installed_profile_path = destination
+        partial = directory / f".ohand-signing-{self.run_identifier}-{len(self.partial_profile_paths)}.partial"
+        self.partial_profile_paths.append(partial)
+        self.installed_profile_paths.append(destination)
         try:
-            shutil.copyfile(self.profile_path, self.partial_profile_path)
-            os.replace(self.partial_profile_path, destination)
+            shutil.copyfile(info.source_path, partial)
+            os.replace(partial, destination)
         except OSError:
             raise SigningError("could not install the provisioning profile", EXIT_FAILURE, "profile-install") from None
 
@@ -390,9 +548,7 @@ class SigningRun:
                 self.keychain_path.unlink()
             if self.keychain_path.exists():
                 problems.append("temporary keychain could not be removed")
-        for profile_path in (self.partial_profile_path, self.installed_profile_path):
-            if profile_path is None:
-                continue
+        for profile_path in self.partial_profile_paths + self.installed_profile_paths:
             with contextlib.suppress(OSError):
                 profile_path.unlink()
             if profile_path.exists():
@@ -420,10 +576,9 @@ class SigningRun:
         if len(lines) > 1 and XCODE_BUILD_PATTERN.match(lines[1].strip()):
             self.toolchain["xcode_build"] = lines[1].strip().split(" ", 2)[2]
 
-    def build_and_export(self) -> Path:
+    def generate_and_archive(self) -> None:
         self.run_tool("generate-project", [str(IOS_ROOT / "scripts" / "generate.sh")])
-        archive_path = self.work_dir / f"{self.scheme}.xcarchive"
-        export_path = self.work_dir / "export"
+        self.archive_path = self.work_dir / f"{self.scheme}.xcarchive"
         derived_data_path = self.work_dir / "derived"
         self.run_tool("archive", [
             "xcodebuild", "archive",
@@ -431,28 +586,151 @@ class SigningRun:
             "-scheme", self.scheme,
             "-configuration", "Release",
             "-destination", "generic/platform=iOS",
-            "-archivePath", str(archive_path),
+            "-archivePath", str(self.archive_path),
             "-derivedDataPath", str(derived_data_path),
             "CODE_SIGNING_ALLOWED=NO",
         ])
 
+    def export_signed_app(self) -> Path:
+        export_path = self.work_dir / "export"
+        if self.embedding:
+            provisioning_profiles = {bundle.identifier: self.assignments[bundle.identifier].uuid for bundle in self.bundles}
+        else:
+            provisioning_profiles = {self.bundle_identifier: self.profiles[0].uuid}
         options_path = self.work_dir / "ExportOptions.plist"
         options = {
             "method": EXPORT_METHOD,
             "signingStyle": "manual",
             "signingCertificate": IDENTITY_CLASS,
-            "teamID": self.profile_info.team_identifier,
-            "provisioningProfiles": {self.bundle_identifier: self.profile_info.uuid},
+            "teamID": self.profiles[0].team_identifier,
+            "provisioningProfiles": provisioning_profiles,
         }
         options_path.write_bytes(plistlib.dumps(options))
         os.chmod(options_path, 0o600)
         self.run_tool("export", [
             "xcodebuild", "-exportArchive",
-            "-archivePath", str(archive_path),
+            "-archivePath", str(self.archive_path),
             "-exportPath", str(export_path),
             "-exportOptionsPlist", str(options_path),
         ])
         return self._extract_signed_app(export_path)
+
+    # ----- embedded bundles -----
+
+    def inspect_archive(self) -> None:
+        """Decide bundle coverage from the unsigned archive, before any keychain, profile or export work."""
+        applications = sorted((self.archive_path / "Products" / "Applications").glob("*.app"))
+        if len(applications) != 1:
+            raise SigningError("archive does not contain exactly one app", EXIT_FAILURE, "archive-inspect")
+        self.bundles = self._signed_bundles(applications[0])
+        if self.bundles[0].identifier != self.bundle_identifier:
+            raise SigningError("archived app does not have the scheme's bundle identifier", EXIT_FAILURE, "archive-inspect")
+        self.assign_profiles()
+        self.check_target_device_listed()
+
+    @staticmethod
+    def _signed_bundle_paths(application: Path) -> List[tuple]:
+        """The application and every nested bundle that takes a profile, at any depth.
+
+        Enumeration fails closed: the application must be a plain directory, every directory under it is walked
+        (the walk never follows a symbolic link, so any symbolic link, to a file or a directory, inside or outside
+        the app, is refused rather than left unwalked), and a directory that cannot be read refuses instead of
+        being skipped.
+        """
+        if application.is_symlink() or not application.is_dir():
+            raise integrity_error(f"archived app {application.name} is not a plain bundle directory", "archive-inspect")
+
+        def refuse_unreadable_directory(error: OSError) -> None:
+            where = Path(error.filename) if error.filename else application
+            try:
+                name = where.relative_to(application) if where != application else where.name
+            except ValueError:
+                name = where.name
+            raise integrity_error(f"archived app directory {name} could not be read", "archive-inspect") from None
+
+        found = [(application, "application")]
+        for directory, subdirectories, files in os.walk(application, onerror=refuse_unreadable_directory):
+            for name in sorted(subdirectories + files):
+                path = Path(directory) / name
+                relative = path.relative_to(application)
+                if name.endswith(UNSIGNED_SERVICE_SUFFIX):
+                    raise integrity_error(f"archived app embeds XPC service {relative}, which this tool does not sign", "archive-inspect")
+                kind = next((kind for suffix, kind in SIGNED_BUNDLE_KINDS.items() if name.endswith(suffix)), None)
+                if kind is not None and (path.is_symlink() or not path.is_dir()):
+                    raise integrity_error(f"archived bundle {relative} is not a plain bundle directory", "archive-inspect")
+                if path.is_symlink():
+                    raise integrity_error(f"archived app contains a symbolic link at {relative}", "archive-inspect")
+                if kind is not None:
+                    found.append((path, kind))
+        return found
+
+    @classmethod
+    def _signed_bundles(cls, application: Path) -> List[EmbeddedBundle]:
+        def identifier_of(bundle: Path) -> str:
+            name = bundle.relative_to(application) if bundle != application else bundle.name
+            try:
+                identifier = plistlib.loads((bundle / "Info.plist").read_bytes())["CFBundleIdentifier"]
+            except Exception:
+                raise integrity_error(f"archived bundle {name} has no readable bundle identifier", "archive-inspect") from None
+            if not isinstance(identifier, str) or not BUNDLE_IDENTIFIER_PATTERN.match(identifier):
+                raise integrity_error(f"archived bundle {name} has an invalid bundle identifier", "archive-inspect")
+            return identifier
+
+        bundles = [EmbeddedBundle(identifier_of(path), kind) for path, kind in cls._signed_bundle_paths(application)]
+        bundles = bundles[:1] + sorted(bundles[1:], key=lambda bundle: bundle.identifier)
+        if len({bundle.identifier for bundle in bundles}) != len(bundles):
+            raise integrity_error("archive embeds two bundles with the same bundle identifier", "archive-inspect")
+        return bundles
+
+    def assign_profiles(self) -> None:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        self.assignments = {}
+        if self.profile_map:
+            unknown = sorted(set(self.profile_map) - {bundle.identifier for bundle in self.bundles})
+            if unknown:
+                raise input_error(f"{PROFILE_MAP_VARIABLE} names bundle identifier {unknown[0]}, which is not an app or extension bundle of {self.scheme}")
+        by_path = {info.source_path: info for info in self.profiles}
+        for bundle in self.bundles:
+            if self.profile_map:
+                if bundle.identifier not in self.profile_map:
+                    raise bundle_profile_error(f"no supplied provisioning profile is mapped to bundle identifier {bundle.identifier}")
+                info = by_path[self.profile_map[bundle.identifier]]
+            else:
+                info = self.profiles[0]
+            if not info.covers(bundle.identifier):
+                raise bundle_profile_error(f"no supplied provisioning profile covers bundle identifier {bundle.identifier}")
+            problem = covering_profile_problem(info, now)
+            if problem:
+                raise bundle_profile_error(f"provisioning profile covering bundle identifier {bundle.identifier} {problem}")
+            self.assignments[bundle.identifier] = info
+
+    def check_target_device_listed(self) -> None:
+        if not self.install:
+            return
+        udid = self.device_udid or self._read_device_udid()
+        self.device_udid = udid
+        self.redactor.register(udid, "device-udid")
+        for bundle in self.bundles:
+            listed = {device.lower() for device in self.assignments[bundle.identifier].provisioned_devices}
+            if udid.lower() not in listed:
+                raise bundle_profile_error(
+                    f"provisioning profile covering bundle identifier {bundle.identifier} does not list the target device")
+
+    def _read_device_udid(self) -> str:
+        output_path = self.work_dir / "device-details.json"
+        completed = self.run_tool("device-details", ["xcrun", "devicectl", "device", "info", "details", "--device", self.device_id,
+                                                     "--json-output", str(output_path)],
+                                  capture_output_in_log=False, allow_failure=True)
+        hint = f"could not read the target device's hardware identifier with devicectl; set {DEVICE_UDID_VARIABLE}"
+        udid = None
+        if completed.returncode == 0:
+            try:
+                udid = json.loads(output_path.read_text())["result"]["hardwareProperties"]["udid"]
+            except Exception:
+                udid = None
+        if not isinstance(udid, str) or not udid:
+            raise SigningError(hint, EXIT_INPUT, "device-details")
+        return udid
 
     def _extract_signed_app(self, export_path: Path) -> Path:
         archives = sorted(export_path.glob("*.ipa")) if export_path.is_dir() else []
@@ -471,12 +749,53 @@ class SigningRun:
             raise SigningError("exported .ipa does not contain exactly one app", EXIT_FAILURE, "export")
         if not (apps[0] / "_CodeSignature" / "CodeResources").is_file():
             raise SigningError("exported app is not code-signed", EXIT_FAILURE, "export")
+        if self.embedding:
+            self._verify_exported_bundles(apps[0])
         return apps[0]
+
+    def _verify_exported_bundles(self, application: Path) -> None:
+        try:
+            exported = self._signed_bundles(application)
+        except SigningError:
+            raise SigningError("exported app embeds bundles that cannot be read", EXIT_FAILURE, "export") from None
+        if [bundle.identifier for bundle in exported] != [bundle.identifier for bundle in self.bundles]:
+            raise SigningError("exported app embeds different bundles than the archive", EXIT_FAILURE, "export")
+        for path, _ in self._signed_bundle_paths(application)[1:]:
+            if not (path / "_CodeSignature" / "CodeResources").is_file():
+                raise SigningError("an exported embedded bundle is not code-signed", EXIT_FAILURE, "export")
 
     def install_on_device(self, app_path: Path) -> None:
         self.install_performed = True
         self.run_tool("install", ["xcrun", "devicectl", "device", "install", "app", "--device", self.device_id, str(app_path)])
         self.install_succeeded = True
+
+    def launch_on_device(self) -> None:
+        self.launch_performed = True
+        launch_output = self.work_dir / "launch.json"
+        self.run_tool("launch", ["xcrun", "devicectl", "device", "process", "launch", "--device", self.device_id,
+                                 "--terminate-existing", "--json-output", str(launch_output), self.bundle_identifier])
+        process_identifier = self._read_json(launch_output, "launch", ("result", "process", "processIdentifier"))
+        if not isinstance(process_identifier, int) or isinstance(process_identifier, bool):
+            raise SigningError("launch did not report a process identifier", EXIT_FAILURE, "launch")
+        self.launched = True
+        processes_output = self.work_dir / "processes.json"
+        self.run_tool("running-check", ["xcrun", "devicectl", "device", "info", "processes", "--device", self.device_id,
+                                        "--json-output", str(processes_output)])
+        running = self._read_json(processes_output, "running-check", ("result", "runningProcesses"))
+        if not isinstance(running, list) or not any(
+                isinstance(entry, dict) and entry.get("processIdentifier") == process_identifier for entry in running):
+            raise SigningError("the launched app is not in the device's running process list", EXIT_FAILURE, "running-check")
+        self.running_confirmed = True
+
+    @staticmethod
+    def _read_json(path: Path, stage: str, keys: tuple):
+        try:
+            value = json.loads(path.read_text())
+            for key in keys:
+                value = value[key]
+            return value
+        except Exception:
+            raise SigningError(f"devicectl output for {stage} could not be read", EXIT_FAILURE, stage) from None
 
     # ----- evidence -----
 
@@ -495,8 +814,9 @@ class SigningRun:
     def evidence_record(self, status: str) -> dict:
         revision = self.build_revision()
         profile_expiry = None
-        if self.profile_info is not None:
-            profile_expiry = self.profile_info.expires_at.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if self.profiles:
+            profile_expiry = min(self.profiles if not self.assignments else self.assignments.values(),
+                                 key=lambda info: info.expires_at).expires_text()
         commit = revision["commit"]
         record = {
             "schema": EVIDENCE_SCHEMA,
@@ -513,7 +833,7 @@ class SigningRun:
             "signing_style": "manual",
             "export_method": EXPORT_METHOD,
             "toolchain": dict(self.toolchain),
-            "profile": {"expires_at": profile_expiry, "device_scoped": self.profile_info is not None},
+            "profile": {"expires_at": profile_expiry, "device_scoped": bool(self.profiles) and not any(info.provisions_all_devices for info in self.profiles)},
             "device": {"label": self.device_label},
             "install": {
                 "requested": self.install,
@@ -522,6 +842,14 @@ class SigningRun:
             },
             "private_evidence_reference": self.run_identifier,
         }
+        if self.embedding:
+            record["schema"] = EMBEDDED_EVIDENCE_SCHEMA
+            record["embedded_bundles"] = [
+                {"bundle_identifier": bundle.identifier, "kind": bundle.kind,
+                 "profile_expires_at": self.assignments[bundle.identifier].expires_text() if bundle.identifier in self.assignments else None}
+                for bundle in self.bundles]
+            record["launch"] = {"requested": self.install, "performed": self.launch_performed, "launched": self.launched,
+                                "running_confirmed": self.running_confirmed}
         return record
 
     def write_evidence(self, status: str) -> Optional[Path]:
@@ -555,14 +883,25 @@ def execute(run: SigningRun) -> int:
         run.prepare_private_log()
         run.work_dir = Path(tempfile.mkdtemp(prefix="ohand-signing-"))
         os.chmod(run.work_dir, 0o700)
-        run.load_profile()
+        run.load_profiles()
         reached_build = True
         run.record_toolchain()
-        run.prepare_identity()
-        run.install_profile()
-        app_path = run.build_and_export()
+        if run.embedding:
+            # The unsigned archive uses no identity or profile. Profile coverage is decided from the bundles it embeds,
+            # before anything touches the keychain, installs a profile or signs.
+            run.generate_and_archive()
+            run.inspect_archive()
+            run.prepare_identity()
+            run.install_profiles()
+        else:
+            run.prepare_identity()
+            run.install_profiles()
+            run.generate_and_archive()
+        app_path = run.export_signed_app()
         if run.install:
             run.install_on_device(app_path)
+            if run.embedding:
+                run.launch_on_device()
     except SigningError as error:
         run.failed_stage = error.stage
         print(f"error: {error.message}", file=sys.stderr)
@@ -585,7 +924,7 @@ def execute(run: SigningRun) -> int:
             exit_code = EXIT_FAILURE
             run.failed_stage = "cleanup"
 
-    if reached_build and run.profile_info is not None:
+    if reached_build and run.profiles:
         try:
             status = "succeeded" if exit_code == EXIT_OK else "failed"
             destination = run.write_evidence(status)
@@ -599,7 +938,7 @@ def execute(run: SigningRun) -> int:
 
 
 def parse_arguments(argv: List[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Archive, sign (Development route) and optionally install a probe.")
+    parser = argparse.ArgumentParser(description="Archive, sign (Development route), and optionally install and launch a probe or OhAndApp.")
     parser.add_argument("--scheme", default=DEFAULT_SCHEME, choices=sorted(SUPPORTED_SCHEME_BUNDLE_IDENTIFIERS))
     parser.add_argument("--install", action="store_true", help=f"install on the device named by {DEVICE_ID_VARIABLE}")
     parser.add_argument("--evidence-dir", default=str(DEFAULT_EVIDENCE_DIR),
