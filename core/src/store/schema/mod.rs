@@ -71,6 +71,10 @@ pub const MIGRATIONS: &[MigrationStep] = &[
         target_version: 7,
         apply: add_transcript_attachments_v7,
     },
+    MigrationStep {
+        target_version: 8,
+        apply: add_reminder_history_events_v8,
+    },
 ];
 
 /// Database handle with schema validation.
@@ -774,6 +778,48 @@ fn add_transcript_attachments_v7(tx: &Transaction<'_>) -> Result<()> {
             confidence REAL,
             transcribed_at TEXT NOT NULL,
             FOREIGN KEY (item_id) REFERENCES items(item_id) ON DELETE CASCADE
+        )",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Step 8 (N06): reminder history. First, facts about a reminder that only the OS or the user
+/// can supply. One row per (reminder, schedule generation, kind) records the first observation
+/// of that fact: `delivered` and `opened` are OS evidence, `acknowledged` is an explicit user
+/// action. `observed_at` is when the fact happened as reported by its source; `recorded_at` is
+/// when core stored it. Neither table holds item text, so they carry no readable content (the
+/// stored reasons are fixed resolver wording).
+fn add_reminder_history_events_v8(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute(
+        "CREATE TABLE reminder_history_events (
+            reminder_id TEXT NOT NULL,
+            schedule_generation INTEGER NOT NULL,
+            event_kind TEXT NOT NULL CHECK (event_kind IN ('delivered', 'opened', 'acknowledged')),
+            observed_at TEXT NOT NULL,
+            recorded_at TEXT NOT NULL,
+            PRIMARY KEY (reminder_id, schedule_generation, event_kind),
+            FOREIGN KEY (reminder_id) REFERENCES reminders(reminder_id)
+        )",
+        [],
+    )?;
+    // Requests the user made that install no notification (repeat, ambiguous or unschedulable
+    // time, cancellation), one row per transition, so a later request does not erase an earlier
+    // one. Requested times that do install something are already kept as schedule operations.
+    // `native_cancel` records whether a cancellation retired a native request.
+    tx.execute(
+        "CREATE TABLE reminder_request_events (
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            reminder_id TEXT NOT NULL,
+            schedule_generation INTEGER NOT NULL,
+            request_state TEXT NOT NULL CHECK (request_state IN
+                ('not_scheduled_yet', 'unsupported_recurrence', 'unschedulable', 'cancelled')),
+            unschedulable_reason TEXT,
+            resolved_instant TEXT,
+            unsupported_reason TEXT,
+            native_cancel INTEGER NOT NULL CHECK (native_cancel IN (0, 1)),
+            recorded_at TEXT NOT NULL,
+            FOREIGN KEY (reminder_id) REFERENCES reminders(reminder_id)
         )",
         [],
     )?;

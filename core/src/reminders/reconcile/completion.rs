@@ -188,9 +188,13 @@ fn cancel_completion(
     match outcome {
         EffectOutcome::Succeeded => {
             set_operation_state(tx, operation, OperationState::Acknowledged)?;
+            let latest_scheduled = list_operations(tx, &reminder.reminder_id)?
+                .into_iter()
+                .rfind(|candidate| candidate.operation_type == OperationType::Schedule);
             let describes_cancelled_generation = reminder.request_state != RequestState::Resolved
-                && reminder.notification_id().as_deref()
-                    == Some(operation.notification_id.as_str());
+                && latest_scheduled.is_some_and(|scheduled| {
+                    scheduled.notification_id == operation.notification_id
+                });
             if describes_cancelled_generation {
                 set_schedule_state(tx, clock, reminder, ScheduleState::NotScheduled)?;
             }
