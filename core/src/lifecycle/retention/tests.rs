@@ -169,6 +169,21 @@ impl Store {
         save_event(&mut self.open(), &event, revision).unwrap();
     }
 
+    fn enqueue_transcription(&self, item_id: &str, job_id: &str) {
+        enqueue_job(
+            &mut self.open(),
+            job_id.to_string(),
+            item_id.to_string(),
+            JOB_TYPE_TRANSCRIPTION_ATTACHMENT.to_string(),
+            0,
+            None,
+            None,
+            1,
+            captured_at(),
+        )
+        .unwrap();
+    }
+
     fn assess(
         &self,
         item_id: &str,
@@ -296,7 +311,10 @@ fn pending_unsupported_and_failed_sole_sources_never_expire() {
         (
             None,
             UnresolvedReason::TranscriptionPending,
-            vec![RetentionOption::DeleteAudio],
+            vec![
+                RetentionOption::RetryTranscription,
+                RetentionOption::DeleteAudio,
+            ],
         ),
         (
             Some(RecognizerResult::Unsupported),
@@ -364,6 +382,40 @@ fn an_empty_recognition_keeps_the_audio_as_a_pending_sole_source() {
         unresolved(UnresolvedReason::TranscriptionPending)
     );
     assert!(assessment.sole_source);
+    assert_eq!(
+        assessment.options,
+        vec![
+            RetentionOption::RetryTranscription,
+            RetentionOption::DeleteAudio
+        ]
+    );
+    assert_eq!(assessment.cleanup, CleanupIntent::None);
+}
+
+#[test]
+fn retry_is_withheld_only_while_transcription_work_is_queued_or_running() {
+    let store = Store::new();
+    let item_id = store.voice_item();
+    let options = |store: &Store| {
+        store
+            .assess(&item_id, captured_at(), StoragePressure::Normal)
+            .unwrap()
+            .options
+    };
+    let both = vec![
+        RetentionOption::RetryTranscription,
+        RetentionOption::DeleteAudio,
+    ];
+    assert_eq!(options(&store), both);
+
+    store.enqueue_transcription(&item_id, "transcription-active");
+    assert_eq!(options(&store), vec![RetentionOption::DeleteAudio]);
+
+    store.execute("UPDATE jobs SET status = 'running'");
+    assert_eq!(options(&store), vec![RetentionOption::DeleteAudio]);
+
+    store.execute("UPDATE jobs SET status = 'failed'");
+    assert_eq!(options(&store), both);
 }
 
 #[test]
@@ -423,6 +475,72 @@ fn a_user_text_without_a_transcript_keeps_the_audio_with_delete_only() {
     assert!(!assessment.sole_source);
     assert_eq!(assessment.options, vec![RetentionOption::DeleteAudio]);
     assert_eq!(assessment.cleanup, CleanupIntent::None);
+}
+
+#[test]
+fn a_text_correction_cleared_to_empty_returns_a_transcriptless_item_to_sole_source() {
+    for cleared in ["", "  \n"] {
+        let store = Store::new();
+        let item_id = store.voice_item();
+        store.transcription_result(
+            &item_id,
+            FIRST_AUDIO,
+            RecognizerResult::Failed,
+            transcribed_at(),
+        );
+        store.correct_text(&item_id, 0, None, "water the ferns");
+        let with_text = store
+            .assess(&item_id, transcribed_at(), StoragePressure::Low)
+            .unwrap();
+        assert!(!with_text.sole_source);
+
+        store.correct_text(&item_id, 1, Some("water the ferns"), cleared);
+        let assessment = store
+            .assess(
+                &item_id,
+                transcribed_at() + Duration::days(400),
+                StoragePressure::Low,
+            )
+            .unwrap();
+        assert_eq!(
+            assessment.state,
+            unresolved(UnresolvedReason::TranscriptionFailed)
+        );
+        assert!(assessment.sole_source);
+        assert_eq!(
+            assessment.options,
+            vec![
+                RetentionOption::RetryTranscription,
+                RetentionOption::DeleteAudio
+            ]
+        );
+        assert_eq!(assessment.cleanup, CleanupIntent::None);
+        assert_eq!(
+            assessment.storage_pressure_notice,
+            Some(StoragePressureNotice::SoleSourceRetained)
+        );
+    }
+}
+
+#[test]
+fn clearing_a_correction_after_a_transcript_exists_does_not_stop_the_audio_expiring() {
+    let store = Store::new();
+    let item_id = store.voice_item();
+    store.transcribe(&item_id, FIRST_AUDIO, transcribed_at());
+    store.correct_text(
+        &item_id,
+        1,
+        Some("water the ferns"),
+        "water the ferns friday",
+    );
+    store.correct_text(&item_id, 2, Some("water the ferns friday"), "");
+
+    let expires_at = transcribed_at() + Duration::days(7);
+    let assessment = store
+        .assess(&item_id, expires_at, StoragePressure::Normal)
+        .unwrap();
+    assert!(!assessment.sole_source, "the transcript stays recoverable");
+    assert!(matches!(assessment.state, RetentionState::Expired { .. }));
 }
 
 #[test]

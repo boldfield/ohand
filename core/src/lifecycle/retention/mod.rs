@@ -18,12 +18,19 @@
 //!   transcript) is flagged `sole_source`. Storage pressure never changes eligibility: it only adds
 //!   a [`StoragePressureNotice`] so the surface can say that nothing was or will be freed
 //!   automatically. The user's explicit options are always [`RetentionOption::DeleteAudio`], plus
-//!   [`RetentionOption::RetryTranscription`] while transcription failed or is unsupported and no
-//!   text exists.
+//!   [`RetentionOption::RetryTranscription`] whenever no text exists, no transcript was attached
+//!   and no transcription job is queued or running. That covers failed, unsupported and
+//!   pending states, including the no-speech outcome, which settles its job as failed and leaves
+//!   the item `audio_pending`.
+//! * "Text exists" follows the item's current text: the latest text correction. Clearing a
+//!   correction to empty makes audio with no transcript a sole source again (and retry is
+//!   offered). Once a transcript is attached, the transcript stays recoverable, so clearing a
+//!   correction does not keep the audio from expiring.
 //! * Deleted items are not assessed: their audio removal is deletion work owned by
 //!   `lifecycle::delete_intent`.
 
 use crate::domain::status::TranscriptionState;
+use crate::privacy::routing::JOB_TYPE_TRANSCRIPTION_ATTACHMENT;
 use crate::store::schema::Clock;
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Duration, Utc};
@@ -174,21 +181,34 @@ struct AudioItemRow {
     audio_reference: String,
     capture_text_present: bool,
     user_text_present: bool,
+    transcription_in_flight: bool,
     transcript_audio_reference: Option<String>,
     transcribed_at: Option<String>,
 }
 
-const AUDIO_ITEM_SELECT: &str = "SELECT items.item_id, items.lifecycle_state,
+/// SQLite's one-argument `TRIM` strips only spaces; this also strips tabs and line breaks.
+const WHITESPACE: &str = "' ' || char(9, 10, 11, 12, 13)";
+
+/// Both text and in-flight flags read current state: user text is the item's latest text
+/// correction (the same one the domain projection resolves), not any correction ever made.
+fn audio_item_select() -> String {
+    format!(
+        "SELECT items.item_id, items.lifecycle_state,
         items.transcription_state, captures.audio_reference,
-        COALESCE(TRIM(captures.text) <> '', 0),
-        EXISTS(SELECT 1 FROM corrections
-               WHERE corrections.item_id = items.item_id AND corrections.kind = 'text'
-                 AND TRIM(corrections.new_value) <> ''),
+        COALESCE(TRIM(captures.text, {WHITESPACE}) <> '', 0),
+        COALESCE((SELECT TRIM(corrections.new_value, {WHITESPACE}) <> '' FROM corrections
+                  WHERE corrections.item_id = items.item_id AND corrections.kind = 'text'
+                  ORDER BY corrections.revision DESC LIMIT 1), 0),
+        EXISTS(SELECT 1 FROM jobs
+               WHERE jobs.item_id = items.item_id AND jobs.job_type = '{JOB_TYPE_TRANSCRIPTION_ATTACHMENT}'
+                 AND jobs.status IN ('queued', 'running')),
         transcript_attachments.audio_reference, transcript_attachments.transcribed_at
     FROM items
     JOIN captures ON captures.capture_id = items.capture_id
     LEFT JOIN transcript_attachments ON transcript_attachments.item_id = items.item_id
-    WHERE captures.audio_reference IS NOT NULL";
+    WHERE captures.audio_reference IS NOT NULL"
+    )
+}
 
 fn audio_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AudioItemRow> {
     Ok(AudioItemRow {
@@ -198,8 +218,9 @@ fn audio_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AudioItemRow
         audio_reference: row.get(3)?,
         capture_text_present: row.get(4)?,
         user_text_present: row.get(5)?,
-        transcript_audio_reference: row.get(6)?,
-        transcribed_at: row.get(7)?,
+        transcription_in_flight: row.get(6)?,
+        transcript_audio_reference: row.get(7)?,
+        transcribed_at: row.get(8)?,
     })
 }
 
@@ -215,7 +236,7 @@ pub fn assess_audio_retention(
     let now = clock.now();
     let row = connection
         .query_row(
-            &format!("{AUDIO_ITEM_SELECT} AND items.item_id = ?"),
+            &format!("{} AND items.item_id = ?", audio_item_select()),
             [item_id],
             audio_item_from_row,
         )
@@ -239,8 +260,9 @@ pub fn sweep_audio_retention(
 ) -> Result<Vec<AudioRetentionAssessment>> {
     let now = clock.now();
     let mut statement = connection.prepare(&format!(
-        "{AUDIO_ITEM_SELECT} AND items.lifecycle_state <> 'deleted'
-         ORDER BY items.created_at, items.item_id"
+        "{} AND items.lifecycle_state <> 'deleted'
+         ORDER BY items.created_at, items.item_id",
+        audio_item_select()
     ))?;
     let rows = statement
         .query_map([], audio_item_from_row)?
@@ -264,7 +286,7 @@ pub fn authorize_audio_removal(
     let now = clock.now();
     let row = connection
         .query_row(
-            &format!("{AUDIO_ITEM_SELECT} AND items.item_id = ?"),
+            &format!("{} AND items.item_id = ?", audio_item_select()),
             [item_id],
             audio_item_from_row,
         )
@@ -328,10 +350,8 @@ fn assess_row(
 
     let mut options = Vec::new();
     if !text_present
-        && matches!(
-            transcription_state,
-            TranscriptionState::TranscriptionFailed | TranscriptionState::TranscriptionUnsupported
-        )
+        && !row.transcription_in_flight
+        && transcription_state != TranscriptionState::Transcribed
     {
         options.push(RetentionOption::RetryTranscription);
     }
