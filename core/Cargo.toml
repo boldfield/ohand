@@ -18,3 +18,7 @@ sha2 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[[test]]
+name = "capture_processing_resilience"
+path = "../tests/resilience/capture-processing/main.rs"
