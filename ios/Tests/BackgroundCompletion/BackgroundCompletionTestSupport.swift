@@ -113,6 +113,22 @@ final class FakeCompletionDrain: BackgroundCompletionDrain, @unchecked Sendable 
         draining = false
         lock.unlock()
     }
+
+    private var idleObserver: (@Sendable () -> Void)?
+
+    func setDrainIdleObserver(_ observer: (@Sendable () -> Void)?) {
+        lock.lock()
+        idleObserver = observer
+        lock.unlock()
+    }
+
+    /// Reports a drain ending outside any lease, as the job runner does for foreground and reachability drains.
+    func fireDrainIdle() {
+        lock.lock()
+        let observer = idleObserver
+        lock.unlock()
+        observer?()
+    }
 }
 
 final class FakePendingReader: PendingProcessingReading, @unchecked Sendable {

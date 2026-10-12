@@ -7,7 +7,8 @@ import Foundation
 ///
 /// * **Completed.** The drain went idle and the core reports nothing queued: the pending alert is removed.
 /// * **Left pending.** The drain went idle with jobs queued (backoff, offline, a missing capability): nothing more is
-///   attempted here, the alert stays armed, and the jobs wait for a later foreground or reachability drain.
+///   attempted here, the alert stays armed, and the jobs wait for a later foreground or reachability drain. Any
+///   later drain that leaves nothing queued removes the alert, so it never reports work that has since finished.
 /// * **Expired.** The system took the time back, the service's own cap elapsed, or the owner shut down: the window is
 ///   closed, which stops the running drain at a checkpoint (its job returns to the queue with no retry budget spent),
 ///   and the grant is ended at once. Nothing is retried in the background and nothing is waited for beyond a short,
@@ -29,6 +30,7 @@ public final class BackgroundCompletionService {
     private var activeLease: Lease?
     private var activeRun: Task<BackgroundCompletionOutcome, Never>?
     private var armTask: Task<Void, Never>?
+    private var leaseGeneration = 0
     private var isShutDown = false
 
     public init(
@@ -47,6 +49,9 @@ public final class BackgroundCompletionService {
         self.maximumWindow = maximumWindow
         self.settleTimeout = settleTimeout
         self.pollInterval = pollInterval
+        drain.setDrainIdleObserver { [weak self] in
+            Task { @MainActor in await self?.drainWentIdle() }
+        }
     }
 
     /// Runs one completion lease and reports how it ended. A call made while a lease is open asks the drain to run
@@ -72,8 +77,21 @@ public final class BackgroundCompletionService {
     /// Ends any open lease as expired and refuses further ones. Idempotent.
     public func shutDown() {
         isShutDown = true
+        drain.setDrainIdleObserver(nil)
         guard let lease = activeLease else { return }
         endLease(lease, cause: .shutDown)
+    }
+
+    /// A drain ended outside a lease (a foreground or reachability drain after a lease left work pending). The
+    /// alert says work is unprocessed, so it is removed as soon as the core reports nothing queued; it never
+    /// outlives the condition it reports. An unreadable count leaves it armed.
+    private func drainWentIdle() async {
+        guard alert != nil, activeLease == nil, !isShutDown else { return }
+        let generation = leaseGeneration
+        guard await pending.read() == PendingProcessingStatus.none else { return }
+        guard activeLease == nil, generation == leaseGeneration else { return }
+        await settleArming()
+        await alert?.disarm()
     }
 
     // MARK: lease
@@ -100,6 +118,7 @@ public final class BackgroundCompletionService {
             return .expired(.systemExpiration)
         }
         activeLease = lease
+        leaseGeneration += 1
         defer { activeLease = nil }
 
         drain.beginCompletionWindow()

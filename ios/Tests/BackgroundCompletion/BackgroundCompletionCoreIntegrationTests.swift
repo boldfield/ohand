@@ -237,4 +237,32 @@ final class BackgroundCompletionCoreIntegrationTests: ProviderTransportTestCase 
         let after = try await pendingIdentifiers(session)
         XCTAssertTrue(after.isEmpty)
     }
+
+    @MainActor func testWorkFinishedInTheForegroundAfterAPendingLeaseRemovesTheAlert() async throws {
+        let server = try makeServer()
+        let storePath = try makeStore()
+        let session = try open(
+            storePath, sender: FixtureRoutingSender(underlying: transport, fixtureServer: server), isReachable: false)
+        let completion = try session.makeCompletion()
+
+        session.service.activate()
+        let outcome = await completion.completeAfterCapture()
+        guard case .pendingRemains = outcome else { return XCTFail("expected pending work to remain, got \(outcome)") }
+        XCTAssertEqual(job(session)?.status, "queued", "offline, the provider job stays saved and unprocessed")
+        let armed = try await pendingIdentifiers(session)
+        XCTAssertEqual(armed, [PendingProcessingAlert.identifier])
+
+        session.service.reachabilityChanged(true)
+        let didComplete = await waitUntilTrue { self.job(session)?.status == "completed" }
+        XCTAssertTrue(didComplete)
+        var remaining = try await pendingIdentifiers(session)
+        let deadline = Date().addingTimeInterval(15)
+        while !remaining.isEmpty, Date() < deadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+            remaining = try await pendingIdentifiers(session)
+        }
+        XCTAssertTrue(remaining.isEmpty, "the alert must not outlive the unprocessed state it reports")
+        XCTAssertEqual(server.requests.count, 1)
+        withExtendedLifetime(completion) {}
+    }
 }

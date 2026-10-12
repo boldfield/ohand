@@ -70,6 +70,9 @@ public protocol BackgroundCompletionDrain: AnyObject, Sendable {
     func beginCompletionWindow()
     func endCompletionWindow()
     func requestDrain()
+    /// Sets the one observer called whenever a drain ends and none follows at once, including drains the foreground
+    /// or a reachability change started. `nil` removes it.
+    func setDrainIdleObserver(_ observer: (@Sendable () -> Void)?)
 }
 
 extension JobRunnerService: BackgroundCompletionDrain {}

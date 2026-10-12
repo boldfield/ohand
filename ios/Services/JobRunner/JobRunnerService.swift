@@ -58,6 +58,7 @@ public final class JobRunnerService: @unchecked Sendable {
     private var runningSends: [UInt64: Task<Void, Never>] = [:]
     private var runningCapabilities: [UInt64: Task<Void, Never>] = [:]
     private var idleWaiters: [@Sendable () -> Void] = []
+    private var drainIdleObserver: (@Sendable () -> Void)?
     private var startedCount = 0
     private var finishedCount = 0
     private var latestOutcome: JobDrainOutcome?
@@ -157,6 +158,14 @@ public final class JobRunnerService: @unchecked Sendable {
             return
         }
         idleWaiters.append(completion)
+        stateLock.unlock()
+    }
+
+    /// Sets the one observer called after a drain's final event when no further drain follows at once, whoever
+    /// started the drain. `nil` removes it. It is called on an arbitrary thread and must not block.
+    public func setDrainIdleObserver(_ observer: (@Sendable () -> Void)?) {
+        stateLock.lock()
+        drainIdleObserver = observer
         stateLock.unlock()
     }
 
@@ -304,12 +313,14 @@ public final class JobRunnerService: @unchecked Sendable {
         }
         let waiters = idleWaiters
         idleWaiters = []
+        let observer = rerun ? nil : drainIdleObserver
         stateLock.unlock()
 
         waiters.forEach { $0() }
         if rerun {
             requestDrain()
         }
+        observer?()
         return true
     }
 

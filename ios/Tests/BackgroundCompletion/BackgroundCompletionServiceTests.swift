@@ -185,4 +185,41 @@ final class BackgroundCompletionServiceTests: XCTestCase {
         await makeService(withAlert: false).appBecameActive()
         XCTAssertEqual(alert.disarmCount, 1)
     }
+
+    @MainActor func testALaterDrainThatLeavesNothingPendingRemovesTheAlert() async {
+        reader.set(.pending(jobs: 1))
+        let service = makeService()
+        let lease = await startLease(service)
+        drain.finishDrain()
+        _ = await lease.value
+        XCTAssertEqual(alert.disarmCount, 0)
+
+        drain.fireDrainIdle()
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(alert.disarmCount, 0, "work still queued keeps the alert")
+
+        reader.set(.unknown)
+        drain.fireDrainIdle()
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(alert.disarmCount, 0, "an unreadable count keeps the alert")
+
+        reader.set(.none)
+        drain.fireDrainIdle()
+        let didDisarm = await waitUntilTrue { self.alert.disarmCount == 1 }
+        XCTAssertTrue(didDisarm, "nothing queued any more, so the alert no longer tells the truth")
+        withExtendedLifetime(service) {}
+    }
+
+    @MainActor func testADrainEndingInsideALeaseLeavesTheAlertToTheLease() async {
+        let service = makeService()
+        let lease = await startLease(service)
+        reader.set(.none)
+        drain.fireDrainIdle()
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(alert.disarmCount, 0)
+        drain.finishDrain()
+        _ = await lease.value
+        XCTAssertEqual(alert.disarmCount, 1)
+        withExtendedLifetime(service) {}
+    }
 }
