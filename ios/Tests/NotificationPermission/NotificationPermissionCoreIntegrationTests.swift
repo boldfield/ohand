@@ -374,6 +374,40 @@ final class NotificationPermissionCoreIntegrationTests: XCTestCase {
         XCTAssertEqual(rig.center.pendingIdentifiers.count, 60)
     }
 
+    func testPendingRequestsTheCoreCannotNameStillHoldTheirSlotsAndAreNeverCancelled() throws {
+        let seeded = reminders(count: 60)
+        try prepareStore(seeded)
+        let prompts = promptCandidates(count: 2)
+        let rig = try makeRig(authorization: .authorized, prompts: prompts)
+        defer { finish(rig) }
+        // Five identifiers one byte over the core's bound and an empty one exhaust the four-slot headroom on their
+        // own; a short foreign request already named like the first stand-in must not collapse into it.
+        let overlong = (0..<5).map { index in String(index) + String(repeating: "x", count: 128) }
+        let foreign = overlong + ["", ReminderNativeEffects.unattributablePrefix + "0"]
+        for identifier in foreign {
+            rig.center.installForeignRequest(identifier: identifier, dueInstant: Date().addingTimeInterval(7200))
+        }
+        XCTAssertEqual(rig.center.pendingIdentifiers.count, 7)
+        let reconciler = rig.reconciler
+
+        let report = try runAsync(timeout: 90) { try await reconciler.refresh(trigger: .launch) }
+
+        XCTAssertEqual(report.readiness.scheduledCount, 53, "each of the seven foreign requests holds a usable slot")
+        XCTAssertEqual(report.readiness.reminders.filter { $0.outlook == .unscheduled(.capacityExceeded) }.count, 7)
+        XCTAssertEqual(report.promptsGranted, 0)
+        XCTAssertEqual(report.promptsDeferred, 2)
+        XCTAssertTrue(rig.center.removedIdentifiers.isEmpty, "no foreign request is cancelled")
+        XCTAssertEqual(rig.center.pendingIdentifiers.count, 60, "the pending set stays within the usable budget")
+        XCTAssertTrue(Set(foreign).isSubset(of: Set(rig.center.pendingIdentifiers)))
+        XCTAssertEqual(rig.center.addedRequests.count, 53)
+
+        let repeated = try runAsync(timeout: 90) { try await reconciler.refresh(trigger: .foreground) }
+        XCTAssertEqual(repeated.readiness.scheduledCount, 53)
+        XCTAssertTrue(rig.center.removedIdentifiers.isEmpty, "a repeated foreground cancels nothing")
+        XCTAssertEqual(rig.center.addedRequests.count, 53, "and installs nothing twice")
+        XCTAssertEqual(rig.center.pendingIdentifiers.count, 60)
+    }
+
     func testOptionalPromptsUseTheRemainingSlotsWhenPermissionIsUsable() throws {
         let seeded = reminders(count: 4)
         try prepareStore(seeded)

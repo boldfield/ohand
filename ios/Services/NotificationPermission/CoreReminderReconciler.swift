@@ -190,11 +190,9 @@ public final class CoreReminderReconciler: ReminderReconciling, @unchecked Senda
                 try await effects.cancel(notificationID)
                 return .done
             case .listPending:
-                let pending = try await effects.pending()
-                return .pending(pending.compactMap { request -> PendingNotificationAnswer? in
-                    let size = request.identifier.utf8.count
-                    guard size > 0, size <= ReminderNativeEffects.maximumIdentifierBytes else { return nil }
-                    return PendingNotificationAnswer(
+                let pending = ReminderNativeEffects.carried(try await effects.pending())
+                return .pending(pending.map { request in
+                    PendingNotificationAnswer(
                         notificationID: request.identifier, fireAt: request.dueInstant.map { formatter.string(from: $0) })
                 })
             case .abandon:

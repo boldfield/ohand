@@ -237,4 +237,20 @@ final class NotificationPermissionReconcilerTests: XCTestCase {
             stored.append(report)
         }
     }
+
+    func testPendingRequestsTheCoreCannotNameAreCarriedUnderUniqueStandIns() {
+        let prefix = ReminderNativeEffects.unattributablePrefix
+        let overlong = String(repeating: "y", count: ReminderNativeEffects.maximumIdentifierBytes + 1)
+        let due = Date(timeIntervalSince1970: 4_000_000_000)
+        let requests = [overlong, "kept", "", prefix + "0", overlong + "z"].map {
+            NotificationCenterPendingRequest(identifier: $0, dueInstant: due, userInfo: [:])
+        }
+
+        let carried = ReminderNativeEffects.carried(requests)
+
+        XCTAssertEqual(carried.map(\.identifier), [prefix + "1", "kept", prefix + "2", prefix + "0", prefix + "3"])
+        XCTAssertEqual(Set(carried.map(\.identifier)).count, requests.count, "one distinct entry per OS request")
+        XCTAssertTrue(carried.allSatisfy { $0.dueInstant == due })
+        XCTAssertFalse(carried.contains { $0.identifier.contains("#") }, "no stand-in reads as a reminder identifier")
+    }
 }
