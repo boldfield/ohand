@@ -150,7 +150,6 @@ final class AudioRetentionCoreIntegrationTests: XCTestCase {
         let stall: TimeInterval = 4.5
         let writerStatus = RecordedValues<Int32>()
         let fileWasThereAtCommit = RecordedValues<Bool>()
-        let writerDone = DispatchSemaphore(value: 0)
         let effectEnded = RecordedValues<Date>()
         let committedAt = RecordedValues<Date>()
         let service = world.makeService(
@@ -162,14 +161,17 @@ final class AudioRetentionCoreIntegrationTests: XCTestCase {
                     committedAt.append(Date())
                     fileWasThereAtCommit.append(world.audioExists(expired.fileName))
                     writerStatus.append(status)
-                    writerDone.signal()
                 }
                 Thread.sleep(forTimeInterval: stall)
                 effectEnded.append(Date())
             }))
 
         let report = await service.sweep()
-        XCTAssertEqual(writerDone.wait(timeout: .now() + 20), .success, "the writer finishes once the fence is released")
+        // Polled without blocking, so the test never waits on the lower-priority writer thread.
+        let deadline = Date().addingTimeInterval(20)
+        while writerStatus.all.isEmpty && Date() < deadline {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
         XCTAssertEqual(writerStatus.all, [SQLITE_OK], "the writer was delayed, not refused")
         XCTAssertEqual(fileWasThereAtCommit.all, [false], "the protecting write committed only after the file was gone")
         let ended = try XCTUnwrap(effectEnded.all.first)
