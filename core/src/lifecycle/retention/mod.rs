@@ -27,10 +27,13 @@
 //!   the item `audio_pending`, and a `transcribed` item whose transcript record is missing,
 //!   inconsistent, blank or attached to a different audio reference. A transcript produced from
 //!   another audio identity is not a recoverable source for this recording.
-//! * "Text exists" follows the item's current text: the latest text correction. Clearing a
-//!   correction to empty makes audio with no transcript a sole source again (and retry is
-//!   offered). Once a transcript is attached, the transcript stays recoverable, so clearing a
-//!   correction does not keep the audio from expiring.
+//! * "Text exists" follows the item's current text with the domain projection's precedence: the
+//!   latest text correction when one exists, else the captured text. A correction supersedes
+//!   captured text even when it clears the text, so clearing a correction (over a failed
+//!   transcription or over typed text captured beside the audio) makes audio with no usable
+//!   transcript a sole source again, and retry is offered. Once a transcript is attached, the
+//!   transcript stays recoverable in its own right, so clearing a correction does not keep the
+//!   audio from expiring.
 //! * Deleted items are not assessed: their audio removal is deletion work owned by
 //!   `lifecycle::delete_intent`.
 
@@ -152,7 +155,8 @@ pub struct AudioRetentionAssessment {
     pub item_id: String,
     pub audio_reference: String,
     pub state: RetentionState,
-    /// True when no captured text, user text correction or usable transcript exists.
+    /// True when the item's current written text (latest text correction, else captured text) is
+    /// blank and no usable transcript exists.
     pub sole_source: bool,
     pub options: Vec<RetentionOption>,
     pub cleanup: CleanupIntent,
@@ -187,8 +191,9 @@ struct AudioItemRow {
     lifecycle_state: String,
     transcription_state: String,
     audio_reference: String,
-    capture_text_present: bool,
-    user_text_present: bool,
+    /// The item's current written text, outside any transcript, holds more than whitespace.
+    /// See [`written_text_present`].
+    written_text_present: bool,
     transcription_in_flight: bool,
     transcript_audio_reference: Option<String>,
     transcript_text_present: bool,
@@ -203,9 +208,22 @@ fn text_present(text: Option<&str>) -> bool {
     text.is_some_and(|value| !value.trim().is_empty())
 }
 
+/// Whether the item's current written text holds anything, following the domain projection's
+/// precedence for text outside a transcript: the latest text correction when one exists, else
+/// the captured text. A correction supersedes captured text even when it clears it, so a
+/// cleared correction over a typed note counts as no text. `text_correction` is `None` only when
+/// no text correction exists (`corrections.new_value` is NOT NULL).
+fn written_text_present(capture_text: Option<&str>, text_correction: Option<&str>) -> bool {
+    match text_correction {
+        Some(correction) => text_present(Some(correction)),
+        None => text_present(capture_text),
+    }
+}
+
 /// Text, transcript and in-flight flags read current state: user text is the item's latest text
-/// correction (the same one the domain projection resolves), not any correction ever made. Raw
-/// text values are selected so that blankness is classified by [`text_present`].
+/// correction (the same one the domain projection resolves), not any correction ever made, and
+/// it supersedes the captured text whenever it exists. Raw text values are selected so that
+/// blankness and precedence are decided by [`written_text_present`].
 fn audio_item_select() -> String {
     format!(
         "SELECT items.item_id, items.lifecycle_state,
@@ -229,15 +247,17 @@ fn audio_item_select() -> String {
 
 fn audio_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AudioItemRow> {
     let capture_text: Option<String> = row.get(4)?;
-    let user_text: Option<String> = row.get(5)?;
+    let text_correction: Option<String> = row.get(5)?;
     let transcript_text: Option<String> = row.get(8)?;
     Ok(AudioItemRow {
         item_id: row.get(0)?,
         lifecycle_state: row.get(1)?,
         transcription_state: row.get(2)?,
         audio_reference: row.get(3)?,
-        capture_text_present: text_present(capture_text.as_deref()),
-        user_text_present: text_present(user_text.as_deref()),
+        written_text_present: written_text_present(
+            capture_text.as_deref(),
+            text_correction.as_deref(),
+        ),
         transcription_in_flight: row.get(6)?,
         transcript_audio_reference: row.get(7)?,
         transcript_text_present: text_present(transcript_text.as_deref()),
@@ -353,7 +373,7 @@ fn assess_row(
     let transcript_recoverable = transcription_state == TranscriptionState::Transcribed
         && row.transcript_audio_reference.as_deref() == Some(row.audio_reference.as_str())
         && row.transcript_text_present;
-    let text_present = row.capture_text_present || row.user_text_present || transcript_recoverable;
+    let text_present = row.written_text_present || transcript_recoverable;
 
     let state = match retention_clock(row, transcription_state, text_present) {
         RetentionClock::Unresolved(reason) => RetentionState::Unresolved { reason },

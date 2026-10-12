@@ -568,6 +568,80 @@ fn captured_text_beside_audio_starts_no_clock() {
 }
 
 #[test]
+fn a_text_correction_clearing_captured_text_returns_the_audio_to_sole_source() {
+    // Captured text beside audio marks transcription not applicable. The latest text correction
+    // supersedes the captured text (the domain projection's precedence), so once the user clears
+    // it, to empty or to Unicode whitespace, no text exists and the audio is a sole source that
+    // keeps explicit retry and delete options and is never freed under storage pressure.
+    for cleared in ["", " \t\n", "\u{00A0}", "\u{3000}\u{2003}\u{2009}"] {
+        let store = Store::new();
+        let item_id = store.import(FIRST_CAPTURE_ID, Some(FIRST_AUDIO), Some("typed note"));
+        store.correct_text(&item_id, 0, Some("typed note"), "typed note, revised");
+        let revised = store
+            .assess(&item_id, captured_at(), StoragePressure::Low)
+            .unwrap();
+        assert!(!revised.sole_source, "a nonblank correction is text");
+        assert_eq!(revised.options, vec![RetentionOption::DeleteAudio]);
+
+        store.correct_text(&item_id, 1, Some("typed note, revised"), cleared);
+        let assessment = store
+            .assess(
+                &item_id,
+                captured_at() + Duration::days(400),
+                StoragePressure::Low,
+            )
+            .unwrap();
+        assert!(assessment.sole_source, "cleared to {cleared:?}");
+        assert_eq!(
+            assessment.state,
+            unresolved(UnresolvedReason::TranscriptRecordInconsistent),
+            "cleared to {cleared:?}"
+        );
+        assert_eq!(
+            assessment.options,
+            vec![
+                RetentionOption::RetryTranscription,
+                RetentionOption::DeleteAudio
+            ],
+            "cleared to {cleared:?}"
+        );
+        assert_eq!(assessment.cleanup, CleanupIntent::None);
+        assert_eq!(
+            assessment.storage_pressure_notice,
+            Some(StoragePressureNotice::SoleSourceRetained),
+            "cleared to {cleared:?}"
+        );
+        assert_eq!(
+            authorize_audio_removal(
+                store.open().conn(),
+                &FixedClock(captured_at() + Duration::days(400)),
+                &RetentionPolicy::default(),
+                &item_id,
+                FIRST_AUDIO,
+            )
+            .unwrap(),
+            RemovalDecision::Denied(RemovalDenial::Unresolved {
+                reason: UnresolvedReason::TranscriptRecordInconsistent
+            }),
+            "cleared to {cleared:?}"
+        );
+
+        // Restoring text through a later correction makes it text again; the captured text was
+        // never consulted once a correction existed.
+        store.correct_text(&item_id, 2, Some(cleared), "typed note again");
+        let restored = store
+            .assess(&item_id, captured_at(), StoragePressure::Low)
+            .unwrap();
+        assert!(!restored.sole_source, "restored after {cleared:?}");
+        assert_eq!(restored.options, vec![RetentionOption::DeleteAudio]);
+        assert_eq!(
+            restored.storage_pressure_notice,
+            Some(StoragePressureNotice::NotYetEligible)
+        );
+    }
+}
+
+#[test]
 fn blank_captured_text_beside_audio_is_not_text() {
     // Ingress accepts whitespace-only captured text and, seeing text, marks transcription not
     // applicable without queuing any. Retention does not count that text: the audio is a sole
