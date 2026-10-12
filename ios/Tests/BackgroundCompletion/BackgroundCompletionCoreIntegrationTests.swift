@@ -179,7 +179,7 @@ final class BackgroundCompletionCoreIntegrationTests: ProviderTransportTestCase 
         let server = try makeServer()
         let storePath = try makeStore()
         let session = try open(storePath, sender: FixtureRoutingSender(underlying: transport, fixtureServer: server))
-        let completion = try session.makeCompletion()
+        let completion = try session.makeCompletion(maximumWindow: 90)
 
         session.service.suspend()
         let outcome = await completion.completeAfterCapture()
