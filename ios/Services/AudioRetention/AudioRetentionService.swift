@@ -111,8 +111,13 @@ actor AudioRetentionService {
                 continue
             }
             // The core keeps offering audio it already approved, so finished removals must not use up the limit.
-            if isRecordedRemoved(itemID: item.itemID, audioReference: audioReference) {
-                reports.append(AudioRetentionItemReport(item: item, removal: .alreadyRemoved))
+            do {
+                if try isRecordedRemoved(itemID: item.itemID, audioReference: audioReference) {
+                    reports.append(AudioRetentionItemReport(item: item, removal: .alreadyRemoved))
+                    continue
+                }
+            } catch {
+                reports.append(AudioRetentionItemReport(item: item, removal: .retryLater(.ledgerUnavailable)))
                 continue
             }
             guard attempted < maximumRemovalsPerSweep else {
@@ -137,10 +142,10 @@ actor AudioRetentionService {
 
     // MARK: Removal
 
-    /// True only when the ledger holds the completion and the file is verified absent. Any doubt is "no", and the
-    /// ordinary flow asks the core again.
-    private func isRecordedRemoved(itemID: String, audioReference: String) -> Bool {
-        guard let recorded = try? ledger.entry(itemID: itemID, audioReference: audioReference),
+    /// True only when the ledger holds the completion and the file is verified absent. Throws when the ledger cannot be
+    /// read, which is "unknown", not "not removed".
+    private func isRecordedRemoved(itemID: String, audioReference: String) throws -> Bool {
+        guard let recorded = try ledger.entry(itemID: itemID, audioReference: audioReference),
               recorded.state == .removed,
               let url = staging.finalizedAudioURL(forReference: audioReference) else { return false }
         return !fileSystem.fileExists(at: url)
