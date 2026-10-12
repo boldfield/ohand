@@ -338,6 +338,10 @@ fn release(handle: OhandCoreHandle, lease_id: u64) -> Outcome {
     consume(ohand_core_release_audio_removal(handle, lease_id))
 }
 
+fn pin(handle: OhandCoreHandle, lease_id: u64) -> Outcome {
+    consume(ohand_core_pin_audio_removal(handle, lease_id))
+}
+
 fn begin(session: &mut Session, item_id: &str, reference: &str) -> Value {
     session.succeed(&json!({
         "command": "begin_removal", "item_id": item_id, "audio_reference": reference,
@@ -453,6 +457,115 @@ fn a_write_that_would_protect_approved_audio_waits_for_the_effect_to_finish() {
 }
 
 #[test]
+fn a_pinned_lease_cannot_expire_while_the_effect_runs() {
+    let _guard = serial();
+    let (directory, path, items) = store("pinned");
+    let database = Database::open(&path, Arc::new(SystemClock)).unwrap();
+    let duration = std::time::Duration::from_millis(300);
+
+    let begun = lease::begin(
+        std::path::Path::new(&path),
+        9,
+        &SystemClock,
+        &RetentionPolicy::default(),
+        &items.expired,
+        EXPIRED_AUDIO,
+        duration,
+    )
+    .unwrap();
+    let lease_id = begun.lease_id.expect("an approved removal is leased");
+    lease::pin(9, lease_id).unwrap();
+    let effect_started = std::time::Instant::now();
+
+    // A protecting writer on another connection races the effect, which stalls well past the
+    // lease's duration. The expiry must not roll back under the effect, so the writer cannot
+    // commit until the effect has finished and the lease is released.
+    let (finished_sender, finished) = std::sync::mpsc::channel();
+    let writer_path = path.clone();
+    let writer_item = items.expired.clone();
+    let writer = std::thread::spawn(move || {
+        let connection = raw_connection(&writer_path, std::time::Duration::from_secs(10));
+        let result = protect(&connection, &writer_item);
+        finished_sender.send(std::time::Instant::now()).unwrap();
+        result.unwrap()
+    });
+    assert!(
+        finished.recv_timeout(duration * 4).is_err(),
+        "the protecting write must wait for the stalled effect, past the lease's duration"
+    );
+    assert!(effect_started.elapsed() > duration * 2);
+    assert_eq!(lease::live_leases(), 1, "a pinned lease does not expire");
+
+    let effect_finished_at = std::time::Instant::now();
+    lease::release(9, lease_id).expect("a pinned lease was held without a gap");
+    let committed_at = finished.recv_timeout(WAIT).expect("the write commits");
+    assert!(committed_at >= effect_finished_at);
+    assert_eq!(writer.join().unwrap(), 1);
+    assert_eq!(lease::live_leases(), 0);
+    drop(database);
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn a_pinned_lease_is_released_even_after_its_handle_is_closed() {
+    let _guard = serial();
+    let (directory, path, items) = store("closed");
+    let mut session = Session::over(open_file(&path));
+    let handle = session.handle;
+
+    let granted = begin(&mut session, &items.expired, EXPIRED_AUDIO);
+    let lease_id = granted["lease_id"].as_u64().unwrap();
+    assert_eq!(pin(handle, lease_id).status, OHAND_CORE_STATUS_OK);
+    assert_eq!(
+        pin(handle, lease_id).status,
+        OHAND_CORE_STATUS_OK,
+        "idempotent"
+    );
+    session.close();
+
+    let other = raw_connection(&path, std::time::Duration::from_millis(50));
+    assert!(is_busy(&protect(&other, &items.expired)), "still pinned");
+    assert_eq!(release(handle, lease_id).status, OHAND_CORE_STATUS_OK);
+    assert_eq!(protect(&other, &items.expired).unwrap(), 1);
+    assert_eq!(release(handle, lease_id).code(), "invalid_handle");
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn concurrent_begins_never_exceed_the_live_lease_limit() {
+    let _guard = serial();
+    let (directory, path, items) = store("limit");
+    let database = Database::open(&path, Arc::new(SystemClock)).unwrap();
+
+    // Leases are taken one at a time (each holds the write lock), but every begin checks and
+    // reserves its slot in one step, so simultaneous begins cannot overshoot the limit.
+    let begins: Vec<_> = (0..24)
+        .map(|_| {
+            let path = path.clone();
+            let item = items.expired.clone();
+            std::thread::spawn(move || {
+                let begun = lease::begin(
+                    std::path::Path::new(&path),
+                    11,
+                    &SystemClock,
+                    &RetentionPolicy::default(),
+                    &item,
+                    EXPIRED_AUDIO,
+                    std::time::Duration::from_millis(20),
+                );
+                (lease::live_leases(), begun.map(|begun| begun.lease_id))
+            })
+        })
+        .collect();
+    for begin in begins {
+        let (live, _) = begin.join().unwrap();
+        assert!(live <= 8);
+    }
+    drop(database);
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
 fn a_denied_removal_holds_no_lock_and_no_lease() {
     let _guard = serial();
     let (directory, path, items) = store("denied");
@@ -518,6 +631,8 @@ fn a_lease_that_is_not_released_expires_and_frees_the_store() {
     let waiting = raw_connection(&path, std::time::Duration::from_secs(5));
     assert_eq!(protect(&waiting, &items.expired).unwrap(), 1);
     assert_eq!(lease::live_leases(), 0);
+    // Too late to start the effect: the pin is refused, so the effect never runs unfenced.
+    assert_eq!(lease::pin(7, lease_id).unwrap_err().code, "lease_expired");
     let late = lease::release(7, lease_id).unwrap_err();
     assert_eq!(late.code, "lease_expired");
     assert_eq!(late.status(), OHAND_CORE_STATUS_TRANSIENT);
@@ -538,6 +653,8 @@ fn only_the_handle_that_holds_a_lease_can_release_it() {
 
     let foreign = release(other_handle, lease_id);
     assert_eq!(foreign.code(), "invalid_request");
+    assert_eq!(pin(other_handle, lease_id).code(), "invalid_request");
+    assert_eq!(pin(0, lease_id).code(), "invalid_handle");
     assert!(is_busy(&protect(&other, &items.expired)), "still held");
     assert_eq!(release(0, lease_id).code(), "invalid_handle");
     assert_eq!(

@@ -150,6 +150,23 @@ final class AudioRetentionServiceTests: XCTestCase {
 
     // MARK: Authority stays with the core
 
+    func testALeaseThatExpiresBeforeTheEffectRemovesNothingAndConvergesOnTheNextSweep() async throws {
+        try expire("item-1", audio: "a.m4a")
+        core.expireLeaseBeforeEffect(of: "a.m4a")
+        let service = makeService()
+
+        let expired = await service.sweep()
+        XCTAssertTrue(storage.audioExists("a.m4a"), "no effect runs without a pinned fence")
+        XCTAssertEqual(outcome(expired, "item-1"), .retryLater(.coreUnavailable))
+        XCTAssertFalse(expired.converged)
+        XCTAssertEqual(try storage.ledgerEntries(), [])
+
+        let next = await service.sweep()
+        XCTAssertEqual(outcome(next, "item-1"), .removed)
+        XCTAssertFalse(storage.audioExists("a.m4a"))
+        XCTAssertTrue(next.converged)
+    }
+
     func testALapsedLeaseAfterTheFileWentIsNotRecordedAndConvergesOnTheNextSweep() async throws {
         try expire("item-1", audio: "a.m4a")
         core.lapseLease(of: "a.m4a")

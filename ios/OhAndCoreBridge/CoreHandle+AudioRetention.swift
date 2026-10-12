@@ -9,7 +9,8 @@ public enum CoreRetentionPressure: String, Equatable, Sendable {
 
 /// One audio-retention request. `sweep` and `authorizeRemoval` only read. `beginRemoval` decides inside a store-wide
 /// fence and, when it approves, keeps the store's write lock held (a lease) while native code removes the one approved
-/// file; `releaseAudioRemoval` ends the lease. Nothing can commit between the approval and the removal.
+/// file. `pinAudioRemoval`, called just before the removal, stops the lease from expiring during it, and
+/// `releaseAudioRemoval` ends the lease. Nothing can commit between the approval and the end of the removal.
 public enum AudioRetentionCommand: Equatable, Sendable {
     /// `periodSeconds` 0 selects the core's default retention period.
     case sweep(pressure: CoreRetentionPressure, periodSeconds: UInt64)
@@ -105,7 +106,7 @@ public struct CoreRetentionSweepAnswer: Decodable, Equatable, Sendable {
 
 /// The answer to `authorizeRemoval` and `beginRemoval`. `decision` is `approved` or `denied`; a denial carries its
 /// `reason`. An approved `beginRemoval` also carries the lease that keeps the store's write lock held: `leaseID` and
-/// the milliseconds `leaseMillis` it lasts at most.
+/// the milliseconds `leaseMillis` it lasts at most unless it is pinned.
 public struct CoreRetentionDecisionAnswer: Decodable, Equatable, Sendable {
     public let decision: String
     public let expiredAt: String?
@@ -135,6 +136,13 @@ extension CoreHandle {
             ohand_core_start_audio_retention(handleIdentifier, operationID, buffer.baseAddress, buffer.count)
         }
         _ = try consumeCoreResult(rawResult)
+    }
+
+    /// Pins a removal lease granted by `beginRemoval` immediately before the file effect: from then on it cannot expire and
+    /// only `releaseAudioRemoval` ends it, so the fence cannot lapse while the effect runs. Throws `lease_expired` when the
+    /// lease is no longer held, in which case the effect must not run. Not queued, like the release.
+    public func pinAudioRemoval(leaseIdentifier: UInt64) throws {
+        _ = try consumeCoreResult(ohand_core_pin_audio_removal(handleIdentifier, leaseIdentifier))
     }
 
     /// Ends a removal lease granted by `beginRemoval`, once the file effect is done. Not queued behind the worker, which

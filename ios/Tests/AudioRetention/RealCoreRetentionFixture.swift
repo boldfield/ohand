@@ -107,13 +107,14 @@ final class RealCoreRetentionWorld {
         XCTAssertNoThrow(try execute("UPDATE items SET lifecycle_state = 'deleted' WHERE item_id = '\(itemID)'"))
     }
 
-    /// The write that makes the item's audio protected, attempted on a second connection that waits only briefly. Returns
-    /// the raw SQLite status, so a test can tell "blocked by the store-wide fence" from "done".
-    func tryMarkDeleted(itemID: String) -> Int32 {
+    /// The write that makes the item's audio protected, attempted on a second connection that waits at most
+    /// `busyMillis` for the store's write lock. Returns the raw SQLite status, so a test can tell "blocked by the
+    /// store-wide fence" from "done".
+    func tryMarkDeleted(itemID: String, busyMillis: Int32 = 100) -> Int32 {
         var database: OpaquePointer?
         guard sqlite3_open(databasePath, &database) == SQLITE_OK else { return SQLITE_CANTOPEN }
         defer { sqlite3_close(database) }
-        sqlite3_busy_timeout(database, 100)
+        sqlite3_busy_timeout(database, busyMillis)
         return sqlite3_exec(
             database, "UPDATE items SET lifecycle_state = 'deleted' WHERE item_id = '\(itemID)'", nil, nil, nil)
     }

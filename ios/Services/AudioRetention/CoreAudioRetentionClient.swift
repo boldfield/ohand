@@ -14,8 +14,6 @@ public final class CoreAudioRetentionClient: AudioRetentionCore, @unchecked Send
 
     static let shutDownFailure = CoreFailure(
         errorClass: .cancelled, code: "client_shut_down", message: "the audio retention client was shut down")
-    static let leaseTooOld = CoreFailure(
-        errorClass: .transient, code: "lease_expired", message: "the removal lease was too old to use")
     static let unreadableAnswer = CoreFailure(
         errorClass: .permanent, code: "unreadable_event", message: "the core answer could not be read")
 
@@ -48,34 +46,25 @@ public final class CoreAudioRetentionClient: AudioRetentionCore, @unchecked Send
     public func removeAudio(
         itemID: String, audioReference: String, periodSeconds: UInt64, effect: () -> AudioRemovalEffect
     ) async throws -> AudioRemovalResult {
-        // Taken before asking, so the lease is never assumed younger than it is.
-        let askedAt = Self.uptime()
         let answer = try await ask(
             .beginRemoval(itemID: itemID, audioReference: audioReference, periodSeconds: periodSeconds),
             as: CoreRetentionDecisionAnswer.self)
         if case .denied(let denial) = try Self.decision(from: answer) { return .denied(denial) }
-        guard let leaseID = answer.leaseID, let leaseMillis = answer.leaseMillis, leaseMillis > 0 else {
-            throw Self.unreadableAnswer
-        }
+        guard let leaseID = answer.leaseID else { throw Self.unreadableAnswer }
 
-        var performed: AudioRemovalEffect?
-        if Self.leaseAllowsEffect(elapsed: Self.uptime() - askedAt, leaseMillis: leaseMillis) {
+        // Pinned first: from then on the lease cannot expire, so the fence stays up for the whole effect however long it
+        // takes, and only the release below ends it. A lease that expired before the pin is refused and nothing runs.
+        let performed: AudioRemovalEffect
+        do {
+            try core.pinAudioRemoval(leaseIdentifier: leaseID)
             performed = effect()
+        } catch {
+            try? core.releaseAudioRemoval(leaseIdentifier: leaseID)
+            throw error
         }
-        // The fence is always ended, and a lease that lapsed first is reported rather than ignored.
+        // A release that cannot vouch for the fence is reported rather than ignored.
         try core.releaseAudioRemoval(leaseIdentifier: leaseID)
-        guard let performed else { throw Self.leaseTooOld }
         return .approved(performed)
-    }
-
-    /// The effect may start only in the first half of the lease, which leaves the rest as margin for the effect itself
-    /// and for scheduling delays between this check and the removal.
-    static func leaseAllowsEffect(elapsed: TimeInterval, leaseMillis: UInt64) -> Bool {
-        elapsed >= 0 && elapsed < Double(leaseMillis) / 2_000
-    }
-
-    private static func uptime() -> TimeInterval {
-        ProcessInfo.processInfo.systemUptime
     }
 
     // MARK: Answer mapping

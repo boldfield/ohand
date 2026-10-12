@@ -142,12 +142,45 @@ final class AudioRetentionCoreIntegrationTests: XCTestCase {
         session.close()
     }
 
-    func testTheEffectStartsOnlyInTheFirstHalfOfTheLease() {
-        XCTAssertTrue(CoreAudioRetentionClient.leaseAllowsEffect(elapsed: 0, leaseMillis: 3_000))
-        XCTAssertTrue(CoreAudioRetentionClient.leaseAllowsEffect(elapsed: 1.4, leaseMillis: 3_000))
-        XCTAssertFalse(CoreAudioRetentionClient.leaseAllowsEffect(elapsed: 1.5, leaseMillis: 3_000))
-        XCTAssertFalse(CoreAudioRetentionClient.leaseAllowsEffect(elapsed: 4, leaseMillis: 3_000))
-        XCTAssertFalse(CoreAudioRetentionClient.leaseAllowsEffect(elapsed: -1, leaseMillis: 3_000))
+    func testAnEffectThatStallsPastTheLeaseStillHoldsOffAProtectingWrite() async throws {
+        let world = try makeWorld()
+        let expired = try await world.seedVoice(captureID: "cap-expired", transcribedDaysAgo: 10)
+        let session = try world.openCore()
+        // Longer than the core's 3 second lease: an unpinned lease would expire and let the writer commit mid-effect.
+        let stall: TimeInterval = 4.5
+        let writerStatus = RecordedValues<Int32>()
+        let fileWasThereAtCommit = RecordedValues<Bool>()
+        let writerDone = DispatchSemaphore(value: 0)
+        let effectEnded = RecordedValues<Date>()
+        let committedAt = RecordedValues<Date>()
+        let service = world.makeService(
+            on: session,
+            core: HookedRetentionCore(wrapped: session.client, duringRemoval: { itemID in
+                // A protecting write races the effect from a second connection, waiting longer than the stall.
+                Thread.detachNewThread {
+                    let status = world.tryMarkDeleted(itemID: itemID, busyMillis: 15_000)
+                    committedAt.append(Date())
+                    fileWasThereAtCommit.append(world.audioExists(expired.fileName))
+                    writerStatus.append(status)
+                    writerDone.signal()
+                }
+                Thread.sleep(forTimeInterval: stall)
+                effectEnded.append(Date())
+            }))
+
+        let report = await service.sweep()
+        XCTAssertEqual(writerDone.wait(timeout: .now() + 20), .success, "the writer finishes once the fence is released")
+        XCTAssertEqual(writerStatus.all, [SQLITE_OK], "the writer was delayed, not refused")
+        XCTAssertEqual(fileWasThereAtCommit.all, [false], "the protecting write committed only after the file was gone")
+        let ended = try XCTUnwrap(effectEnded.all.first)
+        let committed = try XCTUnwrap(committedAt.all.first)
+        XCTAssertGreaterThanOrEqual(committed, ended, "the lease could not expire while the effect ran")
+        XCTAssertEqual(outcome(report, expired.itemID), .removed, "the fence was held for the whole effect")
+        XCTAssertTrue(report.converged)
+
+        let later = await world.makeService(on: session).sweep()
+        XCTAssertNil(outcome(later, expired.itemID), "the item is deleted now; its audio is deletion's")
+        session.close()
     }
 
     func testInterruptionBeforeRemovalConvergesAfterReopeningTheCore() async throws {

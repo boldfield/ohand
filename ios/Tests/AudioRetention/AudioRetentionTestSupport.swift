@@ -5,6 +5,10 @@ import Foundation
 struct RetentionFixtureError: Error {}
 
 enum RetentionFixtures {
+    /// What the core answers when a removal lease is no longer held.
+    static let leaseExpired = CoreFailure(
+        errorClass: .transient, code: "lease_expired", message: "the removal lease is not held")
+
     static func audioReference(_ fileName: String) -> String {
         IngressRecord.audioReference(finalizedFileName: fileName)
     }
@@ -41,6 +45,7 @@ final class ScriptedRetentionCore: AudioRetentionCore, @unchecked Sendable {
     private var failedEffects: Set<String> = []
     private var silentlyKept: Set<String> = []
     private var lapsedLeases: Set<String> = []
+    private var expiredLeases: Set<String> = []
     private(set) var authorizedRequests: [String] = []
     private(set) var removalRequests: [String] = []
     private(set) var removedFileNames: [String] = []
@@ -55,8 +60,10 @@ final class ScriptedRetentionCore: AudioRetentionCore, @unchecked Sendable {
     func interruptRemoval(of fileName: String) { locked { _ = removalFailures.insert(fileName) } }
     /// The next removal of this file is approved but the core reports it could not remove it.
     func failEffect(of fileName: String) { locked { _ = failedEffects.insert(fileName) } }
-    /// The next removal of this file runs its effect, but the core then reports that the fence lapsed before the end.
+    /// The next removal of this file runs its effect, but the core then cannot vouch for the fence when it is released.
     func lapseLease(of fileName: String) { locked { _ = lapsedLeases.insert(fileName) } }
+    /// The next removal of this file is approved, but its lease expires before it can be pinned, so the effect never runs.
+    func expireLeaseBeforeEffect(of fileName: String) { locked { _ = expiredLeases.insert(fileName) } }
     /// Removals of this file are reported as done although the file stays.
     func keepSilently(_ fileName: String) { locked { _ = silentlyKept.insert(fileName) } }
 
@@ -89,9 +96,10 @@ final class ScriptedRetentionCore: AudioRetentionCore, @unchecked Sendable {
             if case .denied(let denial)? = decisions[itemID] { return .denied(denial) }
             if failedEffects.remove(fileName) != nil { return .approved(.failed) }
             if silentlyKept.contains(fileName) { return .approved(.removed) }
+            if expiredLeases.remove(fileName) != nil { throw RetentionFixtures.leaseExpired }
             let performed = effect()
             if performed == .removed { removedFileNames.append(fileName) }
-            if lapsedLeases.remove(fileName) != nil { throw CoreAudioRetentionClient.leaseTooOld }
+            if lapsedLeases.remove(fileName) != nil { throw RetentionFixtures.leaseExpired }
             return .approved(performed)
         }
     }

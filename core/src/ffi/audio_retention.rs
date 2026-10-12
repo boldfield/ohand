@@ -18,7 +18,9 @@
 //!   other writer on any handle, connection or process can commit until the native caller has
 //!   removed the one approved file and ended the lease with `ohand_core_release_audio_removal`
 //!   (which is not queued behind the worker, because the worker may be waiting on that lock), or
-//!   `lease_millis` pass. A denial holds nothing. The file effect is native: the core never opens,
+//!   `lease_millis` pass without the lease being pinned. Native code pins the lease with
+//!   `ohand_core_pin_audio_removal` immediately before the file effect; a pinned lease cannot
+//!   expire, so the fence cannot lapse during the effect. A denial holds nothing. The file effect is native: the core never opens,
 //!   reads or removes an audio file. See [`lease`] for the guarantees and the expiry rule.
 //!
 //! `period_seconds` is the configured retention period; absent or 0 selects the default of seven
@@ -321,19 +323,40 @@ pub unsafe extern "C" fn ohand_core_start_audio_retention(
     })
 }
 
-/// Ends the removal lease `lease_id` that `begin_removal` granted to `handle`, once native code has
-/// carried out (or given up) the file effect. Succeeds only if the store's write lock was held
-/// without a gap until now. An expired or unknown lease fails as transient `lease_expired`: the
-/// fence may have lapsed, so the removal must not be reported as done. Not queued: it runs on the
-/// caller's thread because the worker may be blocked behind the lease's own lock.
+/// Pins the removal lease `lease_id` that `begin_removal` granted to `handle`, immediately before
+/// native code carries out the file effect. Succeeds only while the store's write lock is still
+/// held; from then on the lease cannot expire, and only `ohand_core_release_audio_removal` ends
+/// it, so the fence cannot lapse while the effect runs. An expired or unknown lease fails as
+/// transient `lease_expired` and the effect must not run (the caller still releases). Not queued,
+/// for the same reason as the release.
 #[no_mangle]
-pub extern "C" fn ohand_core_release_audio_removal(
+pub extern "C" fn ohand_core_pin_audio_removal(
     handle: OhandCoreHandle,
     lease_id: u64,
 ) -> OhandCoreResult {
     guarded(|| {
         instance::lookup(handle)?;
-        lease::release(handle, lease_id)
+        lease::pin(handle, lease_id)
+    })
+}
+
+/// Ends the removal lease `lease_id` that `begin_removal` granted to `handle`, once native code has
+/// carried out (or given up) the file effect. Succeeds only if the store's write lock was held
+/// without a gap until now. An expired or unknown lease fails as transient `lease_expired`: the
+/// fence may have lapsed, so the removal must not be reported as done. Not queued: it runs on the
+/// caller's thread because the worker may be blocked behind the lease's own lock. A lease is
+/// released even if its handle has since been closed, because a pinned lease ends only here.
+#[no_mangle]
+pub extern "C" fn ohand_core_release_audio_removal(
+    handle: OhandCoreHandle,
+    lease_id: u64,
+) -> OhandCoreResult {
+    guarded(|| match lease::release(handle, lease_id) {
+        Ok(()) => Ok(()),
+        Err(failure) => {
+            instance::lookup(handle)?;
+            Err(failure)
+        }
     })
 }
 

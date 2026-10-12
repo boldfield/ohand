@@ -40,8 +40,8 @@ struct VolumeStoragePressureProbe: AudioStoragePressureProbing {
 ///   changed;
 /// * after the file is removed but before the ledger write, the file is already absent, the ledger write is made and
 ///   the removal is reported then, never earlier;
-/// * if the core cannot show its fence held until the effect was done (the lease lapsed), the removal is not recorded
-///   and the next sweep decides it again.
+/// * if the lease expired before the effect could be pinned under it, nothing is removed, and if the core cannot vouch
+///   for the fence when it is released, the removal is not recorded; either way the next sweep decides it again.
 ///
 /// A removal is reported as `removed` or `alreadyRemoved` only when the file is verified absent and the ledger holds the
 /// completion.
