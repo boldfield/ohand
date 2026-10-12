@@ -1397,6 +1397,10 @@ fn commit_outcome(
         _ => (previous_generation, ScheduleState::NotScheduled),
     };
 
+    // A new generation is a new native notification: delivery and acknowledgment facts about
+    // the previous one do not carry over to it.
+    let new_notification = request_state == RequestState::Resolved;
+
     if existing.is_none() {
         tx.execute(
             "INSERT INTO reminders
@@ -1426,6 +1430,9 @@ fn commit_outcome(
             "UPDATE reminders SET request_state = ?, schedule_state = ?, resolved_instant = ?,
                 timezone_id = ?, ambiguity_reason = ?, unsupported_reason = ?,
                 unschedulable_reason = ?, source_phrase = ?, schedule_generation = ?,
+                delivery_state = CASE WHEN ? THEN 'unknown' ELSE delivery_state END,
+                acknowledgment_state =
+                    CASE WHEN ? THEN 'not_acknowledged' ELSE acknowledgment_state END,
                 state_version = state_version + 1, updated_at = ?
              WHERE reminder_id = ?",
             rusqlite::params![
@@ -1438,6 +1445,8 @@ fn commit_outcome(
                 &unschedulable_reason,
                 &source_phrase,
                 schedule_generation,
+                new_notification,
+                new_notification,
                 format_instant(now),
                 &reminder_id,
             ],
