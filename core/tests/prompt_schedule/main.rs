@@ -716,16 +716,17 @@ fn a_prompt_cancelled_by_the_reminder_capacity_pass_never_costs_an_earlier_pendi
         ]
     );
 
-    // The reminder side makes room itself and cancels the latest prompt behind the schedule's back.
+    // The reminder side makes room itself, cancels the latest prompt and reports it.
     create_reminder(&mut db, "item-0", "water plants")?;
     create_reminder(&mut db, "item-1", "call the dentist")?;
-    reconcile_with_capacity(
+    let displacement = reconcile_with_capacity(
         &mut db,
         &clock,
         &mut center,
         &policy,
         &schedule.demands(now),
     )?;
+    schedule.record_capacity_pass(&displacement);
     assert_eq!(
         center.prompt_ids(),
         ["prompt:2026-01-16", "prompt:2026-01-17"]
@@ -792,6 +793,7 @@ fn prompts_displaced_entirely_by_the_reminder_pass_return_once_capacity_frees() 
         &schedule.demands(now),
     )?;
     assert_eq!(displacement.prompts_cancelled, NEXT_THREE);
+    schedule.record_capacity_pass(&displacement);
     assert!(center.prompt_ids().is_empty());
 
     // The prompt pass sees all three absent while reminders hold every slot: not deliveries.
@@ -916,6 +918,149 @@ fn a_rollback_under_tight_capacity_gives_the_fired_prompt_slot_to_the_next_in_on
         .filter(|request| request.notification_id == "prompt:2026-01-15")
         .count();
     assert_eq!(installs_of_fired, 0);
+    Ok(())
+}
+
+#[test]
+fn a_fired_prompt_withheld_for_capacity_after_a_rollback_is_not_replayed_when_capacity_frees(
+) -> Result<()> {
+    let mut db = open_db("rollback-withheld")?;
+    let policy = tight_policy();
+    let mut schedule = PromptSchedule::default();
+    schedule.configure(daily(nine_am()), instant("2026-01-15T07:00:00Z"), UTC_ZONE);
+    let mut center = FakeCenter::default();
+    pass_with(
+        &mut db,
+        &mut center,
+        &mut schedule,
+        &policy,
+        "2026-01-15T07:00:00Z",
+    )?;
+    assert!(center.pending.contains_key("prompt:2026-01-15"));
+
+    center.fire_due(instant("2026-01-15T10:00:00Z"));
+    for index in 0..4 {
+        create_reminder(&mut db, &format!("item-{index}"), "water plants")?;
+    }
+    // Rolled back while reminders hold every slot: every prompt is deferred.
+    let rolled_back = instant("2026-01-15T08:00:00Z");
+    schedule.refresh(RefreshTrigger::ClockOrZoneChange, rolled_back, UTC_ZONE);
+    pass_with(
+        &mut db,
+        &mut center,
+        &mut schedule,
+        &policy,
+        "2026-01-15T08:00:00Z",
+    )?;
+    assert!(center.prompt_ids().is_empty());
+
+    for index in 0..4 {
+        cancel_reminder_on(&mut db, &format!("item-{index}"))?;
+    }
+    schedule.refresh(RefreshTrigger::AppOpen, rolled_back, UTC_ZONE);
+    pass_with(
+        &mut db,
+        &mut center,
+        &mut schedule,
+        &policy,
+        "2026-01-15T08:00:00Z",
+    )?;
+
+    assert!(!center.pending.contains_key("prompt:2026-01-15"));
+    assert_eq!(center.prompt_ids(), NEXT_THREE);
+    assert_eq!(fire_instants(&schedule)[0], instant("2026-01-16T09:00:00Z"));
+    let installs_of_fired = center
+        .requests
+        .iter()
+        .filter(|request| request.notification_id == "prompt:2026-01-15")
+        .count();
+    assert_eq!(installs_of_fired, 1);
+    Ok(())
+}
+
+#[test]
+fn a_reported_reminder_pass_after_a_fire_then_a_rollback_does_not_replay_the_fired_prompt(
+) -> Result<()> {
+    let mut db = open_db("rollback-reported")?;
+    let policy = tight_policy();
+    let mut schedule = PromptSchedule::default();
+    schedule.configure(daily(nine_am()), instant("2026-01-15T07:00:00Z"), UTC_ZONE);
+    let mut center = FakeCenter::default();
+    pass_with(
+        &mut db,
+        &mut center,
+        &mut schedule,
+        &policy,
+        "2026-01-15T07:00:00Z",
+    )?;
+    assert_eq!(
+        center.prompt_ids(),
+        [
+            "prompt:2026-01-15",
+            "prompt:2026-01-16",
+            "prompt:2026-01-17"
+        ]
+    );
+
+    // 09:00 fires; at 10:00 the reminder side fills capacity and reports what it cancelled.
+    let after_fire = instant("2026-01-15T10:00:00Z");
+    center.fire_due(after_fire);
+    for index in 0..4 {
+        create_reminder(&mut db, &format!("item-{index}"), "water plants")?;
+    }
+    let displacement = reconcile_with_capacity(
+        &mut db,
+        &clock_at("2026-01-15T10:00:00Z"),
+        &mut center,
+        &policy,
+        &schedule.demands(after_fire),
+    )?;
+    schedule.record_capacity_pass(&displacement);
+    assert_eq!(
+        displacement.prompts_cancelled,
+        ["prompt:2026-01-16", "prompt:2026-01-17"]
+    );
+
+    let rolled_back = instant("2026-01-15T08:00:00Z");
+    schedule.refresh(RefreshTrigger::ClockOrZoneChange, rolled_back, UTC_ZONE);
+    pass_with(
+        &mut db,
+        &mut center,
+        &mut schedule,
+        &policy,
+        "2026-01-15T08:00:00Z",
+    )?;
+    for index in 0..4 {
+        cancel_reminder_on(&mut db, &format!("item-{index}"))?;
+    }
+    pass_with(
+        &mut db,
+        &mut center,
+        &mut schedule,
+        &policy,
+        "2026-01-15T08:00:00Z",
+    )?;
+
+    // The cancelled prompts come back; the fired one does not.
+    assert_eq!(
+        center.prompt_ids(),
+        ["prompt:2026-01-16", "prompt:2026-01-17"]
+    );
+    schedule.refresh(RefreshTrigger::AppOpen, rolled_back, UTC_ZONE);
+    pass_with(
+        &mut db,
+        &mut center,
+        &mut schedule,
+        &policy,
+        "2026-01-15T08:00:00Z",
+    )?;
+    assert_eq!(center.prompt_ids(), NEXT_THREE);
+    let installs_of_fired = center
+        .requests
+        .iter()
+        .filter(|request| request.notification_id == "prompt:2026-01-15")
+        .count();
+    assert_eq!(installs_of_fired, 1);
     Ok(())
 }
 
