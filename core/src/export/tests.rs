@@ -758,23 +758,28 @@ fn a_failed_write_is_reported() {
     assert!(matches!(error, ExportError::Write(_)), "{error:?}");
 }
 
-fn writer_edits(store: &Store, typed_item: &str) {
+fn writer_edits(store: &Store, already_read_item: &str, not_yet_read_item: &str) {
     let mut writer = store.open();
     writer
         .conn()
         .busy_timeout(std::time::Duration::from_millis(0))
         .unwrap();
-    let revision = store.revision(typed_item);
-    let event = Event::new(
-        "late-completion".to_string(),
-        typed_item.to_string(),
-        revision,
-        EventType::Completion,
-        EventPayload::Completion,
-        "2026-10-09T12:00:01Z".to_string(),
-    )
-    .unwrap();
-    save_event(&mut writer, &event, revision).unwrap();
+    for (event_id, item_id) in [
+        ("late-completion-read", already_read_item),
+        ("late-completion-unread", not_yet_read_item),
+    ] {
+        let revision = store.revision(item_id);
+        let event = Event::new(
+            event_id.to_string(),
+            item_id.to_string(),
+            revision,
+            EventType::Completion,
+            EventPayload::Completion,
+            "2026-10-09T12:00:01Z".to_string(),
+        )
+        .unwrap();
+        save_event(&mut writer, &event, revision).unwrap();
+    }
     import_foreground_ingress(
         &mut writer,
         &capture(
@@ -808,7 +813,9 @@ fn concurrent_edits_cannot_split_a_snapshot() {
     let during = read_core_snapshot_observed(&mut database, &both, exported_at(), &mut |read| {
         if read == 1 && !edited {
             edited = true;
-            writer_edits(&seeded.store, &seeded.typed_item);
+            // Items are read oldest first: typed_item is already read at this point and
+            // work_item is not, so a snapshot that is not one transaction would show the latter.
+            writer_edits(&seeded.store, &seeded.typed_item, &seeded.work_item);
         }
     })
     .unwrap();
@@ -823,6 +830,12 @@ fn concurrent_edits_cannot_split_a_snapshot() {
         .find(|item| item.item_id == seeded.typed_item)
         .unwrap();
     assert_eq!(typed.lifecycle_state, "completed");
+    let work = after
+        .items
+        .iter()
+        .find(|item| item.item_id == seeded.work_item)
+        .unwrap();
+    assert_eq!(work.lifecycle_state, "completed");
 }
 
 #[test]
