@@ -814,6 +814,101 @@ fn a_later_time_on_a_day_whose_prompt_already_fired_adds_no_second_prompt() -> R
 }
 
 #[test]
+fn a_time_change_before_the_first_look_after_a_rollback_does_not_replay_the_fired_prompt(
+) -> Result<()> {
+    let mut db = open_db("rollback-then-time-change")?;
+    let mut schedule = PromptSchedule::default();
+    schedule.configure(daily(nine_am()), instant("2026-01-15T07:00:00Z"), UTC_ZONE);
+    let mut center = FakeCenter::default();
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T07:00:00Z")?;
+    assert!(center.pending.contains_key("prompt:2026-01-15"));
+
+    // The 09:00 prompt fires; the clock is moved back to 08:00 and, before any pass looks at
+    // the OS, the user moves the prompt to 11:00. The 15th is re-planned at 11:00 under the same
+    // identifier, so the evidence that the OS held it must survive the change.
+    center.fire_due(instant("2026-01-15T10:00:00Z"));
+    let rolled_back = "2026-01-15T08:00:00Z";
+    let eleven_am = PromptTime::new(11, 0).unwrap();
+    schedule.configure(daily(eleven_am), instant(rolled_back), UTC_ZONE);
+    assert_eq!(fire_instants(&schedule)[0], instant("2026-01-15T11:00:00Z"));
+    pass(&mut db, &mut center, &mut schedule, rolled_back)?;
+
+    assert_eq!(installs_of(&center, "prompt:2026-01-15"), 1);
+    assert!(!center.pending.contains_key("prompt:2026-01-15"));
+    assert_eq!(
+        fire_instants(&schedule),
+        vec![
+            instant("2026-01-16T11:00:00Z"),
+            instant("2026-01-17T11:00:00Z"),
+        ]
+    );
+    // The still-held days moved to the new time under their own identifiers.
+    assert_eq!(
+        center.pending["prompt:2026-01-16"],
+        instant("2026-01-16T11:00:00Z")
+    );
+    assert_eq!(
+        center.pending["prompt:2026-01-17"],
+        instant("2026-01-17T11:00:00Z")
+    );
+
+    // Later looks in the rolled-back clock, including an app open and choosing the original
+    // time again, still never bring the 15th back.
+    schedule.refresh(RefreshTrigger::AppOpen, instant(rolled_back), UTC_ZONE);
+    pass(&mut db, &mut center, &mut schedule, rolled_back)?;
+    schedule.configure(daily(nine_am()), instant(rolled_back), UTC_ZONE);
+    pass(&mut db, &mut center, &mut schedule, rolled_back)?;
+    assert_eq!(installs_of(&center, "prompt:2026-01-15"), 1);
+    assert_eq!(
+        center.prompt_ids(),
+        [
+            "prompt:2026-01-16",
+            "prompt:2026-01-17",
+            "prompt:2026-01-18"
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn an_earlier_time_chosen_in_a_rolled_back_clock_does_not_replay_the_fired_prompt() -> Result<()> {
+    let mut db = open_db("rollback-then-earlier-time")?;
+    let mut schedule = PromptSchedule::default();
+    schedule.configure(daily(nine_am()), instant("2026-01-15T07:00:00Z"), UTC_ZONE);
+    let mut center = FakeCenter::default();
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T07:00:00Z")?;
+
+    // The 09:00 prompt fires; the clock is moved back to 08:00 and the user picks 08:30, still
+    // ahead of the rolled-back clock but before the instant that actually fired.
+    center.fire_due(instant("2026-01-15T10:00:00Z"));
+    let rolled_back = "2026-01-15T08:00:00Z";
+    let half_past_eight = PromptTime::new(8, 30).unwrap();
+    schedule.configure(daily(half_past_eight), instant(rolled_back), UTC_ZONE);
+    assert_eq!(fire_instants(&schedule)[0], instant("2026-01-15T08:30:00Z"));
+    pass(&mut db, &mut center, &mut schedule, rolled_back)?;
+
+    assert_eq!(installs_of(&center, "prompt:2026-01-15"), 1);
+    assert_eq!(
+        center.prompt_ids(),
+        ["prompt:2026-01-16", "prompt:2026-01-17"]
+    );
+    assert_eq!(
+        center.pending["prompt:2026-01-16"],
+        instant("2026-01-16T08:30:00Z")
+    );
+    assert!(schedule
+        .planned()
+        .iter()
+        .all(|prompt| prompt.local_date > date("2026-01-15")));
+
+    // A pass that merely runs again at the same instant changes nothing.
+    center.reset_calls();
+    pass(&mut db, &mut center, &mut schedule, rolled_back)?;
+    assert_eq!(center.mutations(), 0);
+    Ok(())
+}
+
+#[test]
 fn a_prompt_cancelled_by_the_reminder_capacity_pass_never_costs_an_earlier_pending_prompt(
 ) -> Result<()> {
     let mut db = open_db("reminder-side-capacity")?;

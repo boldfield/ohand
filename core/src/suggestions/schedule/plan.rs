@@ -108,9 +108,11 @@ pub struct PlannedPrompt {
     pub notification_id: String,
     pub local_date: NaiveDate,
     pub fire_at: DateTime<Utc>,
-    /// The OS was seen holding this request at `fire_at`, and core has not cancelled it since.
-    /// If it is later absent while `fire_at` still looks ahead of the clock, it fired and the
-    /// clock moved back.
+    /// The OS was seen holding a request with this identifier, and core has not cancelled it
+    /// since. If it is later absent while `fire_at` still looks ahead of the clock, it fired and
+    /// the clock moved back. The mark belongs to the local date, not to the instant: a time or
+    /// zone change moves `fire_at` but keeps the identifier, and the OS holds one request per
+    /// identifier, so the evidence must follow the date.
     #[serde(default)]
     pub installed: bool,
 }
@@ -175,7 +177,10 @@ impl PromptSchedule {
     }
 
     /// Apply the user's choice. Off clears every planned prompt; a time rebuilds the horizon
-    /// from `now`, so an earlier time today that has already passed is not replayed.
+    /// from `now`, so an earlier time today that has already passed is not replayed. A date
+    /// whose request the OS was seen holding keeps that evidence under the new time, so a time
+    /// change made in a rolled-back clock before any pass has looked cannot replay a prompt
+    /// that already fired.
     pub fn configure(&mut self, settings: PromptSettings, now: DateTime<Utc>, zone: Tz) {
         self.retire_elapsed(now);
         self.settings = settings;
@@ -193,10 +198,19 @@ impl PromptSchedule {
         }
     }
 
-    /// Replace the plan with a fresh fill. An occurrence that was already planned at the same
-    /// instant keeps its `installed` mark, so a refill that is the first observation after a
-    /// clock rollback can still tell that the OS fired it.
+    /// Replace the plan with a fresh fill. An occurrence whose local date was already planned
+    /// keeps its `installed` mark even if its instant moved, so a refill or a time change that is
+    /// the first observation after a clock rollback can still tell that the OS fired it. The
+    /// mark is keyed by identifier alone because that is what the OS keys its requests by: if
+    /// the request is still held at the old instant, the next pass replaces it under the same
+    /// identifier; if it is absent, it fired, whatever time the user has since chosen.
     fn rebuild(&mut self, now: DateTime<Utc>, zone: Tz) {
+        let installed_dates: BTreeSet<&str> = self
+            .planned
+            .iter()
+            .filter(|previous| previous.installed)
+            .map(|previous| previous.notification_id.as_str())
+            .collect();
         let mut planned = fill(
             self.settings,
             now,
@@ -205,11 +219,7 @@ impl PromptSchedule {
             self.last_elapsed_date,
         );
         for prompt in &mut planned {
-            prompt.installed = self.planned.iter().any(|previous| {
-                previous.installed
-                    && previous.notification_id == prompt.notification_id
-                    && previous.fire_at == prompt.fire_at
-            });
+            prompt.installed = installed_dates.contains(prompt.notification_id.as_str());
         }
         self.planned = planned;
     }

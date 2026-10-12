@@ -16,7 +16,9 @@
 //   `PromptSchedule::record_capacity_pass`. A fired prompt keeps that evidence while capacity
 //   withholds its slot, so it is never replayed when the slot frees. Never-installed
 //   occurrences an app open planned ahead of a fired one (a multi-day rollback) are retired
-//   with it.
+//   with it. The evidence belongs to the local date: a time or zone change re-plans the date at
+//   a new instant under the same identifier and keeps the mark, so a time change made before
+//   the first look after a rollback cannot replay the fired prompt either.
 // - One prompt per local date: once a date's occurrence has passed or fired, no later time on
 //   that date is planned, even if the user moves the time later.
 // - Disable: cancels every pending prompt and nothing else. No capacity pass runs, so reminders
