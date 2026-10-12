@@ -435,13 +435,30 @@ class SigningRun:
             self.redactor.register(info.team_identifier, "team-id")
             for device in info.provisioned_devices:
                 self.redactor.register(device, "device-udid")
+        self._refuse_different_profiles_sharing_a_uuid()
         if len({info.team_identifier for info in self.profiles}) > 1:
             raise input_error("the supplied provisioning profiles belong to different teams; export signs with one team")
+
+    def _refuse_different_profiles_sharing_a_uuid(self) -> None:
+        """Supplied profile files that declare one UUID must be byte-identical copies.
+
+        The UUID names the single file installed in Xcode's profile directory and the export options map bundles
+        to UUIDs, so two different profiles under one UUID would install only one of them while every mapped bundle
+        is reported as covered. This runs when the profiles are read, before any build, keychain or export work.
+        """
+        first_by_uuid: Dict[str, ProfileInfo] = {}
+        for info in self.profiles:
+            first = first_by_uuid.setdefault(info.uuid, info)
+            if first is not info and first.source_path.read_bytes() != info.source_path.read_bytes():
+                raise input_error("two supplied provisioning profiles declare the same UUID but have different contents; "
+                                  "a UUID identifies one profile, so supply one file per profile")
 
     def profiles_directory(self) -> Path:
         return Path.home() / "Library" / "Developer" / "Xcode" / "UserData" / "Provisioning Profiles"
 
     def profiles_to_install(self) -> List[ProfileInfo]:
+        # Profiles that share a UUID are byte-identical copies (checked when they were read), so one install per UUID
+        # serves every bundle mapped to it.
         used = list(self.assignments.values()) if self.embedding else self.profiles
         return list({info.uuid: info for info in used}.values())
 

@@ -165,6 +165,7 @@ def xcodebuild(arguments):
     elif arguments[0] == "-exportArchive":
         options = plistlib.loads(Path(option_value(arguments, "-exportOptionsPlist")).read_bytes())
         (STATE_DIR / "export-options.json").write_text(json.dumps(options))
+        refuse_export_without_installed_covering_profiles(options.get("provisioningProfiles", {}))
         export_path = Path(option_value(arguments, "-exportPath"))
         export_path.mkdir(parents=True)
         source = next((Path(option_value(arguments, "-archivePath")) / "Products" / "Applications").glob("*.app"))
@@ -177,6 +178,28 @@ def xcodebuild(arguments):
                     for nested in sorted(path for path in source.rglob("*") if path.suffix in (".app", ".appex")):
                         relative = nested.relative_to(source)
                         archive.writestr(f"Payload/Probe.app/{relative}/_CodeSignature/CodeResources", "synthetic")
+
+
+def refuse_export_without_installed_covering_profiles(provisioning_profiles):
+    """Like a manual-signing export, fail unless every mapped UUID is an installed profile that covers its bundle.
+
+    Without this, a run that maps a bundle to a UUID whose file was never installed, or whose installed file covers
+    a different bundle, would export successfully and mask the defect that real Xcode reports only at export.
+    """
+    directory = Path(os.environ["HOME"]) / "Library" / "Developer" / "Xcode" / "UserData" / "Provisioning Profiles"
+    for bundle_identifier, uuid in provisioning_profiles.items():
+        installed = directory / f"{uuid}.mobileprovision"
+        try:
+            profile = plistlib.loads(installed.read_bytes())
+        except (OSError, ValueError):
+            print(f"synthetic export failure: no installed provisioning profile for {bundle_identifier}", file=sys.stderr)
+            sys.exit(1)
+        application_identifier = profile.get("Entitlements", {}).get("application-identifier", "")
+        pattern = application_identifier.split(".", 1)[1] if "." in application_identifier else ""
+        covers = pattern == "*" or (pattern.endswith(".*") and bundle_identifier.startswith(pattern[:-1])) or pattern == bundle_identifier
+        if profile.get("UUID") != uuid or not covers:
+            print(f"synthetic export failure: the installed provisioning profile does not cover {bundle_identifier}", file=sys.stderr)
+            sys.exit(1)
 
 
 def write_bundle_info(bundle, identifier):

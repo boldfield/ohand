@@ -964,6 +964,44 @@ class EmbeddedExtensionTests(SigningToolTestCase):
         ])
         self.assertEqual(evidence["profile"]["expires_at"], "2098-06-07T08:09:10Z")
 
+    def test_different_profiles_declaring_one_uuid_are_refused_before_any_build_or_keychain_work(self):
+        # Two exact per-bundle profiles with different contents that declare the same UUID. Only one file can be
+        # installed under that UUID, so accepting the pair would sign with a profile covering one bundle while the
+        # export options and evidence report both as covered.
+        map_path = self.write_mapped_profiles({
+            APP_BUNDLE_IDENTIFIER: {},
+            EXTENSION_BUNDLE_IDENTIFIER: {"UUID": "00000000-2222-3333-4444-555555555555"},
+        })
+        result = self.sign_app("--install", **self.mapped_environment(map_path))
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("two supplied provisioning profiles declare the same UUID but have different contents", result.stderr)
+        self.assertNotIn("signed build complete", result.stdout)
+        # Only the two profile reads happened: no project generation, archive, keychain, profile install or export.
+        self.assertEqual(self.call_names(), [("security", "cms"), ("security", "cms")])
+        self.assertEqual(self.installed_profile_files(), [])
+        self.assertEqual(self.evidence_files(), [])
+        for sensitive in ("00000000-2222-3333-4444-555555555555", SYNTHETIC_TEAM, PROFILE_CONTENT_SENTINEL):
+            self.assertNotIn(sensitive, result.stdout + result.stderr)
+
+    def test_byte_identical_copies_of_one_profile_may_be_mapped_to_several_bundles(self):
+        content = plistlib.dumps(profile_plist(Entitlements=self.wildcard_entitlements()))
+        entries = {}
+        for index, bundle_identifier in enumerate((APP_BUNDLE_IDENTIFIER, EXTENSION_BUNDLE_IDENTIFIER)):
+            path = self.inputs / f"copy-{index}.mobileprovision"
+            path.write_bytes(content)
+            entries[bundle_identifier] = str(path)
+        map_path = self.inputs / "profile-map.json"
+        map_path.write_text(json.dumps(entries))
+        result = self.sign_app("--install", **self.mapped_environment(map_path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        options = json.loads((self.state / "export-options.json").read_text())
+        self.assertEqual(options["provisioningProfiles"],
+                         {APP_BUNDLE_IDENTIFIER: SYNTHETIC_PROFILE_UUID, EXTENSION_BUNDLE_IDENTIFIER: SYNTHETIC_PROFILE_UUID})
+        self.assertEqual(self.calls_of("xcodebuild", "-exportArchive")[0]["installed_profiles_at_call"],
+                         [f"{USER_DATA_PROFILE_DIRECTORY}/{SYNTHETIC_PROFILE_UUID}.mobileprovision"])
+        self.assertEqual(self.installed_profile_files(), [])
+        self.assert_keychain_cleaned_up()
+
     def test_extension_not_covered_by_the_supplied_profile_is_refused_before_keychain_work(self):
         self.write_profile(Entitlements=self.exact_entitlements(APP_BUNDLE_IDENTIFIER))
         result = self.sign_app("--install")
@@ -1297,6 +1335,37 @@ class ArchiveEnumerationTests(unittest.TestCase):
         with self.assertRaises(sign_probe.SigningError) as context:
             sign_probe.SigningRun._signed_bundle_paths(plain_file)
         self.assertIn("archived app File.app is not a plain bundle directory", context.exception.message)
+
+
+class StubExportFidelityTests(SigningToolTestCase):
+    """The synthetic xcodebuild must not report a successful export that real manual signing would refuse."""
+
+    def export(self, bundle_identifier, label):
+        archive = self.elsewhere / f"{label}.xcarchive"
+        application = archive / "Products" / "Applications" / "Probe.app"
+        application.mkdir(parents=True)
+        (application / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": bundle_identifier}))
+        options = self.elsewhere / f"{label}-options.plist"
+        options.write_bytes(plistlib.dumps({"provisioningProfiles": {bundle_identifier: SYNTHETIC_PROFILE_UUID}}))
+        return subprocess.run([str(self.binaries / "xcodebuild"), "-exportArchive", "-archivePath", str(archive),
+                               "-exportOptionsPlist", str(options), "-exportPath", str(self.elsewhere / f"{label}-export")],
+                              capture_output=True, text=True, env=self.environment(), timeout=60)
+
+    def test_export_fails_unless_every_mapped_uuid_is_an_installed_profile_covering_its_bundle(self):
+        missing = self.export(BUNDLE_IDENTIFIER, "missing")
+        self.assertEqual(missing.returncode, 1)
+        self.assertIn(f"no installed provisioning profile for {BUNDLE_IDENTIFIER}", missing.stderr)
+
+        directory = self.home / USER_DATA_PROFILE_DIRECTORY
+        directory.mkdir(parents=True)
+        (directory / f"{SYNTHETIC_PROFILE_UUID}.mobileprovision").write_bytes(self.profile_path.read_bytes())
+        not_covered = self.export(APP_BUNDLE_IDENTIFIER, "not-covered")
+        self.assertEqual(not_covered.returncode, 1)
+        self.assertIn(f"the installed provisioning profile does not cover {APP_BUNDLE_IDENTIFIER}", not_covered.stderr)
+
+        covered = self.export(BUNDLE_IDENTIFIER, "covered")
+        self.assertEqual(covered.returncode, 0, covered.stderr)
+        self.assertTrue((self.elsewhere / "covered-export" / "Probe.ipa").is_file())
 
 
 class SimulatorPathTests(unittest.TestCase):
