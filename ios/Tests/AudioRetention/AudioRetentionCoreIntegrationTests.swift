@@ -1,3 +1,4 @@
+import SQLite3
 import XCTest
 @testable import OhAndCoreBridge
 @testable import OhAndServices
@@ -109,6 +110,44 @@ final class AudioRetentionCoreIntegrationTests: XCTestCase {
         XCTAssertEqual(outcome(report, expired.itemID), .denied(.audioReferenceMismatch))
         XCTAssertTrue(world.audioExists(expired.fileName))
         session.close()
+    }
+
+    func testAWriteThatWouldProtectApprovedAudioCannotCommitBeforeTheFileIsGone() async throws {
+        let world = try makeWorld()
+        let expired = try await world.seedVoice(captureID: "cap-expired", transcribedDaysAgo: 10)
+        let session = try world.openCore()
+        let attempts = RecordedValues<Int32>()
+        let fileWasThere = RecordedValues<Bool>()
+        let service = world.makeService(
+            on: session,
+            core: HookedRetentionCore(wrapped: session.client, duringRemoval: { itemID in
+                fileWasThere.append(world.audioExists(expired.fileName))
+                attempts.append(world.tryMarkDeleted(itemID: itemID))
+            }))
+
+        let report = await service.sweep()
+        XCTAssertEqual(fileWasThere.all, [true], "the effect ran while the fence was held")
+        XCTAssertEqual(attempts.all.count, 1)
+        let status = try XCTUnwrap(attempts.all.first)
+        XCTAssertTrue(
+            status == SQLITE_BUSY || status == SQLITE_LOCKED,
+            "a protecting write cannot commit between the approval and the file effect: \(status)")
+        XCTAssertEqual(outcome(report, expired.itemID), .removed)
+        XCTAssertFalse(world.audioExists(expired.fileName))
+        XCTAssertTrue(report.converged)
+
+        XCTAssertEqual(world.tryMarkDeleted(itemID: expired.itemID), SQLITE_OK, "the fence is released after the effect")
+        let later = await world.makeService(on: session).sweep()
+        XCTAssertNil(outcome(later, expired.itemID))
+        session.close()
+    }
+
+    func testTheEffectStartsOnlyInTheFirstHalfOfTheLease() {
+        XCTAssertTrue(CoreAudioRetentionClient.leaseAllowsEffect(elapsed: 0, leaseMillis: 3_000))
+        XCTAssertTrue(CoreAudioRetentionClient.leaseAllowsEffect(elapsed: 1.4, leaseMillis: 3_000))
+        XCTAssertFalse(CoreAudioRetentionClient.leaseAllowsEffect(elapsed: 1.5, leaseMillis: 3_000))
+        XCTAssertFalse(CoreAudioRetentionClient.leaseAllowsEffect(elapsed: 4, leaseMillis: 3_000))
+        XCTAssertFalse(CoreAudioRetentionClient.leaseAllowsEffect(elapsed: -1, leaseMillis: 3_000))
     }
 
     func testInterruptionBeforeRemovalConvergesAfterReopeningTheCore() async throws {

@@ -30,7 +30,7 @@ enum RetentionFixtures {
 }
 
 /// A core whose sweep listing and removal-time decisions a test scripts separately, so a listing can be made stale.
-/// `removeAudio` behaves like the real core: it denies what the script denies, and otherwise removes the real file.
+/// `removeAudio` behaves like the real core: it denies what the script denies, and otherwise runs the caller's effect.
 final class ScriptedRetentionCore: AudioRetentionCore, @unchecked Sendable {
     private let lock = NSLock()
     private var listing: [AudioRetentionItem] = []
@@ -40,6 +40,7 @@ final class ScriptedRetentionCore: AudioRetentionCore, @unchecked Sendable {
     private var removalFailures: Set<String> = []
     private var failedEffects: Set<String> = []
     private var silentlyKept: Set<String> = []
+    private var lapsedLeases: Set<String> = []
     private(set) var authorizedRequests: [String] = []
     private(set) var removalRequests: [String] = []
     private(set) var removedFileNames: [String] = []
@@ -54,6 +55,8 @@ final class ScriptedRetentionCore: AudioRetentionCore, @unchecked Sendable {
     func interruptRemoval(of fileName: String) { locked { _ = removalFailures.insert(fileName) } }
     /// The next removal of this file is approved but the core reports it could not remove it.
     func failEffect(of fileName: String) { locked { _ = failedEffects.insert(fileName) } }
+    /// The next removal of this file runs its effect, but the core then reports that the fence lapsed before the end.
+    func lapseLease(of fileName: String) { locked { _ = lapsedLeases.insert(fileName) } }
     /// Removals of this file are reported as done although the file stays.
     func keepSilently(_ fileName: String) { locked { _ = silentlyKept.insert(fileName) } }
 
@@ -75,23 +78,21 @@ final class ScriptedRetentionCore: AudioRetentionCore, @unchecked Sendable {
         }
     }
 
-    func removeAudio(itemID: String, audioReference: String, fileURL: URL, periodSeconds: UInt64) async throws
-        -> AudioRemovalResult
+    func removeAudio(itemID: String, audioReference: String, periodSeconds: UInt64, effect: () -> AudioRemovalEffect)
+        async throws -> AudioRemovalResult
     {
         try locked {
             removalRequests.append(itemID)
-            let fileName = fileURL.lastPathComponent
+            let fileName = (audioReference as NSString).lastPathComponent
             if removalFailures.remove(fileName) != nil { throw RetentionFixtureError() }
             if let decisionFailure { throw decisionFailure }
             if case .denied(let denial)? = decisions[itemID] { return .denied(denial) }
             if failedEffects.remove(fileName) != nil { return .approved(.failed) }
             if silentlyKept.contains(fileName) { return .approved(.removed) }
-            let existed = FileManager.default.fileExists(atPath: fileURL.path)
-            if existed {
-                try FileManager.default.removeItem(at: fileURL)
-                removedFileNames.append(fileName)
-            }
-            return .approved(existed ? .removed : .alreadyAbsent)
+            let performed = effect()
+            if performed == .removed { removedFileNames.append(fileName) }
+            if lapsedLeases.remove(fileName) != nil { throw CoreAudioRetentionClient.leaseTooOld }
+            return .approved(performed)
         }
     }
 

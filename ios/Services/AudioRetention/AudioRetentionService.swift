@@ -29,16 +29,19 @@ struct VolumeStoragePressureProbe: AudioStoragePressureProbing {
 
 /// Removes audio the core's retention policy has approved, and records each completed removal durably.
 ///
-/// The core decides and removes; this service only asks and records. Per item the order is fixed: ask the core to
-/// remove the finalized file the exact audio reference names, which approves and unlinks it in one step on the core's
-/// worker (never trusting the sweep that listed it, which may be stale, and leaving no gap between approval and effect
-/// for newly protected, deleted or changed audio to be lost in), verify the file is absent, then record the completion
-/// in the ledger. Every step is idempotent, so an interruption anywhere converges on the next sweep:
+/// The core decides and holds the fence; this service performs the file effect and records. Per item the order is
+/// fixed: ask the core to remove the finalized file the exact audio reference names. The core re-decides for that
+/// reference (never trusting the sweep that listed it, which may be stale) and, only if it approves, holds its
+/// store-wide write lock while this service unlinks the file and verifies it absent, so audio cannot become protected,
+/// deleted or changed between the approval and the unlink, whichever handle or process writes. Then the completion is
+/// recorded in the ledger. Every step is idempotent, so an interruption anywhere converges on the next sweep:
 ///
 /// * before the core acts, the removal is repeated, or refused if the audio has since become protected, deleted or
 ///   changed;
 /// * after the file is removed but before the ledger write, the file is already absent, the ledger write is made and
-///   the removal is reported then, never earlier.
+///   the removal is reported then, never earlier;
+/// * if the core cannot show its fence held until the effect was done (the lease lapsed), the removal is not recorded
+///   and the next sweep decides it again.
 ///
 /// A removal is reported as `removed` or `alreadyRemoved` only when the file is verified absent and the ledger holds the
 /// completion.
@@ -196,11 +199,22 @@ actor AudioRetentionService {
                 code: AudioRetentionPermanentFailure.audioReferenceUnresolvable.rawValue, permanent: true)
         }
 
-        // The core re-decides for this exact audio and, only if it approves, removes the file in the same step.
+        // The core re-decides for this exact audio and, only if it approves, holds its store-wide fence while the closure
+        // removes the file here: no write can make the audio protected between the approval and the removal.
+        let fileSystem = self.fileSystem
+        let removeFile: () -> AudioRemovalEffect = {
+            let wasPresent = fileSystem.fileExists(at: url)
+            if wasPresent {
+                do { try fileSystem.remove(at: url) } catch { return .failed }
+            }
+            if fileSystem.fileExists(at: url) { return .failed }
+            return wasPresent ? .removed : .alreadyAbsent
+        }
         let result: AudioRemovalResult
         do {
             result = try await core.removeAudio(
-                itemID: itemID, audioReference: audioReference, fileURL: url, periodSeconds: retentionPeriodSeconds)
+                itemID: itemID, audioReference: audioReference, periodSeconds: retentionPeriodSeconds,
+                effect: removeFile)
         } catch {
             return .retryLater(Self.coreReason(error))
         }
@@ -211,7 +225,7 @@ actor AudioRetentionService {
         case .approved(let approvedEffect):
             effect = approvedEffect
         }
-        // The core's word is checked: a file that is still there is never reported gone.
+        // The result is checked: a file that is still there is never reported gone.
         guard effect != .failed, !fileSystem.fileExists(at: url) else {
             return recordFailure(
                 itemID: itemID, audioReference: audioReference,

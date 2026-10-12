@@ -107,6 +107,17 @@ final class RealCoreRetentionWorld {
         XCTAssertNoThrow(try execute("UPDATE items SET lifecycle_state = 'deleted' WHERE item_id = '\(itemID)'"))
     }
 
+    /// The write that makes the item's audio protected, attempted on a second connection that waits only briefly. Returns
+    /// the raw SQLite status, so a test can tell "blocked by the store-wide fence" from "done".
+    func tryMarkDeleted(itemID: String) -> Int32 {
+        var database: OpaquePointer?
+        guard sqlite3_open(databasePath, &database) == SQLITE_OK else { return SQLITE_CANTOPEN }
+        defer { sqlite3_close(database) }
+        sqlite3_busy_timeout(database, 100)
+        return sqlite3_exec(
+            database, "UPDATE items SET lifecycle_state = 'deleted' WHERE item_id = '\(itemID)'", nil, nil, nil)
+    }
+
     func setCaptureAudioReference(captureID: String, to reference: String) {
         XCTAssertNoThrow(
             try execute("UPDATE captures SET audio_reference = '\(reference)' WHERE capture_id = '\(captureID)'"))
@@ -172,17 +183,23 @@ final class RealCoreRetentionSession {
 }
 
 /// The production client with test hooks around the removal: `beforeRemoval` runs just before the removal request is
-/// sent, so a test can change the core's state after the sweep listed the audio and before the core acts on it, and
-/// `interruptNextRemoval` makes the next removal fail before it reaches the core, as a process that dies there would.
+/// sent, so a test can change the core's state after the sweep listed the audio and before the core acts on it,
+/// `duringRemoval` runs inside the file effect, while the core holds its store-wide fence, and `interruptNextRemoval`
+/// makes the next removal fail before it reaches the core, as a process that dies there would.
 final class HookedRetentionCore: AudioRetentionCore, @unchecked Sendable {
     private let wrapped: AudioRetentionCore
     private let beforeRemoval: (@Sendable (String) -> Void)?
+    private let duringRemoval: (@Sendable (String) -> Void)?
     private let lock = NSLock()
     private var interruptions = 0
 
-    init(wrapped: AudioRetentionCore, beforeRemoval: (@Sendable (String) -> Void)? = nil) {
+    init(
+        wrapped: AudioRetentionCore, beforeRemoval: (@Sendable (String) -> Void)? = nil,
+        duringRemoval: (@Sendable (String) -> Void)? = nil
+    ) {
         self.wrapped = wrapped
         self.beforeRemoval = beforeRemoval
+        self.duringRemoval = duringRemoval
     }
 
     func interruptNextRemoval() {
@@ -202,8 +219,8 @@ final class HookedRetentionCore: AudioRetentionCore, @unchecked Sendable {
             itemID: itemID, audioReference: audioReference, periodSeconds: periodSeconds)
     }
 
-    func removeAudio(itemID: String, audioReference: String, fileURL: URL, periodSeconds: UInt64) async throws
-        -> AudioRemovalResult
+    func removeAudio(itemID: String, audioReference: String, periodSeconds: UInt64, effect: () -> AudioRemovalEffect)
+        async throws -> AudioRemovalResult
     {
         beforeRemoval?(itemID)
         lock.lock()
@@ -211,7 +228,30 @@ final class HookedRetentionCore: AudioRetentionCore, @unchecked Sendable {
         if interrupted { interruptions -= 1 }
         lock.unlock()
         if interrupted { throw CoreAudioRetentionClient.unreadableAnswer }
+        let duringRemoval = duringRemoval
         return try await wrapped.removeAudio(
-            itemID: itemID, audioReference: audioReference, fileURL: fileURL, periodSeconds: periodSeconds)
+            itemID: itemID, audioReference: audioReference, periodSeconds: periodSeconds,
+            effect: {
+                duringRemoval?(itemID)
+                return effect()
+            })
+    }
+}
+
+/// Records values from `@Sendable` hooks.
+final class RecordedValues<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [Value] = []
+
+    func append(_ value: Value) {
+        lock.lock()
+        values.append(value)
+        lock.unlock()
+    }
+
+    var all: [Value] {
+        lock.lock()
+        defer { lock.unlock() }
+        return values
     }
 }

@@ -7,15 +7,14 @@ public enum CoreRetentionPressure: String, Equatable, Sendable {
     case low
 }
 
-/// One audio-retention request. `sweep` and `authorizeRemoval` only read; `removeAudio` approves and removes the one
-/// file in a single step on the core's worker, so nothing can change between the approval and the removal.
+/// One audio-retention request. `sweep` and `authorizeRemoval` only read. `beginRemoval` decides inside a store-wide
+/// fence and, when it approves, keeps the store's write lock held (a lease) while native code removes the one approved
+/// file; `releaseAudioRemoval` ends the lease. Nothing can commit between the approval and the removal.
 public enum AudioRetentionCommand: Equatable, Sendable {
     /// `periodSeconds` 0 selects the core's default retention period.
     case sweep(pressure: CoreRetentionPressure, periodSeconds: UInt64)
     case authorizeRemoval(itemID: String, audioReference: String, periodSeconds: UInt64)
-    /// `audioPath` is the absolute path of the file `audioReference` names; the core refuses a path that does not end
-    /// with the reference.
-    case removeAudio(itemID: String, audioReference: String, audioPath: String, periodSeconds: UInt64)
+    case beginRemoval(itemID: String, audioReference: String, periodSeconds: UInt64)
 
     fileprivate var request: Request {
         switch self {
@@ -25,9 +24,9 @@ public enum AudioRetentionCommand: Equatable, Sendable {
             return Request(
                 command: "authorize_removal", itemID: itemID, audioReference: audioReference,
                 periodSeconds: periodSeconds)
-        case .removeAudio(let itemID, let audioReference, let audioPath, let periodSeconds):
+        case .beginRemoval(let itemID, let audioReference, let periodSeconds):
             return Request(
-                command: "remove_audio", itemID: itemID, audioReference: audioReference, audioPath: audioPath,
+                command: "begin_removal", itemID: itemID, audioReference: audioReference,
                 periodSeconds: periodSeconds)
         }
     }
@@ -37,7 +36,6 @@ public enum AudioRetentionCommand: Equatable, Sendable {
         var pressure: String?
         var itemID: String?
         var audioReference: String?
-        var audioPath: String?
         var periodSeconds: UInt64
 
         enum CodingKeys: String, CodingKey {
@@ -45,7 +43,6 @@ public enum AudioRetentionCommand: Equatable, Sendable {
             case pressure
             case itemID = "item_id"
             case audioReference = "audio_reference"
-            case audioPath = "audio_path"
             case periodSeconds = "period_seconds"
         }
     }
@@ -106,15 +103,17 @@ public struct CoreRetentionSweepAnswer: Decodable, Equatable, Sendable {
     public let assessments: [CoreRetentionAssessment]
 }
 
-/// The answer to `authorizeRemoval` and `removeAudio`. `decision` is `approved` or `denied`; a denial carries its
-/// `reason`. `effect` (`removed`, `already_absent` or `failed`) is present only on an approved `removeAudio`.
+/// The answer to `authorizeRemoval` and `beginRemoval`. `decision` is `approved` or `denied`; a denial carries its
+/// `reason`. An approved `beginRemoval` also carries the lease that keeps the store's write lock held: `leaseID` and
+/// the milliseconds `leaseMillis` it lasts at most.
 public struct CoreRetentionDecisionAnswer: Decodable, Equatable, Sendable {
     public let decision: String
     public let expiredAt: String?
     public let reason: String?
     public let expiresAt: String?
     public let unresolvedReason: String?
-    public let effect: String?
+    public let leaseID: UInt64?
+    public let leaseMillis: UInt64?
 
     enum CodingKeys: String, CodingKey {
         case decision
@@ -122,7 +121,8 @@ public struct CoreRetentionDecisionAnswer: Decodable, Equatable, Sendable {
         case reason
         case expiresAt = "expires_at"
         case unresolvedReason = "unresolved_reason"
-        case effect
+        case leaseID = "lease_id"
+        case leaseMillis = "lease_millis"
     }
 }
 
@@ -135,5 +135,12 @@ extension CoreHandle {
             ohand_core_start_audio_retention(handleIdentifier, operationID, buffer.baseAddress, buffer.count)
         }
         _ = try consumeCoreResult(rawResult)
+    }
+
+    /// Ends a removal lease granted by `beginRemoval`, once the file effect is done. Not queued behind the worker, which
+    /// may be waiting on the lease's own lock. Throws `lease_expired` when the fence may have lapsed before this call:
+    /// the removal must then not be reported as done.
+    public func releaseAudioRemoval(leaseIdentifier: UInt64) throws {
+        _ = try consumeCoreResult(ohand_core_release_audio_removal(handleIdentifier, leaseIdentifier))
     }
 }

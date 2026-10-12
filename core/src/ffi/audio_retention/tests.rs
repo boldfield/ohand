@@ -314,26 +314,15 @@ fn malformed_requests_are_refused_before_anything_is_queued() {
         json!({"command": "authorize_removal", "item_id": "x".repeat(MAX_IDENTIFIER_BYTES + 1),
                "audio_reference": "a"}),
         json!([]),
-        json!({"command": "remove_audio", "item_id": "item", "audio_reference": "FinalizedAudio/a.m4a"}),
+        json!({"command": "begin_removal", "item_id": "item"}),
+        json!({"command": "begin_removal", "item_id": "", "audio_reference": "a"}),
+        json!({"command": "begin_removal", "item_id": "item", "audio_reference": ""}),
+        json!({"command": "begin_removal", "item_id": "item", "audio_reference": "a",
+               "audio_path": "/tmp/a"}),
+        json!({"command": "remove_audio", "item_id": "item", "audio_reference": "a"}),
     ] {
         let outcome = start(handle, 1, &request);
         assert_eq!(outcome.status, OHAND_CORE_STATUS_PERMANENT, "{request}");
-        assert_eq!(outcome.code(), "invalid_request", "{request}");
-    }
-    let reference = "FinalizedAudio/a.m4a";
-    for (audio_reference, audio_path) in [
-        (reference, ""),
-        (reference, "relative/FinalizedAudio/a.m4a"),
-        (reference, "/tmp/FinalizedAudio/b.m4a"),
-        (reference, "/tmp/Other/a.m4a"),
-        (reference, "/tmp/../FinalizedAudio/a.m4a"),
-        ("a.m4a", "/tmp/a.m4a"),
-        ("FinalizedAudio/../a.m4a", "/tmp/FinalizedAudio/../a.m4a"),
-        ("/FinalizedAudio/a.m4a", "/tmp/FinalizedAudio/a.m4a"),
-    ] {
-        let request = json!({"command": "remove_audio", "item_id": "item",
-            "audio_reference": audio_reference, "audio_path": audio_path});
-        let outcome = start(handle, 1, &request);
         assert_eq!(outcome.code(), "invalid_request", "{request}");
     }
     let empty = consume(unsafe { ohand_core_start_audio_retention(handle, 2, [].as_ptr(), 0) });
@@ -345,133 +334,279 @@ fn malformed_requests_are_refused_before_anything_is_queued() {
     let _ = std::fs::remove_dir_all(directory);
 }
 
-fn audio_file(directory: &std::path::Path, reference: &str) -> std::path::PathBuf {
-    let path = directory.join(reference);
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(&path, b"synthetic audio").unwrap();
-    path
+fn release(handle: OhandCoreHandle, lease_id: u64) -> Outcome {
+    consume(ohand_core_release_audio_removal(handle, lease_id))
 }
 
-fn remove_request(item_id: &str, reference: &str, path: &std::path::Path) -> Value {
-    json!({
-        "command": "remove_audio", "item_id": item_id, "audio_reference": reference,
-        "audio_path": path.to_string_lossy(),
-    })
+fn begin(session: &mut Session, item_id: &str, reference: &str) -> Value {
+    session.succeed(&json!({
+        "command": "begin_removal", "item_id": item_id, "audio_reference": reference,
+    }))
+}
+
+fn raw_connection(path: &str, busy: std::time::Duration) -> rusqlite::Connection {
+    let connection = rusqlite::Connection::open(path).unwrap();
+    connection.busy_timeout(busy).unwrap();
+    connection
+}
+
+fn protect(connection: &rusqlite::Connection, item_id: &str) -> rusqlite::Result<usize> {
+    connection.execute(
+        "UPDATE items SET lifecycle_state = 'deleted' WHERE item_id = ?",
+        [item_id],
+    )
+}
+
+fn is_busy(result: &rusqlite::Result<usize>) -> bool {
+    matches!(
+        result,
+        Err(rusqlite::Error::SqliteFailure(error, _))
+            if matches!(
+                error.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+    )
 }
 
 #[test]
-fn removal_deletes_exactly_the_approved_file_and_is_idempotent() {
+fn an_approved_removal_holds_the_store_write_lock_until_it_is_released() {
     let _guard = serial();
-    let (directory, path, items) = store("remove");
-    let expired = audio_file(&directory, EXPIRED_AUDIO);
-    let retained = audio_file(&directory, RETAINED_AUDIO);
-    let sole = audio_file(&directory, SOLE_SOURCE_AUDIO);
+    let (directory, path, items) = store("lease");
     let mut session = Session::over(open_file(&path));
 
-    let removed = session.succeed(&remove_request(&items.expired, EXPIRED_AUDIO, &expired));
-    assert_eq!(removed["decision"], "approved");
-    assert_eq!(removed["effect"], "removed");
-    assert!(!expired.exists());
-    assert!(retained.exists() && sole.exists());
+    let granted = begin(&mut session, &items.expired, EXPIRED_AUDIO);
+    assert_eq!(granted["decision"], "approved");
+    assert_eq!(granted["lease_millis"], 3000);
+    let lease_id = granted["lease_id"].as_u64().expect("a lease");
 
-    let again = session.succeed(&remove_request(&items.expired, EXPIRED_AUDIO, &expired));
-    assert_eq!(again["decision"], "approved");
-    assert_eq!(again["effect"], "already_absent");
+    // A write from another connection (another handle or process) cannot land in the interval
+    // between the approval and the file effect.
+    let other = raw_connection(&path, std::time::Duration::from_millis(100));
+    assert!(is_busy(&protect(&other, &items.expired)));
+    // Readers are not blocked.
+    let state: String = other
+        .query_row(
+            "SELECT lifecycle_state FROM items WHERE item_id = ?",
+            [&items.expired],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_ne!(state, "deleted");
+
+    assert_eq!(
+        release(session.handle, lease_id).status,
+        OHAND_CORE_STATUS_OK
+    );
+    assert_eq!(protect(&other, &items.expired).unwrap(), 1);
+
+    // Decided again after the change, the removal is refused and holds nothing.
+    let denied = begin(&mut session, &items.expired, EXPIRED_AUDIO);
+    assert_eq!(denied["decision"], "denied");
+    assert_eq!(denied["reason"], "deletion_owns_cleanup");
+    assert_eq!(denied["lease_id"], Value::Null);
+    assert_eq!(protect(&other, &items.retained).unwrap(), 1);
 
     session.close();
     let _ = std::fs::remove_dir_all(directory);
 }
 
 #[test]
-fn a_denied_removal_keeps_the_file() {
+fn a_write_that_would_protect_approved_audio_waits_for_the_effect_to_finish() {
+    let _guard = serial();
+    let (directory, path, items) = store("race");
+    let mut session = Session::over(open_file(&path));
+
+    let granted = begin(&mut session, &items.expired, EXPIRED_AUDIO);
+    let lease_id = granted["lease_id"].as_u64().expect("a lease");
+
+    // The change is attempted after the approval and before the native effect (the lease is still
+    // held); it commits only once the effect has finished and the lease is released.
+    let (finished_sender, finished) = std::sync::mpsc::channel();
+    let writer_path = path.clone();
+    let writer_item = items.expired.clone();
+    let writer = std::thread::spawn(move || {
+        let connection = raw_connection(&writer_path, std::time::Duration::from_secs(10));
+        let result = protect(&connection, &writer_item);
+        finished_sender.send(std::time::Instant::now()).unwrap();
+        result.unwrap()
+    });
+    assert!(
+        finished
+            .recv_timeout(std::time::Duration::from_millis(400))
+            .is_err(),
+        "the protecting write must wait while the lease is held"
+    );
+    let released_at = std::time::Instant::now();
+    assert_eq!(
+        release(session.handle, lease_id).status,
+        OHAND_CORE_STATUS_OK
+    );
+    let committed_at = finished.recv_timeout(WAIT).expect("the write commits");
+    assert!(committed_at >= released_at);
+    assert_eq!(writer.join().unwrap(), 1);
+
+    let denied = begin(&mut session, &items.expired, EXPIRED_AUDIO);
+    assert_eq!(denied["reason"], "deletion_owns_cleanup");
+
+    session.close();
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn a_denied_removal_holds_no_lock_and_no_lease() {
     let _guard = serial();
     let (directory, path, items) = store("denied");
-    let expired = audio_file(&directory, EXPIRED_AUDIO);
-    let retained = audio_file(&directory, RETAINED_AUDIO);
-    let sole = audio_file(&directory, SOLE_SOURCE_AUDIO);
     let mut session = Session::over(open_file(&path));
+    let other = raw_connection(&path, std::time::Duration::from_millis(100));
 
-    let recent = session.succeed(&remove_request(&items.retained, RETAINED_AUDIO, &retained));
-    assert_eq!(recent["reason"], "not_yet_expired");
-    assert_eq!(recent["effect"], Value::Null);
-    let pending = session.succeed(&remove_request(
-        &items.sole_source,
-        SOLE_SOURCE_AUDIO,
-        &sole,
-    ));
-    assert_eq!(pending["reason"], "unresolved");
-    let mismatch = session.succeed(&remove_request(&items.expired, RETAINED_AUDIO, &retained));
-    assert_eq!(mismatch["reason"], "audio_reference_mismatch");
+    for (item_id, reference, reason) in [
+        (&items.retained, RETAINED_AUDIO, "not_yet_expired"),
+        (&items.sole_source, SOLE_SOURCE_AUDIO, "unresolved"),
+        (&items.expired, RETAINED_AUDIO, "audio_reference_mismatch"),
+    ] {
+        let denied = begin(&mut session, item_id, reference);
+        assert_eq!(denied["decision"], "denied");
+        assert_eq!(denied["reason"], reason);
+        assert_eq!(denied["lease_id"], Value::Null);
+        assert_eq!(
+            other
+                .execute(
+                    "UPDATE items SET revision = revision WHERE item_id = ?",
+                    [item_id]
+                )
+                .unwrap(),
+            1,
+            "a denial must not keep the store locked"
+        );
+    }
+    let missing = begin(&mut session, "no-such-item", EXPIRED_AUDIO);
+    assert_eq!(missing["reason"], "item_not_found");
     let lengthened = session.succeed(&json!({
-        "command": "remove_audio", "item_id": items.expired, "audio_reference": EXPIRED_AUDIO,
-        "audio_path": expired.to_string_lossy(), "period_seconds": 30 * 24 * 60 * 60,
+        "command": "begin_removal", "item_id": items.expired, "audio_reference": EXPIRED_AUDIO,
+        "period_seconds": 30 * 24 * 60 * 60,
     }));
     assert_eq!(lengthened["reason"], "not_yet_expired");
-    assert!(expired.exists() && retained.exists() && sole.exists());
+    assert_eq!(lengthened["lease_id"], Value::Null);
+    assert_eq!(lease::live_leases(), 0);
 
     session.close();
     let _ = std::fs::remove_dir_all(directory);
 }
 
 #[test]
-fn a_change_queued_ahead_of_the_removal_is_seen_by_its_approval() {
+fn a_lease_that_is_not_released_expires_and_frees_the_store() {
     let _guard = serial();
-    let (directory, path, items) = store("fence");
-    let expired = audio_file(&directory, EXPIRED_AUDIO);
-    let handle = open_file(&path);
-    let (recorder, events) = recorder();
-    register(handle, &recorder);
-    let core = instance::lookup(handle).unwrap();
+    let (directory, path, items) = store("expiry");
+    let database = Database::open(&path, Arc::new(SystemClock)).unwrap();
+    let store_path = std::path::Path::new(&path);
 
-    // Both are queued before either runs: the change that protects the audio executes on the same
-    // worker, strictly before the removal's approval and unlink, with nothing in between.
-    let deleted_item = items.expired.clone();
-    core.submit(
-        1,
-        Box::new(move |database: &Mutex<Database>| {
-            lock(database)
-                .conn()
-                .execute(
-                    "UPDATE items SET lifecycle_state = 'deleted' WHERE item_id = ?",
-                    [&deleted_item],
-                )
-                .map_err(|_| AbiFailure::INTERNAL)?;
-            Ok(b"{}".to_vec())
-        }),
+    let begun = lease::begin(
+        store_path,
+        7,
+        &SystemClock,
+        &RetentionPolicy::default(),
+        &items.expired,
+        EXPIRED_AUDIO,
+        std::time::Duration::from_millis(300),
     )
     .unwrap();
-    let request =
-        serde_json::to_vec(&remove_request(&items.expired, EXPIRED_AUDIO, &expired)).unwrap();
-    let queued = consume(unsafe {
-        ohand_core_start_audio_retention(handle, 2, request.as_ptr(), request.len())
-    });
-    assert_eq!(queued.status, OHAND_CORE_STATUS_OK);
+    let lease_id = begun.lease_id.expect("an approved removal is leased");
+    let other = raw_connection(&path, std::time::Duration::from_millis(50));
+    assert!(is_busy(&protect(&other, &items.expired)));
 
-    let change = events.recv_timeout(WAIT).unwrap();
-    assert_eq!(change.operation_id, 1);
-    let removal = events.recv_timeout(WAIT).unwrap();
-    assert_eq!(removal.operation_id, 2);
-    let body: Value = serde_json::from_slice(&removal.payload).unwrap();
-    assert_eq!(body["reason"], "deletion_owns_cleanup");
-    assert!(expired.exists(), "audio that became protected is kept");
-
-    assert_eq!(consume(ohand_core_close(handle)).status, 0);
+    // The caller never releases: the store is freed by the expiry, and a late release says so.
+    let waiting = raw_connection(&path, std::time::Duration::from_secs(5));
+    assert_eq!(protect(&waiting, &items.expired).unwrap(), 1);
+    assert_eq!(lease::live_leases(), 0);
+    let late = lease::release(7, lease_id).unwrap_err();
+    assert_eq!(late.code, "lease_expired");
+    assert_eq!(late.status(), OHAND_CORE_STATUS_TRANSIENT);
+    drop(database);
     let _ = std::fs::remove_dir_all(directory);
 }
 
 #[test]
-fn a_removal_that_cannot_delete_the_file_reports_failure() {
+fn only_the_handle_that_holds_a_lease_can_release_it() {
     let _guard = serial();
-    let (directory, path, items) = store("failed");
-    let blocked = directory.join(EXPIRED_AUDIO);
-    std::fs::create_dir_all(&blocked).unwrap();
+    let (directory, path, items) = store("owner");
+    let mut session = Session::over(open_file(&path));
+    let other_handle = open_file(&path);
+
+    let granted = begin(&mut session, &items.expired, EXPIRED_AUDIO);
+    let lease_id = granted["lease_id"].as_u64().unwrap();
+    let other = raw_connection(&path, std::time::Duration::from_millis(50));
+
+    let foreign = release(other_handle, lease_id);
+    assert_eq!(foreign.code(), "invalid_request");
+    assert!(is_busy(&protect(&other, &items.expired)), "still held");
+    assert_eq!(release(0, lease_id).code(), "invalid_handle");
+    assert_eq!(
+        release(session.handle, lease_id + 1000).code(),
+        "lease_expired"
+    );
+
+    assert_eq!(
+        release(session.handle, lease_id).status,
+        OHAND_CORE_STATUS_OK
+    );
+    assert_eq!(release(session.handle, lease_id).code(), "lease_expired");
+    assert_eq!(protect(&other, &items.expired).unwrap(), 1);
+
+    assert_eq!(consume(ohand_core_close(other_handle)).status, 0);
+    session.close();
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn a_busy_store_defers_the_removal_instead_of_deciding_it() {
+    let _guard = serial();
+    let (directory, path, items) = store("busy");
     let mut session = Session::over(open_file(&path));
 
-    let body = session.succeed(&remove_request(&items.expired, EXPIRED_AUDIO, &blocked));
-    assert_eq!(body["decision"], "approved");
-    assert_eq!(body["effect"], "failed");
-    assert!(blocked.exists());
+    let writer = raw_connection(&path, std::time::Duration::from_millis(50));
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let operation_id = session.next_operation_id;
+    session.next_operation_id += 1;
+    let request = json!({
+        "command": "begin_removal", "item_id": items.expired, "audio_reference": EXPIRED_AUDIO,
+    });
+    assert_eq!(start(session.handle, operation_id, &request).status, 0);
+    let event = session.events.recv_timeout(WAIT).expect("an outcome event");
+    assert_eq!(event.status, OHAND_CORE_STATUS_TRANSIENT);
+    let failure: Value = serde_json::from_slice(&event.payload).unwrap();
+    assert_eq!(failure["code"], "store_busy");
+    writer.execute_batch("ROLLBACK").unwrap();
+
+    let granted = begin(&mut session, &items.expired, EXPIRED_AUDIO);
+    assert_eq!(granted["decision"], "approved");
+    let lease_id = granted["lease_id"].as_u64().unwrap();
+    assert_eq!(
+        release(session.handle, lease_id).status,
+        OHAND_CORE_STATUS_OK
+    );
 
     session.close();
     let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn a_store_without_a_file_cannot_be_leased() {
+    let _guard = serial();
+    let mut handle = 0;
+    let memory = ":memory:";
+    let opened = consume(unsafe { ohand_core_open(memory.as_ptr(), memory.len(), &mut handle) });
+    assert_eq!(opened.status, OHAND_CORE_STATUS_OK);
+    let session = Session::over(handle);
+
+    let operation_id = session.next_operation_id;
+    let request = json!({
+        "command": "begin_removal", "item_id": "item", "audio_reference": EXPIRED_AUDIO,
+    });
+    assert_eq!(start(handle, operation_id, &request).status, 0);
+    let event = session.events.recv_timeout(WAIT).expect("an outcome event");
+    assert_ne!(event.status, OHAND_CORE_STATUS_OK);
+    let failure: Value = serde_json::from_slice(&event.payload).unwrap();
+    assert_eq!(failure["code"], "store_unavailable");
+
+    session.close();
 }

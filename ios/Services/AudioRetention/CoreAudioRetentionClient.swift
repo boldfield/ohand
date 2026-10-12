@@ -14,6 +14,8 @@ public final class CoreAudioRetentionClient: AudioRetentionCore, @unchecked Send
 
     static let shutDownFailure = CoreFailure(
         errorClass: .cancelled, code: "client_shut_down", message: "the audio retention client was shut down")
+    static let leaseTooOld = CoreFailure(
+        errorClass: .transient, code: "lease_expired", message: "the removal lease was too old to use")
     static let unreadableAnswer = CoreFailure(
         errorClass: .permanent, code: "unreadable_event", message: "the core answer could not be read")
 
@@ -43,14 +45,37 @@ public final class CoreAudioRetentionClient: AudioRetentionCore, @unchecked Send
         return try Self.decision(from: answer)
     }
 
-    public func removeAudio(itemID: String, audioReference: String, fileURL: URL, periodSeconds: UInt64) async throws
-        -> AudioRemovalResult
-    {
+    public func removeAudio(
+        itemID: String, audioReference: String, periodSeconds: UInt64, effect: () -> AudioRemovalEffect
+    ) async throws -> AudioRemovalResult {
+        // Taken before asking, so the lease is never assumed younger than it is.
+        let askedAt = Self.uptime()
         let answer = try await ask(
-            .removeAudio(
-                itemID: itemID, audioReference: audioReference, audioPath: fileURL.path, periodSeconds: periodSeconds),
+            .beginRemoval(itemID: itemID, audioReference: audioReference, periodSeconds: periodSeconds),
             as: CoreRetentionDecisionAnswer.self)
-        return try Self.result(from: answer)
+        if case .denied(let denial) = try Self.decision(from: answer) { return .denied(denial) }
+        guard let leaseID = answer.leaseID, let leaseMillis = answer.leaseMillis, leaseMillis > 0 else {
+            throw Self.unreadableAnswer
+        }
+
+        var performed: AudioRemovalEffect?
+        if Self.leaseAllowsEffect(elapsed: Self.uptime() - askedAt, leaseMillis: leaseMillis) {
+            performed = effect()
+        }
+        // The fence is always ended, and a lease that lapsed first is reported rather than ignored.
+        try core.releaseAudioRemoval(leaseIdentifier: leaseID)
+        guard let performed else { throw Self.leaseTooOld }
+        return .approved(performed)
+    }
+
+    /// The effect may start only in the first half of the lease, which leaves the rest as margin for the effect itself
+    /// and for scheduling delays between this check and the removal.
+    static func leaseAllowsEffect(elapsed: TimeInterval, leaseMillis: UInt64) -> Bool {
+        elapsed >= 0 && elapsed < Double(leaseMillis) / 2_000
+    }
+
+    private static func uptime() -> TimeInterval {
+        ProcessInfo.processInfo.systemUptime
     }
 
     // MARK: Answer mapping
@@ -100,20 +125,6 @@ public final class CoreAudioRetentionClient: AudioRetentionCore, @unchecked Send
             return .removeAudio(audioReference: reference, expiredAt: expiredAt)
         default:
             throw unreadableAnswer
-        }
-    }
-
-    static func result(from answer: CoreRetentionDecisionAnswer) throws -> AudioRemovalResult {
-        switch try decision(from: answer) {
-        case .denied(let denial):
-            return .denied(denial)
-        case .approved:
-            switch answer.effect {
-            case "removed": return .approved(.removed)
-            case "already_absent": return .approved(.alreadyAbsent)
-            case "failed": return .approved(.failed)
-            default: throw unreadableAnswer
-            }
         }
     }
 

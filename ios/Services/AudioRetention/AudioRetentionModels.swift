@@ -81,7 +81,7 @@ public enum AudioRemovalDecision: Equatable, Sendable {
     case denied(AudioRemovalDenial)
 }
 
-/// What happened to the file after the core approved its removal.
+/// What happened to the file when native code carried out an approved removal.
 public enum AudioRemovalEffect: Equatable, Sendable {
     /// The file existed, was removed and is verified absent.
     case removed
@@ -91,7 +91,8 @@ public enum AudioRemovalEffect: Equatable, Sendable {
     case failed
 }
 
-/// The core's answer to `removeAudio`: refused with nothing touched, or approved with the effect it carried out.
+/// The outcome of `removeAudio`: refused with the effect never run, or approved with the effect that native code carried
+/// out while the core held its fence.
 public enum AudioRemovalResult: Equatable, Sendable {
     case denied(AudioRemovalDenial)
     case approved(AudioRemovalEffect)
@@ -99,9 +100,9 @@ public enum AudioRemovalResult: Equatable, Sendable {
 
 /// The retention policy as native code uses it (`core/src/lifecycle/retention`). The core stays the only authority on
 /// what may be removed: it decides eligibility from the successful-transcription time and the item's authoritative
-/// source state. Native code never derives eligibility itself, and never removes a retention file on its own: the core
-/// approves and removes in one step, so audio that became protected after a sweep, or between an approval and the
-/// removal, cannot be lost.
+/// source state. Native code never derives eligibility itself, and removes a retention file only inside `removeAudio`,
+/// where the core decides and then holds a store-wide fence (the store's write lock) while native code carries out the
+/// removal, so audio that became protected after a sweep, or between the approval and the removal, cannot be lost.
 public protocol AudioRetentionCore: Sendable {
     /// Every live item that holds audio, with the core's retention state and cleanup intent.
     func sweep(pressure: CoreRetentionPressure, periodSeconds: UInt64) async throws -> [AudioRetentionItem]
@@ -110,10 +111,14 @@ public protocol AudioRetentionCore: Sendable {
     func authorizeRemoval(itemID: String, audioReference: String, periodSeconds: UInt64) async throws
         -> AudioRemovalDecision
 
-    /// Re-decides the removal of the exact audio reference and, only when approved, removes `fileURL` (the file that
-    /// reference names) and verifies it absent, as one step that no other core write can interleave with.
-    func removeAudio(itemID: String, audioReference: String, fileURL: URL, periodSeconds: UInt64) async throws
-        -> AudioRemovalResult
+    /// Re-decides the removal of the exact audio reference and, only when approved, runs `effect` while no other write
+    /// to the store can commit, then ends the fence. `effect` removes the one file the reference names, verifies it
+    /// absent and says what happened; it is never run when the removal is denied, and never run late in the fence's
+    /// life. Throws, after the effect may have run, when the fence cannot be shown to have held throughout: the removal
+    /// is then not reported as done and the next sweep decides it again.
+    func removeAudio(
+        itemID: String, audioReference: String, periodSeconds: UInt64, effect: () -> AudioRemovalEffect
+    ) async throws -> AudioRemovalResult
 }
 
 /// Why a removal was left for the next sweep. Fixed codes only: a result never reports identifiers, paths or error text.
