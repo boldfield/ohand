@@ -265,15 +265,21 @@ fn request_entries(
         })
         .collect();
 
+    // A cancellation records no instant while the reminders row keeps its last one, so a
+    // recorded cancellation of the current generation describes a cancelled row whatever its
+    // retained instant.
     let current_is_recorded = request_events.last().is_some_and(|event| {
         event.request_state == record.request_state
-            && event.resolved_instant == record.resolved_instant
             && event.schedule_generation == record.schedule_generation
+            && (event.request_state == RequestState::Cancelled
+                || event.resolved_instant == record.resolved_instant)
     });
     if !current_is_recorded {
-        let native_cancel = operations
-            .iter()
-            .any(|operation| operation.operation_type == OperationType::Cancel);
+        let native_cancel = operations.iter().any(|operation| {
+            operation.operation_type == OperationType::Cancel
+                && parse_notification_id(&operation.notification_id)
+                    .is_some_and(|(_, generation)| generation == record.schedule_generation)
+        });
         if let Some(kind) = request_kind(
             record.request_state,
             record.resolved_instant,

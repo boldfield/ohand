@@ -1289,3 +1289,70 @@ fn request_entries_recorded_in_the_same_instant_keep_request_order() -> Result<(
     );
     Ok(())
 }
+
+#[test]
+fn cancelling_a_past_time_request_with_no_earlier_schedule_is_one_entry() -> Result<()> {
+    let mut db = open_db("past_then_cancelled")?;
+    let revision = insert_action(&mut db, "item-1", "call the roofer")?;
+    let past = "2026-01-15T09:00:00Z";
+    let record = set_time(&mut db, "item-1", revision, past, "2026-01-15T11:00:00Z")?;
+    let past_in_time = RequestState::Unschedulable(UnschedulableReason::TimeInPast);
+    assert_eq!(record.request_state, past_in_time);
+    cancel(&mut db, "item-1", revision, "2026-01-15T11:05:00Z")?;
+    // The row keeps the past instant after cancellation; history must not read that as an
+    // unrecorded request and add a second cancellation.
+    assert_eq!(
+        stored(&mut db, "item-1")?.resolved_instant,
+        Some(instant(past))
+    );
+
+    let view = history(&mut db, "item-1", "2026-01-15T11:10:00Z")?;
+    assert_eq!(
+        kinds(&view),
+        vec![
+            HistoryEntryKind::NotSchedulable {
+                request_state: past_in_time,
+                due_at: Some(instant(past)),
+            },
+            HistoryEntryKind::Cancelled {
+                generation: None,
+                native_cancel: None,
+            },
+        ]
+    );
+    assert_eq!(view.entries[1].occurred_at, instant("2026-01-15T11:05:00Z"));
+    assert_eq!(view.summary.request_state, RequestState::Cancelled);
+    Ok(())
+}
+
+#[test]
+fn cancelling_an_ambiguous_request_is_one_entry() -> Result<()> {
+    let mut db = open_db("ambiguous_then_cancelled")?;
+    let revision = insert_action(&mut db, "item-1", "call the roofer tomorrow")?;
+    let record = derive(
+        &mut db,
+        "item-1",
+        revision,
+        "tomorrow",
+        "2026-01-15T11:00:00Z",
+    )?;
+    assert_eq!(record.request_state, RequestState::NotScheduledYet);
+    cancel(&mut db, "item-1", revision, "2026-01-15T11:05:00Z")?;
+
+    let view = history(&mut db, "item-1", "2026-01-15T11:10:00Z")?;
+    assert_eq!(
+        kinds(&view),
+        vec![
+            HistoryEntryKind::NotSchedulable {
+                request_state: RequestState::NotScheduledYet,
+                due_at: None,
+            },
+            HistoryEntryKind::Cancelled {
+                generation: None,
+                native_cancel: None,
+            },
+        ]
+    );
+    assert_eq!(view.summary.request_state, RequestState::Cancelled);
+    Ok(())
+}
