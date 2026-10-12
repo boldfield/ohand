@@ -16,7 +16,8 @@ use ohand_core::reminders::reconcile::{
     ScheduleRequest,
 };
 use ohand_core::reminders::state::{
-    apply_derived_request, get_reminder, DerivedReminderRequest, ReminderStateError, ScheduleState,
+    apply_derived_request, cancel_reminder, get_reminder, DerivedReminderRequest,
+    ReminderCancellation, ReminderStateError, ScheduleState,
 };
 use ohand_core::store::events::{
     save_event, Correction, CorrectionKind, Event, EventPayload, EventType,
@@ -129,6 +130,31 @@ fn create_reminder(db: &mut Database, item_id: &str, text: &str) -> Result<Strin
     Ok(record.notification_id().expect("resolved reminder"))
 }
 
+/// The user cancels the reminder on `item_id`, freeing its OS slot.
+fn cancel_reminder_on(db: &mut Database, item_id: &str) -> Result<()> {
+    let clock = clock_at("2026-01-15T10:30:00Z");
+    let cancelled = run(db, |tx| {
+        let expected_revision: i32 = tx.query_row(
+            "SELECT revision FROM items WHERE item_id = ?",
+            [item_id],
+            |row| row.get(0),
+        )?;
+        let reminder = get_reminder(tx, item_id)?.expect("reminder exists");
+        cancel_reminder(
+            tx,
+            &clock,
+            &ReminderCancellation {
+                command_id: format!("cancel-{item_id}"),
+                item_id: item_id.to_string(),
+                expected_revision,
+                expected_reminder_version: reminder.state_version,
+            },
+        )
+    })?;
+    assert!(cancelled.is_some());
+    Ok(())
+}
+
 #[derive(Default)]
 struct FakeCenter {
     pending: BTreeMap<String, DateTime<Utc>>,
@@ -209,6 +235,22 @@ fn pass(
         center,
         schedule,
         &CapacityPolicy::default(),
+    )?)
+}
+
+fn pass_with(
+    db: &mut Database,
+    center: &mut FakeCenter,
+    schedule: &mut PromptSchedule,
+    policy: &CapacityPolicy,
+    now: &str,
+) -> Result<ohand_core::suggestions::schedule::PromptPassReport> {
+    Ok(reconcile_prompts(
+        db,
+        &clock_at(now),
+        center,
+        schedule,
+        policy,
     )?)
 }
 
@@ -708,6 +750,172 @@ fn a_prompt_cancelled_by_the_reminder_capacity_pass_never_costs_an_earlier_pendi
         .cancel_calls
         .iter()
         .any(|id| id == "prompt:2026-01-16" || id == "prompt:2026-01-17"));
+    Ok(())
+}
+
+fn tight_policy() -> CapacityPolicy {
+    CapacityPolicy {
+        os_pending_limit: 8,
+        replacement_headroom: 4,
+        ..CapacityPolicy::default()
+    }
+}
+
+const NEXT_THREE: [&str; 3] = [
+    "prompt:2026-01-16",
+    "prompt:2026-01-17",
+    "prompt:2026-01-18",
+];
+
+#[test]
+fn prompts_displaced_entirely_by_the_reminder_pass_return_once_capacity_frees() -> Result<()> {
+    let mut db = open_db("full-displacement")?;
+    let policy = tight_policy();
+    let mut schedule = PromptSchedule::default();
+    let moment = "2026-01-15T10:30:00Z";
+    let now = instant(moment);
+    let clock = clock_at(moment);
+    schedule.configure(daily(nine_am()), now, UTC_ZONE);
+    let mut center = FakeCenter::default();
+    reconcile_prompts(&mut db, &clock, &mut center, &mut schedule, &policy)?;
+    assert_eq!(center.prompt_ids(), NEXT_THREE);
+
+    // Four reminders fill the whole usable budget; the reminder side cancels every prompt.
+    for index in 0..4 {
+        create_reminder(&mut db, &format!("item-{index}"), "water plants")?;
+    }
+    let displacement = reconcile_with_capacity(
+        &mut db,
+        &clock,
+        &mut center,
+        &policy,
+        &schedule.demands(now),
+    )?;
+    assert_eq!(displacement.prompts_cancelled, NEXT_THREE);
+    assert!(center.prompt_ids().is_empty());
+
+    // The prompt pass sees all three absent while reminders hold every slot: not deliveries.
+    reconcile_prompts(&mut db, &clock, &mut center, &mut schedule, &policy)?;
+    assert_eq!(
+        fire_instants(&schedule),
+        [
+            instant("2026-01-16T09:00:00Z"),
+            instant("2026-01-17T09:00:00Z"),
+            instant("2026-01-18T09:00:00Z"),
+        ]
+    );
+    assert!(center.prompt_ids().is_empty());
+
+    for index in 0..4 {
+        cancel_reminder_on(&mut db, &format!("item-{index}"))?;
+    }
+    schedule.refresh(RefreshTrigger::AppOpen, now, UTC_ZONE);
+    reconcile_prompts(&mut db, &clock, &mut center, &mut schedule, &policy)?;
+
+    assert_eq!(
+        fire_instants(&schedule),
+        [
+            instant("2026-01-16T09:00:00Z"),
+            instant("2026-01-17T09:00:00Z"),
+            instant("2026-01-18T09:00:00Z"),
+        ]
+    );
+    assert_eq!(center.prompt_ids(), NEXT_THREE);
+    Ok(())
+}
+
+#[test]
+fn a_reported_reminder_pass_keeps_displaced_prompts_even_if_capacity_frees_before_the_next_look(
+) -> Result<()> {
+    let mut db = open_db("reported-displacement")?;
+    let policy = tight_policy();
+    let mut schedule = PromptSchedule::default();
+    let moment = "2026-01-15T10:30:00Z";
+    let now = instant(moment);
+    let clock = clock_at(moment);
+    schedule.configure(daily(nine_am()), now, UTC_ZONE);
+    let mut center = FakeCenter::default();
+    reconcile_prompts(&mut db, &clock, &mut center, &mut schedule, &policy)?;
+
+    for index in 0..4 {
+        create_reminder(&mut db, &format!("item-{index}"), "water plants")?;
+    }
+    let displacement = reconcile_with_capacity(
+        &mut db,
+        &clock,
+        &mut center,
+        &policy,
+        &schedule.demands(now),
+    )?;
+    schedule.record_capacity_pass(&displacement);
+    assert!(center.prompt_ids().is_empty());
+
+    // The reminders go away before the prompt pass ever sees the empty OS.
+    for index in 0..4 {
+        cancel_reminder_on(&mut db, &format!("item-{index}"))?;
+    }
+    schedule.refresh(RefreshTrigger::AppOpen, now, UTC_ZONE);
+    reconcile_prompts(&mut db, &clock, &mut center, &mut schedule, &policy)?;
+
+    assert_eq!(center.prompt_ids(), NEXT_THREE);
+    assert_eq!(fire_instants(&schedule)[0], instant("2026-01-16T09:00:00Z"));
+    Ok(())
+}
+
+#[test]
+fn a_rollback_under_tight_capacity_gives_the_fired_prompt_slot_to_the_next_in_one_pass(
+) -> Result<()> {
+    let mut db = open_db("rollback-tight")?;
+    let policy = tight_policy();
+    // Two reminders leave two prompt slots.
+    create_reminder(&mut db, "item-0", "water plants")?;
+    create_reminder(&mut db, "item-1", "call the dentist")?;
+    let mut schedule = PromptSchedule::default();
+    schedule.configure(daily(nine_am()), instant("2026-01-15T07:00:00Z"), UTC_ZONE);
+    let mut center = FakeCenter::default();
+    pass_with(
+        &mut db,
+        &mut center,
+        &mut schedule,
+        &policy,
+        "2026-01-15T07:00:00Z",
+    )?;
+    assert_eq!(
+        center.prompt_ids(),
+        ["prompt:2026-01-15", "prompt:2026-01-16"]
+    );
+
+    center.fire_due(instant("2026-01-15T10:00:00Z"));
+    let rolled_back = instant("2026-01-15T08:00:00Z");
+    schedule.refresh(RefreshTrigger::ClockOrZoneChange, rolled_back, UTC_ZONE);
+    pass_with(
+        &mut db,
+        &mut center,
+        &mut schedule,
+        &policy,
+        "2026-01-15T08:00:00Z",
+    )?;
+
+    assert_eq!(
+        center.prompt_ids(),
+        ["prompt:2026-01-16", "prompt:2026-01-17"]
+    );
+    center.reset_calls();
+    let repeat = pass_with(
+        &mut db,
+        &mut center,
+        &mut schedule,
+        &policy,
+        "2026-01-15T08:00:00Z",
+    )?;
+    assert_eq!(center.mutations(), 0);
+    assert!(repeat.installed.is_empty() && repeat.cancelled.is_empty());
+    let installs_of_fired = center
+        .requests
+        .iter()
+        .filter(|request| request.notification_id == "prompt:2026-01-15")
+        .count();
+    assert_eq!(installs_of_fired, 0);
     Ok(())
 }
 

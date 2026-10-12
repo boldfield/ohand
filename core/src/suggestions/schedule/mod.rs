@@ -9,6 +9,11 @@
 // - Refill: only on app open, or when the user changes the setting in the open app. Re-entry
 //   and clock or zone changes drop passed occurrences and add none. A missed prompt is never
 //   replayed, and after several days of nonuse the OS holds no prompt: no backlog or catch-up.
+// - Fired versus displaced: an installed prompt that vanishes from the OS before its instant
+//   counts as fired (clock moved back) only when the capacity allocation still grants it a
+//   slot. Prompts core's capacity rule cancelled for explicit reminders are kept and come back
+//   when a slot frees; a capacity pass run outside `reconcile_prompts` with these demands must
+//   report back through `PromptSchedule::record_capacity_pass`.
 // - Disable: cancels every pending prompt and nothing else. No capacity pass runs, so reminders
 //   keep their state and their OS requests.
 // - Payload: always `PayloadKind::Generic`; the opaque target is the prompt's own identifier

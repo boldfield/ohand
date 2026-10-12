@@ -4,7 +4,9 @@ use chrono::{DateTime, Utc};
 
 use super::plan::{is_prompt_notification_id, PromptSchedule};
 use crate::providers::contracts::ErrorClass;
-use crate::reminders::capacity::{reconcile_with_capacity, CapacityPolicy, CapacityReport};
+use crate::reminders::capacity::{
+    reconcile_with_capacity, CapacityPolicy, CapacityReport, PromptDemand,
+};
 use crate::reminders::reconcile::{
     NotificationEffects, PayloadKind, PendingRequest, ReconcileError, ScheduleRequest,
 };
@@ -67,8 +69,10 @@ pub fn cancel_prompts(
 /// and their own opaque identifier as target. A failed install is reported and retried by any
 /// later pass; it is never recorded as delivery. This function never extends the horizon:
 /// only the schedule's own refresh rules do. It does retire occurrences the OS held at the
-/// previous pass but no longer holds, so a prompt that fired is not reinstalled if the clock
-/// is moved back, and it records which prompts the OS now holds for the next pass.
+/// previous pass but no longer holds although capacity grants them a slot, so a prompt that
+/// fired is not reinstalled if the clock is moved back, while a prompt held back for explicit
+/// reminders is kept and reinstalled when a slot frees. It records which prompts the OS now
+/// holds for the next pass.
 pub fn reconcile_prompts(
     database: &mut Database,
     clock: &dyn Clock,
@@ -87,36 +91,43 @@ pub fn reconcile_prompts(
         .iter()
         .map(|request| request.notification_id.as_str())
         .collect();
-    schedule.retire_fired(pass_clock.now, &pending_ids);
-    let demands = schedule.demands(pass_clock.now);
-    let offered: BTreeSet<&str> = demands
-        .iter()
-        .map(|demand| demand.notification_id.as_str())
-        .collect();
+    schedule.retire_elapsed(pass_clock.now);
 
     let mut report = PromptPassReport::default();
-    cancel_where(effects, &pending, &mut report, |notification_id| {
-        !offered.contains(notification_id)
-    });
-
-    let capacity = reconcile_with_capacity(database, &pass_clock, effects, policy, &demands)?;
-    report
-        .cancelled
-        .extend(capacity.prompts_cancelled.iter().cloned());
-    report.failures.extend(
-        capacity
-            .prompt_cancel_failures
-            .iter()
-            .map(|failure| PromptFailure {
-                notification_id: failure.notification_id.clone(),
-                operation: PromptOperation::Cancel,
-                class: failure.class,
-                code: failure.code.clone(),
-            }),
-    );
+    let (mut demands, mut capacity) = capacity_pass(
+        database,
+        &pass_clock,
+        effects,
+        schedule,
+        policy,
+        &pending,
+        &mut report,
+    )?;
+    // A prompt the OS held at the last pass and no longer holds, although the allocation just
+    // granted it a slot, was not cancelled by core: it fired and the clock moved back. Once such
+    // prompts are retired their slots go to later occurrences, so the pass runs again.
+    let granted: BTreeSet<&str> = capacity
+        .allocation
+        .granted_prompts
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let retired_fired = schedule.retire_fired(pass_clock.now, &pending_ids, &granted);
+    if retired_fired {
+        (demands, capacity) = capacity_pass(
+            database,
+            &pass_clock,
+            effects,
+            schedule,
+            policy,
+            &pending,
+            &mut report,
+        )?;
+    }
 
     let held: BTreeMap<&str, Option<DateTime<Utc>>> = pending
         .iter()
+        .filter(|request| !report.cancelled.contains(&request.notification_id))
         .map(|request| (request.notification_id.as_str(), request.fire_at))
         .collect();
     for notification_id in &capacity.allocation.granted_prompts {
@@ -155,6 +166,45 @@ pub fn reconcile_prompts(
     schedule.record_installed(&held_now);
     report.capacity = Some(capacity);
     Ok(report)
+}
+
+/// Cancel pending prompts outside the schedule's demands, then run the capacity pass with
+/// them. Returns the demands offered and the capacity report.
+fn capacity_pass(
+    database: &mut Database,
+    pass_clock: &PassClock,
+    effects: &mut dyn NotificationEffects,
+    schedule: &PromptSchedule,
+    policy: &CapacityPolicy,
+    pending: &[PendingRequest],
+    report: &mut PromptPassReport,
+) -> Result<(Vec<PromptDemand>, CapacityReport), ReconcileError> {
+    let demands = schedule.demands(pass_clock.now);
+    let offered: BTreeSet<&str> = demands
+        .iter()
+        .map(|demand| demand.notification_id.as_str())
+        .collect();
+    let already_cancelled: BTreeSet<String> = report.cancelled.iter().cloned().collect();
+    cancel_where(effects, pending, report, |notification_id| {
+        !offered.contains(notification_id) && !already_cancelled.contains(notification_id)
+    });
+
+    let capacity = reconcile_with_capacity(database, pass_clock, effects, policy, &demands)?;
+    report
+        .cancelled
+        .extend(capacity.prompts_cancelled.iter().cloned());
+    report.failures.extend(
+        capacity
+            .prompt_cancel_failures
+            .iter()
+            .map(|failure| PromptFailure {
+                notification_id: failure.notification_id.clone(),
+                operation: PromptOperation::Cancel,
+                class: failure.class,
+                code: failure.code.clone(),
+            }),
+    );
+    Ok((demands, capacity))
 }
 
 fn cancel_where(

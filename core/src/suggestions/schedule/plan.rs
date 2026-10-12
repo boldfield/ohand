@@ -5,7 +5,9 @@ use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::reminders::capacity::{PromptDemand, MAX_PROMPT_REQUESTS, PROMPT_HORIZON};
+use crate::reminders::capacity::{
+    CapacityReport, PromptDemand, MAX_PROMPT_REQUESTS, PROMPT_HORIZON,
+};
 
 /// The most daily prompts planned at once: the next three occurrences of the chosen time. After
 /// that many days without opening the app the OS holds no prompt at all, so there is no backlog.
@@ -106,8 +108,9 @@ pub struct PlannedPrompt {
     pub notification_id: String,
     pub local_date: NaiveDate,
     pub fire_at: DateTime<Utc>,
-    /// The OS was last seen holding this request at `fire_at`. If it is later absent while
-    /// `fire_at` still looks ahead of the clock, it fired and the clock moved back.
+    /// The OS was last seen holding this request at `fire_at`, and no capacity pass has since
+    /// reported cancelling it. If it is later absent while `fire_at` still looks ahead of the
+    /// clock and a slot is free for it, it fired and the clock moved back.
     #[serde(default)]
     pub installed: bool,
 }
@@ -128,11 +131,15 @@ pub struct PlannedPrompt {
 ///   either by the clock or because an installed request vanished from the OS before its
 ///   instant (it fired and the clock was moved back). No occurrence at or before it is planned
 ///   again, so rolling the clock back cannot replay a prompt that already fired. It is bounded
-///   by the horizon, never by the clock reading itself. Absence from the OS cannot tell a
-///   delivery from a cancellation (capacity displacement, a permission toggle, an OS purge), so
-///   only the leading run of vanished occurrences counts: the fence never passes a prompt the OS
-///   still holds. A purge that empties the OS can thus cost at most the planned horizon of
-///   prompts, which is acceptable for an optional feature; it never cancels a pending one.
+///   by the horizon, never by the clock reading itself.
+/// - Absence from the OS is taken for delivery only when core did not cause it. A prompt that
+///   core's capacity rule cancelled or holds back for explicit reminders is never fenced: the
+///   reconcile pass checks its own allocation, and a capacity pass run elsewhere reports its
+///   cancellations through [`PromptSchedule::record_capacity_pass`]. Only the leading run of
+///   vanished occurrences counts, so the fence never passes a prompt the OS still holds. A
+///   cancellation core cannot see (a permission toggle, an OS purge) can thus cost at most the
+///   planned horizon of prompts, which is acceptable for an optional feature; it never cancels a
+///   pending one.
 /// - The identifier of an occurrence is `prompt:<local date>`: stable, so a re-plan replaces
 ///   rather than duplicates, and it carries no item content.
 /// - Local-time semantics: a skipped local time (DST gap) fires at the first valid minute after
@@ -193,25 +200,37 @@ impl PromptSchedule {
     }
 
     /// Drop occurrences whose instant has passed by the clock and remember the latest.
-    fn retire_elapsed(&mut self, now: DateTime<Utc>) {
+    pub(super) fn retire_elapsed(&mut self, now: DateTime<Utc>) {
         self.retire_where(|prompt| prompt.fire_at <= now);
     }
 
-    /// Retire occurrences the clock says have passed, and the leading run of installed ones the
-    /// OS no longer holds: those fired before the clock was moved back. The run stops at the first
-    /// occurrence still pending (or never installed), so a prompt displaced by the reminder
-    /// capacity pass behind an earlier pending one is not mistaken for a delivery and never moves
-    /// the refill floor past a prompt that is still valid. Called by the reconcile pass with the
-    /// identifiers the OS currently holds.
-    pub(super) fn retire_fired(&mut self, now: DateTime<Utc>, pending: &BTreeSet<&str>) {
+    /// Retire occurrences the clock says have passed, and the leading run of installed ones that
+    /// the OS no longer holds although this pass's capacity allocation grants them a slot: those
+    /// fired before the clock was moved back. Absence alone is not delivery. A prompt the
+    /// capacity rule holds back (because explicit reminders need its slot) is absent because
+    /// core cancelled it, so it is kept and reinstalled once a slot frees. The run also stops at
+    /// the first occurrence still pending (or never installed), so the refill floor never passes
+    /// a prompt that is still valid. Called by the reconcile pass with the identifiers the OS
+    /// currently holds and the prompts the capacity pass granted. Returns whether an occurrence
+    /// the clock has not reached was retired.
+    pub(super) fn retire_fired(
+        &mut self,
+        now: DateTime<Utc>,
+        pending: &BTreeSet<&str>,
+        granted: &BTreeSet<&str>,
+    ) -> bool {
         self.planned.sort_by_key(|prompt| prompt.fire_at);
         let mut run_open = true;
+        let mut retired_ahead_of_clock = false;
         self.retire_where(|prompt| {
-            let fired = prompt.fire_at <= now
-                || (prompt.installed && !pending.contains(prompt.notification_id.as_str()));
-            run_open = run_open && fired;
+            let vanished = prompt.installed
+                && !pending.contains(prompt.notification_id.as_str())
+                && granted.contains(prompt.notification_id.as_str());
+            run_open = run_open && (prompt.fire_at <= now || vanished);
+            retired_ahead_of_clock |= run_open && prompt.fire_at > now;
             run_open
         });
+        retired_ahead_of_clock
     }
 
     fn retire_where(&mut self, mut has_fired: impl FnMut(&PlannedPrompt) -> bool) {
@@ -230,6 +249,32 @@ impl PromptSchedule {
     pub(super) fn record_installed(&mut self, held: &BTreeSet<&str>) {
         for prompt in &mut self.planned {
             prompt.installed = held.contains(prompt.notification_id.as_str());
+        }
+    }
+
+    /// Record a capacity pass that ran outside [`reconcile_prompts`](super::reconcile_prompts)
+    /// with this schedule's [`demands`](Self::demands), such as the reminder side making room
+    /// for a new reminder. Prompts it cancelled or held back are no longer marked installed, so
+    /// their absence from the OS is never taken for a delivery, whatever capacity is free when
+    /// the prompts are next reconciled. Every caller that offers these demands to a capacity
+    /// pass must hand its report back here.
+    pub fn record_capacity_pass(&mut self, report: &CapacityReport) {
+        let displaced: BTreeSet<&str> = report
+            .prompts_cancelled
+            .iter()
+            .chain(
+                report
+                    .allocation
+                    .deferred_prompts
+                    .iter()
+                    .map(|deferred| &deferred.notification_id),
+            )
+            .map(String::as_str)
+            .collect();
+        for prompt in &mut self.planned {
+            if displaced.contains(prompt.notification_id.as_str()) {
+                prompt.installed = false;
+            }
         }
     }
 
