@@ -160,7 +160,7 @@ jobs:
         run: |
           set -euo pipefail
           cd ios
-          OHAND_SIMULATOR_ADHOC_SIGN=1 ./scripts/build-simulator.sh OhAndApp 2>&1 | tee .evidence/OhAndApp-build.log
+          OHAND_DERIVED_DATA_PATH=.derived/OhAndApp OHAND_SIMULATOR_ADHOC_SIGN=1 ./scripts/build-simulator.sh OhAndApp 2>&1 | tee .evidence/OhAndApp-build.log
 
       - name: Launch OhAndApp smoke test
         shell: bash
@@ -174,7 +174,7 @@ jobs:
           cd ios
           ./scripts/smoke-simulator.sh \
             "${SIMULATOR_UDID}" \
-            .derived/Build/Products/Debug-iphonesimulator/OhAnd.app \
+            .derived/OhAndApp/Build/Products/Debug-iphonesimulator/OhAnd.app \
             com.boldfield.ohand.app \
             .evidence \
             "ohandapp-launch.png" 2>&1 | tee .evidence/ohandapp-smoke.log
@@ -184,7 +184,7 @@ jobs:
         run: |
           set -euo pipefail
           cd ios
-          app_path=.derived/Build/Products/Debug-iphonesimulator/OhAnd.app
+          app_path=.derived/OhAndApp/Build/Products/Debug-iphonesimulator/OhAnd.app
           {
             find "${app_path}/Frameworks" "${app_path}/PlugIns" -maxdepth 2
             for framework in OhAndServices OhAndCoreBridge; do
@@ -192,6 +192,13 @@ jobs:
             done
             test -d "${app_path}/PlugIns/OhAndCaptureControl.appex"
             test ! -d "${app_path}/PlugIns/OhAndCaptureControl.appex/Frameworks"
+            # A production bundle carries no test-host injection (OhAndTests uses OhAnd.app as TEST_HOST).
+            test_host_files="$(find "${app_path}" \( -iname 'XC*' -o -iname 'Testing.framework' -o -iname 'libXCTest*' -o -name '*.xctest' \) -print)"
+            if [ -n "${test_host_files}" ]; then
+              echo "OhAnd.app contains test-host files:" >&2
+              echo "${test_host_files}" >&2
+              exit 1
+            fi
           } 2>&1 | tee .evidence/OhAndApp-bundle.txt
 
       - name: Build CaptureProbe

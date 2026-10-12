@@ -132,7 +132,7 @@ def check_embedded_frameworks(project):
             ]
         for framework_name in sorted(reached - embedded):
             errors.append(
-                f"{app_name} reaches framework {framework_name} through another framework but does not embed it; "
+                f"{app_name} links framework {framework_name} (directly or through another framework) but does not embed it; "
                 f"add '- target: {framework_name}' to {app_name}.dependencies"
             )
     return errors
