@@ -75,6 +75,10 @@ pub const MIGRATIONS: &[MigrationStep] = &[
         target_version: 8,
         apply: add_reminder_history_events_v8,
     },
+    MigrationStep {
+        target_version: 9,
+        apply: add_local_metrics_v9,
+    },
 ];
 
 /// Database handle with schema validation.
@@ -820,6 +824,43 @@ fn add_reminder_history_events_v8(tx: &Transaction<'_>) -> Result<()> {
             native_cancel INTEGER NOT NULL CHECK (native_cancel IN (0, 1)),
             recorded_at TEXT NOT NULL,
             FOREIGN KEY (reminder_id) REFERENCES reminders(reminder_id)
+        )",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Content-free local metrics (T01): bounded timing samples with no event time, failure counters
+/// over a closed label set, and the single recording on/off setting.
+fn add_local_metrics_v9(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute(
+        "CREATE TABLE metric_timing_samples (
+            sample_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            series TEXT NOT NULL CHECK (series IN ('trigger_to_ready', 'end_of_input_to_save')),
+            dimension TEXT NOT NULL,
+            duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0 AND duration_ms <= 3600000)
+        )",
+        [],
+    )?;
+    tx.execute(
+        "CREATE INDEX idx_metric_timing_samples_series
+            ON metric_timing_samples(series, dimension, sample_id)",
+        [],
+    )?;
+    tx.execute(
+        "CREATE TABLE metric_failure_counts (
+            series TEXT NOT NULL CHECK (series IN ('processing_failure', 'scheduling_failure')),
+            dimension TEXT NOT NULL,
+            occurrences INTEGER NOT NULL CHECK (occurrences >= 0),
+            PRIMARY KEY (series, dimension)
+        )",
+        [],
+    )?;
+    tx.execute(
+        "CREATE TABLE metric_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+            updated_at TEXT NOT NULL
         )",
         [],
     )?;
