@@ -133,6 +133,7 @@ struct Center {
     fail_list: bool,
     silent: bool,
     unanswered: Vec<u64>,
+    unattributable: usize,
 }
 
 struct NativeSide {
@@ -230,7 +231,11 @@ unsafe extern "C" fn native_command(
                             })
                         })
                         .collect();
-                    json!({ "pending": pending })
+                    if center.unattributable > 0 {
+                        json!({ "pending": pending, "unattributable": center.unattributable })
+                    } else {
+                        json!({ "pending": pending })
+                    }
                 }
             }
             other => panic!("unexpected command {other}"),
@@ -466,6 +471,99 @@ fn capacity_overflow_is_held_back_and_reminders_win_over_prompts() {
 }
 
 #[test]
+fn unattributable_requests_hold_slots_without_aliasing_any_prompt_or_being_cancelled() {
+    let _guard = serial();
+    let mut session = Session::open("unattributable", 60);
+    // Pending prompts and offered prompts are named exactly as the placeholders of other
+    // identifier schemes would be; none may be mistaken for an unattributable request.
+    let offered: Vec<Value> = [
+        "unattributable",
+        "ohand.unattributable.0",
+        "ohand.unattributable.1",
+    ]
+    .iter()
+    .enumerate()
+    .map(|(index, id)| {
+        json!({
+            "notification_id": id,
+            "fire_at": (Utc::now() + ChronoDuration::hours(index as i64 + 1))
+                .to_rfc3339_opts(SecondsFormat::Secs, true),
+        })
+    })
+    .collect();
+    {
+        let mut center = session.native.center();
+        center.unattributable = 4;
+        for id in ["ohand.unattributable.0", "ohand.unattributable.1"] {
+            center
+                .pending
+                .push((id.to_string(), Utc::now() + ChronoDuration::hours(1)));
+        }
+    }
+
+    let outcome = session.pass(json!({
+        "allow_optional_prompts": true,
+        "prompts": offered,
+    }));
+    assert_eq!(
+        count(&outcome, "installed"),
+        56,
+        "four unattributable slots are charged"
+    );
+    assert_eq!(count(&outcome, "demoted"), 4);
+    assert_eq!(count(&outcome, "prompts_granted"), 0);
+    assert_eq!(count(&outcome, "prompts_deferred"), 3);
+    assert_eq!(count(&outcome, "failures"), 0);
+    {
+        let center = session.native.center();
+        let mut cancels = center.cancels.clone();
+        cancels.sort();
+        assert_eq!(
+            cancels,
+            ["ohand.unattributable.0", "ohand.unattributable.1"],
+            "pending prompts yield their slots whatever their names"
+        );
+        assert_eq!(center.pending.len() + center.unattributable, 60);
+    }
+
+    let repeat = session.pass(json!({
+        "allow_optional_prompts": true,
+        "prompts": offered,
+    }));
+    assert_eq!(count(&repeat, "installed"), 0);
+    assert_eq!(count(&repeat, "prompts_granted"), 0);
+    let center = session.native.center();
+    assert_eq!(center.cancels.len(), 2, "a repeat cancels nothing again");
+    assert_eq!(center.schedules.len(), 56, "and installs nothing twice");
+    drop(center);
+    session.close();
+}
+
+#[test]
+fn unattributable_placeholders_are_distinct_and_cannot_be_offered_as_prompts() {
+    let placeholders: Vec<String> = (0..12).map(unattributable_identifier).collect();
+    let distinct: std::collections::BTreeSet<&String> = placeholders.iter().collect();
+    assert_eq!(distinct.len(), placeholders.len());
+    for placeholder in &placeholders {
+        assert!(placeholder.len() > MAX_IDENTIFIER_BYTES);
+        assert!(!placeholder.contains('#'));
+        let offered = ReconcileRequest {
+            rearm_rejected_schedules: false,
+            allow_optional_prompts: true,
+            prompts: vec![PromptCandidate {
+                notification_id: placeholder.clone(),
+                fire_at: "2090-01-01T00:00:00Z".to_string(),
+            }],
+            facts_only: false,
+        };
+        assert!(
+            validate(offered).is_err(),
+            "no prompt can carry a placeholder's name"
+        );
+    }
+}
+
+#[test]
 fn optional_prompts_use_the_slots_left_and_are_withheld_without_permission() {
     let _guard = serial();
     let mut session = Session::open("prompts", 10);
@@ -608,6 +706,8 @@ fn bad_requests_and_answers_are_refused_with_normalized_failures() {
         &b"{"[..],
         br#"{"unexpected":1}"#,
         br#"{"pending":[{"notification_id":""}]}"#,
+        br#"{"unattributable":1}"#,
+        br#"{"pending":[],"unattributable":-1}"#,
     ] {
         let outcome = consume(unsafe {
             ohand_core_complete_notification_effect(session.handle, 1, bytes.as_ptr(), bytes.len())

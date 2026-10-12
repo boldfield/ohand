@@ -11,8 +11,6 @@ import Foundation
 struct ReminderNativeEffects: Sendable {
     /// The core rejects longer identifiers, so a request this long cannot be one the core created.
     static let maximumIdentifierBytes = 128
-    /// Prefix of the stand-in identifiers listed for pending requests whose identifiers the core cannot carry.
-    static let unattributablePrefix = "ohand.unattributable."
 
     let bridge: NotificationBridge
     let center: NotificationCenterProviding
@@ -29,34 +27,27 @@ struct ReminderNativeEffects: Sendable {
         }
     }
 
-    /// Every pending request as the core can carry it, one entry per request the OS holds.
+    /// The pending requests split into those the core can name and a count of the rest.
+    struct CarriedPending {
+        let named: [NotificationCenterPendingRequest]
+        let unattributableCount: Int
+    }
+
+    /// Every pending request as the core can carry it.
     ///
     /// A request whose identifier is empty or longer than the core accepts cannot be one the core created, but it
-    /// still occupies an OS slot, so it is listed under a stand-in identifier instead of being left out. Each
-    /// stand-in is unique within the list (and contains no `#`, so it never reads as a reminder's identifier):
-    /// the core counts every one against the budget and, attributing none of them, never asks to cancel one.
-    static func carried(_ requests: [NotificationCenterPendingRequest]) -> [NotificationCenterPendingRequest] {
-        func representable(_ identifier: String) -> Bool {
-            let size = identifier.utf8.count
+    /// still occupies an OS slot, so it is counted instead of being left out. It is not renamed: any name native
+    /// chose could equal a valid prompt identifier, so the count crosses the boundary on its own and the core
+    /// charges each one under a placeholder that no prompt or reminder identifier can match.
+    static func carried(_ requests: [NotificationCenterPendingRequest]) -> CarriedPending {
+        let named = requests.filter { request in
+            let size = request.identifier.utf8.count
             return size > 0 && size <= maximumIdentifierBytes
         }
-        var listed = Set(requests.map(\.identifier).filter(representable))
-        var nextStandIn = 0
-        return requests.map { request in
-            if representable(request.identifier) { return request }
-            var standIn: String
-            repeat {
-                standIn = unattributablePrefix + String(nextStandIn)
-                nextStandIn += 1
-            } while listed.contains(standIn)
-            listed.insert(standIn)
-            return NotificationCenterPendingRequest(identifier: standIn, dueInstant: request.dueInstant, userInfo: [:])
-        }
+        return CarriedPending(named: named, unattributableCount: requests.count - named.count)
     }
 
     func cancel(_ rawIdentifier: String) async throws {
-        // A stand-in names no request the OS holds; refusing it keeps whatever the core meant still charged.
-        if rawIdentifier.hasPrefix(Self.unattributablePrefix) { throw NotificationBridgeError.invalidPayload }
         if let reminderIdentifier = NotificationIdentifier(rawValue: rawIdentifier) {
             try await bridge.cancel(reminderIdentifier)
             return

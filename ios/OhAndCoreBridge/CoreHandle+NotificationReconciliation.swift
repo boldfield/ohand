@@ -48,7 +48,10 @@ public struct PendingNotificationAnswer: Equatable, Sendable {
 public enum NotificationEffectAnswer: Equatable, Sendable {
     case done
     case failed(errorClass: CoreErrorClass, code: String)
-    case pending([PendingNotificationAnswer])
+    /// The pending requests native can name, plus how many more are pending under identifiers the core cannot
+    /// carry (empty, or longer than 128 UTF-8 bytes). The core charges each of those against the budget under a
+    /// placeholder no prompt or reminder can share, and never asks to cancel one.
+    case pending([PendingNotificationAnswer], unattributable: Int = 0)
 }
 
 /// One pass of the core's capacity and reconciliation logic. `factsOnly` reads the reminders without a pass.
@@ -172,18 +175,22 @@ private struct EffectAnswerBody: Encodable {
 
     let error: ErrorBody?
     let pending: [PendingBody]?
+    let unattributable: Int?
 
     init(_ answer: NotificationEffectAnswer) {
         switch answer {
         case .done:
             error = nil
             pending = nil
+            unattributable = nil
         case .failed(let errorClass, let code):
             error = ErrorBody(errorClass: errorClass.rawValue, code: code)
             pending = nil
-        case .pending(let entries):
+            unattributable = nil
+        case .pending(let entries, let unattributableCount):
             error = nil
             pending = entries.map { PendingBody(notificationID: $0.notificationID, fireAt: $0.fireAt) }
+            unattributable = unattributableCount > 0 ? unattributableCount : nil
         }
     }
 }

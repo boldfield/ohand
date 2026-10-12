@@ -381,9 +381,9 @@ final class NotificationPermissionCoreIntegrationTests: XCTestCase {
         let rig = try makeRig(authorization: .authorized, prompts: prompts)
         defer { finish(rig) }
         // Five identifiers one byte over the core's bound and an empty one exhaust the four-slot headroom on their
-        // own; a short foreign request already named like the first stand-in must not collapse into it.
+        // own; a short foreign request is counted beside them.
         let overlong = (0..<5).map { index in String(index) + String(repeating: "x", count: 128) }
-        let foreign = overlong + ["", ReminderNativeEffects.unattributablePrefix + "0"]
+        let foreign = overlong + ["", "ohand.unattributable.0"]
         for identifier in foreign {
             rig.center.installForeignRequest(identifier: identifier, dueInstant: Date().addingTimeInterval(7200))
         }
@@ -405,6 +405,49 @@ final class NotificationPermissionCoreIntegrationTests: XCTestCase {
         XCTAssertEqual(repeated.readiness.scheduledCount, 53)
         XCTAssertTrue(rig.center.removedIdentifiers.isEmpty, "a repeated foreground cancels nothing")
         XCTAssertEqual(rig.center.addedRequests.count, 53, "and installs nothing twice")
+        XCTAssertEqual(rig.center.pendingIdentifiers.count, 60)
+    }
+
+    func testUnnameablePendingRequestsNeverAliasOfferedPromptsAndPromptsOfAnyNameYieldTheirSlots() throws {
+        let seeded = reminders(count: 60)
+        try prepareStore(seeded)
+        // Prompt identifiers chosen to equal any stand-in name native might have invented for an unnameable request.
+        let promptIDs = ["ohand.unattributable.0", "ohand.unattributable.1", "ohand.unattributable.2", "unattributable"]
+        let prompts = promptIDs.enumerated().map { index, identifier in
+            OptionalPromptCandidate(notificationID: identifier, fireAt: Date().addingTimeInterval(3600 * Double(index + 1)))
+        }
+        let rig = try makeRig(authorization: .authorized, prompts: prompts)
+        defer { finish(rig) }
+        let unnameable = (0..<3).map { index in String(index) + String(repeating: "x", count: 128) } + [""]
+        for identifier in unnameable {
+            rig.center.installForeignRequest(identifier: identifier, dueInstant: Date().addingTimeInterval(7200))
+        }
+        let pendingPrompts = Array(prompts.prefix(2))
+        for prompt in pendingPrompts {
+            rig.center.installForeignRequest(identifier: prompt.notificationID, dueInstant: prompt.fireAt)
+        }
+        XCTAssertEqual(rig.center.pendingIdentifiers.count, 6)
+        let reconciler = rig.reconciler
+
+        let report = try runAsync(timeout: 90) { try await reconciler.refresh(trigger: .launch) }
+
+        XCTAssertNil(report.reconciliationFailure)
+        XCTAssertEqual(report.readiness.scheduledCount, 56, "each of the four unnameable requests holds a slot")
+        XCTAssertEqual(report.readiness.reminders.filter { $0.outlook == .unscheduled(.capacityExceeded) }.count, 4)
+        XCTAssertEqual(report.promptsGranted, 0, "no unnameable request is mistaken for an offered prompt")
+        XCTAssertEqual(report.promptsDeferred, 4)
+        XCTAssertEqual(
+            rig.center.removedIdentifiers.sorted(), pendingPrompts.map(\.notificationID).sorted(),
+            "pending prompts yield their slots to explicit reminders whatever their names")
+        XCTAssertEqual(rig.center.pendingIdentifiers.count, 60, "the pending set stays within the usable budget")
+        XCTAssertTrue(Set(unnameable).isSubset(of: Set(rig.center.pendingIdentifiers)), "no foreign request is cancelled")
+        XCTAssertEqual(rig.center.addedRequests.count, 56)
+
+        let repeated = try runAsync(timeout: 90) { try await reconciler.refresh(trigger: .foreground) }
+        XCTAssertEqual(repeated.readiness.scheduledCount, 56)
+        XCTAssertEqual(repeated.promptsGranted, 0)
+        XCTAssertEqual(rig.center.removedIdentifiers.count, 2, "a repeated foreground cancels nothing again")
+        XCTAssertEqual(rig.center.addedRequests.count, 56, "and installs nothing twice")
         XCTAssertEqual(rig.center.pendingIdentifiers.count, 60)
     }
 

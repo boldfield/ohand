@@ -191,10 +191,11 @@ public final class CoreReminderReconciler: ReminderReconciling, @unchecked Senda
                 return .done
             case .listPending:
                 let pending = ReminderNativeEffects.carried(try await effects.pending())
-                return .pending(pending.map { request in
+                let named = pending.named.map { request in
                     PendingNotificationAnswer(
                         notificationID: request.identifier, fireAt: request.dueInstant.map { formatter.string(from: $0) })
-                })
+                }
+                return .pending(named, unattributable: pending.unattributableCount)
             case .abandon:
                 return .done
             }

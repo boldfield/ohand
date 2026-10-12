@@ -28,6 +28,12 @@
 //!   normalized failure. Counts and machine labels only: no text, no native identifier.
 //!   `reminders` are the stored facts of active items after the pass. Delivery and acknowledgment
 //!   are read, never written: a revoked permission, Focus or elapsed time records neither.
+//! * A listing answer may add `"unattributable": n`, the number of pending requests whose
+//!   identifiers native cannot carry (empty, or longer than `MAX_IDENTIFIER_BYTES`). Each one
+//!   still occupies an OS slot, so the core lists it under a placeholder identifier longer than
+//!   any identifier a prompt candidate or a reminder can have: no placeholder can alias an
+//!   offered prompt or a known reminder, so each is charged against the budget as foreign and
+//!   never cancelled.
 //! * The pass holds the worker thread while it waits for native answers, so the native layer
 //!   answers promptly; each command is bounded by `EFFECT_DEADLINE`.
 
@@ -84,6 +90,9 @@ const WAIT_SLICE: Duration = Duration::from_millis(25);
 const MAX_PROMPT_CANDIDATES: usize = 256;
 const MAX_IDENTIFIER_BYTES: usize = 128;
 const MAX_CODE_BYTES: usize = 64;
+/// Most unattributable requests carried per listing. A count above the OS pending limit
+/// exhausts the budget the same way, so a larger count is charged as this many.
+const MAX_UNATTRIBUTABLE_PENDING: usize = 1_024;
 
 struct Registration {
     callback: EffectCallbackFn,
@@ -286,6 +295,19 @@ struct AnswerJson {
     error: Option<ErrorAnswer>,
     #[serde(default)]
     pending: Option<Vec<PendingAnswer>>,
+    #[serde(default)]
+    unattributable: Option<usize>,
+}
+
+/// The placeholder identifier of the `index`th unattributable pending request. It is longer than
+/// `MAX_IDENTIFIER_BYTES` and has no `#`, so it is distinct from every prompt candidate (bounded
+/// by `validate`), every reminder identifier and every other placeholder.
+fn unattributable_identifier(index: usize) -> String {
+    format!(
+        "{:.<width$}{index}",
+        "unattributable",
+        width = MAX_IDENTIFIER_BYTES + 1
+    )
 }
 
 fn sanitized_code(code: &str) -> String {
@@ -309,6 +331,9 @@ fn parse_answer(answer: AnswerJson) -> Result<Answer, AbiFailure> {
         )));
     }
     let Some(pending) = answer.pending else {
+        if answer.unattributable.is_some() {
+            return Err(AbiFailure::INVALID_REQUEST);
+        }
         return Ok(Answer::Done);
     };
     let mut requests = Vec::with_capacity(pending.len());
@@ -329,6 +354,14 @@ fn parse_answer(answer: AnswerJson) -> Result<Answer, AbiFailure> {
             fire_at,
         });
     }
+    let unattributable = answer
+        .unattributable
+        .unwrap_or(0)
+        .min(MAX_UNATTRIBUTABLE_PENDING);
+    requests.extend((0..unattributable).map(|index| PendingRequest {
+        notification_id: unattributable_identifier(index),
+        fire_at: None,
+    }));
     Ok(Answer::Pending(requests))
 }
 
@@ -677,7 +710,8 @@ pub unsafe extern "C" fn ohand_core_start_reconcile_reminders(
 /// Answers the native command `effect_id` of `handle` with the JSON at `answer`: `{}` for a
 /// completed schedule or cancel, `{"error":{"class","code"}}` for a failure (`class` is one of
 /// the normalized classes, `code` lowercase letters, digits and underscores), or
-/// `{"pending":[{"notification_id","fire_at"}]}` for a listing. An answer for a command that has
+/// `{"pending":[{"notification_id","fire_at"}],"unattributable":n}` for a listing (`n` optional,
+/// see the module documentation). An answer for a command that has
 /// ended is `not_found`.
 ///
 /// # Safety
