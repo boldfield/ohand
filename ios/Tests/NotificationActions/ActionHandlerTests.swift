@@ -2,8 +2,23 @@ import XCTest
 @testable import OhAndCoreBridge
 @testable import OhAndServices
 
+/// A real session over an immediately completing boundary, so tests exercise the epoch-bound authorization.
 final class FakeActionAuthorization: ActionAuthorizing {
-    var isAuthenticated = false
+    let session = ReadAuthenticationSession(boundary: FakeReadAuthenticationBoundary())
+
+    var isAuthenticated: Bool {
+        get { session.scope == .authenticated }
+        set {
+            if newValue {
+                session.authenticate(reason: "test") { _ in }
+            } else {
+                session.relock(.explicit)
+            }
+        }
+    }
+
+    func currentAuthorization() -> ReadAuthorization? { session.currentAuthorization() }
+    func isCurrent(_ authorization: ReadAuthorization) -> Bool { session.isCurrent(authorization) }
 }
 
 final class FakeActionCore: NotificationActionCore, @unchecked Sendable {
@@ -309,6 +324,27 @@ final class ActionHandlerTests: XCTestCase {
         XCTAssertEqual(report.deferred, 1)
         XCTAssertTrue(rig.openedItems.isEmpty)
         XCTAssertEqual(rig.journal.stored.map(\.operation), [.open])
+    }
+
+    func testRelockAndReauthenticationWhileResolvingStillDropsThePreRelockAnswer() async {
+        let rig = makeRig()
+        rig.authorization.isAuthenticated = true
+        rig.core.onResolve = {
+            rig.authorization.isAuthenticated = false
+            rig.authorization.isAuthenticated = true
+        }
+        rig.handler.ingest(event(.opened))
+        let report = await rig.handler.reconcile()
+        XCTAssertTrue(rig.authorization.isAuthenticated)
+        XCTAssertEqual(report.deferred, 1)
+        XCTAssertTrue(rig.openedItems.isEmpty)
+        XCTAssertEqual(rig.journal.stored.map(\.operation), [.open])
+
+        rig.core.onResolve = nil
+        let replay = await rig.handler.reconcile()
+        XCTAssertEqual(replay.openedItemIDs, ["item-from-core"])
+        XCTAssertEqual(rig.openedItems, ["item-from-core"])
+        XCTAssertTrue(rig.journal.stored.isEmpty)
     }
 
     func testEntriesLeftByAnEarlierLaunchAreReconciledByANewHandler() async {

@@ -15,19 +15,21 @@ public protocol NotificationActionCore: Sendable {
     func resolve(notificationID: String) async throws -> NotificationActionAnswer
 }
 
-/// Whether the session may read or change private content right now.
+/// Whether the session may read or change private content right now. Authorizations are epoch-bound, so a result
+/// admitted before a relock is recognized as stale even if the session has authenticated again since.
 protocol ActionAuthorizing: AnyObject {
-    var isAuthenticated: Bool { get }
+    func currentAuthorization() -> ReadAuthorization?
+    func isCurrent(_ authorization: ReadAuthorization) -> Bool
 }
 
-extension ReadAuthenticationSession: ActionAuthorizing {
-    var isAuthenticated: Bool { scope == .authenticated }
-}
+extension ReadAuthenticationSession: ActionAuthorizing {}
 
 /// The identifiers of the actions the app attaches to its reminder notifications.
 public enum NotificationActionIdentifier {
     public static let acknowledge = "ohand.action.acknowledge"
     public static let complete = "ohand.action.complete"
+    /// The category the app attaches to its reminder notifications; it carries the two actions above.
+    public static let reminderCategory = "ohand.category.reminder"
 }
 
 /// What `ingest` did with one OS callback.
@@ -218,14 +220,15 @@ final class ActionHandler: @unchecked Sendable {
             case .acknowledge:
                 _ = try await core.acknowledge(notificationID: entry.notificationID, itemID: entry.targetID)
             case .complete:
-                guard authorization.isAuthenticated else { return .deferred }
+                guard authorization.currentAuthorization() != nil else { return .deferred }
                 _ = try await core.complete(notificationID: entry.notificationID, itemID: entry.targetID)
             case .open:
-                guard authorization.isAuthenticated else { return .deferred }
+                guard let admitted = authorization.currentAuthorization() else { return .deferred }
                 let answer = try await core.resolve(notificationID: entry.notificationID)
                 if answer.outcome == "item", let itemID = answer.itemID {
-                    // The session may have relocked while the core was answering: show nothing, keep the tap.
-                    guard authorization.isAuthenticated else { return .deferred }
+                    // The session may have relocked, even relocked and authenticated again, while the core was
+                    // answering: the answer belongs to the earlier epoch, so show nothing and keep the tap.
+                    guard authorization.isCurrent(admitted) else { return .deferred }
                     openItem(itemID)
                     openedItemID = itemID
                 }
