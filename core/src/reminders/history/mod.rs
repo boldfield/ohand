@@ -3,9 +3,11 @@
 //
 // Evidence rules:
 // - History is assembled only from recorded facts. Requested times and installation or
-//   cancellation outcomes come from the reminder's durable operations; delivery and opening come
-//   from OS events (`record_delivery_evidence`); acknowledgment comes from an explicit user action
-//   (`acknowledge_reminder`). The clock is read for exactly one thing: whether the due time lies
+//   cancellation outcomes come from the reminder's durable operations; requests that install
+//   nothing (repeat, ambiguous or unschedulable time, cancellation with nothing to cancel) come
+//   from the request events kept per transition, so a later request never erases them;
+//   delivery and opening come from OS events (`record_delivery_evidence`); acknowledgment comes
+//   from an explicit user action (`acknowledge_reminder`). The clock is read for exactly one thing: whether the due time lies
 //   in the past (`DueStatus`). It never produces a delivered, opened, missed, seen or
 //   acknowledged fact, and never completes the item.
 // - An elapsed reminder with no OS evidence is `DueStatus::Elapsed` with `DeliveryState::Unknown`

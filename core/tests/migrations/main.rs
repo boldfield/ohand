@@ -1281,6 +1281,7 @@ fn test_v7_to_v8_migration_adds_reminder_history_events_without_touching_reminde
         let db = make_test_db(&path, instant)?;
         assert_eq!(db.schema_version()?, 8);
         assert!(table_exists(db.conn(), "reminder_history_events")?);
+        assert!(table_exists(db.conn(), "reminder_request_events")?);
         let (delivery, acknowledgment): (String, String) = db.conn().query_row(
             "SELECT delivery_state, acknowledgment_state FROM reminders WHERE reminder_id = 'rem-1'",
             [],
@@ -1313,6 +1314,24 @@ fn test_v7_to_v8_migration_adds_reminder_history_events_without_touching_reminde
         assert!(
             insert("missing-reminder", 1, "delivered").is_err(),
             "a fact needs its reminder"
+        );
+
+        let insert_request = |reminder: &str, state: &str| {
+            db.conn().execute(
+                "INSERT INTO reminder_request_events (reminder_id, schedule_generation, request_state, native_cancel, recorded_at)
+                 VALUES (?, 1, ?, 0, '2026-01-16T09:00:06Z')",
+                rusqlite::params![reminder, state],
+            )
+        };
+        insert_request("rem-1", "unsupported_recurrence")?;
+        insert_request("rem-1", "unsupported_recurrence")?;
+        assert!(
+            insert_request("rem-1", "resolved").is_err(),
+            "a requested time that installs a notification is kept as its schedule operation"
+        );
+        assert!(
+            insert_request("missing-reminder", "cancelled").is_err(),
+            "a request needs its reminder"
         );
     }
 

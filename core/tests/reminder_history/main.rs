@@ -15,7 +15,7 @@ use ohand_core::reminders::reconcile::{
 use ohand_core::reminders::state::{
     apply_derived_request, apply_user_time_correction, cancel_reminder, end_item_with_event,
     get_reminder, AcknowledgmentState, DeliveryState, DerivedReminderRequest, ReminderCancellation,
-    ReminderRecord, RequestState, UserTimeCorrection,
+    ReminderRecord, RequestState, UnschedulableReason, UserTimeCorrection,
 };
 use ohand_core::store::events::{
     save_event, Correction, CorrectionKind, Event, EventPayload, EventType,
@@ -591,6 +591,10 @@ fn acknowledging_without_delivery_evidence_does_not_invent_delivery() -> Result<
         kind,
         HistoryEntryKind::Delivered { .. } | HistoryEntryKind::Opened { .. }
     )));
+    // Elapsed with no delivery evidence, but acknowledged: it must not be presented as an
+    // unacknowledged reminder.
+    assert_eq!(view.summary.due, DueStatus::Elapsed);
+    assert!(!view.summary.elapsed_without_delivery_evidence());
     Ok(())
 }
 
@@ -1063,5 +1067,225 @@ fn item_without_a_reminder_has_no_history() -> Result<()> {
     let tx = db.immediate_transaction()?;
     assert!(reminder_history(&tx, &clock_at(CAPTURE_TIME), "item-1")?.is_none());
     tx.commit()?;
+    Ok(())
+}
+
+fn derive(
+    db: &mut Database,
+    item_id: &str,
+    revision: i32,
+    phrase: &str,
+    now: &str,
+) -> Result<ReminderRecord> {
+    let tx = db.immediate_transaction()?;
+    let record = apply_derived_request(
+        &tx,
+        &clock_at(now),
+        &DerivedReminderRequest {
+            item_id: item_id.to_string(),
+            source_revision: revision,
+            phrase: phrase.to_string(),
+        },
+    )?;
+    tx.commit()?;
+    Ok(record)
+}
+
+fn cancel(
+    db: &mut Database,
+    item_id: &str,
+    revision: i32,
+    now: &str,
+) -> Result<Option<ReminderRecord>> {
+    let cancellation = ReminderCancellation {
+        command_id: format!("cmd-{}", uuid::Uuid::new_v4()),
+        item_id: item_id.to_string(),
+        expected_revision: revision,
+        expected_reminder_version: reminder_version(db, item_id),
+    };
+    let tx = db.immediate_transaction()?;
+    let record = cancel_reminder(&tx, &clock_at(now), &cancellation)?;
+    tx.commit()?;
+    Ok(record)
+}
+
+#[test]
+fn repeat_request_stays_in_history_after_a_manual_one_shot_correction() -> Result<()> {
+    let mut db = open_db("repeat_then_one_shot")?;
+    let revision = insert_action(&mut db, "item-1", "water the plants every day")?;
+    let mut center = FakeCenter::default();
+    let record = derive(
+        &mut db,
+        "item-1",
+        revision,
+        "every day",
+        "2026-01-15T11:00:00Z",
+    )?;
+    assert_eq!(record.request_state, RequestState::UnsupportedRecurrence);
+
+    // The offered manual one-shot time.
+    let corrected = set_time(
+        &mut db,
+        "item-1",
+        revision,
+        DUE_TIME,
+        "2026-01-15T11:05:00Z",
+    )?;
+    assert_eq!(corrected.request_state, RequestState::Resolved);
+    settle(&mut db, &mut center, "2026-01-15T11:06:00Z")?;
+
+    let view = history(&mut db, "item-1", "2026-01-15T11:07:00Z")?;
+    assert!(
+        matches!(
+            kinds(&view).as_slice(),
+            [
+                HistoryEntryKind::RepeatRequested { reason: Some(_) },
+                HistoryEntryKind::TimeRequested {
+                    generation: 1,
+                    installation: NativeEffectStatus::Confirmed,
+                    ..
+                },
+            ]
+        ),
+        "{:?}",
+        view.entries
+    );
+    assert_eq!(view.entries[0].occurred_at, instant("2026-01-15T11:00:00Z"));
+    assert_eq!(view.entries[1].occurred_at, instant("2026-01-15T11:05:00Z"));
+    // The repeat request acknowledged nothing and the one-shot has no delivery evidence.
+    assert_eq!(view.summary.delivery, DeliveryState::Unknown);
+    assert_eq!(
+        view.summary.acknowledgment,
+        AcknowledgmentState::NotAcknowledged
+    );
+    Ok(())
+}
+
+#[test]
+fn ambiguous_request_stays_in_history_after_the_time_is_resolved() -> Result<()> {
+    let mut db = open_db("ambiguous_then_resolved")?;
+    let revision = insert_action(&mut db, "item-1", "call the roofer tomorrow")?;
+    let record = derive(
+        &mut db,
+        "item-1",
+        revision,
+        "tomorrow",
+        "2026-01-15T11:00:00Z",
+    )?;
+    assert_eq!(record.request_state, RequestState::NotScheduledYet);
+
+    set_time(
+        &mut db,
+        "item-1",
+        revision,
+        DUE_TIME,
+        "2026-01-15T11:05:00Z",
+    )?;
+
+    let view = history(&mut db, "item-1", "2026-01-15T11:06:00Z")?;
+    assert!(
+        matches!(
+            kinds(&view).as_slice(),
+            [
+                HistoryEntryKind::NotSchedulable {
+                    request_state: RequestState::NotScheduledYet,
+                    due_at: None,
+                },
+                HistoryEntryKind::TimeRequested { generation: 1, .. },
+            ]
+        ),
+        "{:?}",
+        view.entries
+    );
+    assert_eq!(view.summary.request_state, RequestState::Resolved);
+    Ok(())
+}
+
+#[test]
+fn unschedulable_request_stays_in_history_through_later_requests_and_cancellation() -> Result<()> {
+    let mut db = open_db("unschedulable_then_cancelled")?;
+    let revision = insert_action(&mut db, "item-1", "call the roofer")?;
+    let past = "2026-01-15T09:00:00Z";
+
+    let record = set_time(&mut db, "item-1", revision, past, "2026-01-15T11:00:00Z")?;
+    assert_eq!(
+        record.request_state,
+        RequestState::Unschedulable(UnschedulableReason::TimeInPast)
+    );
+    let record = set_time(
+        &mut db,
+        "item-1",
+        revision,
+        DUE_TIME,
+        "2026-01-15T11:05:00Z",
+    )?;
+    assert_eq!(record.request_state, RequestState::Resolved);
+    let record = set_time(
+        &mut db,
+        "item-1",
+        revision,
+        "2026-01-15T10:00:00Z",
+        "2026-01-15T11:10:00Z",
+    )?;
+    assert_eq!(record.schedule_generation, 2);
+    cancel(&mut db, "item-1", revision, "2026-01-15T11:15:00Z")?;
+
+    let view = history(&mut db, "item-1", "2026-01-15T11:20:00Z")?;
+    let past_in_time = RequestState::Unschedulable(UnschedulableReason::TimeInPast);
+    assert_eq!(
+        kinds(&view),
+        vec![
+            HistoryEntryKind::NotSchedulable {
+                request_state: past_in_time,
+                due_at: Some(instant(past)),
+            },
+            HistoryEntryKind::TimeRequested {
+                generation: 1,
+                due_at: instant(DUE_TIME),
+                installation: NativeEffectStatus::Superseded,
+            },
+            HistoryEntryKind::Cancelled {
+                generation: Some(1),
+                native_cancel: Some(NativeEffectStatus::NotAttempted),
+            },
+            HistoryEntryKind::NotSchedulable {
+                request_state: past_in_time,
+                due_at: Some(instant("2026-01-15T10:00:00Z")),
+            },
+            // No native request was live at gen 2, so the cancellation is its own entry.
+            HistoryEntryKind::Cancelled {
+                generation: None,
+                native_cancel: None,
+            },
+        ]
+    );
+    assert_eq!(view.summary.request_state, RequestState::Cancelled);
+    Ok(())
+}
+
+#[test]
+fn request_entries_recorded_in_the_same_instant_keep_request_order() -> Result<()> {
+    let mut db = open_db("same_instant")?;
+    let revision = insert_action(&mut db, "item-1", "call the roofer")?;
+    let now = "2026-01-15T11:00:00Z";
+    set_time(&mut db, "item-1", revision, DUE_TIME, now)?;
+    set_time(&mut db, "item-1", revision, "2026-01-15T10:00:00Z", now)?;
+
+    let view = history(&mut db, "item-1", now)?;
+    assert!(
+        matches!(
+            kinds(&view).as_slice(),
+            [
+                HistoryEntryKind::TimeRequested { generation: 1, .. },
+                HistoryEntryKind::Cancelled {
+                    generation: Some(1),
+                    ..
+                },
+                HistoryEntryKind::NotSchedulable { .. },
+            ]
+        ),
+        "{:?}",
+        view.entries
+    );
     Ok(())
 }

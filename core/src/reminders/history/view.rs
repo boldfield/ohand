@@ -4,8 +4,9 @@ use rusqlite::{OptionalExtension, Transaction};
 use super::record::{parse_instant, parse_notification_id};
 use super::HistoryError;
 use crate::reminders::state::{
-    get_reminder, list_operations, AcknowledgmentState, DeliveryState, OperationState,
-    OperationType, ReminderOperation, ReminderRecord, RequestState, ScheduleState,
+    get_reminder, list_operations, list_request_events, AcknowledgmentState, DeliveryState,
+    OperationState, OperationType, ReminderOperation, ReminderRecord, RequestEvent, RequestState,
+    ScheduleState,
 };
 use crate::store::schema::Clock;
 
@@ -88,14 +89,16 @@ impl HistoryEntryKind {
         }
     }
 
-    fn generation(&self) -> i64 {
+    /// The generation a native-side entry names; request entries without one are placed by the
+    /// generation current when they were recorded.
+    fn generation(&self) -> Option<i64> {
         match self {
             HistoryEntryKind::TimeRequested { generation, .. }
             | HistoryEntryKind::Delivered { generation }
             | HistoryEntryKind::Opened { generation }
-            | HistoryEntryKind::Acknowledged { generation } => *generation,
-            HistoryEntryKind::Cancelled { generation, .. } => generation.unwrap_or(0),
-            _ => 0,
+            | HistoryEntryKind::Acknowledged { generation } => Some(*generation),
+            HistoryEntryKind::Cancelled { generation, .. } => *generation,
+            _ => None,
         }
     }
 }
@@ -122,10 +125,13 @@ pub struct ReminderSummary {
 }
 
 impl ReminderSummary {
-    /// The due time has passed and the OS supplied no delivery evidence: the honest report is
-    /// "elapsed, delivery unknown, not acknowledged", never missed, fired or noticed.
+    /// The due time has passed, the OS supplied no delivery evidence and the user has not
+    /// acknowledged it: the honest report is "elapsed, delivery unknown, not acknowledged",
+    /// never missed, fired or noticed.
     pub fn elapsed_without_delivery_evidence(&self) -> bool {
-        self.due == DueStatus::Elapsed && self.delivery == DeliveryState::Unknown
+        self.due == DueStatus::Elapsed
+            && self.delivery == DeliveryState::Unknown
+            && self.acknowledgment == AcknowledgmentState::NotAcknowledged
     }
 }
 
@@ -159,16 +165,17 @@ pub fn reminder_history(
         return Ok(None);
     };
     let operations = list_operations(tx, &record.reminder_id)?;
-    let mut entries = operation_entries(&operations)?;
-    entries.extend(request_entries(&record, &operations));
-    entries.extend(fact_entries(tx, &record.reminder_id)?);
-    entries.sort_by_key(|entry| {
-        (
-            entry.occurred_at,
-            entry.kind.rank(),
-            entry.kind.generation(),
-        )
-    });
+    let request_events = list_request_events(tx, &record.reminder_id)?;
+    // Each entry is paired with the generation it belongs to, so entries recorded at the same
+    // instant still read in the order the requests were made.
+    let mut placed: Vec<(i64, HistoryEntry)> = operation_entries(&operations)?
+        .into_iter()
+        .chain(fact_entries(tx, &record.reminder_id)?)
+        .map(|entry| (entry.kind.generation().unwrap_or(0), entry))
+        .collect();
+    placed.extend(request_entries(&record, &request_events, &operations));
+    placed.sort_by_key(|(generation, entry)| (entry.occurred_at, *generation, entry.kind.rank()));
+    let entries = placed.into_iter().map(|(_, entry)| entry).collect();
 
     Ok(Some(ReminderHistory {
         summary: summarize(&record, clock.now()),
@@ -230,34 +237,83 @@ fn operation_entries(operations: &[ReminderOperation]) -> Result<Vec<HistoryEntr
         .collect()
 }
 
-/// Entries for the reminder's current request that no operation represents.
-fn request_entries(record: &ReminderRecord, operations: &[ReminderOperation]) -> Vec<HistoryEntry> {
-    let kind = match record.request_state {
-        RequestState::UnsupportedRecurrence => HistoryEntryKind::RepeatRequested {
-            reason: record.unsupported_reason.clone(),
-        },
+/// Entries for every recorded request that no operation represents, oldest first. A request
+/// can also reach such a state without a user request (capacity demotion, or expiry while held
+/// back); when the current state is not the latest recorded request, it is added as its own
+/// entry stamped with the reminder's last change.
+fn request_entries(
+    record: &ReminderRecord,
+    request_events: &[RequestEvent],
+    operations: &[ReminderOperation],
+) -> Vec<(i64, HistoryEntry)> {
+    let mut entries: Vec<(i64, HistoryEntry)> = request_events
+        .iter()
+        .filter_map(|event| {
+            request_kind(
+                event.request_state,
+                event.resolved_instant,
+                event.unsupported_reason.as_ref(),
+                event.native_cancel,
+            )
+            .map(|kind| {
+                let entry = HistoryEntry {
+                    occurred_at: event.recorded_at,
+                    kind,
+                };
+                (event.schedule_generation, entry)
+            })
+        })
+        .collect();
+
+    let current_is_recorded = request_events.last().is_some_and(|event| {
+        event.request_state == record.request_state
+            && event.resolved_instant == record.resolved_instant
+            && event.schedule_generation == record.schedule_generation
+    });
+    if !current_is_recorded {
+        let native_cancel = operations
+            .iter()
+            .any(|operation| operation.operation_type == OperationType::Cancel);
+        if let Some(kind) = request_kind(
+            record.request_state,
+            record.resolved_instant,
+            record.unsupported_reason.as_ref(),
+            native_cancel,
+        ) {
+            let entry = HistoryEntry {
+                occurred_at: record.updated_at,
+                kind,
+            };
+            entries.push((record.schedule_generation, entry));
+        }
+    }
+    entries
+}
+
+/// The entry for a request that installs nothing. A cancellation that retired a native request
+/// has none of its own: the cancel operation's entry describes it.
+fn request_kind(
+    request_state: RequestState,
+    resolved_instant: Option<DateTime<Utc>>,
+    unsupported_reason: Option<&String>,
+    native_cancel: bool,
+) -> Option<HistoryEntryKind> {
+    match request_state {
+        RequestState::UnsupportedRecurrence => Some(HistoryEntryKind::RepeatRequested {
+            reason: unsupported_reason.cloned(),
+        }),
         RequestState::NotScheduledYet | RequestState::Unschedulable(_) => {
-            HistoryEntryKind::NotSchedulable {
-                request_state: record.request_state,
-                due_at: record.resolved_instant,
-            }
+            Some(HistoryEntryKind::NotSchedulable {
+                request_state,
+                due_at: resolved_instant,
+            })
         }
-        RequestState::Cancelled
-            if !operations
-                .iter()
-                .any(|operation| operation.operation_type == OperationType::Cancel) =>
-        {
-            HistoryEntryKind::Cancelled {
-                generation: None,
-                native_cancel: None,
-            }
-        }
-        _ => return Vec::new(),
-    };
-    vec![HistoryEntry {
-        occurred_at: record.updated_at,
-        kind,
-    }]
+        RequestState::Cancelled if !native_cancel => Some(HistoryEntryKind::Cancelled {
+            generation: None,
+            native_cancel: None,
+        }),
+        _ => None,
+    }
 }
 
 fn fact_entries(
