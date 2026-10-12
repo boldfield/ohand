@@ -155,6 +155,45 @@ jobs:
             .evidence \
             "credentialprobe-launch.png" 2>&1 | tee .evidence/credential-smoke.log
 
+      - name: Build OhAndApp
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd ios
+          OHAND_SIMULATOR_ADHOC_SIGN=1 ./scripts/build-simulator.sh OhAndApp 2>&1 | tee .evidence/OhAndApp-build.log
+
+      - name: Launch OhAndApp smoke test
+        shell: bash
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+          SIMULATOR_NAME: ${{ steps.simulator.outputs.name }}
+          SIMULATOR_RUNTIME: ${{ steps.simulator.outputs.runtime }}
+        run: |
+          set -euo pipefail
+          echo "OhAndApp smoke test: ${SIMULATOR_NAME} (iOS ${SIMULATOR_RUNTIME}, UDID ${SIMULATOR_UDID})"
+          cd ios
+          ./scripts/smoke-simulator.sh \
+            "${SIMULATOR_UDID}" \
+            .derived/Build/Products/Debug-iphonesimulator/OhAnd.app \
+            com.boldfield.ohand.app \
+            .evidence \
+            "ohandapp-launch.png" 2>&1 | tee .evidence/ohandapp-smoke.log
+
+      - name: Verify OhAndApp embedded frameworks
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd ios
+          app_path=.derived/Build/Products/Debug-iphonesimulator/OhAnd.app
+          {
+            find "${app_path}/Frameworks" "${app_path}/PlugIns" -maxdepth 2
+            for framework in OhAndServices OhAndCoreBridge; do
+              test -f "${app_path}/Frameworks/${framework}.framework/${framework}"
+            done
+            test -d "${app_path}/PlugIns/OhAndCaptureControl.appex"
+            test ! -d "${app_path}/PlugIns/OhAndCaptureControl.appex/Frameworks"
+          } 2>&1 | tee .evidence/OhAndApp-bundle.txt
+
       - name: Build CaptureProbe
         shell: bash
         run: |
