@@ -1769,6 +1769,34 @@
         "docs/features/m1-external-prerequisites.md"
       ],
       "starts_blocked": "maintainer signed OhAndApp build, install and launch evidence"
+    },
+    {
+      "key": "F09",
+      "parent": null,
+      "title": "Embed every framework the production app loads, and smoke-launch it in CI",
+      "file_scope": [
+        "ios/project.yml",
+        "ios/scripts/check_project_config.py",
+        ".github/workflows/ios.yml",
+        "ios/scripts/"
+      ],
+      "intent": "OhAndApp dies at launch on device because OhAndCoreBridge.framework is linked through OhAndServices but never embedded; embed it and add a CI launch smoke of OhAndApp plus a config check so a missing transitive framework cannot pass again.",
+      "acceptance": [
+        "OhAnd.app/Frameworks holds OhAndServices and OhAndCoreBridge with binaries; the extension stays embedded without duplicate frameworks.",
+        "ios.yml builds OhAndApp and smoke-launches it outside a test host; the step is shown failing with the fix reverted and passing with it.",
+        "Existing OhAndTests, probe builds and smoke tests unchanged and passing; make check/test pass; exact-commit macOS CI evidence linked.",
+        "check_project_config.py fails when a framework OhAndApp reaches transitively is not a direct embedded dependency, with a unit test."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/project.yml:41",
+        "ios/project.yml:60",
+        "ios/project.yml:101",
+        ".github/workflows/ios.yml:124",
+        "ios/scripts/smoke-simulator.sh",
+        "ios/scripts/check_project_config.py"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -2315,8 +2343,10 @@
       "P08b"
     ],
     "P11b": [
-      "P11a"
-    ]
+      "P11a",
+      "F09"
+    ],
+    "F09": []
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -2406,6 +2436,10 @@
     {
       "date": "2026-10-12",
       "change": "P11a criterion 2 amended: bundle coverage is decided from the unsigned archive before any keychain, profile-installation, signing or export work, instead of from a project-spec prediction before the build. Same refusals, distinct exit, fail-closed archive enumeration; a spec parser is advisory and off the review surface."
+    },
+    {
+      "date": "2026-10-12",
+      "change": "Added F09 after P11b's first device run: OhAndApp crashed at launch with OhAndCoreBridge.framework not embedded (linked only through OhAndServices). F09 embeds it, adds an OhAndApp simulator launch smoke and a config check for transitive frameworks. P11b depends on F09."
     }
   ]
 }

@@ -73,6 +73,8 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
   - (3) **No spec parser on the review surface.** A project-spec prediction of the bundle set is no longer required. Any such prediction kept in the tool is advisory. It may produce an earlier, friendlier refusal, but it never allows a bundle the archive check would refuse. Its completeness against XcodeGen constructs is not a review criterion. Removing it is preferred.
   - (4) The behaviour tests in criterion 4 then drive the uncovered-extension, expired and Xcode-managed cases through a stub archive containing the offending bundle. They assert that no `security` keychain or import call and no `-exportArchive` call was made.
 
+- F09 added (coordinator, 2026-10-12, from the first P11b device run). The signed `OhAndApp` build exported, installed and launched on the maintainer's iPhone with the extension embedded, then dyld killed it at launch: `Library not loaded: @rpath/OhAndCoreBridge.framework/OhAndCoreBridge`, referenced from `OhAnd.app/Frameworks/OhAndServices.framework`. In `ios/project.yml`, `OhAndApp` depends on `OhAndServices`, and `OhAndServices` depends on `OhAndCoreBridge`. XcodeGen embeds only an application's direct framework dependencies, so `OhAndCoreBridge` is linked but never copied into the app. CI never saw this: `OhAndTests` runs hosted in `OhAnd.app` under `xcodebuild test`, which puts the build-products directory on the framework search path, and no CI job launches `OhAndApp` on its own. F09 embeds the framework and adds the missing launch smoke test. P11b now waits for F09. The maintainer reruns the P11b procedure after F09 lands.
+
 - V06 and V07 now depend on V01 alone: they implement Rust adapters against its transport interface using fixtures. V05 is the native effect implementation and remains required by app composition/integration, not by independent protocol adapter implementation. This is an explicit dependency override for those retained tasks.
 
 ## Why some tasks stay together
@@ -405,6 +407,29 @@ Acceptance:
 Source pointers (baseline above): `docs/validation/signing.md`, `docs/features/m1-external-prerequisites.md`.
 
 Contributes to T10's signed-candidate criterion. Records evidence only and does not modify the tooling.
+
+### F09
+
+Embed every framework the production app loads, and smoke-launch it in CI
+
+Make `OhAndApp` launch outside a test host by embedding `OhAndCoreBridge.framework` in `OhAnd.app/Frameworks`, and add a CI launch check so a missing embedded framework cannot pass CI again.
+
+Owned paths: `ios/project.yml` (the `OhAndApp` target's `dependencies` list only), `.github/workflows/ios.yml` (a new `OhAndApp` build and launch-smoke step in the `simulator` job), `ios/scripts/check_project_config.py` and its unit test (criterion 4), `ios/scripts/build-simulator.sh` and `ios/scripts/smoke-simulator.sh` (only a small addition if `OhAndApp` needs one; existing callers and outputs unchanged).
+
+Dependencies: none (F08 and P11a have landed).
+
+Context: P11b's first signed device run (2026-10-12) installed `OhAnd.app` and launched it, and dyld then terminated it with `Library not loaded: @rpath/OhAndCoreBridge.framework/OhAndCoreBridge` (referenced from `OhAndServices.framework`; searched `OhAnd.app/Frameworks/`, no such file). The cause is in `ios/project.yml`: `OhAndApp.dependencies` lists `OhAndServices` and `OhAndCaptureControl` but not `OhAndCoreBridge`. That is a dependency of `OhAndServices` only, and XcodeGen does not embed a framework's dependencies into the application. `OhAndTests` passes because `xcodebuild test` runs it hosted with `DYLD_FRAMEWORK_PATH` pointing at build products. The existing launch smoke tests cover only `BridgeProbe`, `CredentialProbe` and `TranscriptionProbe`, never `OhAndApp`. Expected fix: one `- target: OhAndCoreBridge` entry, embedded, under `OhAndApp.dependencies`. Do not use `transitivelyLinkDependencies` or other project-wide settings. Do not change `OhAndServices`, the test targets or any probe target.
+
+Acceptance:
+
+1. After `ios/scripts/generate.sh`, a simulator build of `OhAndApp` produces `OhAnd.app/Frameworks/` containing both `OhAndServices.framework` and `OhAndCoreBridge.framework`, each with its binary. `OhAndCaptureControl.appex` is still embedded under `PlugIns/`. `OhAndCaptureControl` does not embed a second copy of either framework.
+2. The `simulator` job in `ios.yml` builds `OhAndApp` for the simulator and runs `smoke-simulator.sh` against it with bundle ID `com.boldfield.ohand.app`, outside any test host. The step fails the job if the app is not still running after launch. Its log and screenshot go into the existing `ios-evidence` artifact (`retention-days: 7`). Show that the check works: on a commit with the fix temporarily reverted, the new step fails with the dyld `Library not loaded` termination, or `simctl` reports the process exited. Link that failing run, then show the run on the fix passing. Do not leave the revert in the final branch.
+3. The existing `OhAndTests`, probe builds and probe smoke tests are unchanged and pass, and `make check`/`make test` pass. Required macOS CI evidence per AGENTS.md is linked for the exact submitted commit.
+4. `ios/scripts/check_project_config.py` fails when a framework target that `OhAndApp` reaches through another framework's dependencies is not also a direct embedded dependency of `OhAndApp`, with a unit test. This keeps the bug from coming back through a future framework.
+
+Source pointers: `ios/project.yml:41` (`OhAndServices`, depends on `OhAndCoreBridge`), `ios/project.yml:60` (`OhAndApp.dependencies`), `ios/project.yml:101` (`OhAndTests` test host), `.github/workflows/ios.yml:124` (existing launch smoke), `ios/scripts/smoke-simulator.sh`, `ios/scripts/check_project_config.py`.
+
+Unblocks P11b, whose maintainer device run needs a launchable app. T06 and T10 also inherit this fix.
 
 ### F08
 
