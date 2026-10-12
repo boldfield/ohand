@@ -119,7 +119,7 @@ final class BackgroundCompletionCoreIntegrationTests: ProviderTransportTestCase 
         XCTAssertTrue(didFinish)
         let stored = try XCTUnwrap(job(session))
         XCTAssertEqual(stored.status, "queued", "the acknowledged work is back in the queue, saved and unprocessed")
-        XCTAssertNil(stored.failureReason)
+        XCTAssertEqual(stored.failureReason, "cancelled", "recorded as a checkpoint, not a failure")
         XCTAssertEqual(session.grant.endedTokenList, [7], "the background task is ended once")
 
         let identifiers = try await pendingIdentifiers(session)
@@ -146,7 +146,7 @@ final class BackgroundCompletionCoreIntegrationTests: ProviderTransportTestCase 
         let didFinish = await waitUntilTrue { session.service.finishedDrainCount == 1 && !session.service.isDraining }
         XCTAssertTrue(didFinish)
         XCTAssertEqual(job(session)?.status, "queued")
-        XCTAssertNil(job(session)?.failureReason)
+        XCTAssertEqual(job(session)?.failureReason, "cancelled", "recorded as a checkpoint, not a failure")
         XCTAssertEqual(session.grant.endedTokenList, [7])
         let identifiers = try await pendingIdentifiers(session)
         XCTAssertEqual(identifiers, [PendingProcessingAlert.identifier])
