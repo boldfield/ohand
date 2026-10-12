@@ -24,9 +24,10 @@ use ohand_core::store::events::{
 };
 use ohand_core::store::schema::{Clock, Database};
 use ohand_core::suggestions::schedule::{
-    cancel_prompts, is_prompt_notification_id, local_fire_instant, reconcile_prompts,
-    PromptFailure, PromptOperation, PromptSchedule, PromptScheduleError, PromptSettings,
-    PromptTime, RefreshTrigger, PROMPT_HORIZON_DAYS, PROMPT_ID_PREFIX,
+    cancel_prompts, is_prompt_notification_id, local_fire_instant, prompt_notification_id,
+    reconcile_prompts, PromptFailure, PromptOperation, PromptSchedule, PromptScheduleError,
+    PromptSettings, PromptTime, RefreshTrigger, PROMPT_HORIZON_DAYS, PROMPT_ID_PREFIX,
+    SPENT_DATE_RETENTION_DAYS,
 };
 
 struct FixedClock {
@@ -114,7 +115,17 @@ fn run<T>(
 
 /// A reminder due on 2026-01-16 at 09:00:00Z for `item_id`.
 fn create_reminder(db: &mut Database, item_id: &str, text: &str) -> Result<String> {
-    insert_item(db, item_id, &format!("{text} 2026-01-16 09:00:00"))?;
+    create_reminder_due(db, item_id, text, "2026-01-16 09:00:00")
+}
+
+/// A reminder for `item_id` due at the explicit `phrase` (`YYYY-MM-DD HH:MM:SS`, UTC).
+fn create_reminder_due(
+    db: &mut Database,
+    item_id: &str,
+    text: &str,
+    phrase: &str,
+) -> Result<String> {
+    insert_item(db, item_id, &format!("{text} {phrase}"))?;
     let clock = clock_at("2026-01-15T10:30:00Z");
     let record = run(db, |tx| {
         apply_derived_request(
@@ -123,7 +134,7 @@ fn create_reminder(db: &mut Database, item_id: &str, text: &str) -> Result<Strin
             &DerivedReminderRequest {
                 item_id: item_id.to_string(),
                 source_revision: 1,
-                phrase: "2026-01-16 09:00:00".to_string(),
+                phrase: phrase.to_string(),
             },
         )
     })?;
@@ -163,6 +174,8 @@ struct FakeCenter {
     cancel_calls: Vec<String>,
     fail_schedule: Option<NotificationEffectError>,
     fail_cancel_for: Vec<String>,
+    /// Identifiers the OS has delivered (and dropped) so far, in delivery order.
+    delivered: Vec<String>,
 }
 
 impl FakeCenter {
@@ -186,7 +199,21 @@ impl FakeCenter {
 
     /// The OS delivers and drops requests whose due instant has passed.
     fn fire_due(&mut self, now: DateTime<Utc>) {
-        self.pending.retain(|_, due| *due > now);
+        let due_now: Vec<String> = self
+            .pending
+            .iter()
+            .filter(|(_, due)| **due <= now)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in due_now {
+            self.pending.remove(&id);
+            self.delivered.push(id);
+        }
+    }
+
+    /// The OS drops a request without delivering it (a purge, a permission toggle).
+    fn vanish(&mut self, notification_id: &str) {
+        self.pending.remove(notification_id);
     }
 }
 
@@ -498,7 +525,11 @@ fn cancel_prompts_removes_leftovers_even_without_a_stored_plan() -> Result<()> {
         instant("2026-01-16T09:00:00Z"),
     );
 
-    let report = cancel_prompts(&mut center)?;
+    let report = cancel_prompts(
+        &clock_at("2026-01-15T10:30:00Z"),
+        &mut center,
+        &mut PromptSchedule::default(),
+    )?;
 
     assert_eq!(report.cancelled, ["prompt:2026-01-16"]);
     assert_eq!(
@@ -716,11 +747,13 @@ fn an_app_open_after_a_multi_day_rollback_does_not_replay_the_fired_prompt() -> 
     );
 
     // The 15th fires; the clock is then moved back almost two days and the app is opened
-    // before any pass has seen the delivery. The refill plans the 14th, ahead of the 15th.
+    // before any pass has seen the delivery. The refill starts after the high-water mark (the
+    // 07:00 pass), so the 14th, a day the user has already lived through, is never planned;
+    // the 15th still is, because nothing has yet shown that its request fired.
     center.fire_due(instant("2026-01-15T10:00:00Z"));
     let rolled_back = "2026-01-13T20:00:00Z";
     schedule.refresh(RefreshTrigger::AppOpen, instant(rolled_back), UTC_ZONE);
-    assert_eq!(schedule.planned()[0].local_date, date("2026-01-14"));
+    assert_eq!(schedule.planned()[0].local_date, date("2026-01-15"));
     pass(&mut db, &mut center, &mut schedule, rolled_back)?;
 
     assert_eq!(installs_of(&center, "prompt:2026-01-15"), 1);
@@ -943,7 +976,7 @@ fn a_prompt_cancelled_by_the_reminder_capacity_pass_never_costs_an_earlier_pendi
         &policy,
         &schedule.demands(now),
     )?;
-    schedule.record_capacity_pass(&displacement);
+    schedule.record_capacity_pass(&displacement, now);
     assert_eq!(
         center.prompt_ids(),
         ["prompt:2026-01-16", "prompt:2026-01-17"]
@@ -1010,7 +1043,7 @@ fn prompts_displaced_entirely_by_the_reminder_pass_return_once_capacity_frees() 
         &schedule.demands(now),
     )?;
     assert_eq!(displacement.prompts_cancelled, NEXT_THREE);
-    schedule.record_capacity_pass(&displacement);
+    schedule.record_capacity_pass(&displacement, now);
     assert!(center.prompt_ids().is_empty());
 
     // The prompt pass sees all three absent while reminders hold every slot: not deliveries.
@@ -1066,7 +1099,7 @@ fn a_reported_reminder_pass_keeps_displaced_prompts_even_if_capacity_frees_befor
         &policy,
         &schedule.demands(now),
     )?;
-    schedule.record_capacity_pass(&displacement);
+    schedule.record_capacity_pass(&displacement, now);
     assert!(center.prompt_ids().is_empty());
 
     // The reminders go away before the prompt pass ever sees the empty OS.
@@ -1232,7 +1265,7 @@ fn a_reported_reminder_pass_after_a_fire_then_a_rollback_does_not_replay_the_fir
         &policy,
         &schedule.demands(after_fire),
     )?;
-    schedule.record_capacity_pass(&displacement);
+    schedule.record_capacity_pass(&displacement, after_fire);
     assert_eq!(
         displacement.prompts_cancelled,
         ["prompt:2026-01-16", "prompt:2026-01-17"]
@@ -1550,4 +1583,624 @@ fn prompt_identifiers_cannot_alias_a_reminder_identifier() {
     assert!(is_prompt_notification_id("prompt:2026-01-16"));
     assert!(!is_prompt_notification_id("prompt:2026-01-16#1"));
     assert!(!is_prompt_notification_id("3f2a0c3e#1"));
+}
+
+// ---- Fired evidence is a ledger, independent of the plan ----------------------------------
+
+fn configure_and_install_from_seven(label: &str) -> Result<(Database, FakeCenter, PromptSchedule)> {
+    let mut db = open_db(label)?;
+    let mut schedule = PromptSchedule::default();
+    schedule.configure(daily(nine_am()), instant("2026-01-15T07:00:00Z"), UTC_ZONE);
+    let mut center = FakeCenter::default();
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T07:00:00Z")?;
+    assert_eq!(
+        center.prompt_ids(),
+        [
+            "prompt:2026-01-15",
+            "prompt:2026-01-16",
+            "prompt:2026-01-17"
+        ]
+    );
+    Ok((db, center, schedule))
+}
+
+#[test]
+fn turning_prompting_off_and_on_after_a_rollback_does_not_replay_the_fired_prompt() -> Result<()> {
+    let (mut db, mut center, mut schedule) = configure_and_install_from_seven("off-on-rollback")?;
+
+    // The 15th fires; the clock is moved back; the user switches prompting off and on again
+    // before any pass has looked at the OS. Nothing has shown the three requests still
+    // pending when the plan was emptied, so all three dates are spent.
+    center.fire_due(instant("2026-01-15T10:00:00Z"));
+    let rolled_back = instant("2026-01-15T08:00:00Z");
+    schedule.configure(PromptSettings::Off, rolled_back, UTC_ZONE);
+    assert!(schedule.planned().is_empty());
+    schedule.configure(daily(nine_am()), rolled_back, UTC_ZONE);
+    assert!(schedule
+        .planned()
+        .iter()
+        .all(|prompt| prompt.local_date > date("2026-01-17")));
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T08:00:00Z")?;
+
+    assert_eq!(installs_of(&center, "prompt:2026-01-15"), 1);
+    assert!(!center.pending.contains_key("prompt:2026-01-15"));
+    assert_eq!(
+        center.prompt_ids(),
+        [
+            "prompt:2026-01-18",
+            "prompt:2026-01-19",
+            "prompt:2026-01-20"
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn a_pass_while_off_then_re_enabling_after_a_rollback_does_not_replay_the_fired_prompt(
+) -> Result<()> {
+    let (mut db, mut center, mut schedule) = configure_and_install_from_seven("off-pass-on")?;
+
+    center.fire_due(instant("2026-01-15T10:00:00Z"));
+    let rolled_back = instant("2026-01-15T08:00:00Z");
+    schedule.configure(PromptSettings::Off, rolled_back, UTC_ZONE);
+    let off_pass = pass(&mut db, &mut center, &mut schedule, "2026-01-15T08:00:00Z")?;
+    assert_eq!(
+        off_pass.cancelled,
+        ["prompt:2026-01-16", "prompt:2026-01-17"]
+    );
+    assert!(center.prompt_ids().is_empty());
+
+    schedule.configure(daily(nine_am()), rolled_back, UTC_ZONE);
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T08:00:00Z")?;
+
+    assert_eq!(installs_of(&center, "prompt:2026-01-15"), 1);
+    assert_eq!(
+        center.prompt_ids(),
+        [
+            "prompt:2026-01-18",
+            "prompt:2026-01-19",
+            "prompt:2026-01-20"
+        ]
+    );
+    // Toggling again in the rolled-back clock spends nothing further: the OS held nothing.
+    schedule.configure(PromptSettings::Off, rolled_back, UTC_ZONE);
+    schedule.configure(daily(nine_am()), rolled_back, UTC_ZONE);
+    assert!(!schedule.is_spent(date("2026-01-21")));
+    Ok(())
+}
+
+#[test]
+fn disabling_in_the_ordinary_path_spends_the_held_dates_and_re_enabling_moves_on() -> Result<()> {
+    let mut db = open_db("disable-spends")?;
+    let mut schedule = PromptSchedule::default();
+    let now = instant("2026-01-15T10:30:00Z");
+    schedule.configure(daily(nine_am()), now, UTC_ZONE);
+    let mut center = FakeCenter::default();
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T10:30:00Z")?;
+
+    schedule.configure(PromptSettings::Off, now, UTC_ZONE);
+    for day in ["2026-01-16", "2026-01-17", "2026-01-18"] {
+        assert!(schedule.is_spent(date(day)), "{day} spent on disable");
+    }
+    schedule.configure(daily(nine_am()), now, UTC_ZONE);
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T10:30:00Z")?;
+
+    assert_eq!(
+        center.prompt_ids(),
+        [
+            "prompt:2026-01-19",
+            "prompt:2026-01-20",
+            "prompt:2026-01-21"
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn the_ledger_survives_a_store_and_reload() -> Result<()> {
+    let (mut db, mut center, mut schedule) = configure_and_install_from_seven("ledger-reload")?;
+    center.fire_due(instant("2026-01-15T10:00:00Z"));
+    schedule.refresh(
+        RefreshTrigger::Reentry,
+        instant("2026-01-15T10:00:00Z"),
+        UTC_ZONE,
+    );
+    assert!(schedule.is_spent(date("2026-01-15")));
+    assert_eq!(schedule.high_water(), Some(instant("2026-01-15T10:00:00Z")));
+
+    let stored = serde_json::to_string(&schedule)?;
+    let mut restored: PromptSchedule = serde_json::from_str(&stored)?;
+    assert_eq!(restored, schedule);
+
+    // The restored ledger still fences the fired date in a rolled-back clock, and still knows
+    // which requests the OS was handed: the 16th vanishing is a delivery, not a free slot.
+    let rolled_back = instant("2026-01-15T08:00:00Z");
+    restored.configure(daily(nine_am()), rolled_back, UTC_ZONE);
+    assert_eq!(fire_instants(&restored)[0], instant("2026-01-16T09:00:00Z"));
+    center.vanish("prompt:2026-01-16");
+    pass(&mut db, &mut center, &mut restored, "2026-01-15T08:00:00Z")?;
+    assert_eq!(installs_of(&center, "prompt:2026-01-15"), 1);
+    assert_eq!(installs_of(&center, "prompt:2026-01-16"), 1);
+    assert!(restored.is_spent(date("2026-01-16")));
+    assert_eq!(
+        center.prompt_ids(),
+        ["prompt:2026-01-17", "prompt:2026-01-18"]
+    );
+
+    // A schedule stored before the ledger existed loads as an unspent, unobserved schedule.
+    let legacy = r#"{"settings":{"mode":"daily","time":{"hour":9,"minute":0}},"planned":[]}"#;
+    let legacy: PromptSchedule = serde_json::from_str(legacy)?;
+    assert!(legacy.is_enabled() && legacy.high_water().is_none());
+    Ok(())
+}
+
+#[test]
+fn a_forward_clock_jump_and_back_suppresses_the_days_in_between_rather_than_replaying() -> Result<()>
+{
+    let mut db = open_db("forward-jump")?;
+    let mut schedule = PromptSchedule::default();
+    schedule.configure(daily(nine_am()), instant("2026-01-15T10:30:00Z"), UTC_ZONE);
+    let mut center = FakeCenter::default();
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T10:30:00Z")?;
+
+    // The clock is set five days ahead by mistake. The OS delivers everything it held; the
+    // app comes to the foreground and sees the 20th.
+    let ahead = instant("2026-01-20T12:00:00Z");
+    center.fire_due(ahead);
+    assert_eq!(center.delivered.len(), PROMPT_HORIZON_DAYS);
+    schedule.refresh(RefreshTrigger::Reentry, ahead, UTC_ZONE);
+    assert!(schedule.planned().is_empty());
+
+    // The clock is corrected. Nothing between the real date and the high-water mark is
+    // planned: those requests may have been delivered, and ambiguity suppresses.
+    let corrected = instant("2026-01-15T12:00:00Z");
+    schedule.refresh(RefreshTrigger::AppOpen, corrected, UTC_ZONE);
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T12:00:00Z")?;
+    assert_eq!(
+        fire_instants(&schedule),
+        [
+            instant("2026-01-21T09:00:00Z"),
+            instant("2026-01-22T09:00:00Z"),
+            instant("2026-01-23T09:00:00Z"),
+        ]
+    );
+    for day in ["2026-01-16", "2026-01-17", "2026-01-18"] {
+        assert_eq!(installs_of(&center, &format!("prompt:{day}")), 1);
+    }
+    Ok(())
+}
+
+#[test]
+fn requests_the_os_lost_on_its_own_are_spent_and_never_cost_a_pending_prompt() -> Result<()> {
+    let mut db = open_db("os-loss")?;
+    let mut schedule = PromptSchedule::default();
+    let now = instant("2026-01-15T10:30:00Z");
+    schedule.configure(daily(nine_am()), now, UTC_ZONE);
+    let mut center = FakeCenter::default();
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T10:30:00Z")?;
+
+    // The OS drops the 17th without delivering it (a purge core cannot distinguish from a
+    // delivery under a moved clock). It is spent; the 16th and 18th are untouched.
+    center.vanish("prompt:2026-01-17");
+    let mutations_before = center.mutations();
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T10:30:00Z")?;
+    assert_eq!(center.mutations(), mutations_before);
+    assert!(schedule.is_spent(date("2026-01-17")));
+    assert_eq!(
+        center.prompt_ids(),
+        ["prompt:2026-01-16", "prompt:2026-01-18"]
+    );
+
+    // The next open fills around the spent date, up to the horizon, and never reinstalls it.
+    schedule.refresh(RefreshTrigger::AppOpen, now, UTC_ZONE);
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T10:30:00Z")?;
+    assert_eq!(
+        center.prompt_ids(),
+        [
+            "prompt:2026-01-16",
+            "prompt:2026-01-18",
+            "prompt:2026-01-19"
+        ]
+    );
+    assert_eq!(installs_of(&center, "prompt:2026-01-17"), 1);
+    Ok(())
+}
+
+#[test]
+fn spent_dates_are_pruned_only_by_age_from_the_high_water_mark() -> Result<()> {
+    let (mut db, mut center, mut schedule) = configure_and_install_from_seven("pruning")?;
+    center.fire_due(instant("2026-01-15T10:00:00Z"));
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T10:00:00Z")?;
+    assert!(schedule.is_spent(date("2026-01-15")));
+
+    // No operation removes the date: rollbacks, time changes, disable, re-enable, opens.
+    let rolled_back = instant("2026-01-14T08:00:00Z");
+    schedule.refresh(RefreshTrigger::ClockOrZoneChange, rolled_back, UTC_ZONE);
+    schedule.configure(daily(PromptTime::new(6, 0).unwrap()), rolled_back, UTC_ZONE);
+    schedule.configure(PromptSettings::Off, rolled_back, UTC_ZONE);
+    schedule.configure(daily(nine_am()), rolled_back, UTC_ZONE);
+    schedule.refresh(RefreshTrigger::AppOpen, rolled_back, UTC_ZONE);
+    assert!(schedule.is_spent(date("2026-01-15")));
+    assert!(schedule
+        .planned()
+        .iter()
+        .all(|prompt| prompt.local_date != date("2026-01-15")));
+
+    // Only age prunes it: once the high-water date is more than the retention beyond it.
+    let retention = chrono::Duration::days(SPENT_DATE_RETENTION_DAYS);
+    schedule.refresh(
+        RefreshTrigger::Reentry,
+        instant("2026-01-15T10:00:00Z") + retention,
+        UTC_ZONE,
+    );
+    assert!(schedule.is_spent(date("2026-01-15")));
+    schedule.refresh(
+        RefreshTrigger::Reentry,
+        instant("2026-01-16T00:00:00Z") + retention,
+        UTC_ZONE,
+    );
+    assert!(!schedule.is_spent(date("2026-01-15")));
+    Ok(())
+}
+
+#[test]
+fn the_ordinary_path_installs_every_chosen_day_exactly_once() -> Result<()> {
+    let mut db = open_db("ordinary")?;
+    let mut schedule = PromptSchedule::default();
+    let mut now = instant("2026-01-15T10:30:00Z");
+    schedule.configure(daily(nine_am()), now, UTC_ZONE);
+    let mut center = FakeCenter::default();
+    reconcile_prompts(
+        &mut db,
+        &FixedClock { instant: now },
+        &mut center,
+        &mut schedule,
+        &CapacityPolicy::default(),
+    )?;
+
+    // Ten days of use: the app is opened each morning before the prompt, returns to the
+    // foreground in the afternoon, and on the fourth day the user moves the time to 10:00.
+    let mut day = date("2026-01-16");
+    for ordinal in 0..10 {
+        now = day.and_hms_opt(7, 30, 0).unwrap().and_utc();
+        center.fire_due(now);
+        schedule.refresh(RefreshTrigger::AppOpen, now, UTC_ZONE);
+        reconcile_prompts(
+            &mut db,
+            &FixedClock { instant: now },
+            &mut center,
+            &mut schedule,
+            &CapacityPolicy::default(),
+        )?;
+        if ordinal == 3 {
+            now = day.and_hms_opt(8, 0, 0).unwrap().and_utc();
+            schedule.configure(daily(PromptTime::new(10, 0).unwrap()), now, UTC_ZONE);
+            reconcile_prompts(
+                &mut db,
+                &FixedClock { instant: now },
+                &mut center,
+                &mut schedule,
+                &CapacityPolicy::default(),
+            )?;
+        }
+        now = day.and_hms_opt(15, 0, 0).unwrap().and_utc();
+        center.fire_due(now);
+        schedule.refresh(RefreshTrigger::Reentry, now, UTC_ZONE);
+        reconcile_prompts(
+            &mut db,
+            &FixedClock { instant: now },
+            &mut center,
+            &mut schedule,
+            &CapacityPolicy::default(),
+        )?;
+        assert!(
+            center.delivered.contains(&prompt_notification_id(day)),
+            "{day} delivered"
+        );
+        day = day.succ_opt().unwrap();
+    }
+
+    let mut delivered = center.delivered.clone();
+    delivered.sort();
+    delivered.dedup();
+    assert_eq!(
+        delivered.len(),
+        center.delivered.len(),
+        "no date delivered twice"
+    );
+    let mut expected: Vec<String> = (0..10)
+        .map(|offset| prompt_notification_id(date("2026-01-16") + chrono::Duration::days(offset)))
+        .collect();
+    expected.sort();
+    assert_eq!(delivered, expected);
+    assert!(center.pending.values().all(|due| *due > now));
+    // The afternoon re-entry dropped the delivered day and refilled nothing; the two days the
+    // morning open planned beyond it are still held, at the time chosen on the fourth day.
+    assert_eq!(
+        center.prompt_ids(),
+        ["prompt:2026-01-26", "prompt:2026-01-27"]
+    );
+    assert_eq!(
+        center.pending["prompt:2026-01-26"],
+        instant("2026-01-26T10:00:00Z")
+    );
+    Ok(())
+}
+
+// ---- Interleavings -----------------------------------------------------------------------
+//
+// A seeded deterministic generator drives random interleavings of time changes, disable and
+// re-enable, every refresh trigger, clock jumps forward and back (within the retention), zone
+// changes, reminder-side capacity passes, OS deliveries and OS losses, and reconcile passes.
+// The invariant: once the OS has delivered or dropped a date's request, that identifier is
+// never installed again. Replay is the only defect; suppression is allowed.
+
+struct SplitMix(u64);
+
+impl SplitMix {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut value = self.0;
+        value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        value ^ (value >> 31)
+    }
+
+    fn below(&mut self, bound: u64) -> u64 {
+        self.next() % bound
+    }
+}
+
+struct Interleaving {
+    seed: u64,
+    db: Database,
+    center: FakeCenter,
+    schedule: PromptSchedule,
+    policy: CapacityPolicy,
+    now: DateTime<Utc>,
+    /// The furthest the clock has been: rollbacks stay within the retention of it.
+    peak: DateTime<Utc>,
+    zone: Tz,
+    reminders: Vec<String>,
+    next_item: usize,
+    /// Identifiers the OS has delivered or dropped. None may be installed again.
+    gone: std::collections::BTreeSet<String>,
+    /// Prompt requests the reminder-side capacity pass cancelled.
+    displaced: usize,
+    checked_requests: usize,
+    log: Vec<String>,
+}
+
+impl Interleaving {
+    fn new(seed: u64) -> Result<Interleaving> {
+        let now = instant("2026-01-15T10:30:00Z");
+        let mut schedule = PromptSchedule::default();
+        schedule.configure(daily(nine_am()), now, UTC_ZONE);
+        Ok(Interleaving {
+            seed,
+            db: open_db(&format!("interleaving-{seed}"))?,
+            center: FakeCenter::default(),
+            schedule,
+            policy: tight_policy(),
+            now,
+            peak: now,
+            zone: UTC_ZONE,
+            reminders: Vec::new(),
+            next_item: 0,
+            gone: std::collections::BTreeSet::new(),
+            displaced: 0,
+            checked_requests: 0,
+            log: Vec::new(),
+        })
+    }
+
+    fn clock(&self) -> FixedClock {
+        FixedClock { instant: self.now }
+    }
+
+    fn step(&mut self, rng: &mut SplitMix) -> Result<()> {
+        match rng.below(24) {
+            0..=5 => {
+                let minutes = i64::try_from(rng.below(60 * 48) + 1)?;
+                self.now += chrono::Duration::minutes(minutes);
+                self.peak = self.peak.max(self.now);
+                self.center.fire_due(self.now);
+                self.note_gone();
+                self.log.push(format!("advance to {}", self.now));
+            }
+            6 => {
+                let minutes = i64::try_from(rng.below(60 * 24 * 13) + 1)?;
+                let floor = self.peak - chrono::Duration::days(SPENT_DATE_RETENTION_DAYS - 1);
+                self.now = (self.now - chrono::Duration::minutes(minutes)).max(floor);
+                self.log.push(format!("rollback to {}", self.now));
+            }
+            7 => {
+                let hour = u8::try_from(rng.below(24))?;
+                let minute = u8::try_from(rng.below(4) * 15)?;
+                let time = PromptTime::new(hour, minute).unwrap();
+                self.schedule.configure(daily(time), self.now, self.zone);
+                self.log.push(format!("configure {hour:02}:{minute:02}"));
+            }
+            8 => {
+                self.schedule
+                    .configure(PromptSettings::Off, self.now, self.zone);
+                self.log.push("configure off".to_string());
+            }
+            9 | 10 => {
+                self.schedule
+                    .configure(daily(nine_am()), self.now, self.zone);
+                self.log.push("configure 09:00 (on)".to_string());
+            }
+            11 | 12 => {
+                self.schedule
+                    .refresh(RefreshTrigger::AppOpen, self.now, self.zone);
+                self.log.push("refresh app open".to_string());
+            }
+            13 => {
+                self.schedule
+                    .refresh(RefreshTrigger::Reentry, self.now, self.zone);
+                self.log.push("refresh reentry".to_string());
+            }
+            14 => {
+                let zones: [Tz; 3] = [
+                    UTC_ZONE,
+                    "America/New_York".parse().unwrap(),
+                    "Asia/Tokyo".parse().unwrap(),
+                ];
+                self.zone = zones[usize::try_from(rng.below(3))?];
+                self.schedule
+                    .refresh(RefreshTrigger::ClockOrZoneChange, self.now, self.zone);
+                self.log
+                    .push(format!("refresh clock/zone change ({})", self.zone));
+            }
+            15 => {
+                if self.reminders.len() < 4 {
+                    let item_id = format!("item-{}", self.next_item);
+                    self.next_item += 1;
+                    create_reminder_due(
+                        &mut self.db,
+                        &item_id,
+                        "water plants",
+                        "2027-01-01 09:00:00",
+                    )?;
+                    self.reminders.push(item_id);
+                } else if let Some(item_id) = self.reminders.pop() {
+                    cancel_reminder_on(&mut self.db, &item_id)?;
+                }
+                self.reminder_side_pass()?;
+            }
+            16 => {
+                if let Some(item_id) = self.reminders.pop() {
+                    cancel_reminder_on(&mut self.db, &item_id)?;
+                }
+                self.reminder_side_pass()?;
+            }
+            17 => {
+                let pending = self.center.prompt_ids();
+                if !pending.is_empty() {
+                    let victim = &pending[usize::try_from(rng.below(pending.len() as u64))?];
+                    self.center.vanish(victim);
+                    self.gone.insert(victim.clone());
+                    self.log.push(format!("os drops {victim}"));
+                }
+            }
+            _ => {
+                let clock = self.clock();
+                reconcile_prompts(
+                    &mut self.db,
+                    &clock,
+                    &mut self.center,
+                    &mut self.schedule,
+                    &self.policy,
+                )?;
+                self.log.push("reconcile prompts".to_string());
+                self.check_pass_bounds();
+            }
+        }
+        self.check_no_replay();
+        Ok(())
+    }
+
+    fn reminder_side_pass(&mut self) -> Result<()> {
+        let clock = self.clock();
+        let demands = self.schedule.demands(self.now);
+        let report = reconcile_with_capacity(
+            &mut self.db,
+            &clock,
+            &mut self.center,
+            &self.policy,
+            &demands,
+        )?;
+        self.schedule.record_capacity_pass(&report, self.now);
+        self.displaced += report.prompts_cancelled.len();
+        self.log.push(format!(
+            "reminder-side pass ({} reminders, cancelled {:?})",
+            self.reminders.len(),
+            report.prompts_cancelled
+        ));
+        Ok(())
+    }
+
+    fn note_gone(&mut self) {
+        for id in &self.center.delivered {
+            if is_prompt_notification_id(id) {
+                self.gone.insert(id.clone());
+            }
+        }
+    }
+
+    fn check_no_replay(&mut self) {
+        for request in &self.center.requests[self.checked_requests..] {
+            assert!(
+                !self.gone.contains(&request.notification_id),
+                "seed {}: {} installed again after the OS delivered or dropped it\n{}",
+                self.seed,
+                request.notification_id,
+                self.log.join("\n")
+            );
+        }
+        self.checked_requests = self.center.requests.len();
+    }
+
+    fn check_pass_bounds(&self) {
+        let context = || format!("seed {}\n{}", self.seed, self.log.join("\n"));
+        assert!(
+            self.center.prompt_ids().len() <= PROMPT_HORIZON_DAYS,
+            "{}",
+            context()
+        );
+        assert!(
+            self.schedule.planned().len() <= PROMPT_HORIZON_DAYS,
+            "{}",
+            context()
+        );
+        assert!(
+            self.schedule
+                .planned()
+                .iter()
+                .all(|prompt| prompt.fire_at > self.now),
+            "{}",
+            context()
+        );
+        if !self.schedule.is_enabled() {
+            assert!(self.center.prompt_ids().is_empty(), "{}", context());
+        }
+    }
+}
+
+#[test]
+fn random_interleavings_never_install_a_prompt_after_the_os_delivered_or_dropped_it() -> Result<()>
+{
+    let mut total_installs = 0;
+    let mut total_gone = 0;
+    let mut total_displaced = 0;
+    for seed in 1..=48 {
+        let mut rng = SplitMix(seed);
+        let mut run = Interleaving::new(seed)?;
+        for _ in 0..80 {
+            run.step(&mut rng)?;
+        }
+        total_installs += run.center.schedule_calls;
+        total_gone += run.gone.len();
+        total_displaced += run.displaced;
+        // Finish with a pass at the clock's furthest reading, then one more look back.
+        run.now = run.peak;
+        let clock = run.clock();
+        reconcile_prompts(
+            &mut run.db,
+            &clock,
+            &mut run.center,
+            &mut run.schedule,
+            &run.policy,
+        )?;
+        run.check_pass_bounds();
+        run.check_no_replay();
+    }
+    // The generator is not vacuous: prompts were installed, delivered or dropped, and
+    // displaced by reminders across the runs.
+    assert!(
+        total_installs > 250 && total_gone > 100 && total_displaced > 12,
+        "{total_installs} installs, {total_gone} delivered or dropped, {total_displaced} displaced"
+    );
+    Ok(())
 }

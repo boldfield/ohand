@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Duration, LocalResult, NaiveDate, NaiveTime, TimeZone, Utc};
 use chrono_tz::Tz;
@@ -17,6 +17,11 @@ pub const PROMPT_HORIZON_DAYS: usize = 3;
 /// reminder's `reminder_id#generation` identifier.
 pub const PROMPT_ID_PREFIX: &str = "prompt:";
 
+/// How long a spent local date stays in the ledger, measured from the high-water date. A clock
+/// rolled back further than this can replay a prompt that fired before the rollback; a larger
+/// rollback is out of scope.
+pub const SPENT_DATE_RETENTION_DAYS: i64 = 14;
+
 const _: () = assert!(PROMPT_HORIZON_DAYS <= MAX_PROMPT_REQUESTS);
 const _: () = assert!(
     Duration::days(PROMPT_HORIZON_DAYS as i64 + 1).num_seconds() <= PROMPT_HORIZON.num_seconds()
@@ -24,6 +29,9 @@ const _: () = assert!(
 
 /// Longest DST gap searched for the first valid local minute after a skipped time.
 const MAX_GAP_MINUTES: i64 = 180;
+
+/// Most dates a fill scans forward before giving up on a full horizon.
+const FILL_SCAN_LIMIT_DAYS: usize = 366;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 pub enum PromptScheduleError {
@@ -102,65 +110,69 @@ pub enum RefreshTrigger {
     ClockOrZoneChange,
 }
 
-/// One planned local-date occurrence.
+/// One planned local-date occurrence. Plan entries carry no delivery evidence: that lives in
+/// the schedule's ledger, which survives every rebuild of the plan.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlannedPrompt {
     pub notification_id: String,
     pub local_date: NaiveDate,
     pub fire_at: DateTime<Utc>,
-    /// The OS was seen holding a request with this identifier, and core has not cancelled it
-    /// since. If it is later absent while `fire_at` still looks ahead of the clock, it fired and
-    /// the clock moved back. The mark belongs to the local date, not to the instant: a time or
-    /// zone change moves `fire_at` but keeps the identifier, and the OS holds one request per
-    /// identifier, so the evidence must follow the date.
-    #[serde(default)]
-    pub installed: bool,
 }
 
-/// The bounded optional daily prompt schedule: the user's setting and the occurrences planned
-/// from it. A plain value. The caller keeps it with the app's other configuration (it
-/// serializes to JSON) and hands it to `reconcile_prompts` to bring the OS in line.
+/// The bounded optional daily prompt schedule: the user's setting, the occurrences planned
+/// from it, and the ledger that says which local dates have had their prompt. A plain value.
+/// The caller keeps it with the app's other configuration (it serializes to JSON) and hands it
+/// to `reconcile_prompts` to bring the OS in line.
 ///
 /// Rules:
 /// - Off by default; a daily prompt exists only after a local time has been chosen.
-/// - At most [`PROMPT_HORIZON_DAYS`] occurrences are planned, always in the future. The
-///   horizon is refilled only by [`RefreshTrigger::AppOpen`] or by the user changing the
-///   setting, which happens inside the open app. Re-entry and clock or zone changes only drop
-///   occurrences that have passed; they never add one.
+/// - At most [`PROMPT_HORIZON_DAYS`] occurrences are planned, always ahead of every clock
+///   reading seen so far. The horizon is refilled only by [`RefreshTrigger::AppOpen`] or by the
+///   user changing the setting, which happens inside the open app. Re-entry and clock or zone
+///   changes only drop occurrences; they never add one.
 /// - A passed occurrence is never replayed or made up, so nonuse leaves nothing queued and the
 ///   next open starts from the next future occurrence.
-/// - Passing is remembered: `last_elapsed` is the latest planned instant seen to have passed,
-///   either by the clock or because an installed request vanished from the OS before its
-///   instant (it fired and the clock was moved back). No occurrence at or before it is planned
-///   again, so rolling the clock back cannot replay a prompt that already fired. It is bounded
-///   by the horizon, never by the clock reading itself. The local date of that occurrence is
-///   fenced too: each local date has at most one prompt, so choosing a later time on a day
-///   whose prompt has passed starts from the next day.
-/// - Absence from the OS is taken for delivery only when core did not cause it. A prompt that
-///   core's capacity rule cancelled for explicit reminders is never fenced: the reconcile pass
-///   clears the mark of every prompt it cancels, and a capacity pass run elsewhere reports its
-///   cancellations through [`PromptSchedule::record_capacity_pass`]. A prompt that vanished on
-///   its own keeps its mark while capacity withholds its slot, so it is fenced as soon as it is
-///   seen and is not replayed when the slot frees. Only vanished occurrences before the first
-///   prompt the OS still holds count, so the fence never passes a pending prompt. A
-///   cancellation core cannot see (a permission toggle, an OS purge) can thus cost at most the
-///   planned horizon of prompts, which is acceptable for an optional feature; it never cancels a
-///   pending one.
+///
+/// The ledger, kept apart from the plan:
+/// - `high_water` is the latest `now` any entry point has observed. The plan never holds an
+///   instant at or before it, so a backward clock change cannot plan a date the user has
+///   already lived through, whatever the plan looked like when the clock moved.
+/// - `held` records, per local date, the instant of the request core handed to the OS and has
+///   not since cancelled. It is the only evidence that a prompt may have been delivered.
+/// - `spent` is the append-only set of local dates whose prompt has been delivered, or may have
+///   been. No date is planned again while it is in the set. A date is spent when it is held and
+///   (a) the high-water mark has reached its instant, or (b) an OS listing no longer shows its
+///   request although core did not cancel it, or (c) core cancels it or empties the plan
+///   containing it without having seen it still pending in that same pass, which is what
+///   disabling does. A request core cancels after seeing it pending in the same pass, for
+///   capacity or because the plan changed, has not fired: it is merely released, and comes
+///   back when a slot frees or the plan holds it again. Ambiguity fails toward suppression:
+///   skipping a prompt whose delivery is uncertain is intended; replaying one is the defect.
+/// - Nothing removes a date from `spent` except age: dates more than
+///   [`SPENT_DATE_RETENTION_DAYS`] before the high-water date are pruned.
+/// - Every entry point that takes `now` first raises the high-water mark and settles the
+///   ledger ([`PromptSchedule::observe`]), and only then rebuilds, cancels or discards anything.
+///
+/// Also:
 /// - The identifier of an occurrence is `prompt:<local date>`: stable, so a re-plan replaces
-///   rather than duplicates, and it carries no item content.
+///   rather than duplicates, and it carries no item content. Each local date has at most one
+///   prompt.
 /// - Local-time semantics: a skipped local time (DST gap) fires at the first valid minute after
 ///   the gap; a repeated local time (DST fold) fires at its first occurrence.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptSchedule {
     settings: PromptSettings,
     planned: Vec<PlannedPrompt>,
+    /// The latest clock reading any entry point has observed.
     #[serde(default)]
-    last_elapsed: Option<DateTime<Utc>>,
-    /// The latest local date whose occurrence has passed. No later time on that date is
-    /// planned, so moving the time later on a day that already had its prompt adds no second
-    /// one.
+    high_water: Option<DateTime<Utc>>,
+    /// Local dates whose request core handed to the OS and has not cancelled since, with the
+    /// instant of that request. Independent of the plan.
     #[serde(default)]
-    last_elapsed_date: Option<NaiveDate>,
+    held: BTreeMap<NaiveDate, DateTime<Utc>>,
+    /// Local dates that have had their prompt, or may have. Append-only apart from age pruning.
+    #[serde(default)]
+    spent: BTreeSet<NaiveDate>,
 }
 
 impl PromptSchedule {
@@ -176,139 +188,112 @@ impl PromptSchedule {
         &self.planned
     }
 
-    /// Apply the user's choice. Off clears every planned prompt; a time rebuilds the horizon
-    /// from `now`, so an earlier time today that has already passed is not replayed. A date
-    /// whose request the OS was seen holding keeps that evidence under the new time, so a time
-    /// change made in a rolled-back clock before any pass has looked cannot replay a prompt
-    /// that already fired.
+    /// The latest clock reading this schedule has observed, if any.
+    pub fn high_water(&self) -> Option<DateTime<Utc>> {
+        self.high_water
+    }
+
+    /// Whether `local_date` has had its prompt (or may have) and is therefore never planned
+    /// again while it stays in the ledger.
+    pub fn is_spent(&self, local_date: NaiveDate) -> bool {
+        self.spent.contains(&local_date)
+    }
+
+    /// Apply the user's choice. Off empties the plan, and every date whose request core had
+    /// handed to the OS is spent: nothing has shown those requests still pending, so turning
+    /// prompting back on never plans them again. A time rebuilds the horizon ahead of the
+    /// high-water mark and the ledger, so an earlier time today that has already passed is not
+    /// replayed, and a date whose request the OS fired while the clock was moved back is spent
+    /// by the next pass however often the time changes in between.
     pub fn configure(&mut self, settings: PromptSettings, now: DateTime<Utc>, zone: Tz) {
-        self.retire_elapsed(now);
+        self.observe(now);
         self.settings = settings;
-        self.rebuild(now, zone);
+        if !self.is_enabled() {
+            self.spend_held_without_listing();
+        }
+        self.rebuild(zone);
     }
 
     pub fn refresh(&mut self, trigger: RefreshTrigger, now: DateTime<Utc>, zone: Tz) {
+        self.observe(now);
         if !self.is_enabled() {
+            self.spend_held_without_listing();
             self.planned.clear();
             return;
         }
-        self.retire_elapsed(now);
         if trigger == RefreshTrigger::AppOpen {
-            self.rebuild(now, zone);
+            self.rebuild(zone);
         }
     }
 
-    /// Replace the plan with a fresh fill. An occurrence whose local date was already planned
-    /// keeps its `installed` mark even if its instant moved, so a refill or a time change that is
-    /// the first observation after a clock rollback can still tell that the OS fired it. The
-    /// mark is keyed by identifier alone because that is what the OS keys its requests by: if
-    /// the request is still held at the old instant, the next pass replaces it under the same
-    /// identifier; if it is absent, it fired, whatever time the user has since chosen.
-    fn rebuild(&mut self, now: DateTime<Utc>, zone: Tz) {
-        let installed_dates: BTreeSet<&str> = self
-            .planned
+    /// The chokepoint. Raises the high-water mark to `now`, spends every held date whose
+    /// instant the high-water mark has reached, prunes the ledger by age, and drops planned
+    /// occurrences at or before the high-water mark or on a spent date. Every entry point calls
+    /// this before it rebuilds, cancels or discards anything.
+    pub fn observe(&mut self, now: DateTime<Utc>) {
+        let high_water = self.high_water.map_or(now, |previous| previous.max(now));
+        self.high_water = Some(high_water);
+        let reached: Vec<NaiveDate> = self
+            .held
             .iter()
-            .filter(|previous| previous.installed)
-            .map(|previous| previous.notification_id.as_str())
+            .filter(|(_, fire_at)| **fire_at <= high_water)
+            .map(|(local_date, _)| *local_date)
             .collect();
-        let mut planned = fill(
-            self.settings,
-            now,
-            zone,
-            self.last_elapsed,
-            self.last_elapsed_date,
-        );
-        for prompt in &mut planned {
-            prompt.installed = installed_dates.contains(prompt.notification_id.as_str());
+        self.spend(reached);
+        let oldest_kept = high_water.date_naive() - Duration::days(SPENT_DATE_RETENTION_DAYS);
+        self.spent.retain(|local_date| *local_date >= oldest_kept);
+        self.settle_plan();
+    }
+
+    /// The chokepoint with an OS listing in hand: after [`observe`](Self::observe), every held
+    /// date whose request the listing no longer shows is spent, because core did not cancel it
+    /// (a cancel releases the date first). Called by the reconcile pass before it allocates or
+    /// cancels anything, with the identifiers the OS currently holds.
+    pub(super) fn observe_pending(&mut self, now: DateTime<Utc>, pending: &BTreeSet<&str>) {
+        self.observe(now);
+        let vanished: Vec<NaiveDate> = self
+            .held
+            .keys()
+            .copied()
+            .filter(|local_date| !pending.contains(prompt_notification_id(*local_date).as_str()))
+            .collect();
+        self.spend(vanished);
+        self.settle_plan();
+    }
+
+    /// Core handed the OS a request for `local_date` at `fire_at`, or saw the OS holding one.
+    pub(super) fn record_held(&mut self, local_date: NaiveDate, fire_at: DateTime<Utc>) {
+        if !self.spent.contains(&local_date) {
+            self.held.insert(local_date, fire_at);
         }
-        self.planned = planned;
     }
 
-    /// Drop occurrences whose instant has passed by the clock and remember the latest.
-    pub(super) fn retire_elapsed(&mut self, now: DateTime<Utc>) {
-        self.retire_where(|prompt| prompt.fire_at <= now);
-    }
-
-    /// Retire installed occurrences that the OS no longer holds: they fired before the clock
-    /// was moved back. `installed` is cleared only when core itself cancels a request, so a
-    /// prompt core displaced for explicit reminders is never taken for a delivery, while a fired
-    /// prompt keeps its evidence for as long as capacity withholds its slot. Only occurrences
-    /// before the first one the OS still holds are considered, so the refill floor never passes
-    /// a prompt that is still valid. Within that span, everything up to the latest vanished
-    /// occurrence is retired, including never-installed occurrences ahead of it: an app open
-    /// after a multi-day rollback plans dates earlier than the fired one, and those lie before
-    /// a prompt that has already been delivered. Called by the reconcile pass, before capacity
-    /// is allocated, with the identifiers the OS currently holds.
-    pub(super) fn retire_fired(&mut self, now: DateTime<Utc>, pending: &BTreeSet<&str>) {
-        self.planned.sort_by_key(|prompt| prompt.fire_at);
-        let still_held = |prompt: &PlannedPrompt| pending.contains(prompt.notification_id.as_str());
-        let first_held = self
-            .planned
-            .iter()
-            .position(|prompt| prompt.fire_at > now && still_held(prompt))
-            .unwrap_or(self.planned.len());
-        let Some(latest_vanished) = self.planned[..first_held]
-            .iter()
-            .rposition(|prompt| prompt.fire_at <= now || (prompt.installed && !still_held(prompt)))
-        else {
-            return;
-        };
-        let mut position = 0;
-        self.retire_where(|_| {
-            let retire = position <= latest_vanished;
-            position += 1;
-            retire
-        });
-    }
-
-    fn retire_where(&mut self, mut has_fired: impl FnMut(&PlannedPrompt) -> bool) {
-        let mut latest = self.last_elapsed;
-        let mut latest_date = self.last_elapsed_date;
-        self.planned.retain(|prompt| {
-            if !has_fired(prompt) {
-                return true;
+    /// Core cancelled these requests after seeing them pending in the same pass. The OS had
+    /// not fired them, so their dates are released, not spent, and are planned again when a slot
+    /// frees or the plan holds them.
+    pub(super) fn release<'a>(&mut self, cancelled: impl IntoIterator<Item = &'a str>) {
+        for notification_id in cancelled {
+            if let Some(local_date) = prompt_local_date(notification_id) {
+                self.held.remove(&local_date);
             }
-            latest = latest.max(Some(prompt.fire_at));
-            latest_date = latest_date.max(Some(prompt.local_date));
-            false
-        });
-        self.last_elapsed = latest;
-        self.last_elapsed_date = latest_date;
-    }
-
-    /// Record which planned prompts the OS holds after a reconcile pass. A prompt core
-    /// cancelled loses its mark; one that vanished on its own but is withheld for capacity keeps
-    /// it, so it is still recognised as fired once capacity frees.
-    pub(super) fn record_installed(&mut self, held: &BTreeSet<&str>, cancelled: &BTreeSet<&str>) {
-        for prompt in &mut self.planned {
-            let notification_id = prompt.notification_id.as_str();
-            prompt.installed = held.contains(notification_id)
-                || (prompt.installed && !cancelled.contains(notification_id));
         }
     }
 
     /// Record a capacity pass that ran outside [`reconcile_prompts`](super::reconcile_prompts)
     /// with this schedule's [`demands`](Self::demands), such as the reminder side making room
-    /// for a new reminder. Prompts it cancelled are no longer marked installed, so their absence
-    /// from the OS is never taken for a delivery. Prompts it merely deferred keep their mark: if
-    /// one is absent it vanished on its own (it fired), and that evidence must survive. Every
+    /// for a new reminder, at the instant `now` that pass used. The clock reading settles the
+    /// ledger first, so a prompt whose instant has passed by then is spent even though the
+    /// demands no longer named it. The prompts the pass cancelled were pending in its own
+    /// listing, so they are released, never spent, and come back when a slot frees. Every
     /// caller that offers these demands to a capacity pass must hand its report back here; an
-    /// unreported cancellation is indistinguishable from a delivery.
-    pub fn record_capacity_pass(&mut self, report: &CapacityReport) {
-        let cancelled: BTreeSet<&str> = report
-            .prompts_cancelled
-            .iter()
-            .map(String::as_str)
-            .collect();
-        for prompt in &mut self.planned {
-            if cancelled.contains(prompt.notification_id.as_str()) {
-                prompt.installed = false;
-            }
-        }
+    /// unreported cancellation is indistinguishable from a delivery and spends the date.
+    pub fn record_capacity_pass(&mut self, report: &CapacityReport, now: DateTime<Utc>) {
+        self.observe(now);
+        self.release(report.prompts_cancelled.iter().map(String::as_str));
     }
 
     /// The prompt candidates to offer the capacity pass: none unless enabled, only future
-    /// occurrences, soonest first and never more than the horizon.
+    /// occurrences on unspent dates, soonest first and never more than the horizon.
     pub fn demands(&self, now: DateTime<Utc>) -> Vec<PromptDemand> {
         if !self.is_enabled() {
             return Vec::new();
@@ -317,7 +302,9 @@ impl PromptSchedule {
             .planned
             .iter()
             .filter(|prompt| {
-                prompt.fire_at > now && prompt.notification_id.starts_with(PROMPT_ID_PREFIX)
+                prompt.fire_at > now
+                    && !self.spent.contains(&prompt.local_date)
+                    && prompt.notification_id.starts_with(PROMPT_ID_PREFIX)
             })
             .collect();
         upcoming.sort_by(|left, right| {
@@ -333,6 +320,40 @@ impl PromptSchedule {
             })
             .collect()
     }
+
+    /// Replace the plan with a fresh fill ahead of the high-water mark and the ledger.
+    fn rebuild(&mut self, zone: Tz) {
+        let Some(floor) = self.high_water else {
+            self.planned.clear();
+            return;
+        };
+        self.planned = fill(self.settings, floor, zone, &self.spent);
+    }
+
+    /// Case (c): the plan is being emptied without an OS listing, so nothing has shown the held
+    /// requests still pending. Every held date is spent.
+    fn spend_held_without_listing(&mut self) {
+        let held: Vec<NaiveDate> = self.held.keys().copied().collect();
+        self.spend(held);
+    }
+
+    fn spend(&mut self, local_dates: Vec<NaiveDate>) {
+        for local_date in local_dates {
+            self.held.remove(&local_date);
+            self.spent.insert(local_date);
+        }
+    }
+
+    /// Drop planned occurrences the ledger rules out: at or before the high-water mark, or on
+    /// a spent date.
+    fn settle_plan(&mut self) {
+        let high_water = self.high_water;
+        let spent = &self.spent;
+        self.planned.retain(|prompt| {
+            high_water.is_none_or(|mark| prompt.fire_at > mark)
+                && !spent.contains(&prompt.local_date)
+        });
+    }
 }
 
 /// The identifier of the occurrence on `local_date`.
@@ -345,32 +366,40 @@ pub fn is_prompt_notification_id(notification_id: &str) -> bool {
     notification_id.starts_with(PROMPT_ID_PREFIX) && !notification_id.contains('#')
 }
 
+/// The local date a prompt identifier names, if it is one.
+pub fn prompt_local_date(notification_id: &str) -> Option<NaiveDate> {
+    if !is_prompt_notification_id(notification_id) {
+        return None;
+    }
+    notification_id.strip_prefix(PROMPT_ID_PREFIX)?.parse().ok()
+}
+
 fn fill(
     settings: PromptSettings,
-    now: DateTime<Utc>,
+    floor: DateTime<Utc>,
     zone: Tz,
-    last_elapsed: Option<DateTime<Utc>>,
-    last_elapsed_date: Option<NaiveDate>,
+    spent: &BTreeSet<NaiveDate>,
 ) -> Vec<PlannedPrompt> {
     let PromptSettings::Daily { time } = settings else {
         return Vec::new();
     };
     let mut planned = Vec::with_capacity(PROMPT_HORIZON_DAYS);
-    let floor = last_elapsed.map_or(now, |elapsed| elapsed.max(now));
     let mut local_date = floor.with_timezone(&zone).date_naive();
-    // Today's occurrence may already be past, and a gap can push one past `now` again, so scan
-    // a couple of extra dates rather than assuming the first `PROMPT_HORIZON_DAYS` qualify.
-    for _ in 0..PROMPT_HORIZON_DAYS + 2 {
+    // Today's occurrence may already be past, spent dates are skipped (and repeated
+    // disable/re-enable cycles can spend a run of future dates), and a gap can push one past
+    // the floor again, so scan forward until the horizon is full rather than assuming the
+    // first `PROMPT_HORIZON_DAYS` dates qualify. The ledger is finite, so this terminates;
+    // the hard bound only guards against a pathological ledger.
+    for _ in 0..FILL_SCAN_LIMIT_DAYS {
         if planned.len() == PROMPT_HORIZON_DAYS {
             break;
         }
         if let Some(fire_at) = local_fire_instant(local_date, time, zone) {
-            if fire_at > floor && last_elapsed_date.is_none_or(|elapsed| local_date > elapsed) {
+            if fire_at > floor && !spent.contains(&local_date) {
                 planned.push(PlannedPrompt {
                     notification_id: prompt_notification_id(local_date),
                     local_date,
                     fire_at,
-                    installed: false,
                 });
             }
         }

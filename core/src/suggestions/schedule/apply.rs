@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
 
-use super::plan::{is_prompt_notification_id, PromptSchedule};
+use super::plan::{is_prompt_notification_id, prompt_local_date, PromptSchedule};
 use crate::providers::contracts::ErrorClass;
 use crate::reminders::capacity::{
     reconcile_with_capacity, CapacityPolicy, CapacityReport, PromptDemand,
@@ -46,14 +46,28 @@ impl PromptPassReport {
 /// Cancel every pending daily prompt and nothing else. Reminders and requests of other
 /// features are never touched. Cancellation is idempotent. A failed cancel is reported and
 /// retried by the next pass.
+///
+/// The schedule's ledger is settled first with the clock and the OS listing: a held request
+/// the listing no longer shows is spent, and the requests this pass cancels after seeing them
+/// pending are released, not spent. With prompting off every held date was already spent when
+/// it was switched off, so this pass changes nothing in the ledger.
 pub fn cancel_prompts(
+    clock: &dyn Clock,
     effects: &mut dyn NotificationEffects,
+    schedule: &mut PromptSchedule,
 ) -> Result<PromptPassReport, ReconcileError> {
+    let now = clock.now();
     let pending = effects
         .list_pending()
         .map_err(ReconcileError::ListPending)?;
+    let pending_ids: BTreeSet<&str> = pending
+        .iter()
+        .map(|request| request.notification_id.as_str())
+        .collect();
+    schedule.observe_pending(now, &pending_ids);
     let mut report = PromptPassReport::default();
     cancel_where(effects, &pending, &mut report, |_| true);
+    schedule.release(report.cancelled.iter().map(String::as_str));
     Ok(report)
 }
 
@@ -62,17 +76,18 @@ pub fn cancel_prompts(
 /// Off: every pending prompt is cancelled and no capacity pass runs, so reminders are left
 /// exactly as they were.
 ///
-/// On: pending prompts outside the plan (an earlier time, another zone, a passed day) are
-/// cancelled first so they stop consuming budget. The capacity pass then plans the offered
-/// prompts after explicit reminders and cancels any it defers. Last, the granted prompts that
-/// the OS does not already hold at the planned instant are installed with the generic payload
-/// and their own opaque identifier as target. A failed install is reported and retried by any
-/// later pass; it is never recorded as delivery. This function never extends the horizon:
-/// only the schedule's own refresh rules do. It does retire occurrences the OS held but no
-/// longer holds although core did not cancel them, so a prompt that fired is not reinstalled if
-/// the clock is moved back, while a prompt core cancelled for explicit reminders is kept and
-/// reinstalled when a slot frees. It records which prompts the OS now holds, and which core
-/// cancelled, for the next pass.
+/// On: the ledger is settled first with this pass's clock reading and OS listing, before
+/// anything is cancelled. A date whose request core had handed to the OS and the listing no
+/// longer shows is spent: it fired, even if the clock has since been moved back, and it is
+/// never installed again. Then pending prompts outside the plan (an earlier time, another
+/// zone, a passed or spent day) are cancelled so they stop consuming budget. The capacity
+/// pass plans the offered prompts after explicit reminders and cancels any it defers. Every
+/// request cancelled this way was seen pending in this same listing, so its date is released
+/// rather than spent and comes back when a slot frees. Last, the granted prompts that the OS
+/// does not already hold at the planned instant are installed with the generic payload and
+/// their own opaque identifier as target, and each is recorded as held. A failed install is
+/// reported and retried by any later pass; it is never recorded as held. This function never
+/// extends the horizon: only the schedule's own refresh rules do.
 pub fn reconcile_prompts(
     database: &mut Database,
     clock: &dyn Clock,
@@ -81,7 +96,7 @@ pub fn reconcile_prompts(
     policy: &CapacityPolicy,
 ) -> Result<PromptPassReport, ReconcileError> {
     if !schedule.is_enabled() {
-        return cancel_prompts(effects);
+        return cancel_prompts(clock, effects, schedule);
     }
     let pass_clock = PassClock { now: clock.now() };
     let pending = effects
@@ -91,10 +106,7 @@ pub fn reconcile_prompts(
         .iter()
         .map(|request| request.notification_id.as_str())
         .collect();
-    schedule.retire_elapsed(pass_clock.now);
-    // A prompt the OS held and no longer holds, which core did not cancel, fired and the clock
-    // moved back. Retiring it before allocation gives its slot to the next occurrence.
-    schedule.retire_fired(pass_clock.now, &pending_ids);
+    schedule.observe_pending(pass_clock.now, &pending_ids);
 
     let mut report = PromptPassReport::default();
     let (demands, capacity) = capacity_pass(
@@ -106,6 +118,7 @@ pub fn reconcile_prompts(
         &pending,
         &mut report,
     )?;
+    schedule.release(report.cancelled.iter().map(String::as_str));
     let held: BTreeMap<&str, Option<DateTime<Utc>>> = pending
         .iter()
         .filter(|request| !report.cancelled.contains(&request.notification_id))
@@ -118,8 +131,12 @@ pub fn reconcile_prompts(
         else {
             continue;
         };
+        let Some(local_date) = prompt_local_date(notification_id) else {
+            continue;
+        };
         if held.get(notification_id.as_str()) == Some(&Some(demand.fire_at)) {
             report.already_installed.push(notification_id.clone());
+            schedule.record_held(local_date, demand.fire_at);
             continue;
         }
         let request = ScheduleRequest {
@@ -129,7 +146,10 @@ pub fn reconcile_prompts(
             opaque_target_id: notification_id.clone(),
         };
         match effects.schedule(&request) {
-            Ok(()) => report.installed.push(notification_id.clone()),
+            Ok(()) => {
+                report.installed.push(notification_id.clone());
+                schedule.record_held(local_date, demand.fire_at);
+            }
             Err(error) => report.failures.push(PromptFailure {
                 notification_id: notification_id.clone(),
                 operation: PromptOperation::Schedule,
@@ -138,14 +158,6 @@ pub fn reconcile_prompts(
             }),
         }
     }
-    let held_now: BTreeSet<&str> = report
-        .installed
-        .iter()
-        .chain(&report.already_installed)
-        .map(String::as_str)
-        .collect();
-    let cancelled: BTreeSet<&str> = report.cancelled.iter().map(String::as_str).collect();
-    schedule.record_installed(&held_now, &cancelled);
     report.capacity = Some(capacity);
     Ok(report)
 }

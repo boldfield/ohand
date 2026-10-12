@@ -9,24 +9,28 @@
 // - Refill: only on app open, or when the user changes the setting in the open app. Re-entry
 //   and clock or zone changes drop passed occurrences and add none. A missed prompt is never
 //   replayed, and after several days of nonuse the OS holds no prompt: no backlog or catch-up.
-// - Fired versus displaced: an installed prompt that vanishes from the OS before its instant
-//   counts as fired (clock moved back) unless core cancelled it. Prompts core's capacity rule
-//   cancelled for explicit reminders are kept and come back when a slot frees; a capacity pass
-//   run outside `reconcile_prompts` with these demands must report back through
-//   `PromptSchedule::record_capacity_pass`. A fired prompt keeps that evidence while capacity
-//   withholds its slot, so it is never replayed when the slot frees. Never-installed
-//   occurrences an app open planned ahead of a fired one (a multi-day rollback) are retired
-//   with it. The evidence belongs to the local date: a time or zone change re-plans the date at
-//   a new instant under the same identifier and keeps the mark, so a time change made before
-//   the first look after a rollback cannot replay the fired prompt either.
-// - One prompt per local date: once a date's occurrence has passed or fired, no later time on
-//   that date is planned, even if the user moves the time later.
+// - Ledger, not plan state: whether a local date has had its prompt is recorded in
+//   `PromptSchedule` apart from the plan, as an append-only set of spent dates plus the
+//   high-water mark of every clock reading seen. Every entry point that takes `now`
+//   (`configure`, `refresh`, `record_capacity_pass`, `reconcile_prompts`, `cancel_prompts`)
+//   settles that ledger first and only then rebuilds, cancels or discards anything, so no
+//   ordering of time changes, app opens, disable/re-enable, capacity passes and backward clock
+//   changes can lose the evidence that a prompt fired. A date is spent once its request was
+//   handed to the OS and the clock has reached its instant, or an OS listing no longer shows it
+//   although core did not cancel it, or core discards it without a listing (disable). A request
+//   core cancels after seeing it pending in the same pass (capacity, or a changed plan) has not
+//   fired and comes back when a slot frees. Ambiguity fails toward suppression: a prompt whose
+//   delivery is uncertain is skipped, never replayed. Spent dates are pruned only by age
+//   (`SPENT_DATE_RETENTION_DAYS`); a rollback larger than that is out of scope.
+// - One prompt per local date: the identifier is `prompt:<local date>`, and once a date is
+//   spent no time on that date is planned again, even if the user moves the time later.
 // - Disable: cancels every pending prompt and nothing else. No capacity pass runs, so reminders
-//   keep their state and their OS requests.
+//   keep their state and their OS requests. The dates of the cancelled prompts are spent, so
+//   re-enabling plans from the next unspent date.
 // - Payload: always `PayloadKind::Generic`; the opaque target is the prompt's own identifier
 //   (`prompt:<local date>`). No item text, count or route is available to this module.
 // - Persistence: `PromptSchedule` is a serializable value held by the caller with its other
-//   configuration. This module owns no table.
+//   configuration, ledger included. This module owns no table.
 
 mod apply;
 mod plan;
@@ -35,7 +39,7 @@ pub use apply::{
     cancel_prompts, reconcile_prompts, PromptFailure, PromptOperation, PromptPassReport,
 };
 pub use plan::{
-    is_prompt_notification_id, local_fire_instant, prompt_notification_id, PlannedPrompt,
-    PromptSchedule, PromptScheduleError, PromptSettings, PromptTime, RefreshTrigger,
-    PROMPT_HORIZON_DAYS, PROMPT_ID_PREFIX,
+    is_prompt_notification_id, local_fire_instant, prompt_local_date, prompt_notification_id,
+    PlannedPrompt, PromptSchedule, PromptScheduleError, PromptSettings, PromptTime, RefreshTrigger,
+    PROMPT_HORIZON_DAYS, PROMPT_ID_PREFIX, SPENT_DATE_RETENTION_DAYS,
 };
