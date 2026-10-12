@@ -11,6 +11,7 @@
 //! constants of this crate are never exported), types appear in the header only when an
 //! exported function uses them, and no export is gated on the build target.
 
+pub mod audio_retention;
 pub mod capture;
 pub mod core_handle;
 pub mod deletion_cleanup;
