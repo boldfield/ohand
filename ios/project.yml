@@ -78,6 +78,7 @@ targets:
       CODE_SIGN_ENTITLEMENTS: Config/OhAndApp.entitlements
     dependencies:
       - target: OhAndServices
+      - target: OhAndCoreBridge
       - target: OhAndCaptureControl
 
   OhAndTests:

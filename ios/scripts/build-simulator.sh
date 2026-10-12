@@ -2,6 +2,7 @@
 # Simulator build of one scheme (default OhAndApp). macOS with Xcode only.
 # Unsigned by default. OHAND_SIMULATOR_ADHOC_SIGN=1 ad-hoc signs with the target's entitlements, which the
 # simulator needs before Keychain calls stop failing with errSecMissingEntitlement (-34018).
+# OHAND_DERIVED_DATA_PATH overrides the derived data directory (default .derived).
 set -euo pipefail
 
 scheme="${1:-OhAndApp}"
@@ -19,5 +20,5 @@ xcodebuild build \
   -configuration Debug \
   -sdk iphonesimulator \
   -destination 'generic/platform=iOS Simulator' \
-  -derivedDataPath .derived \
+  -derivedDataPath "${OHAND_DERIVED_DATA_PATH:-.derived}" \
   "${signing_settings[@]}"
