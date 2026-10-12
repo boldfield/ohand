@@ -984,6 +984,30 @@ fn facts_for_unknown_stale_mismatched_or_deleted_targets_are_refused() -> Result
 }
 
 #[test]
+fn deleted_items_expose_no_reminder_history() -> Result<()> {
+    let mut db = open_db("deleted-history")?;
+    let revision = insert_action(&mut db, "item-1", "call the roofer")?;
+    let mut center = FakeCenter::default();
+    set_time(
+        &mut db,
+        "item-1",
+        revision,
+        DUE_TIME,
+        "2026-01-15T11:00:00Z",
+    )?;
+    settle(&mut db, &mut center, "2026-01-15T11:01:00Z")?;
+    assert!(!history(&mut db, "item-1", "2026-01-15T12:00:00Z")?
+        .entries
+        .is_empty());
+
+    mark_deletion_intent(&mut db, "item-1", revision, instant("2026-01-16T10:00:00Z"))?;
+    let tx = db.immediate_transaction()?;
+    assert!(reminder_history(&tx, &clock_at("2026-01-16T10:01:00Z"), "item-1")?.is_none());
+    tx.commit()?;
+    Ok(())
+}
+
+#[test]
 fn evidence_for_a_completed_item_is_still_recorded() -> Result<()> {
     let mut db = open_db("completed")?;
     let revision = insert_action(&mut db, "item-1", "call the roofer")?;

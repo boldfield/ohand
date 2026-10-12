@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use rusqlite::Transaction;
+use rusqlite::{OptionalExtension, Transaction};
 
 use super::record::{parse_instant, parse_notification_id};
 use super::HistoryError;
@@ -138,12 +138,23 @@ pub struct ReminderHistory {
     pub entries: Vec<HistoryEntry>,
 }
 
-/// The inspectable history of one item's reminder, or `None` when the item has none. Read-only.
+/// The inspectable history of one item's reminder, or `None` when the item has none or has been
+/// deleted (tombstones are excluded from every result). Read-only.
 pub fn reminder_history(
     tx: &Transaction<'_>,
     clock: &dyn Clock,
     item_id: &str,
 ) -> Result<Option<ReminderHistory>, HistoryError> {
+    let lifecycle_state: Option<String> = tx
+        .query_row(
+            "SELECT lifecycle_state FROM items WHERE item_id = ?",
+            [item_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if lifecycle_state.as_deref() == Some("deleted") {
+        return Ok(None);
+    }
     let Some(record) = get_reminder(tx, item_id)? else {
         return Ok(None);
     };
