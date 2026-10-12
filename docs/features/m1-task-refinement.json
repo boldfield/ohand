@@ -1064,7 +1064,7 @@
         2
       ],
       "depends_on": [
-        "U03b",
+        "U02b",
         "N06"
       ],
       "source_pointers": [
@@ -1113,7 +1113,7 @@
         2
       ],
       "depends_on": [
-        "U04b",
+        "U01",
         "V06",
         "V07",
         "V04"
@@ -1281,7 +1281,7 @@
         2
       ],
       "depends_on": [
-        "U06b",
+        "U01",
         "L03b",
         "L04b",
         "L05b"
@@ -1356,7 +1356,7 @@
         2
       ],
       "depends_on": [
-        "U07c",
+        "U01",
         "S03"
       ],
       "source_pointers": [
@@ -2147,14 +2147,14 @@
       "U03a"
     ],
     "U04a": [
-      "U03b",
+      "U02b",
       "N06"
     ],
     "U04b": [
       "U04a"
     ],
     "U05a": [
-      "U04b",
+      "U01",
       "V06",
       "V07",
       "V04"
@@ -2183,7 +2183,7 @@
       "L05a"
     ],
     "U07a": [
-      "U06b",
+      "U01",
       "L03b",
       "L04b",
       "L05b"
@@ -2195,14 +2195,14 @@
       "U07b"
     ],
     "U08a": [
-      "U07c",
+      "U01",
       "S03"
     ],
     "U08b": [
       "U08a"
     ],
     "U09": [
-      "U08b",
+      "U01",
       "J03",
       "D05",
       "N04b",
@@ -2213,17 +2213,27 @@
       "U08b"
     ],
     "U10": [
+      "U03b",
+      "U04b",
+      "U07c",
+      "U08b",
       "U09",
       "C06"
     ],
     "T03": [
       "N06",
       "S03",
-      "U09"
+      "U09",
+      "U04b",
+      "U08b"
     ],
     "T09": [
-      "U11",
+      "U03b",
+      "U04b",
+      "U07c",
+      "U08b",
       "U09",
+      "U11",
       "B03",
       "N07"
     ],
@@ -2384,6 +2394,10 @@
     {
       "date": "2026-10-11",
       "change": "Added P11a (tooling: sign OhAndApp with its embedded OhAndCaptureControl extension, per-bundle provisioningProfiles, launch check) and P11b (maintainer signed-install evidence, starts blocked). T10 also depends on P11b so the signed candidate route is proven before the device exit matrix."
+    },
+    {
+      "date": "2026-10-12",
+      "change": "UI chain restructured at the maintainer's direction: removed ordering-only links U03b->U04a, U04b->U05a, U06b->U07a, U07c->U08a; U09 depends on U01/J03/D05/N04b/U11; T09, U10 and T03 depend on every UI branch end. Standing one-entry shared-host allowance for U01's settings/navigation host and U02b's source-detail host. Critical path 30 -> 20."
     }
   ]
 }
