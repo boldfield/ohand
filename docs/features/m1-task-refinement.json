@@ -2444,6 +2444,10 @@
     {
       "date": "2026-10-12",
       "change": "S02 bounded interpretation after 14 rejections over PRs #188/#193/#197, all one root cause (fired-prompt evidence stored on mutable plan entries): append-only spent-date ledger plus wall-clock high-water mark, settled at one chokepoint before any rebuild/cancel; ambiguity fails toward suppression; capacity displacement before the high-water reaches the instant does not spend a date; property-style interleaving test is the review surface."
+    },
+    {
+      "date": "2026-10-12",
+      "change": "L05a: the 'existing fence hook' is the per-item deletion guard (tombstone + lifecycle rejection in every apply path); allowance for schema v9 reset table and an additive reset tombstone helper in delete_intent; generation boundary is max(items.rowid) at reset start, no clock; L05b drains/purges pre-tap native staging before core reset start."
     }
   ]
 }
