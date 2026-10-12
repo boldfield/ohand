@@ -143,6 +143,12 @@ fn child_entry() {
             say("finished");
             wait_to_be_killed();
         }
+        "interpret_in_flight" | "interpret_applied" => crate::processing::run_child_drain(
+            &scenario.root,
+            scenario.name == "interpret_in_flight",
+            say,
+            || wait_to_be_killed(),
+        ),
         other => panic!("unknown child scenario {other}"),
     }
 }

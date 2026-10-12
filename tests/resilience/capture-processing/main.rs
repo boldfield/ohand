@@ -4,10 +4,14 @@
 //! stable identity, that redelivery never duplicates, and that a sole uncommitted source (staged
 //! record, incomplete write, in-progress or finalized audio file) is never deleted. The audio
 //! handoff follows the native in-progress to finalized move; see `harness.rs` for what the
-//! native staging model does and does not reproduce. All content is synthetic.
+//! native staging model does and does not reproduce. `processing_tests` (T02b) covers the job
+//! runner side: provider timeouts, invalid output, policy changes, crash and duplicate delivery,
+//! and deletion or correction racing a provider result. All content is synthetic.
 
 mod child;
 mod harness;
+mod processing;
+mod processing_tests;
 
 use harness::*;
 use ohand_core::ingress::{
