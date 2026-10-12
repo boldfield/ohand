@@ -5,10 +5,10 @@ Route: Apple Development identity plus a Development provisioning profile that l
 The probe is archived unsigned, then `xcodebuild -exportArchive` signs it from an explicit export
 options file, so each bundle identifier gets its own profile and frameworks are never given one.
 
-Schemes that embed app extensions (OhAndApp) sign one profile per signed bundle. The signed bundles are read from
-the project spec and every one must be covered by a supplied, usable profile before the project is generated; the
-unsigned archive must then embed exactly those bundles, and the export options map every signed bundle (application
-and extensions, never frameworks) to its profile UUID. Reading the spec needs PyYAML.
+Schemes that embed app extensions (OhAndApp) sign one profile per signed bundle. The signed bundles are enumerated
+from the unsigned archive: the application and every nested .app or .appex at any depth, including inside frameworks.
+Every one must be covered by a supplied, usable profile before any keychain, profile-installation, signing or export
+work, and the export options map each of them (never frameworks or resource bundles) to its profile UUID.
 
 Signing inputs come only from the environment or injected files outside the repository:
   OHAND_SIGNING_PROFILE_PATH         required  .mobileprovision file (one profile may cover several bundles)
@@ -21,7 +21,6 @@ Signing inputs come only from the environment or injected files outside the repo
   OHAND_DEVICE_ID                    devicectl device identifier; required with --install
   OHAND_DEVICE_UDID                  optional; hardware identifier to check against the profiles when devicectl
                                                cannot report it (OhAndApp with --install)
-  OHAND_SIGNING_PROJECT_SPEC_PATH    optional (OhAndApp); XcodeGen spec to read the signed bundles from (default ios/project.yml)
   OHAND_DEVICE_LABEL                 optional content-free label for evidence (a-z, 0-9, '-')
   OHAND_PRIVATE_EVIDENCE_DIR         optional; raw redacted logs, must be outside the repository
 
@@ -29,8 +28,9 @@ Stdout and stderr carry only fixed messages. Child tool output goes to a redacte
 evidence directory. The sanitized evidence record contains fixed fields only.
 
 Exit status: 0 success, 1 build/signing/install/launch failure, 2 missing or invalid input, 3 a bundle in an
-embedding scheme has no usable covering profile (the message names only the bundle identifier), 4 the project spec
-cannot be resolved to its signed bundles or the archive embeds different bundles than the spec (tooling integrity).
+embedding scheme has no usable covering profile (the message names only the bundle identifier), 4 the archive's
+signed bundles cannot be enumerated (an XPC service, a missing or unreadable bundle identifier, a duplicate identifier
+or a bundle that is not a plain directory).
 """
 
 import argparse
@@ -76,37 +76,13 @@ SUPPORTED_SCHEME_BUNDLE_IDENTIFIERS = {
     "OhAndApp": "com.boldfield.ohand.app",
 }
 EMBEDDING_SCHEMES = frozenset({"OhAndApp"})
-EXTENSION_DIRECTORY_NAMES = ("PlugIns", "Extensions")
-# Dependency target types of the application that are never signed with their own profile. Anything else must be
-# resolved or the run is refused before the project is generated.
-UNSIGNED_DEPENDENCY_TYPES = frozenset({"framework", "framework.static", "library.static", "library.dynamic", "bundle"})
-# The subset of XcodeGen the pre-build reader models for the application and its dependency targets. Any other target
-# key (templates, info, configFiles, scheme, ...) or dependency key (copy, platformFilter, ...) refuses the run, as does
-# any dependency that names no project target (framework, sdk, package, carthage or bundle): such a dependency can copy
-# a prebuilt bundle into the application or, for a package, run build-tool plugins during the archive.
-MODELED_TARGET_KEYS = frozenset({"type", "platform", "deploymentTarget", "sources", "settings", "dependencies", "preBuildScripts",
-                                 "postCompileScripts", "postBuildScripts", "buildRules", "attributes"})
-MODELED_TARGET_DEPENDENCY_KEYS = frozenset({"target", "embed", "link", "codeSign", "removeHeaders", "weak"})
-# Executable build phases can create or rewrite bundles while the archive is built, so the application and its resolved
-# dependency targets must not use them. Source entries may only name files compiled or copied by their file type: an
-# explicit build phase (copyFiles into PlugIns, for one) or a path that is itself a signed bundle refuses the run.
-EXECUTABLE_BUILD_PHASE_KEYS = ("preBuildScripts", "postCompileScripts", "postBuildScripts", "buildRules")
-MODELED_SOURCE_KEYS = frozenset({"path", "name", "group", "createIntermediateGroups", "excludes", "includes", "optional",
-                                 "compilerFlags", "headerVisibility"})
-# The one reviewed executable phase: the repository's Rust core build, which writes a static library and a C header to
-# $OHAND_RUST_OUTPUT_DIR for the OhAndCoreBridge framework and places nothing in a bundle. It is accepted only on a
-# framework target and only exactly as written here; any other phase, or this one changed, refuses the run.
-REVIEWED_FRAMEWORK_BUILD_PHASES = {
-    "preBuildScripts": ({"name": "Build Rust core bindings", "script": '"${SRCROOT}/../core/bindings/build-ios.sh"',
-                         "basedOnDependencyAnalysis": False},),
-}
-SIGNED_BUNDLE_SUFFIXES = (".app", ".appex", ".xpc", ".framework")
-BUNDLE_IDENTIFIER_REFERENCES = ("$(PRODUCT_BUNDLE_IDENTIFIER)", "${PRODUCT_BUNDLE_IDENTIFIER}")
-STRUCTURED_SETTINGS_KEYS = ("base", "configs", "groups")
+# Nested bundles that take a profile of their own. XPC services are refused: this tool does not sign them.
+# Frameworks and resource bundles take no profile.
+SIGNED_BUNDLE_KINDS = {".appex": "app-extension", ".app": "nested-application"}
+UNSIGNED_SERVICE_SUFFIX = ".xpc"
 
 PROFILE_PATH_VARIABLE = "OHAND_SIGNING_PROFILE_PATH"
 PROFILE_MAP_VARIABLE = "OHAND_SIGNING_PROFILE_MAP_PATH"
-PROJECT_SPEC_VARIABLE = "OHAND_SIGNING_PROJECT_SPEC_PATH"
 CERT_PATH_VARIABLE = "OHAND_SIGNING_CERT_PATH"
 CERT_PASSWORD_VARIABLE = "OHAND_SIGNING_CERT_PASSWORD"
 CERT_PASSWORD_FILE_VARIABLE = "OHAND_SIGNING_CERT_PASSWORD_FILE"
@@ -291,7 +267,6 @@ class SigningRun:
         self.redactor = Redactor()
         self.started_at = datetime.datetime.now(datetime.timezone.utc)
 
-        self.project_spec_path = IOS_ROOT / "project.yml"
         self.profile_path: Optional[Path] = None
         self.profile_map: Dict[str, Path] = {}
         self.certificate_path: Optional[Path] = None
@@ -339,9 +314,6 @@ class SigningRun:
                               f"repository that covers every signed bundle), or {PROFILE_MAP_VARIABLE} for one profile per bundle")
         else:
             raise input_error(f"{PROFILE_PATH_VARIABLE} is required (path to a Development .mobileprovision outside the repository)")
-
-        if self.embedding and env.get(PROJECT_SPEC_VARIABLE):
-            self.project_spec_path = Path(env[PROJECT_SPEC_VARIABLE])
 
         certificate_value = env.get(CERT_PATH_VARIABLE)
         if certificate_value:
@@ -629,233 +601,50 @@ class SigningRun:
     # ----- embedded bundles -----
 
     def inspect_archive(self) -> None:
+        """Decide bundle coverage from the unsigned archive, before any keychain, profile or export work."""
         applications = sorted((self.archive_path / "Products" / "Applications").glob("*.app"))
         if len(applications) != 1:
             raise SigningError("archive does not contain exactly one app", EXIT_FAILURE, "archive-inspect")
-        archived = self._signed_bundles(applications[0])
-        if archived[0].identifier != self.bundle_identifier:
+        self.bundles = self._signed_bundles(applications[0])
+        if self.bundles[0].identifier != self.bundle_identifier:
             raise SigningError("archived app does not have the scheme's bundle identifier", EXIT_FAILURE, "archive-inspect")
-        declared = {bundle.identifier for bundle in self.bundles}
-        found = {bundle.identifier for bundle in archived}
-        if declared != found:
-            details = [f"declared by the project spec but not archived: {identifier}" for identifier in sorted(declared - found)]
-            details += [f"archived but not declared by the project spec: {identifier}" for identifier in sorted(found - declared)]
-            raise integrity_error("archive embeds different bundles than the project spec; the profile coverage checked before the build "
-                                  "does not apply (" + "; ".join(details) + ")", "archive-mismatch")
-        self.bundles = archived
-
-    @staticmethod
-    def _signed_bundles(application: Path) -> List[EmbeddedBundle]:
-        def identifier_of(bundle: Path) -> str:
-            try:
-                identifier = plistlib.loads((bundle / "Info.plist").read_bytes())["CFBundleIdentifier"]
-            except Exception:
-                raise SigningError(f"embedded bundle {bundle.relative_to(application)} has no readable bundle identifier",
-                                   EXIT_FAILURE, "archive-inspect") from None
-            if not isinstance(identifier, str) or not BUNDLE_IDENTIFIER_PATTERN.match(identifier):
-                raise SigningError(f"embedded bundle {bundle.relative_to(application)} has an invalid bundle identifier",
-                                   EXIT_FAILURE, "archive-inspect")
-            return identifier
-
-        bundles = [EmbeddedBundle(identifier_of(application), "application")]
-        extensions = [path for name in EXTENSION_DIRECTORY_NAMES for path in sorted((application / name).glob("*.appex"))]
-        bundles += sorted((EmbeddedBundle(identifier_of(extension), "app-extension") for extension in extensions),
-                          key=lambda bundle: bundle.identifier)
-        if len({bundle.identifier for bundle in bundles}) != len(bundles):
-            raise SigningError("archive embeds two bundles with the same bundle identifier", EXIT_FAILURE, "archive-inspect")
-        return bundles
-
-    def preflight_embedded_bundles(self) -> None:
-        self.bundles = self._project_signed_bundles()
         self.assign_profiles()
         self.check_target_device_listed()
 
-    def _project_signed_bundles(self) -> List[EmbeddedBundle]:
-        """The application and the app extensions it embeds, from the project spec.
-
-        The reader models a strict subset of XcodeGen. Any construct outside it (includes, templates, setting groups,
-        multi-platform targets, unknown target or dependency keys) refuses the run rather than being skipped, because an
-        unmodeled construct could add or rename a signed bundle that would then escape the pre-build profile checks.
-        """
-        try:
-            import yaml
-        except ImportError:
-            raise input_error("PyYAML is required to read the project spec before the build (python3 -m pip install pyyaml)") from None
-        try:
-            spec = yaml.safe_load(self.project_spec_path.read_text())
-            targets = spec["targets"]
-        except (OSError, ValueError, KeyError, TypeError, yaml.YAMLError):
-            raise integrity_error("the project spec could not be read as a set of targets", "project-spec") from None
-        if not isinstance(targets, dict):
-            raise integrity_error("the project spec could not be read as a set of targets", "project-spec")
-
-        def unmodeled(construct: str) -> SigningError:
-            return integrity_error(f"the project spec uses {construct}, which this tool cannot resolve before the build", "project-spec")
-
-        if "include" in spec:
-            raise unmodeled("include")
-        options = spec.get("options")
-        if options is not None and not isinstance(options, dict):
-            raise integrity_error("the options of the project spec cannot be read before the build", "project-spec")
-        if isinstance(options, dict) and options.get("transitivelyLinkDependencies") not in (None, False):
-            raise unmodeled("options.transitivelyLinkDependencies")
-        spec_directory = self.project_spec_path.parent
-        # A declared scheme may only build its own target: scheme actions are executable and other build targets
-        # could place further bundles beside the application.
-        schemes = spec.get("schemes")
-        if schemes is not None and not isinstance(schemes, dict):
-            raise integrity_error("the schemes of the project spec cannot be read before the build", "project-spec")
-        if isinstance(schemes, dict) and self.scheme in schemes:
-            declared = schemes[self.scheme]
-            build = declared.get("build") if isinstance(declared, dict) else None
-            if not isinstance(declared, dict) or set(declared) != {"build"} or not isinstance(build, dict) or set(build) != {"targets"} \
-                    or not isinstance(build["targets"], dict) or set(build["targets"]) != {self.scheme}:
-                raise unmodeled(f"scheme {self.scheme} with actions or targets beyond building {self.scheme}")
-
-        def target_of(name: str, role: str) -> dict:
-            if not isinstance(name, str) or name not in targets or not isinstance(targets[name], dict) \
-                    or not isinstance(targets[name].get("type"), str):
-                raise integrity_error(f"{role} {name} has no resolvable type", "project-spec")
-            target = targets[name]
-            unknown = sorted(str(key) for key in target if key not in MODELED_TARGET_KEYS)
-            if unknown:
-                raise unmodeled(f"key {unknown[0]} in target {name}")
-            if "platform" in target and not isinstance(target["platform"], str):
-                raise unmodeled(f"a platform list in target {name}")
-            for phase in EXECUTABLE_BUILD_PHASE_KEYS:
-                entries = target.get(phase)
-                if entries in (None, []):
+    @staticmethod
+    def _signed_bundle_paths(application: Path) -> List[tuple]:
+        """The application and every nested bundle that takes a profile, at any depth. Enumeration fails closed."""
+        found = [(application, "application")]
+        for directory, subdirectories, files in os.walk(application):
+            for name in sorted(subdirectories + files):
+                path = Path(directory) / name
+                relative = path.relative_to(application)
+                if name.endswith(UNSIGNED_SERVICE_SUFFIX):
+                    raise integrity_error(f"archived app embeds XPC service {relative}, which this tool does not sign", "archive-inspect")
+                kind = next((kind for suffix, kind in SIGNED_BUNDLE_KINDS.items() if name.endswith(suffix)), None)
+                if kind is None:
                     continue
-                reviewed = REVIEWED_FRAMEWORK_BUILD_PHASES.get(phase, ()) if target["type"] == "framework" else ()
-                if not isinstance(entries, list) or not all(entry in reviewed for entry in entries):
-                    raise unmodeled(f"executable build phase {phase} in target {name}")
-            check_sources_of(name, target.get("sources"))
-            return target
+                if path.is_symlink() or not path.is_dir():
+                    raise integrity_error(f"archived bundle {relative} is not a plain bundle directory", "archive-inspect")
+                found.append((path, kind))
+        return found
 
-        def check_sources_of(name: str, sources) -> None:
-            if sources is None:
-                return
-            entries = sources if isinstance(sources, list) else [sources]
-            for entry in entries:
-                if isinstance(entry, dict):
-                    unknown = sorted(str(key) for key in entry if key not in MODELED_SOURCE_KEYS)
-                    if unknown:
-                        raise unmodeled(f"key {unknown[0]} in a source of target {name}")
-                    path = entry.get("path")
-                else:
-                    path = entry
-                if not isinstance(path, str) or not path:
-                    raise integrity_error(f"a source of project target {name} cannot be read before the build", "project-spec")
-                # A signed bundle among the sources, named directly or found inside a source directory, would be
-                # copied into the application unsigned by this tool.
-                source = spec_directory / path
-                found = [source] if source.name.endswith(SIGNED_BUNDLE_SUFFIXES) or any(
-                    part.endswith(SIGNED_BUNDLE_SUFFIXES) for part in Path(path).parts) else []
-                if not found and source.is_dir():
-                    found = [nested for nested in source.rglob("*") if nested.name.endswith(SIGNED_BUNDLE_SUFFIXES)]
-                if found:
-                    raise integrity_error(f"a source of project target {name} is a signed bundle, which this tool does not sign", "project-spec")
-
-        def check_info_plists_of(name: str, configured_settings: List[dict]) -> None:
-            # A literal CFBundleIdentifier in the Info.plist would override PRODUCT_BUNDLE_IDENTIFIER in the archive.
-            # Without an explicit INFOPLIST_FILE, XcodeGen picks any Info.plist it finds among the target's sources,
-            # which this reader would not see, so the setting is required for every signed target.
-            if not isinstance(configured_settings[0].get("INFOPLIST_FILE"), str):
-                raise integrity_error(f"project target {name} does not set INFOPLIST_FILE explicitly", "project-spec")
-            for values in configured_settings:
-                plist_path = values.get("INFOPLIST_FILE")
-                if plist_path is None:
-                    continue
-                unreadable = integrity_error(f"the Info.plist of project target {name} cannot be read before the build", "project-spec")
-                if not isinstance(plist_path, str) or "$" in plist_path:
-                    raise unreadable
-                try:
-                    info = plistlib.loads((spec_directory / plist_path).read_bytes())
-                except (OSError, ValueError, plistlib.InvalidFileException):
-                    raise unreadable from None
-                if not isinstance(info, dict):
-                    raise unreadable
-                if info.get("CFBundleIdentifier", BUNDLE_IDENTIFIER_REFERENCES[0]) not in BUNDLE_IDENTIFIER_REFERENCES:
-                    raise integrity_error(f"the Info.plist of project target {name} sets its own bundle identifier", "project-spec")
-
-        def bundle_identifier_of(name: str) -> str:
-            settings = targets[name].get("settings")
-            unresolvable = integrity_error(f"the bundle identifier of project target {name} cannot be resolved before the build", "project-spec")
-            if not isinstance(settings, dict):
-                raise unresolvable
-            if any(key in settings for key in STRUCTURED_SETTINGS_KEYS):
-                if "groups" in settings:
-                    raise unmodeled(f"settings.groups in target {name}")
-                unknown = sorted(str(key) for key in settings if key not in STRUCTURED_SETTINGS_KEYS)
-                if unknown:
-                    raise unmodeled(f"key {unknown[0]} beside settings.base or settings.configs in target {name}")
-                base = settings.get("base", {})
-                configurations = settings.get("configs", {})
-                if not isinstance(base, dict) or not isinstance(configurations, dict) \
-                        or not all(isinstance(values, dict) for values in configurations.values()):
-                    raise unresolvable
-            else:
-                base, configurations = settings, {}
-            identifier = base.get("PRODUCT_BUNDLE_IDENTIFIER")
+    @classmethod
+    def _signed_bundles(cls, application: Path) -> List[EmbeddedBundle]:
+        def identifier_of(bundle: Path) -> str:
+            name = bundle.relative_to(application) if bundle != application else bundle.name
+            try:
+                identifier = plistlib.loads((bundle / "Info.plist").read_bytes())["CFBundleIdentifier"]
+            except Exception:
+                raise integrity_error(f"archived bundle {name} has no readable bundle identifier", "archive-inspect") from None
             if not isinstance(identifier, str) or not BUNDLE_IDENTIFIER_PATTERN.match(identifier):
-                raise unresolvable
-            # Per-configuration overrides are keyed by configuration name. Any override that differs from the base
-            # identifier would make the archived identifier depend on configuration matching, so it is refused.
-            for values in configurations.values():
-                if "PRODUCT_BUNDLE_IDENTIFIER" in values and values["PRODUCT_BUNDLE_IDENTIFIER"] != identifier:
-                    raise integrity_error(f"the bundle identifier of project target {name} differs between configurations", "project-spec")
-            check_info_plists_of(name, [base, *configurations.values()])
+                raise integrity_error(f"archived bundle {name} has an invalid bundle identifier", "archive-inspect")
             return identifier
 
-        def dependencies_of(name: str) -> list:
-            dependencies = targets[name].get("dependencies") or []
-            if not isinstance(dependencies, list) or not all(isinstance(dependency, dict) for dependency in dependencies):
-                raise integrity_error(f"the dependencies of project target {name} cannot be read before the build", "project-spec")
-            for dependency in dependencies:
-                if "target" not in dependency:
-                    raise unmodeled(f"a dependency of target {name} that names no project target")
-                unknown = sorted(str(key) for key in dependency if key not in MODELED_TARGET_DEPENDENCY_KEYS)
-                if unknown:
-                    raise unmodeled(f"key {unknown[0]} in a dependency of target {name}")
-            return [dependency for dependency in dependencies if "target" in dependency]
-
-        target_of(self.scheme, "project target")
-        if bundle_identifier_of(self.scheme) != self.bundle_identifier:
-            raise integrity_error(f"project target {self.scheme} does not have the scheme's bundle identifier", "project-spec")
-        extensions: List[EmbeddedBundle] = []
-        for dependency in dependencies_of(self.scheme):
-            name = dependency["target"]
-            dependency_type = target_of(name, f"dependency of project target {self.scheme}")["type"]
-            if dependency.get("embed") is False or dependency_type in UNSIGNED_DEPENDENCY_TYPES:
-                continue
-            if not (dependency_type.startswith("app-extension") or dependency_type == "extensionkit-extension"):
-                raise integrity_error(f"dependency {name} of project target {self.scheme} has a type this tool does not know how to sign",
-                                      "project-spec")
-            # An extension's own signed dependencies would be nested bundles this tool does not sign.
-            for nested in dependencies_of(name):
-                nested_type = target_of(nested["target"], f"dependency of project target {name}")["type"]
-                if nested.get("embed") is not False and nested_type not in UNSIGNED_DEPENDENCY_TYPES:
-                    raise integrity_error(f"app extension {name} embeds a signed bundle, which this tool does not sign", "project-spec")
-            extensions.append(EmbeddedBundle(bundle_identifier_of(name), "app-extension"))
-        # Every target the build reaches is checked, not only direct dependencies: a target reached through a framework
-        # runs its build phases during the archive too. Beyond the direct dependencies handled above, only unsigned
-        # types may appear.
-        direct = {dependency["target"] for dependency in dependencies_of(self.scheme)}
-        reached, pending = {self.scheme}, [self.scheme]
-        while pending:
-            for dependency in dependencies_of(pending.pop()):
-                name = dependency["target"]
-                if name in reached:
-                    continue
-                reached.add(name)
-                reached_type = target_of(name, "project target reached from " + self.scheme)["type"]
-                if name not in direct and reached_type not in UNSIGNED_DEPENDENCY_TYPES:
-                    raise integrity_error(f"project target {name} is reached from {self.scheme} through another target "
-                                          "and is of a type this tool does not know how to sign", "project-spec")
-                pending.append(name)
-        bundles = [EmbeddedBundle(self.bundle_identifier, "application")] + sorted(extensions, key=lambda bundle: bundle.identifier)
+        bundles = [EmbeddedBundle(identifier_of(path), kind) for path, kind in cls._signed_bundle_paths(application)]
+        bundles = bundles[:1] + sorted(bundles[1:], key=lambda bundle: bundle.identifier)
         if len({bundle.identifier for bundle in bundles}) != len(bundles):
-            raise integrity_error("the project spec embeds two bundles with the same bundle identifier", "project-spec")
+            raise integrity_error("archive embeds two bundles with the same bundle identifier", "archive-inspect")
         return bundles
 
     def assign_profiles(self) -> None:
@@ -930,12 +719,15 @@ class SigningRun:
         return apps[0]
 
     def _verify_exported_bundles(self, application: Path) -> None:
-        exported = self._signed_bundles(application)
+        try:
+            exported = self._signed_bundles(application)
+        except SigningError:
+            raise SigningError("exported app embeds bundles that cannot be read", EXIT_FAILURE, "export") from None
         if [bundle.identifier for bundle in exported] != [bundle.identifier for bundle in self.bundles]:
             raise SigningError("exported app embeds different bundles than the archive", EXIT_FAILURE, "export")
-        for extension in [path for name in EXTENSION_DIRECTORY_NAMES for path in (application / name).glob("*.appex")]:
-            if not (extension / "_CodeSignature" / "CodeResources").is_file():
-                raise SigningError("an exported app extension is not code-signed", EXIT_FAILURE, "export")
+        for path, _ in self._signed_bundle_paths(application)[1:]:
+            if not (path / "_CodeSignature" / "CodeResources").is_file():
+                raise SigningError("an exported embedded bundle is not code-signed", EXIT_FAILURE, "export")
 
     def install_on_device(self, app_path: Path) -> None:
         self.install_performed = True
@@ -1060,9 +852,8 @@ def execute(run: SigningRun) -> int:
         reached_build = True
         run.record_toolchain()
         if run.embedding:
-            # Profile coverage is decided from the project spec before project generation or the archive. The archive must
-            # then match the spec exactly; a difference is a tooling-integrity failure, never a profile decision.
-            run.preflight_embedded_bundles()
+            # The unsigned archive uses no identity or profile. Profile coverage is decided from the bundles it embeds,
+            # before anything touches the keychain, installs a profile or signs.
             run.generate_and_archive()
             run.inspect_archive()
             run.prepare_identity()

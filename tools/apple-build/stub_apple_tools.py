@@ -14,6 +14,10 @@ Every call is appended to $STUB_STATE_DIR/calls.jsonl. Behaviour is selected thr
   STUB_FAIL_RESTORE_SEARCH_LIST=1           fail only the call that restores the original keychain search list
   STUB_ARCHIVE_EXTENSIONS=<id>[,<id>...]    bundle identifiers of the app extensions embedded in an OhAndApp archive
                                             (default: the capture-control extension; empty means none)
+  STUB_ARCHIVE_NESTED=<path>=<id>[,...]     further bundles in an OhAndApp archive at a path relative to the app
+                                            (e.g. Frameworks/X.framework/PlugIns/Y.appex=<id>); an empty <id> writes no
+                                            Info.plist and the id "unreadable" writes an Info.plist that does not parse
+  STUB_ARCHIVE_SYMLINK=<path>=<target>     a symbolic link at a path relative to an OhAndApp archive's app
   STUB_UNSIGNED_EXTENSION=1                 export an OhAndApp whose extensions lack _CodeSignature
   STUB_DEVICECTL_FAIL=<step>[,...]          fail one devicectl step: install, details, launch or processes
   STUB_NOT_RUNNING=1                        the launched process is absent from the device process list
@@ -139,6 +143,18 @@ def xcodebuild(arguments):
                 framework = application / "Frameworks" / f"{name}.framework"
                 framework.mkdir(parents=True)
                 write_bundle_info(framework, identifier)
+            for entry in split_names(os.environ.get("STUB_ARCHIVE_NESTED", "")):
+                relative, identifier = entry.split("=", 1)
+                nested = application / relative
+                nested.mkdir(parents=True, exist_ok=True)
+                if identifier == "unreadable":
+                    (nested / "Info.plist").write_text("not a property list")
+                elif identifier:
+                    write_bundle_info(nested, identifier)
+            for entry in split_names(os.environ.get("STUB_ARCHIVE_SYMLINK", "")):
+                relative, target = entry.split("=", 1)
+                (application / relative).parent.mkdir(parents=True, exist_ok=True)
+                (application / relative).symlink_to(target)
         (archive / "Info.plist").write_bytes(plistlib.dumps({"Name": "Synthetic"}))
     elif arguments[0] == "-exportArchive":
         options = plistlib.loads(Path(option_value(arguments, "-exportOptionsPlist")).read_bytes())
@@ -152,8 +168,8 @@ def xcodebuild(arguments):
             if os.environ.get("STUB_UNSIGNED_EXPORT") != "1":
                 archive.writestr("Payload/Probe.app/_CodeSignature/CodeResources", "synthetic")
                 if os.environ.get("STUB_UNSIGNED_EXTENSION") != "1":
-                    for extension in sorted(source.glob("PlugIns/*.appex")):
-                        relative = extension.relative_to(source)
+                    for nested in sorted(path for path in source.rglob("*") if path.suffix in (".app", ".appex")):
+                        relative = nested.relative_to(source)
                         archive.writestr(f"Payload/Probe.app/{relative}/_CodeSignature/CodeResources", "synthetic")
 
 

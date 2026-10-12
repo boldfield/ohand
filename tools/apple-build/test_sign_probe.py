@@ -741,6 +741,7 @@ class RedactionAndEvidenceTests(SigningToolTestCase):
 APP_BUNDLE_IDENTIFIER = "com.boldfield.ohand.app"
 EXTENSION_BUNDLE_IDENTIFIER = "com.boldfield.ohand.app.capture-control"
 SECOND_EXTENSION_IDENTIFIER = "com.boldfield.ohand.app.second-extension"
+NESTED_APPLICATION_IDENTIFIER = "com.boldfield.ohand.app.companion"
 FRAMEWORK_BUNDLE_IDENTIFIERS = ("com.boldfield.ohand.core-bridge", "com.boldfield.ohand.services")
 EXTENSION_PROFILE_UUID = "66666666-7777-8888-9999-000000000000"
 EXTENSION_PROFILE_NAME = "Synthetic Extension Profile Name"
@@ -784,12 +785,14 @@ class EmbeddedExtensionTests(SigningToolTestCase):
         return dict(OHAND_SIGNING_PROFILE_PATH=None, OHAND_SIGNING_PROFILE_MAP_PATH=str(map_path), **extra)
 
     def assert_refused_before_keychain_and_export(self, result, exit_code, message):
+        # Coverage is decided from the unsigned archive, so the archive is built once. Nothing touches the keychain,
+        # installs a profile, signs, exports or installs on the device before the refusal.
         self.assertEqual(result.returncode, exit_code, result.stderr)
         self.assertIn(message, result.stderr)
-        self.assertEqual(self.calls_of("mint", "run"), [])
-        self.assertEqual(self.calls_of("xcodebuild", "archive"), [])
+        self.assertEqual(len(self.calls_of("xcodebuild", "archive")), 1)
         self.assertEqual(self.calls_of("security", "create-keychain"), [])
         self.assertEqual(self.calls_of("security", "import"), [])
+        self.assertEqual([call for call in self.calls_of("security", "list-keychains") if "-s" in call["argv"]], [])
         self.assertEqual(self.calls_of("xcodebuild", "-exportArchive"), [])
         self.assertLessEqual(set(self.devicectl_steps()), {("info", "details")})
         self.assertEqual(self.installed_profile_files(), [])
@@ -798,44 +801,6 @@ class EmbeddedExtensionTests(SigningToolTestCase):
 
     def devicectl_steps(self):
         return [tuple(call["argv"][1:3]) for call in self.calls_of("devicectl", "device")]
-
-    def write_project_spec(self, extensions=(("OhAndCaptureControl", EXTENSION_BUNDLE_IDENTIFIER),), base_layout=False, extra_dependencies=(),
-                           embed=True, extension_type="app-extension", extension_settings=None, edit=None):
-        # Signed targets name their Info.plist explicitly, referring to the build setting, as ios/project.yml does.
-        (self.inputs / "Signed-Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "$(PRODUCT_BUNDLE_IDENTIFIER)"}))
-
-        def settings(identifier, signed=True):
-            flat = {"PRODUCT_BUNDLE_IDENTIFIER": identifier, **({"INFOPLIST_FILE": "Signed-Info.plist"} if signed else {})}
-            return {"base": flat} if base_layout else flat
-
-        targets = {
-            "OhAndCoreBridge": {"type": "framework", "settings": settings("com.boldfield.ohand.corebridge", signed=False)},
-            "OhAndApp": {
-                "type": "application",
-                "settings": settings(APP_BUNDLE_IDENTIFIER),
-                "dependencies": [{"target": "OhAndCoreBridge"}]
-                + [{"target": name, **({} if embed else {"embed": False})} for name, _ in extensions] + list(extra_dependencies),
-            },
-        }
-        for name, identifier in extensions:
-            targets[name] = {"type": extension_type, "settings": extension_settings if extension_settings is not None else settings(identifier)}
-        spec = {"name": "Synthetic", "targets": targets}
-        if edit:
-            edit(spec)
-        path = self.inputs / "project.json"
-        path.write_text(json.dumps(spec))
-        return path
-
-    def spec_environment(self, **spec_options):
-        return {"OHAND_SIGNING_PROJECT_SPEC_PATH": str(self.write_project_spec(**spec_options))}
-
-    def assert_refused_before_generation(self, result, exit_code, message):
-        self.assertEqual(result.returncode, exit_code, result.stderr)
-        self.assertIn(message, result.stderr)
-        self.assertEqual(self.calls_of("mint", "run"), [])
-        self.assertEqual(self.calls_of("xcodebuild", "archive"), [])
-        self.assertEqual(self.calls_of("security", "create-keychain"), [])
-        self.assertEqual(self.calls_of("xcodebuild", "-exportArchive"), [])
 
     def test_extension_under_one_wildcard_profile_is_signed_installed_and_launched(self):
         result = self.sign_app("--install", OHAND_DEVICE_LABEL="phone-a")
@@ -871,283 +836,73 @@ class EmbeddedExtensionTests(SigningToolTestCase):
         steps = [(call["tool"], call["argv"][0], *call["argv"][1:3]) for call in self.calls()]
         self.assertLess(names.index(("xcodebuild", "-exportArchive")), steps.index(("devicectl", "device", "install", "app")))
 
-    def test_the_signed_bundles_follow_the_project_spec_and_the_archive_rather_than_a_fixed_list(self):
-        two = (("OhAndCaptureControl", EXTENSION_BUNDLE_IDENTIFIER), ("OhAndSecondExtension", SECOND_EXTENSION_IDENTIFIER))
-        result = self.sign_app(STUB_ARCHIVE_EXTENSIONS=f"{EXTENSION_BUNDLE_IDENTIFIER},{SECOND_EXTENSION_IDENTIFIER}", **self.spec_environment(extensions=two))
+    def test_the_signed_bundles_follow_the_archive_rather_than_a_fixed_list(self):
+        result = self.sign_app(STUB_ARCHIVE_EXTENSIONS=f"{EXTENSION_BUNDLE_IDENTIFIER},{SECOND_EXTENSION_IDENTIFIER}")
         self.assertEqual(result.returncode, 0, result.stderr)
         options = json.loads((self.state / "export-options.json").read_text())
         self.assertEqual(set(options["provisioningProfiles"]),
                          {APP_BUNDLE_IDENTIFIER, EXTENSION_BUNDLE_IDENTIFIER, SECOND_EXTENSION_IDENTIFIER})
 
         self.state_reset()
-        result = self.sign_app(STUB_ARCHIVE_EXTENSIONS="", **self.spec_environment(extensions=()))
+        result = self.sign_app(STUB_ARCHIVE_EXTENSIONS="")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads((self.state / "export-options.json").read_text())["provisioningProfiles"],
                          {APP_BUNDLE_IDENTIFIER: SYNTHETIC_PROFILE_UUID})
 
-    def test_a_dependency_that_is_not_embedded_is_not_a_signed_bundle(self):
-        result = self.sign_app(STUB_ARCHIVE_EXTENSIONS="", **self.spec_environment(embed=False))
+    def test_bundles_nested_at_any_depth_including_inside_frameworks_need_a_covering_profile(self):
+        nested = (f"Frameworks/OhAndServices.framework/PlugIns/Hidden.appex={SECOND_EXTENSION_IDENTIFIER},"
+                  f"Watch/Companion.app={NESTED_APPLICATION_IDENTIFIER}")
+        result = self.sign_app("--install", STUB_ARCHIVE_NESTED=nested)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads((self.state / "export-options.json").read_text())["provisioningProfiles"],
-                         {APP_BUNDLE_IDENTIFIER: SYNTHETIC_PROFILE_UUID})
+        self.assertEqual(json.loads((self.state / "export-options.json").read_text())["provisioningProfiles"], {
+            identifier: SYNTHETIC_PROFILE_UUID
+            for identifier in (APP_BUNDLE_IDENTIFIER, EXTENSION_BUNDLE_IDENTIFIER, SECOND_EXTENSION_IDENTIFIER, NESTED_APPLICATION_IDENTIFIER)})
+        self.assertEqual([(bundle["bundle_identifier"], bundle["kind"]) for bundle in self.only_evidence()["embedded_bundles"]], [
+            (APP_BUNDLE_IDENTIFIER, "application"), (EXTENSION_BUNDLE_IDENTIFIER, "app-extension"),
+            (NESTED_APPLICATION_IDENTIFIER, "nested-application"), (SECOND_EXTENSION_IDENTIFIER, "app-extension")])
+        for framework_identifier in FRAMEWORK_BUNDLE_IDENTIFIERS:
+            self.assertNotIn(framework_identifier, (self.state / "export-options.json").read_text())
 
-    def test_the_standard_settings_base_layout_is_resolved_before_the_build(self):
-        self.write_profile(Entitlements=self.exact_entitlements(APP_BUNDLE_IDENTIFIER))
-        result = self.sign_app("--install", **self.spec_environment(base_layout=True))
+        # An exact mapping that leaves the extension hidden inside a framework uncovered is refused from the archive.
+        self.state_reset()
+        map_path = self.write_mapped_profiles({APP_BUNDLE_IDENTIFIER: {}, EXTENSION_BUNDLE_IDENTIFIER: {"UUID": EXTENSION_PROFILE_UUID}})
+        result = self.sign_app("--install", STUB_ARCHIVE_NESTED=f"Frameworks/OhAndServices.framework/PlugIns/Hidden.appex={SECOND_EXTENSION_IDENTIFIER}",
+                               **self.mapped_environment(map_path))
         self.assert_refused_before_keychain_and_export(
-            result, 3, f"no supplied provisioning profile covers bundle identifier {EXTENSION_BUNDLE_IDENTIFIER}")
-        self.assertEqual(self.calls_of("mint", "run"), [])
+            result, 3, f"no supplied provisioning profile is mapped to bundle identifier {SECOND_EXTENSION_IDENTIFIER}")
+        self.assertEqual(self.only_evidence()["failed_stage"], "bundle-coverage")
 
         self.state_reset()
-        self.write_profile(Entitlements=self.wildcard_entitlements())
-        self.assertEqual(self.sign_app(**self.spec_environment(base_layout=True)).returncode, 0)
+        self.write_profile(Entitlements=self.exact_entitlements(APP_BUNDLE_IDENTIFIER))
+        result = self.sign_app(STUB_ARCHIVE_EXTENSIONS="", STUB_ARCHIVE_NESTED=f"Watch/Companion.app={NESTED_APPLICATION_IDENTIFIER}")
+        self.assert_refused_before_keychain_and_export(
+            result, 3, f"no supplied provisioning profile covers bundle identifier {NESTED_APPLICATION_IDENTIFIER}")
 
-    def test_a_project_spec_that_cannot_be_resolved_is_refused_before_generation_and_never_skipped(self):
-        broken = self.inputs / "broken.json"
-        broken.write_text("{not yaml or json: [")
+    def test_archive_enumeration_fails_closed_before_keychain_and_export_work(self):
+        (self.inputs / "Elsewhere.appex").mkdir()
         cases = {
-            "unresolvable bundle identifier": dict(extension_settings={"PRODUCT_BUNDLE_IDENTIFIER": "$(INHERITED_IDENTIFIER)"}),
-            "missing bundle identifier": dict(extension_settings={}),
-            "ambiguous bundle identifier": dict(extension_settings={"PRODUCT_BUNDLE_IDENTIFIER": SECOND_EXTENSION_IDENTIFIER,
-                                                                    "base": {"PRODUCT_BUNDLE_IDENTIFIER": EXTENSION_BUNDLE_IDENTIFIER}}),
-            "unknown dependency target": dict(extra_dependencies=[{"target": "OhAndMissing"}]),
-            "dependency of unknown kind": dict(extra_dependencies=[{"mystery": "OhAndMystery"}]),
-            "dependency type that is not understood": dict(extension_type="application.watchapp2"),
+            "XPC service": (dict(STUB_ARCHIVE_NESTED=f"XPCServices/Helper.xpc={SECOND_EXTENSION_IDENTIFIER}"),
+                            "archived app embeds XPC service XPCServices/Helper.xpc, which this tool does not sign"),
+            "XPC service inside a framework": (
+                dict(STUB_ARCHIVE_NESTED=f"Frameworks/OhAndServices.framework/XPCServices/Helper.xpc={SECOND_EXTENSION_IDENTIFIER}"),
+                "archived app embeds XPC service Frameworks/OhAndServices.framework/XPCServices/Helper.xpc"),
+            "missing Info.plist": (dict(STUB_ARCHIVE_NESTED="PlugIns/Bare.appex="),
+                                   "archived bundle PlugIns/Bare.appex has no readable bundle identifier"),
+            "unreadable Info.plist": (dict(STUB_ARCHIVE_NESTED="Frameworks/OhAndServices.framework/PlugIns/Broken.appex=unreadable"),
+                                      "archived bundle Frameworks/OhAndServices.framework/PlugIns/Broken.appex has no readable bundle identifier"),
+            "invalid identifier": (dict(STUB_ARCHIVE_EXTENSIONS="bad identifier!"), "has an invalid bundle identifier"),
+            "duplicate identifier": (dict(STUB_ARCHIVE_NESTED=f"Frameworks/OhAndServices.framework/PlugIns/Copy.appex={EXTENSION_BUNDLE_IDENTIFIER}"),
+                                     "archive embeds two bundles with the same bundle identifier"),
+            "symbolic link to a bundle": (dict(STUB_ARCHIVE_SYMLINK=f"PlugIns/Linked.appex={self.inputs / 'Elsewhere.appex'}"),
+                                          "archived bundle PlugIns/Linked.appex is not a plain bundle directory"),
         }
-        for description, options in cases.items():
+        for description, (environment, message) in cases.items():
             with self.subTest(description):
                 self.state_reset()
-                result = self.sign_app(**self.spec_environment(**options))
-                self.assert_refused_before_generation(result, 4, "")
-                self.assertEqual(self.only_evidence()["failed_stage"], "project-spec")
-                self.assertNotIn(SYNTHETIC_TEAM, result.stderr)
-        with self.subTest("unparseable spec"):
-            self.state_reset()
-            self.assert_refused_before_generation(self.sign_app(OHAND_SIGNING_PROJECT_SPEC_PATH=str(broken)), 4,
-                                                  "the project spec could not be read")
-        with self.subTest("missing spec"):
-            self.state_reset()
-            self.assert_refused_before_generation(self.sign_app(OHAND_SIGNING_PROJECT_SPEC_PATH=str(self.inputs / "absent.yml")), 4,
-                                                  "the project spec could not be read")
-
-    def test_per_configuration_bundle_identifiers_are_read_by_configuration_name(self):
-        def release_override(identifier):
-            def edit(spec):
-                spec["targets"]["OhAndCaptureControl"]["settings"]["configs"] = {"Release": {"PRODUCT_BUNDLE_IDENTIFIER": identifier}}
-            return edit
-
-        self.write_profile(Entitlements=self.wildcard_entitlements())
-        result = self.sign_app(**self.spec_environment(base_layout=True, edit=release_override(EXTENSION_BUNDLE_IDENTIFIER)))
-        self.assertEqual(result.returncode, 0, result.stderr)
-
-        # An exact profile for the base identifier must not pass when the Release configuration archives another identifier.
-        self.state_reset()
-        map_path = self.write_mapped_profiles({APP_BUNDLE_IDENTIFIER: {}, EXTENSION_BUNDLE_IDENTIFIER: {}})
-        result = self.sign_app(**self.mapped_environment(map_path, **self.spec_environment(
-            base_layout=True, edit=release_override("com.boldfield.ohand.release-capture-control"))))
-        self.assert_refused_before_generation(result, 4, "the bundle identifier of project target OhAndCaptureControl differs between configurations")
-        self.assertEqual(self.only_evidence()["failed_stage"], "project-spec")
-
-        self.state_reset()
-        result = self.sign_app(**self.spec_environment(
-            base_layout=True, edit=lambda spec: spec["targets"]["OhAndApp"]["settings"].update(
-                configs={"Release": {"PRODUCT_BUNDLE_IDENTIFIER": "com.boldfield.ohand.release-app"}})))
-        self.assert_refused_before_generation(result, 4, "the bundle identifier of project target OhAndApp differs between configurations")
-
-    def test_project_spec_constructs_the_reader_does_not_model_are_refused_before_generation(self):
-        def move_dependencies_into_a_template(spec):
-            application = spec["targets"]["OhAndApp"]
-            spec["targetTemplates"] = {"Embedding": {"dependencies": application.pop("dependencies")}}
-            application["templates"] = ["Embedding"]
-
-        def template_on_the_extension(spec):
-            spec["targetTemplates"] = {"Renamed": {"settings": {"PRODUCT_BUNDLE_IDENTIFIER": SECOND_EXTENSION_IDENTIFIER}}}
-            spec["targets"]["OhAndCaptureControl"]["templates"] = ["Renamed"]
-
-        def setting_groups(spec):
-            spec["settingGroups"] = {"Identifiers": {"PRODUCT_BUNDLE_IDENTIFIER": SECOND_EXTENSION_IDENTIFIER}}
-            spec["targets"]["OhAndCaptureControl"]["settings"]["groups"] = ["Identifiers"]
-
-        def nested_signed_bundle(spec):
-            spec["targets"]["OhAndNested"] = {"type": "app-extension", "settings": {"PRODUCT_BUNDLE_IDENTIFIER": SECOND_EXTENSION_IDENTIFIER}}
-            spec["targets"]["OhAndCaptureControl"]["dependencies"] = [{"target": "OhAndNested"}]
-
-        cases = {
-            "top-level include": (dict(edit=lambda spec: spec.update(include=["more.yml"])), "uses include"),
-            "dependencies from a target template": (dict(edit=move_dependencies_into_a_template), "key templates in target OhAndApp"),
-            "template on an extension": (dict(edit=template_on_the_extension), "key templates in target OhAndCaptureControl"),
-            "setting groups": (dict(base_layout=True, edit=setting_groups), "settings.groups in target OhAndCaptureControl"),
-            "generated Info.plist properties": (dict(edit=lambda spec: spec["targets"]["OhAndCaptureControl"].update(
-                info={"path": "Info.plist", "properties": {"CFBundleIdentifier": SECOND_EXTENSION_IDENTIFIER}})),
-                "key info in target OhAndCaptureControl"),
-            "multi-platform target": (dict(edit=lambda spec: spec["targets"]["OhAndCaptureControl"].update(platform=["iOS", "tvOS"])),
-                                      "a platform list in target OhAndCaptureControl"),
-            "unmodeled dependency key": (dict(edit=lambda spec: spec["targets"]["OhAndApp"]["dependencies"][1].update(
-                copy={"destination": "resources"})), "key copy in a dependency of target OhAndApp"),
-            "prebuilt extension copied into PlugIns by a framework dependency": (dict(extra_dependencies=[
-                {"framework": "Prebuilt/Extra.appex", "embed": True, "link": False, "copy": {"destination": "plugins"}}]),
-                "a dependency of target OhAndApp that names no project target"),
-            "package dependency": (dict(extra_dependencies=[{"package": "Vendor", "product": "VendorKit"}]),
-                                   "a dependency of target OhAndApp that names no project target"),
-            "SDK dependency on the extension": (dict(edit=lambda spec: spec["targets"]["OhAndCaptureControl"].update(
-                dependencies=[{"sdk": "WidgetKit.framework"}])), "a dependency of target OhAndCaptureControl that names no project target"),
-            "transitive linking": (dict(edit=lambda spec: spec.update(options={"transitivelyLinkDependencies": True})),
-                                   "uses options.transitivelyLinkDependencies"),
-            "extension embedding a signed bundle": (dict(edit=nested_signed_bundle), "app extension OhAndCaptureControl embeds a signed bundle"),
-            "post-build script that creates an extension": (dict(edit=lambda spec: spec["targets"]["OhAndApp"].update(postBuildScripts=[
-                {"name": "Extra", "script": 'mkdir -p "$TARGET_BUILD_DIR/$PLUGINS_FOLDER_PATH/Extra.appex"'}])),
-                "executable build phase postBuildScripts in target OhAndApp"),
-            "pre-build script on the extension": (dict(edit=lambda spec: spec["targets"]["OhAndCaptureControl"].update(
-                preBuildScripts=[{"script": "true"}])), "executable build phase preBuildScripts in target OhAndCaptureControl"),
-            "post-compile script on a framework dependency": (dict(edit=lambda spec: spec["targets"]["OhAndCoreBridge"].update(
-                postCompileScripts=[{"script": "true"}])), "executable build phase postCompileScripts in target OhAndCoreBridge"),
-            "build rule": (dict(edit=lambda spec: spec["targets"]["OhAndApp"].update(buildRules=[{"fileType": "*.x", "script": "true"}])),
-                           "executable build phase buildRules in target OhAndApp"),
-            "source copied into PlugIns": (dict(edit=lambda spec: spec["targets"]["OhAndApp"].update(sources=[
-                {"path": "Prebuilt/Extra.appex", "buildPhase": {"copyFiles": {"destination": "plugins"}}}])),
-                "key buildPhase in a source of target OhAndApp"),
-            "source of another type": (dict(edit=lambda spec: spec["targets"]["OhAndApp"].update(sources=[{"path": "Bundles", "type": "folder"}])),
-                                       "key type in a source of target OhAndApp"),
-            "source that is a signed bundle": (dict(edit=lambda spec: spec["targets"]["OhAndApp"].update(sources=["Prebuilt/Extra.appex"])),
-                                               "a source of project target OhAndApp is a signed bundle"),
-            "scheme with a pre-action": (dict(edit=lambda spec: spec.update(schemes={"OhAndApp": {
-                "build": {"targets": {"OhAndApp": "all"}, "preActions": [{"script": "true"}]}}})),
-                "scheme OhAndApp with actions or targets beyond building OhAndApp"),
-            "scheme building another target": (dict(edit=lambda spec: spec.update(schemes={"OhAndApp": {
-                "build": {"targets": {"OhAndApp": "all", "OhAndCoreBridge": "all"}}}})),
-                "scheme OhAndApp with actions or targets beyond building OhAndApp"),
-        }
-        for description, (options, message) in cases.items():
-            with self.subTest(description):
-                self.state_reset()
-                self.write_profile(Entitlements=self.wildcard_entitlements())
-                result = self.sign_app("--install", **self.spec_environment(**options))
-                self.assert_refused_before_generation(result, 4, message)
-                self.assertEqual(self.calls_of("security", "import"), [])
-                self.assertEqual(self.installed_profile_files(), [])
-                self.assertEqual(self.only_evidence()["failed_stage"], "project-spec")
-
-    def test_signed_bundles_and_bundle_identifiers_found_on_disk_are_refused_before_generation(self):
-        (self.inputs / "Sources" / "Vendor" / "Extra.appex").mkdir(parents=True)
-        (self.inputs / "Plain").mkdir()
-        (self.inputs / "Plain" / "main.swift").write_text("")
-
-        def with_sources(path):
-            return lambda spec: spec["targets"]["OhAndApp"].update(sources=[{"path": path, "createIntermediateGroups": True}])
-
-        def with_info_plist(name, identifier):
-            def edit(spec):
-                plist = self.inputs / f"{name}.plist"
-                plist.write_bytes(plistlib.dumps({"CFBundleIdentifier": identifier, "CFBundleName": name}))
-                spec["targets"][name]["settings"]["INFOPLIST_FILE"] = plist.name
-            return edit
-
-        def without_info_plist_setting(name):
-            def edit(spec):
-                sources = self.inputs / f"{name}Sources"
-                sources.mkdir(exist_ok=True)
-                (sources / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "com.example.uncovered"}))
-                spec["targets"][name]["settings"].pop("INFOPLIST_FILE")
-                spec["targets"][name]["sources"] = [{"path": sources.name, "createIntermediateGroups": True}]
-            return edit
-
-        refused = {
-            "source directory containing an extension": (with_sources("Sources"), "a source of project target OhAndApp is a signed bundle"),
-            "literal extension identifier": (with_info_plist("OhAndCaptureControl", SECOND_EXTENSION_IDENTIFIER),
-                                             "the Info.plist of project target OhAndCaptureControl sets its own bundle identifier"),
-            "literal application identifier": (with_info_plist("OhAndApp", APP_BUNDLE_IDENTIFIER),
-                                               "the Info.plist of project target OhAndApp sets its own bundle identifier"),
-            "missing Info.plist": (lambda spec: spec["targets"]["OhAndApp"]["settings"].update(INFOPLIST_FILE="Absent.plist"),
-                                   "the Info.plist of project target OhAndApp cannot be read"),
-            # XcodeGen would pick the Info.plist among the sources itself, and its literal identifier would be archived.
-            "extension Info.plist found among the sources": (without_info_plist_setting("OhAndCaptureControl"),
-                                                             "project target OhAndCaptureControl does not set INFOPLIST_FILE explicitly"),
-            "application Info.plist found among the sources": (without_info_plist_setting("OhAndApp"),
-                                                               "project target OhAndApp does not set INFOPLIST_FILE explicitly"),
-            "Info.plist set only for one configuration": (
-                lambda spec: spec["targets"]["OhAndCaptureControl"].update(settings={
-                    "base": {"PRODUCT_BUNDLE_IDENTIFIER": EXTENSION_BUNDLE_IDENTIFIER},
-                    "configs": {"Release": {"INFOPLIST_FILE": "Signed-Info.plist"}}}),
-                "project target OhAndCaptureControl does not set INFOPLIST_FILE explicitly"),
-        }
-        for description, (edit, message) in refused.items():
-            with self.subTest(description):
-                self.state_reset()
-                self.write_profile(Entitlements=self.wildcard_entitlements())
-                self.assert_refused_before_generation(self.sign_app(**self.spec_environment(edit=edit)), 4, message)
-                self.assertEqual(self.only_evidence()["failed_stage"], "project-spec")
-
-        accepted = {
-            "plain source directory": with_sources("Plain"),
-            "Info.plist referring to the build setting": with_info_plist("OhAndCaptureControl", "$(PRODUCT_BUNDLE_IDENTIFIER)"),
-            "scheme building only the application": lambda spec: spec.update(schemes={"OhAndApp": {"build": {"targets": {"OhAndApp": "all"}}}}),
-        }
-        for description, edit in accepted.items():
-            with self.subTest(description):
-                self.state_reset()
-                self.write_profile(Entitlements=self.wildcard_entitlements())
-                result = self.sign_app(**self.spec_environment(edit=edit))
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(len(self.calls_of("xcodebuild", "archive")), 1)
-
-    def test_targets_reached_through_a_framework_are_checked_before_generation(self):
-        rust_core_build = {"name": "Build Rust core bindings", "script": '"${SRCROOT}/../core/bindings/build-ios.sh"',
-                           "basedOnDependencyAnalysis": False}
-
-        def through_services(**core_bridge):
-            # OhAndApp -> OhAndServices -> OhAndCoreBridge, as in ios/project.yml: the core bridge is not a direct dependency.
-            def edit(spec):
-                targets = spec["targets"]
-                targets["OhAndServices"] = {"type": "framework", "settings": {"PRODUCT_BUNDLE_IDENTIFIER": "com.boldfield.ohand.services"},
-                                            "dependencies": [{"target": "OhAndCoreBridge"}]}
-                targets["OhAndApp"]["dependencies"] = [{"target": "OhAndServices"} if dependency["target"] == "OhAndCoreBridge" else dependency
-                                                       for dependency in targets["OhAndApp"]["dependencies"]]
-                targets["OhAndCoreBridge"].update(core_bridge)
-            return edit
-
-        def extension_behind_a_framework(spec):
-            through_services()(spec)
-            spec["targets"]["OhAndHidden"] = {"type": "app-extension", "settings": {"PRODUCT_BUNDLE_IDENTIFIER": SECOND_EXTENSION_IDENTIFIER}}
-            spec["targets"]["OhAndCoreBridge"]["dependencies"] = [{"target": "OhAndHidden"}]
-
-        (self.inputs / "Vendor" / "Extra.appex").mkdir(parents=True)
-        refused = {
-            "unreviewed post-build script that creates an extension": (
-                through_services(postBuildScripts=[{"script": 'mkdir -p "$BUILT_PRODUCTS_DIR/OhAnd.app/PlugIns/Extra.appex"'}]),
-                "executable build phase postBuildScripts in target OhAndCoreBridge"),
-            "changed Rust core build": (through_services(preBuildScripts=[dict(rust_core_build, script='"${SRCROOT}/other.sh"')]),
-                                        "executable build phase preBuildScripts in target OhAndCoreBridge"),
-            "Rust core build beside another script": (through_services(preBuildScripts=[rust_core_build, {"script": "true"}]),
-                                                      "executable build phase preBuildScripts in target OhAndCoreBridge"),
-            "reviewed Rust core build on the application": (
-                lambda spec: spec["targets"]["OhAndApp"].update(preBuildScripts=[rust_core_build]),
-                "executable build phase preBuildScripts in target OhAndApp"),
-            "signed bundle among transitive sources": (through_services(sources=["Vendor"]),
-                                                       "a source of project target OhAndCoreBridge is a signed bundle"),
-            "unmodeled key on a transitive target": (through_services(info={"path": "Info.plist"}), "key info in target OhAndCoreBridge"),
-            "extension reached through a framework": (extension_behind_a_framework,
-                                                      "project target OhAndHidden is reached from OhAndApp through another target"),
-        }
-        for description, (edit, message) in refused.items():
-            with self.subTest(description):
-                self.state_reset()
-                self.write_profile(Entitlements=self.wildcard_entitlements())
-                self.assert_refused_before_generation(self.sign_app("--install", **self.spec_environment(edit=edit)), 4, message)
-                self.assertEqual(self.only_evidence()["failed_stage"], "project-spec")
-
-        self.state_reset()
-        self.write_profile(Entitlements=self.wildcard_entitlements())
-        result = self.sign_app(**self.spec_environment(edit=through_services(preBuildScripts=[rust_core_build])))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(self.calls_of("xcodebuild", "archive")), 1)
-        self.assertEqual(json.loads((self.state / "export-options.json").read_text())["provisioningProfiles"],
-                         {APP_BUNDLE_IDENTIFIER: SYNTHETIC_PROFILE_UUID, EXTENSION_BUNDLE_IDENTIFIER: SYNTHETIC_PROFILE_UUID})
-
-    def test_the_repository_project_spec_is_within_the_modeled_subset(self):
-        result = self.sign_app()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads((self.state / "export-options.json").read_text())["provisioningProfiles"],
-                         {APP_BUNDLE_IDENTIFIER: SYNTHETIC_PROFILE_UUID, EXTENSION_BUNDLE_IDENTIFIER: SYNTHETIC_PROFILE_UUID})
+                result = self.sign_app("--install", **environment)
+                self.assert_refused_before_keychain_and_export(result, 4, message)
+                self.assertEqual(self.devicectl_steps(), [])
+                self.assertEqual(self.only_evidence()["failed_stage"], "archive-inspect")
 
     def test_two_bundles_are_signed_under_a_per_bundle_profile_mapping(self):
         map_path = self.write_mapped_profiles({
@@ -1180,27 +935,6 @@ class EmbeddedExtensionTests(SigningToolTestCase):
         evidence = self.only_evidence()
         self.assertEqual((evidence["status"], evidence["failed_stage"]), ("failed", "bundle-coverage"))
         self.assertFalse(evidence["install"]["performed"])
-
-    def test_an_archive_that_disagrees_with_the_project_spec_is_a_tooling_integrity_failure_not_a_profile_decision(self):
-        map_path = self.write_mapped_profiles({APP_BUNDLE_IDENTIFIER: {}, EXTENSION_BUNDLE_IDENTIFIER: {"UUID": EXTENSION_PROFILE_UUID}})
-        cases = {
-            f"archived but not declared by the project spec: {SECOND_EXTENSION_IDENTIFIER}":
-                f"{EXTENSION_BUNDLE_IDENTIFIER},{SECOND_EXTENSION_IDENTIFIER}",
-            f"declared by the project spec but not archived: {EXTENSION_BUNDLE_IDENTIFIER}": "",
-        }
-        for message, archived in cases.items():
-            with self.subTest(message):
-                self.state_reset()
-                result = self.sign_app(STUB_ARCHIVE_EXTENSIONS=archived, **self.mapped_environment(map_path))
-                self.assertEqual(result.returncode, 4, result.stderr)
-                self.assertIn(message, result.stderr)
-                self.assertNotIn("no supplied provisioning profile", result.stderr)
-                self.assertEqual(len(self.calls_of("xcodebuild", "archive")), 1)
-                self.assertEqual(self.calls_of("security", "create-keychain"), [])
-                self.assertEqual(self.calls_of("security", "import"), [])
-                self.assertEqual(self.calls_of("xcodebuild", "-exportArchive"), [])
-                self.assertEqual(self.installed_profile_files(), [])
-                self.assertEqual(self.only_evidence()["failed_stage"], "archive-mismatch")
 
     def test_covering_profile_that_cannot_sign_a_bundle_is_refused_with_a_distinct_exit_status(self):
         cases = {
@@ -1285,7 +1019,8 @@ class EmbeddedExtensionTests(SigningToolTestCase):
         result = self.sign_app(**self.mapped_environment(stray))
         self.assertEqual(result.returncode, 2)
         self.assertIn(f"names bundle identifier {SECOND_EXTENSION_IDENTIFIER}, which is not an app or extension bundle of OhAndApp", result.stderr)
-        self.assertEqual(self.calls_of("xcodebuild", "archive"), [])
+        self.assertEqual(self.calls_of("security", "create-keychain"), [])
+        self.assertEqual(self.installed_profile_files(), [])
 
         inside = self.inputs / "inside.json"
         inside.write_text(json.dumps({APP_BUNDLE_IDENTIFIER: str(REPO_ROOT / "Makefile")}))
@@ -1368,16 +1103,9 @@ class EmbeddedExtensionTests(SigningToolTestCase):
     def test_unsigned_extension_in_the_export_is_a_failure(self):
         result = self.sign_app("--install", STUB_UNSIGNED_EXTENSION="1")
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn("an exported app extension is not code-signed", result.stderr)
+        self.assertIn("an exported embedded bundle is not code-signed", result.stderr)
         self.assertEqual(self.devicectl_steps(), [("info", "details")])
         self.assert_keychain_cleaned_up()
-
-    def test_archive_with_an_invalid_extension_identifier_is_a_failure_before_keychain_work(self):
-        result = self.sign_app(STUB_ARCHIVE_EXTENSIONS="bad identifier!")
-        self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn("has an invalid bundle identifier", result.stderr)
-        self.assertEqual(self.calls_of("security", "create-keychain"), [])
-        self.assertEqual(self.only_evidence()["failed_stage"], "archive-inspect")
 
     def test_evidence_record_is_schema_v2_with_bundles_expiry_and_launch_result(self):
         result = self.sign_app("--install", OHAND_DEVICE_LABEL="phone-a")
