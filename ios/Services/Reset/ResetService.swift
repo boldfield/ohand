@@ -8,10 +8,11 @@ import Foundation
 /// 1. The tap. In one step, native staging is listed and the ingress boundary is held: a capture made from this moment
 ///    on is fresh-generation content, so its import waits (it stays staged and durable) and it is neither listed,
 ///    imported nor purged. Everything listed is by definition from before the tap.
-/// 2. Record the tap as one durable request: the credential choice, the list and whether an earlier generation is still
-///    pending at the tap. Nothing else is written yet, so an interruption here leaves a request a restart can only honor
-///    in full, never a half-started reset or a choice acted on early. While a request is recorded the boundary stays
-///    held, in this process and, because the ingress gate holds it again at launch from the recorded list, in the next.
+/// 2. Record the tap as one durable request: the credential choice, the profiles a `remove` choice applies to (those the
+///    core lists at the tap), the list and whether an earlier generation is still pending at the tap. Nothing else is
+///    written yet, so an interruption here leaves a request a restart can only honor in full, never a half-started reset
+///    or a choice acted on early. While a request is recorded the boundary stays held, in this process and, because the
+///    ingress gate holds it again at launch from the recorded list, in the next.
 /// 3. When the tap found an earlier reset unfinished (its generation pending, or native cleanup still outstanding for
 ///    it), finish that reset first (its cleanup, temporaries and recorded choice, steps 7 to 10), then, once it
 ///    completed, record the tap again as no longer awaiting it. Resuming the earlier generation only erases what existed
@@ -24,15 +25,17 @@ import Foundation
 ///    the core starts; if it cannot, the core is not started and the reset reports why.
 /// 5. Start the core reset (or resume the pending one this tap started). The core tombstones every pre-reset item,
 ///    cancels its jobs and reminders and queues one durable cleanup row per effect.
-/// 6. Only now carry the choice into its markers, mark native cleanup outstanding and clear the request. Then release
+/// 6. Only now carry the choice, with the profiles it binds, into its marker, mark native cleanup outstanding and clear
+///    the request. Then release
 ///    the ingress boundary: the captures that waited import into the fresh generation. No item can be created while a
 ///    request is recorded, so a restart that starts the core again for that request finds no fresh capture to tombstone.
 ///    The outstanding marker is cleared only when a report says `completed`.
 /// 7. Run the per-item cleanup executors (`DeletionCleanupService`), which perform each effect and ask the core to
 ///    record only the ones that actually finished.
 /// 8. Remove export and share temporaries.
-/// 9. When the user chose it, revoke every provider profile and remove its credential. Without that choice neither is
-///    touched, and nothing is touched before step 5 completed.
+/// 9. When the user chose it, revoke every provider profile that existed at the tap and remove its credential. Without
+///    that choice neither is touched, nothing is touched before step 5 completed, and a profile or secret configured
+///    after the tap is never touched, not even by a retry of a removal that failed or was interrupted.
 /// 10. Ask the core to re-evaluate. The report says `completed` only when the core reports the generation completed
 ///    and every native step converged; this service never decides success on its own.
 ///
@@ -90,8 +93,18 @@ actor ResetService {
         // steps it owes (cleanup, temporaries, its credential choice) are still outstanding. A marker that cannot be read
         // counts as unfinished; `finishEarlierReset` decides again.
         let earlierOutstanding = (try? markers.isCleanupOutstanding()) ?? true
+        // A remove choice applies to the profiles that exist now, at the tap. They are recorded with it, so neither a
+        // retry nor a restart can widen it to a profile configured later.
+        var removal: ResetCredentialRemoval?
+        if credentialChoice == .remove {
+            do {
+                removal = ResetCredentialRemoval(binding: try await core.profileCredentials())
+            } catch {
+                return withdrawRequest(Self.coreFailed(error, progress: current))
+            }
+        }
         let request = ResetRequest(
-            credentialChoice: credentialChoice, stagedBeforeTheTap: snapshot,
+            credentialChoice: credentialChoice, credentialRemoval: removal, stagedBeforeTheTap: snapshot,
             awaitsEarlierReset: current?.phase == .pending || (current != nil && earlierOutstanding))
         do {
             try markers.recordRequest(request)
@@ -146,7 +159,8 @@ actor ResetService {
         if request.awaitsEarlierReset {
             if let stopped = await finishEarlierReset() { return stopped }
             let ownTurn = ResetRequest(
-                credentialChoice: request.credentialChoice, stagedBeforeTheTap: request.stagedBeforeTheTap)
+                credentialChoice: request.credentialChoice, credentialRemoval: request.credentialRemoval,
+                stagedBeforeTheTap: request.stagedBeforeTheTap)
             do {
                 try markers.recordRequest(ownTurn)
             } catch {
@@ -161,9 +175,10 @@ actor ResetService {
         case .started(let progress): started = progress
         }
         do {
-            switch request.credentialChoice {
-            case .remove: try markers.recordRemovalRequested()
-            case .keep: try markers.clearRemovalRequest()
+            if let removal = request.credentialRemoval {
+                try markers.recordRemovalRequested(removal)
+            } else {
+                try markers.clearRemovalRequest()
             }
             try markers.recordCleanupOutstanding()
             try markers.clearRequest()
@@ -299,14 +314,17 @@ actor ResetService {
         return ResetReport(state: state, progress: latest, blockers: blockers, itemCleanup: cleanup)
     }
 
+    /// Carries out an owed `remove` choice on exactly the profiles it binds. The core's current listing only tells which
+    /// of them still need revoking; a profile it lists that the choice did not bind was configured after the tap and is
+    /// left alone, with its secret.
     private func removeCredentialsIfChosen() async -> ResetBlocker? {
-        let requested: Bool
+        let removal: ResetCredentialRemoval?
         do {
-            requested = try markers.isRemovalRequested()
+            removal = try markers.removalRequest()
         } catch {
             return .credentialRemovalIncomplete
         }
-        guard requested else { return nil }
+        guard let removal else { return nil }
 
         let profiles: [ResetProfileCredential]
         do {
@@ -314,17 +332,17 @@ actor ResetService {
         } catch {
             return .credentialRemovalIncomplete
         }
+        let bound = removal.profileVersions
         // Revoking first retires queued jobs and stops new dispatch before the secret goes.
         var incomplete = false
-        for profile in profiles where !profile.isRevoked {
+        for profile in profiles where bound.contains(profile.profileVersion) && !profile.isRevoked {
             do {
                 try await core.revokeProfile(profileVersion: profile.profileVersion)
             } catch {
                 incomplete = true
             }
         }
-        let references = Set(profiles.compactMap { $0.credentialReference }).sorted()
-        for reference in references {
+        for reference in removal.credentialReferences.sorted() {
             do {
                 try credentials.deleteCredential(reference: reference)
             } catch CredentialError.invalidReference {

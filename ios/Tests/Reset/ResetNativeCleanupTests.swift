@@ -181,8 +181,16 @@ final class ResetNativeCleanupTests: IngressStorageTestCase {
 
     // MARK: Markers
 
+    private static let boundProfiles = ResetCredentialRemoval(profiles: [
+        ResetBoundProfile(profileVersion: "profile-a-v1", credentialReference: "ref-a"),
+        ResetBoundProfile(profileVersion: "profile-b-v1", credentialReference: nil),
+    ])
+
+    /// A tap; a `remove` tap binds `boundProfiles`.
     private func tap(_ choice: ResetCredentialChoice, _ captureIDs: Set<String>) -> ResetRequest {
-        ResetRequest(credentialChoice: choice, stagedBeforeTheTap: ResetStagingSnapshot(captureIDs: captureIDs))
+        ResetRequest(
+            credentialChoice: choice, credentialRemoval: choice == .remove ? Self.boundProfiles : nil,
+            stagedBeforeTheTap: ResetStagingSnapshot(captureIDs: captureIDs))
     }
 
     private var requestFileNames: [String] {
@@ -196,7 +204,10 @@ final class ResetNativeCleanupTests: IngressStorageTestCase {
 
         try store.recordRequest(tap(.remove, ["cap-a", "cap-b"]))
         let relaunched = FileResetMarkerStore(layout: layout)
-        XCTAssertEqual(try relaunched.request(), tap(.remove, ["cap-a", "cap-b"]), "the tap and its list survive a restart")
+        XCTAssertEqual(
+            try relaunched.request(), tap(.remove, ["cap-a", "cap-b"]),
+            "the tap, the profiles its choice binds and its list survive a restart")
+        XCTAssertEqual(try relaunched.request()?.credentialRemoval, Self.boundProfiles)
         XCTAssertFalse(try relaunched.isRemovalRequested(), "the choice is not armed by the tap alone")
         XCTAssertFalse(try relaunched.isCleanupOutstanding(), "cleanup is not outstanding for a reset that has not started")
 
@@ -206,6 +217,14 @@ final class ResetNativeCleanupTests: IngressStorageTestCase {
 
         try store.recordRequest(tap(.keep, []))
         XCTAssertEqual(try relaunched.request(), tap(.keep, []), "a repeated choice still records its own list")
+        XCTAssertNil(try relaunched.request()?.credentialRemoval, "a keep tap binds no profile")
+
+        try store.recordRequest(ResetRequest(
+            credentialChoice: .remove, credentialRemoval: ResetCredentialRemoval(profiles: []),
+            stagedBeforeTheTap: ResetStagingSnapshot(captureIDs: [])))
+        XCTAssertEqual(
+            try relaunched.request()?.credentialRemoval, ResetCredentialRemoval(profiles: []),
+            "a remove tap made with no profile configured binds none, and is still a remove tap")
 
         try store.clearRequest()
         try store.clearRequest()
@@ -262,6 +281,41 @@ final class ResetNativeCleanupTests: IngressStorageTestCase {
 
         try Data("not a request".utf8).write(to: directory.appendingPathComponent(FileResetMarkerStore.requestFilePrefix + "9"))
         XCTAssertThrowsError(try store.request(), "a damaged request is unreadable, never taken as no request")
+
+        try store.clearRequest()
+        try Data(#"{"credentialChoice":"remove","stagedBeforeTheTap":[]}"#.utf8)
+            .write(to: directory.appendingPathComponent(FileResetMarkerStore.requestFilePrefix + "1"))
+        XCTAssertThrowsError(
+            try store.request(), "a remove tap that does not say which profiles it binds is unreadable, never unbounded")
+    }
+
+    func testTheRemovalMarkerKeepsWhatTheChoiceBindsAndIsNeverReadAsUnbounded() throws {
+        let store = FileResetMarkerStore(layout: layout)
+        let directory = layout.directory(for: .temporaryFiles)
+        XCTAssertNil(try store.removalRequest())
+
+        try store.recordRemovalRequested(Self.boundProfiles)
+        let relaunched = FileResetMarkerStore(layout: layout)
+        XCTAssertEqual(try relaunched.removalRequest(), Self.boundProfiles, "the bound profiles survive a restart")
+
+        let widened = ResetCredentialRemoval(profiles: Self.boundProfiles.profiles + [
+            ResetBoundProfile(profileVersion: "profile-c-v1", credentialReference: "ref-c"),
+        ])
+        try store.recordRemovalRequested(widened)
+        XCTAssertEqual(
+            try relaunched.removalRequest(), Self.boundProfiles,
+            "an owed removal is never widened while it is outstanding")
+
+        try store.clearRemovalRequest()
+        XCTAssertNil(try relaunched.removalRequest())
+        try store.recordRemovalRequested(widened)
+        XCTAssertEqual(try relaunched.removalRequest(), widened, "a removal recorded after the earlier one was spent binds its own profiles")
+
+        try store.clearRemovalRequest()
+        try Data("1".utf8).write(to: directory.appendingPathComponent(FileResetMarkerStore.removalFileName))
+        XCTAssertThrowsError(
+            try relaunched.removalRequest(), "a marker that does not say what it binds is unreadable, never every profile")
+        XCTAssertThrowsError(try relaunched.isRemovalRequested())
     }
 
     func testMarkersAreDurableIdempotentAndIndependent() throws {
@@ -269,8 +323,8 @@ final class ResetNativeCleanupTests: IngressStorageTestCase {
         XCTAssertFalse(try store.isRemovalRequested())
         XCTAssertFalse(try store.isCleanupOutstanding())
 
-        try store.recordRemovalRequested()
-        try store.recordRemovalRequested()
+        try store.recordRemovalRequested(Self.boundProfiles)
+        try store.recordRemovalRequested(Self.boundProfiles)
         let relaunched = FileResetMarkerStore(layout: layout)
         XCTAssertTrue(try relaunched.isRemovalRequested(), "the choice survives a restart")
         XCTAssertFalse(try relaunched.isCleanupOutstanding())

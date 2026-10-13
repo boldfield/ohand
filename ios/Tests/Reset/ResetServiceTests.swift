@@ -533,6 +533,87 @@ final class ResetServiceTests: ResetTestCase {
         XCTAssertFalse(world.choice.isRequested)
     }
 
+    private static let laterProfile = ResetProfileCredential(
+        profileVersion: "profile-d-v1", credentialReference: "ref-d", isRevoked: false)
+
+    func testARetriedRemovalNeverTouchesAProfileConfiguredAfterTheTap() async throws {
+        for retriedBy in ["resume", "keep tap"] {
+            let context = "retried by \(retriedBy)"
+            let world = try makeResetWorld()
+            try await seedVoiceAndTextCaptures(world)
+            configureProfiles(world)
+            world.faults.arm("credentials.delete")
+            let first = await world.makeService().reset(credentialChoice: .remove)
+            XCTAssertEqual(first.blockers, [.credentialRemovalIncomplete], context)
+            XCTAssertEqual(first.progress?.phase, .completed, context)
+            XCTAssertEqual(
+                world.choice.removal?.profileVersions, ["profile-a-v1", "profile-b-v1", "profile-c-v1"],
+                "the owed removal binds the profiles that existed at the tap: \(context)")
+
+            // In the fresh generation, with the removal still owed, the user configures a new profile and its secret.
+            world.core.addProfile(Self.laterProfile)
+            let report: ResetReport
+            if retriedBy == "resume" {
+                report = await world.makeService().resume()
+            } else {
+                report = await world.makeService().reset(credentialChoice: .keep)
+            }
+
+            XCTAssertTrue(report.isComplete, "\(context): \(report.blockers)")
+            XCTAssertEqual(
+                world.core.revokedProfileVersions, ["profile-a-v1", "profile-c-v1"],
+                "only the profiles bound at the tap are revoked, each once: \(context)")
+            XCTAssertEqual(
+                Set(world.credentials.removedReferences), ["ref-a", "ref-b"],
+                "only the secrets bound at the tap are removed: \(context)")
+            XCTAssertEqual(world.core.isProfileRevoked("profile-d-v1"), false, context)
+            XCTAssertFalse(world.choice.isRequested, "the removal is spent once what it binds is gone: \(context)")
+            XCTAssertNil(world.choice.recordedRequest, context)
+        }
+    }
+
+    func testATapThatWaitsForARestartBindsOnlyTheProfilesThatExistedAtTheTap() async throws {
+        let world = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(world)
+        configureProfiles(world)
+        await crashDuringReset(world, at: "before.start", choice: .remove)
+        XCTAssertEqual(
+            world.choice.recordedRequest?.credentialRemoval?.profileVersions, ["profile-a-v1", "profile-b-v1", "profile-c-v1"],
+            "the recorded tap carries the profiles its choice applies to")
+        XCTAssertFalse(world.choice.isRequested, "nothing is armed before the core started")
+
+        world.core.addProfile(Self.laterProfile)
+        world.relaunch()
+        let resumed = await world.makeService().resume()
+
+        XCTAssertTrue(resumed.isComplete, "blockers: \(resumed.blockers)")
+        XCTAssertEqual(world.core.revokedProfileVersions, ["profile-a-v1", "profile-c-v1"])
+        XCTAssertEqual(Set(world.credentials.removedReferences), ["ref-a", "ref-b"])
+        XCTAssertEqual(world.core.isProfileRevoked("profile-d-v1"), false, "a profile configured after the tap is not bound by it")
+        XCTAssertFalse(world.choice.isRequested)
+    }
+
+    func testARemoveTapWhoseProfilesCannotBeListedStartsNothingAndIsRetried() async throws {
+        let world = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(world)
+        configureProfiles(world)
+        world.faults.arm("reset.profiles")
+
+        let report = await world.makeService().reset(credentialChoice: .remove)
+
+        XCTAssertEqual(report.state, .notStarted)
+        XCTAssertEqual(report.blockers, [.coreUnavailable])
+        XCTAssertNil(world.choice.recordedRequest, "a tap whose choice cannot be bound is not recorded")
+        XCTAssertFalse(world.staging.isHolding, "the boundary is released with the withdrawn tap")
+        XCTAssertEqual(world.core.startCalls, 0)
+        XCTAssertEqual(world.credentials.removedReferences, [])
+
+        let retried = await world.makeService().reset(credentialChoice: .remove)
+
+        XCTAssertTrue(retried.isComplete, "blockers: \(retried.blockers)")
+        XCTAssertEqual(Set(world.credentials.removedReferences), ["ref-a", "ref-b"])
+    }
+
     func testAKeepTapAfterAnUnfinishedRemovalCarriesThatRemovalOutBeforeItsOwnGeneration() async throws {
         for removalFailsAgain in [false, true] {
             let context = "removal fails again: \(removalFailsAgain)"

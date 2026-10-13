@@ -274,8 +274,12 @@ final class RealCoreResetRuntime {
         let client = session.resetClient
         let current = try session.run { try await client.status() }
         let earlierOutstanding = try markers.isCleanupOutstanding()
+        var removal: ResetCredentialRemoval?
+        if choice == .remove {
+            removal = ResetCredentialRemoval(binding: try session.run { try await client.profileCredentials() })
+        }
         let request = ResetRequest(
-            credentialChoice: choice, stagedBeforeTheTap: snapshot,
+            credentialChoice: choice, credentialRemoval: removal, stagedBeforeTheTap: snapshot,
             awaitsEarlierReset: current?.phase == .pending || (current != nil && earlierOutstanding))
         try markers.recordRequest(request)
         return request

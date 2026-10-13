@@ -474,6 +474,66 @@ final class ResetCoreIntegrationTests: XCTestCase {
         XCTAssertFalse(try second.markers.isRemovalRequested())
     }
 
+    func testARetriedRemovalLeavesAProfileConfiguredAfterTheResetAlone() throws {
+        for retriedBy in ["resume", "keep tap"] {
+            let context = "retried by \(retriedBy)"
+            let world = try makeWorld()
+            _ = try seedCaptures(world)
+            let earlierReference = try world.addProfile(version: "profile-a-v1")
+            let first = try world.launch()
+            world.keychain.forcedStatus[.remove] = errSecIO
+            let interrupted = try first.reset(.remove)
+            XCTAssertEqual(interrupted.blockers, [.credentialRemovalIncomplete], context)
+            XCTAssertEqual(interrupted.progress?.phase, .completed, "the core completed; the native removal is still owed: \(context)")
+            let earlierGeneration = try XCTUnwrap(interrupted.progress?.generation)
+            XCTAssertEqual(
+                try first.markers.removalRequest()?.profileVersions, ["profile-a-v1"],
+                "the owed removal binds the profile that existed at the tap: \(context)")
+            first.terminate()
+
+            // In the fresh generation, with the removal still owed, the user configures a new profile and its secret.
+            let laterReference = try world.addProfile(version: "profile-b-v1")
+            world.keychain.forcedStatus[.remove] = nil
+            let second = try world.launch()
+            let report = try retriedBy == "resume" ? second.resume() : second.reset(.keep)
+            second.terminate()
+
+            XCTAssertEqual(report.state, .completed, "\(context): \(report.blockers)")
+            XCTAssertEqual(
+                report.progress?.generation, retriedBy == "resume" ? earlierGeneration : earlierGeneration + 1, context)
+            XCTAssertTrue(try world.isProfileRevoked("profile-a-v1"), context)
+            XCTAssertFalse(try world.isCredentialPresent(earlierReference), "the earlier choice was carried out: \(context)")
+            XCTAssertFalse(try world.isProfileRevoked("profile-b-v1"), "a profile configured after the tap is not revoked: \(context)")
+            XCTAssertTrue(try world.isCredentialPresent(laterReference), "nor is its secret removed: \(context)")
+            XCTAssertFalse(try second.markers.isRemovalRequested(), context)
+            XCTAssertFalse(try second.markers.isCleanupOutstanding(), context)
+            XCTAssertNil(try second.markers.request(), context)
+        }
+    }
+
+    func testATapRecordedBeforeARestartBindsOnlyTheProfilesThatExistedAtTheTap() throws {
+        let world = try makeWorld()
+        _ = try seedCaptures(world)
+        let earlierReference = try world.addProfile(version: "profile-a-v1")
+        let first = try world.launch()
+        let request = try first.recordTap(.remove)
+        XCTAssertEqual(request.credentialRemoval?.profileVersions, ["profile-a-v1"])
+        first.terminate()
+
+        let laterReference = try world.addProfile(version: "profile-b-v1")
+        let second = try world.launch()
+        XCTAssertEqual(try second.markers.request()?.credentialRemoval?.profileVersions, ["profile-a-v1"], "the recorded tap carries what it binds")
+        let resumed = try second.resume()
+        second.terminate()
+
+        XCTAssertEqual(resumed.state, .completed, "blockers: \(resumed.blockers)")
+        XCTAssertTrue(try world.isProfileRevoked("profile-a-v1"))
+        XCTAssertFalse(try world.isCredentialPresent(earlierReference))
+        XCTAssertFalse(try world.isProfileRevoked("profile-b-v1"), "a profile configured after the tap is not bound by it")
+        XCTAssertTrue(try world.isCredentialPresent(laterReference))
+        XCTAssertFalse(try second.markers.isRemovalRequested())
+    }
+
     func testAKeepTapNeverCancelsAnEarlierRemovalThatIsStillOwed() throws {
         let world = try makeWorld()
         _ = try seedCaptures(world)

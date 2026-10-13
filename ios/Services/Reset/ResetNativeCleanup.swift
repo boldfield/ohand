@@ -126,12 +126,14 @@ final class ExportTemporaryCleaner: ResetExportTemporaries {
     }
 }
 
-/// Keeps the reset markers as small files in the protected temporary store. The choice and cleanup markers hold no
-/// secret, identifier or generation; their existence is the marker.
+/// Keeps the reset markers as small files in the protected temporary store. No marker holds a secret, content, a path
+/// or a generation. The cleanup marker is its existence alone. The removal marker holds what the `remove` choice binds:
+/// the profile versions to revoke and the opaque Keychain references whose secrets to delete, so a retry after a failure
+/// or a restart removes exactly the profiles that existed at the tap and never one configured since.
 ///
-/// A recorded tap is a numbered file holding the credential choice, the capture identifiers staged at the tap (local
-/// identifiers that already name files in the same protected store; never content, paths or a generation) and whether
-/// it awaits an earlier pending reset. The highest
+/// A recorded tap is a numbered file holding the credential choice, what a `remove` choice binds, the capture
+/// identifiers staged at the tap (local identifiers that already name files in the same protected store) and whether it
+/// awaits an earlier pending reset. The highest
 /// number is the request. A new tap is written in full under the next number before the earlier files are removed, so
 /// an interruption or a failure at any point leaves either the earlier tap or the new one as the latest, never no
 /// request and never an older choice in place of a newer one. Clearing removes the oldest first, so whatever survives a
@@ -141,13 +143,24 @@ final class FileResetMarkerStore: ResetMarkerStore {
     static let outstandingFileName = "reset-cleanup-outstanding"
     static let requestFilePrefix = "reset-request-"
 
+    private struct StoredProfile: Codable {
+        let profileVersion: String
+        let credentialReference: String?
+    }
+
+    private struct StoredRemoval: Codable {
+        let profiles: [StoredProfile]
+    }
+
     private struct StoredRequest: Codable {
         let credentialChoice: String
+        let profilesToRemove: [StoredProfile]?
         let stagedBeforeTheTap: [String]
         let awaitsEarlierReset: Bool?
     }
 
     struct UnreadableRequest: Error {}
+    struct UnreadableRemoval: Error {}
 
     private let directory: URL
     private let removalURL: URL
@@ -165,13 +178,22 @@ final class FileResetMarkerStore: ResetMarkerStore {
         guard let latest = try requestNumbers().last else { return nil }
         let stored = try JSONDecoder().decode(StoredRequest.self, from: try fileSystem.read(from: requestURL(latest)))
         let choice: ResetCredentialChoice
+        let removal: ResetCredentialRemoval?
         switch stored.credentialChoice {
-        case "keep": choice = .keep
-        case "remove": choice = .remove
-        default: throw UnreadableRequest()
+        case "keep":
+            choice = .keep
+            removal = nil
+        case "remove":
+            // A remove tap always records what it binds; a file without the list is not a tap this store wrote.
+            guard let profiles = stored.profilesToRemove else { throw UnreadableRequest() }
+            choice = .remove
+            removal = Self.removal(from: profiles)
+        default:
+            throw UnreadableRequest()
         }
         return ResetRequest(
-            credentialChoice: choice, stagedBeforeTheTap: ResetStagingSnapshot(captureIDs: Set(stored.stagedBeforeTheTap)),
+            credentialChoice: choice, credentialRemoval: removal,
+            stagedBeforeTheTap: ResetStagingSnapshot(captureIDs: Set(stored.stagedBeforeTheTap)),
             awaitsEarlierReset: stored.awaitsEarlierReset ?? false)
     }
 
@@ -179,6 +201,7 @@ final class FileResetMarkerStore: ResetMarkerStore {
         let earlier = try requestNumbers()
         let stored = StoredRequest(
             credentialChoice: request.credentialChoice == .remove ? "remove" : "keep",
+            profilesToRemove: request.credentialRemoval.map(Self.stored(from:)),
             stagedBeforeTheTap: request.stagedBeforeTheTap.captureIDs.sorted(),
             awaitsEarlierReset: request.awaitsEarlierReset)
         try fileSystem.writeDurably(try JSONEncoder().encode(stored), to: requestURL((earlier.last ?? 0) + 1))
@@ -195,8 +218,21 @@ final class FileResetMarkerStore: ResetMarkerStore {
         }
     }
 
-    func isRemovalRequested() throws -> Bool { fileSystem.fileExists(at: removalURL) }
-    func recordRemovalRequested() throws { try record(removalURL) }
+    func removalRequest() throws -> ResetCredentialRemoval? {
+        guard fileSystem.fileExists(at: removalURL) else { return nil }
+        let data = try fileSystem.read(from: removalURL)
+        guard let stored = try? JSONDecoder().decode(StoredRemoval.self, from: data) else { throw UnreadableRemoval() }
+        return Self.removal(from: stored.profiles)
+    }
+
+    /// A marker that already exists was written for the same started reset (a later tap waits until an owed removal is
+    /// carried out and its marker cleared), so it binds the same profiles and stays as it is.
+    func recordRemovalRequested(_ removal: ResetCredentialRemoval) throws {
+        guard !fileSystem.fileExists(at: removalURL) else { return }
+        let stored = StoredRemoval(profiles: Self.stored(from: removal))
+        try fileSystem.writeDurably(try JSONEncoder().encode(stored), to: removalURL)
+    }
+
     func clearRemovalRequest() throws { try clear(removalURL) }
 
     func isCleanupOutstanding() throws -> Bool { fileSystem.fileExists(at: outstandingURL) }
@@ -219,6 +255,18 @@ final class FileResetMarkerStore: ResetMarkerStore {
     private func record(_ url: URL) throws {
         guard !fileSystem.fileExists(at: url) else { return }
         try fileSystem.writeDurably(Data("1".utf8), to: url)
+    }
+
+    private static func stored(from removal: ResetCredentialRemoval) -> [StoredProfile] {
+        removal.profiles
+            .sorted { $0.profileVersion < $1.profileVersion }
+            .map { StoredProfile(profileVersion: $0.profileVersion, credentialReference: $0.credentialReference) }
+    }
+
+    private static func removal(from profiles: [StoredProfile]) -> ResetCredentialRemoval {
+        ResetCredentialRemoval(profiles: profiles.map {
+            ResetBoundProfile(profileVersion: $0.profileVersion, credentialReference: $0.credentialReference)
+        })
     }
 
     private func clear(_ url: URL) throws {

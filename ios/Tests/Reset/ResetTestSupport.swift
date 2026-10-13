@@ -105,6 +105,15 @@ final class FakeResetCore: ResetCore, @unchecked Sendable {
         locked { profiles = newProfiles }
     }
 
+    /// The user configures a profile now, whatever generation is current.
+    func addProfile(_ profile: ResetProfileCredential) {
+        locked { profiles.append(profile) }
+    }
+
+    func isProfileRevoked(_ profileVersion: String) -> Bool? {
+        locked { profiles.first { $0.profileVersion == profileVersion }?.isRevoked }
+    }
+
     var currentGeneration: Int64 { locked { generation } }
     var startCalls: Int { locked { starts } }
     var revokedProfileVersions: [String] { locked { revokedVersions } }
@@ -340,10 +349,12 @@ final class MemoryResetMarkerStore: ResetMarkerStore {
     struct WriteFailed: Error {}
 
     private let faults: FaultPlan
-    private(set) var isRequested = false
+    private(set) var removal: ResetCredentialRemoval?
     private(set) var isOutstanding = false
     private(set) var recordedRequest: ResetRequest?
 
+    /// Whether a removal is owed.
+    var isRequested: Bool { removal != nil }
     /// The credential choice of the recorded tap.
     var requested: ResetCredentialChoice? { recordedRequest?.credentialChoice }
 
@@ -366,16 +377,16 @@ final class MemoryResetMarkerStore: ResetMarkerStore {
         recordedRequest = nil
     }
 
-    func isRemovalRequested() throws -> Bool { isRequested }
+    func removalRequest() throws -> ResetCredentialRemoval? { removal }
 
-    func recordRemovalRequested() throws {
+    func recordRemovalRequested(_ newRemoval: ResetCredentialRemoval) throws {
         if faults.fires("choice.record") { throw WriteFailed() }
-        isRequested = true
+        if removal == nil { removal = newRemoval }
     }
 
     func clearRemovalRequest() throws {
         if faults.fires("choice.clear") { throw WriteFailed() }
-        isRequested = false
+        removal = nil
     }
 
     func isCleanupOutstanding() throws -> Bool { isOutstanding }

@@ -30,6 +30,34 @@ enum ResetCredentialChoice: Equatable, Sendable {
     case remove
 }
 
+/// A provider profile as a `remove` choice binds it: the version to revoke and the reference whose secret to delete.
+struct ResetBoundProfile: Hashable, Sendable {
+    let profileVersion: String
+    let credentialReference: String?
+}
+
+/// What a `remove` choice applies to: exactly the profiles present at the tap that made it, revoked ones included (their
+/// secret is still stored). The reset revokes these and deletes their secrets, on the first attempt or on a retry after a
+/// failure or a crash, and never touches a profile or a secret configured after the tap: that is fresh-generation state,
+/// like a capture made after the tap.
+struct ResetCredentialRemoval: Equatable, Sendable {
+    let profiles: [ResetBoundProfile]
+
+    init(profiles: [ResetBoundProfile]) {
+        self.profiles = profiles
+    }
+
+    /// Binds the profiles the core lists at the tap.
+    init(binding profiles: [ResetProfileCredential]) {
+        self.profiles = profiles.map {
+            ResetBoundProfile(profileVersion: $0.profileVersion, credentialReference: $0.credentialReference)
+        }
+    }
+
+    var profileVersions: Set<String> { Set(profiles.map(\.profileVersion)) }
+    var credentialReferences: Set<String> { Set(profiles.compactMap(\.credentialReference)) }
+}
+
 /// The durable reset operation as native code uses it (`core/src/lifecycle/reset`). The core owns the generation, the
 /// boundary and the completion rule; native code never keeps a generation of its own and never decides that a reset
 /// succeeded.
@@ -58,9 +86,9 @@ struct ResetStagingSnapshot: Equatable {
 }
 
 /// The user's reset tap, recorded durably from the tap until the core confirms that it recorded the reset: the explicit
-/// credential choice and the staged inputs that existed at the tap. The list is the durable form of the tap's moment, so
-/// a restart treats exactly what the tap would have as pre-reset input and every later capture as fresh-generation
-/// content.
+/// credential choice, the profiles a `remove` choice applies to and the staged inputs that existed at the tap. Both lists
+/// are the durable form of the tap's moment, so a restart treats exactly what the tap would have as pre-reset input and
+/// every later capture, profile or secret as fresh-generation content.
 ///
 /// A tap made while an earlier reset is unfinished (its generation still pending, or native cleanup such as its
 /// credential choice still outstanding) `awaitsEarlierReset`: resuming that generation only erases what existed at the
@@ -70,11 +98,20 @@ struct ResetStagingSnapshot: Equatable {
 /// earlier reset completed.
 struct ResetRequest: Equatable {
     let credentialChoice: ResetCredentialChoice
+    /// For `remove`, the profiles present at the tap (possibly none); always nil for `keep`.
+    let credentialRemoval: ResetCredentialRemoval?
     let stagedBeforeTheTap: ResetStagingSnapshot
     let awaitsEarlierReset: Bool
 
-    init(credentialChoice: ResetCredentialChoice, stagedBeforeTheTap: ResetStagingSnapshot, awaitsEarlierReset: Bool = false) {
+    init(
+        credentialChoice: ResetCredentialChoice,
+        credentialRemoval: ResetCredentialRemoval? = nil,
+        stagedBeforeTheTap: ResetStagingSnapshot,
+        awaitsEarlierReset: Bool = false
+    ) {
         self.credentialChoice = credentialChoice
+        self.credentialRemoval =
+            credentialChoice == .remove ? credentialRemoval ?? ResetCredentialRemoval(profiles: []) : nil
         self.stagedBeforeTheTap = stagedBeforeTheTap
         self.awaitsEarlierReset = awaitsEarlierReset
     }
@@ -126,7 +163,8 @@ protocol ResetCredentialRemoving {
 extension CredentialService: ResetCredentialRemoving {}
 
 /// What native code still owes a reset, as small durable markers, so a restart finishes what the user asked for. They
-/// hold a choice and flags, never a generation or a result: the core alone says whether the reset itself is complete.
+/// hold a choice, what it binds and flags, never a generation or a result: the core alone says whether the reset itself
+/// is complete.
 protocol ResetMarkerStore {
     /// The latest recorded tap the core has not confirmed. A restart that finds it holds the ingress boundary at its list
     /// and runs the whole reset again (finishing an earlier pending generation first when the tap awaits it, then
@@ -139,9 +177,11 @@ protocol ResetMarkerStore {
     /// Clears every recorded tap. When this throws, the latest request that remains is still a tap the user made.
     func clearRequest() throws
 
-    /// The user chose to remove provider profiles and their credentials.
-    func isRemovalRequested() throws -> Bool
-    func recordRemovalRequested() throws
+    /// The user chose to remove provider profiles and their credentials, and what that choice binds: nil when no removal
+    /// is owed. Set only after the core started the reset that carries the choice, and cleared once every bound profile
+    /// is revoked and every bound secret is gone, so a retry acts on exactly the profiles the choice applied to.
+    func removalRequest() throws -> ResetCredentialRemoval?
+    func recordRemovalRequested(_ removal: ResetCredentialRemoval) throws
     func clearRemovalRequest() throws
 
     /// The core started a reset and its native steps (cleanup, temporaries, credentials) have not all been confirmed.
@@ -149,6 +189,11 @@ protocol ResetMarkerStore {
     func isCleanupOutstanding() throws -> Bool
     func recordCleanupOutstanding() throws
     func clearCleanupOutstanding() throws
+}
+
+extension ResetMarkerStore {
+    /// Whether a removal is owed, regardless of what it binds.
+    func isRemovalRequested() throws -> Bool { try removalRequest() != nil }
 }
 
 /// Why the reset is not finished. Fixed codes only: never identifiers, paths, content or error text.
