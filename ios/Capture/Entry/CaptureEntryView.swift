@@ -45,7 +45,9 @@ struct CaptureEntryView: View {
         .onAppear {
             model.refreshProgress()
             focusFieldIfSilent()
+            reportReady()
         }
+        .onChange(of: model.presentation) { _ in reportReady() }
         .onChange(of: scenePhase) { phase in
             if phase == .active { model.refreshProgress() }
         }
@@ -114,6 +116,11 @@ struct CaptureEntryView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .fixedSize(horizontal: false, vertical: true)
             .accessibilityIdentifier(Self.noticeIdentifier)
+    }
+
+    /// Runs after the focus request above has been queued, so the measurement ends once the field can take input.
+    private func reportReady() {
+        DispatchQueue.main.async { model.surfaceDidBecomeReady() }
     }
 
     private func focusFieldIfSilent() {

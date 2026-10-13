@@ -29,6 +29,11 @@ public enum JobDrainOutcome: Equatable, Sendable {
 ///   `cancelled`, which the core also puts back at no cost. Network return starts a drain, which releases the
 ///   deferred jobs. A native capability running when the network drops is not cancelled.
 ///
+/// * **Failures are counted, not announced.** When a `metrics` sink is given, each drain's failed, exhausted,
+///   deferred or interrupted jobs are reported to it as closed machine labels (`processingFailures(in:)`). That is
+///   what the system observed; it says nothing about whether anyone saw it, and nothing else about this type
+///   changes.
+///
 /// The owner of the core's single event handler must forward every event to `handle(_:)`; it returns `true` when
 /// the event ended one of this service's drains.
 public final class JobRunnerService: @unchecked Sendable {
@@ -40,6 +45,7 @@ public final class JobRunnerService: @unchecked Sendable {
     private let sender: ProviderRequestSender
     private let capabilityHandlers: [String: JobCapabilityHandler]
     private let retryDelay: TimeInterval
+    private let metrics: MetricsRecording?
 
     private let stateLock = NSLock()
     /// Serialises reachability changes so the flag here and the core's flag always end on the same, latest value.
@@ -69,8 +75,10 @@ public final class JobRunnerService: @unchecked Sendable {
         sender: ProviderRequestSender,
         capabilityHandlers: [String: JobCapabilityHandler],
         isReachable: Bool,
-        retryDelay: TimeInterval
+        retryDelay: TimeInterval,
+        metrics: MetricsRecording?
     ) {
+        self.metrics = metrics
         self.core = core
         self.storePath = storePath
         self.sender = sender
@@ -89,7 +97,8 @@ public final class JobRunnerService: @unchecked Sendable {
         sender: ProviderRequestSender,
         capabilities: [JobCapabilityHandler] = [],
         isReachable: Bool = false,
-        retryDelay: TimeInterval = 60
+        retryDelay: TimeInterval = 60,
+        metrics: MetricsRecording? = nil
     ) throws -> JobRunnerService {
         var handlers: [String: JobCapabilityHandler] = [:]
         for handler in capabilities {
@@ -97,7 +106,7 @@ public final class JobRunnerService: @unchecked Sendable {
         }
         let service = JobRunnerService(
             core: core, storePath: storePath, sender: sender, capabilityHandlers: handlers,
-            isReachable: isReachable, retryDelay: retryDelay)
+            isReachable: isReachable, retryDelay: retryDelay, metrics: metrics)
         let registration = try core.registerJobHost(nativeJobTypes: handlers.keys.sorted()) {
             [weak service] requestID, command in
             service?.handleHost(requestID: requestID, command: command)
@@ -316,12 +325,50 @@ public final class JobRunnerService: @unchecked Sendable {
         let observer = rerun ? nil : drainIdleObserver
         stateLock.unlock()
 
+        if let metrics {
+            Self.processingFailures(in: outcome).forEach { metrics.recordProcessingFailure($0) }
+        }
         waiters.forEach { $0() }
         if rerun {
             requestDrain()
         }
         observer?()
         return true
+    }
+
+    /// The processing failures one drain observed, as closed labels: one per job that did not finish, plus one for a
+    /// drain that could not claim work or end normally. A job that completed or was retired is not a failure. The
+    /// summary carries no reason beyond the result, so a failure whose cause is not named maps to `other` rather than
+    /// to a guess.
+    static func processingFailures(in outcome: JobDrainOutcome) -> [CoreMetricsProcessingFailure] {
+        switch outcome {
+        case .failed(let failure):
+            switch failure.errorClass {
+            case .transient: return [.unavailable]
+            case .unauthorized: return [.unauthorized]
+            case .permanent, .cancelled, .unsupported: return [.other]
+            }
+        case .finished(let summary):
+            var failures = summary.jobs.compactMap(processingFailure(of:))
+            if summary.stop == "claim_failed" { failures.append(.unavailable) }
+            return failures
+        }
+    }
+
+    private static func processingFailure(of job: JobDrainJob) -> CoreMetricsProcessingFailure? {
+        switch job.result {
+        case "settled":
+            switch job.settlement {
+            case "failed", "backed_off": return .other
+            case "interrupted": return .interrupted
+            default: return nil
+            }
+        case "retry_scheduled", "failed_permanently", "lease_lost", "unsettled": return .other
+        case "retries_exhausted": return .retriesExhausted
+        case "interrupted": return .interrupted
+        case "capability_unavailable": return .capabilityUnavailable
+        default: return nil
+        }
     }
 
     private static func outcome(of event: CoreEvent) -> JobDrainOutcome {
