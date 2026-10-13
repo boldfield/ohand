@@ -215,12 +215,13 @@ final class ResetServiceTests: ResetTestCase {
         world.faults.arm("fs.remove:cap-1.m4a")
         _ = await world.makeService().reset(credentialChoice: .keep)
         world.staging.stage("cap-staged-between")
-        world.faults.arm("fs.remove:cap-1.m4a")
+        // The earlier generation's cleanup now finishes, but the core cannot be asked to complete it.
+        world.faults.arm("reset.advance")
 
         let waiting = await world.makeService().reset(credentialChoice: .remove)
 
         XCTAssertEqual(waiting.state, .pending)
-        XCTAssertTrue(waiting.blockers.contains(.coreResetPending), "blockers: \(waiting.blockers)")
+        XCTAssertEqual(waiting.blockers, [.coreUnavailable])
         XCTAssertEqual(waiting.progress?.generation, 1)
         XCTAssertEqual(world.core.startCalls, 1, "no generation is started for the second tap while the first is pending")
         XCTAssertEqual(world.choice.recordedRequest?.credentialChoice, .remove, "the second tap stays recorded")
