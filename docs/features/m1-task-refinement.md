@@ -91,6 +91,8 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
 
 - F10 added (coordinator, 2026-10-12, at the maintainer's direction). On 2026-10-12 the `simulator` job in `ios.yml` failed five times on UI tests and passed on rerun with no code change. These failures blocked P11b once and cost F09 and S02 a rerun each. All of them are XCTest waits timing out on a simulator that `OhAndTests` had already used. F10 finds the cause of each failure mode and fixes it, without lowering what the tests check.
 
+- F11 added (coordinator, 2026-10-13). On F10's head `6ab5caa`, attempt 3 of run 38361190686 failed in `OhAndTests`: `NotificationActionCoreIntegrationTests.testCompleteStoredBeforeRelaunchRunsAfterTheNextUnlock`, where `sqlite3_prepare_v2` returned 5 (`SQLITE_BUSY`) at line 71. The test reads the store through its own SQLite connection while the core still holds a write lock. The core sets a 5 s busy timeout on its own connections (`core/src/store/schema/mod.rs:115`), but 12 native test files open direct connections without one. F11 gives every one of those direct connections a busy timeout. It depends on B02, whose PR edits one of those files.
+
 - V06 and V07 now depend on V01 alone: they implement Rust adapters against its transport interface using fixtures. V05 is the native effect implementation and remains required by app composition/integration, not by independent protocol adapter implementation. This is an explicit dependency override for those retained tasks.
 
 ## Why some tasks stay together
@@ -494,6 +496,27 @@ Acceptance:
 4. Everything else stays unchanged and passing: the `OhAndTests`, `OhAndApp` and probe smoke tests, the artifact contents, `retention-days: 7` and the 60-minute job timeout. `make check` and `make test` pass. Required macOS CI evidence per AGENTS.md is linked.
 
 Source pointers: `ios/NotificationProbe/Tests/NotificationProbeUITestCase.swift:10`, `:31`, `:49`; `ios/CaptureProbe/UITests/CaptureProbeHandoffUITests.swift:61`; `.github/workflows/ios.yml:90` (NotificationProbe UI step), `:242` (CaptureProbe handoff step).
+
+### F11
+
+Give direct test connections to the core store a busy timeout
+
+Make the native integration tests that inspect the core's SQLite store wait for the core's write lock instead of failing on `SQLITE_BUSY`.
+
+Owned paths: `ios/Tests/Deletion/RealCoreDeletionFixture.swift`, `ios/Tests/Ingress/IngressCoreImportIntegrationTests.swift`, `ios/Tests/ShadowReview/ShadowReviewFixture.swift`, `ios/Tests/Health/ProcessingHealthTests.swift`, `ios/Tests/NotificationPermission/NotificationPermissionCoreIntegrationTests.swift`, `ios/Tests/NotificationActions/NotificationActionCoreIntegrationTests.swift`, `ios/Tests/ProviderTransport/ProviderExchangeFixture.swift`, `ios/Tests/CoreBridge/CaptureStatusTests.swift`, `ios/Tests/CaptureEntry/CaptureEntryCoreIntegrationTests.swift`, `ios/Tests/Export/ExportCoreIntegrationTests.swift`, `ios/Tests/VoiceCapture/VoiceRecordingCoreIntegrationTests.swift`, `ios/Tests/Notifications/NotificationCoreIntegrationTests.swift`. Only the direct-connection helpers in these files change.
+
+Dependencies: B02 (its PR edits `NotificationActionCoreIntegrationTests.swift`).
+
+Observed failure (2026-10-13, F10 run 38361190686 attempt 3, job 115209045404): `NotificationActionCoreIntegrationTests.swift:71`, `XCTAssertEqual failed: ("5") is not equal to ("0")` in `testCompleteStoredBeforeRelaunchRunsAfterTheNextUnlock`. The test's `withDatabase` helper opens the store with `sqlite3_open` and no busy timeout while a core launch is still writing. Four other test helpers already set one (`TranscriptionTestSupport.swift:258`, `RealCoreRetentionFixture.swift:117`, `JobRunnerTestSupport.swift:21`).
+
+Acceptance:
+
+1. Every direct `sqlite3_open` connection in the owned files sets `sqlite3_busy_timeout` before its first statement. The value is at least the core's own 5 s (`core/src/store/schema/mod.rs:115`) and is named once per file. Connections that deliberately provoke contention keep their intended behaviour, and the PR lists any such connection.
+2. No assertion is removed or relaxed. No test is skipped, retried or rewritten to tolerate `SQLITE_BUSY`. Production code, the core and the Rust tests are unchanged.
+3. The PR states, for each owned file, whether its reads can overlap a running core (as in `NotificationActionCoreIntegrationTests`) or only happen after shutdown. It does not claim that an unchanged file was flaky without evidence.
+4. Required macOS CI evidence per AGENTS.md is linked for the exact head, with `OhAndTests` passing. `make check` and `make test` pass.
+
+Source pointers: `ios/Tests/NotificationActions/NotificationActionCoreIntegrationTests.swift:49` (`withDatabase`), `:71` (`scalar`); `core/src/store/schema/mod.rs:115`.
 
 ### I05b
 
