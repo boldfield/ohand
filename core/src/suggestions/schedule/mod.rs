@@ -13,9 +13,10 @@
 //   `PromptSchedule` apart from the plan, as an append-only set of spent dates plus the
 //   high-water mark of every clock reading seen. Every entry point that takes `now`
 //   (`configure`, `refresh`, `record_capacity_pass`, `reconcile_prompts`, `cancel_prompts`)
-//   settles that ledger first and only then rebuilds, cancels or discards anything, so no
-//   ordering of time changes, app opens, disable/re-enable, capacity passes and backward clock
-//   changes can lose the evidence that a prompt fired. A date is spent once its request was
+//   settles that ledger first, with the clock before any fallible work (the OS listing) and
+//   only then rebuilds, cancels or discards anything, so no ordering of time changes, app
+//   opens, disable/re-enable, capacity passes, failed listings and backward clock changes can
+//   lose the evidence that a prompt fired or that a clock reading was lived through. A date is spent once its request was
 //   attempted (recorded as held before the native call, so a lost acknowledgment still counts)
 //   and the clock has reached its instant, or an OS listing no longer shows it although core
 //   did not cancel it, or core discards it without a listing (disable). A request core cancels

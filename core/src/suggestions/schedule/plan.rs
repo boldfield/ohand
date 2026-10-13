@@ -153,7 +153,9 @@ pub struct PlannedPrompt {
 /// - Nothing removes a date from `spent` except age: dates more than
 ///   [`SPENT_DATE_RETENTION_DAYS`] before the high-water date are pruned.
 /// - Every entry point that takes `now` first raises the high-water mark and settles the
-///   ledger ([`PromptSchedule::observe`]), and only then rebuilds, cancels or discards anything.
+///   ledger ([`PromptSchedule::observe`]) before any fallible work such as an OS listing, and
+///   only then rebuilds, cancels or discards anything. A pass that fails at its listing has
+///   still recorded its clock reading; it has learned nothing about OS absence.
 ///
 /// Also:
 /// - The identifier of an occurrence is `prompt:<local date>`: stable, so a re-plan replaces
@@ -251,7 +253,9 @@ impl PromptSchedule {
     /// The chokepoint with an OS listing in hand: after [`observe`](Self::observe), every held
     /// date whose request the listing no longer shows is spent, because core did not cancel it
     /// (a cancel releases the date first). Called by the reconcile pass before it allocates or
-    /// cancels anything, with the identifiers the OS currently holds.
+    /// cancels anything, with the identifiers the OS currently holds. The pass has already
+    /// called `observe` with the same `now` before asking the OS for the listing; repeating it
+    /// here changes nothing.
     pub(super) fn observe_pending(&mut self, now: DateTime<Utc>, pending: &BTreeSet<&str>) {
         self.observe(now);
         let vanished: Vec<NaiveDate> = self

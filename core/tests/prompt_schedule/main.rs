@@ -13,7 +13,7 @@ use ohand_core::reminders::capacity::{
 };
 use ohand_core::reminders::reconcile::{
     reconcile, NotificationEffectError, NotificationEffects, PayloadKind, PendingRequest,
-    ScheduleRequest,
+    ReconcileError, ScheduleRequest,
 };
 use ohand_core::reminders::state::{
     apply_derived_request, cancel_reminder, get_reminder, DerivedReminderRequest,
@@ -179,6 +179,8 @@ struct FakeCenter {
     /// the acknowledgment was lost (a timeout, a cancelled caller).
     fail_after_install: Option<NotificationEffectError>,
     fail_cancel_for: Vec<String>,
+    /// `list_pending` fails with this error: the pass learns nothing about what the OS holds.
+    fail_list: Option<NotificationEffectError>,
     /// Identifiers the OS has delivered (and dropped) so far, in delivery order.
     delivered: Vec<String>,
 }
@@ -247,6 +249,9 @@ impl NotificationEffects for FakeCenter {
     }
 
     fn list_pending(&mut self) -> Result<Vec<PendingRequest>, NotificationEffectError> {
+        if let Some(error) = &self.fail_list {
+            return Err(error.clone());
+        }
         Ok(self
             .pending
             .iter()
@@ -1781,6 +1786,186 @@ fn configure_and_install_from_seven(label: &str) -> Result<(Database, FakeCenter
     Ok((db, center, schedule))
 }
 
+fn listing_failure() -> NotificationEffectError {
+    NotificationEffectError::new(ErrorClass::Transient, "notification center unavailable")
+}
+
+/// A reconcile pass at `now` whose OS listing fails. Returns the error the pass reported.
+fn pass_with_failed_listing(
+    db: &mut Database,
+    center: &mut FakeCenter,
+    schedule: &mut PromptSchedule,
+    now: &str,
+) -> std::result::Result<ohand_core::suggestions::schedule::PromptPassReport, ReconcileError> {
+    center.fail_list = Some(listing_failure());
+    let outcome = reconcile_prompts(
+        db,
+        &clock_at(now),
+        center,
+        schedule,
+        &CapacityPolicy::default(),
+    );
+    center.fail_list = None;
+    outcome
+}
+
+#[test]
+fn a_pass_whose_listing_fails_still_records_the_clock_so_a_rollback_does_not_replay() -> Result<()>
+{
+    let (mut db, mut center, mut schedule) = configure_and_install_from_seven("list-fails")?;
+
+    // A pass at 10:00 cannot list the OS and fails. It has still lived through 09:00, so the
+    // 15th is spent by the clock alone: whether the OS delivered that prompt is unknown, and
+    // ambiguity fails toward suppression. (Here the OS still holds the request: the 10:00
+    // reading was a misset clock, corrected back to 08:00 before the request's own instant.)
+    let failed =
+        pass_with_failed_listing(&mut db, &mut center, &mut schedule, "2026-01-15T10:00:00Z");
+    assert!(matches!(failed, Err(ReconcileError::ListPending(_))));
+    assert_eq!(
+        center.mutations(),
+        3,
+        "a failed listing changes nothing on the OS"
+    );
+    assert_eq!(schedule.high_water(), Some(instant("2026-01-15T10:00:00Z")));
+    assert!(schedule.is_spent(date("2026-01-15")));
+    // A failed listing proves nothing about OS absence: the 16th and 17th stay held, and the
+    // ledger survives the persist the caller does after the failed pass.
+    assert!(!schedule.is_spent(date("2026-01-16")));
+    let restored: PromptSchedule = serde_json::from_str(&serde_json::to_string(&schedule)?)?;
+    assert_eq!(restored, schedule);
+
+    // The clock is moved back to 08:00, the app opens and a pass succeeds: the 15th is not
+    // planned, and the request the OS still holds for it is cancelled rather than left to
+    // fire at a 09:00 the failed pass had already observed as past.
+    let rolled_back = instant("2026-01-15T08:00:00Z");
+    schedule.refresh(RefreshTrigger::AppOpen, rolled_back, UTC_ZONE);
+    assert_eq!(fire_instants(&schedule)[0], instant("2026-01-16T09:00:00Z"));
+    let report = pass(&mut db, &mut center, &mut schedule, "2026-01-15T08:00:00Z")?;
+
+    assert_eq!(report.cancelled, ["prompt:2026-01-15"]);
+    assert!(!center.pending.contains_key("prompt:2026-01-15"));
+    assert_eq!(installs_of(&center, "prompt:2026-01-15"), 1);
+    assert_eq!(
+        center.prompt_ids(),
+        [
+            "prompt:2026-01-16",
+            "prompt:2026-01-17",
+            "prompt:2026-01-18"
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn a_fired_prompt_a_failed_listing_could_not_see_is_still_spent_by_the_clock() -> Result<()> {
+    // The ordinary form of the same sequence: the OS delivered the 15th at 09:00 before the
+    // listing failed at 10:00. The failed pass fences it by the clock; the later successful
+    // pass would also have seen it gone, but must not be the first evidence.
+    let (mut db, mut center, mut schedule) = configure_and_install_from_seven("list-fails-fired")?;
+    center.fire_due(instant("2026-01-15T10:00:00Z"));
+    let failed =
+        pass_with_failed_listing(&mut db, &mut center, &mut schedule, "2026-01-15T10:00:00Z");
+    assert!(matches!(failed, Err(ReconcileError::ListPending(_))));
+    assert_eq!(schedule.high_water(), Some(instant("2026-01-15T10:00:00Z")));
+    assert!(schedule.is_spent(date("2026-01-15")));
+
+    let rolled_back = instant("2026-01-15T08:00:00Z");
+    schedule.refresh(RefreshTrigger::AppOpen, rolled_back, UTC_ZONE);
+    assert!(schedule
+        .planned()
+        .iter()
+        .all(|prompt| prompt.local_date > date("2026-01-15")));
+    pass(&mut db, &mut center, &mut schedule, "2026-01-15T08:00:00Z")?;
+
+    assert_eq!(installs_of(&center, "prompt:2026-01-15"), 1);
+    assert_eq!(
+        center.prompt_ids(),
+        [
+            "prompt:2026-01-16",
+            "prompt:2026-01-17",
+            "prompt:2026-01-18"
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn a_failed_listing_seen_only_by_a_clock_change_pass_does_not_replay_after_a_rollback() -> Result<()>
+{
+    // As above, with a clock-change refresh instead of an app open as the first look after
+    // the rollback: nothing refills, and the failed pass's clock reading still fences the
+    // 15th, so its still-pending request is cancelled instead of firing again.
+    let (mut db, mut center, mut schedule) = configure_and_install_from_seven("list-fails-clock")?;
+    let failed =
+        pass_with_failed_listing(&mut db, &mut center, &mut schedule, "2026-01-15T10:00:00Z");
+    assert!(matches!(failed, Err(ReconcileError::ListPending(_))));
+
+    let rolled_back = instant("2026-01-15T08:00:00Z");
+    schedule.refresh(RefreshTrigger::ClockOrZoneChange, rolled_back, UTC_ZONE);
+    assert_eq!(
+        fire_instants(&schedule),
+        vec![
+            instant("2026-01-16T09:00:00Z"),
+            instant("2026-01-17T09:00:00Z"),
+        ]
+    );
+    let report = pass(&mut db, &mut center, &mut schedule, "2026-01-15T08:00:00Z")?;
+
+    assert_eq!(report.cancelled, ["prompt:2026-01-15"]);
+    assert_eq!(installs_of(&center, "prompt:2026-01-15"), 1);
+    assert_eq!(
+        center.prompt_ids(),
+        ["prompt:2026-01-16", "prompt:2026-01-17"]
+    );
+    Ok(())
+}
+
+#[test]
+fn a_cancel_pass_whose_listing_fails_still_records_the_clock_so_a_rollback_does_not_replay(
+) -> Result<()> {
+    let (mut db, mut center, mut schedule) = configure_and_install_from_seven("cancel-list-fails")?;
+
+    // A cancel-only pass at 10:00 (prompting still on) cannot list the OS and fails. It has
+    // still lived through 09:00, so the 15th is spent by the clock, and nothing was cancelled.
+    center.fail_list = Some(listing_failure());
+    let failed = cancel_prompts(
+        &clock_at("2026-01-15T10:00:00Z"),
+        &mut center,
+        &mut schedule,
+    );
+    assert!(matches!(failed, Err(ReconcileError::ListPending(_))));
+    center.fail_list = None;
+    assert_eq!(schedule.high_water(), Some(instant("2026-01-15T10:00:00Z")));
+    assert!(schedule.is_spent(date("2026-01-15")));
+    assert!(center.cancel_calls.is_empty());
+
+    // After the rollback the 15th is neither planned nor left pending.
+    let rolled_back = instant("2026-01-15T08:00:00Z");
+    schedule.refresh(RefreshTrigger::AppOpen, rolled_back, UTC_ZONE);
+    let report = pass(&mut db, &mut center, &mut schedule, "2026-01-15T08:00:00Z")?;
+
+    assert_eq!(report.cancelled, ["prompt:2026-01-15"]);
+    assert_eq!(installs_of(&center, "prompt:2026-01-15"), 1);
+    assert_eq!(
+        center.prompt_ids(),
+        [
+            "prompt:2026-01-16",
+            "prompt:2026-01-17",
+            "prompt:2026-01-18"
+        ]
+    );
+
+    // Once the listing works again, a cancel pass is as before: every prompt and nothing else.
+    let report = cancel_prompts(
+        &clock_at("2026-01-15T08:30:00Z"),
+        &mut center,
+        &mut schedule,
+    )?;
+    assert_eq!(report.cancelled.len(), 3);
+    assert!(center.prompt_ids().is_empty());
+    Ok(())
+}
+
 #[test]
 fn turning_prompting_off_and_on_after_a_rollback_does_not_replay_the_fired_prompt() -> Result<()> {
     let (mut db, mut center, mut schedule) = configure_and_install_from_seven("off-on-rollback")?;
@@ -2110,7 +2295,8 @@ fn the_ordinary_path_installs_every_chosen_day_exactly_once() -> Result<()> {
 // re-enable, every refresh trigger, clock jumps forward and back (within the retention), zone
 // changes, reminder-side capacity passes, OS deliveries and OS losses, and reconcile passes,
 // some of whose install calls fail: definitively, ambiguously with nothing installed, or
-// ambiguously after the OS accepted the request (a lost acknowledgment).
+// ambiguously after the OS accepted the request (a lost acknowledgment), and some of which
+// fail at the OS listing before doing anything.
 // The invariant: once the OS has delivered or dropped a date's request, that identifier is
 // never installed again. Replay is the only defect; suppression is allowed.
 
@@ -2158,6 +2344,8 @@ struct Interleaving {
     displaced: usize,
     /// Install calls the OS accepted and then reported as failed.
     lost_acknowledgments: usize,
+    /// Reconcile passes that failed at their OS listing.
+    failed_listings: usize,
     checked_requests: usize,
     log: Vec<String>,
 }
@@ -2181,6 +2369,7 @@ impl Interleaving {
             gone: std::collections::BTreeSet::new(),
             displaced: 0,
             lost_acknowledgments: 0,
+            failed_listings: 0,
             checked_requests: 0,
             log: Vec::new(),
         })
@@ -2191,7 +2380,7 @@ impl Interleaving {
     }
 
     fn step(&mut self, rng: &mut SplitMix) -> Result<()> {
-        match rng.below(28) {
+        match rng.below(29) {
             0..=5 => {
                 let minutes = i64::try_from(rng.below(60 * 48) + 1)?;
                 self.now += chrono::Duration::minutes(minutes);
@@ -2327,6 +2516,43 @@ impl Interleaving {
                     ));
                 }
             }
+            28 => {
+                // The OS listing fails: the pass returns an error having learned nothing about
+                // the OS, but it has still read the clock.
+                self.center.fail_list = Some(NotificationEffectError::new(
+                    AMBIGUOUS[usize::try_from(rng.below(2))?],
+                    "center unavailable",
+                ));
+                let clock = self.clock();
+                let failed = reconcile_prompts(
+                    &mut self.db,
+                    &clock,
+                    &mut self.center,
+                    &mut self.schedule,
+                    &self.policy,
+                );
+                self.center.fail_list = None;
+                assert!(
+                    matches!(failed, Err(ReconcileError::ListPending(_))),
+                    "seed {}: a failed listing must fail the pass\n{}",
+                    self.seed,
+                    self.log.join("\n")
+                );
+                assert_eq!(
+                    self.schedule.high_water().map(|mark| mark >= self.now),
+                    Some(true),
+                    "seed {}: a failed listing must still record the clock\n{}",
+                    self.seed,
+                    self.log.join("\n")
+                );
+                self.failed_listings += 1;
+                self.log
+                    .push("reconcile prompts (listing fails)".to_string());
+                // The failed pass mutated nothing on the OS (with prompting off, the prompts
+                // it would have cancelled are still pending), so only the schedule's own
+                // bounds are checked here; the next successful pass restores the OS bounds.
+                self.check_schedule_bounds();
+            }
             _ => {
                 self.reconcile_prompts("reconcile prompts")?;
             }
@@ -2397,6 +2623,15 @@ impl Interleaving {
             "{}",
             context()
         );
+        self.check_schedule_bounds();
+        if !self.schedule.is_enabled() {
+            assert!(self.center.prompt_ids().is_empty(), "{}", context());
+        }
+    }
+
+    /// The bounds that hold on the schedule alone, whether or not the pass reached the OS.
+    fn check_schedule_bounds(&self) {
+        let context = || format!("seed {}\n{}", self.seed, self.log.join("\n"));
         assert!(
             self.schedule.planned().len() <= PROMPT_HORIZON_DAYS,
             "{}",
@@ -2410,9 +2645,6 @@ impl Interleaving {
             "{}",
             context()
         );
-        if !self.schedule.is_enabled() {
-            assert!(self.center.prompt_ids().is_empty(), "{}", context());
-        }
     }
 }
 
@@ -2423,6 +2655,7 @@ fn random_interleavings_never_install_a_prompt_after_the_os_delivered_or_dropped
     let mut total_gone = 0;
     let mut total_displaced = 0;
     let mut total_lost_acknowledgments = 0;
+    let mut total_failed_listings = 0;
     for seed in 1..=48 {
         let mut rng = SplitMix(seed);
         let mut run = Interleaving::new(seed)?;
@@ -2433,6 +2666,7 @@ fn random_interleavings_never_install_a_prompt_after_the_os_delivered_or_dropped
         total_gone += run.gone.len();
         total_displaced += run.displaced;
         total_lost_acknowledgments += run.lost_acknowledgments;
+        total_failed_listings += run.failed_listings;
         // Finish with a pass at the clock's furthest reading, then one more look back.
         run.now = run.peak;
         let clock = run.clock();
@@ -2447,14 +2681,17 @@ fn random_interleavings_never_install_a_prompt_after_the_os_delivered_or_dropped
         run.check_no_replay();
     }
     // The generator is not vacuous: prompts were installed, delivered or dropped, displaced by
-    // reminders, and installed under a lost acknowledgment across the runs.
+    // reminders, and installed under a lost acknowledgment across the runs, and passes failed
+    // at their listing.
     assert!(
         total_installs > 250
             && total_gone > 100
             && total_displaced > 12
-            && total_lost_acknowledgments > 24,
+            && total_lost_acknowledgments > 24
+            && total_failed_listings > 24,
         "{total_installs} installs, {total_gone} delivered or dropped, {total_displaced} \
-         displaced, {total_lost_acknowledgments} lost acknowledgments"
+         displaced, {total_lost_acknowledgments} lost acknowledgments, \
+         {total_failed_listings} failed listings"
     );
     Ok(())
 }

@@ -47,16 +47,21 @@ impl PromptPassReport {
 /// features are never touched. Cancellation is idempotent. A failed cancel is reported and
 /// retried by the next pass.
 ///
-/// The schedule's ledger is settled first with the clock and the OS listing: a held request
-/// the listing no longer shows is spent, and the requests this pass cancels after seeing them
-/// pending are released, not spent. With prompting off every held date was already spent when
-/// it was switched off, so this pass changes nothing in the ledger.
+/// The schedule's ledger is settled first with the clock, before the fallible OS listing, and
+/// then with the listing: a held request whose instant the clock has reached, or that the
+/// listing no longer shows, is spent, and the requests this pass cancels after seeing them
+/// pending are released, not spent. A listing failure therefore still leaves the clock reading
+/// in the ledger (and nothing else: OS absence is only known from a listing), so a rollback
+/// after it cannot replay a prompt the failed pass had already lived past. With prompting off
+/// every held date was already spent when it was switched off, so this pass changes nothing
+/// in the ledger.
 pub fn cancel_prompts(
     clock: &dyn Clock,
     effects: &mut dyn NotificationEffects,
     schedule: &mut PromptSchedule,
 ) -> Result<PromptPassReport, ReconcileError> {
     let now = clock.now();
+    schedule.observe(now);
     let pending = effects
         .list_pending()
         .map_err(ReconcileError::ListPending)?;
@@ -76,10 +81,14 @@ pub fn cancel_prompts(
 /// Off: every pending prompt is cancelled and no capacity pass runs, so reminders are left
 /// exactly as they were.
 ///
-/// On: the ledger is settled first with this pass's clock reading and OS listing, before
-/// anything is cancelled. A date whose request core had handed to the OS and the listing no
-/// longer shows is spent: it fired, even if the clock has since been moved back, and it is
-/// never installed again. Then pending prompts outside the plan (an earlier time, another
+/// On: the ledger is settled first with this pass's clock reading, before the fallible OS
+/// listing, and then with the listing, before anything is cancelled. A listing failure
+/// therefore still raises the high-water mark to this pass's clock (and spends every held
+/// date whose instant it has reached), so a rollback after the failure cannot replay a prompt
+/// this pass had already lived past; it infers nothing about OS absence, which only a listing
+/// can show. A date whose request core had handed to the OS and the listing no longer shows
+/// is spent: it fired, even if the clock has since been moved back, and it is never installed
+/// again. Then pending prompts outside the plan (an earlier time, another
 /// zone, a passed or spent day) are cancelled so they stop consuming budget. The capacity
 /// pass plans the offered prompts after explicit reminders and cancels any it defers. Every
 /// request cancelled this way was seen pending in this same listing, so its date is released
@@ -113,6 +122,9 @@ pub fn reconcile_prompts(
         return cancel_prompts(clock, effects, schedule);
     }
     let pass_clock = PassClock { now: clock.now() };
+    // The chokepoint runs before the fallible listing: a failed listing must not lose this
+    // pass's clock reading.
+    schedule.observe(pass_clock.now);
     let pending = effects
         .list_pending()
         .map_err(ReconcileError::ListPending)?;
