@@ -198,6 +198,8 @@ public struct NotificationContent: Equatable, Sendable {
     public let title: String
     public let body: String
     public let userInfo: [String: String]
+    /// The registered action category, or nil for a notification that offers no actions.
+    public var categoryIdentifier: String?
 
     static func generic(opaqueTargetID: OpaqueIdentifier) -> NotificationContent {
         NotificationContent(
@@ -206,7 +208,8 @@ public struct NotificationContent: Equatable, Sendable {
             userInfo: [
                 targetKey: opaqueTargetID.rawValue,
                 kindKey: NotificationPayloadKind.generic.rawValue,
-            ]
+            ],
+            categoryIdentifier: NotificationActionIdentifier.reminderCategory
         )
     }
 }

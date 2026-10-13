@@ -17,9 +17,11 @@ pub mod core_handle;
 pub mod deletion_cleanup;
 pub mod export_snapshot;
 pub mod ingress_import;
+pub mod metrics;
 pub mod provider_transport;
 pub mod transcription_attachment;
 
 pub mod job_health;
 pub mod job_runner;
+pub mod notification_actions;
 pub mod notification_reconciliation;

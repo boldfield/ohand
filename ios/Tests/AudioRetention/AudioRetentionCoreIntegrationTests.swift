@@ -277,12 +277,14 @@ final class AudioRetentionCoreIntegrationTests: XCTestCase {
         let starts: [UInt64] = [
             TranscriptionCoreClient.firstOperationID, CoreDeletionCleanupClient.firstOperationID,
             CoreExportClient.firstOperationID, CoreReminderReconciler.firstOperationID,
-            CoreAudioRetentionClient.firstOperationID, ProcessingHealthService.firstOperationID,
-            JobRunnerService.firstOperationID,
+            CoreAudioRetentionClient.firstOperationID, CoreNotificationActionClient.firstOperationID,
+            ProcessingHealthService.firstOperationID, JobRunnerService.firstOperationID,
         ]
         XCTAssertEqual(Set(starts).count, starts.count, "no two clients start at the same operation identifier")
         let following = starts.filter { $0 > CoreAudioRetentionClient.firstOperationID }.min()
-        XCTAssertEqual(following, ProcessingHealthService.firstOperationID, "retention's range ends where health's starts")
+        XCTAssertEqual(
+            following, CoreNotificationActionClient.firstOperationID, "retention's range ends where notification actions start")
+        XCTAssertGreaterThan(ProcessingHealthService.firstOperationID, CoreNotificationActionClient.firstOperationID)
         XCTAssertGreaterThan(CoreAudioRetentionClient.firstOperationID, CoreReminderReconciler.firstOperationID)
     }
 

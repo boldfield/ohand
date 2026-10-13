@@ -24,6 +24,21 @@ struct CaptureEntryPresentation: Equatable {
     let mode: CaptureEntryMode
     let launchKind: CaptureLaunchKind
     let access: CaptureEntryAccess
+    /// The monotonic uptime of the user's trigger (see `CaptureEntryRequest`); `nil` when the presentation was not
+    /// made by a trigger, so nothing is measured for it.
+    let triggeredAtUptimeNanoseconds: UInt64?
+
+    init(
+        entryID: String, source: CaptureEntrySource, mode: CaptureEntryMode, launchKind: CaptureLaunchKind,
+        access: CaptureEntryAccess, triggeredAtUptimeNanoseconds: UInt64? = nil
+    ) {
+        self.entryID = entryID
+        self.source = source
+        self.mode = mode
+        self.launchKind = launchKind
+        self.access = access
+        self.triggeredAtUptimeNanoseconds = triggeredAtUptimeNanoseconds
+    }
 }
 
 /// The shortcut entry: `ohand-capture://capture`, optionally `?mode=voice` or `?mode=silent`. The URL carries no
@@ -116,6 +131,7 @@ final class CaptureEntrySession {
             source: request.source,
             mode: request.requestedMode ?? defaultMode(),
             launchKind: launchKind,
-            access: access())
+            access: access(),
+            triggeredAtUptimeNanoseconds: request.triggeredAtUptimeNanoseconds)
     }
 }

@@ -67,11 +67,12 @@ final class JobRunnerBoundaryTests: ProviderTransportTestCase {
         sender: ProviderRequestSender,
         capabilities: [JobCapabilityHandler] = [],
         isReachable: Bool = true,
-        retryDelay: TimeInterval = 3600
+        retryDelay: TimeInterval = 3600,
+        metrics: MetricsRecording? = nil
     ) throws -> JobRunnerSession {
         let session = try JobRunnerSession(
             storePath: storePath, sender: sender, capabilities: capabilities, isReachable: isReachable,
-            retryDelay: retryDelay)
+            retryDelay: retryDelay, metrics: metrics)
         sessions.append(session)
         return session
     }
@@ -357,6 +358,74 @@ final class JobRunnerBoundaryTests: ProviderTransportTestCase {
         let deferred = try XCTUnwrap(summary.jobs.first { $0.jobType == "transcribe" })
         XCTAssertEqual(deferred.result, "capability_unavailable")
         XCTAssertEqual(job(session, "job-native-3")?.status, "queued")
+    }
+
+    // MARK: metrics
+
+    func testDrainFailuresAreReportedAsClosedLabelsAndSuccessReportsNothing() throws {
+        let server = try makeServer()
+        let storePath = try makeStore()
+        try JobStoreInspector.insertQueuedJob(at: storePath, id: "job-native-4", jobType: "transcribe")
+        let metrics = RecordingMetrics()
+        let capability = ScriptedCapability(jobType: "transcribe", result: .permanentFailure(reason: "call the roofer at 9"))
+        let session = try open(
+            storePath, sender: FixtureRoutingSender(underlying: transport, fixtureServer: server),
+            capabilities: [capability], metrics: metrics)
+
+        session.service.activate()
+        XCTAssertTrue(session.waitForFinishedDrains(1))
+
+        XCTAssertEqual(job(session)?.status, "completed")
+        XCTAssertEqual(job(session, "job-native-4")?.status, "failed")
+        XCTAssertEqual(metrics.records, [.processingFailure(.other)], "only the failed job is counted")
+    }
+
+    func testADeferredJobTypeIsCountedAsCapabilityUnavailable() throws {
+        let server = try makeServer()
+        let storePath = try makeStore()
+        try JobStoreInspector.insertQueuedJob(at: storePath, id: "job-native-5", jobType: "transcribe")
+        let metrics = RecordingMetrics()
+        let session = try open(
+            storePath, sender: FixtureRoutingSender(underlying: transport, fixtureServer: server), metrics: metrics)
+
+        session.service.activate()
+        XCTAssertTrue(session.waitForFinishedDrains(1))
+
+        XCTAssertEqual(metrics.records, [.processingFailure(.capabilityUnavailable)])
+    }
+
+    func testAnAllSuccessfulDrainReportsNoFailure() throws {
+        let server = try makeServer()
+        let storePath = try makeStore()
+        let metrics = RecordingMetrics()
+        let session = try open(
+            storePath, sender: FixtureRoutingSender(underlying: transport, fixtureServer: server), metrics: metrics)
+
+        session.service.activate()
+        XCTAssertTrue(session.waitForFinishedDrains(1))
+
+        XCTAssertEqual(job(session)?.status, "completed")
+        XCTAssertTrue(metrics.records.isEmpty)
+    }
+
+    func testTheMappingNamesEachUnfinishedResultAndIgnoresFinishedOnes() {
+        func job(_ result: String, _ settlement: String? = nil) -> JobDrainJob {
+            JobDrainJob(jobID: "j", jobType: "interpret", result: result, settlement: settlement)
+        }
+        let summary = JobDrainSummary(
+            operationID: 1, stop: "claim_failed",
+            jobs: [
+                job("settled", "completed"), job("settled", "retired"), job("settled", "failed"),
+                job("settled", "interrupted"), job("retries_exhausted"), job("capability_unavailable"),
+                job("retry_scheduled"), job("failed_permanently"),
+            ])
+        XCTAssertEqual(
+            JobRunnerService.processingFailures(in: .finished(summary)),
+            [.other, .interrupted, .retriesExhausted, .capabilityUnavailable, .other, .other, .unavailable])
+        XCTAssertEqual(
+            JobRunnerService.processingFailures(
+                in: .failed(CoreFailure(errorClass: .unauthorized, code: "x", message: "x"))),
+            [.unauthorized])
     }
 
     // MARK: offline on-device work

@@ -7,6 +7,7 @@ public final class SystemNotificationCenter: NotificationCenterProviding, @unche
 
     public init(center: UNUserNotificationCenter = .current()) {
         self.center = center
+        center.setNotificationCategories([ReminderNotificationCategory.make()])
     }
 
     public func authorization() async -> NotificationAuthorization {
@@ -63,6 +64,9 @@ public final class SystemNotificationCenter: NotificationCenterProviding, @unche
         content.body = request.content.body
         content.userInfo = request.content.userInfo
         content.sound = .default
+        if let categoryIdentifier = request.content.categoryIdentifier {
+            content.categoryIdentifier = categoryIdentifier
+        }
 
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .current
