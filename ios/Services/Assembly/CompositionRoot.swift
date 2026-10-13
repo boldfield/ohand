@@ -141,8 +141,8 @@ public struct CompositionContext {
 /// its own operation identifier range, may contribute native job capabilities, and receives the core events that
 /// answer its operations.
 ///
-/// The root refuses a module whose `firstOperationID` is below `ServiceCompositionRoot.minimumModuleOperationID` or
-/// within `ServiceCompositionRoot.operationRangeWidth` of the range of the root's own clients or another module, so
+/// The root refuses a module whose `firstOperationID` is below `ServiceCompositionRoot.minimumModuleOperationID`, at or
+/// above `JobRunnerService.firstOperationID` (the job runner claims every event from there up), or within `ServiceCompositionRoot.operationRangeWidth` of the range of the root's own clients or another module, so
 /// two clients can never take each other's events. Modules are attached in the order given, after the job runner.
 public protocol CompositionModule: AnyObject {
     var identifier: String { get }
@@ -182,6 +182,8 @@ struct CompositionAdapters {
     let lifecycleNotifications: NotificationCenter
     /// `nil` selects the on-device speech recognizer.
     let recognizer: OnDeviceRecognizing?
+    /// The read-authorization session every private read goes through.
+    let readSession: ReadAuthenticationSession
 
     fileprivate init(
         kind: CompositionAdapterSet,
@@ -191,7 +193,8 @@ struct CompositionAdapters {
         reachability: NetworkReachability,
         backgroundGrant: BackgroundExecutionGrant?,
         lifecycleNotifications: NotificationCenter,
-        recognizer: OnDeviceRecognizing?
+        recognizer: OnDeviceRecognizing?,
+        readSession: ReadAuthenticationSession
     ) {
         self.kind = kind
         self.sender = sender
@@ -201,6 +204,7 @@ struct CompositionAdapters {
         self.backgroundGrant = backgroundGrant
         self.lifecycleNotifications = lifecycleNotifications
         self.recognizer = recognizer
+        self.readSession = readSession
     }
 
     fileprivate static func production(for configuration: CompositionConfiguration) -> CompositionAdapters {
@@ -213,13 +217,16 @@ struct CompositionAdapters {
             reachability: SystemNetworkReachability(),
             backgroundGrant: ApplicationBackgroundExecutionGrant(),
             lifecycleNotifications: .default,
-            recognizer: nil)
+            recognizer: nil,
+            readSession: ReadAuthenticationSession(boundary: LocalAuthenticationBoundary()))
     }
 
     #if DEBUG
-    /// Debug builds only: the substitutes a test injects. Compiled out of release builds.
+    /// Debug builds only: the substitutes a test injects. Compiled out of release builds. The session is required so a
+    /// test states whether its reads are authenticated.
     static func injectedForTests(
         sender: ProviderRequestSender,
+        readSession: ReadAuthenticationSession,
         notificationCenter: NotificationCenterProviding,
         permissionObservations: NotificationPermissionObservationStore = InMemoryNotificationPermissionObservationStore(),
         reachability: NetworkReachability,
@@ -231,7 +238,7 @@ struct CompositionAdapters {
             kind: .injectedForTests, sender: sender, notificationCenter: notificationCenter,
             permissionObservations: permissionObservations, reachability: reachability,
             backgroundGrant: backgroundGrant, lifecycleNotifications: lifecycleNotifications,
-            recognizer: recognizer)
+            recognizer: recognizer, readSession: readSession)
     }
     #endif
 }
@@ -273,21 +280,58 @@ final class CoreEventRouter: @unchecked Sendable {
     }
 }
 
-/// Reads an item's independent status facts from the core.
+/// Adapts the core handle to the read gate's verbs.
+private final class CoreHandleReadSource: PrivateReadSource {
+    private let core: CoreHandle
+
+    init(core: CoreHandle) {
+        self.core = core
+    }
+
+    func startStoreCheck(operationID: UInt64) throws {
+        try core.startStoreCheck(operationID: operationID)
+    }
+
+    func startGetCapture(operationID: UInt64, captureID: String) throws {
+        try core.startGetCapture(operationID: operationID, captureID: captureID)
+    }
+
+    func startItemStatus(operationID: UInt64, itemID: String) throws {
+        try core.startItemStatus(operationID: operationID, itemID: itemID)
+    }
+}
+
+/// Reads an item's independent status facts from the core, only through the private read gate: a capture-only session
+/// never reaches the core, and an answer that arrives after a relock is dropped undecoded.
 final class CoreItemStatusReader: @unchecked Sendable {
     static let firstOperationID: UInt64 = 1 << 57
 
     private static let unreadableAnswer = CoreFailure(
         errorClass: .permanent, code: "unreadable_event", message: "the core answer could not be read")
 
-    private let core: CoreHandle
+    private let gate: PrivateReadGate
     private let lock = NSLock()
     private var nextOperationID = CoreItemStatusReader.firstOperationID
     private var pending: [UInt64: (Result<ItemStatusReport, CoreFailure>) -> Void] = [:]
     private var isShutDown = false
 
-    init(core: CoreHandle) {
-        self.core = core
+    init(gate: PrivateReadGate) {
+        self.gate = gate
+    }
+
+    /// The content-free failure a refused read reports; it never says whether the item exists.
+    static func failure(for denial: PrivateReadDenied) -> CoreFailure {
+        switch denial {
+        case .sessionNotAuthenticated:
+            return CoreFailure(
+                errorClass: .unauthorized, code: "read_not_authenticated",
+                message: "reading requires an authenticated session")
+        case .relockedBeforeDelivery:
+            return CoreFailure(
+                errorClass: .unauthorized, code: "read_relocked", message: "the session relocked before the answer")
+        case .notAGatedRead:
+            return unreadableAnswer
+        }
     }
 
     func read(itemID: String, completion: @escaping (Result<ItemStatusReport, CoreFailure>) -> Void) {
@@ -302,12 +346,16 @@ final class CoreItemStatusReader: @unchecked Sendable {
         pending[operationID] = completion
         lock.unlock()
         do {
-            try core.startItemStatus(operationID: operationID, itemID: itemID)
+            try gate.startItemStatus(operationID: operationID, itemID: itemID)
         } catch {
             lock.lock()
             let claimed = pending.removeValue(forKey: operationID)
             lock.unlock()
-            claimed?(.failure((error as? CoreFailure) ?? CoreFailure.handleClosed))
+            if let denial = error as? PrivateReadDenied {
+                claimed?(.failure(Self.failure(for: denial)))
+            } else {
+                claimed?(.failure((error as? CoreFailure) ?? CoreFailure.handleClosed))
+            }
         }
     }
 
@@ -316,6 +364,13 @@ final class CoreItemStatusReader: @unchecked Sendable {
         let completion = pending.removeValue(forKey: event.operationID)
         lock.unlock()
         guard let completion else { return false }
+        do {
+            try gate.admit(operationID: event.operationID)
+        } catch {
+            let denial = (error as? PrivateReadDenied) ?? .notAGatedRead
+            completion(.failure(Self.failure(for: denial)))
+            return true
+        }
         switch event.outcome {
         case .failure(let failure):
             completion(.failure(failure))
@@ -387,6 +442,8 @@ public final class ServiceCompositionRoot {
     public let reminderReconciler: NotificationPermissionReconciler
 
     let adapters: CompositionAdapters
+    /// The session whose scope gates every private read the root performs.
+    var readSession: ReadAuthenticationSession { adapters.readSession }
     let coreHandle: CoreHandle
     let transcription: TranscriptionCapability
 
@@ -566,7 +623,8 @@ public final class ServiceCompositionRoot {
         }
     }
 
-    /// Reads an item's save, processing, transcription and reminder facts from the core.
+    /// Reads an item's save, processing, transcription and reminder facts from the core. Private: with a capture-only
+    /// session the read is refused with an `unauthorized` failure and never reaches the core.
     public func itemStatus(
         itemID: String,
         completion: @escaping (Result<ItemStatusReport, CoreFailure>) -> Void
@@ -671,7 +729,7 @@ public final class ServiceCompositionRoot {
                 throw CompositionError.duplicateModule(module.identifier)
             }
             let start = module.firstOperationID
-            guard start >= minimumModuleOperationID else {
+            guard start >= minimumModuleOperationID, start < JobRunnerService.firstOperationID else {
                 throw CompositionError.operationRangeConflict(module.identifier)
             }
             for other in claimed {
@@ -711,7 +769,8 @@ public final class ServiceCompositionRoot {
             router.register { importer.handle($0) }
             let ingress = try ForegroundIngressService(layout: layout, importer: importer, protection: protection)
 
-            let statusReader = CoreItemStatusReader(core: core)
+            let readGate = PrivateReadGate(session: adapters.readSession, source: CoreHandleReadSource(core: core))
+            let statusReader = CoreItemStatusReader(gate: readGate)
             router.register { statusReader.handle($0) }
             undo.append { statusReader.shutDown() }
 

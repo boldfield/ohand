@@ -137,6 +137,7 @@ final class CompositionRootTests: XCTestCase {
         XCTAssertTrue(root.adapters.permissionObservations is UserDefaultsNotificationPermissionObservationStore)
         XCTAssertTrue(root.adapters.lifecycleNotifications === NotificationCenter.default)
         XCTAssertNil(root.adapters.recognizer, "production uses the on-device speech recognizer")
+        XCTAssertEqual(root.readSession.scope, .captureOnly, "production reads start locked")
     }
 
     func testInjectedAdaptersAreMarkedAsTestOnly() throws {
@@ -170,12 +171,26 @@ final class CompositionRootTests: XCTestCase {
         XCTAssertTrue(module.isShutDown)
     }
 
+    func testModuleJustBelowTheJobRunnerRangeReceivesItsEvents() throws {
+        let module = RecordingModule(
+            identifier: "highest.accepted",
+            firstOperationID: JobRunnerService.firstOperationID - ServiceCompositionRoot.operationRangeWidth)
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), modules: [module])
+        defer { root.shutDown() }
+        try module.askCore()
+        XCTAssertTrue(
+            pump(until: { !module.receivedEvents.isEmpty }),
+            "an accepted module at the top of the allowed range is not shadowed by the job runner")
+    }
+
     func testModuleOperationRangesThatCollideAreRefused() throws {
         let sender = ScriptedProviderSender(reply: Data())
         let cases: [(String, [CompositionModule])] = [
             ("below the importer range", [RecordingModule(identifier: "a", firstOperationID: 1 << 10)]),
             ("the status reader range", [RecordingModule(identifier: "a", firstOperationID: 1 << 57)]),
             ("the job runner range", [RecordingModule(identifier: "a", firstOperationID: 1 << 62)]),
+            ("above the job runner start", [RecordingModule(identifier: "a", firstOperationID: 1 << 63)]),
+            ("the highest identifier", [RecordingModule(identifier: "a", firstOperationID: UInt64.max)]),
             ("the reminder range", [RecordingModule(identifier: "a", firstOperationID: 1 << 56)]),
             (
                 "another module's range",
@@ -289,7 +304,72 @@ final class CompositionRootTests: XCTestCase {
         }
     }
 
+    // MARK: private read gate
+
+    func testStatusReadIsRefusedWhileTheSessionIsLockedAndNeverReachesTheCore() throws {
+        let (session, _) = makeSession(authenticated: false)
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), readSession: session)
+        defer { root.shutDown() }
+
+        var result: Result<ItemStatusReport, CoreFailure>?
+        root.itemStatus(itemID: "any-item") { result = $0 }
+        guard case .failure(let failure)? = result else {
+            return XCTFail("a locked read fails at once: \(String(describing: result))")
+        }
+        XCTAssertEqual(failure.errorClass, .unauthorized)
+        XCTAssertEqual(failure.code, "read_not_authenticated")
+    }
+
+    func testStatusAnswerArrivingAfterARelockIsDroppedUndelivered() throws {
+        try prepareStore()
+        let (session, _) = makeSession(authenticated: true)
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), readSession: session)
+        defer { root.shutDown() }
+
+        var result: Result<ItemStatusReport, CoreFailure>?
+        root.itemStatus(itemID: "any-item") { result = $0 }
+        session.relock(.explicit)
+        XCTAssertTrue(pump(until: { result != nil }), "the read still completes")
+        guard case .failure(let failure)? = result else {
+            return XCTFail("a relocked answer is not delivered: \(String(describing: result))")
+        }
+        XCTAssertEqual(failure.errorClass, .unauthorized)
+        XCTAssertEqual(failure.code, "read_relocked")
+    }
+
+    func testStatusReadSucceedsOnlyAfterTheSessionAuthenticates() throws {
+        let (session, boundary) = makeSession(authenticated: false)
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), readSession: session)
+        defer { root.shutDown() }
+
+        var refused: Result<ItemStatusReport, CoreFailure>?
+        root.itemStatus(itemID: "any-item") { refused = $0 }
+        guard case .failure(let refusal)? = refused else {
+            return XCTFail("a locked read fails at once: \(String(describing: refused))")
+        }
+        XCTAssertEqual(refusal.code, "read_not_authenticated")
+
+        boundary.nextOutcome = .succeeded
+        XCTAssertEqual(authenticateAndWait(session), .authenticated)
+        var admitted: Result<ItemStatusReport, CoreFailure>?
+        root.itemStatus(itemID: "any-item") { admitted = $0 }
+        XCTAssertTrue(pump(until: { admitted != nil }))
+        if case .failure(let failure)? = admitted {
+            XCTAssertNotEqual(failure.errorClass, .unauthorized, "an authenticated read reaches the core")
+        }
+    }
+
     // MARK: helpers
+
+    /// A session over a fake boundary, already authenticated when `authenticated` is set.
+    private func makeSession(authenticated: Bool) -> (ReadAuthenticationSession, FakeReadAuthenticationBoundary) {
+        let boundary = FakeReadAuthenticationBoundary()
+        let session = ReadAuthenticationSession(boundary: boundary)
+        if authenticated {
+            XCTAssertEqual(authenticateAndWait(session), .authenticated)
+        }
+        return (session, boundary)
+    }
 
     private func makeConfiguration() -> CompositionConfiguration {
         CompositionConfiguration(
@@ -299,14 +379,16 @@ final class CompositionRootTests: XCTestCase {
     private func makeTestRoot(
         sender: ProviderRequestSender,
         notifications: NotificationCenterProviding = FakeNotificationCenter(),
+        readSession: ReadAuthenticationSession? = nil,
         modules: [CompositionModule] = []
     ) throws -> ServiceCompositionRoot {
-        try ServiceCompositionRoot(
+        let session = readSession ?? makeSession(authenticated: true).0
+        return try ServiceCompositionRoot(
             testing: makeConfiguration(),
             environment: CompositionEnvironment(
                 timeZone: { Self.captureTimeZone }, locale: { Locale(identifier: "en_US") }),
             adapters: .injectedForTests(
-                sender: sender, notificationCenter: notifications,
+                sender: sender, readSession: session, notificationCenter: notifications,
                 reachability: FakeReachability(reachable: true)),
             modules: modules)
     }
