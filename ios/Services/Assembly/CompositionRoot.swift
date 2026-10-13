@@ -130,12 +130,13 @@ public struct CompositionEnvironment: Sendable {
 
 /// What the root hands a module when it attaches. It deliberately carries no `CoreHandle`: the handle's read verbs are
 /// ungated, so a module reaches the core only through `clients` (clients whose verbs never return stored history, and
-/// that enforce their own authentication where they must) and `privateReads` (the gated read verbs).
+/// that enforce their own authentication where they must) and `privateReads` (the gated read verbs). It carries no
+/// storage location either, since the root's directory holds the core's protected stores, and no provider transport:
+/// the transport sends whatever origins a caller claims, so a module reaches a provider only through the job
+/// capabilities it contributes, which the job runner drives from the core's own route, grant and revocation decision.
 public struct CompositionContext {
     public let clients: CompositionCoreClients
     public let privateReads: CompositionPrivateReads
-    public let storageRootURL: URL
-    public let sender: ProviderRequestSender
     public let now: @Sendable () -> Date
 }
 
@@ -935,7 +936,7 @@ public final class ServiceCompositionRoot {
 
             let context = CompositionContext(
                 clients: CompositionCoreClients(core: core), privateReads: CompositionPrivateReads(gate: readGate),
-                storageRootURL: layout.rootDirectory, sender: adapters.sender, now: environment.now)
+                now: environment.now)
             for module in modules {
                 try module.attach(to: context)
                 undo.append { module.shutDown() }

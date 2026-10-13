@@ -179,6 +179,22 @@ final class CompositionRootTests: XCTestCase {
         XCTAssertTrue(module.isShutDown)
     }
 
+    func testModuleContextCarriesOnlyGatedAndCoreMediatedCapabilities() throws {
+        let module = RecordingModule(identifier: "boundary.probe", firstOperationID: 1 << 58)
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), modules: [module])
+        defer { root.shutDown() }
+        let context = try XCTUnwrap(module.context)
+        let fields = Mirror(reflecting: context).children.map { child -> (String, Any) in (child.label ?? "", child.value) }
+        XCTAssertEqual(
+            fields.map(\.0), ["clients", "privateReads", "now"],
+            "a new context field must not widen the seam past gated reads and core-mediated clients")
+        for (label, value) in fields {
+            XCTAssertFalse(value is CoreHandle, "\(label) hands a module the ungated core handle")
+            XCTAssertFalse(value is ProviderRequestSender, "\(label) hands a module the raw provider transport")
+            XCTAssertFalse(value is URL, "\(label) hands a module a path that can reach the core's stores")
+        }
+    }
+
     func testModuleReadIsRefusedWhileTheSessionIsLocked() throws {
         let (session, _) = makeSession(authenticated: false)
         let module = RecordingModule(identifier: "locked.reader", firstOperationID: 1 << 58)
