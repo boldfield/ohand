@@ -2479,6 +2479,10 @@
     {
       "date": "2026-10-12",
       "change": "Added F10: root-cause the intermittent NotificationProbe/CaptureProbe UI-test timeouts in the simulator job (five flakes on 2026-10-12); no retries or weakened assertions; five consecutive green executions required."
+    },
+    {
+      "date": "2026-10-13",
+      "change": "S02 interpretation item (6): error-path skips. A skip that follows a returned error (lost provenance for an effect that succeeded before the failure) is suppression, not a defect; only replay is blocking. S02 records provenance it holds before its next fallible call (release cancel_where cancels before reconcile_with_capacity) but does not change reconcile_with_capacity's error contract."
     }
   ]
 }
