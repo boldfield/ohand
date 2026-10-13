@@ -109,6 +109,8 @@ These could not be tested on Linux. The October 2026 run confirmed the following
 
 ## Evidence and validity
 
+### P08b: BridgeProbe signed build and install
+
 On 2026-10-09, the maintainer successfully built and installed BridgeProbe on a trial device using Xcode 26.6 (build 17F113) with a clean working tree. The signed build evidence is recorded in [`apple-signing-20261009T000932Z-c2cb6485.json`](./evidence/apple-signing/apple-signing-20261009T000932Z-c2cb6485.json):
 
 | Attribute | Value |
@@ -125,3 +127,29 @@ On 2026-10-09, the maintainer successfully built and installed BridgeProbe on a 
 **Install validity:** The BridgeProbe install is signed with a Development provisioning profile valid until 2027-10-09T00:08:01Z. A two-week trial must begin before 2027-09-25T00:08:01Z to complete before profile expiry. The trial build (T10) is covered only if signed with this same profile; per [m1-external-prerequisites.md](../features/m1-external-prerequisites.md#signed-build-evidence-for-p08b), that profile is a wildcard App ID with the same certificate and device.
 
 **Renewal:** The profile expires 2027-10-09T00:08:01Z. With an expiry approximately one year away at the time of collection, renewal is not planned within the trial window and remains untested.
+
+### P11b: OhAndApp signed build with embedded extension
+
+On 2026-10-12, the maintainer successfully built and installed OhAndApp on the trial device with the embedded `OhAndCaptureControl` extension using Xcode 26.6 (build 17F113) and a clean working tree. The signed build evidence is recorded in [`apple-signing-20261012T195208Z-441b7e77.json`](./evidence/apple-signing/apple-signing-20261012T195208Z-441b7e77.json):
+
+| Attribute | Value |
+| --- | --- |
+| Collection time | 2026-10-12T19:52:44Z |
+| Build revision | `4911be0994f48a5c79e5e9ce04a0c2f24d731176` |
+| Build identifier | `4911be09-441b7e77` |
+| Scheme | OhAndApp |
+| Device label | `maintainer-iphone` |
+| Main app bundle | `com.boldfield.ohand.app` |
+| Embedded extension bundle | `com.boldfield.ohand.app.capture-control` |
+| Profile expiry | 2027-10-09T00:08:01Z |
+| Install | succeeded |
+| Launch | succeeded, running confirmed |
+
+**Embedded bundles:** The record confirms both the application and the `OhAndCaptureControl` extension are embedded and signed:
+
+- `com.boldfield.ohand.app` (application) — profile expires 2027-10-09T00:08:01Z
+- `com.boldfield.ohand.app.capture-control` (app-extension) — profile expires 2027-10-09T00:08:01Z
+
+**Install and launch validity:** The OhAndApp install succeeded with `install.succeeded` true and the app launched successfully with `launch.running_confirmed` true, confirming the app with embedded extension can be installed and launched on a real device. The maintainer observed the Oh And control in the Control Center gallery (per evidence commit 421abb8).
+
+**Trial validity for T06 and T10:** The OhAndApp signed build proves the production bundle layout and signing route with a Development profile valid until 2027-10-09T00:08:01Z. A two-week trial (T10) must begin before 2027-09-25T00:08:01Z to complete before profile expiry. Per the maintainer evidence (commit 421abb8), one wildcard Development profile covers both bundle identifiers (`com.boldfield.ohand.app` and `com.boldfield.ohand.app.capture-control`); the embedded bundles table confirms both have the same profile expiry of 2027-10-09T00:08:01Z.
