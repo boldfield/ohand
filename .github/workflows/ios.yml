@@ -78,6 +78,26 @@ jobs:
             -resultBundlePath .evidence/OhAndTests.xcresult \
             CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= 2>&1 | tee .evidence/OhAndTests.log
 
+      - name: TEMPORARY F12 repetition evidence (reverted before merge)
+        shell: bash
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+        run: |
+          set -euo pipefail
+          cd ios
+          xcodebuild test \
+            -project OhAnd.xcodeproj \
+            -scheme OhAndTests \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
+            -derivedDataPath .derived \
+            -resultBundlePath .evidence/OhAndTests-F12-iterations.xcresult \
+            -only-testing:OhAndTests/NotificationBridgeBoundednessTests/testAScheduleThatFailsWhileAnEarlierRestoreIsSuspendedKeepsTheRecordedRequest \
+            -only-testing:OhAndTests/FakeNotificationCenterConcurrencyTests \
+            -test-iterations 200 -run-tests-until-failure \
+            CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= 2>&1 | tee .evidence/OhAndTests-F12-iterations.log
+
       - name: Run credential cross-process relaunch check
         shell: bash
         env:
