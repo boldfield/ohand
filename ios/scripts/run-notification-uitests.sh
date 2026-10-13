@@ -16,7 +16,7 @@ cd "${script_dir}/.."
 overall_status=0
 
 for suite in "${suites[@]}"; do
-  "${script_dir}/prepare-simulator.sh" "${udid}" --erase "${evidence_dir}/${suite}.prepare.log"
+  "${script_dir}/prepare-simulator.sh" "${udid}" --erase
   rm -rf "${evidence_dir}/${suite}.xcresult"
   suite_status=0
   xcodebuild test \

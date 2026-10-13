@@ -54,16 +54,12 @@ final class CaptureProbeHandoffUITests: XCTestCase {
 
     private func sendAppToBackground() {
         XCUIDevice.shared.press(.home)
-        // Read the state in a loop and judge the value that was read, not the time the read took: on a loaded runner a
-        // single state read can block for longer than any fixed wait, and an XCTNSPredicateExpectation reports a
-        // timeout for a predicate that was already true once that read returned.
-        let deadline = Date().addingTimeInterval(30)
-        var leftForeground = false
-        repeat {
-            leftForeground = app.state != .runningForeground
-            if !leftForeground { Thread.sleep(forTimeInterval: 0.5) }
-        } while !leftForeground && Date() < deadline
-        XCTAssertTrue(leftForeground, "app never left the foreground; state \(app.state.rawValue)")
+        // Spin the run loop: XCTest delivers app state changes on the main queue, and a predicate wait can lose its deadline to an accessibility snapshot.
+        let deadline = Date().addingTimeInterval(15)
+        while app.state == .runningForeground && Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        }
+        XCTAssertNotEqual(app.state, .runningForeground, "app never left the foreground")
     }
 
     private var statusLabel: XCUIElement { app.staticTexts["capture-status"] }

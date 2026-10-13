@@ -249,7 +249,7 @@ jobs:
           set -euo pipefail
           echo "Capture smoke device: ${SIMULATOR_NAME} (iOS ${SIMULATOR_RUNTIME}, UDID ${SIMULATOR_UDID})"
           cd ios
-          ./scripts/prepare-simulator.sh "${SIMULATOR_UDID}" --erase .evidence/capture-prepare.log
+          ./scripts/prepare-simulator.sh "${SIMULATOR_UDID}" --erase
           ./scripts/smoke-capture-simulator.sh \
             "${SIMULATOR_UDID}" \
             com.boldfield.ohand.probes.capture \
