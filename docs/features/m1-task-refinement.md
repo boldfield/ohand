@@ -95,6 +95,21 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
 
 - F12 added (coordinator, 2026-10-13). On F10's head `1b04f01` (run 38462101769, attempt 1, job 115519616876), the `OhAndTests` host process stopped in `NotificationBridgeBoundednessTests.testAScheduleThatFailsWhileAnEarlierRestoreIsSuspendedKeepsTheRecordedRequest`. The test started at 20:32:26 and printed nothing until "Restarting after unexpected exit, crash, or test timeout" at 20:33:04. The test uses a 50 ms effect timeout and test gates. Whether this is a test race or a bridge defect is unknown. F12 diagnoses it and fixes the cause.
 
+- L05b credential-claim fence and allowance (coordinator, 2026-10-13, after PR #206 round 2). Both reviewers found the same race. `removeCredentialsIfChosen` takes one `profileCredentials` snapshot, awaits the profile revocations, and only then deletes Keychain items. A profile version created in that window that keeps a bound reference without re-entering the secret is missing from the snapshot, so it loses its credential. No production profile-write path exists yet: U05a and U05b add it. Criterion 2 must still hold by construction, so the fence lives in storage, not in a future caller's discipline.
+  - (1) **Allowance.** In `core/src/store/schema/mod.rs`, only one appended migration step (v9 → v10). It creates `reset_credential_claims(credential_ref TEXT PRIMARY KEY, generation INTEGER NOT NULL REFERENCES reset_generations(generation))` and two triggers, `BEFORE INSERT ON provider_profiles` and `BEFORE UPDATE OF credential_ref ON provider_profiles`. Each does `RAISE(ABORT, 'credential_pending_removal')` when the new row's `credential_ref` is claimed. `validate_schema_shape` already covers triggers. The step gets a migration test in `core/tests/migrations/`. Core functions to claim, list and release claims go in `core/src/ffi/reset.rs` (already in the PR), with their Swift bridge. Nothing else outside L05b's owned paths is covered.
+  - (2) **Protocol.**
+    - (a) **Claim.** One core transaction reads the current profiles and inserts a claim for each bound secret reference that no unbound profile holds. References already held by a later profile are left unclaimed and are never deleted.
+    - (b) Revoke the bound profiles.
+    - (c) Delete the Keychain item for each **claimed** reference, conditional on its tap identity as now.
+    - (d) Release the claims in one transaction, together with clearing the removal request, only after every deletion is acknowledged.
+    - Resume after a crash or a failure uses the persisted claim set as the authority, not a new snapshot. A profile write that reuses a claimed reference is refused by storage with `credential_pending_removal` until (d).
+  - (3) **Review surface.**
+    - A real-core test inserts a later profile that reuses a reference after the claim returns and before `deleteCredential`, and asserts the insert is refused and nothing else changes.
+    - A real-core test shows that a profile inserted before the claim keeps its reference unclaimed and its secret.
+    - The migration test covers both triggers.
+    - Out of scope: how U05a and U05b present the refusal (re-enter the secret under a new reference, or retry after reset), and profile-write UX.
+- T11 prerequisites (coordinator, 2026-10-13, after T11 blocked itself on main 67f85fd). The core FFI never dispatches the self-hosted protocol. `core/src/ffi/provider_transport.rs:692` and `:761` and `shadow_review.rs:535` return `unsupported_protocol`, and `core/src/ffi/job_runner.rs:776` registers only the Anthropic and OpenAI adapters. Also, `ServiceCompositionRoot` never calls `ProviderExchangeCoordinator.attach`, so a module cannot dispatch a shadow review. Both gaps are outside T11's owned paths. T11a (core) and T11b (root seam) close them, and T11 now depends on both.
+
 - V06 and V07 now depend on V01 alone: they implement Rust adapters against its transport interface using fixtures. V05 is the native effect implementation and remains required by app composition/integration, not by independent protocol adapter implementation. This is an explicit dependency override for those retained tasks.
 
 ## Why some tasks stay together
@@ -546,6 +561,42 @@ Acceptance:
 4. `make check` and `make test` pass. Required macOS CI evidence per AGENTS.md is linked.
 
 Source pointers: `ios/Tests/Notifications/NotificationBridgeBoundednessTests.swift:449`; `ios/Services/Notifications/NotificationBridge.swift`.
+
+### T11a
+
+Dispatch the verified self-hosted protocol through the core FFI
+
+Make self-hosted profiles reachable from the native job runner, provider exchange and shadow review, under the same routing and credential rules as the other protocols.
+
+Owned paths: `core/src/ffi/provider_transport.rs`, `core/src/ffi/provider_transport/` (including `shadow_review.rs` and tests), `core/src/ffi/job_runner.rs`, `core/src/ffi/job_runner/`.
+
+Dependencies: V09.
+
+Acceptance:
+
+1. `prepare` and `run_exchange` in `provider_transport.rs`, shadow-review dispatch, and the job runner's `AdapterRegistry` dispatch `ProviderProtocol::SelfHosted` through `SelfHostedAdapter`. The `unsupported_protocol` refusals for self-hosted are removed.
+2. The checks are exactly those of the other protocols: execution resolution, authorized destinations, the credential reference matching the profile, stale source, revocation, and redaction. A self-hosted profile without its own valid https endpoint is rejected before anything is sent. There is no default or fallback endpoint.
+3. Tests with a synthetic transport cover a successful self-hosted interpretation exchange, a job-runner dispatch and a shadow-review dispatch. They also cover a missing endpoint, an unauthorized destination and a revoked profile, each refused with nothing sent. Existing tests for the other protocols are unchanged and pass. `make check` and `make test` pass.
+
+Source pointers: `core/src/ffi/provider_transport.rs:692`, `:761`; `core/src/ffi/provider_transport/shadow_review.rs:535`; `core/src/ffi/job_runner.rs:776`; `core/src/providers/self_hosted/mod.rs:200`.
+
+### T11b
+
+Attach core-mediated provider transport at the composition root
+
+Let the production root attach the provider exchange transport to its core handle, so shadow review and other core-mediated exchanges can dispatch. Modules still get no raw `CoreHandle`.
+
+Owned paths: `ios/Services/Assembly/CompositionRoot.swift`, `ios/Tests/Services/CompositionRootTests.swift`.
+
+Dependencies: B03 (its PR edits `CompositionRoot.swift`).
+
+Acceptance:
+
+1. The root calls `ProviderExchangeCoordinator.attach(to:sender:)` once, on its own `CoreHandle` with the production `ProviderRequestSender`, during assembly. This runs under the root's existing undo-on-failure. The DEBUG test path injects a fake sender.
+2. Modules get no raw `CoreHandle` and no `ProviderRequestSender`. A module that needs shadow review gets it through the existing typed `CompositionCoreClients` surface (B02 round-2 rule). Private reads stay behind `PrivateReadGate`.
+3. A root test shows that a module calling `shadowReview()` can dispatch a review through the attached transport to a fake sender. A test shows a dispatch before attach, or with attach failing, is refused (`transport_not_registered`) and leaves the root assembled or cleanly undone. Existing `CompositionRootTests` pass. Required macOS CI evidence per AGENTS.md is linked.
+
+Source pointers: `ios/Services/ProviderTransport/ProviderExchangeCoordinator.swift:33`; `ios/Services/Assembly/CompositionRoot.swift`.
 
 ### I05b
 
