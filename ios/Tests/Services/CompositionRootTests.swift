@@ -65,6 +65,8 @@ private final class RecordingModule: CompositionModule {
 
 final class CompositionRootTests: XCTestCase {
     private static let routeID = "route-composition"
+    /// The core requires a proposal's zone to equal the capture's, so the reply reads the identifier the root stamps.
+    private static let captureTimeZone = TimeZone(identifier: "UTC")!
     private static let profileVersion = "4b7a1bfe-88ff-4ba7-848e-a45069cf9081"
     private static let requestVersion = "5a1c0000-0000-4000-8000-0000000000a2"
     /// "about the quarterly estimate" is outside the offline grammar's closed content lexicon, so the offline fast path
@@ -302,7 +304,7 @@ final class CompositionRootTests: XCTestCase {
         try ServiceCompositionRoot(
             testing: makeConfiguration(),
             environment: CompositionEnvironment(
-                timeZone: { TimeZone(identifier: "UTC")! }, locale: { Locale(identifier: "en_US") }),
+                timeZone: { Self.captureTimeZone }, locale: { Locale(identifier: "en_US") }),
             adapters: .injectedForTests(
                 sender: sender, notificationCenter: notifications,
                 reachability: FakeReachability(reachable: true)),
@@ -401,7 +403,7 @@ final class CompositionRootTests: XCTestCase {
             "source_spans": [["start": 0, "end": Self.captureText.count]],
             "reminder_proposal": [
                 "instant": "2099-01-15T11:00:00Z",
-                "timezone_id": "UTC",
+                "timezone_id": Self.captureTimeZone.identifier,
                 "quality": "explicit",
                 "source_span": ["start": phraseStart, "end": phraseEnd],
             ],
