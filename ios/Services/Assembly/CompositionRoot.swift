@@ -736,6 +736,19 @@ public final class ServiceCompositionRoot {
         permissionObserver.start(isActive: isActive)
     }
 
+    /// Imports every capture a previous run left staged and reports what was found; `nil` once the root is shut down.
+    /// Safe to repeat. Call on the main queue; the completion arrives there.
+    func recoverStagedIngress(completion: @escaping (IngressRecoveryReport?) -> Void) {
+        stateLock.lock()
+        let service = ingress
+        stateLock.unlock()
+        guard let service else {
+            completion(nil)
+            return
+        }
+        service.recover { completion($0) }
+    }
+
     /// Stops everything the root started and closes the core. Idempotent. Captures still waiting for the core stay
     /// staged on disk and are imported by the next run. Must not be called from a core callback.
     public func shutDown() {
