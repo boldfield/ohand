@@ -142,14 +142,16 @@ public struct CompositionContext {
 
 /// Builds the core-backed clients a module owns, without handing the module the core handle itself. Each client takes
 /// the operation identifier range it documents; a module forwards the events of that range to the client's `handle`.
+///
+/// Only clients whose callers cannot claim a read authorization they do not hold belong here. The raw export and
+/// metrics clients take the caller's word that reads are authenticated, and the raw notification action client
+/// completes and resolves reminders without the authenticated session `ActionHandler` requires, so none of them is
+/// offered: a capability that needs one is built over the root's read session, never from this factory.
 public struct CompositionCoreClients {
     fileprivate let core: CoreHandle
 
     public func audioRetention() -> CoreAudioRetentionClient { CoreAudioRetentionClient(core: core) }
     public func deletionCleanup() -> CoreDeletionCleanupClient { CoreDeletionCleanupClient(core: core) }
-    public func export() -> CoreExportClient { CoreExportClient(core: core) }
-    public func metrics() -> CoreMetricsClient { CoreMetricsClient(core: core) }
-    public func notificationActions() -> CoreNotificationActionClient { CoreNotificationActionClient(core: core) }
     public func processingHealth(stallAfterSeconds: UInt32 = 0, leaseGraceSeconds: UInt32 = 0) -> ProcessingHealthService {
         ProcessingHealthService(core: core, stallAfterSeconds: stallAfterSeconds, leaseGraceSeconds: leaseGraceSeconds)
     }
