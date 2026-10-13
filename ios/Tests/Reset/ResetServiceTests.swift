@@ -179,22 +179,96 @@ final class ResetServiceTests: ResetTestCase {
         XCTAssertEqual(world.core.startCalls, 0)
     }
 
-    func testAPendingResetIsResumedWithoutImportingOrPurgingStagingAgain() async throws {
+    func testASecondTapWhileAnEarlierResetIsPendingFinishesThatOneThenErasesWhatExistedAtTheSecondTap() async throws {
         let world = try makeResetWorld()
         try await seedVoiceAndTextCaptures(world)
         world.faults.arm("fs.remove:cap-1.m4a")
-        _ = await world.makeService().reset(credentialChoice: .keep)
-        XCTAssertEqual(world.staging.snapshotCalls, 1)
+        let first = await world.makeService().reset(credentialChoice: .keep)
+        XCTAssertEqual(first.state, .pending)
+        XCTAssertEqual(world.core.currentGeneration, 1)
 
-        world.staging.stage("cap-post-tap")
+        try await world.seedItem("item-between", captureID: "cap-between", stagedRecord: .text)
+        world.staging.stage("cap-staged-between")
         let second = await world.makeService().reset(credentialChoice: .keep)
 
-        XCTAssertTrue(second.isComplete)
-        XCTAssertEqual(world.staging.purgedCaptureIDs, [], "staging written after the first tap is not purged by a retry")
-        XCTAssertEqual(world.staging.importedCaptureIDs, [])
-        XCTAssertEqual(world.staging.staged, ["cap-post-tap"])
-        XCTAssertFalse(world.staging.isHolding, "the boundary a retry took is released")
-        XCTAssertEqual(world.core.currentGeneration, 1, "a second tap while pending never opens another generation")
+        XCTAssertTrue(second.isComplete, "blockers: \(second.blockers)")
+        XCTAssertEqual(second.progress?.generation, 2, "the second tap opened its own generation once the first completed")
+        XCTAssertEqual(world.core.currentGeneration, 2)
+        assertEverythingErased(world)
+        XCTAssertTrue(world.deletion.core.isDeletionComplete("item-between"), "a capture that existed at the second tap is erased")
+        XCTAssertEqual(world.deletion.remnants(of: "cap-between"), [])
+        XCTAssertEqual(world.staging.purgedCaptureIDs, ["cap-staged-between"], "staging listed at the second tap is drained")
+        XCTAssertEqual(world.staging.staged, [])
+        XCTAssertNil(world.choice.recordedRequest)
+        XCTAssertFalse(world.staging.isHolding)
+        let events = world.log.events
+        let advances = events.indices.filter { events[$0] == "core.advance" }
+        XCTAssertEqual(advances.count, 3, "the first tap's, the earlier generation's completion and the second tap's")
+        let secondImport = try XCTUnwrap(events.lastIndex(of: "staging.import"))
+        XCTAssertLessThan(advances[1], secondImport, "the earlier generation completed before the second tap's staging ran")
+    }
+
+    func testASecondTapWaitsForAnEarlierResetThatCannotCompleteWithoutReportingSuccess() async throws {
+        let world = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(world)
+        configureProfiles(world)
+        world.faults.arm("fs.remove:cap-1.m4a")
+        _ = await world.makeService().reset(credentialChoice: .keep)
+        world.staging.stage("cap-staged-between")
+        world.faults.arm("fs.remove:cap-1.m4a")
+
+        let waiting = await world.makeService().reset(credentialChoice: .remove)
+
+        XCTAssertEqual(waiting.state, .pending)
+        XCTAssertTrue(waiting.blockers.contains(.coreResetPending), "blockers: \(waiting.blockers)")
+        XCTAssertEqual(waiting.progress?.generation, 1)
+        XCTAssertEqual(world.core.startCalls, 1, "no generation is started for the second tap while the first is pending")
+        XCTAssertEqual(world.choice.recordedRequest?.credentialChoice, .remove, "the second tap stays recorded")
+        XCTAssertEqual(world.choice.recordedRequest?.awaitsEarlierReset, true)
+        XCTAssertEqual(world.staging.staged, ["cap-staged-between"], "nothing of the second tap is drained yet")
+        XCTAssertTrue(world.staging.isHolding, "the second tap keeps its boundary held")
+        XCTAssertEqual(world.credentials.removedReferences, [], "the second tap's choice is not acted on before its generation")
+
+        world.relaunch()
+        let resumed = await world.makeService().resume()
+
+        XCTAssertTrue(resumed.isComplete, "blockers: \(resumed.blockers)")
+        XCTAssertEqual(resumed.progress?.generation, 2)
+        XCTAssertEqual(world.staging.purgedCaptureIDs, ["cap-staged-between"])
+        XCTAssertEqual(Set(world.credentials.removedReferences), ["ref-a", "ref-b"])
+        XCTAssertNil(world.choice.recordedRequest)
+        assertEverythingErased(world)
+    }
+
+    func testARestartWithASecondTapRecordedWhileTheEarlierResetWasPendingNeverTakesThatResetForItsOwn() async throws {
+        for point in ["none", "staging.import", "staging.purge", "before.start", "after.start"] {
+            let world = try makeResetWorld()
+            try await seedVoiceAndTextCaptures(world)
+            world.faults.arm("fs.remove:cap-1.m4a")
+            _ = await world.makeService().reset(credentialChoice: .keep)
+            try await world.seedItem("item-between", captureID: "cap-between", stagedRecord: .text)
+            world.staging.stage("cap-staged-between")
+            let context = "crash at \(point)"
+
+            if point == "none" {
+                // A kill right after the tap was recorded: the earlier generation is still pending.
+                let snapshot = try await world.staging.snapshot()
+                try world.choice.recordRequest(ResetRequest(
+                    credentialChoice: .keep, stagedBeforeTheTap: snapshot, awaitsEarlierReset: true))
+            } else {
+                await crashDuringReset(world, at: point, choice: .keep)
+                XCTAssertNotNil(world.choice.recordedRequest, context)
+            }
+            world.relaunch()
+            let resumed = await world.makeService().resume()
+
+            XCTAssertTrue(resumed.isComplete, "\(context): \(resumed.blockers)")
+            XCTAssertEqual(resumed.progress?.generation, 2, context)
+            XCTAssertTrue(world.deletion.core.isDeletionComplete("item-between"), context)
+            XCTAssertEqual(world.staging.staged, [], context)
+            XCTAssertNil(world.choice.recordedRequest, context)
+            assertEverythingErased(world)
+        }
     }
 
     // MARK: Ingress boundary

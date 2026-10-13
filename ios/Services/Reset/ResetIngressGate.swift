@@ -61,11 +61,19 @@ final class ResetIngressGate: ForegroundIngressImporting {
         })
     }
 
-    /// Starts holding the boundary. `stagedBeforeTheTap` are the captures the reset itself imports or purges; they pass
-    /// through, every other import waits for `release`.
+    /// Starts holding the boundary, or moves it to a later tap. `stagedBeforeTheTap` are the captures the reset itself
+    /// imports or purges; they pass through, every other import waits for `release`. An import already waiting here for a
+    /// capture the new list names is pre-tap input of this tap, so it is started now: the reset's own import of that
+    /// capture joins the attempt in flight and must not wait for a release that only follows the reset.
     func hold(stagedBeforeTheTap: Set<String>) {
         isHolding = true
         capturesStagedBeforeTheTap = stagedBeforeTheTap
+        let nowListed = parked.filter { stagedBeforeTheTap.contains($0.record.captureID) }
+        guard !nowListed.isEmpty else { return }
+        parked.removeAll { stagedBeforeTheTap.contains($0.record.captureID) }
+        for pending in nowListed {
+            forward(pending.record, completion: pending.completion)
+        }
     }
 
     /// Ends the hold and starts every parked import, in the order they arrived. Safe to call when nothing is held.

@@ -323,6 +323,66 @@ final class ResetCoreIntegrationTests: XCTestCase {
         XCTAssertFalse(try world.isCredentialPresent(reference))
     }
 
+    func testATapWhileAnEarlierTapHoldsAWaitingCaptureTreatsItAsPreTapInputAndReturns() throws {
+        let world = try makeWorld()
+        _ = try seedCaptures(world)
+        let runtime = try world.launch()
+        // A tap that stays recorded (as after a report that kept it) holds the boundary at its list.
+        let earlierTap = try runtime.recordTap(.keep)
+        XCTAssertFalse(earlierTap.stagedBeforeTheTap.captureIDs.contains("cap-waiting"))
+        var waitingOutcome: IngressOutcome?
+        runtime.submitLater(world.textRecord("cap-waiting")) { waitingOutcome = $0 }
+        XCTAssertTrue(runtime.session.pump(until: { !world.storage.remnants(of: "cap-waiting").isEmpty }))
+        _ = runtime.session.pump(until: { waitingOutcome != nil }, timeout: 0.5)
+        XCTAssertNil(waitingOutcome, "the capture waits at the earlier tap's boundary")
+        XCTAssertEqual(runtime.gate?.heldImportCount, 1)
+
+        let report = try runtime.reset(.keep)
+
+        XCTAssertEqual(report.state, .completed, "blockers: \(report.blockers)")
+        XCTAssertEqual(try runtime.currentGeneration(), 1)
+        XCTAssertTrue(runtime.session.pump(until: { waitingOutcome != nil }))
+        guard case .saved(let acknowledgment)? = waitingOutcome else {
+            return XCTFail("the waiting capture's import completes: \(String(describing: waitingOutcome))")
+        }
+        XCTAssertEqual(
+            try runtime.generation(ofItem: acknowledgment.itemID), 0,
+            "it existed at the new tap, so it is pre-reset content")
+        XCTAssertEqual(world.storage.remnants(of: "cap-waiting"), [])
+        XCTAssertEqual(runtime.session.importAndWait(world.textRecord("cap-waiting")), .failed(.itemDeleted))
+        XCTAssertEqual(runtime.gate?.heldImportCount, 0)
+        XCTAssertNil(try runtime.markers.request())
+    }
+
+    func testASecondTapWhileTheEarlierResetIsPendingErasesWhatExistedAtTheSecondTap() throws {
+        let world = try makeWorld()
+        _ = try seedCaptures(world)
+        let runtime = try world.launch()
+        world.storage.faults.arm("core.complete.remove_audio")
+        let first = try runtime.reset(.keep)
+        XCTAssertEqual(first.state, .pending)
+        XCTAssertEqual(first.progress?.phase, .pending)
+        let between = try runtime.capture(world.textRecord("cap-between"))
+        XCTAssertEqual(try runtime.generation(ofItem: between), 1, "made after the first tap, so fresh for it")
+        try world.stageTextRecord(captureID: "cap-staged-between")
+
+        let second = try runtime.reset(.keep)
+
+        XCTAssertEqual(second.state, .completed, "blockers: \(second.blockers)")
+        XCTAssertEqual(second.progress?.generation, 2, "the second tap opened its own generation")
+        XCTAssertEqual(try runtime.currentGeneration(), 2)
+        for captureID in ["cap-1", "cap-2", "cap-staged", "cap-between", "cap-staged-between"] {
+            XCTAssertEqual(world.storage.remnants(of: captureID), [], "no file of \(captureID) remains")
+        }
+        XCTAssertEqual(try runtime.generation(ofItem: between), 1)
+        XCTAssertEqual(
+            runtime.session.importAndWait(world.textRecord("cap-between")), .failed(.itemDeleted),
+            "a capture that existed at the second tap is fenced by its reset")
+        XCTAssertEqual(runtime.session.importAndWait(world.textRecord("cap-staged-between")), .failed(.itemDeleted))
+        XCTAssertNil(try runtime.markers.request())
+        XCTAssertFalse(try runtime.markers.isCleanupOutstanding())
+    }
+
     // MARK: Interruption
 
     func testAnInterruptedResetStaysPendingThenFinishesAfterARelaunchWithoutRestoringContent() throws {

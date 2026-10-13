@@ -125,8 +125,9 @@ final class ExportTemporaryCleaner: ResetExportTemporaries {
 /// Keeps the reset markers as small files in the protected temporary store. The choice and cleanup markers hold no
 /// secret, identifier or generation; their existence is the marker.
 ///
-/// A recorded tap is a numbered file holding the credential choice and the capture identifiers staged at the tap (local
-/// identifiers that already name files in the same protected store; never content, paths or a generation). The highest
+/// A recorded tap is a numbered file holding the credential choice, the capture identifiers staged at the tap (local
+/// identifiers that already name files in the same protected store; never content, paths or a generation) and whether
+/// it awaits an earlier pending reset. The highest
 /// number is the request. A new tap is written in full under the next number before the earlier files are removed, so
 /// an interruption or a failure at any point leaves either the earlier tap or the new one as the latest, never no
 /// request and never an older choice in place of a newer one. Clearing removes the oldest first, so whatever survives a
@@ -139,6 +140,7 @@ final class FileResetMarkerStore: ResetMarkerStore {
     private struct StoredRequest: Codable {
         let credentialChoice: String
         let stagedBeforeTheTap: [String]
+        let awaitsEarlierReset: Bool?
     }
 
     struct UnreadableRequest: Error {}
@@ -165,14 +167,16 @@ final class FileResetMarkerStore: ResetMarkerStore {
         default: throw UnreadableRequest()
         }
         return ResetRequest(
-            credentialChoice: choice, stagedBeforeTheTap: ResetStagingSnapshot(captureIDs: Set(stored.stagedBeforeTheTap)))
+            credentialChoice: choice, stagedBeforeTheTap: ResetStagingSnapshot(captureIDs: Set(stored.stagedBeforeTheTap)),
+            awaitsEarlierReset: stored.awaitsEarlierReset ?? false)
     }
 
     func recordRequest(_ request: ResetRequest) throws {
         let earlier = try requestNumbers()
         let stored = StoredRequest(
             credentialChoice: request.credentialChoice == .remove ? "remove" : "keep",
-            stagedBeforeTheTap: request.stagedBeforeTheTap.captureIDs.sorted())
+            stagedBeforeTheTap: request.stagedBeforeTheTap.captureIDs.sorted(),
+            awaitsEarlierReset: request.awaitsEarlierReset)
         try fileSystem.writeDurably(try JSONEncoder().encode(stored), to: requestURL((earlier.last ?? 0) + 1))
         // The new tap is now the latest. An earlier file that cannot be removed here is never read again, and the next
         // clear removes it before the latest.

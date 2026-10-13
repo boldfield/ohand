@@ -238,8 +238,16 @@ final class FakeResetStaging: ResetIngressStaging {
         try faults.check("staging.snapshot")
         let taken = ResetStagingSnapshot(captureIDs: staged)
         isHolding = true
+        forwardHeld(namedBy: taken)
         onSnapshot?()
         return taken
+    }
+
+    /// As at the production gate: a waiting capture the new list names is pre-tap input of that tap, so it proceeds now.
+    private func forwardHeld(namedBy snapshot: ResetStagingSnapshot) {
+        let listed = heldCaptureIDs.filter { snapshot.captureIDs.contains($0) }
+        heldCaptureIDs.removeAll { snapshot.captureIDs.contains($0) }
+        for captureID in listed { importLive(captureID) }
     }
 
     /// A process start, as the production ingress gate is created: a capture that was waiting is still staged and is
@@ -257,6 +265,7 @@ final class FakeResetStaging: ResetIngressStaging {
         log.append("staging.hold")
         heldSnapshots.append(snapshot)
         isHolding = true
+        forwardHeld(namedBy: snapshot)
     }
 
     func endBoundary() {

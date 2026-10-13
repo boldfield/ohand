@@ -61,6 +61,39 @@ final class ResetIngressGateTests: IngressStorageTestCase {
         guard case .saved(_)? = outcome else { return XCTFail("an unheld gate imports at once: \(String(describing: outcome))") }
     }
 
+    func testALaterTapStartsTheWaitingImportsItListsAndKeepsHoldingTheRest() throws {
+        let importer = FakeForegroundIngressImporter()
+        importer.results = [FakeForegroundIngressImporter.confirmation("cap-listed", itemID: "item-listed")]
+        importer.holdsCompletions = true
+        let (service, gate) = try makeGatedService(importer: importer)
+        gate.hold(stagedBeforeTheTap: [])
+
+        var parkedOutcome: IngressOutcome?
+        var laterOutcome: IngressOutcome?
+        service.submit(textRecord("cap-listed")) { parkedOutcome = $0 }
+        service.submit(textRecord("cap-later")) { laterOutcome = $0 }
+        XCTAssertEqual(gate.heldImportCount, 2)
+        XCTAssertEqual(importer.importedRecords.map { $0.captureID }, [])
+
+        gate.hold(stagedBeforeTheTap: ["cap-listed"])
+
+        XCTAssertEqual(
+            importer.importedRecords.map { $0.captureID }, ["cap-listed"],
+            "a waiting capture the new tap lists is its pre-tap input, so its import starts at once")
+        XCTAssertEqual(gate.heldImportCount, 1, "a waiting capture the new tap does not list keeps waiting")
+
+        // The reset's own import of the listed capture joins the attempt in flight, which no release has to unblock.
+        var resetImportOutcome: IngressOutcome?
+        service.submit(textRecord("cap-listed")) { resetImportOutcome = $0 }
+        importer.release()
+
+        guard case .saved(_)? = resetImportOutcome, case .saved(_)? = parkedOutcome else {
+            return XCTFail("both completions of the listed capture arrive without a release: \(String(describing: resetImportOutcome)), \(String(describing: parkedOutcome))")
+        }
+        XCTAssertNil(laterOutcome)
+        XCTAssertEqual(importer.importedRecords.map { $0.captureID }, ["cap-listed"], "one import served both")
+    }
+
     // MARK: Launch
 
     func testAGateCreatedWhileATapIsRecordedHoldsFromLaunchAtTheRecordedList() throws {

@@ -271,7 +271,10 @@ final class RealCoreResetRuntime {
     func recordTap(_ choice: ResetCredentialChoice) throws -> ResetRequest {
         let staging = ResetUncheckedBox(try XCTUnwrap(self.staging))
         let snapshot = try session.run { try await staging.value.snapshot() }
-        let request = ResetRequest(credentialChoice: choice, stagedBeforeTheTap: snapshot)
+        let client = session.resetClient
+        let current = try session.run { try await client.status() }
+        let request = ResetRequest(
+            credentialChoice: choice, stagedBeforeTheTap: snapshot, awaitsEarlierReset: current?.phase == .pending)
         try markers.recordRequest(request)
         return request
     }

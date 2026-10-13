@@ -61,9 +61,21 @@ struct ResetStagingSnapshot: Equatable {
 /// credential choice and the staged inputs that existed at the tap. The list is the durable form of the tap's moment, so
 /// a restart treats exactly what the tap would have as pre-reset input and every later capture as fresh-generation
 /// content.
+///
+/// A tap made while an earlier generation is still pending `awaitsEarlierReset`: resuming that generation only erases
+/// what existed at the earlier tap, so this tap first lets it finish and then opens a generation of its own for its list.
+/// The flag is what tells a restart that a pending generation is the earlier one rather than one this tap already
+/// started; it is cleared, by recording the tap again without it, once the earlier generation completed.
 struct ResetRequest: Equatable {
     let credentialChoice: ResetCredentialChoice
     let stagedBeforeTheTap: ResetStagingSnapshot
+    let awaitsEarlierReset: Bool
+
+    init(credentialChoice: ResetCredentialChoice, stagedBeforeTheTap: ResetStagingSnapshot, awaitsEarlierReset: Bool = false) {
+        self.credentialChoice = credentialChoice
+        self.stagedBeforeTheTap = stagedBeforeTheTap
+        self.awaitsEarlierReset = awaitsEarlierReset
+    }
 }
 
 /// The outcome of purging staged inputs that were written before the tap and are still unimported.
@@ -115,7 +127,8 @@ extension CredentialService: ResetCredentialRemoving {}
 /// hold a choice and flags, never a generation or a result: the core alone says whether the reset itself is complete.
 protocol ResetMarkerStore {
     /// The latest recorded tap the core has not confirmed. A restart that finds it holds the ingress boundary at its list
-    /// and runs the whole reset again (staging, core start, cleanup) with its choice. It is cleared once the core has
+    /// and runs the whole reset again (finishing an earlier pending generation first when the tap awaits it, then
+    /// staging, core start, cleanup) with its choice. It is cleared once the core has
     /// started and the two markers below carry the choice, or withdrawn when the user is told the reset did not start.
     func request() throws -> ResetRequest?
     /// Records a tap. It replaces any earlier one, and an interruption or failure at any point leaves either the earlier

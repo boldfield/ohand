@@ -8,32 +8,36 @@ import Foundation
 /// 1. The tap. In one step, native staging is listed and the ingress boundary is held: a capture made from this moment
 ///    on is fresh-generation content, so its import waits (it stays staged and durable) and it is neither listed,
 ///    imported nor purged. Everything listed is by definition from before the tap.
-/// 2. Record the tap as one durable request: the credential choice and the list. Nothing else is written yet, so an
-///    interruption here leaves a request a restart can only honor in full, never a half-started reset or a choice acted
-///    on early. While a request is recorded the boundary stays held, in this process and, because the ingress gate holds
-///    it again at launch from the recorded list, in the next one.
-/// 3. Unless a reset is already pending: import the listed records through the production ingress path (an imported
-///    capture becomes an item the core tombstones), then purge whatever of the list is still unimported. A capture
-///    staged before the tap has no item for a tombstone to fence, so the purge must finish before the core starts; if it
-///    cannot, the core is not started and the reset reports why.
-/// 4. Start the core reset (or resume the pending one). The core tombstones every pre-reset item, cancels its jobs and
-///    reminders and queues one durable cleanup row per effect.
-/// 5. Only now carry the choice into its markers, mark native cleanup outstanding and clear the request. Then release
+/// 2. Record the tap as one durable request: the credential choice, the list and whether an earlier generation is still
+///    pending at the tap. Nothing else is written yet, so an interruption here leaves a request a restart can only honor
+///    in full, never a half-started reset or a choice acted on early. While a request is recorded the boundary stays
+///    held, in this process and, because the ingress gate holds it again at launch from the recorded list, in the next.
+/// 3. When the tap found an earlier generation pending, finish that generation first (its cleanup, temporaries and
+///    recorded choice, steps 7 to 10), then, once the core completed it, record the tap again as no longer awaiting it.
+///    Resuming the earlier generation only erases what existed at the earlier tap, so this tap never counts it as its
+///    own: until the core completes it, the tap stays recorded, the boundary stays held and the report says `pending`.
+/// 4. Unless a generation this tap started is already pending: import the listed records through the production
+///    ingress path (an imported capture becomes an item the core tombstones), then purge whatever of the list is still
+///    unimported. A capture staged before the tap has no item for a tombstone to fence, so the purge must finish before
+///    the core starts; if it cannot, the core is not started and the reset reports why.
+/// 5. Start the core reset (or resume the pending one this tap started). The core tombstones every pre-reset item,
+///    cancels its jobs and reminders and queues one durable cleanup row per effect.
+/// 6. Only now carry the choice into its markers, mark native cleanup outstanding and clear the request. Then release
 ///    the ingress boundary: the captures that waited import into the fresh generation. No item can be created while a
 ///    request is recorded, so a restart that starts the core again for that request finds no fresh capture to tombstone.
 ///    The outstanding marker is cleared only when a report says `completed`.
-/// 6. Run the per-item cleanup executors (`DeletionCleanupService`), which perform each effect and ask the core to
+/// 7. Run the per-item cleanup executors (`DeletionCleanupService`), which perform each effect and ask the core to
 ///    record only the ones that actually finished.
-/// 7. Remove export and share temporaries.
-/// 8. When the user chose it, revoke every provider profile and remove its credential. Without that choice neither is
-///    touched, and nothing is touched before step 4 completed.
-/// 9. Ask the core to re-evaluate. The report says `completed` only when the core reports the generation completed and
-///    every native step converged; this service never decides success on its own.
+/// 8. Remove export and share temporaries.
+/// 9. When the user chose it, revoke every provider profile and remove its credential. Without that choice neither is
+///    touched, and nothing is touched before step 5 completed.
+/// 10. Ask the core to re-evaluate. The report says `completed` only when the core reports the generation completed
+///    and every native step converged; this service never decides success on its own.
 ///
 /// Every step is idempotent. A step that cannot finish is reported with a fixed blocker and repeated by the next
-/// `reset` or `resume` call, so a crash at any point converges: a request that survives a crash before step 5 makes
-/// `resume` hold the boundary at the recorded list and run steps 3 to 9; the markers of step 5 make it finish steps 6
-/// to 9. A `reset` that ends before the core started withdraws the request (every recorded tap, so no earlier choice is
+/// `reset` or `resume` call, so a crash at any point converges: a request that survives a crash before step 6 makes
+/// `resume` hold the boundary at the recorded list and run steps 3 to 10; the markers of step 6 make it finish steps 7
+/// to 10. A `reset` that ends before the core started withdraws the request (every recorded tap, so no earlier choice is
 /// left armed) and releases the boundary; when it cannot, or when the call was cancelled or was a `resume`, the request
 /// stays recorded, the boundary stays held and the report says `pending`, never `notStarted`. Calls are serialized.
 actor ResetService {
@@ -74,7 +78,15 @@ actor ResetService {
             return withdrawRequest(
                 ResetReport(state: .notStarted, progress: nil, blockers: [.stagingUnreadable], itemCleanup: nil))
         }
-        let request = ResetRequest(credentialChoice: credentialChoice, stagedBeforeTheTap: snapshot)
+        let current: ResetProgress?
+        do {
+            current = try await core.status()
+        } catch {
+            return withdrawRequest(Self.coreFailed(error, progress: nil))
+        }
+        let request = ResetRequest(
+            credentialChoice: credentialChoice, stagedBeforeTheTap: snapshot,
+            awaitsEarlierReset: current?.phase == .pending)
         do {
             try markers.recordRequest(request)
         } catch {
@@ -121,9 +133,22 @@ actor ResetService {
         return await finish(from: progress)
     }
 
-    /// Steps 3 to 9 for a recorded request, with the boundary held. The request stays recorded, and the boundary held,
-    /// until the core has started and the choice is carried over.
-    private func performRequestedReset(_ request: ResetRequest) async -> ResetReport {
+    /// Steps 3 to 10 for a recorded request, with the boundary held. The request stays recorded, and the boundary held,
+    /// until the core has started a generation for it and the choice is carried over.
+    private func performRequestedReset(_ recorded: ResetRequest) async -> ResetReport {
+        var request = recorded
+        if request.awaitsEarlierReset {
+            if let stopped = await finishEarlierReset() { return stopped }
+            let ownTurn = ResetRequest(
+                credentialChoice: request.credentialChoice, stagedBeforeTheTap: request.stagedBeforeTheTap)
+            do {
+                try markers.recordRequest(ownTurn)
+            } catch {
+                // The tap still awaits the (now completed) earlier generation, which the next attempt finds finished.
+                return ResetReport(state: .pending, progress: nil, blockers: [.markerNotRecorded], itemCleanup: nil)
+            }
+            request = ownTurn
+        }
         let started: ResetProgress
         switch await startCore(request.stagedBeforeTheTap) {
         case .stopped(let report): return report
@@ -149,7 +174,26 @@ actor ResetService {
         case stopped(ResetReport)
     }
 
-    /// Drains the pre-tap staging in `snapshot` (unless a reset is already pending) and starts the core.
+    /// Finishes the generation that was pending when the tap was made. Returns nil once no generation is pending, or the
+    /// `pending` report of what keeps it from completing; the tap stays recorded either way.
+    private func finishEarlierReset() async -> ResetReport? {
+        let progress: ResetProgress?
+        do {
+            progress = try await core.status()
+        } catch {
+            let blocker: ResetBlocker = Task.isCancelled || error is CancellationError ? .cancelled : .coreUnavailable
+            return ResetReport(state: .pending, progress: nil, blockers: [blocker], itemCleanup: nil)
+        }
+        guard let progress, progress.phase == .pending else { return nil }
+        // Once the core completed it, native steps still owed to it (cleanup, temporaries) are repeated by this tap's own
+        // finish, and the credential markers take this tap's choice.
+        let earlier = await finish(from: progress)
+        return earlier.progress?.phase == .completed ? nil : earlier
+    }
+
+    /// Drains the pre-tap staging in `snapshot` and starts the core. A generation that is pending here was started by
+    /// this request before an interruption (a tap made while an earlier one was pending has finished that one first), so
+    /// it is resumed without draining staging again.
     private func startCore(_ snapshot: ResetStagingSnapshot) async -> CoreStart {
         let existing: ResetProgress?
         do {
