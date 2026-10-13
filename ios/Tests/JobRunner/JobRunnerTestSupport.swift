@@ -262,13 +262,14 @@ final class JobRunnerSession {
         sender: ProviderRequestSender,
         capabilities: [JobCapabilityHandler] = [],
         isReachable: Bool = true,
-        retryDelay: TimeInterval = 3600
+        retryDelay: TimeInterval = 3600,
+        metrics: MetricsRecording? = nil
     ) throws {
         self.storePath = storePath
         core = try CoreHandle(path: storePath)
         service = try JobRunnerService.attach(
             to: core, storePath: storePath, sender: sender, capabilities: capabilities,
-            isReachable: isReachable, retryDelay: retryDelay)
+            isReachable: isReachable, retryDelay: retryDelay, metrics: metrics)
         try core.setEventHandler { [unowned self] event in
             XCTAssertTrue(Thread.isMainThread, "events are delivered on the main thread")
             if !self.service.handle(event) {
