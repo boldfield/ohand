@@ -273,9 +273,10 @@ final class RealCoreResetRuntime {
         let snapshot = try session.run { try await staging.value.snapshot() }
         let client = session.resetClient
         let current = try session.run { try await client.status() }
+        let earlierOutstanding = try markers.isCleanupOutstanding()
         let request = ResetRequest(
             credentialChoice: choice, stagedBeforeTheTap: snapshot,
-            awaitsEarlierReset: current?.phase == .pending || (current != nil && (try markers.isCleanupOutstanding())))
+            awaitsEarlierReset: current?.phase == .pending || (current != nil && earlierOutstanding))
         try markers.recordRequest(request)
         return request
     }
