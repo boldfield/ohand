@@ -88,6 +88,8 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
   - (3) **Review surface for criterion 1.** Process-restart tests over populated mixed-route records, jobs, transcripts, reminders and indexes show that each late result arriving after reset has started is rejected by the existing guard and revives nothing: a job result, a correction, a transcript attachment, an interpretation apply, a reminder effect, and a re-import of a pre-reset capture ID. If such a test finds an apply path that does not reject for a tombstoned item, that is a defect in the path's owner. L05a blocks and names the path. It does not patch the path.
   - (4) **Native staging belongs to L05b.** A capture staged natively before the reset tap but not yet imported has no item, so no tombstone can fence it. L05b must import the native ingress staging before it calls core's reset start. It must also purge any staged record written before the tap that is still unimported after that drain. Both are required cleanup acknowledgments. A capture made after the tap is fresh-generation content and must not be purged.
 
+- F10 added (coordinator, 2026-10-12, at the maintainer's direction). On 2026-10-12 the `simulator` job in `ios.yml` failed five times on UI tests and passed on rerun with no code change. These failures blocked P11b once and cost F09 and S02 a rerun each. All of them are XCTest waits timing out on a simulator that `OhAndTests` had already used. F10 finds the cause of each failure mode and fixes it, without lowering what the tests check.
+
 - V06 and V07 now depend on V01 alone: they implement Rust adapters against its transport interface using fixtures. V05 is the native effect implementation and remains required by app composition/integration, not by independent protocol adapter implementation. This is an explicit dependency override for those retained tasks.
 
 ## Why some tasks stay together
@@ -461,6 +463,36 @@ Acceptance:
 3. `AGENTS.md` names the new runner, Xcode and SDK, and the evidence requirements are unchanged.
 
 Source pointers (baseline above): `.github/workflows/ios.yml:18`, `.github/workflows/ios.yml:26`, `ios/project.yml:6`, `ios/scripts/select_simulator.py:71`, `AGENTS.md:65`.
+
+### F10
+
+Make the simulator UI tests deterministic on hosted runners
+
+Find the cause of each intermittent UI-test failure in the `simulator` job and fix it, so a red `ios.yml` run means a real defect.
+
+Owned paths: `ios/NotificationProbe/Tests/`, `ios/CaptureProbe/UITests/`, `.github/workflows/ios.yml` (the `simulator` job's UI-test steps and the simulator preparation before them), `ios/scripts/` (only for a new simulator reset or preparation helper; existing scripts and their callers unchanged).
+
+Dependencies: none.
+
+Observed failures (2026-10-12; each passed on rerun without a code change; job logs in runs 38302508836, 38308773981, 38273173711, 38271046668 and 38265038613):
+
+- `NotificationProbeAuthorizedUITests.testAuthorizedSchedulingBehavior`: "capacity never published", an `XCTWaiter` timeout at `NotificationProbeUITestCase.swift:31` with a 90 s wait. The test took 227 s.
+- `NotificationProbeDeniedUITests.testDeniedPermissionBehavior`: "authorization prompt never appeared", at `NotificationProbeUITestCase.swift:49` with a 30 s wait.
+- `NotificationProbeAuthorizedUITests.testAuthorizedSchedulingBehavior`: "Failed to launch com.boldfield.ohand.probes.notification", at `NotificationProbeUITestCase.swift:10`.
+- `CaptureProbeHandoffUITests.testEachShortcutHandoffRendersOneNewEntryAndPlainLaunchesRenderNone`: "app never left the foreground", at `CaptureProbeHandoffUITests.swift:61` with a 15 s wait after `press(.home)`. This happened twice.
+
+Every failure came after `OhAndTests` had run on the same simulator, which leaves `OhAnd` processes, a share sheet and a microphone permission request behind.
+
+Acceptance:
+
+1. **Diagnosis before change.** For each of the four failure modes, the PR states the cause it found, with evidence: an `xcresult` screenshot or hierarchy at the failure, a log line, or a reproduction. Candidate causes include leftover system alerts or sheets from earlier steps, notification authorization persisting across tests or attempts, a simulator that is not quiescent, and a wait that does not observe the state it claims to. A cause it cannot confirm is labelled as a hypothesis.
+2. **Fix the cause; don't mask it.**
+   - Allowed: give each UI suite a known simulator state (for example, uninstall the probe app or reset permissions, terminate leftover apps, dismiss or prevent stray alerts, or use a freshly erased or separate simulator per UI suite); replace waits that don't observe the right state; and raise a wait only when the PR shows the operation legitimately takes that long on a hosted runner.
+   - Not allowed: skipping or deleting tests or assertions; test retries (`-retry-tests-on-failure`, retry loops or rerun-until-green wrappers); treating a timeout as success; and moving any check out of the required job.
+3. **Proof of stability.** On the final submitted head, the `simulator` job passes in at least 5 consecutive executions: the original run plus reruns with `gh run rerun <id>`, using `gh run watch --interval 60`. All attempt URLs are linked. A failed attempt resets the count and needs its cause stated.
+4. Everything else stays unchanged and passing: the `OhAndTests`, `OhAndApp` and probe smoke tests, the artifact contents, `retention-days: 7` and the 60-minute job timeout. `make check` and `make test` pass. Required macOS CI evidence per AGENTS.md is linked.
+
+Source pointers: `ios/NotificationProbe/Tests/NotificationProbeUITestCase.swift:10`, `:31`, `:49`; `ios/CaptureProbe/UITests/CaptureProbeHandoffUITests.swift:61`; `.github/workflows/ios.yml:90` (NotificationProbe UI step), `:242` (CaptureProbe handoff step).
 
 ### I05b
 
