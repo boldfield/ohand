@@ -111,6 +111,23 @@ final class MetricsCoreIntegrationTests: XCTestCase {
         core.close()
     }
 
+    func testCaptureOnlySessionCannotDisableOrClearAndRecordingContinues() throws {
+        let (core, client, capturingService) = try openProcess(authenticated: false)
+        capturingService.recordEndOfInputToSave(.text, elapsed: 0.02)
+        XCTAssertFalse(try run { await capturingService.setRecordingEnabled(false) })
+        XCTAssertFalse(try run { await capturingService.clearAll() })
+        capturingService.recordEndOfInputToSave(.text, elapsed: 0.04)
+
+        let authenticatedSession = ReadAuthenticationSession(boundary: boundary)
+        authenticatedSession.authenticate(reason: "test") { _ in }
+        let readingService = MetricsService(core: client, session: authenticatedSession)
+        let report = try run { try await readingService.exportReport() }
+        XCTAssertTrue(report.report.recordingEnabled, "a capture-only session cannot switch recording off")
+        XCTAssertEqual(report.report.timings.first?.retainedSamples, 2, "a capture-only session cannot clear")
+        client.shutDown()
+        core.close()
+    }
+
     func testDisablingStopsRecordingAndClearingRemovesFigures() throws {
         let (core, client, service) = try openProcess(authenticated: true)
         service.recordEndOfInputToSave(.text, elapsed: 0.02)

@@ -47,9 +47,10 @@ struct MetricsStopwatch {
 ///   that was shut down) is counted in `droppedRecordCount` and otherwise forgotten.
 /// * **Local only.** This type has no destination. The only way data leaves is `exportReport()`, which needs an
 ///   authenticated read session, and the caller decides where the returned JSON goes.
-/// * **Switchable.** `setRecordingEnabled(false)` stops new records (the core stores nothing while it is off) and
-///   `clearAll()` removes what was stored.
-final class MetricsService: @unchecked Sendable {
+/// * **Switchable, authenticated.** `setRecordingEnabled` (on or off) and `clearAll()` need an authenticated read
+///   session, like the export. A capture-only session gets `false` back and the core is not asked. While recording is
+///   off the core stores nothing; `clearAll()` removes what was stored.
+final class MetricsService: MetricsRecording, @unchecked Sendable {
     private let core: MetricsCore
     private let session: ReadAuthenticationSession
     private let monotonicNanoseconds: @Sendable () -> UInt64
@@ -122,23 +123,27 @@ final class MetricsService: @unchecked Sendable {
 
     // MARK: Control
 
-    /// Turns recording on or off. Stored figures are kept; use `clearAll()` to remove them. Returns whether the core
-    /// applied the change.
+    /// Turns recording on or off. Stored figures are kept; use `clearAll()` to remove them. Needs an authenticated
+    /// read session. Returns whether the core applied the change; `false` for a capture-only session (the core is not
+    /// asked).
     @discardableResult
     func setRecordingEnabled(_ enabled: Bool) async -> Bool {
-        await acknowledged(.setEnabled(enabled))
+        await authenticated { .setEnabled(enabled, readAuthentication: .authenticated) }
     }
 
-    /// Removes every stored sample and counter. The enabled setting is unchanged. Returns whether the core applied it.
+    /// Removes every stored sample and counter. The enabled setting is unchanged. Needs an authenticated read
+    /// session. Returns whether the core applied it, with the same refusal as `setRecordingEnabled`.
     @discardableResult
     func clearAll() async -> Bool {
-        await acknowledged(.clear)
+        await authenticated { .clear(readAuthentication: .authenticated) }
     }
 
-    private func acknowledged(_ request: CoreMetricsRequest) async -> Bool {
+    private func authenticated(_ request: () -> CoreMetricsRequest) async -> Bool {
+        guard session.currentAuthorization() != nil else { return false }
+        let submission = request()
         let result = await withCheckedContinuation {
             (continuation: CheckedContinuation<Result<CoreMetricsAnswer, CoreFailure>, Never>) in
-            core.submit(request) { continuation.resume(returning: $0) }
+            core.submit(submission) { continuation.resume(returning: $0) }
         }
         if case .success = result { return true }
         return false

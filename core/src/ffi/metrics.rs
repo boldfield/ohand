@@ -9,11 +9,13 @@
 //! * `{"op":"record_failure","series","dimension"}`: one observed failure. `series` is
 //!   `processing_failure` or `scheduling_failure`; `dimension` is one of the closed reason labels
 //!   in [`crate::metrics`].
-//! * `{"op":"set_enabled","enabled"}` switches recording on or off; `{"op":"clear"}` removes the
-//!   stored samples and counters.
-//! * `{"op":"export","read_authentication"}` returns the aggregate report. `read_authentication`
-//!   is `authenticated` or `capture_only`, the native session read scope; `capture_only` is
-//!   refused as `metrics_export_not_authorized` before anything is read.
+//! * `{"op":"set_enabled","enabled","read_authentication"}` switches recording on or off;
+//!   `{"op":"clear","read_authentication"}` removes the stored samples and counters.
+//! * `{"op":"export","read_authentication"}` returns the aggregate report.
+//!
+//!   For these three, `read_authentication` is `authenticated` or `capture_only`, the native
+//!   session read scope; `capture_only` is refused as `metrics_not_authorized` before anything is
+//!   read or changed. Recording a sample or failure needs no authentication.
 //!
 //! Anything else (an unknown op, series, dimension or field, a duration over the maximum) is
 //! refused as `invalid_request` and nothing is stored. The outcome event is `{"operation_id",
@@ -52,8 +54,11 @@ enum Command {
     },
     SetEnabled {
         enabled: bool,
+        read_authentication: String,
     },
-    Clear,
+    Clear {
+        read_authentication: String,
+    },
     Export {
         read_authentication: String,
     },
@@ -62,16 +67,16 @@ enum Command {
 enum Validated {
     RecordTiming(TimingSeries, u64),
     RecordFailure(FailureSeries),
-    SetEnabled(bool),
-    Clear,
+    SetEnabled(bool, ReadAuthentication),
+    Clear(ReadAuthentication),
     Export(ReadAuthentication),
 }
 
 const fn unauthorized() -> AbiFailure {
     AbiFailure {
         class: ErrorClass::Unauthorized,
-        code: "metrics_export_not_authorized",
-        message: Cow::Borrowed("metrics export requires an authenticated read session"),
+        code: "metrics_not_authorized",
+        message: Cow::Borrowed("metrics export and control require an authenticated read session"),
     }
 }
 
@@ -92,16 +97,32 @@ impl Command {
                     FailureSeries::parse(&series, &dimension).ok_or(AbiFailure::INVALID_REQUEST)?;
                 Ok(Validated::RecordFailure(series))
             }
-            Command::SetEnabled { enabled } => Ok(Validated::SetEnabled(enabled)),
-            Command::Clear => Ok(Validated::Clear),
+            Command::SetEnabled {
+                enabled,
+                read_authentication,
+            } => Ok(Validated::SetEnabled(
+                enabled,
+                parse_authentication(&read_authentication)?,
+            )),
+            Command::Clear {
+                read_authentication,
+            } => Ok(Validated::Clear(parse_authentication(
+                &read_authentication,
+            )?)),
             Command::Export {
                 read_authentication,
-            } => match read_authentication.as_str() {
-                "authenticated" => Ok(Validated::Export(ReadAuthentication::Authenticated)),
-                "capture_only" => Ok(Validated::Export(ReadAuthentication::CaptureOnly)),
-                _ => Err(AbiFailure::INVALID_REQUEST),
-            },
+            } => Ok(Validated::Export(parse_authentication(
+                &read_authentication,
+            )?)),
         }
+    }
+}
+
+fn parse_authentication(label: &str) -> Result<ReadAuthentication, AbiFailure> {
+    match label {
+        "authenticated" => Ok(ReadAuthentication::Authenticated),
+        "capture_only" => Ok(ReadAuthentication::CaptureOnly),
+        _ => Err(AbiFailure::INVALID_REQUEST),
     }
 }
 
@@ -134,12 +155,13 @@ fn run(database: &Database, command: &Validated) -> Result<Value, AbiFailure> {
             let outcome = record_failure(database, *series).map_err(metrics_failure)?;
             Ok(json!({ "outcome": outcome_label(outcome) }))
         }
-        Validated::SetEnabled(enabled) => {
-            set_metrics_enabled(database, *enabled, now).map_err(metrics_failure)?;
+        Validated::SetEnabled(enabled, authentication) => {
+            set_metrics_enabled(database, *enabled, *authentication, now)
+                .map_err(metrics_failure)?;
             Ok(json!({ "outcome": "ok" }))
         }
-        Validated::Clear => {
-            clear_metrics(database).map_err(metrics_failure)?;
+        Validated::Clear(authentication) => {
+            clear_metrics(database, *authentication).map_err(metrics_failure)?;
             Ok(json!({ "outcome": "ok" }))
         }
         Validated::Export(authentication) => {
@@ -162,8 +184,8 @@ fn metrics_job(command: Validated, operation_id: u64) -> JobFn {
 
 /// Queues one metrics operation described by the `request_len` JSON bytes at `request` (see the
 /// module documentation). A malformed or unknown request is refused as `invalid_request` before
-/// anything is queued. A `capture_only` export is queued but its event is
-/// `metrics_export_not_authorized`. The outcome event for `operation_id` is the documented JSON or
+/// anything is queued. A `capture_only` export, enable or clear is queued but its event is
+/// `metrics_not_authorized`. The outcome event for `operation_id` is the documented JSON or
 /// a normalized failure.
 ///
 /// # Safety

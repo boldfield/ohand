@@ -28,6 +28,7 @@ fn timing<'a>(report: &'a MetricsReport, series: &str, dimension: &str) -> &'a T
 }
 
 fn stored_rows(database: &Database) -> i64 {
+    metrics_enabled(database).unwrap();
     let count = |table: &str| -> i64 {
         database
             .conn()
@@ -36,7 +37,7 @@ fn stored_rows(database: &Database) -> i64 {
             })
             .unwrap()
     };
-    count("metric_timing_samples") + count("metric_failure_counts")
+    count("metrics.metric_timing_samples") + count("metrics.metric_failure_counts")
 }
 
 #[test]
@@ -267,10 +268,11 @@ fn the_report_holds_aggregates_and_labels_only() {
 #[test]
 fn the_stored_tables_have_no_column_that_could_hold_content_or_identifiers() {
     let database = memory_database();
+    metrics_enabled(&database).unwrap();
     let columns = |table: &str| -> Vec<String> {
         let mut statement = database
             .conn()
-            .prepare("SELECT name FROM pragma_table_info(?1) ORDER BY cid")
+            .prepare("SELECT name FROM pragma_table_info(?1, 'metrics') ORDER BY cid")
             .unwrap();
         statement
             .query_map([table], |row| row.get::<_, String>(0))
@@ -300,7 +302,7 @@ fn disabled_metrics_store_nothing_and_stay_disabled_until_enabled_again() {
         RecordOutcome::Recorded
     );
 
-    set_metrics_enabled(&database, false, now()).unwrap();
+    set_metrics_enabled(&database, false, ReadAuthentication::Authenticated, now()).unwrap();
     assert!(!metrics_enabled(&database).unwrap());
     assert_eq!(
         record_timing(&database, series, 6).unwrap(),
@@ -319,7 +321,7 @@ fn disabled_metrics_store_nothing_and_stay_disabled_until_enabled_again() {
     );
     assert!(disabled_report.failures.is_empty());
 
-    set_metrics_enabled(&database, true, now()).unwrap();
+    set_metrics_enabled(&database, true, ReadAuthentication::Authenticated, now()).unwrap();
     assert_eq!(
         record_failure(&database, failure).unwrap(),
         RecordOutcome::Recorded
@@ -335,9 +337,9 @@ fn clearing_removes_samples_and_counters_but_not_the_setting() {
         FailureSeries::Processing(ProcessingFailureReason::Other),
     )
     .unwrap();
-    set_metrics_enabled(&database, false, now()).unwrap();
+    set_metrics_enabled(&database, false, ReadAuthentication::Authenticated, now()).unwrap();
 
-    clear_metrics(&database).unwrap();
+    clear_metrics(&database, ReadAuthentication::Authenticated).unwrap();
     assert_eq!(stored_rows(&database), 0);
     assert!(!metrics_enabled(&database).unwrap());
     let cleared = report(&database);
@@ -351,6 +353,63 @@ fn export_is_refused_without_an_authenticated_session_and_reads_nothing() {
     let refused = export_metrics(&database, ReadAuthentication::CaptureOnly, now());
     assert!(matches!(refused, Err(MetricsError::NotAuthenticated)));
     assert!(export_metrics(&database, ReadAuthentication::Authenticated, now()).is_ok());
+}
+
+#[test]
+fn turning_recording_off_or_on_and_clearing_need_an_authenticated_session() {
+    let database = memory_database();
+    let series = TimingSeries::TriggerToReady(LaunchKind::Cold);
+    record_timing(&database, series, 5).unwrap();
+
+    for enabled in [false, true] {
+        let refused =
+            set_metrics_enabled(&database, enabled, ReadAuthentication::CaptureOnly, now());
+        assert!(matches!(refused, Err(MetricsError::NotAuthenticated)));
+    }
+    assert!(
+        metrics_enabled(&database).unwrap(),
+        "a refused switch changes nothing"
+    );
+
+    set_metrics_enabled(&database, false, ReadAuthentication::Authenticated, now()).unwrap();
+    let refused = set_metrics_enabled(&database, true, ReadAuthentication::CaptureOnly, now());
+    assert!(matches!(refused, Err(MetricsError::NotAuthenticated)));
+    assert!(
+        !metrics_enabled(&database).unwrap(),
+        "capture-only cannot resume recording"
+    );
+
+    let refused = clear_metrics(&database, ReadAuthentication::CaptureOnly);
+    assert!(matches!(refused, Err(MetricsError::NotAuthenticated)));
+    assert_eq!(
+        stored_rows(&database),
+        1,
+        "capture-only cannot wipe the evidence"
+    );
+}
+
+#[test]
+fn metrics_never_enter_the_stores_migrated_schema() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("core.sqlite");
+    let path = path.to_str().unwrap();
+    let database = Database::open(path, Arc::new(SystemClock) as Arc<dyn Clock>).unwrap();
+    let version = database.schema_version().unwrap();
+    record_timing(&database, TimingSeries::TriggerToReady(LaunchKind::Warm), 7).unwrap();
+    let in_main: i64 = database
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM main.sqlite_master WHERE name LIKE 'metric%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(in_main, 0);
+    assert_eq!(database.schema_version().unwrap(), version);
+    assert!(std::path::Path::new(&format!("{path}.metrics")).exists());
+    drop(database);
+    // The store validates its shape on open; the sidecar must not disturb that.
+    Database::open(path, Arc::new(SystemClock) as Arc<dyn Clock>).unwrap();
 }
 
 #[test]
@@ -408,7 +467,7 @@ fn metrics_and_the_enabled_choice_survive_reopening_the_store() {
             FailureSeries::Processing(ProcessingFailureReason::Interrupted),
         )
         .unwrap();
-        set_metrics_enabled(&database, false, now()).unwrap();
+        set_metrics_enabled(&database, false, ReadAuthentication::Authenticated, now()).unwrap();
     }
     let database = Database::open(path, Arc::new(SystemClock) as Arc<dyn Clock>).unwrap();
     let reopened = report(&database);

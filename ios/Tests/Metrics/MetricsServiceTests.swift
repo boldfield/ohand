@@ -161,18 +161,54 @@ final class MetricsServiceTests: XCTestCase {
     }
 
     func testSwitchAndClearAreAcknowledgedOnlyWhenTheCoreApplies() async {
+        authenticate()
         let core = FakeMetricsCore()
         core.answer = .success(CoreMetricsAnswer(outcome: "ok"))
         let service = MetricsService(core: core, session: session)
         let disabled = await service.setRecordingEnabled(false)
+        let enabled = await service.setRecordingEnabled(true)
         let cleared = await service.clearAll()
         XCTAssertTrue(disabled)
+        XCTAssertTrue(enabled)
         XCTAssertTrue(cleared)
-        XCTAssertEqual(core.requests, [.setEnabled(false), .clear])
+        XCTAssertEqual(
+            core.requests,
+            [
+                .setEnabled(false, readAuthentication: .authenticated),
+                .setEnabled(true, readAuthentication: .authenticated),
+                .clear(readAuthentication: .authenticated),
+            ])
 
         core.answer = .failure(CoreFailure(errorClass: .transient, code: "store_busy", message: "busy"))
         let refused = await service.clearAll()
         XCTAssertFalse(refused)
+    }
+
+    func testCaptureOnlySessionCannotDisableEnableOrClearAndTheCoreIsNotAsked() async {
+        let core = FakeMetricsCore()
+        core.answer = .success(CoreMetricsAnswer(outcome: "ok"))
+        let service = MetricsService(core: core, session: session)
+        let disabled = await service.setRecordingEnabled(false)
+        let enabled = await service.setRecordingEnabled(true)
+        let cleared = await service.clearAll()
+        XCTAssertFalse(disabled)
+        XCTAssertFalse(enabled)
+        XCTAssertFalse(cleared)
+        XCTAssertTrue(core.requests.isEmpty)
+
+        authenticate()
+        session.relock(.enteredBackground)
+        let clearedAfterRelock = await service.clearAll()
+        XCTAssertFalse(clearedAfterRelock, "a relocked session is capture-only again")
+        XCTAssertTrue(core.requests.isEmpty)
+    }
+
+    func testRecordingStillWorksInACaptureOnlySession() {
+        let core = FakeMetricsCore()
+        let service = MetricsService(core: core, session: session)
+        service.recordEndOfInputToSave(.text, elapsed: 0.05)
+        service.recordProcessingFailure(.timeout)
+        XCTAssertEqual(core.requests.count, 2)
     }
 
     func testExportRefusesACaptureOnlySessionWithoutAskingTheCore() async {
@@ -223,7 +259,7 @@ final class MetricsServiceTests: XCTestCase {
         let core = FakeMetricsCore()
         let service = MetricsService(core: core, session: session)
         let refusal = CoreFailure(
-            errorClass: .unauthorized, code: "metrics_export_not_authorized", message: "not authorized")
+            errorClass: .unauthorized, code: "metrics_not_authorized", message: "not authorized")
         core.answer = .failure(refusal)
         do {
             _ = try await service.exportReport()
@@ -253,6 +289,14 @@ final class MetricsServiceTests: XCTestCase {
         XCTAssertEqual(
             try JSONSerialization.jsonObject(with: failure) as? NSDictionary,
             ["op": "record_failure", "series": "scheduling_failure", "dimension": "capacity_exceeded"] as NSDictionary)
+        let control = try CoreMetricsRequest.setEnabled(false, readAuthentication: .captureOnly).encoded()
+        XCTAssertEqual(
+            try JSONSerialization.jsonObject(with: control) as? NSDictionary,
+            ["op": "set_enabled", "enabled": false, "read_authentication": "capture_only"] as NSDictionary)
+        let clear = try CoreMetricsRequest.clear(readAuthentication: .authenticated).encoded()
+        XCTAssertEqual(
+            try JSONSerialization.jsonObject(with: clear) as? NSDictionary,
+            ["op": "clear", "read_authentication": "authenticated"] as NSDictionary)
         let export = try CoreMetricsRequest.export(readAuthentication: .captureOnly).encoded()
         XCTAssertEqual(
             try JSONSerialization.jsonObject(with: export) as? NSDictionary,
@@ -266,7 +310,7 @@ final class MetricsServiceTests: XCTestCase {
         XCTAssertFalse(client.handle(CoreEvent(operationID: 1, outcome: .success(Data()))))
         client.shutDown()
         let box = MetricsResultBox()
-        client.submit(.clear) { box.set($0) }
+        client.submit(.clear(readAuthentication: .authenticated)) { box.set($0) }
         XCTAssertEqual(box.value, .failure(CoreMetricsClient.shutDownFailure))
     }
 }

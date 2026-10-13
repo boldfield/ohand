@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import OhAndCoreBridge
 
 /// What the entry surface needs from the voice recorder. `VoiceRecordingController` conforms; tests script it.
 /// Confined to the main queue.
@@ -44,6 +45,10 @@ private final class OutcomeReportingTextCaptureIngress: TextCaptureIngress {
 ///   and dropped when it stops. Nothing here reads stored data to show history.
 /// * The acknowledgment starts as "saved, not processed, no reminder confirmed" and only a successful status read can
 ///   change that. No other event upgrades it.
+/// * Latency is measured on two separate clocks and handed to `metrics`, fire and forget: trigger-to-ready (the
+///   system trigger until the surface can take input, `surfaceDidBecomeReady`) and end-of-input-to-save (the user
+///   finishing a text save or a recording until a durable acknowledgment is shown). Only a durable end is measured,
+///   and nothing about the input is recorded.
 ///
 /// Confined to the main queue.
 final class CaptureEntryModel: ObservableObject {
@@ -64,6 +69,11 @@ final class CaptureEntryModel: ObservableObject {
     private let progressReader: CaptureProgressReading?
     private let currentAccess: () -> CaptureEntryAccess
     private let wording: CaptureAcknowledgmentWording
+    private let metrics: MetricsRecording?
+    private let uptimeNanoseconds: () -> UInt64
+    private var readyReportedEntryID: String?
+    private var textInputEndedAt: UInt64?
+    private var voiceInputEndedAt: UInt64?
     private var progressGeneration = 0
     private var cancellables: [AnyCancellable] = []
 
@@ -75,7 +85,9 @@ final class CaptureEntryModel: ObservableObject {
         access: @escaping () -> CaptureEntryAccess,
         wording: CaptureAcknowledgmentWording = .standard,
         makeCaptureID: @escaping () -> String = { UUID().uuidString.lowercased() },
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        metrics: MetricsRecording? = nil,
+        uptimeNanoseconds: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }
     ) {
         let reporting = OutcomeReportingTextCaptureIngress(base: textIngress)
         self.textModel = TextCaptureModel(ingress: reporting, makeCaptureID: makeCaptureID, now: now)
@@ -83,12 +95,14 @@ final class CaptureEntryModel: ObservableObject {
         self.progressReader = progressReader
         self.currentAccess = access
         self.wording = wording
+        self.metrics = metrics
+        self.uptimeNanoseconds = uptimeNanoseconds
         self.mode = defaultMode
         self.access = access()
 
         reporting.willSubmit = { [weak self] in self?.textSaveStarted() }
         reporting.didFinish = { [weak self] outcome in self?.textSaveFinished(outcome) }
-        voice.onStateChange = { [weak self] state in self?.recorderState = state }
+        voice.onStateChange = { [weak self] state in self?.recorderStateChanged(to: state) }
         voice.onOutcome = { [weak self] outcome in self?.voiceRecordingEnded(outcome) }
         textModel.objectWillChange
             .sink { [weak self] _ in self?.objectWillChange.send() }
@@ -131,6 +145,21 @@ final class CaptureEntryModel: ObservableObject {
         voiceNotice = nil
     }
 
+    /// The capture surface is on screen and can take input. Measures the wait since the system trigger of the current
+    /// presentation, once per entry; a presentation without a trigger (nothing asked for it) measures nothing.
+    func surfaceDidBecomeReady() {
+        guard let presentation = presentation, presentation.entryID != readyReportedEntryID else { return }
+        readyReportedEntryID = presentation.entryID
+        guard let triggeredAt = presentation.triggeredAtUptimeNanoseconds else { return }
+        let launch: CoreMetricsLaunchKind
+        if !presentation.access.protectedDataAvailable {
+            launch = .lockedHandoff
+        } else {
+            launch = presentation.launchKind == .cold ? .cold : .warm
+        }
+        metrics?.recordTriggerToReady(launch, elapsed: Self.seconds(from: triggeredAt, to: uptimeNanoseconds()))
+    }
+
     func switchMode(to newMode: CaptureEntryMode) {
         guard isIdle, newMode != mode else { return }
         mode = newMode
@@ -156,6 +185,7 @@ final class CaptureEntryModel: ObservableObject {
     }
 
     private func textSaveStarted() {
+        textInputEndedAt = uptimeNanoseconds()
         voiceNotice = nil
         setAcknowledgment(CaptureAcknowledgment(source: .text, save: .saving, progress: nil, earlyEnd: nil))
     }
@@ -169,6 +199,7 @@ final class CaptureEntryModel: ObservableObject {
         case .itemDeleted: save = .itemDeleted
         }
         setAcknowledgment(CaptureAcknowledgment(source: .text, save: save, progress: nil, earlyEnd: nil))
+        recordEndOfInputToSave(.text, save: save)
         finishIfDurable(save)
     }
 
@@ -186,6 +217,7 @@ final class CaptureEntryModel: ObservableObject {
             guard let self = self else { return }
             switch result {
             case .success:
+                self.voiceInputEndedAt = nil
                 self.clearAcknowledgment()
             case .failure(let failure):
                 self.voiceNotice = Self.startFailureMessage(failure)
@@ -194,11 +226,18 @@ final class CaptureEntryModel: ObservableObject {
     }
 
     func stopRecording() {
+        voiceInputEndedAt = voiceInputEndedAt ?? uptimeNanoseconds()
         voice.stop()
     }
 
     func cancelRecording() {
+        voiceInputEndedAt = nil
         voice.cancel()
+    }
+
+    private func recorderStateChanged(to state: VoiceRecorderState) {
+        if case .finishing = state { voiceInputEndedAt = voiceInputEndedAt ?? uptimeNanoseconds() }
+        recorderState = state
     }
 
     private func voiceRecordingEnded(_ outcome: VoiceCaptureOutcome) {
@@ -226,6 +265,7 @@ final class CaptureEntryModel: ObservableObject {
                 source: .audio, save: .unreadable(retained: fileRetained), progress: nil, earlyEnd: early(end))
         }
         setAcknowledgment(acknowledgment)
+        recordEndOfInputToSave(.voice, save: acknowledgment.save)
         finishIfDurable(acknowledgment.save)
     }
 
@@ -250,6 +290,31 @@ final class CaptureEntryModel: ObservableObject {
     }
 
     // MARK: Helpers
+
+    /// Ends the end-of-input span of `capture`. Only a durable acknowledgment is a sample; a failed or cancelled end
+    /// is not a save and is dropped.
+    private func recordEndOfInputToSave(_ capture: CoreMetricsCaptureKind, save: CaptureSaveState) {
+        let endedAt: UInt64?
+        switch capture {
+        case .text:
+            endedAt = textInputEndedAt
+            textInputEndedAt = nil
+        case .voice:
+            endedAt = voiceInputEndedAt
+            voiceInputEndedAt = nil
+        }
+        guard let endedAt = endedAt else { return }
+        switch save {
+        case .saved, .keptOnDevice:
+            metrics?.recordEndOfInputToSave(capture, elapsed: Self.seconds(from: endedAt, to: uptimeNanoseconds()))
+        case .saving, .notSaved, .itemDeleted, .cancelled, .unreadable:
+            break
+        }
+    }
+
+    private static func seconds(from start: UInt64, to end: UInt64) -> TimeInterval {
+        end >= start ? TimeInterval(end - start) / 1_000_000_000 : 0
+    }
 
     private func finishIfDurable(_ save: CaptureSaveState) {
         switch save {

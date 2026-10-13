@@ -114,7 +114,7 @@ fn recorded_samples_are_exported_as_a_content_free_report() {
 }
 
 #[test]
-fn a_capture_only_export_is_refused_and_recording_needs_no_authentication() {
+fn capture_only_export_enable_and_clear_are_refused_and_recording_needs_no_authentication() {
     let _guard = serial();
     let mut session = Session::open();
     let recorded = session.succeed(&json!({
@@ -124,7 +124,19 @@ fn a_capture_only_export_is_refused_and_recording_needs_no_authentication() {
     let (status, code) =
         session.fail(&json!({"op": "export", "read_authentication": "capture_only"}));
     assert_eq!(status, OHAND_CORE_STATUS_UNAUTHORIZED);
-    assert_eq!(code, "metrics_export_not_authorized");
+    assert_eq!(code, "metrics_not_authorized");
+    for request in [
+        json!({"op": "set_enabled", "enabled": false, "read_authentication": "capture_only"}),
+        json!({"op": "set_enabled", "enabled": true, "read_authentication": "capture_only"}),
+        json!({"op": "clear", "read_authentication": "capture_only"}),
+    ] {
+        let (status, code) = session.fail(&request);
+        assert_eq!(status, OHAND_CORE_STATUS_UNAUTHORIZED, "{request}");
+        assert_eq!(code, "metrics_not_authorized", "{request}");
+    }
+    let report = export(&mut session);
+    assert_eq!(report["report"]["recording_enabled"], true);
+    assert_eq!(report["report"]["failures"][0]["occurrences"], 1);
     session.close();
 }
 
@@ -137,7 +149,9 @@ fn disabling_stops_recording_and_clearing_removes_what_was_recorded() {
     });
     session.succeed(&timing);
     assert_eq!(
-        session.succeed(&json!({"op": "set_enabled", "enabled": false}))["outcome"],
+        session.succeed(
+            &json!({"op": "set_enabled", "enabled": false, "read_authentication": "authenticated"})
+        )["outcome"],
         "ok"
     );
     assert_eq!(session.succeed(&timing)["outcome"], "disabled");
@@ -145,7 +159,10 @@ fn disabling_stops_recording_and_clearing_removes_what_was_recorded() {
     assert_eq!(report["report"]["recording_enabled"], false);
     assert_eq!(report["report"]["timings"][0]["retained_samples"], 1);
 
-    assert_eq!(session.succeed(&json!({"op": "clear"}))["outcome"], "ok");
+    assert_eq!(
+        session.succeed(&json!({"op": "clear", "read_authentication": "authenticated"}))["outcome"],
+        "ok"
+    );
     let report = export(&mut session);
     assert!(report["report"]["timings"].as_array().unwrap().is_empty());
     assert_eq!(report["report"]["recording_enabled"], false);
@@ -181,6 +198,9 @@ fn requests_outside_the_closed_vocabulary_are_refused_before_queueing() {
         json!({"op": "record_failure", "series": "processing_failure", "dimension": "timeout", "detail": "x"}),
     );
     rejected(json!({"op": "export", "read_authentication": "maybe"}));
+    rejected(json!({"op": "set_enabled", "enabled": true}));
+    rejected(json!({"op": "clear"}));
+    rejected(json!({"op": "clear", "read_authentication": "maybe"}));
     rejected(json!({"op": "send_somewhere", "url": "example"}));
     let bytes: &[u8] = b"not json";
     let outcome =

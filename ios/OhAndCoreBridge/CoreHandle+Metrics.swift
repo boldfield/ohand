@@ -37,6 +37,19 @@ public enum CoreMetricsSchedulingFailure: String, Codable, Equatable, Sendable {
     case other
 }
 
+/// Where the production flows report content-free metrics. Every call is fire and forget: it never throws, never
+/// waits for the core and never changes what the caller does next. `MetricsService` is the implementation.
+public protocol MetricsRecording: AnyObject, Sendable {
+    /// Seconds from the user's trigger until the capture surface could take input.
+    func recordTriggerToReady(_ launch: CoreMetricsLaunchKind, elapsed: TimeInterval)
+    /// Seconds from the user finishing input until the durable acknowledgment was shown.
+    func recordEndOfInputToSave(_ capture: CoreMetricsCaptureKind, elapsed: TimeInterval)
+    /// Counts one observed processing failure. It claims nothing about whether anyone saw it.
+    func recordProcessingFailure(_ reason: CoreMetricsProcessingFailure)
+    /// Counts one observed reminder scheduling failure. It claims nothing about whether anyone saw it.
+    func recordSchedulingFailure(_ reason: CoreMetricsSchedulingFailure)
+}
+
 /// A latency series. The two cases are separate clocks and are never combined.
 public enum CoreMetricsTimingSeries: Equatable, Sendable {
     /// From the user's trigger until the capture surface can take input.
@@ -84,8 +97,8 @@ public enum CoreMetricsFailureSeries: Equatable, Sendable {
 public enum CoreMetricsRequest: Equatable, Sendable {
     case recordTiming(CoreMetricsTimingSeries, durationMilliseconds: UInt64)
     case recordFailure(CoreMetricsFailureSeries)
-    case setEnabled(Bool)
-    case clear
+    case setEnabled(Bool, readAuthentication: CoreExportReadAuthentication)
+    case clear(readAuthentication: CoreExportReadAuthentication)
     case export(readAuthentication: CoreExportReadAuthentication)
 
     private struct Wire: Encodable {
@@ -118,11 +131,13 @@ public enum CoreMetricsRequest: Equatable, Sendable {
             wire = Wire(op: "record_failure")
             wire.series = series.wireSeries
             wire.dimension = series.wireDimension
-        case .setEnabled(let enabled):
+        case .setEnabled(let enabled, let readAuthentication):
             wire = Wire(op: "set_enabled")
             wire.enabled = enabled
-        case .clear:
+            wire.readAuthentication = readAuthentication.rawValue
+        case .clear(let readAuthentication):
             wire = Wire(op: "clear")
+            wire.readAuthentication = readAuthentication.rawValue
         case .export(let readAuthentication):
             wire = Wire(op: "export")
             wire.readAuthentication = readAuthentication.rawValue
@@ -224,7 +239,7 @@ public struct CoreMetricsAnswer: Decodable, Equatable, Sendable {
 
 extension CoreHandle {
     /// Queues one metrics operation. The outcome event decodes as `CoreMetricsAnswer`, or is a failure:
-    /// `metrics_export_not_authorized` for a capture-only export (nothing was read) and `invalid_request` for an
+    /// `metrics_not_authorized` for a capture-only export, enable/disable or clear (nothing was read or changed) and `invalid_request` for an
     /// implausible duration. Throws when the request could not be queued, in which case nothing ran.
     public func startMetrics(operationID: UInt64, request: CoreMetricsRequest) throws {
         let requestBytes = Array(try request.encoded())

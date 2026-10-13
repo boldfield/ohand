@@ -18,16 +18,20 @@
 //!   when the user captured something.
 //! * **Bounded.** Each timing series keeps its newest [`MAX_SAMPLES_PER_SERIES`] samples; failure
 //!   series are counters over a closed set. The series set is finite, so the whole store is too.
+//! * **Own storage.** The tables sit in a sidecar file beside the store, attached to its connection,
+//!   and are not part of the store's migrated schema (see `store`). Restoring or resetting the store
+//!   does not depend on them.
 //! * **Local only, explicit export.** The module has no network code and no destination. The only
 //!   way data leaves is [`export_metrics`], which the host calls for an explicit action and which
-//!   refuses unless the native read session is authenticated. Recording can be switched off with
-//!   [`set_metrics_enabled`] and the stored data removed with [`clear_metrics`]; neither touches
+//!   refuses unless the native read session is authenticated. Recording can be switched off or
+//!   on with [`set_metrics_enabled`] and the stored data removed with [`clear_metrics`]; both need
+//!   the same authenticated session as export, and neither touches
 //!   captures, items or reminders.
 
 use crate::export::ReadAuthentication;
 use crate::store::schema::Database;
 use chrono::{DateTime, SecondsFormat, Utc};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
 /// Timing samples kept per series; recording another drops the oldest.
@@ -249,7 +253,7 @@ impl FailureSeries {
 pub enum MetricsError {
     #[error("the duration is outside the accepted range")]
     DurationOutOfRange,
-    #[error("metrics export requires an authenticated read session")]
+    #[error("metrics export and control require an authenticated read session")]
     NotAuthenticated,
     #[error("metrics storage failed: {0}")]
     Storage(#[from] rusqlite::Error),
@@ -268,12 +272,72 @@ fn timestamp(instant: DateTime<Utc>) -> String {
     instant.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
+/// Name of the attached database that holds the metrics tables.
+const STORE_SCHEMA: &str = "metrics";
+
+const STORE_TABLES_SQL: &str = "
+    CREATE TABLE IF NOT EXISTS metrics.metric_timing_samples (
+        sample_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        series TEXT NOT NULL CHECK (series IN ('trigger_to_ready', 'end_of_input_to_save')),
+        dimension TEXT NOT NULL,
+        duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0 AND duration_ms <= 3600000)
+    );
+    CREATE INDEX IF NOT EXISTS metrics.idx_metric_timing_samples_series
+        ON metric_timing_samples(series, dimension, sample_id);
+    CREATE TABLE IF NOT EXISTS metrics.metric_failure_counts (
+        series TEXT NOT NULL CHECK (series IN ('processing_failure', 'scheduling_failure')),
+        dimension TEXT NOT NULL,
+        occurrences INTEGER NOT NULL CHECK (occurrences >= 0),
+        PRIMARY KEY (series, dimension)
+    );
+    CREATE TABLE IF NOT EXISTS metrics.metric_settings (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+        updated_at TEXT NOT NULL
+    );";
+
+/// The connection with the metrics store attached.
+///
+/// The tables live in a small file beside the main store (`<store path>.metrics`; in memory when
+/// the store is in memory), attached to the store's own connection under [`STORE_SCHEMA`]. They are
+/// deliberately not part of the store's migrated schema: that schema is versioned and shaped by
+/// other tasks, and trial figures are neither captured content nor needed to restore it. Deleting
+/// the sidecar file only forgets the figures. Attaching is idempotent and runs outside any
+/// transaction because every public function here calls it first.
+fn store(database: &Database) -> Result<&Connection, MetricsError> {
+    let connection = database.conn();
+    let attached: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_database_list WHERE name = ?1)",
+        params![STORE_SCHEMA],
+        |row| row.get(0),
+    )?;
+    if !attached {
+        let location = match connection.path() {
+            Some(path) if !path.is_empty() => format!("{path}.metrics"),
+            _ => ":memory:".to_string(),
+        };
+        connection.execute(
+            &format!("ATTACH DATABASE ?1 AS {STORE_SCHEMA}"),
+            params![location],
+        )?;
+        connection.execute_batch(STORE_TABLES_SQL)?;
+    }
+    Ok(connection)
+}
+
+fn require_authenticated(authentication: ReadAuthentication) -> Result<(), MetricsError> {
+    if authentication == ReadAuthentication::Authenticated {
+        Ok(())
+    } else {
+        Err(MetricsError::NotAuthenticated)
+    }
+}
+
 /// Whether recording is on. It is on until [`set_metrics_enabled`] says otherwise.
 pub fn metrics_enabled(database: &Database) -> Result<bool, MetricsError> {
-    let enabled: Option<i64> = database
-        .conn()
+    let enabled: Option<i64> = store(database)?
         .query_row(
-            "SELECT enabled FROM metric_settings WHERE id = 1",
+            "SELECT enabled FROM metrics.metric_settings WHERE id = 1",
             [],
             |row| row.get(0),
         )
@@ -282,13 +346,17 @@ pub fn metrics_enabled(database: &Database) -> Result<bool, MetricsError> {
 }
 
 /// Switches recording on or off. Stored samples are kept; use [`clear_metrics`] to remove them.
+/// Refused unless `authentication` is [`ReadAuthentication::Authenticated`]: a capture-only
+/// context can neither silence nor resume the trial evidence.
 pub fn set_metrics_enabled(
     database: &Database,
     enabled: bool,
+    authentication: ReadAuthentication,
     now: DateTime<Utc>,
 ) -> Result<(), MetricsError> {
-    database.conn().execute(
-        "INSERT INTO metric_settings (id, enabled, updated_at) VALUES (1, ?1, ?2)
+    require_authenticated(authentication)?;
+    store(database)?.execute(
+        "INSERT INTO metrics.metric_settings (id, enabled, updated_at) VALUES (1, ?1, ?2)
          ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled, updated_at = excluded.updated_at",
         params![i64::from(enabled), timestamp(now)],
     )?;
@@ -308,9 +376,9 @@ pub fn record_timing(
     if !metrics_enabled(database)? {
         return Ok(RecordOutcome::Disabled);
     }
-    let transaction = database.conn().unchecked_transaction()?;
+    let transaction = store(database)?.unchecked_transaction()?;
     transaction.execute(
-        "INSERT INTO metric_timing_samples (series, dimension, duration_ms) VALUES (?1, ?2, ?3)",
+        "INSERT INTO metrics.metric_timing_samples (series, dimension, duration_ms) VALUES (?1, ?2, ?3)",
         params![
             series.series_label(),
             series.dimension_label(),
@@ -318,9 +386,9 @@ pub fn record_timing(
         ],
     )?;
     transaction.execute(
-        "DELETE FROM metric_timing_samples
+        "DELETE FROM metrics.metric_timing_samples
          WHERE series = ?1 AND dimension = ?2 AND sample_id <= COALESCE(
-             (SELECT sample_id FROM metric_timing_samples WHERE series = ?1 AND dimension = ?2
+             (SELECT sample_id FROM metrics.metric_timing_samples WHERE series = ?1 AND dimension = ?2
               ORDER BY sample_id DESC LIMIT 1 OFFSET ?3), 0)",
         params![
             series.series_label(),
@@ -340,8 +408,8 @@ pub fn record_failure(
     if !metrics_enabled(database)? {
         return Ok(RecordOutcome::Disabled);
     }
-    database.conn().execute(
-        "INSERT INTO metric_failure_counts (series, dimension, occurrences) VALUES (?1, ?2, 1)
+    store(database)?.execute(
+        "INSERT INTO metrics.metric_failure_counts (series, dimension, occurrences) VALUES (?1, ?2, 1)
          ON CONFLICT(series, dimension) DO UPDATE SET
              occurrences = MIN(occurrences + 1, 9223372036854775807)",
         params![series.series_label(), series.dimension_label()],
@@ -349,14 +417,16 @@ pub fn record_failure(
     Ok(RecordOutcome::Recorded)
 }
 
-/// Removes every stored sample and counter. The enabled setting is unchanged.
-pub fn clear_metrics(database: &Database) -> Result<(), MetricsError> {
-    database
-        .conn()
-        .execute("DELETE FROM metric_timing_samples", [])?;
-    database
-        .conn()
-        .execute("DELETE FROM metric_failure_counts", [])?;
+/// Removes every stored sample and counter. The enabled setting is unchanged. Refused unless
+/// `authentication` is [`ReadAuthentication::Authenticated`].
+pub fn clear_metrics(
+    database: &Database,
+    authentication: ReadAuthentication,
+) -> Result<(), MetricsError> {
+    require_authenticated(authentication)?;
+    let connection = store(database)?;
+    connection.execute("DELETE FROM metrics.metric_timing_samples", [])?;
+    connection.execute("DELETE FROM metrics.metric_failure_counts", [])?;
     Ok(())
 }
 
@@ -407,13 +477,12 @@ pub fn export_metrics(
     authentication: ReadAuthentication,
     now: DateTime<Utc>,
 ) -> Result<MetricsReport, MetricsError> {
-    if authentication != ReadAuthentication::Authenticated {
-        return Err(MetricsError::NotAuthenticated);
-    }
+    require_authenticated(authentication)?;
+    let connection = store(database)?;
     let mut timings = Vec::new();
     for series in TimingSeries::all() {
-        let mut statement = database.conn().prepare(
-            "SELECT duration_ms FROM metric_timing_samples WHERE series = ?1 AND dimension = ?2
+        let mut statement = connection.prepare(
+            "SELECT duration_ms FROM metrics.metric_timing_samples WHERE series = ?1 AND dimension = ?2
              ORDER BY duration_ms",
         )?;
         let sorted = statement
@@ -438,10 +507,9 @@ pub fn export_metrics(
     }
     let mut failures = Vec::new();
     for series in FailureSeries::all() {
-        let occurrences: Option<i64> = database
-            .conn()
+        let occurrences: Option<i64> = connection
             .query_row(
-                "SELECT occurrences FROM metric_failure_counts WHERE series = ?1 AND dimension = ?2",
+                "SELECT occurrences FROM metrics.metric_failure_counts WHERE series = ?1 AND dimension = ?2",
                 params![series.series_label(), series.dimension_label()],
                 |row| row.get(0),
             )

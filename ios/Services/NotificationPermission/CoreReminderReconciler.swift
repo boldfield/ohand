@@ -39,6 +39,10 @@ public struct ReminderReconciliationFailure: Error, Equatable, Sendable {
 /// finish (for example an unreadable pending list) changed nothing it did not confirm, and the next pass repeats
 /// it.
 ///
+/// When given a `metrics` sink, a schedule the native side could not perform is reported to it as a closed machine
+/// label (`schedulingFailure(of:)`). That counts what the system observed; it never claims the user saw the failure,
+/// and it changes nothing about the pass.
+///
 /// It owns the core's event handler through `claimEventHandler()`, or an assembly that needs other event
 /// consumers forwards each event to `handle(_:)` and keeps the handler. Operation identifiers start at
 /// `firstOperationID`, a range of its own: the core accepts a duplicate operation identifier without complaint,
@@ -61,7 +65,8 @@ public final class CoreReminderReconciler: ReminderReconciling, @unchecked Senda
     public init(
         core: CoreHandle, bridge: NotificationBridge, center: NotificationCenterProviding,
         effectTimeout: TimeInterval = 10, removalPollInterval: TimeInterval = 0.05, maximumRemovalPolls: Int = 20,
-        firstOperationID: UInt64 = CoreReminderReconciler.firstOperationID
+        firstOperationID: UInt64 = CoreReminderReconciler.firstOperationID,
+        metrics: MetricsRecording? = nil
     ) throws {
         self.core = core
         self.nextOperationID = firstOperationID
@@ -69,7 +74,7 @@ public final class CoreReminderReconciler: ReminderReconciling, @unchecked Senda
             bridge: bridge, center: center, effectTimeout: effectTimeout,
             removalPollInterval: removalPollInterval, maximumRemovalPolls: maximumRemovalPolls)
         registration = try core.registerNotificationEffects { [weak core] effectID, command in
-            Self.perform(core: core, effects: effects, effectID: effectID, command: command)
+            Self.perform(core: core, effects: effects, metrics: metrics, effectID: effectID, command: command)
         }
     }
 
@@ -171,15 +176,20 @@ public final class CoreReminderReconciler: ReminderReconciling, @unchecked Senda
 
     /// Runs on the core worker thread, which waits for the answer: start the OS work and return. An abandoned
     /// effect needs nothing here; the bridge bounds its own work, and its late answer is `not_found`.
-    private static func perform(core: CoreHandle?, effects: ReminderNativeEffects, effectID: UInt64, command: NotificationEffectCommand) {
+    private static func perform(
+        core: CoreHandle?, effects: ReminderNativeEffects, metrics: MetricsRecording?, effectID: UInt64,
+        command: NotificationEffectCommand
+    ) {
         if command == .abandon { return }
         Task {
-            let reply = await answer(for: command, effects: effects)
+            let reply = await answer(for: command, effects: effects, metrics: metrics)
             try? core?.completeNotificationEffect(effectID: effectID, answer: reply)
         }
     }
 
-    private static func answer(for command: NotificationEffectCommand, effects: ReminderNativeEffects) async -> NotificationEffectAnswer {
+    private static func answer(
+        for command: NotificationEffectCommand, effects: ReminderNativeEffects, metrics: MetricsRecording?
+    ) async -> NotificationEffectAnswer {
         let invalidPayload = NotificationEffectAnswer.failed(errorClass: .permanent, code: NotificationBridgeError.invalidPayload.code)
         let formatter = makeFormatter()
         do {
@@ -189,8 +199,17 @@ public final class CoreReminderReconciler: ReminderReconciling, @unchecked Senda
                       let dueInstant = formatter.date(from: schedule.fireAt),
                       schedule.payloadKind == NotificationPayloadKind.generic.rawValue,
                       let target = OpaqueIdentifier(schedule.opaqueTargetID)
-                else { return invalidPayload }
-                _ = try await effects.bridge.schedule(.generic(identifier: identifier, dueInstant: dueInstant, opaqueTargetID: target))
+                else {
+                    metrics?.recordSchedulingFailure(.unschedulable)
+                    return invalidPayload
+                }
+                do {
+                    _ = try await effects.bridge.schedule(
+                        .generic(identifier: identifier, dueInstant: dueInstant, opaqueTargetID: target))
+                } catch {
+                    if let reason = schedulingFailure(of: error) { metrics?.recordSchedulingFailure(reason) }
+                    throw error
+                }
                 return .done
             case .cancel(let notificationID):
                 try await effects.cancel(notificationID)
@@ -208,6 +227,18 @@ public final class CoreReminderReconciler: ReminderReconciling, @unchecked Senda
         } catch {
             let failure = ReminderReconciliationFailure.normalized(error)
             return .failed(errorClass: CoreErrorClass(rawValue: failure.errorClass.rawValue) ?? .permanent, code: failure.code)
+        }
+    }
+
+    /// The closed label for a schedule the system or the bridge refused. A cancelled schedule is not a failure.
+    static func schedulingFailure(of error: Error) -> CoreMetricsSchedulingFailure? {
+        let failure = NotificationBridgeError.normalized(error)
+        switch failure {
+        case .permissionDenied: return .permissionDenied
+        case .invalidPayload, .dueTimeInPast, .previewApprovalRequired, .previewNotEnabled: return .unschedulable
+        case .installNotConfirmed, .centerFailed, .timedOut: return .nativeFailure
+        case .cancelled: return nil
+        default: return .other
         }
     }
 }

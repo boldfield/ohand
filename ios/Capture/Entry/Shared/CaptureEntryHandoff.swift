@@ -22,6 +22,9 @@ struct CaptureEntryRequest: Equatable {
     let source: CaptureEntrySource
     /// `nil` means the user's configured default mode.
     let requestedMode: CaptureEntryMode?
+    /// When the user's trigger reached the handoff, on the system's monotonic uptime clock (comparable across the
+    /// control extension and the app). It starts the trigger-to-ready measurement and carries nothing else.
+    let triggeredAtUptimeNanoseconds: UInt64
 }
 
 /// Holds the one pending entry request between the moment the system runs the entry (the intent's `perform()`, which
@@ -30,6 +33,8 @@ struct CaptureEntryRequest: Equatable {
 /// * A request is minted once. A second handoff before the first was presented (the system running `perform()` twice,
 ///   a double tap) adopts the pending request: same ID, newest explicit mode. Only a request that was taken can be
 ///   followed by a new one, so one press never yields two presentations.
+/// * A request is stamped with the monotonic uptime of the first trigger; an adopted request keeps that stamp, so the
+///   measured wait runs from the earliest press.
 /// * Nothing is persisted: a request holds no user input. Nothing here waits for any other component.
 final class CaptureEntryHandoff {
     static let registeredNotification = Notification.Name("com.boldfield.ohand.capture.entry.registered")
@@ -37,15 +42,18 @@ final class CaptureEntryHandoff {
 
     private let notificationCenter: NotificationCenter
     private let makeEntryID: () -> String
+    private let uptimeNanoseconds: () -> UInt64
     private let lock = NSLock()
     private var pending: CaptureEntryRequest?
 
     init(
         notificationCenter: NotificationCenter = .default,
-        makeEntryID: @escaping () -> String = { UUID().uuidString }
+        makeEntryID: @escaping () -> String = { UUID().uuidString },
+        uptimeNanoseconds: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }
     ) {
         self.notificationCenter = notificationCenter
         self.makeEntryID = makeEntryID
+        self.uptimeNanoseconds = uptimeNanoseconds
     }
 
     /// Registers a request and returns it. Adopts a request that is still pending.
@@ -56,11 +64,14 @@ final class CaptureEntryHandoff {
         if let existing = pending {
             let adopted = CaptureEntryRequest(
                 entryID: existing.entryID, source: existing.source,
-                requestedMode: requestedMode ?? existing.requestedMode)
+                requestedMode: requestedMode ?? existing.requestedMode,
+                triggeredAtUptimeNanoseconds: existing.triggeredAtUptimeNanoseconds)
             pending = adopted
             return adopted
         }
-        let created = CaptureEntryRequest(entryID: makeEntryID(), source: source, requestedMode: requestedMode)
+        let created = CaptureEntryRequest(
+            entryID: makeEntryID(), source: source, requestedMode: requestedMode,
+            triggeredAtUptimeNanoseconds: uptimeNanoseconds())
         pending = created
         return created
     }
