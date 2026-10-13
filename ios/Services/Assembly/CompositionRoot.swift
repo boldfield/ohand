@@ -128,13 +128,88 @@ public struct CompositionEnvironment: Sendable {
 
 // MARK: - Extension seam
 
-/// What the root hands a module when it attaches: the open core and the facts a module needs to build its own client.
+/// What the root hands a module when it attaches. It deliberately carries no `CoreHandle`: the handle's read verbs are
+/// ungated, so a module reaches the core only through `clients` (clients whose verbs never return stored history, and
+/// that enforce their own authentication where they must) and `privateReads` (the gated read verbs).
 public struct CompositionContext {
-    public let core: CoreHandle
-    public let storeURL: URL
+    public let clients: CompositionCoreClients
+    public let privateReads: CompositionPrivateReads
     public let storageRootURL: URL
     public let sender: ProviderRequestSender
     public let now: @Sendable () -> Date
+}
+
+/// Builds the core-backed clients a module owns, without handing the module the core handle itself. Each client takes
+/// the operation identifier range it documents; a module forwards the events of that range to the client's `handle`.
+public struct CompositionCoreClients {
+    fileprivate let core: CoreHandle
+
+    public func audioRetention() -> CoreAudioRetentionClient { CoreAudioRetentionClient(core: core) }
+    public func deletionCleanup() -> CoreDeletionCleanupClient { CoreDeletionCleanupClient(core: core) }
+    public func export() -> CoreExportClient { CoreExportClient(core: core) }
+    public func metrics() -> CoreMetricsClient { CoreMetricsClient(core: core) }
+    public func notificationActions() -> CoreNotificationActionClient { CoreNotificationActionClient(core: core) }
+    public func processingHealth(stallAfterSeconds: UInt32 = 0, leaseGraceSeconds: UInt32 = 0) -> ProcessingHealthService {
+        ProcessingHealthService(core: core, stallAfterSeconds: stallAfterSeconds, leaseGraceSeconds: leaseGraceSeconds)
+    }
+    public func shadowReview(configuration: ShadowReviewConfiguration = .off) -> ShadowReviewService {
+        ShadowReviewService(core: core, configuration: configuration)
+    }
+}
+
+/// The core's read verbs for stored history, state derived from it and the store check, behind the read gate. A read is
+/// refused with an `unauthorized` failure while the session is capture-only, and a module must pass every event for
+/// one of these operations through `admit` before decoding it: an answer that arrives after a relock is refused too.
+public final class CompositionPrivateReads {
+    private let gate: PrivateReadGate
+
+    init(gate: PrivateReadGate) {
+        self.gate = gate
+    }
+
+    public func startStoreCheck(operationID: UInt64) throws {
+        try gated { try gate.startStoreCheck(operationID: operationID) }
+    }
+
+    public func startGetCapture(operationID: UInt64, captureID: String) throws {
+        try gated { try gate.startGetCapture(operationID: operationID, captureID: captureID) }
+    }
+
+    public func startItemStatus(operationID: UInt64, itemID: String) throws {
+        try gated { try gate.startItemStatus(operationID: operationID, itemID: itemID) }
+    }
+
+    /// Returns normally only while the read this event answers is still authorized. On a throw the caller discards the
+    /// event without decoding it. Each answer is admitted at most once.
+    public func admit(operationID: UInt64) throws {
+        try gated { try gate.admit(operationID: operationID) }
+    }
+
+    private func gated(_ body: () throws -> Void) throws {
+        do {
+            try body()
+        } catch let denial as PrivateReadDenied {
+            throw CoreItemStatusReader.failure(for: denial)
+        }
+    }
+}
+
+/// The read scope of the running session, as the app sees it.
+public enum CompositionReadScope: Equatable, Sendable {
+    /// New captures can be saved; no stored history or state derived from it is returned.
+    case captureOnly
+    case authenticated
+}
+
+/// How one read-authentication attempt ended.
+public enum CompositionAuthenticationOutcome: Equatable, Sendable {
+    case authenticated
+    case cancelled
+    case denied
+    /// No usable authentication method on the device.
+    case unavailable
+    /// A relock or a newer attempt ended this attempt before it could grant access.
+    case interrupted
 }
 
 /// An optional capability that joins the root without editing it (the T11 seam). A module owns one core client with
@@ -551,6 +626,17 @@ public final class ServiceCompositionRoot {
             center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { _ in
                 foregroundState.set(false)
             })
+        let readSession = adapters.readSession
+        for (name, reason) in [
+            (UIApplication.didEnterBackgroundNotification, RelockReason.enteredBackground),
+            (UIApplication.willEnterForegroundNotification, RelockReason.willEnterForeground),
+            (UIApplication.protectedDataWillBecomeUnavailableNotification, RelockReason.protectedDataUnavailable),
+        ] {
+            foregroundTokens.append(
+                center.addObserver(forName: name, object: nil, queue: nil) { _ in
+                    readSession.relock(reason)
+                })
+        }
         let jobObserver = JobRunnerLifecycleObserver(
             service: jobRunner, notificationCenter: center, reachability: adapters.reachability,
             backgroundGrant: adapters.backgroundGrant)
@@ -621,6 +707,41 @@ public final class ServiceCompositionRoot {
         service.submit(record) { outcome in
             completion(Self.saveOutcome(for: outcome))
         }
+    }
+
+    // MARK: Read authentication
+
+    /// Whether private reads are currently allowed. Every launch starts `captureOnly`.
+    public var readScope: CompositionReadScope {
+        adapters.readSession.scope == .authenticated ? .authenticated : .captureOnly
+    }
+
+    /// Asks the device owner to authenticate. Only a success moves the scope to `authenticated`; any other outcome
+    /// leaves (or returns) it `captureOnly`. `completion` runs on the main queue.
+    public func authenticateReads(
+        reason: String,
+        completion: @escaping (CompositionAuthenticationOutcome) -> Void
+    ) {
+        adapters.readSession.authenticate(reason: reason) { result in
+            switch result {
+            case .authenticated:
+                completion(.authenticated)
+            case .notAuthenticated(.cancelled):
+                completion(.cancelled)
+            case .notAuthenticated(.denied):
+                completion(.denied)
+            case .notAuthenticated(.unavailable):
+                completion(.unavailable)
+            case .notAuthenticated(.interrupted):
+                completion(.interrupted)
+            }
+        }
+    }
+
+    /// Returns to capture-only and invalidates every read still waiting for its answer. The root also relocks itself
+    /// when the app enters the background or returns to the foreground, and when protected data becomes unavailable.
+    public func relockReads() {
+        adapters.readSession.relock(.explicit)
     }
 
     /// Reads an item's save, processing, transcription and reminder facts from the core. Private: with a capture-only
@@ -813,8 +934,8 @@ public final class ServiceCompositionRoot {
             router.register { jobRunner.handle($0) }
 
             let context = CompositionContext(
-                core: core, storeURL: layout.databaseURL, storageRootURL: layout.rootDirectory,
-                sender: adapters.sender, now: environment.now)
+                clients: CompositionCoreClients(core: core), privateReads: CompositionPrivateReads(gate: readGate),
+                storageRootURL: layout.rootDirectory, sender: adapters.sender, now: environment.now)
             for module in modules {
                 try module.attach(to: context)
                 undo.append { module.shutDown() }
