@@ -49,6 +49,7 @@ final class NotificationActionCoreIntegrationTests: XCTestCase {
     private func withDatabase<Value>(_ body: (OpaquePointer?) throws -> Value) rethrows -> Value {
         var database: OpaquePointer?
         XCTAssertEqual(sqlite3_open(storePath, &database), SQLITE_OK)
+        sqlite3_busy_timeout(database, 5_000)
         defer { sqlite3_close(database) }
         return try body(database)
     }
