@@ -61,6 +61,19 @@ public struct CompositionConfiguration: Codable, Equatable, Sendable {
         case jobRetryDelaySeconds = "job_retry_delay_seconds"
     }
 
+    /// A file names the version, storage root and capture route; every other setting falls back to its default.
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        version = try values.decode(Int.self, forKey: .version)
+        storageRootPath = try values.decode(String.self, forKey: .storageRootPath)
+        captureRouteID = try values.decode(String.self, forKey: .captureRouteID)
+        captureItemScope = try values.decodeIfPresent(String.self, forKey: .captureItemScope) ?? "personal"
+        credentialServiceName =
+            try values.decodeIfPresent(String.self, forKey: .credentialServiceName)
+            ?? CredentialService.defaultServiceName
+        jobRetryDelaySeconds = try values.decodeIfPresent(Double.self, forKey: .jobRetryDelaySeconds) ?? 60
+    }
+
     private struct VersionProbe: Decodable {
         let version: Int
     }

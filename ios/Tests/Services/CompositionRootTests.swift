@@ -221,7 +221,8 @@ final class CompositionRootTests: XCTestCase {
 
         let captureID = UUID().uuidString.lowercased()
         var saved: CompositionSaveOutcome?
-        root.saveText(captureID: captureID, text: Self.captureText, capturedAt: Date()) { saved = $0 }
+        let capturedAt = Date()
+        root.saveText(captureID: captureID, text: Self.captureText, capturedAt: capturedAt) { saved = $0 }
         XCTAssertTrue(pump(until: { saved != nil }), "the save completes")
         guard case .saved(let savedCaptureID, let itemID, let alreadySaved)? = saved else {
             return XCTFail("expected a confirmed save, got \(String(describing: saved))")
@@ -237,7 +238,9 @@ final class CompositionRootTests: XCTestCase {
         try insertInterpretationJob(itemID: itemID)
         root.start(isActive: true)
 
-        XCTAssertTrue(pump(until: { !sender.requests.isEmpty }, timeout: 20), "the job reaches the provider transport")
+        XCTAssertTrue(
+            pump(until: { !sender.requests.isEmpty }, timeout: 20),
+            "the job reaches the provider transport: \(jobDiagnostics(root, sender: sender))")
         XCTAssertEqual(sender.requests.first?.url.host, "api.anthropic.com")
 
         var processed: ItemStatusReport?
@@ -246,7 +249,7 @@ final class CompositionRootTests: XCTestCase {
                 processed = self.readStatus(root, itemID: itemID)
                 return processed?.reminderRequestState != nil
             }, timeout: 30),
-            "the provider reply is applied to the item")
+            "the provider reply is applied to the item: \(jobDiagnostics(root, sender: sender))")
         XCTAssertEqual(processed?.processingState, "processed")
         XCTAssertEqual(processed?.reminderRequestState, "resolved")
 
@@ -272,7 +275,7 @@ final class CompositionRootTests: XCTestCase {
         XCTAssertEqual(durable.reminderScheduleState, "scheduled")
 
         var repeated: CompositionSaveOutcome?
-        reopened.saveText(captureID: captureID, text: Self.captureText, capturedAt: Date()) { repeated = $0 }
+        reopened.saveText(captureID: captureID, text: Self.captureText, capturedAt: capturedAt) { repeated = $0 }
         XCTAssertTrue(pump(until: { repeated != nil }))
         if case .saved(_, let repeatedItemID, let again)? = repeated {
             XCTAssertEqual(repeatedItemID, itemID)
@@ -318,6 +321,13 @@ final class CompositionRootTests: XCTestCase {
         root.itemStatus(itemID: itemID) { result = $0 }
         _ = pump(until: { result != nil })
         return try? result?.get()
+    }
+
+    private func jobDiagnostics(_ root: ServiceCompositionRoot, sender: ScriptedProviderSender) -> String {
+        let job = JobStoreInspector.job(at: databasePath, id: "job-composition-1")
+        return "requests=\(sender.requests.count) drains started=\(root.jobRunner.startedDrainCount) "
+            + "finished=\(root.jobRunner.finishedDrainCount) outcome=\(String(describing: root.jobRunner.lastOutcome)) "
+            + "job=\(String(describing: job))"
     }
 
     private var databasePath: String {
