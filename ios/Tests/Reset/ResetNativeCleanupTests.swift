@@ -109,25 +109,31 @@ final class ResetNativeCleanupTests: IngressStorageTestCase {
         XCTAssertEqual(filesMentioning("cap-a"), [])
     }
 
-    func testTheRecordOutlivesEveryAudioFileSoAFailedOrInterruptedPurgeIsRetriedAfterARelaunch() async throws {
+    /// One process that lists `cap-a` at the tap and purges it once with the bound `cap-a.wav` refusing removal. The
+    /// process's ingress (and its single-writer lock) is gone when this returns.
+    private func purgeOnceWithAStuckBoundAudioFile() async throws -> (ResetStagingSnapshot, ResetStagingPurge) {
         let faults = FaultPlan()
         let (ingress, service) = try makeIngress(
             importer: FakeForegroundIngressImporter(), fileSystem: FaultingDeletionFileSystem(faults: faults))
         withExtendedLifetime(service) {}
+        let snapshot = try await ingress.snapshot()
+        ingress.endBoundary()
+        faults.arm("fs.remove:cap-a.wav")
+        return (snapshot, await ingress.purgeUnimported(from: snapshot))
+    }
+
+    func testTheRecordOutlivesEveryAudioFileSoAFailedPurgeIsRetriedAfterARelaunch() async throws {
         _ = try stagingStore.stage(try audioRecord("cap-a"))
         // Finalized audio bound to the capture that its record does not name, as a finalize interrupted after the copy.
         try Data("synthetic audio".utf8).write(to: finalizedAudioURL("cap-a.m4a"))
         try Data("synthetic audio".utf8).write(to: finalizedAudioURL("cap-a.wav"))
-        let snapshot = try await ingress.snapshot()
-        ingress.endBoundary()
-        faults.arm("fs.remove:cap-a.wav")
 
-        let first = await ingress.purgeUnimported(from: snapshot)
+        let (snapshot, first) = try await purgeOnceWithAStuckBoundAudioFile()
         XCTAssertEqual(first, .incomplete(remaining: 1))
         XCTAssertTrue(exists(finalizedAudioURL("cap-a.wav")))
         XCTAssertTrue(exists(recordURL("cap-a")), "the record stays while any audio of the capture remains")
 
-        // A relaunch knows the capture only from the recorded list and what is still staged.
+        // The relaunched process knows the capture only from the recorded list and what is still staged.
         let (relaunched, relaunchedService) = try makeIngress(importer: FakeForegroundIngressImporter())
         withExtendedLifetime(relaunchedService) {}
         let retried = await relaunched.purgeUnimported(from: snapshot)
