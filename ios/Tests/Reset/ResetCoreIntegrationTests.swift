@@ -534,6 +534,84 @@ final class ResetCoreIntegrationTests: XCTestCase {
         XCTAssertFalse(try second.markers.isRemovalRequested())
     }
 
+    func testAKeepTapAfterARemoveTapInterruptedRightAfterTheCoreStartedCarriesTheRemovalOutFirst() throws {
+        for interruption in ["process death after start", "carry-over failure"] {
+            let context = interruption
+            let world = try makeWorld()
+            _ = try seedCaptures(world)
+            let reference = try world.addProfile(version: "profile-a-v1")
+            let faults = world.storage.faults
+            let first = try world.launch(markerFileSystem: FaultingResetMarkerFileSystem(faults: faults))
+            let runtime: RealCoreResetRuntime
+            if interruption == "process death after start" {
+                try first.killAfterCoreStart(.remove)
+                first.terminate()
+                runtime = try world.launch()
+            } else {
+                faults.arm("fs.write:\(FileResetMarkerStore.removalFileName)")
+                let interrupted = try first.reset(.remove)
+                XCTAssertEqual(interrupted.state, .pending, context)
+                XCTAssertEqual(interrupted.blockers, [.markerNotRecorded], context)
+                runtime = first
+            }
+            let earlierGeneration = try runtime.currentGeneration()
+            XCTAssertEqual(earlierGeneration, 1, "the core started the remove tap's reset: \(context)")
+            XCTAssertEqual(try runtime.markers.request()?.credentialChoice, .remove, "the recorded tap is the only copy of the choice: \(context)")
+            XCTAssertFalse(try runtime.markers.isRemovalRequested(), context)
+            XCTAssertFalse(try runtime.markers.isCleanupOutstanding(), context)
+            XCTAssertTrue(try world.isCredentialPresent(reference), context)
+
+            let report = try runtime.reset(.keep)
+            runtime.terminate()
+
+            XCTAssertEqual(report.state, .completed, "\(context): \(report.blockers)")
+            XCTAssertEqual(report.progress?.generation, earlierGeneration + 1, "the keep tap's own generation ran after the earlier reset: \(context)")
+            XCTAssertTrue(try world.isProfileRevoked("profile-a-v1"), context)
+            XCTAssertFalse(try world.isCredentialPresent(reference), "the earlier remove choice was carried out, not replaced by the keep tap: \(context)")
+            XCTAssertFalse(try runtime.markers.isRemovalRequested(), context)
+            XCTAssertFalse(try runtime.markers.isCleanupOutstanding(), context)
+            XCTAssertNil(try runtime.markers.request(), context)
+            for captureID in ["cap-1", "cap-2", "cap-staged"] {
+                XCTAssertEqual(world.storage.remnants(of: captureID), [], context)
+            }
+        }
+    }
+
+    func testAKeepTapThatCannotBeRecordedNeverWithdrawsAStartedRemoveTap() throws {
+        let world = try makeWorld()
+        _ = try seedCaptures(world)
+        let reference = try world.addProfile(version: "profile-a-v1")
+        let faults = world.storage.faults
+        let first = try world.launch(markerFileSystem: FaultingResetMarkerFileSystem(faults: faults))
+        faults.arm("fs.write:\(FileResetMarkerStore.removalFileName)")
+        let interrupted = try first.reset(.remove)
+        XCTAssertEqual(interrupted.blockers, [.markerNotRecorded])
+        XCTAssertEqual(try first.currentGeneration(), 1)
+        faults.arm("fs.write:\(FileResetMarkerStore.requestFilePrefix)2")
+
+        let failed = try first.reset(.keep)
+
+        XCTAssertEqual(failed.state, .pending, "the earlier reset is still owed, so the tap is not reported as 'not started'")
+        XCTAssertEqual(failed.blockers, [.markerNotRecorded])
+        XCTAssertNil(try first.markers.request(), "the started remove tap was carried over before it was withdrawn")
+        XCTAssertEqual(try first.markers.removalRequest()?.profileVersions, ["profile-a-v1"], "its choice, bound to its profiles, is armed")
+        XCTAssertTrue(try first.markers.isCleanupOutstanding())
+        XCTAssertTrue(try world.isCredentialPresent(reference), "nothing is removed by a tap that was not recorded")
+        first.terminate()
+
+        let second = try world.launch()
+        let resumed = try second.resume()
+        second.terminate()
+
+        XCTAssertEqual(resumed.state, .completed, "blockers: \(resumed.blockers)")
+        XCTAssertEqual(resumed.progress?.generation, 1, "no generation was opened for the keep tap")
+        XCTAssertTrue(try world.isProfileRevoked("profile-a-v1"))
+        XCTAssertFalse(try world.isCredentialPresent(reference), "the earlier remove choice was carried out")
+        XCTAssertFalse(try second.markers.isRemovalRequested())
+        XCTAssertFalse(try second.markers.isCleanupOutstanding())
+        XCTAssertNil(try second.markers.request())
+    }
+
     func testAKeepTapNeverCancelsAnEarlierRemovalThatIsStillOwed() throws {
         let world = try makeWorld()
         _ = try seedCaptures(world)

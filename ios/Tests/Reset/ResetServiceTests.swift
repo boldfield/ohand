@@ -673,6 +673,116 @@ final class ResetServiceTests: ResetTestCase {
         XCTAssertEqual(world.core.revokedProfileVersions, [])
     }
 
+    func testAKeepTapAfterARemoveTapWhoseProcessDiedRightAfterTheCoreStartedCarriesTheRemovalOutFirst() async throws {
+        for replacementRecorded in [true, false] {
+            let context = "keep tap recorded: \(replacementRecorded)"
+            let world = try makeResetWorld()
+            try await seedVoiceAndTextCaptures(world)
+            configureProfiles(world)
+            await crashDuringReset(world, at: "after.start", choice: .remove)
+            XCTAssertEqual(world.core.currentGeneration, 1, context)
+            XCTAssertEqual(world.choice.requested, .remove, "the recorded tap is the only durable copy of the choice: \(context)")
+            XCTAssertFalse(world.choice.isRequested, context)
+            XCTAssertFalse(world.choice.isOutstanding, context)
+            world.relaunch()
+            // Made in the fresh generation of the started reset, before the keep tap.
+            try await world.seedItem("item-between", captureID: "cap-between")
+            if !replacementRecorded { world.faults.arm("intent.record") }
+
+            let report = await world.makeService().reset(credentialChoice: .keep)
+
+            if replacementRecorded {
+                XCTAssertTrue(report.isComplete, "\(context): \(report.blockers)")
+                XCTAssertEqual(report.progress?.generation, 2, "the keep tap's own generation ran after the earlier reset: \(context)")
+                XCTAssertTrue(world.deletion.core.isDeletionComplete("item-between"), "pre-tap content of the keep tap: \(context)")
+            } else {
+                XCTAssertEqual(report.state, .pending, "an earlier reset is still owed, so this is not 'not started': \(context)")
+                XCTAssertEqual(report.blockers, [.markerNotRecorded], context)
+                XCTAssertNil(
+                    world.choice.recordedRequest,
+                    "the started tap was carried over before it was withdrawn, so withdrawing it loses nothing: \(context)")
+                XCTAssertEqual(world.choice.removal?.profileVersions, ["profile-a-v1", "profile-b-v1", "profile-c-v1"], context)
+                XCTAssertTrue(world.choice.isOutstanding, context)
+                XCTAssertEqual(world.credentials.removedReferences, [], "nothing is removed by a tap that was not recorded: \(context)")
+                XCTAssertFalse(world.staging.isHolding, context)
+
+                let resumed = await world.makeService().resume()
+
+                XCTAssertTrue(resumed.isComplete, "\(context): \(resumed.blockers)")
+                XCTAssertEqual(resumed.progress?.generation, 1, "no generation was opened for the keep tap: \(context)")
+                XCTAssertNil(world.deletion.core.status("item-between", .removeAudio), "fresh content of the started reset: \(context)")
+            }
+            XCTAssertEqual(
+                Set(world.credentials.removedReferences), ["ref-a", "ref-b"],
+                "the earlier remove choice was carried out, not cancelled by the keep tap: \(context)")
+            XCTAssertEqual(Set(world.core.revokedProfileVersions), ["profile-a-v1", "profile-c-v1"], context)
+            XCTAssertFalse(world.choice.isRequested, context)
+            XCTAssertFalse(world.choice.isOutstanding, context)
+            XCTAssertNil(world.choice.recordedRequest, context)
+            assertEverythingErased(world)
+        }
+    }
+
+    func testAKeepTapAfterARemoveTapWhoseChoiceCouldNotBeCarriedOverCarriesItOutFirst() async throws {
+        for carryOverFailsAgain in [false, true] {
+            let context = "carry-over fails again: \(carryOverFailsAgain)"
+            let world = try makeResetWorld()
+            try await seedVoiceAndTextCaptures(world)
+            configureProfiles(world)
+            world.faults.arm("choice.record")
+            let interrupted = await world.makeService().reset(credentialChoice: .remove)
+            XCTAssertEqual(interrupted.blockers, [.markerNotRecorded], context)
+            XCTAssertEqual(world.choice.requested, .remove, "the request still carries the choice: \(context)")
+            XCTAssertEqual(world.core.currentGeneration, 1, context)
+            if carryOverFailsAgain { world.faults.arm("choice.record") }
+
+            var report = await world.makeService().reset(credentialChoice: .keep)
+
+            if carryOverFailsAgain {
+                XCTAssertEqual(report.state, .pending, context)
+                XCTAssertEqual(report.blockers, [.markerNotRecorded], context)
+                XCTAssertEqual(world.choice.requested, .remove, "the started remove tap stays recorded: \(context)")
+                XCTAssertEqual(world.credentials.removedReferences, [], context)
+                XCTAssertEqual(world.staging.snapshotCalls, 1, "the keep tap holds nothing new before the earlier tap is safe: \(context)")
+
+                report = await world.makeService().resume()
+                XCTAssertEqual(report.progress?.generation, 1, "the resumed request finishes its own generation: \(context)")
+            } else {
+                XCTAssertEqual(report.progress?.generation, 2, "the keep tap's own generation ran after the earlier reset: \(context)")
+            }
+            XCTAssertTrue(report.isComplete, "\(context): \(report.blockers)")
+            XCTAssertEqual(
+                Set(world.credentials.removedReferences), ["ref-a", "ref-b"],
+                "the earlier remove choice was carried out, not replaced by the keep tap: \(context)")
+            XCTAssertFalse(world.choice.isRequested, context)
+            XCTAssertFalse(world.choice.isOutstanding, context)
+            XCTAssertNil(world.choice.recordedRequest, context)
+            assertEverythingErased(world)
+        }
+    }
+
+    func testATapThatCannotAskTheCoreKeepsAnEarlierRecordedTap() async throws {
+        let world = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(world)
+        configureProfiles(world)
+        await crashDuringReset(world, at: "after.start", choice: .remove)
+        world.relaunch()
+        world.faults.arm("reset.status")
+
+        let report = await world.makeService().reset(credentialChoice: .keep)
+
+        XCTAssertEqual(report.state, .pending, "whether the recorded tap started is unknown, so it is kept")
+        XCTAssertEqual(report.blockers, [.coreUnavailable])
+        XCTAssertEqual(world.choice.requested, .remove)
+        XCTAssertTrue(world.staging.isHolding)
+        XCTAssertEqual(world.staging.snapshotCalls, 0)
+
+        let resumed = await world.makeService().resume()
+
+        XCTAssertTrue(resumed.isComplete, "blockers: \(resumed.blockers)")
+        XCTAssertEqual(Set(world.credentials.removedReferences), ["ref-a", "ref-b"])
+    }
+
     func testAChoiceThatCannotBeRecordedStartsNothing() async throws {
         let world = try makeResetWorld()
         try await seedVoiceAndTextCaptures(world)

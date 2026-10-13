@@ -96,24 +96,43 @@ struct ResetStagingSnapshot: Equatable {
 /// then opens a generation of its own for its list. The flag is what tells a restart that a pending generation is the
 /// earlier one rather than one this tap already started; it is cleared, by recording the tap again without it, once the
 /// earlier reset completed.
+///
+/// The tap also notes the core's latest generation as it was at the tap. That is a reference to the core's own durable
+/// state, not a generation native code keeps: comparing it with what the core reports later says whether the core has
+/// since started a generation for this tap (`coreHasStarted`). The answer decides what a later tap may do with a tap
+/// that is still recorded: one the core never started is replaced by the latest explicit choice, one the core started
+/// has its choice carried out first, exactly as if it had been carried over before the interruption.
 struct ResetRequest: Equatable {
     let credentialChoice: ResetCredentialChoice
     /// For `remove`, the profiles present at the tap (possibly none); always nil for `keep`.
     let credentialRemoval: ResetCredentialRemoval?
     let stagedBeforeTheTap: ResetStagingSnapshot
     let awaitsEarlierReset: Bool
+    /// The core's latest generation at the tap; nil when no reset had ever started.
+    let latestGenerationAtTheTap: Int64?
 
     init(
         credentialChoice: ResetCredentialChoice,
         credentialRemoval: ResetCredentialRemoval? = nil,
         stagedBeforeTheTap: ResetStagingSnapshot,
-        awaitsEarlierReset: Bool = false
+        awaitsEarlierReset: Bool = false,
+        latestGenerationAtTheTap: Int64? = nil
     ) {
         self.credentialChoice = credentialChoice
         self.credentialRemoval =
             credentialChoice == .remove ? credentialRemoval ?? ResetCredentialRemoval(profiles: []) : nil
         self.stagedBeforeTheTap = stagedBeforeTheTap
         self.awaitsEarlierReset = awaitsEarlierReset
+        self.latestGenerationAtTheTap = latestGenerationAtTheTap
+    }
+
+    /// Whether the core has started a generation since this tap, given its latest progress: a generation newer than
+    /// the one at the tap is one this tap started (while the tap awaits an earlier reset, that reset's generation is the
+    /// one at the tap, so it never counts). A core that reports no generation has started nothing.
+    func coreHasStarted(latest: ResetProgress?) -> Bool {
+        guard let latest else { return false }
+        guard let atTheTap = latestGenerationAtTheTap else { return true }
+        return latest.generation > atTheTap
     }
 }
 
@@ -163,8 +182,8 @@ protocol ResetCredentialRemoving {
 extension CredentialService: ResetCredentialRemoving {}
 
 /// What native code still owes a reset, as small durable markers, so a restart finishes what the user asked for. They
-/// hold a choice, what it binds and flags, never a generation or a result: the core alone says whether the reset itself
-/// is complete.
+/// hold a choice, what it binds, flags and, with a tap, a reference to the core's generation at that tap; never a
+/// generation of their own or a result: the core alone says whether the reset itself is complete.
 protocol ResetMarkerStore {
     /// The latest recorded tap the core has not confirmed. A restart that finds it holds the ingress boundary at its list
     /// and runs the whole reset again (finishing an earlier pending generation first when the tap awaits it, then

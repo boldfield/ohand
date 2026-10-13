@@ -27,9 +27,13 @@ final class RealCoreResetWorld {
     }
 
     /// A process start over the on-disk store: a new core, clients, ingress service and reset service. `wrapStaging`
-    /// puts a test decorator around the production staging, to act at a precise moment of the reset.
-    func launch(wrapStaging: ((ResetIngressStaging) -> ResetIngressStaging)? = nil) throws -> RealCoreResetRuntime {
-        let runtime = try RealCoreResetRuntime(world: self, wrapStaging: wrapStaging)
+    /// puts a test decorator around the production staging, to act at a precise moment of the reset; `markerFileSystem`
+    /// is the file system the marker store writes through (the real one when nil), to fail a marker write.
+    func launch(
+        markerFileSystem: IngressFileSystem? = nil,
+        wrapStaging: ((ResetIngressStaging) -> ResetIngressStaging)? = nil
+    ) throws -> RealCoreResetRuntime {
+        let runtime = try RealCoreResetRuntime(world: self, markerFileSystem: markerFileSystem, wrapStaging: wrapStaging)
         runtimes.append(runtime)
         return runtime
     }
@@ -225,9 +229,13 @@ final class RealCoreResetRuntime {
     private(set) var staging: NativeResetIngress?
     private(set) var service: ResetService?
 
-    init(world: RealCoreResetWorld, wrapStaging: ((ResetIngressStaging) -> ResetIngressStaging)? = nil) throws {
+    init(
+        world: RealCoreResetWorld,
+        markerFileSystem: IngressFileSystem? = nil,
+        wrapStaging: ((ResetIngressStaging) -> ResetIngressStaging)? = nil
+    ) throws {
         session = try RealCoreResetSession(path: world.storage.databasePath)
-        markers = FileResetMarkerStore(layout: world.layout)
+        markers = FileResetMarkerStore(layout: world.layout, fileSystem: markerFileSystem ?? FileManagerIngressFileSystem())
         let faults = world.storage.faults
         do {
             let gate = ResetIngressGate(wrapping: session, layout: world.layout, markers: markers)
@@ -280,9 +288,27 @@ final class RealCoreResetRuntime {
         }
         let request = ResetRequest(
             credentialChoice: choice, credentialRemoval: removal, stagedBeforeTheTap: snapshot,
-            awaitsEarlierReset: current?.phase == .pending || (current != nil && earlierOutstanding))
+            awaitsEarlierReset: current?.phase == .pending || (current != nil && earlierOutstanding),
+            latestGenerationAtTheTap: current?.generation)
         try markers.recordRequest(request)
         return request
+    }
+
+    /// A process killed right after the core started the reset of a tap: the tap is recorded, its pre-tap staging was
+    /// drained and the core has recorded the generation, but nothing was carried over into the markers and the request
+    /// was not cleared. The caller terminates the process.
+    @discardableResult
+    func killAfterCoreStart(_ choice: ResetCredentialChoice) throws -> ResetProgress {
+        let snapshot = ResetUncheckedBox(try recordTap(choice).stagedBeforeTheTap)
+        let staging = ResetUncheckedBox(try XCTUnwrap(self.staging))
+        try session.run { await staging.value.importSnapshot(snapshot.value) }
+        let purge = try session.run { await staging.value.purgeUnimported(from: snapshot.value) }
+        guard case .purged = purge else {
+            XCTFail("the pre-tap staging was not drained: \(purge)")
+            throw StorageSetupFailed()
+        }
+        let client = session.resetClient
+        return try session.run { try await client.start() }
     }
 
     /// Runs ingress recovery as a launch does and returns without waiting for held captures.

@@ -132,8 +132,8 @@ final class ExportTemporaryCleaner: ResetExportTemporaries {
 /// or a restart removes exactly the profiles that existed at the tap and never one configured since.
 ///
 /// A recorded tap is a numbered file holding the credential choice, what a `remove` choice binds, the capture
-/// identifiers staged at the tap (local identifiers that already name files in the same protected store) and whether it
-/// awaits an earlier pending reset. The highest
+/// identifiers staged at the tap (local identifiers that already name files in the same protected store), whether it
+/// awaits an earlier pending reset and the core's generation at the tap (a reference to the core's state). The highest
 /// number is the request. A new tap is written in full under the next number before the earlier files are removed, so
 /// an interruption or a failure at any point leaves either the earlier tap or the new one as the latest, never no
 /// request and never an older choice in place of a newer one. Clearing removes the oldest first, so whatever survives a
@@ -157,6 +157,7 @@ final class FileResetMarkerStore: ResetMarkerStore {
         let profilesToRemove: [StoredProfile]?
         let stagedBeforeTheTap: [String]
         let awaitsEarlierReset: Bool?
+        let latestGenerationAtTheTap: Int64?
     }
 
     struct UnreadableRequest: Error {}
@@ -194,7 +195,8 @@ final class FileResetMarkerStore: ResetMarkerStore {
         return ResetRequest(
             credentialChoice: choice, credentialRemoval: removal,
             stagedBeforeTheTap: ResetStagingSnapshot(captureIDs: Set(stored.stagedBeforeTheTap)),
-            awaitsEarlierReset: stored.awaitsEarlierReset ?? false)
+            awaitsEarlierReset: stored.awaitsEarlierReset ?? false,
+            latestGenerationAtTheTap: stored.latestGenerationAtTheTap)
     }
 
     func recordRequest(_ request: ResetRequest) throws {
@@ -203,7 +205,8 @@ final class FileResetMarkerStore: ResetMarkerStore {
             credentialChoice: request.credentialChoice == .remove ? "remove" : "keep",
             profilesToRemove: request.credentialRemoval.map(Self.stored(from:)),
             stagedBeforeTheTap: request.stagedBeforeTheTap.captureIDs.sorted(),
-            awaitsEarlierReset: request.awaitsEarlierReset)
+            awaitsEarlierReset: request.awaitsEarlierReset,
+            latestGenerationAtTheTap: request.latestGenerationAtTheTap)
         try fileSystem.writeDurably(try JSONEncoder().encode(stored), to: requestURL((earlier.last ?? 0) + 1))
         // The new tap is now the latest. An earlier file that cannot be removed here is never read again, and the next
         // clear removes it before the latest.

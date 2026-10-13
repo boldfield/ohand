@@ -232,6 +232,34 @@ final class ResetNativeCleanupTests: IngressStorageTestCase {
         XCTAssertEqual(requestFileNames, [])
     }
 
+    func testTheRecordedTapKeepsTheCoreGenerationItSawAndReadsNoneAsNone() throws {
+        let store = FileResetMarkerStore(layout: layout)
+        let relaunched = FileResetMarkerStore(layout: layout)
+
+        try store.recordRequest(ResetRequest(
+            credentialChoice: .remove, credentialRemoval: Self.boundProfiles,
+            stagedBeforeTheTap: ResetStagingSnapshot(captureIDs: ["cap-a"]), awaitsEarlierReset: true,
+            latestGenerationAtTheTap: 3))
+        let afterThree = try XCTUnwrap(try relaunched.request())
+        XCTAssertEqual(afterThree.latestGenerationAtTheTap, 3, "the core's generation at the tap survives a restart")
+        XCTAssertTrue(afterThree.awaitsEarlierReset)
+        XCTAssertFalse(afterThree.coreHasStarted(latest: progress(generation: 3)), "the generation at the tap is not the tap's own")
+        XCTAssertTrue(afterThree.coreHasStarted(latest: progress(generation: 4)), "a newer generation is the tap's own")
+        XCTAssertFalse(afterThree.coreHasStarted(latest: nil))
+
+        try store.recordRequest(tap(.keep, []))
+        let beforeAny = try XCTUnwrap(try relaunched.request())
+        XCTAssertNil(beforeAny.latestGenerationAtTheTap, "a tap made before any reset notes no generation")
+        XCTAssertFalse(beforeAny.coreHasStarted(latest: nil))
+        XCTAssertTrue(beforeAny.coreHasStarted(latest: progress(generation: 1)), "any generation is newer than none")
+    }
+
+    private func progress(generation: Int64) -> ResetProgress {
+        ResetProgress(
+            generation: generation, phase: .completed, boundaryRowID: 0, itemsAwaitingTombstone: 0, cleanupPending: 0,
+            cleanupFailed: 0)
+    }
+
     func testReplacingATapNeverLosesItNorRevertsToTheEarlierChoice() throws {
         let faults = FaultPlan()
         let store = FileResetMarkerStore(layout: layout, fileSystem: FaultingResetMarkerFileSystem(faults: faults))

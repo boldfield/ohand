@@ -45,6 +45,13 @@ import Foundation
 /// to 10. A `reset` that ends before the core started withdraws the request (every recorded tap, so no earlier choice is
 /// left armed) and releases the boundary; when it cannot, or when the call was cancelled or was a `resume`, the request
 /// stays recorded, the boundary stays held and the report says `pending`, never `notStarted`. Calls are serialized.
+///
+/// A tap that finds an earlier tap still recorded asks the core first whether that tap's reset started (the recorded
+/// tap notes the core's generation at its moment; a newer one is its own). A recorded tap the core never started is
+/// superseded by the new explicit choice. One the core did start (step 5 ran, but the interruption came before step 6
+/// carried its choice over) is carried over now, before anything else: its choice, with the profiles it binds, goes
+/// into the markers and native cleanup is marked outstanding, so the new tap awaits it like any unfinished earlier reset
+/// and its choice is carried out before the new one applies, whether the new tap is recorded, withdrawn or fails.
 actor ResetService {
     private let core: ResetCore
     private let staging: ResetIngressStaging
@@ -76,18 +83,40 @@ actor ResetService {
         await acquire()
         defer { release() }
 
-        let snapshot: ResetStagingSnapshot
+        // An earlier tap may still be recorded. Whether the core started its reset decides its fate, so until that is
+        // known nothing is withdrawn: the recorded tap and whatever boundary it holds stay as they are.
+        let recorded: ResetRequest?
         do {
-            snapshot = try await staging.snapshot()
+            recorded = try markers.request()
         } catch {
-            return withdrawRequest(
-                ResetReport(state: .notStarted, progress: nil, blockers: [.stagingUnreadable], itemCleanup: nil))
+            return ResetReport(state: .pending, progress: nil, blockers: [.markerUnreadable], itemCleanup: nil)
         }
         let current: ResetProgress?
         do {
             current = try await core.status()
         } catch {
-            return withdrawRequest(Self.coreFailed(error, progress: nil))
+            let failed = Self.coreFailed(error, progress: nil)
+            return recorded == nil ? withdrawRequest(failed) : keepRequest(failed)
+        }
+        // A recorded tap the core started is an unfinished earlier reset whose choice is only in the request. Carry it
+        // over now, so the new tap awaits it and nothing below can withdraw it.
+        var earlierStarted = false
+        if let recorded, recorded.coreHasStarted(latest: current) {
+            do {
+                try carryOver(recorded)
+            } catch {
+                return ResetReport(state: .pending, progress: current, blockers: [.markerNotRecorded], itemCleanup: nil)
+            }
+            earlierStarted = true
+        }
+
+        let snapshot: ResetStagingSnapshot
+        do {
+            snapshot = try await staging.snapshot()
+        } catch {
+            return withdrawRequest(
+                ResetReport(state: .notStarted, progress: current, blockers: [.stagingUnreadable], itemCleanup: nil),
+                earlierOwed: earlierStarted)
         }
         // An earlier reset is unfinished while its generation is pending or, once the core completed it, while native
         // steps it owes (cleanup, temporaries, its credential choice) are still outstanding. A marker that cannot be read
@@ -100,18 +129,21 @@ actor ResetService {
             do {
                 removal = ResetCredentialRemoval(binding: try await core.profileCredentials())
             } catch {
-                return withdrawRequest(Self.coreFailed(error, progress: current))
+                return withdrawRequest(Self.coreFailed(error, progress: current), earlierOwed: earlierStarted)
             }
         }
         let request = ResetRequest(
             credentialChoice: credentialChoice, credentialRemoval: removal, stagedBeforeTheTap: snapshot,
-            awaitsEarlierReset: current?.phase == .pending || (current != nil && earlierOutstanding))
+            awaitsEarlierReset: current?.phase == .pending || (current != nil && earlierOutstanding),
+            latestGenerationAtTheTap: current?.generation)
         do {
             try markers.recordRequest(request)
         } catch {
-            // An earlier tap may still be recorded. The user is told this one did not start, so none may stay armed.
+            // An earlier tap the core never started may still be recorded. The user is told this one did not start, so
+            // none may stay armed.
             return withdrawRequest(
-                ResetReport(state: .notStarted, progress: nil, blockers: [.markerNotRecorded], itemCleanup: nil))
+                ResetReport(state: .notStarted, progress: current, blockers: [.markerNotRecorded], itemCleanup: nil),
+                earlierOwed: earlierStarted)
         }
         let report = await performRequestedReset(request)
         guard report.state == .notStarted else { return report }
@@ -160,7 +192,8 @@ actor ResetService {
             if let stopped = await finishEarlierReset() { return stopped }
             let ownTurn = ResetRequest(
                 credentialChoice: request.credentialChoice, credentialRemoval: request.credentialRemoval,
-                stagedBeforeTheTap: request.stagedBeforeTheTap)
+                stagedBeforeTheTap: request.stagedBeforeTheTap,
+                latestGenerationAtTheTap: request.latestGenerationAtTheTap)
             do {
                 try markers.recordRequest(ownTurn)
             } catch {
@@ -175,19 +208,26 @@ actor ResetService {
         case .started(let progress): started = progress
         }
         do {
-            if let removal = request.credentialRemoval {
-                try markers.recordRemovalRequested(removal)
-            } else {
-                try markers.clearRemovalRequest()
-            }
-            try markers.recordCleanupOutstanding()
+            try carryOver(request)
             try markers.clearRequest()
         } catch {
-            // The request is still recorded, so the next resume carries the choice over before acting on it.
+            // The request is still recorded, so the next resume (or tap) carries the choice over before acting on it.
             return ResetReport(state: .pending, progress: started, blockers: [.markerNotRecorded], itemCleanup: nil)
         }
         staging.endBoundary()
         return await finish(from: started)
+    }
+
+    /// Step 6 for a tap whose reset the core has started: its choice, with the profiles it binds, becomes the removal
+    /// marker (or clears one that a `keep` choice replaces), and native cleanup is marked outstanding. Idempotent: an
+    /// owed removal already recorded for the same started reset stays as it is.
+    private func carryOver(_ request: ResetRequest) throws {
+        if let removal = request.credentialRemoval {
+            try markers.recordRemovalRequested(removal)
+        } else {
+            try markers.clearRemovalRequest()
+        }
+        try markers.recordCleanupOutstanding()
     }
 
     private enum CoreStart {
@@ -245,8 +285,9 @@ actor ResetService {
 
     /// Withdraws every recorded tap for a report that says the reset did not start, then releases the boundary. When the
     /// withdrawal fails, a restart would run the request that remains, so the boundary stays held and the report says
-    /// `pending` with the reason.
-    private func withdrawRequest(_ report: ResetReport) -> ResetReport {
+    /// `pending` with the reason. When an earlier started reset is owed (`earlierOwed`: its choice was carried over at
+    /// this tap, so withdrawing the request loses nothing), the report says `pending` too: the next `resume` finishes it.
+    private func withdrawRequest(_ report: ResetReport, earlierOwed: Bool = false) -> ResetReport {
         do {
             try markers.clearRequest()
         } catch {
@@ -255,7 +296,7 @@ actor ResetService {
                 itemCleanup: report.itemCleanup)
         }
         staging.endBoundary()
-        return report
+        return earlierOwed ? keepRequest(report) : report
     }
 
     /// The request stays recorded and the boundary held, so a report that the reset did not start says `pending`: the
