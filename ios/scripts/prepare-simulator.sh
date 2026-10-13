@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # Puts a simulator into a known state before a UI-test suite: shut down (which ends every leftover app), optionally
 # erase (which clears installed apps, permissions and recorded notification decisions), boot, wait until the boot has
-# finished. It prints how long each step took and what is using the host (busiest processes, memory, booted
-# simulators), because UI tests that run on a saturated hosted runner see launches and accessibility reads that are many
-# times slower. Output goes to stdout only. macOS with Xcode only.
+# finished, then wait (bounded) until the host CPU has settled. A freshly erased simulator keeps the host saturated for
+# a while after bootstatus reports success (first-boot daemons), and UI tests that start in that window see launches and
+# accessibility reads many times slower. The settle wait is an explicit poll that logs how long it took; the host
+# snapshots are diagnostics only. Output goes to stdout only. macOS with Xcode only.
 # Usage: prepare-simulator.sh <simulator-udid> [--erase]
 set -euo pipefail
+
+settle_idle_percent=50
+settle_consecutive_samples=2
+settle_timeout_seconds=300
 
 udid="${1:?simulator udid required}"
 erase=0
@@ -30,6 +35,33 @@ host_snapshot() {
   log "simulator-related processes: $(pgrep -fl 'CoreSimulator|launchd_sim|Simulator' | wc -l | tr -d ' ')"
 }
 
+host_idle_percent() {
+  top -l 2 -s 1 -n 0 | grep 'CPU usage' | tail -1 | sed -E 's/.* ([0-9]+)(\.[0-9]+)?% idle.*/\1/'
+}
+
+wait_for_host_to_settle() {
+  local started=${SECONDS}
+  local consecutive=0
+  local idle
+  while [ $((SECONDS - started)) -lt "${settle_timeout_seconds}" ]; do
+    idle="$(host_idle_percent || true)"
+    case "${idle}" in
+      ''|*[!0-9]*) idle=0 ;;
+    esac
+    if [ "${idle}" -ge "${settle_idle_percent}" ]; then
+      consecutive=$((consecutive + 1))
+    else
+      consecutive=0
+    fi
+    log "settle poll: host ${idle}% idle (need ${settle_idle_percent}% for ${settle_consecutive_samples} samples in a row, ${consecutive} so far)"
+    if [ "${consecutive}" -ge "${settle_consecutive_samples}" ]; then
+      log "host settled after $((SECONDS - started))s"
+      return 0
+    fi
+  done
+  log "WARNING: host did not settle within ${settle_timeout_seconds}s; continuing anyway"
+}
+
 step() {
   local label="$1"
   shift
@@ -48,5 +80,6 @@ fi
 step boot xcrun simctl boot "${udid}" 2>/dev/null || true
 step bootstatus xcrun simctl bootstatus "${udid}" -b >/dev/null
 
-host_snapshot "after boot completed"
+wait_for_host_to_settle
+host_snapshot "after boot completed and host settled"
 log "simulator ${udid} ready"
