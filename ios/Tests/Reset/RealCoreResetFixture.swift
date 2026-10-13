@@ -226,14 +226,15 @@ final class RealCoreResetRuntime {
         markers = FileResetMarkerStore(layout: world.layout)
         let faults = world.storage.faults
         do {
-            let ingress = try ForegroundIngressService(layout: world.layout, importer: session)
+            let gate = ResetIngressGate(wrapping: session, layout: world.layout)
+            let ingress = try ForegroundIngressService(layout: world.layout, importer: gate)
             self.ingress = ingress
             let itemCleanup = DeletionCleanupService(
                 core: FaultingDeletionCleanupCore(wrapped: session.deletionClient, faults: faults),
                 notifications: FaultingNotificationCanceller(bridge: world.storage.makeBridge(), faults: faults),
                 localCleanup: DeletionLocalCleanup(
                     layout: world.layout, fileSystem: FaultingDeletionFileSystem(faults: faults)))
-            let nativeStaging = NativeResetIngress(service: ingress, layout: world.layout)
+            let nativeStaging = NativeResetIngress(service: ingress, gate: gate, layout: world.layout)
             service = ResetService(
                 core: session.resetClient,
                 staging: wrapStaging?(nativeStaging) ?? nativeStaging,
@@ -255,6 +256,14 @@ final class RealCoreResetRuntime {
     func resume() throws -> ResetReport {
         let service = try XCTUnwrap(service)
         return try session.run { await service.resume() }
+    }
+
+    /// Submits a capture through the foreground ingress path on the main queue without waiting for its outcome. Safe to
+    /// call from the reset's own task, where the outcome cannot arrive until the reset releases the ingress boundary.
+    func submitLater(_ record: IngressRecord, outcome: @escaping (IngressOutcome) -> Void) {
+        DispatchQueue.main.async { [weak self] in
+            self?.ingress?.submit(record, completion: outcome)
+        }
     }
 
     /// Submits a new capture through the foreground ingress path and returns the item the core created.
@@ -315,11 +324,13 @@ final class SnapshotHookStaging: ResetIngressStaging {
         self.afterSnapshot = afterSnapshot
     }
 
-    func snapshot() throws -> ResetStagingSnapshot {
-        let taken = try wrapped.snapshot()
+    func snapshot() async throws -> ResetStagingSnapshot {
+        let taken = try await wrapped.snapshot()
         afterSnapshot()
         return taken
     }
+
+    func endBoundary() { wrapped.endBoundary() }
 
     func importSnapshot(_ snapshot: ResetStagingSnapshot) async { await wrapped.importSnapshot(snapshot) }
 

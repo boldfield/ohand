@@ -68,9 +68,12 @@ enum ResetStagingPurge: Equatable {
 }
 
 /// Native ingress staging as reset needs it. A capture staged before the tap has no item yet, so no tombstone can fence
-/// it: it is imported first (and then tombstoned by the core) or purged.
+/// it: it is imported first (and then tombstoned by the core) or purged. A capture made after the tap is fresh-generation
+/// content, so from the tap until the core has recorded the reset it must neither be listed, imported nor purged.
 protocol ResetIngressStaging {
-    func snapshot() throws -> ResetStagingSnapshot
+    /// The tap. Lists the staged inputs and, in the same step, holds the ingress boundary: an import of any input not in
+    /// the list waits (its input stays staged) until `endBoundary`. When this throws, no boundary is held.
+    func snapshot() async throws -> ResetStagingSnapshot
     /// Imports the staged records named by `snapshot` through the production ingress path. A record staged after the
     /// snapshot is never imported here, so it cannot land below the reset boundary. A record that cannot be imported
     /// stays staged and is left to `purgeUnimported`.
@@ -78,6 +81,9 @@ protocol ResetIngressStaging {
     /// Removes the records and owned audio of `snapshot` that are still staged. Inputs staged after the snapshot are
     /// never touched.
     func purgeUnimported(from snapshot: ResetStagingSnapshot) async -> ResetStagingPurge
+    /// Releases the boundary `snapshot` held, so inputs that waited import into whatever generation is then current.
+    /// Idempotent, and safe to call when nothing is held.
+    func endBoundary()
 }
 
 /// Export and share temporaries inside the protected temporary store.

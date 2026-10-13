@@ -179,7 +179,7 @@ final class ResetServiceTests: ResetTestCase {
         XCTAssertEqual(world.core.startCalls, 0)
     }
 
-    func testAPendingResetIsResumedWithoutTouchingStagingAgain() async throws {
+    func testAPendingResetIsResumedWithoutImportingOrPurgingStagingAgain() async throws {
         let world = try makeResetWorld()
         try await seedVoiceAndTextCaptures(world)
         world.faults.arm("fs.remove:cap-1.m4a")
@@ -190,9 +190,94 @@ final class ResetServiceTests: ResetTestCase {
         let second = await world.makeService().reset(credentialChoice: .keep)
 
         XCTAssertTrue(second.isComplete)
-        XCTAssertEqual(world.staging.snapshotCalls, 1, "staging written after the first tap is not drained by a retry")
+        XCTAssertEqual(world.staging.purgedCaptureIDs, [], "staging written after the first tap is not purged by a retry")
+        XCTAssertEqual(world.staging.importedCaptureIDs, [])
         XCTAssertEqual(world.staging.staged, ["cap-post-tap"])
+        XCTAssertFalse(world.staging.isHolding, "the boundary a retry took is released")
         XCTAssertEqual(world.core.currentGeneration, 1, "a second tap while pending never opens another generation")
+    }
+
+    // MARK: Ingress boundary
+
+    func testACaptureMadeAfterTheTapWaitsForTheCoreAndBelongsToTheFreshGeneration() async throws {
+        let world = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(world)
+        world.staging.onSnapshot = { [staging = world.staging] in staging.liveCapture("cap-live") }
+        world.staging.onLiveImport = { [deletion = world.deletion, core = world.core] captureID in
+            deletion.core.addItem("item-\(captureID)", captureID: captureID, audioReference: nil)
+            core.register("item-\(captureID)")
+        }
+
+        let report = await world.makeService().reset(credentialChoice: .keep)
+
+        XCTAssertTrue(report.isComplete, "blockers: \(report.blockers)")
+        XCTAssertEqual(world.staging.liveImportedCaptureIDs, ["cap-live"])
+        XCTAssertEqual(world.staging.purgedCaptureIDs, [], "a capture made after the tap is never purged")
+        let startIndex = try XCTUnwrap(world.log.index(of: "core.start"))
+        let importIndex = try XCTUnwrap(world.log.index(of: "staging.live.import:cap-live"))
+        let releaseIndex = try XCTUnwrap(world.log.index(of: "staging.release"))
+        XCTAssertLessThan(startIndex, releaseIndex, "the boundary is held until the core recorded the reset")
+        XCTAssertLessThan(releaseIndex, importIndex)
+        XCTAssertNil(world.deletion.core.status("item-cap-live", .removeAudio), "the fresh capture is not tombstoned")
+        XCTAssertFalse(world.staging.isHolding)
+    }
+
+    func testTheBoundaryIsReleasedOnEveryPathThatEndsBeforeTheCoreStarts() async throws {
+        for point in ["staging.purge", "staging.purge.unreadable", "reset.start", "reset.status"] {
+            let world = try makeResetWorld()
+            world.staging.stage("cap-stuck")
+            world.staging.onSnapshot = { [staging = world.staging] in staging.liveCapture("cap-live") }
+            world.faults.arm(point)
+
+            _ = await world.makeService().reset(credentialChoice: .keep)
+
+            XCTAssertFalse(world.staging.isHolding, "the boundary is released after a fault at \(point)")
+            XCTAssertEqual(world.staging.liveImportedCaptureIDs, ["cap-live"], "the waiting capture proceeds: \(point)")
+        }
+    }
+
+    func testACancelledResetKeepsTheRecordedTapAndReportsItAsPendingNeverNotStarted() async throws {
+        let world = try makeResetWorld()
+        configureProfiles(world)
+        world.staging.stage("cap-stuck")
+        world.staging.onImportSnapshot = { withUnsafeCurrentTask { $0?.cancel() } }
+        let service = world.makeService()
+
+        let report = await Task { await service.reset(credentialChoice: .remove) }.value
+
+        XCTAssertEqual(report.state, .pending)
+        XCTAssertEqual(report.blockers, [.cancelled])
+        XCTAssertEqual(world.choice.requested, .remove, "the recorded tap is what the next launch runs")
+        XCTAssertEqual(world.core.startCalls, 0)
+        XCTAssertFalse(world.staging.isHolding)
+
+        world.staging.onImportSnapshot = nil
+        let resumed = await world.makeService().resume()
+
+        XCTAssertTrue(resumed.isComplete, "blockers: \(resumed.blockers)")
+        XCTAssertEqual(Set(world.credentials.removedReferences), ["ref-a", "ref-b"])
+    }
+
+    func testAnUnwithdrawableRequestIsReportedAndRunByTheNextLaunchNeverHiddenBehindNotStarted() async throws {
+        let world = try makeResetWorld()
+        configureProfiles(world)
+        world.staging.stage("cap-stuck")
+        world.faults.arm("staging.purge")
+        world.faults.arm("intent.clear")
+
+        let blocked = await world.makeService().reset(credentialChoice: .remove)
+
+        XCTAssertEqual(blocked.state, .pending, "the request is still recorded, so the reset is not 'not started'")
+        XCTAssertEqual(blocked.blockers, [.stagingPurgeIncomplete, .markerNotCleared])
+        XCTAssertEqual(world.choice.requested, .remove)
+        XCTAssertEqual(world.core.startCalls, 0)
+        XCTAssertEqual(world.credentials.removedReferences, [], "nothing is removed before the core started")
+
+        let relaunched = await world.makeService().resume()
+
+        XCTAssertTrue(relaunched.isComplete, "blockers: \(relaunched.blockers)")
+        XCTAssertEqual(Set(world.credentials.removedReferences), ["ref-a", "ref-b"])
+        XCTAssertNil(world.choice.requested)
     }
 
     // MARK: Fresh generation
@@ -393,7 +478,8 @@ final class ResetServiceTests: ResetTestCase {
         XCTAssertEqual(report.state, .notStarted)
         XCTAssertEqual(report.blockers, [.markerNotRecorded])
         XCTAssertEqual(world.core.startCalls, 0)
-        XCTAssertEqual(world.staging.snapshotCalls, 0)
+        XCTAssertFalse(world.staging.isHolding, "a tap that was not recorded holds nothing back")
+        XCTAssertEqual(world.staging.purgedCaptureIDs, [])
     }
 
     func testAChoiceThatCannotBeCarriedOverAfterTheCoreStartedIsRetriedBeforeAnythingIsRemoved() async throws {
@@ -485,7 +571,7 @@ final class ResetServiceTests: ResetTestCase {
 
         let blocked = await world.makeService().resume()
 
-        XCTAssertEqual(blocked.state, .notStarted)
+        XCTAssertEqual(blocked.state, .pending, "the recorded tap will run again, so it is not reported as not started")
         XCTAssertEqual(blocked.blockers, [.stagingPurgeIncomplete])
         XCTAssertEqual(world.choice.requested, .remove, "the user never saw a result, so the tap is kept")
         XCTAssertEqual(world.core.startCalls, 0)
@@ -506,8 +592,9 @@ final class ResetServiceTests: ResetTestCase {
 
         let report = await world.makeService().resume()
 
-        XCTAssertEqual(report.state, .notStarted)
+        XCTAssertEqual(report.state, .pending, "the recorded tap is still armed for the next launch")
         XCTAssertEqual(report.blockers, [.coreUnavailable])
+        XCTAssertEqual(world.choice.requested, .remove)
         XCTAssertEqual(world.credentials.removedReferences, [])
         XCTAssertEqual(world.core.revokedProfileVersions, [])
     }

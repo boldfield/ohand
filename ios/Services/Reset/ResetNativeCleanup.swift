@@ -3,25 +3,46 @@ import Foundation
 /// Production staging for reset: the foreground ingress path for the import of the snapshot's records only (never a
 /// fresh listing, which could pull a later capture below the boundary), and `DeletionLocalCleanup` (the per-item
 /// ingress and audio executor) for the purge, so reset removes staged files exactly the way a deleted item's are removed.
+///
+/// The ingress boundary is `ResetIngressGate`, which must be the importer of the `ForegroundIngressService` given here.
+/// Listing and holding happen in one main-queue step, the queue every ingress submission stages on, so each input is
+/// either in the list or held, never both and never neither.
 final class NativeResetIngress: ResetIngressStaging {
     private static let incompleteRecordSuffix = "." + IngressRecord.fileExtension + IngressFileSystemNaming.incompleteWriteSuffix
 
     private let service: ForegroundIngressService
+    private let gate: ResetIngressGate
     private let staging: IngressStagingStore
     private let localCleanup: DeletionLocalCleanup
 
     init(
         service: ForegroundIngressService,
+        gate: ResetIngressGate,
         layout: ProtectedStorageLayout,
         fileSystem: IngressFileSystem = FileManagerIngressFileSystem()
     ) {
         self.service = service
+        self.gate = gate
         staging = IngressStagingStore(layout: layout, fileSystem: fileSystem)
         localCleanup = DeletionLocalCleanup(layout: layout, fileSystem: fileSystem)
     }
 
-    func snapshot() throws -> ResetStagingSnapshot {
-        ResetStagingSnapshot(captureIDs: Self.captureIDs(in: try staging.listRecords()))
+    func snapshot() async throws -> ResetStagingSnapshot {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ResetStagingSnapshot, Error>) in
+            DispatchQueue.main.async { [staging, gate] in
+                do {
+                    let captureIDs = Self.captureIDs(in: try staging.listRecords())
+                    gate.hold(stagedBeforeTheTap: captureIDs)
+                    continuation.resume(returning: ResetStagingSnapshot(captureIDs: captureIDs))
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    func endBoundary() {
+        DispatchQueue.main.async { [gate] in gate.release() }
     }
 
     func importSnapshot(_ snapshot: ResetStagingSnapshot) async {

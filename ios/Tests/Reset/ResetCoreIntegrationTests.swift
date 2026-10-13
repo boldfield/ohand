@@ -169,6 +169,63 @@ final class ResetCoreIntegrationTests: XCTestCase {
         XCTAssertEqual(try runtime.generation(ofItem: confirmation.itemID), 1)
     }
 
+    func testALiveCaptureSubmittedBetweenTheSnapshotAndTheCoreStartBelongsToTheFreshGeneration() throws {
+        let world = try makeWorld()
+        _ = try seedCaptures(world)
+        try world.addWorkRoute()
+        let reference = RuntimeReference()
+        let runtime = try world.launch(wrapStaging: { staging in
+            SnapshotHookStaging(staging) {
+                reference.runtime?.submitLater(world.workTextRecord("cap-live")) { reference.outcome = $0 }
+            }
+        })
+        reference.runtime = runtime
+
+        let report = try runtime.reset(.keep)
+
+        XCTAssertEqual(report.state, .completed, "blockers: \(report.blockers)")
+        XCTAssertTrue(runtime.session.pump(until: { reference.outcome != nil }), "the held capture proceeds once the core started")
+        guard case .saved(let acknowledgment)? = reference.outcome else {
+            return XCTFail("the capture must be saved, not erased: \(String(describing: reference.outcome))")
+        }
+        XCTAssertFalse(acknowledgment.alreadyImported)
+        XCTAssertEqual(try runtime.generation(ofItem: acknowledgment.itemID), 1, "the capture is fresh-generation content")
+        XCTAssertEqual(try runtime.currentGeneration(), 1)
+        reference.runtime = nil
+        runtime.terminate()
+
+        let relaunched = try world.launch()
+        let resumed = try relaunched.resume()
+        XCTAssertEqual(resumed.state, .completed)
+        XCTAssertEqual(try relaunched.generation(ofItem: acknowledgment.itemID), 1, "a relaunch never erases it")
+        guard case .confirmed(let confirmation)? = relaunched.session.importAndWait(world.workTextRecord("cap-live")) else {
+            return XCTFail("the live capture must still import")
+        }
+        XCTAssertEqual(confirmation.itemID, acknowledgment.itemID)
+        XCTAssertTrue(confirmation.alreadyImported)
+    }
+
+    func testALateVoiceHandoffThroughForegroundIngressLeavesNoRecordOrAudioAfterAReset() throws {
+        let world = try makeWorld()
+        _ = try seedCaptures(world)
+        let runtime = try world.launch()
+        XCTAssertEqual(try runtime.reset(.keep).state, .completed)
+        XCTAssertEqual(world.storage.remnants(of: "cap-1"), [])
+
+        try Data("synthetic audio".utf8).write(to: world.storage.url(.ingressInProgressAudio, "cap-1-recording.m4a"))
+        var outcome: IngressOutcome?
+        runtime.submitLater(world.voiceRecord("cap-1")) { outcome = $0 }
+        XCTAssertTrue(runtime.session.pump(until: { outcome != nil }))
+
+        XCTAssertEqual(outcome, .itemDeleted(captureID: "cap-1"))
+        XCTAssertEqual(world.storage.remnants(of: "cap-1"), [], "neither the record nor the audio it finalized survives")
+        runtime.terminate()
+
+        let relaunched = try world.launch()
+        XCTAssertEqual(try relaunched.resume().state, .completed)
+        XCTAssertEqual(world.storage.remnants(of: "cap-1"), [], "a relaunch finds nothing to restore")
+    }
+
     // MARK: Crash after the tap
 
     func testATapRecordedBeforeTheCoreStartedIsHonoredByTheNextLaunchWithoutEarlyCredentialRemoval() throws {
@@ -311,4 +368,10 @@ final class ResetCoreIntegrationTests: XCTestCase {
         XCTAssertFalse(try world.isCredentialPresent(reference))
         XCTAssertFalse(try second.markers.isRemovalRequested())
     }
+}
+
+/// Hands the runtime to a hook that is installed before the runtime exists, and collects the outcome it produces.
+private final class RuntimeReference: @unchecked Sendable {
+    var runtime: RealCoreResetRuntime?
+    var outcome: IngressOutcome?
 }

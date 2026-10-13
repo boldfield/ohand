@@ -193,6 +193,15 @@ final class FakeResetStaging: ResetIngressStaging {
     var onImport: ((String) -> Void)?
     /// Called right after the snapshot is taken: the moment a capture can land after the tap.
     var onSnapshot: (() -> Void)?
+    /// Called at the start of `importSnapshot`, on the task that runs the reset.
+    var onImportSnapshot: (() -> Void)?
+    /// True from a successful snapshot until `endBoundary`: live captures wait, as at the production ingress gate.
+    private(set) var isHolding = false
+    private(set) var boundaryReleases = 0
+    private(set) var heldCaptureIDs: [String] = []
+    private(set) var liveImportedCaptureIDs: [String] = []
+    /// Called with the capture ID when a live capture imports, so the test can create the item the core would hold.
+    var onLiveImport: ((String) -> Void)?
 
     init(faults: FaultPlan, log: ResetEventLog, crash: ResetCrashSignal) {
         self.faults = faults
@@ -204,17 +213,45 @@ final class FakeResetStaging: ResetIngressStaging {
         staged.insert(captureID)
     }
 
-    func snapshot() throws -> ResetStagingSnapshot {
+    /// A capture the foreground app makes now: staged durably, imported at once unless the boundary is held.
+    func liveCapture(_ captureID: String) {
+        staged.insert(captureID)
+        if isHolding {
+            heldCaptureIDs.append(captureID)
+        } else {
+            importLive(captureID)
+        }
+    }
+
+    private func importLive(_ captureID: String) {
+        staged.remove(captureID)
+        liveImportedCaptureIDs.append(captureID)
+        log.append("staging.live.import:\(captureID)")
+        onLiveImport?(captureID)
+    }
+
+    func snapshot() async throws -> ResetStagingSnapshot {
         snapshotCalls += 1
         log.append("staging.snapshot")
         try faults.check("staging.snapshot")
         let taken = ResetStagingSnapshot(captureIDs: staged)
+        isHolding = true
         onSnapshot?()
         return taken
     }
 
+    func endBoundary() {
+        log.append("staging.release")
+        isHolding = false
+        boundaryReleases += 1
+        let waiting = heldCaptureIDs
+        heldCaptureIDs = []
+        for captureID in waiting { importLive(captureID) }
+    }
+
     func importSnapshot(_ snapshot: ResetStagingSnapshot) async {
         log.append("staging.import")
+        onImportSnapshot?()
         await crash.crashIfArmed("staging.import", faults: faults)
         if faults.fires("staging.import") { return }
         for captureID in staged.intersection(snapshot.captureIDs).intersection(importable).sorted() {

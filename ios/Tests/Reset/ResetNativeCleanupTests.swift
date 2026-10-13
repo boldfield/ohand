@@ -12,8 +12,9 @@ final class ResetNativeCleanupTests: IngressStorageTestCase {
         importer: ForegroundIngressImporting,
         fileSystem: IngressFileSystem = FileManagerIngressFileSystem()
     ) throws -> (NativeResetIngress, ForegroundIngressService) {
-        let service = try makeService(importer: importer)
-        return (NativeResetIngress(service: service, layout: layout, fileSystem: fileSystem), service)
+        let gate = ResetIngressGate(wrapping: importer, layout: layout)
+        let service = try makeService(importer: gate)
+        return (NativeResetIngress(service: service, gate: gate, layout: layout, fileSystem: fileSystem), service)
     }
 
     private func filesMentioning(_ captureID: String) -> [String] {
@@ -23,13 +24,16 @@ final class ResetNativeCleanupTests: IngressStorageTestCase {
 
     // MARK: Ingress staging
 
-    func testSnapshotNamesStagedRecordsAndInterruptedWrites() throws {
+    func testSnapshotNamesStagedRecordsAndInterruptedWrites() async throws {
         let (ingress, service) = try makeIngress(importer: FakeForegroundIngressImporter())
         withExtendedLifetime(service) {}
         _ = try stagingStore.stage(textRecord("cap-a"))
         try Data("{\"text\":\"buy oat".utf8).write(to: recordURL("cap-b").appendingPathExtension("incomplete"))
 
-        XCTAssertEqual(try ingress.snapshot().captureIDs, ["cap-a", "cap-b"])
+        let snapshot = try await ingress.snapshot()
+        ingress.endBoundary()
+
+        XCTAssertEqual(snapshot.captureIDs, ["cap-a", "cap-b"])
     }
 
     func testPurgeRemovesTheSnapshotRecordsAndTheirAudioButNotInputsStagedAfterIt() async throws {
@@ -37,7 +41,7 @@ final class ResetNativeCleanupTests: IngressStorageTestCase {
         withExtendedLifetime(service) {}
         _ = try stagingStore.stage(try audioRecord("cap-a"))
         _ = try stagingStore.stage(textRecord("cap-b"))
-        let snapshot = try ingress.snapshot()
+        let snapshot = try await ingress.snapshot()
         _ = try stagingStore.stage(textRecord("cap-late"))
 
         let purge = await ingress.purgeUnimported(from: snapshot)
@@ -55,7 +59,7 @@ final class ResetNativeCleanupTests: IngressStorageTestCase {
         withExtendedLifetime(service) {}
         _ = try stagingStore.stage(textRecord("cap-a"))
         _ = try stagingStore.stage(textRecord("cap-b"))
-        let snapshot = try ingress.snapshot()
+        let snapshot = try await ingress.snapshot()
 
         await ingress.importSnapshot(snapshot)
         let purge = await ingress.purgeUnimported(from: snapshot)
@@ -75,7 +79,7 @@ final class ResetNativeCleanupTests: IngressStorageTestCase {
         let (ingress, service) = try makeIngress(importer: importer)
         withExtendedLifetime(service) {}
         _ = try stagingStore.stage(textRecord("cap-a"))
-        let snapshot = try ingress.snapshot()
+        let snapshot = try await ingress.snapshot()
         _ = try stagingStore.stage(textRecord("cap-late"))
 
         await ingress.importSnapshot(snapshot)
@@ -93,7 +97,7 @@ final class ResetNativeCleanupTests: IngressStorageTestCase {
             importer: FakeForegroundIngressImporter(), fileSystem: FaultingDeletionFileSystem(faults: faults))
         withExtendedLifetime(service) {}
         _ = try stagingStore.stage(textRecord("cap-a"))
-        let snapshot = try ingress.snapshot()
+        let snapshot = try await ingress.snapshot()
         faults.arm("fs.remove:cap-a.json")
 
         let first = await ingress.purgeUnimported(from: snapshot)
@@ -111,7 +115,10 @@ final class ResetNativeCleanupTests: IngressStorageTestCase {
             importer: FakeForegroundIngressImporter(), fileSystem: FaultingDeletionFileSystem(faults: faults))
         withExtendedLifetime(service) {}
         faults.arm("fs.entryNames")
-        XCTAssertThrowsError(try ingress.snapshot())
+        do {
+            _ = try await ingress.snapshot()
+            XCTFail("an unreadable staging area must not produce a snapshot")
+        } catch {}
 
         faults.arm("fs.entryNames")
         let purge = await ingress.purgeUnimported(from: ResetStagingSnapshot(captureIDs: ["cap-a"]))
