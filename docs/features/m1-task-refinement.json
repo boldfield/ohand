@@ -1812,7 +1812,7 @@
       "acceptance": [
         "Each of four observed failure modes diagnosed with evidence (or labelled hypothesis).",
         "Causes fixed via known simulator state, correct waits or justified bounds; no skips, retries, success-on-timeout or moving checks out of the required job.",
-        "Simulator job passes 5 consecutive executions on the final head, attempt URLs linked.",
+        "Simulator job's targeted UI steps (NotificationProbe UI, CaptureProbe handoff UI) pass in 5 consecutive counting executions on the final head; out-of-scope failures that skip them are neutral (listed, routed to owner); targeted failures reset and need a cause; attempt URLs linked.",
         "All other checks, artifacts, retention and job timeout unchanged; make check/test pass; macOS CI evidence linked."
       ],
       "covers_parent_criteria": [],
@@ -1857,6 +1857,28 @@
         "ios/Tests/NotificationActions/NotificationActionCoreIntegrationTests.swift:49",
         "ios/Tests/NotificationActions/NotificationActionCoreIntegrationTests.swift:71",
         "core/src/store/schema/mod.rs:115"
+      ]
+    },
+    {
+      "key": "F12",
+      "parent": null,
+      "title": "Diagnose and fix the NotificationBridgeBoundednessTests host restart",
+      "file_scope": [
+        "ios/Tests/Notifications/NotificationBridgeBoundednessTests.swift",
+        "ios/Services/Notifications/NotificationBridge.swift"
+      ],
+      "intent": "Find why the OhAndTests host crashed, hung or timed out in testAScheduleThatFailsWhileAnEarlierRestoreIsSuspendedKeepsTheRecordedRequest and fix the cause.",
+      "acceptance": [
+        "Cause diagnosed from the xcresult or a reproduction (crash stack, blocked wait, or allowance), else labelled hypothesis.",
+        "Fix the cause: test race via correct waits; bridge defect via fix plus failing-first regression; no skips, retries, relaxed assertions or unjustified timeouts.",
+        "200 consecutive iterations of the test pass (linked); exact-head ios.yml passes.",
+        "make check/test pass; macOS CI evidence linked."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/Tests/Notifications/NotificationBridgeBoundednessTests.swift:449",
+        "ios/Services/Notifications/NotificationBridge.swift"
       ]
     }
   ],
@@ -2411,7 +2433,8 @@
     "F10": [],
     "F11": [
       "B02"
-    ]
+    ],
+    "F12": []
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -2525,6 +2548,10 @@
     {
       "date": "2026-10-13",
       "change": "Added F11: 12 native test files open the core store with sqlite3_open and no busy timeout; one (NotificationActionCoreIntegrationTests) failed with SQLITE_BUSY on F10's run 38361190686 attempt 3. F11 adds a busy timeout of at least 5 s to each direct connection; no assertion changes. Depends on B02 (shared file)."
+    },
+    {
+      "date": "2026-10-13",
+      "change": "F10 criterion 3 amended: the streak counts F10's targeted UI steps; executions where an out-of-scope OhAndTests failure skipped them are neutral (listed and routed: F11 SQLITE_BUSY, F12 bridge host restart). Added F12: diagnose/fix the OhAndTests host restart in NotificationBridgeBoundednessTests (run 38462101769 attempt 1)."
     }
   ]
 }

@@ -93,6 +93,8 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
 
 - F11 added (coordinator, 2026-10-13). On F10's head `6ab5caa`, attempt 3 of run 38361190686 failed in `OhAndTests`: `NotificationActionCoreIntegrationTests.testCompleteStoredBeforeRelaunchRunsAfterTheNextUnlock`, where `sqlite3_prepare_v2` returned 5 (`SQLITE_BUSY`) at line 71. The test reads the store through its own SQLite connection while the core still holds a write lock. The core sets a 5 s busy timeout on its own connections (`core/src/store/schema/mod.rs:115`), but 12 native test files open direct connections without one. F11 gives every one of those direct connections a busy timeout. It depends on B02, whose PR edits one of those files.
 
+- F12 added (coordinator, 2026-10-13). On F10's head `1b04f01` (run 38462101769, attempt 1, job 115519616876), the `OhAndTests` host process stopped in `NotificationBridgeBoundednessTests.testAScheduleThatFailsWhileAnEarlierRestoreIsSuspendedKeepsTheRecordedRequest`. The test started at 20:32:26 and printed nothing until "Restarting after unexpected exit, crash, or test timeout" at 20:33:04. The test uses a 50 ms effect timeout and test gates. Whether this is a test race or a bridge defect is unknown. F12 diagnoses it and fixes the cause.
+
 - V06 and V07 now depend on V01 alone: they implement Rust adapters against its transport interface using fixtures. V05 is the native effect implementation and remains required by app composition/integration, not by independent protocol adapter implementation. This is an explicit dependency override for those retained tasks.
 
 ## Why some tasks stay together
@@ -493,6 +495,12 @@ Acceptance:
    - Allowed: give each UI suite a known simulator state (for example, uninstall the probe app or reset permissions, terminate leftover apps, dismiss or prevent stray alerts, or use a freshly erased or separate simulator per UI suite); replace waits that don't observe the right state; and raise a wait only when the PR shows the operation legitimately takes that long on a hosted runner.
    - Not allowed: skipping or deleting tests or assertions; test retries (`-retry-tests-on-failure`, retry loops or rerun-until-green wrappers); treating a timeout as success; and moving any check out of the required job.
 3. **Proof of stability.** On the final submitted head, the `simulator` job passes in at least 5 consecutive executions: the original run plus reruns with `gh run rerun <id>`, using `gh run watch --interval 60`. All attempt URLs are linked. A failed attempt resets the count and needs its cause stated.
+   - **Amended 2026-10-13 (coordinator).** The job also runs `OhAndTests` before the UI steps, and a failure there skips them. Two flakes F10 does not own also fail that step: `SQLITE_BUSY` in `NotificationActionCoreIntegrationTests` (F11) and a hang in `NotificationBridgeBoundednessTests` (F12). The count is therefore defined over F10's targeted steps, the NotificationProbe UI tests and the CaptureProbe handoff UI test.
+   - An execution counts when both targeted steps ran and passed.
+   - A failure of either targeted step resets the count and needs its cause stated.
+   - An execution where a step outside F10's scope failed and the targeted steps did not run is **neutral**. It neither counts nor resets. It is listed with its failing test and routed to its owner, not fixed in F10.
+   - An execution where an out-of-scope step failed but both targeted steps still ran and passed counts.
+   - The streak is five counting executions on the final head with no targeted failure between them. A streak does not count past an unexplained failure of a targeted step on that head.
 4. Everything else stays unchanged and passing: the `OhAndTests`, `OhAndApp` and probe smoke tests, the artifact contents, `retention-days: 7` and the 60-minute job timeout. `make check` and `make test` pass. Required macOS CI evidence per AGENTS.md is linked.
 
 Source pointers: `ios/NotificationProbe/Tests/NotificationProbeUITestCase.swift:10`, `:31`, `:49`; `ios/CaptureProbe/UITests/CaptureProbeHandoffUITests.swift:61`; `.github/workflows/ios.yml:90` (NotificationProbe UI step), `:242` (CaptureProbe handoff step).
@@ -517,6 +525,27 @@ Acceptance:
 4. Required macOS CI evidence per AGENTS.md is linked for the exact head, with `OhAndTests` passing. `make check` and `make test` pass.
 
 Source pointers: `ios/Tests/NotificationActions/NotificationActionCoreIntegrationTests.swift:49` (`withDatabase`), `:71` (`scalar`); `core/src/store/schema/mod.rs:115`.
+
+### F12
+
+Diagnose and fix the NotificationBridgeBoundednessTests host restart
+
+Find out why the `OhAndTests` host stopped (crash, hang or test-time allowance) in `testAScheduleThatFailsWhileAnEarlierRestoreIsSuspendedKeepsTheRecordedRequest`, and fix the cause.
+
+Owned paths: `ios/Tests/Notifications/NotificationBridgeBoundednessTests.swift` and the test support it uses. Also `ios/Services/Notifications/NotificationBridge.swift`, but only if the diagnosis shows a bridge defect. In that case the PR adds a regression test that fails without the fix.
+
+Dependencies: none.
+
+Observed failure (2026-10-13, run 38462101769 attempt 1, job 115519616876): the test started at 20:32:26.46 and xcodebuild reported "Restarting after unexpected exit, crash, or test timeout" at 20:33:04.22. The other tests in the class each take under 0.3 s, apart from one 4 s test. The test sets `effectTimeout: 0.05` and coordinates with gates (`addGate`, `restoreGate`), `eventually` and `letLateWorkRun`.
+
+Acceptance:
+
+1. **Diagnosis with evidence.** Take it from the failing attempt's `OhAndTests.xcresult` (crash report, test-host diagnostics, activity log) or from a reproduction, for example running the test repeatedly with `-test-iterations` locally under CPU load. State whether the host crashed (with the stack), deadlocked (which wait never returns), or exceeded an execution allowance. A cause that cannot be confirmed is labelled as a hypothesis, with the evidence for and against.
+2. **Fix the cause.** A test race is fixed by making the test wait on the state it needs. No skip, no retry, no removed or relaxed assertion, and no larger timeout unless it is shown to be the cause. If the cause is a bridge defect (a crash, deadlock or continuation misuse in production code), fix it in `NotificationBridge.swift` with a regression test. The existing boundedness behaviour stays unchanged.
+3. **Repetition evidence.** The test passes 200 consecutive iterations (`-only-testing` with `-test-iterations 200`), either locally on macOS or in a CI log linked from the PR. The required `ios.yml` run on the exact head passes.
+4. `make check` and `make test` pass. Required macOS CI evidence per AGENTS.md is linked.
+
+Source pointers: `ios/Tests/Notifications/NotificationBridgeBoundednessTests.swift:449`; `ios/Services/Notifications/NotificationBridge.swift`.
 
 ### I05b
 
