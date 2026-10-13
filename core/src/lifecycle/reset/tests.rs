@@ -563,31 +563,88 @@ fn starting_again_while_pending_resumes_the_same_generation() {
 }
 
 #[test]
-fn a_crash_between_tombstone_batches_resumes_without_starting_another_generation() {
+fn a_crash_before_the_reset_commits_leaves_no_half_reset_and_a_retry_completes_it() {
     let store = Store::new();
     populate(&store);
 
-    let interrupted = start_with_batch_limit(&mut store.open(), instant(10), 2, Some(1)).unwrap();
-    assert_eq!(interrupted.phase, ResetPhase::Pending);
+    let crashed = start_with_fault(&mut store.open(), instant(10), Some(2));
+    assert!(crashed.is_err());
+
+    assert_eq!(store.count("SELECT COUNT(*) FROM reset_generations"), 0);
     assert_eq!(
-        interrupted.items_awaiting_tombstone,
-        ITEM_COUNT as usize - 2
+        store.count("SELECT COUNT(*) FROM items WHERE lifecycle_state = 'deleted'"),
+        0
+    );
+    assert_eq!(
+        store.count("SELECT COUNT(*) FROM events WHERE event_type = 'deletion'"),
+        0
     );
 
-    let resumed = start_reset(&mut store.open(), instant(11)).unwrap();
-    assert_eq!(resumed.generation, interrupted.generation);
-    assert_eq!(resumed.boundary_rowid, interrupted.boundary_rowid);
+    let retried = start_reset(&mut store.open(), instant(11)).unwrap();
+    assert_eq!(retried.generation, 1);
+    assert_eq!(retried.items_awaiting_tombstone, 0);
+    assert_eq!(store.secret_hits(), 0);
+    assert_eq!(
+        store.count("SELECT COUNT(*) FROM events WHERE event_type = 'deletion'"),
+        ITEM_COUNT,
+        "each item is tombstoned exactly once"
+    );
+    let replay = start_reset(&mut store.open(), instant(12)).unwrap();
+    assert_eq!(replay.generation, 1);
+    assert_eq!(
+        store.count("SELECT COUNT(*) FROM events WHERE event_type = 'deletion'"),
+        ITEM_COUNT
+    );
+}
+
+#[test]
+fn a_committed_pending_generation_never_exposes_a_live_item_inside_its_boundary() {
+    let store = Store::new();
+    populate(&store);
+
+    let started = start_reset(&mut store.open(), instant(10)).unwrap();
+    assert_eq!(started.phase, ResetPhase::Pending);
+
+    let reopened = store.open();
+    let live_inside_boundary: i64 = reopened
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM items
+             WHERE lifecycle_state != 'deleted'
+               AND rowid <= (SELECT boundary_rowid FROM reset_generations WHERE phase = 'pending')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(live_inside_boundary, 0);
+}
+
+#[test]
+fn a_pending_generation_found_with_live_items_is_resumed_in_one_transaction() {
+    let store = Store::new();
+    populate(&store);
+    store
+        .open()
+        .conn()
+        .execute(
+            "INSERT INTO reset_generations (phase, boundary_rowid, started_at)
+             VALUES ('pending', (SELECT MAX(rowid) FROM items), ?)",
+            [instant(9).to_rfc3339()],
+        )
+        .unwrap();
+
+    let crashed = advance_reset_with_fault(&mut store.open(), instant(10), Some(3));
+    assert!(crashed.is_err());
+    assert_eq!(
+        store.count("SELECT COUNT(*) FROM items WHERE lifecycle_state = 'deleted'"),
+        0
+    );
+
+    let resumed = advance_reset(&mut store.open(), instant(11)).unwrap();
+    assert_eq!(resumed.generation, 1);
     assert_eq!(resumed.items_awaiting_tombstone, 0);
     assert_eq!(store.count("SELECT COUNT(*) FROM reset_generations"), 1);
     assert_eq!(store.secret_hits(), 0);
-
-    let replay = start_reset(&mut store.open(), instant(12)).unwrap();
-    assert_eq!(replay.generation, 1);
-    let deletion_events = store.count("SELECT COUNT(*) FROM events WHERE event_type = 'deletion'");
-    assert_eq!(
-        deletion_events, ITEM_COUNT,
-        "each item is tombstoned exactly once"
-    );
 }
 
 #[test]
@@ -616,7 +673,7 @@ fn an_item_already_deleted_by_the_user_keeps_its_own_cleanup_in_the_reset() {
 fn a_capture_after_reset_started_belongs_to_the_fresh_generation_and_survives_retries() {
     let store = Store::new();
     let populated = populate(&store);
-    start_with_batch_limit(&mut store.open(), instant(10), 2, Some(1)).unwrap();
+    start_reset(&mut store.open(), instant(10)).unwrap();
 
     let fresh_item = import(
         &store,

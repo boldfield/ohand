@@ -12,10 +12,11 @@
 //!   and its boundary: the highest `items.rowid` at that moment (0 for an empty store). No clock
 //!   is compared. Items are never removed from the table, so rowids only grow: an item created
 //!   after the boundary belongs to the fresh generation and no retry ever tombstones it.
-//! * Reset tombstones the live items at or below the boundary in bounded batches, each batch in
-//!   its own transaction (the first one together with the generation record). The pass is
-//!   idempotent and resumes after a crash: starting again while a generation is pending resumes
-//!   that generation and never opens another one (the schema allows one pending generation).
+//! * The same transaction tombstones every live item at or below the boundary, so no committed
+//!   pending generation ever exposes an unfenced pre-reset item: a crash before the commit
+//!   leaves no reset at all and one after it leaves every old item tombstoned. Starting again
+//!   while a generation is pending resumes that generation and never opens another one (the
+//!   schema allows one pending generation); the pass is idempotent.
 //! * The generation completes only when every item at or below the boundary is tombstoned and
 //!   every required cleanup work row of those items is acknowledged as completed. A terminally
 //!   failed cleanup keeps the reset pending and is reported, never counted as acknowledged.
@@ -30,9 +31,6 @@ use rusqlite::{OptionalExtension, Transaction};
 
 #[cfg(test)]
 mod tests;
-
-/// Live items tombstoned per transaction while a reset pass runs.
-const TOMBSTONE_BATCH_SIZE: usize = 100;
 
 /// Where a reset generation stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,7 +75,7 @@ pub struct ResetStatus {
 /// Calling this while a generation is pending returns that generation's progress and never
 /// starts another. After a completed reset it starts a new generation.
 pub fn start_reset(db: &mut Database, now: DateTime<Utc>) -> Result<ResetStatus> {
-    start_with_batch_limit(db, now, TOMBSTONE_BATCH_SIZE, None)
+    start_with_fault(db, now, None)
 }
 
 /// Resume the pending reset after a restart or after cleanup acknowledgments arrived:
@@ -88,7 +86,29 @@ pub fn advance_reset(db: &mut Database, now: DateTime<Utc>) -> Result<ResetStatu
     if latest.phase == ResetPhase::Completed {
         return Ok(latest);
     }
-    run_pass(db, now, latest.generation, TOMBSTONE_BATCH_SIZE, None)
+    advance_with_fault(db, now, latest.generation, None)
+}
+
+#[cfg(test)]
+pub(crate) fn advance_reset_with_fault(
+    db: &mut Database,
+    now: DateTime<Utc>,
+    fault_after_tombstones: Option<usize>,
+) -> Result<ResetStatus> {
+    let latest = latest_generation(db)?.ok_or_else(|| anyhow!("No reset has been started"))?;
+    advance_with_fault(db, now, latest.generation, fault_after_tombstones)
+}
+
+fn advance_with_fault(
+    db: &mut Database,
+    now: DateTime<Utc>,
+    generation: i64,
+    fault_after_tombstones: Option<usize>,
+) -> Result<ResetStatus> {
+    let tx = db.immediate_transaction()?;
+    drive_in_tx(&tx, now, generation, fault_after_tombstones)?;
+    tx.commit()?;
+    status_of(db, generation)
 }
 
 /// The latest reset generation, or `None` when no reset has ever started. Read-only.
@@ -124,59 +144,46 @@ pub fn current_generation(db: &Database) -> Result<i64> {
     )?)
 }
 
-/// `max_batches` stops the pass after that many tombstone batches without completing, which
-/// models a crash between batches.
-pub(crate) fn start_with_batch_limit(
+/// `fault_after_tombstones` fails the transaction after that many tombstones, which models a
+/// crash before the commit: nothing of the reset survives.
+pub(crate) fn start_with_fault(
     db: &mut Database,
     now: DateTime<Utc>,
-    batch_size: usize,
-    max_batches: Option<usize>,
+    fault_after_tombstones: Option<usize>,
 ) -> Result<ResetStatus> {
-    let generation = {
-        let tx = db.immediate_transaction()?;
-        let generation = match pending_generation_in_tx(&tx)? {
-            Some(pending) => pending,
-            None => {
-                tx.execute(
-                    "INSERT INTO reset_generations (phase, boundary_rowid, started_at)
-                     VALUES ('pending', (SELECT COALESCE(MAX(rowid), 0) FROM items), ?)",
-                    [now.to_rfc3339()],
-                )?;
-                tx.last_insert_rowid()
-            }
-        };
-        tx.commit()?;
-        generation
+    let tx = db.immediate_transaction()?;
+    let generation = match pending_generation_in_tx(&tx)? {
+        Some(pending) => pending,
+        None => {
+            tx.execute(
+                "INSERT INTO reset_generations (phase, boundary_rowid, started_at)
+                 VALUES ('pending', (SELECT COALESCE(MAX(rowid), 0) FROM items), ?)",
+                [now.to_rfc3339()],
+            )?;
+            tx.last_insert_rowid()
+        }
     };
-    run_pass(db, now, generation, batch_size, max_batches)
+    drive_in_tx(&tx, now, generation, fault_after_tombstones)?;
+    tx.commit()?;
+    status_of(db, generation)
 }
 
-fn run_pass(
-    db: &mut Database,
+fn drive_in_tx(
+    tx: &Transaction<'_>,
     now: DateTime<Utc>,
     generation: i64,
-    batch_size: usize,
-    max_batches: Option<usize>,
-) -> Result<ResetStatus> {
-    let mut batches = 0;
-    loop {
-        if max_batches.is_some_and(|limit| batches >= limit) {
-            return status_of(db, generation);
+    fault_after_tombstones: Option<usize>,
+) -> Result<()> {
+    let boundary = boundary_in_tx(tx, generation)?;
+    for (tombstoned, item_id) in live_items_up_to(tx, boundary)?.iter().enumerate() {
+        if fault_after_tombstones == Some(tombstoned) {
+            return Err(anyhow!(
+                "simulated crash before the reset transaction commits"
+            ));
         }
-        let tx = db.immediate_transaction()?;
-        let boundary = boundary_in_tx(&tx, generation)?;
-        let live = live_items_up_to(&tx, boundary, batch_size)?;
-        if live.is_empty() {
-            complete_if_acknowledged(&tx, generation, boundary, now)?;
-            tx.commit()?;
-            return status_of(db, generation);
-        }
-        for item_id in &live {
-            tombstone_at_current_revision(&tx, item_id, now)?;
-        }
-        tx.commit()?;
-        batches += 1;
+        tombstone_at_current_revision(tx, item_id, now)?;
     }
+    complete_if_acknowledged(tx, generation, boundary, now)
 }
 
 fn boundary_in_tx(tx: &Transaction<'_>, generation: i64) -> Result<i64> {
@@ -197,13 +204,13 @@ fn pending_generation_in_tx(tx: &Transaction<'_>) -> Result<Option<i64>> {
         .optional()?)
 }
 
-fn live_items_up_to(tx: &Transaction<'_>, boundary: i64, limit: usize) -> Result<Vec<String>> {
+fn live_items_up_to(tx: &Transaction<'_>, boundary: i64) -> Result<Vec<String>> {
     let mut statement = tx.prepare(
         "SELECT item_id FROM items WHERE rowid <= ? AND lifecycle_state != 'deleted'
-         ORDER BY rowid LIMIT ?",
+         ORDER BY rowid",
     )?;
     let items = statement
-        .query_map(rusqlite::params![boundary, limit as i64], |row| row.get(0))?
+        .query_map([boundary], |row| row.get(0))?
         .collect::<Result<Vec<String>, _>>()?;
     Ok(items)
 }
