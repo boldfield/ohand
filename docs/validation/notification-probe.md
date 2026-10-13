@@ -11,9 +11,9 @@ Everything marked **simulator** below was observed by automated UI tests running
 | `ios/NotificationProbe/Sources/ProbeScenarios.swift` | One async function per scenario. Each returns string observations. Also records `willPresent` delegate callbacks. |
 | `ios/NotificationProbe/Sources/AppDelegate.swift` | Probe app: one button per scenario (`probe.run.<name>`), publishes the latest result as JSON in the accessibility label `probe.lastResult`, and logs it with `os.Logger`. |
 | `ios/NotificationProbe/Tests/` | `NotificationProbeUITests` bundle (`XCUITest`): `NotificationProbeAuthorizedUITests` answers the system prompt with Allow, `NotificationProbeDeniedUITests` answers Don't Allow. Both print every result as `PROBE-RESULT {json}`. |
-| `ios/NotificationProbe/scripts/run-evidence.sh` | Erases the simulator before each suite (uninstalling the app does not clear a recorded notification decision), then runs the suite with `xcodebuild test`. Called by the `Run NotificationProbe UI tests` step of `.github/workflows/ios.yml`. |
+| `ios/scripts/run-notification-uitests.sh` | Prepares the simulator before each suite with `ios/scripts/prepare-simulator.sh --erase` (uninstalling the app does not clear a recorded notification decision; the helper also waits for the boot to finish and the host to go idle, and records timings and load in `<suite>.prepare.log`), then runs the suite with `xcodebuild test`. Called by the `Run NotificationProbe UI tests` step of `.github/workflows/ios.yml`. Supersedes `ios/NotificationProbe/scripts/run-evidence.sh`, which the workflow no longer calls. |
 
-Run locally on macOS: `cd ios && ./scripts/generate.sh && ./NotificationProbe/scripts/run-evidence.sh <simulator-udid> /tmp/notification-evidence`. The script erases the chosen simulator.
+Run locally on macOS: `cd ios && ./scripts/generate.sh && ./scripts/run-notification-uitests.sh <simulator-udid> /tmp/notification-evidence`. The script erases the chosen simulator.
 
 ## Evidence provenance
 

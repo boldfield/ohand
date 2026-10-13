@@ -93,7 +93,7 @@ jobs:
           SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
         run: |
           set -euo pipefail
-          ios/NotificationProbe/scripts/run-evidence.sh "${SIMULATOR_UDID}" ios/.evidence/notification-probe
+          ios/scripts/run-notification-uitests.sh "${SIMULATOR_UDID}" ios/.evidence/notification-probe
 
       - name: Build BridgeProbe
         shell: bash
@@ -249,6 +249,7 @@ jobs:
           set -euo pipefail
           echo "Capture smoke device: ${SIMULATOR_NAME} (iOS ${SIMULATOR_RUNTIME}, UDID ${SIMULATOR_UDID})"
           cd ios
+          ./scripts/prepare-simulator.sh "${SIMULATOR_UDID}" --erase .evidence/capture-prepare.log
           ./scripts/smoke-capture-simulator.sh \
             "${SIMULATOR_UDID}" \
             com.boldfield.ohand.probes.capture \
