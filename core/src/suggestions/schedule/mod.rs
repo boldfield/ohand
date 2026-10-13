@@ -26,6 +26,12 @@
 //   replayed, and an ambiguous install failure that in fact installed nothing costs that date.
 //   Spent dates are pruned only by age (`SPENT_DATE_RETENTION_DAYS`); a rollback larger than
 //   that is out of scope.
+// - Error paths: provenance core already holds is recorded before the next fallible call. A
+//   pass releases the prompts it cancelled outside the plan before the capacity pass lists the
+//   OS again, so a failure there cannot turn core's own cancellation into an apparent delivery
+//   that skips a still-future day. A native effect whose evidence a returned error does lose
+//   (a cancel the capacity pass made before failing) can cost that date its prompt: a skip
+//   after an error is suppression, not a defect; only replay is.
 // - One prompt per local date: the identifier is `prompt:<local date>`, and once a date is
 //   spent no time on that date is planned again, even if the user moves the time later.
 // - Disable: cancels every pending prompt and nothing else. No capacity pass runs, so reminders

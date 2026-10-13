@@ -89,12 +89,17 @@ pub fn cancel_prompts(
 /// can show. A date whose request core had handed to the OS and the listing no longer shows
 /// is spent: it fired, even if the clock has since been moved back, and it is never installed
 /// again. Then pending prompts outside the plan (an earlier time, another
-/// zone, a passed or spent day) are cancelled so they stop consuming budget. The capacity
-/// pass plans the offered prompts after explicit reminders and cancels any it defers. Every
-/// request cancelled this way was seen pending in this same listing, so its date is released
-/// rather than spent and comes back when a slot frees. Last, the granted prompts that the OS
-/// does not already hold at the planned instant are installed with the generic payload and
-/// their own opaque identifier as target.
+/// zone, a passed or spent day) are cancelled so they stop consuming budget, and their dates
+/// are released in the ledger at once, before the next fallible call: the capacity pass lists
+/// the OS again, and if that listing fails the pass returns with the cancellations already
+/// recorded as core's own, so the next pass does not mistake their absence for a delivery and
+/// skip a still-future day. The capacity pass plans the offered prompts after explicit
+/// reminders and cancels any it defers. Every request cancelled either way was seen pending
+/// in this same listing, so its date is released rather than spent and comes back when a slot
+/// frees. (A cancel the capacity pass itself made before failing is not in its report and
+/// may spend its date: a skip after a returned error, never a replay.) Last, the granted
+/// prompts that the OS does not already hold at the planned instant are installed with the
+/// generic payload and their own opaque identifier as target.
 ///
 /// Each install attempt is recorded as held *before* the native call. A call that fails after
 /// the OS accepted the request (a lost acknowledgment, which surfaces as `Transient` or
@@ -144,7 +149,6 @@ pub fn reconcile_prompts(
         &pending,
         &mut report,
     )?;
-    schedule.release(report.cancelled.iter().map(String::as_str));
     let held: BTreeMap<&str, Option<DateTime<Utc>>> = pending
         .iter()
         .filter(|request| !report.cancelled.contains(&request.notification_id))
@@ -203,11 +207,16 @@ pub fn reconcile_prompts(
 
 /// Cancel pending prompts outside the schedule's demands, then run the capacity pass with
 /// them. Returns the demands offered and the capacity report.
+///
+/// Every cancellation this function makes or learns of is released in the ledger before the
+/// next step that can fail. The cancels outside the demands are released before the capacity
+/// pass runs its own OS listing, and the capacity pass's cancels as soon as it reports them.
+/// Provenance core already holds is never left behind an early return.
 fn capacity_pass(
     database: &mut Database,
     pass_clock: &PassClock,
     effects: &mut dyn NotificationEffects,
-    schedule: &PromptSchedule,
+    schedule: &mut PromptSchedule,
     policy: &CapacityPolicy,
     pending: &[PendingRequest],
     report: &mut PromptPassReport,
@@ -220,8 +229,12 @@ fn capacity_pass(
     cancel_where(effects, pending, report, |notification_id| {
         !offered.contains(notification_id)
     });
+    // Recorded now: `reconcile_with_capacity` lists the OS again and may return an error
+    // before this function gets another chance.
+    schedule.release(report.cancelled.iter().map(String::as_str));
 
     let capacity = reconcile_with_capacity(database, pass_clock, effects, policy, &demands)?;
+    schedule.release(capacity.prompts_cancelled.iter().map(String::as_str));
     report
         .cancelled
         .extend(capacity.prompts_cancelled.iter().cloned());

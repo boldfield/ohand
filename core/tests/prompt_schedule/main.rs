@@ -181,6 +181,9 @@ struct FakeCenter {
     fail_cancel_for: Vec<String>,
     /// `list_pending` fails with this error: the pass learns nothing about what the OS holds.
     fail_list: Option<NotificationEffectError>,
+    /// `list_pending` succeeds this many more times, then fails with the error: a pass whose
+    /// own listing worked but whose nested capacity listing does not.
+    fail_list_after: Option<(usize, NotificationEffectError)>,
     /// Identifiers the OS has delivered (and dropped) so far, in delivery order.
     delivered: Vec<String>,
 }
@@ -251,6 +254,12 @@ impl NotificationEffects for FakeCenter {
     fn list_pending(&mut self) -> Result<Vec<PendingRequest>, NotificationEffectError> {
         if let Some(error) = &self.fail_list {
             return Err(error.clone());
+        }
+        if let Some((successes_left, error)) = &mut self.fail_list_after {
+            if *successes_left == 0 {
+                return Err(error.clone());
+            }
+            *successes_left -= 1;
         }
         Ok(self
             .pending
@@ -1966,6 +1975,126 @@ fn a_cancel_pass_whose_listing_fails_still_records_the_clock_so_a_rollback_does_
     Ok(())
 }
 
+/// A reconcile pass at `now` whose own OS listing succeeds but whose capacity pass's nested
+/// listing fails. Returns the error the pass reported.
+fn pass_with_failed_capacity_listing(
+    db: &mut Database,
+    center: &mut FakeCenter,
+    schedule: &mut PromptSchedule,
+    zone_now: &str,
+) -> std::result::Result<ohand_core::suggestions::schedule::PromptPassReport, ReconcileError> {
+    center.fail_list_after = Some((1, listing_failure()));
+    let outcome = reconcile_prompts(
+        db,
+        &clock_at(zone_now),
+        center,
+        schedule,
+        &CapacityPolicy::default(),
+    );
+    center.fail_list_after = None;
+    outcome
+}
+
+#[test]
+fn a_prompt_cancelled_before_the_capacity_listing_fails_is_released_not_spent() -> Result<()> {
+    let (mut db, mut center, mut schedule) =
+        configure_and_install_from_seven("capacity-list-fails")?;
+    let tokyo: Tz = "Asia/Tokyo".parse().unwrap();
+
+    // The 15th fires. At 01:00Z on the 16th the app opens in Tokyo, where 09:00 on the 16th
+    // (00:00Z) has already passed, so the plan moves to the 17th..19th at 00:00Z and the
+    // still-future UTC request for the 16th (09:00Z) is outside it.
+    let landed = instant("2026-01-16T01:00:00Z");
+    center.fire_due(landed);
+    schedule.refresh(RefreshTrigger::AppOpen, landed, tokyo);
+    assert_eq!(
+        schedule.planned()[0].fire_at,
+        instant("2026-01-17T00:00:00Z")
+    );
+
+    // The pass lists the OS, cancels the 16th, and then fails at the capacity pass's own
+    // listing. The cancellation is core's and is already recorded when the pass returns.
+    let failed = pass_with_failed_capacity_listing(
+        &mut db,
+        &mut center,
+        &mut schedule,
+        "2026-01-16T01:00:00Z",
+    );
+    assert!(matches!(failed, Err(ReconcileError::ListPending(_))));
+    assert_eq!(center.cancel_calls, ["prompt:2026-01-16"]);
+    assert!(!center
+        .prompt_ids()
+        .contains(&"prompt:2026-01-16".to_string()));
+    assert!(schedule.is_spent(date("2026-01-15")), "the 15th fired");
+    assert!(
+        !schedule.is_spent(date("2026-01-16")),
+        "a request core cancelled after seeing it pending is released, not spent"
+    );
+
+    // Back in UTC, the next open plans the 16th again and the next pass installs it: core
+    // cancelled that request itself, so its absence from the listing is not a delivery.
+    schedule.refresh(RefreshTrigger::AppOpen, landed, UTC_ZONE);
+    let report = pass(&mut db, &mut center, &mut schedule, "2026-01-16T01:00:00Z")?;
+    assert!(report.converged());
+    assert!(!schedule.is_spent(date("2026-01-16")));
+    assert_eq!(
+        center.prompt_ids(),
+        [
+            "prompt:2026-01-16",
+            "prompt:2026-01-17",
+            "prompt:2026-01-18"
+        ]
+    );
+    assert_eq!(
+        center.pending.get("prompt:2026-01-16"),
+        Some(&instant("2026-01-16T09:00:00Z"))
+    );
+    assert_eq!(
+        installs_of(&center, "prompt:2026-01-15"),
+        1,
+        "the fired 15th is not replayed"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_prompt_cancelled_before_the_capacity_listing_fails_is_not_replayed_once_it_fires() -> Result<()>
+{
+    // The same failure, followed by the day actually passing: release leaves the date free to
+    // be planned again, and once installed and fired it is spent like any other.
+    let (mut db, mut center, mut schedule) =
+        configure_and_install_from_seven("capacity-list-fails-then-fires")?;
+    let tokyo: Tz = "Asia/Tokyo".parse().unwrap();
+    let landed = instant("2026-01-16T01:00:00Z");
+    center.fire_due(landed);
+    schedule.refresh(RefreshTrigger::AppOpen, landed, tokyo);
+    let failed = pass_with_failed_capacity_listing(
+        &mut db,
+        &mut center,
+        &mut schedule,
+        "2026-01-16T01:00:00Z",
+    );
+    assert!(matches!(failed, Err(ReconcileError::ListPending(_))));
+    assert_eq!(center.cancel_calls, ["prompt:2026-01-16"]);
+
+    schedule.refresh(RefreshTrigger::AppOpen, landed, UTC_ZONE);
+    pass(&mut db, &mut center, &mut schedule, "2026-01-16T01:00:00Z")?;
+    assert_eq!(installs_of(&center, "prompt:2026-01-16"), 2);
+
+    // It fires at 09:00Z; the clock is then moved back and the app opened: no third install.
+    center.fire_due(instant("2026-01-16T10:00:00Z"));
+    pass(&mut db, &mut center, &mut schedule, "2026-01-16T10:00:00Z")?;
+    assert!(schedule.is_spent(date("2026-01-16")));
+    let rolled_back = instant("2026-01-16T02:00:00Z");
+    schedule.refresh(RefreshTrigger::AppOpen, rolled_back, UTC_ZONE);
+    pass(&mut db, &mut center, &mut schedule, "2026-01-16T02:00:00Z")?;
+    assert_eq!(installs_of(&center, "prompt:2026-01-16"), 2);
+    assert!(!center
+        .prompt_ids()
+        .contains(&"prompt:2026-01-16".to_string()));
+    Ok(())
+}
+
 #[test]
 fn turning_prompting_off_and_on_after_a_rollback_does_not_replay_the_fired_prompt() -> Result<()> {
     let (mut db, mut center, mut schedule) = configure_and_install_from_seven("off-on-rollback")?;
@@ -2346,6 +2475,10 @@ struct Interleaving {
     lost_acknowledgments: usize,
     /// Reconcile passes that failed at their OS listing.
     failed_listings: usize,
+    /// Reconcile passes whose own listing worked but whose capacity pass's listing failed.
+    failed_capacity_listings: usize,
+    /// Those of them that had already cancelled a prompt outside the plan when they failed.
+    cancels_before_failed_capacity_listings: usize,
     checked_requests: usize,
     log: Vec<String>,
 }
@@ -2370,6 +2503,8 @@ impl Interleaving {
             displaced: 0,
             lost_acknowledgments: 0,
             failed_listings: 0,
+            failed_capacity_listings: 0,
+            cancels_before_failed_capacity_listings: 0,
             checked_requests: 0,
             log: Vec::new(),
         })
@@ -2380,7 +2515,7 @@ impl Interleaving {
     }
 
     fn step(&mut self, rng: &mut SplitMix) -> Result<()> {
-        match rng.below(29) {
+        match rng.below(30) {
             0..=5 => {
                 let minutes = i64::try_from(rng.below(60 * 48) + 1)?;
                 self.now += chrono::Duration::minutes(minutes);
@@ -2553,6 +2688,100 @@ impl Interleaving {
                 // bounds are checked here; the next successful pass restores the OS bounds.
                 self.check_schedule_bounds();
             }
+            29 => {
+                // The app opens in a distant zone, so a still-future request can fall outside
+                // the new plan. The pass's own listing works, it cancels the prompts outside
+                // its plan, and then the capacity pass's nested listing fails. The pass returns
+                // an error with those cancellations already released in the ledger, so the
+                // next pass plans the still-future days among them again rather than counting
+                // them delivered. With prompting off there is no capacity pass, so the pass
+                // simply succeeds.
+                let tokyo: Tz = "Asia/Tokyo".parse().unwrap();
+                let new_york: Tz = "America/New_York".parse().unwrap();
+                self.zone = if self.zone == tokyo { new_york } else { tokyo };
+                self.schedule
+                    .refresh(RefreshTrigger::ClockOrZoneChange, self.now, self.zone);
+                self.schedule
+                    .refresh(RefreshTrigger::AppOpen, self.now, self.zone);
+                self.log.push(format!(
+                    "refresh clock/zone change ({}), refresh app open",
+                    self.zone
+                ));
+                self.center.fail_list_after = Some((
+                    1,
+                    NotificationEffectError::new(
+                        AMBIGUOUS[usize::try_from(rng.below(2))?],
+                        "center unavailable",
+                    ),
+                ));
+                let pending_before = self.center.pending.clone();
+                let spent_before: std::collections::BTreeSet<NaiveDate> = pending_before
+                    .keys()
+                    .filter_map(|id| prompt_local_date(id))
+                    .filter(|local_date| self.schedule.is_spent(*local_date))
+                    .collect();
+                let cancels_before = self.center.cancel_calls.len();
+                let clock = self.clock();
+                let outcome = reconcile_prompts(
+                    &mut self.db,
+                    &clock,
+                    &mut self.center,
+                    &mut self.schedule,
+                    &self.policy,
+                );
+                self.center.fail_list_after = None;
+                if self.schedule.is_enabled() {
+                    let cancelled = &self.center.cancel_calls[cancels_before..];
+                    self.log.push(format!(
+                        "reconcile prompts (capacity listing fails after {} cancels)",
+                        cancelled.len()
+                    ));
+                    self.failed_capacity_listings += 1;
+                    self.cancels_before_failed_capacity_listings += cancelled.len();
+                    let cancelled: Vec<String> = cancelled.to_vec();
+                    {
+                        let context = || format!("seed {}\n{}", self.seed, self.log.join("\n"));
+                        assert!(
+                            matches!(outcome, Err(ReconcileError::ListPending(_))),
+                            "a failed capacity listing must fail the pass: {}",
+                            context()
+                        );
+                    }
+                    // The next pass sees those requests absent. Core's own cancellations never
+                    // spend a date: every prompt the failed pass saw pending and cancelled is
+                    // still unspent after it, unless it was spent before the failed pass (a
+                    // leftover of a disable) or the clock had already reached its instant
+                    // (then it is spent by the clock, as always).
+                    self.reconcile_prompts("reconcile prompts (after the failed one)")?;
+                    let context = || format!("seed {}\n{}", self.seed, self.log.join("\n"));
+                    for notification_id in &cancelled {
+                        let Some(local_date) = prompt_local_date(notification_id) else {
+                            continue;
+                        };
+                        if spent_before.contains(&local_date) {
+                            continue;
+                        }
+                        let reached = match pending_before.get(notification_id) {
+                            Some(fire_at) => self
+                                .schedule
+                                .high_water()
+                                .is_some_and(|mark| mark >= *fire_at),
+                            None => true,
+                        };
+                        assert!(
+                            reached || !self.schedule.is_spent(local_date),
+                            "{notification_id} cancelled by core but spent: {}",
+                            context()
+                        );
+                    }
+                    self.check_pass_bounds();
+                } else {
+                    outcome?;
+                    self.log
+                        .push("reconcile prompts (off; nested failure unused)".to_string());
+                    self.check_pass_bounds();
+                }
+            }
             _ => {
                 self.reconcile_prompts("reconcile prompts")?;
             }
@@ -2656,7 +2885,9 @@ fn random_interleavings_never_install_a_prompt_after_the_os_delivered_or_dropped
     let mut total_displaced = 0;
     let mut total_lost_acknowledgments = 0;
     let mut total_failed_listings = 0;
-    for seed in 1..=48 {
+    let mut total_failed_capacity_listings = 0;
+    let mut total_cancels_before_failed_capacity_listings = 0;
+    for seed in 1..=64 {
         let mut rng = SplitMix(seed);
         let mut run = Interleaving::new(seed)?;
         for _ in 0..80 {
@@ -2667,6 +2898,9 @@ fn random_interleavings_never_install_a_prompt_after_the_os_delivered_or_dropped
         total_displaced += run.displaced;
         total_lost_acknowledgments += run.lost_acknowledgments;
         total_failed_listings += run.failed_listings;
+        total_failed_capacity_listings += run.failed_capacity_listings;
+        total_cancels_before_failed_capacity_listings +=
+            run.cancels_before_failed_capacity_listings;
         // Finish with a pass at the clock's furthest reading, then one more look back.
         run.now = run.peak;
         let clock = run.clock();
@@ -2682,16 +2916,20 @@ fn random_interleavings_never_install_a_prompt_after_the_os_delivered_or_dropped
     }
     // The generator is not vacuous: prompts were installed, delivered or dropped, displaced by
     // reminders, and installed under a lost acknowledgment across the runs, and passes failed
-    // at their listing.
+    // at their own listing and at the capacity pass's nested listing, some of those after
+    // cancelling a prompt outside the plan.
     assert!(
         total_installs > 250
             && total_gone > 100
             && total_displaced > 12
             && total_lost_acknowledgments > 24
-            && total_failed_listings > 24,
+            && total_failed_listings > 24
+            && total_failed_capacity_listings > 24
+            && total_cancels_before_failed_capacity_listings > 8,
         "{total_installs} installs, {total_gone} delivered or dropped, {total_displaced} \
          displaced, {total_lost_acknowledgments} lost acknowledgments, \
-         {total_failed_listings} failed listings"
+         {total_failed_listings} failed listings, {total_failed_capacity_listings} failed \
+         capacity listings ({total_cancels_before_failed_capacity_listings} cancels before them)"
     );
     Ok(())
 }
