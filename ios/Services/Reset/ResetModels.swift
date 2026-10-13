@@ -57,6 +57,15 @@ struct ResetStagingSnapshot: Equatable {
     let captureIDs: Set<String>
 }
 
+/// The user's reset tap, recorded durably from the tap until the core confirms that it recorded the reset: the explicit
+/// credential choice and the staged inputs that existed at the tap. The list is the durable form of the tap's moment, so
+/// a restart treats exactly what the tap would have as pre-reset input and every later capture as fresh-generation
+/// content.
+struct ResetRequest: Equatable {
+    let credentialChoice: ResetCredentialChoice
+    let stagedBeforeTheTap: ResetStagingSnapshot
+}
+
 /// The outcome of purging staged inputs that were written before the tap and are still unimported.
 enum ResetStagingPurge: Equatable {
     /// Every such input and the audio it owns is gone.
@@ -69,11 +78,14 @@ enum ResetStagingPurge: Equatable {
 
 /// Native ingress staging as reset needs it. A capture staged before the tap has no item yet, so no tombstone can fence
 /// it: it is imported first (and then tombstoned by the core) or purged. A capture made after the tap is fresh-generation
-/// content, so from the tap until the core has recorded the reset it must neither be listed, imported nor purged.
+/// content, so while the tap is recorded and not yet consumed it must neither be listed, imported nor purged.
 protocol ResetIngressStaging {
     /// The tap. Lists the staged inputs and, in the same step, holds the ingress boundary: an import of any input not in
-    /// the list waits (its input stays staged) until `endBoundary`. When this throws, no boundary is held.
+    /// the list waits (its input stays staged) until `endBoundary`. When this throws, this call holds nothing new.
     func snapshot() async throws -> ResetStagingSnapshot
+    /// Holds the boundary of a tap recorded by an earlier process, with the list taken at that tap. Inputs staged since
+    /// the tap are not in it, so they wait exactly as they would have in the process that recorded the tap.
+    func holdBoundary(for snapshot: ResetStagingSnapshot) async
     /// Imports the staged records named by `snapshot` through the production ingress path. A record staged after the
     /// snapshot is never imported here, so it cannot land below the reset boundary. A record that cannot be imported
     /// stays staged and is left to `purgeUnimported`.
@@ -81,8 +93,8 @@ protocol ResetIngressStaging {
     /// Removes the records and owned audio of `snapshot` that are still staged. Inputs staged after the snapshot are
     /// never touched.
     func purgeUnimported(from snapshot: ResetStagingSnapshot) async -> ResetStagingPurge
-    /// Releases the boundary `snapshot` held, so inputs that waited import into whatever generation is then current.
-    /// Idempotent, and safe to call when nothing is held.
+    /// Releases the boundary, so inputs that waited import into whatever generation is then current. Called only once no
+    /// tap is recorded any more. Idempotent, and safe to call when nothing is held.
     func endBoundary()
 }
 
@@ -102,12 +114,15 @@ extension CredentialService: ResetCredentialRemoving {}
 /// What native code still owes a reset, as small durable markers, so a restart finishes what the user asked for. They
 /// hold a choice and flags, never a generation or a result: the core alone says whether the reset itself is complete.
 protocol ResetMarkerStore {
-    /// The user tapped reset and the core has not confirmed that it recorded the reset. A restart that finds it runs the
-    /// whole reset again (staging, core start, cleanup) with this choice. It is replaced by the next tap and cleared once
-    /// the core has started and the two markers below carry the choice.
-    func requestedChoice() throws -> ResetCredentialChoice?
-    func recordRequested(_ choice: ResetCredentialChoice) throws
-    func clearRequested() throws
+    /// The latest recorded tap the core has not confirmed. A restart that finds it holds the ingress boundary at its list
+    /// and runs the whole reset again (staging, core start, cleanup) with its choice. It is cleared once the core has
+    /// started and the two markers below carry the choice, or withdrawn when the user is told the reset did not start.
+    func request() throws -> ResetRequest?
+    /// Records a tap. It replaces any earlier one, and an interruption or failure at any point leaves either the earlier
+    /// request or this one as the latest, never a mix of the two and never no request where one was recorded before.
+    func recordRequest(_ request: ResetRequest) throws
+    /// Clears every recorded tap. When this throws, the latest request that remains is still a tap the user made.
+    func clearRequest() throws
 
     /// The user chose to remove provider profiles and their credentials.
     func isRemovalRequested() throws -> Bool

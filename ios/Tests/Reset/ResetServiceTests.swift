@@ -249,13 +249,14 @@ final class ResetServiceTests: ResetTestCase {
         XCTAssertEqual(report.blockers, [.cancelled])
         XCTAssertEqual(world.choice.requested, .remove, "the recorded tap is what the next launch runs")
         XCTAssertEqual(world.core.startCalls, 0)
-        XCTAssertFalse(world.staging.isHolding)
+        XCTAssertTrue(world.staging.isHolding, "while the tap is recorded no capture may land below its boundary")
 
         world.staging.onImportSnapshot = nil
         let resumed = await world.makeService().resume()
 
         XCTAssertTrue(resumed.isComplete, "blockers: \(resumed.blockers)")
         XCTAssertEqual(Set(world.credentials.removedReferences), ["ref-a", "ref-b"])
+        XCTAssertFalse(world.staging.isHolding)
     }
 
     func testAnUnwithdrawableRequestIsReportedAndRunByTheNextLaunchNeverHiddenBehindNotStarted() async throws {
@@ -272,12 +273,15 @@ final class ResetServiceTests: ResetTestCase {
         XCTAssertEqual(world.choice.requested, .remove)
         XCTAssertEqual(world.core.startCalls, 0)
         XCTAssertEqual(world.credentials.removedReferences, [], "nothing is removed before the core started")
+        XCTAssertTrue(world.staging.isHolding, "the request that remains keeps the boundary held")
 
+        world.relaunch()
         let relaunched = await world.makeService().resume()
 
         XCTAssertTrue(relaunched.isComplete, "blockers: \(relaunched.blockers)")
         XCTAssertEqual(Set(world.credentials.removedReferences), ["ref-a", "ref-b"])
         XCTAssertNil(world.choice.requested)
+        XCTAssertFalse(world.staging.isHolding)
     }
 
     // MARK: Fresh generation
@@ -482,6 +486,49 @@ final class ResetServiceTests: ResetTestCase {
         XCTAssertEqual(world.staging.purgedCaptureIDs, [])
     }
 
+    func testATapThatCannotBeRecordedWithdrawsAnEarlierTapSoNoOlderChoiceStaysArmed() async throws {
+        let world = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(world)
+        configureProfiles(world)
+        await crashDuringReset(world, at: "before.start", choice: .remove)
+        world.relaunch()
+        XCTAssertEqual(world.choice.requested, .remove)
+        world.faults.arm("intent.record")
+
+        let report = await world.makeService().reset(credentialChoice: .keep)
+
+        XCTAssertEqual(report.state, .notStarted)
+        XCTAssertEqual(report.blockers, [.markerNotRecorded])
+        XCTAssertNil(world.choice.recordedRequest, "the earlier remove tap is withdrawn with the failed keep tap")
+        XCTAssertFalse(world.staging.isHolding)
+
+        let relaunched = await world.makeService().resume()
+
+        XCTAssertEqual(relaunched.state, .notStarted)
+        XCTAssertEqual(world.core.startCalls, 0)
+        XCTAssertEqual(world.credentials.removedReferences, [])
+        XCTAssertEqual(world.core.revokedProfileVersions, [])
+    }
+
+    func testATapThatCannotBeRecordedNorWithdrawnIsReportedAsStillArmed() async throws {
+        let world = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(world)
+        configureProfiles(world)
+        await crashDuringReset(world, at: "before.start", choice: .remove)
+        world.relaunch()
+        world.faults.arm("intent.record")
+        world.faults.arm("intent.clear")
+
+        let report = await world.makeService().reset(credentialChoice: .keep)
+
+        XCTAssertEqual(report.state, .pending, "a tap that a restart would run is never hidden behind 'not started'")
+        XCTAssertEqual(report.blockers, [.markerNotRecorded, .markerNotCleared])
+        XCTAssertEqual(world.choice.requested, .remove)
+        XCTAssertTrue(world.staging.isHolding)
+        XCTAssertEqual(world.core.startCalls, 0)
+        XCTAssertEqual(world.credentials.removedReferences, [])
+    }
+
     func testAChoiceThatCannotBeCarriedOverAfterTheCoreStartedIsRetriedBeforeAnythingIsRemoved() async throws {
         let world = try makeResetWorld()
         try await seedVoiceAndTextCaptures(world)
@@ -559,6 +606,75 @@ final class ResetServiceTests: ResetTestCase {
                 }
             }
         }
+    }
+
+    func testACaptureMadeAfterTheTapSurvivesACrashBeforeTheCoreConfirmedTheReset() async throws {
+        for seeded in [true, false] {
+            for point in ["staging.import", "staging.purge", "before.start", "after.start"] {
+                let world = try makeResetWorld()
+                if seeded { try await seedVoiceAndTextCaptures(world) }
+                world.makeImportedItemOnImport()
+                world.staging.importable = ["cap-pre-tap", "cap-live", "cap-after-crash"]
+                world.staging.stage("cap-pre-tap")
+                world.staging.stage("cap-stuck")
+                world.staging.onSnapshot = { [staging = world.staging] in staging.liveCapture("cap-live") }
+                world.staging.onLiveImport = { [deletion = world.deletion, core = world.core] captureID in
+                    deletion.core.addItem("item-\(captureID)", captureID: captureID, audioReference: nil)
+                    core.register("item-\(captureID)")
+                }
+                let context = "crash at \(point), seeded \(seeded)"
+
+                await crashDuringReset(world, at: point, choice: .keep)
+                world.staging.onSnapshot = nil
+                world.relaunch()
+                XCTAssertTrue(world.staging.isHolding, "the relaunched gate holds while the tap is recorded: \(context)")
+                world.staging.liveCapture("cap-after-crash")
+                XCTAssertEqual(world.staging.liveImportedCaptureIDs, [], "nothing fresh imports before the core started: \(context)")
+
+                let resumed = await world.makeService().resume()
+
+                XCTAssertEqual(resumed.state, .completed, "\(context): \(resumed.blockers)")
+                XCTAssertEqual(world.staging.snapshotCalls, 1, "resume uses the recorded list, never a new one: \(context)")
+                XCTAssertEqual(
+                    world.staging.heldSnapshots, [ResetStagingSnapshot(captureIDs: ["cap-pre-tap", "cap-stuck"])], context)
+                XCTAssertFalse(world.staging.purgedCaptureIDs.contains("cap-live"), context)
+                XCTAssertFalse(world.staging.importedCaptureIDs.contains("cap-live"), context)
+                XCTAssertEqual(
+                    Set(world.staging.liveImportedCaptureIDs), ["cap-live", "cap-after-crash"],
+                    "post-tap captures import after the core recorded the reset: \(context)")
+                for captureID in ["cap-live", "cap-after-crash"] {
+                    XCTAssertNil(
+                        world.deletion.core.status("item-\(captureID)", .removeAudio),
+                        "\(captureID) is fresh-generation content, never tombstoned: \(context)")
+                }
+                XCTAssertTrue(world.deletion.core.isDeletionComplete("item-cap-pre-tap"), context)
+                XCTAssertEqual(world.staging.staged, [], context)
+                XCTAssertFalse(world.staging.isHolding, context)
+                if seeded { assertEverythingErased(world) }
+            }
+        }
+    }
+
+    func testARestartAfterTheCoreCompletedAtStartNeverTombstonesACaptureMadeAfterTheTap() async throws {
+        let world = try makeResetWorld()
+        world.staging.onSnapshot = { [staging = world.staging] in staging.liveCapture("cap-live") }
+        world.staging.onLiveImport = { [deletion = world.deletion, core = world.core] captureID in
+            deletion.core.addItem("item-\(captureID)", captureID: captureID, audioReference: nil)
+            core.register("item-\(captureID)")
+        }
+
+        await crashDuringReset(world, at: "after.start", choice: .keep)
+        XCTAssertEqual(world.core.currentGeneration, 1)
+        XCTAssertEqual(world.staging.liveImportedCaptureIDs, [], "the boundary is still held while the tap is recorded")
+        world.relaunch()
+
+        let resumed = await world.makeService().resume()
+
+        XCTAssertEqual(resumed.state, .completed, "blockers: \(resumed.blockers)")
+        XCTAssertEqual(world.staging.liveImportedCaptureIDs, ["cap-live"])
+        XCTAssertNil(
+            world.deletion.core.status("item-cap-live", .removeAudio),
+            "starting the core again for the recorded tap finds no fresh capture below its boundary")
     }
 
     func testAResumeThatCannotPrepareStagingKeepsTheRecordedTapForTheNextLaunch() async throws {

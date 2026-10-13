@@ -6,9 +6,12 @@ import XCTest
 final class ResetIngressGateTests: IngressStorageTestCase {
     private func makeGatedService(
         importer: ForegroundIngressImporting,
-        gateFileSystem: IngressFileSystem = FileManagerIngressFileSystem()
+        gateFileSystem: IngressFileSystem = FileManagerIngressFileSystem(),
+        markers: ResetMarkerStore? = nil
     ) throws -> (ForegroundIngressService, ResetIngressGate) {
-        let gate = ResetIngressGate(wrapping: importer, layout: layout, fileSystem: gateFileSystem)
+        let gate = ResetIngressGate(
+            wrapping: importer, layout: layout, markers: markers ?? FileResetMarkerStore(layout: layout),
+            fileSystem: gateFileSystem)
         return (try makeService(importer: gate), gate)
     }
 
@@ -57,6 +60,55 @@ final class ResetIngressGateTests: IngressStorageTestCase {
 
         guard case .saved(_)? = outcome else { return XCTFail("an unheld gate imports at once: \(String(describing: outcome))") }
     }
+
+    // MARK: Launch
+
+    func testAGateCreatedWhileATapIsRecordedHoldsFromLaunchAtTheRecordedList() throws {
+        let markers = FileResetMarkerStore(layout: layout)
+        try markers.recordRequest(ResetRequest(
+            credentialChoice: .remove, stagedBeforeTheTap: ResetStagingSnapshot(captureIDs: ["cap-before"])))
+        let importer = FakeForegroundIngressImporter()
+        importer.results = [
+            FakeForegroundIngressImporter.confirmation("cap-before", itemID: "item-before"),
+            FakeForegroundIngressImporter.confirmation("cap-after", itemID: "item-after"),
+        ]
+        let (service, gate) = try makeGatedService(importer: importer, markers: markers)
+
+        var beforeOutcome: IngressOutcome?
+        var afterOutcome: IngressOutcome?
+        service.submit(textRecord("cap-before")) { beforeOutcome = $0 }
+        service.submit(textRecord("cap-after")) { afterOutcome = $0 }
+
+        guard case .saved(_)? = beforeOutcome else {
+            return XCTFail("a capture listed at the recorded tap imports: \(String(describing: beforeOutcome))")
+        }
+        XCTAssertNil(afterOutcome, "a capture made after a tap recorded by an earlier process waits from launch")
+        XCTAssertEqual(gate.heldImportCount, 1)
+        XCTAssertTrue(exists(recordURL("cap-after")))
+
+        gate.release()
+
+        guard case .saved(_)? = afterOutcome else {
+            return XCTFail("the held capture imports after the release: \(String(describing: afterOutcome))")
+        }
+    }
+
+    func testAGateWhoseMarkersCannotBeReadHoldsEveryImport() throws {
+        let faults = FaultPlan()
+        faults.arm("intent.read")
+        let importer = FakeForegroundIngressImporter()
+        importer.results = [FakeForegroundIngressImporter.confirmation("cap-a", itemID: "item-a")]
+        let (service, gate) = try makeGatedService(importer: importer, markers: MemoryResetMarkerStore(faults: faults))
+
+        var outcome: IngressOutcome?
+        service.submit(textRecord("cap-a")) { outcome = $0 }
+
+        XCTAssertNil(outcome, "a recorded tap cannot be ruled out, so nothing imports before reset resolves it")
+        XCTAssertEqual(importer.importedRecords.map { $0.captureID }, [])
+        XCTAssertEqual(gate.heldImportCount, 1)
+    }
+
+    // MARK: Rejected captures
 
     func testARejectedLateVoiceHandoffRemovesBothTheRecordAndTheAudioItFinalized() throws {
         let importer = FakeForegroundIngressImporter()

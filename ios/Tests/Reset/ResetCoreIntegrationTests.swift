@@ -233,7 +233,7 @@ final class ResetCoreIntegrationTests: XCTestCase {
         let items = try seedCaptures(world)
         let reference = try world.addProfile(version: "profile-a-v1")
         let killed = try world.launch()
-        try killed.markers.recordRequested(.remove)
+        try killed.recordTap(.remove)
         XCTAssertEqual(try killed.currentGeneration(), 0, "the core never started")
         XCTAssertTrue(try world.isCredentialPresent(reference))
         XCTAssertFalse(try killed.markers.isCleanupOutstanding())
@@ -246,7 +246,7 @@ final class ResetCoreIntegrationTests: XCTestCase {
         XCTAssertEqual(try relaunched.currentGeneration(), 1)
         XCTAssertTrue(try world.isProfileRevoked("profile-a-v1"))
         XCTAssertFalse(try world.isCredentialPresent(reference))
-        XCTAssertNil(try relaunched.markers.requestedChoice())
+        XCTAssertNil(try relaunched.markers.request())
         XCTAssertFalse(try relaunched.markers.isCleanupOutstanding())
         for captureID in ["cap-1", "cap-2", "cap-staged"] {
             XCTAssertEqual(world.storage.remnants(of: captureID), [])
@@ -256,6 +256,50 @@ final class ResetCoreIntegrationTests: XCTestCase {
         }
     }
 
+    func testACaptureMadeAfterATapWhoseProcessDiedBelongsToTheFreshGenerationOfTheResumedReset() throws {
+        let world = try makeWorld()
+        _ = try seedCaptures(world)
+        try world.addWorkRoute()
+        let reference = try world.addProfile(version: "profile-a-v1")
+        let killed = try world.launch()
+        let request = try killed.recordTap(.remove)
+        XCTAssertEqual(request.stagedBeforeTheTap.captureIDs, ["cap-staged"])
+        var heldOutcome: IngressOutcome?
+        killed.submitLater(world.workTextRecord("cap-post-tap")) { heldOutcome = $0 }
+        XCTAssertTrue(killed.session.pump(until: { !world.storage.remnants(of: "cap-post-tap").isEmpty }))
+        _ = killed.session.pump(until: { heldOutcome != nil }, timeout: 0.5)
+        XCTAssertNil(heldOutcome, "the post-tap capture is staged and waits at the boundary")
+        killed.terminate()
+        try world.stageTextRecord(captureID: "cap-while-dead")
+
+        let relaunched = try world.launch()
+        try relaunched.recoverIngress()
+        _ = relaunched.session.pump(until: { false }, timeout: 0.5)
+        XCTAssertEqual(try relaunched.currentGeneration(), 0, "recovery ran first and the core has not started")
+        XCTAssertFalse(world.storage.remnants(of: "cap-post-tap").isEmpty, "the relaunched gate holds post-tap captures")
+        XCTAssertTrue(try world.isCredentialPresent(reference))
+
+        let resumed = try relaunched.resume()
+
+        XCTAssertEqual(resumed.state, .completed, "blockers: \(resumed.blockers)")
+        XCTAssertEqual(try relaunched.currentGeneration(), 1)
+        XCTAssertFalse(try world.isCredentialPresent(reference), "the recorded choice is honored")
+        XCTAssertEqual(world.storage.remnants(of: "cap-staged"), [], "the pre-tap staged capture is erased")
+        XCTAssertTrue(relaunched.session.pump(until: {
+            world.storage.remnants(of: "cap-post-tap").isEmpty && world.storage.remnants(of: "cap-while-dead").isEmpty
+        }), "the held captures import once the core recorded the reset")
+        for record in [world.workTextRecord("cap-post-tap"), world.textRecord("cap-while-dead")] {
+            guard case .confirmed(let confirmation)? = relaunched.session.importAndWait(record) else {
+                return XCTFail("\(record.captureID) must be saved, not erased")
+            }
+            XCTAssertTrue(confirmation.alreadyImported, "\(record.captureID) was imported by recovery")
+            XCTAssertEqual(
+                try relaunched.generation(ofItem: confirmation.itemID), 1,
+                "\(record.captureID) is fresh-generation content")
+        }
+        XCTAssertNil(try relaunched.markers.request())
+    }
+
     func testATapAfterACompletedResetIsNotMistakenForThatResetByTheNextLaunch() throws {
         let world = try makeWorld()
         _ = try seedCaptures(world)
@@ -263,7 +307,7 @@ final class ResetCoreIntegrationTests: XCTestCase {
         let first = try world.launch()
         XCTAssertEqual(try first.reset(.keep).state, .completed)
         let newItem = try first.capture(world.textRecord("cap-new"))
-        try first.markers.recordRequested(.remove)
+        try first.recordTap(.remove)
         first.terminate()
 
         let second = try world.launch()

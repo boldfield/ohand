@@ -12,7 +12,7 @@ final class ResetNativeCleanupTests: IngressStorageTestCase {
         importer: ForegroundIngressImporting,
         fileSystem: IngressFileSystem = FileManagerIngressFileSystem()
     ) throws -> (NativeResetIngress, ForegroundIngressService) {
-        let gate = ResetIngressGate(wrapping: importer, layout: layout)
+        let gate = ResetIngressGate(wrapping: importer, layout: layout, markers: FileResetMarkerStore(layout: layout))
         let service = try makeService(importer: gate)
         return (NativeResetIngress(service: service, gate: gate, layout: layout, fileSystem: fileSystem), service)
     }
@@ -149,27 +149,87 @@ final class ResetNativeCleanupTests: IngressStorageTestCase {
 
     // MARK: Markers
 
+    private func tap(_ choice: ResetCredentialChoice, _ captureIDs: Set<String>) -> ResetRequest {
+        ResetRequest(credentialChoice: choice, stagedBeforeTheTap: ResetStagingSnapshot(captureIDs: captureIDs))
+    }
+
+    private var requestFileNames: [String] {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: layout.directory(for: .temporaryFiles).path)) ?? []
+        return names.filter { $0.hasPrefix(FileResetMarkerStore.requestFilePrefix) }.sorted()
+    }
+
     func testTheRecordedTapIsDurableReplaceableAndIndependentOfTheOtherMarkers() throws {
         let store = FileResetMarkerStore(layout: layout)
-        XCTAssertNil(try store.requestedChoice())
+        XCTAssertNil(try store.request())
 
-        try store.recordRequested(.remove)
-        try store.recordRequested(.remove)
+        try store.recordRequest(tap(.remove, ["cap-a", "cap-b"]))
         let relaunched = FileResetMarkerStore(layout: layout)
-        XCTAssertEqual(try relaunched.requestedChoice(), .remove, "the tap survives a restart")
+        XCTAssertEqual(try relaunched.request(), tap(.remove, ["cap-a", "cap-b"]), "the tap and its list survive a restart")
         XCTAssertFalse(try relaunched.isRemovalRequested(), "the choice is not armed by the tap alone")
         XCTAssertFalse(try relaunched.isCleanupOutstanding(), "cleanup is not outstanding for a reset that has not started")
 
-        try store.recordRequested(.keep)
-        XCTAssertEqual(try relaunched.requestedChoice(), .keep, "the latest tap replaces the earlier one")
+        try store.recordRequest(tap(.keep, ["cap-c"]))
+        XCTAssertEqual(try relaunched.request(), tap(.keep, ["cap-c"]), "the latest tap replaces the earlier one")
+        XCTAssertEqual(requestFileNames.count, 1, "the earlier tap is removed once the new one is durable")
 
-        try store.recordRequested(.remove)
-        try Data("1".utf8).write(to: layout.directory(for: .temporaryFiles).appendingPathComponent(FileResetMarkerStore.requestedKeepFileName))
-        XCTAssertEqual(try relaunched.requestedChoice(), .keep, "an interrupted replacement never resolves toward removal")
+        try store.recordRequest(tap(.keep, []))
+        XCTAssertEqual(try relaunched.request(), tap(.keep, []), "a repeated choice still records its own list")
 
-        try store.clearRequested()
-        try store.clearRequested()
-        XCTAssertNil(try relaunched.requestedChoice())
+        try store.clearRequest()
+        try store.clearRequest()
+        XCTAssertNil(try relaunched.request())
+        XCTAssertEqual(requestFileNames, [])
+    }
+
+    func testReplacingATapNeverLosesItNorRevertsToTheEarlierChoice() throws {
+        let faults = FaultPlan()
+        let store = FileResetMarkerStore(layout: layout, fileSystem: FaultingResetMarkerFileSystem(faults: faults))
+        let relaunched = FileResetMarkerStore(layout: layout)
+        for (earlierChoice, laterChoice) in [(ResetCredentialChoice.remove, ResetCredentialChoice.keep), (.keep, .remove)] {
+            let earlier = tap(earlierChoice, ["cap-early"])
+            let later = tap(laterChoice, ["cap-early", "cap-late"])
+            let context = "\(earlierChoice) replaced by \(laterChoice)"
+
+            // Killed after the new tap was written and before the earlier one was removed.
+            try store.recordRequest(earlier)
+            faults.arm("fs.remove:\(FileResetMarkerStore.requestFilePrefix)1")
+            try store.recordRequest(later)
+            XCTAssertEqual(requestFileNames.count, 2, context)
+            XCTAssertEqual(try relaunched.request(), later, "the newest complete tap is the request: \(context)")
+            try store.clearRequest()
+            XCTAssertNil(try relaunched.request(), "a clear consumes both files: \(context)")
+
+            // The new tap cannot be written: the earlier tap is still recorded, untouched.
+            try store.recordRequest(earlier)
+            faults.arm("fs.write:\(FileResetMarkerStore.requestFilePrefix)2")
+            XCTAssertThrowsError(try store.recordRequest(later), context)
+            XCTAssertEqual(try relaunched.request(), earlier, "a failed replacement never loses the earlier tap: \(context)")
+            try store.clearRequest()
+
+            // A clear that fails part-way removes the older file first, so what remains is still the latest tap.
+            try store.recordRequest(earlier)
+            faults.arm("fs.remove:\(FileResetMarkerStore.requestFilePrefix)1")
+            try store.recordRequest(later)
+            faults.arm("fs.remove:\(FileResetMarkerStore.requestFilePrefix)2")
+            XCTAssertThrowsError(try store.clearRequest(), context)
+            XCTAssertEqual(try relaunched.request(), later, "a failed clear never exposes the earlier choice: \(context)")
+            try store.clearRequest()
+            XCTAssertNil(try relaunched.request(), context)
+        }
+    }
+
+    func testAnInterruptedOrUnreadableRequestWriteIsNeverReadAsNoRequest() throws {
+        let store = FileResetMarkerStore(layout: layout)
+        let directory = layout.directory(for: .temporaryFiles)
+        try Data("{".utf8).write(
+            to: directory.appendingPathComponent(FileResetMarkerStore.requestFilePrefix + "1" + IngressFileSystemNaming.incompleteWriteSuffix))
+        XCTAssertNil(try store.request(), "a write interrupted before it became a file is not a tap")
+
+        try store.recordRequest(tap(.keep, ["cap-a"]))
+        XCTAssertEqual(try store.request(), tap(.keep, ["cap-a"]))
+
+        try Data("not a request".utf8).write(to: directory.appendingPathComponent(FileResetMarkerStore.requestFilePrefix + "9"))
+        XCTAssertThrowsError(try store.request(), "a damaged request is unreadable, never taken as no request")
     }
 
     func testMarkersAreDurableIdempotentAndIndependent() throws {

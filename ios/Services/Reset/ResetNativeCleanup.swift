@@ -41,6 +41,15 @@ final class NativeResetIngress: ResetIngressStaging {
         }
     }
 
+    func holdBoundary(for snapshot: ResetStagingSnapshot) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.main.async { [gate] in
+                gate.hold(stagedBeforeTheTap: snapshot.captureIDs)
+                continuation.resume()
+            }
+        }
+    }
+
     func endBoundary() {
         DispatchQueue.main.async { [gate] in gate.release() }
     }
@@ -113,50 +122,69 @@ final class ExportTemporaryCleaner: ResetExportTemporaries {
     }
 }
 
-/// Keeps the reset markers as small files in the protected temporary store. A file holds no secret, identifier or
-/// generation; its existence is the marker.
+/// Keeps the reset markers as small files in the protected temporary store. The choice and cleanup markers hold no
+/// secret, identifier or generation; their existence is the marker.
+///
+/// A recorded tap is a numbered file holding the credential choice and the capture identifiers staged at the tap (local
+/// identifiers that already name files in the same protected store; never content, paths or a generation). The highest
+/// number is the request. A new tap is written in full under the next number before the earlier files are removed, so
+/// an interruption or a failure at any point leaves either the earlier tap or the new one as the latest, never no
+/// request and never an older choice in place of a newer one. Clearing removes the oldest first, so whatever survives a
+/// failed clear is still the latest tap.
 final class FileResetMarkerStore: ResetMarkerStore {
     static let removalFileName = "reset-credential-removal"
     static let outstandingFileName = "reset-cleanup-outstanding"
-    static let requestedKeepFileName = "reset-requested-keep"
-    static let requestedRemoveFileName = "reset-requested-remove"
+    static let requestFilePrefix = "reset-request-"
 
+    private struct StoredRequest: Codable {
+        let credentialChoice: String
+        let stagedBeforeTheTap: [String]
+    }
+
+    struct UnreadableRequest: Error {}
+
+    private let directory: URL
     private let removalURL: URL
     private let outstandingURL: URL
-    private let requestedKeepURL: URL
-    private let requestedRemoveURL: URL
     private let fileSystem: IngressFileSystem
 
     init(layout: ProtectedStorageLayout, fileSystem: IngressFileSystem = FileManagerIngressFileSystem()) {
-        let directory = layout.directory(for: .temporaryFiles)
+        directory = layout.directory(for: .temporaryFiles)
         removalURL = directory.appendingPathComponent(Self.removalFileName)
         outstandingURL = directory.appendingPathComponent(Self.outstandingFileName)
-        requestedKeepURL = directory.appendingPathComponent(Self.requestedKeepFileName)
-        requestedRemoveURL = directory.appendingPathComponent(Self.requestedRemoveFileName)
         self.fileSystem = fileSystem
     }
 
-    /// When both files exist (a tap interrupted while replacing the earlier one) the choice that removes nothing wins.
-    func requestedChoice() throws -> ResetCredentialChoice? {
-        if fileSystem.fileExists(at: requestedKeepURL) { return .keep }
-        if fileSystem.fileExists(at: requestedRemoveURL) { return .remove }
-        return nil
+    func request() throws -> ResetRequest? {
+        guard let latest = try requestNumbers().last else { return nil }
+        let stored = try JSONDecoder().decode(StoredRequest.self, from: try fileSystem.read(from: requestURL(latest)))
+        let choice: ResetCredentialChoice
+        switch stored.credentialChoice {
+        case "keep": choice = .keep
+        case "remove": choice = .remove
+        default: throw UnreadableRequest()
+        }
+        return ResetRequest(
+            credentialChoice: choice, stagedBeforeTheTap: ResetStagingSnapshot(captureIDs: Set(stored.stagedBeforeTheTap)))
     }
 
-    func recordRequested(_ choice: ResetCredentialChoice) throws {
-        switch choice {
-        case .keep:
-            try clear(requestedRemoveURL)
-            try record(requestedKeepURL)
-        case .remove:
-            try clear(requestedKeepURL)
-            try record(requestedRemoveURL)
+    func recordRequest(_ request: ResetRequest) throws {
+        let earlier = try requestNumbers()
+        let stored = StoredRequest(
+            credentialChoice: request.credentialChoice == .remove ? "remove" : "keep",
+            stagedBeforeTheTap: request.stagedBeforeTheTap.captureIDs.sorted())
+        try fileSystem.writeDurably(try JSONEncoder().encode(stored), to: requestURL((earlier.last ?? 0) + 1))
+        // The new tap is now the latest. An earlier file that cannot be removed here is never read again, and the next
+        // clear removes it before the latest.
+        for number in earlier {
+            try? fileSystem.remove(at: requestURL(number))
         }
     }
 
-    func clearRequested() throws {
-        try clear(requestedKeepURL)
-        try clear(requestedRemoveURL)
+    func clearRequest() throws {
+        for number in try requestNumbers() {
+            try fileSystem.remove(at: requestURL(number))
+        }
     }
 
     func isRemovalRequested() throws -> Bool { fileSystem.fileExists(at: removalURL) }
@@ -166,6 +194,19 @@ final class FileResetMarkerStore: ResetMarkerStore {
     func isCleanupOutstanding() throws -> Bool { fileSystem.fileExists(at: outstandingURL) }
     func recordCleanupOutstanding() throws { try record(outstandingURL) }
     func clearCleanupOutstanding() throws { try clear(outstandingURL) }
+
+    /// Numbers of the complete request files, ascending. A write interrupted before it became a file is not a request.
+    private func requestNumbers() throws -> [Int] {
+        guard fileSystem.fileExists(at: directory) else { return [] }
+        return try fileSystem.entryNames(in: directory)
+            .filter { $0.hasPrefix(Self.requestFilePrefix) }
+            .compactMap { Int($0.dropFirst(Self.requestFilePrefix.count)) }
+            .sorted()
+    }
+
+    private func requestURL(_ number: Int) -> URL {
+        directory.appendingPathComponent(Self.requestFilePrefix + String(number))
+    }
 
     private func record(_ url: URL) throws {
         guard !fileSystem.fileExists(at: url) else { return }

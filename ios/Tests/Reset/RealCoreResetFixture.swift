@@ -153,6 +153,8 @@ final class RealCoreResetSession: ForegroundIngressImporting {
     }
 
     func importRecord(_ record: IngressRecord, completion: @escaping (IngressImportResult) -> Void) {
+        // A closed session is a dead process: the import never reaches a core and nothing answers.
+        guard !isClosed else { return }
         let operationID = nextImportOperationID
         nextImportOperationID += 1
         pendingImports[operationID] = completion
@@ -219,6 +221,8 @@ final class RealCoreResetRuntime {
     let session: RealCoreResetSession
     let markers: FileResetMarkerStore
     private(set) var ingress: ForegroundIngressService?
+    private(set) var gate: ResetIngressGate?
+    private(set) var staging: NativeResetIngress?
     private(set) var service: ResetService?
 
     init(world: RealCoreResetWorld, wrapStaging: ((ResetIngressStaging) -> ResetIngressStaging)? = nil) throws {
@@ -226,15 +230,17 @@ final class RealCoreResetRuntime {
         markers = FileResetMarkerStore(layout: world.layout)
         let faults = world.storage.faults
         do {
-            let gate = ResetIngressGate(wrapping: session, layout: world.layout)
+            let gate = ResetIngressGate(wrapping: session, layout: world.layout, markers: markers)
             let ingress = try ForegroundIngressService(layout: world.layout, importer: gate)
             self.ingress = ingress
+            self.gate = gate
             let itemCleanup = DeletionCleanupService(
                 core: FaultingDeletionCleanupCore(wrapped: session.deletionClient, faults: faults),
                 notifications: FaultingNotificationCanceller(bridge: world.storage.makeBridge(), faults: faults),
                 localCleanup: DeletionLocalCleanup(
                     layout: world.layout, fileSystem: FaultingDeletionFileSystem(faults: faults)))
             let nativeStaging = NativeResetIngress(service: ingress, gate: gate, layout: world.layout)
+            staging = nativeStaging
             service = ResetService(
                 core: session.resetClient,
                 staging: wrapStaging?(nativeStaging) ?? nativeStaging,
@@ -256,6 +262,23 @@ final class RealCoreResetRuntime {
     func resume() throws -> ResetReport {
         let service = try XCTUnwrap(service)
         return try session.run { await service.resume() }
+    }
+
+    /// The tap exactly as `ResetService.reset` performs it before anything else: production staging lists and holds the
+    /// boundary in one step, then the request is recorded. A process killed right after this has recorded the tap and
+    /// nothing more.
+    @discardableResult
+    func recordTap(_ choice: ResetCredentialChoice) throws -> ResetRequest {
+        let staging = ResetUncheckedBox(try XCTUnwrap(self.staging))
+        let snapshot = try session.run { try await staging.value.snapshot() }
+        let request = ResetRequest(credentialChoice: choice, stagedBeforeTheTap: snapshot)
+        try markers.recordRequest(request)
+        return request
+    }
+
+    /// Runs ingress recovery as a launch does and returns without waiting for held captures.
+    func recoverIngress() throws {
+        try XCTUnwrap(ingress).recover { _ in }
     }
 
     /// Submits a capture through the foreground ingress path on the main queue without waiting for its outcome. Safe to
@@ -289,11 +312,26 @@ final class RealCoreResetRuntime {
         return try session.run { try await client.currentGeneration() }
     }
 
-    /// Ends the process: the ingress service (and its writer lock) goes away, then the core closes.
+    /// Ends the process: the core closes, then the ingress service (and its writer lock) goes away. Imports the gate
+    /// still holds are dropped as a kill drops them: released into the closed session, which answers nothing, so their
+    /// completions (which keep the ingress service alive) go too. Their records stay staged.
     func terminate() {
         service = nil
-        ingress = nil
+        staging = nil
         session.close()
+        gate?.release()
+        gate = nil
+        ingress = nil
+    }
+}
+
+/// Carries a main-queue-confined test object into a `RealCoreResetSession.run` operation, which awaits it from the
+/// main run loop.
+final class ResetUncheckedBox<Value>: @unchecked Sendable {
+    let value: Value
+
+    init(_ value: Value) {
+        self.value = value
     }
 }
 
@@ -329,6 +367,8 @@ final class SnapshotHookStaging: ResetIngressStaging {
         afterSnapshot()
         return taken
     }
+
+    func holdBoundary(for snapshot: ResetStagingSnapshot) async { await wrapped.holdBoundary(for: snapshot) }
 
     func endBoundary() { wrapped.endBoundary() }
 

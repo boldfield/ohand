@@ -195,8 +195,10 @@ final class FakeResetStaging: ResetIngressStaging {
     var onSnapshot: (() -> Void)?
     /// Called at the start of `importSnapshot`, on the task that runs the reset.
     var onImportSnapshot: (() -> Void)?
-    /// True from a successful snapshot until `endBoundary`: live captures wait, as at the production ingress gate.
+    /// True from a successful snapshot (or `holdBoundary`) until `endBoundary`: live captures wait, as at the production
+    /// ingress gate.
     private(set) var isHolding = false
+    private(set) var heldSnapshots: [ResetStagingSnapshot] = []
     private(set) var boundaryReleases = 0
     private(set) var heldCaptureIDs: [String] = []
     private(set) var liveImportedCaptureIDs: [String] = []
@@ -238,6 +240,23 @@ final class FakeResetStaging: ResetIngressStaging {
         isHolding = true
         onSnapshot?()
         return taken
+    }
+
+    /// A process start, as the production ingress gate is created: a capture that was waiting is still staged and is
+    /// submitted again by ingress recovery, and the gate holds exactly when a tap is recorded.
+    func relaunch(recordedRequest: ResetRequest?) {
+        isHolding = recordedRequest != nil
+        if !isHolding {
+            let waiting = heldCaptureIDs
+            heldCaptureIDs = []
+            for captureID in waiting { importLive(captureID) }
+        }
+    }
+
+    func holdBoundary(for snapshot: ResetStagingSnapshot) async {
+        log.append("staging.hold")
+        heldSnapshots.append(snapshot)
+        isHolding = true
     }
 
     func endBoundary() {
@@ -314,22 +333,28 @@ final class MemoryResetMarkerStore: ResetMarkerStore {
     private let faults: FaultPlan
     private(set) var isRequested = false
     private(set) var isOutstanding = false
-    private(set) var requested: ResetCredentialChoice?
+    private(set) var recordedRequest: ResetRequest?
+
+    /// The credential choice of the recorded tap.
+    var requested: ResetCredentialChoice? { recordedRequest?.credentialChoice }
 
     init(faults: FaultPlan) {
         self.faults = faults
     }
 
-    func requestedChoice() throws -> ResetCredentialChoice? { requested }
-
-    func recordRequested(_ choice: ResetCredentialChoice) throws {
-        if faults.fires("intent.record") { throw WriteFailed() }
-        requested = choice
+    func request() throws -> ResetRequest? {
+        if faults.fires("intent.read") { throw WriteFailed() }
+        return recordedRequest
     }
 
-    func clearRequested() throws {
+    func recordRequest(_ request: ResetRequest) throws {
+        if faults.fires("intent.record") { throw WriteFailed() }
+        recordedRequest = request
+    }
+
+    func clearRequest() throws {
         if faults.fires("intent.clear") { throw WriteFailed() }
-        requested = nil
+        recordedRequest = nil
     }
 
     func isRemovalRequested() throws -> Bool { isRequested }
@@ -382,6 +407,12 @@ final class ResetWorld {
         choice = MemoryResetMarkerStore(faults: deletion.faults)
     }
 
+    /// A process start after a kill: the ingress gate is created from the recorded tap, and the next `makeService()` is
+    /// the new process's reset service.
+    func relaunch() {
+        staging.relaunch(recordedRequest: choice.recordedRequest)
+    }
+
     func makeService() -> ResetService {
         ResetService(
             core: core,
@@ -414,6 +445,42 @@ final class ResetWorld {
             deletion.core.addItem(itemID, captureID: captureID, audioReference: nil)
             core.register(itemID)
         }
+    }
+}
+
+/// Wraps the real file system and fails selected operations once, by point name `fs.<operation>:<file name>` or
+/// `fs.entryNames`. A failed removal after a write leaves exactly the files a kill at that moment would leave.
+final class FaultingResetMarkerFileSystem: IngressFileSystem {
+    private let wrapped = FileManagerIngressFileSystem()
+    private let faults: FaultPlan
+
+    init(faults: FaultPlan) {
+        self.faults = faults
+    }
+
+    func fileExists(at url: URL) -> Bool { wrapped.fileExists(at: url) }
+    func fileSize(at url: URL) throws -> Int { try wrapped.fileSize(at: url) }
+
+    func entryNames(in directory: URL) throws -> [String] {
+        try faults.check("fs.entryNames")
+        return try wrapped.entryNames(in: directory)
+    }
+
+    func read(from url: URL) throws -> Data {
+        try faults.check("fs.read:\(url.lastPathComponent)")
+        return try wrapped.read(from: url)
+    }
+
+    func writeDurably(_ data: Data, to url: URL) throws {
+        try faults.check("fs.write:\(url.lastPathComponent)")
+        try wrapped.writeDurably(data, to: url)
+    }
+
+    func move(from source: URL, to destination: URL) throws { try wrapped.move(from: source, to: destination) }
+
+    func remove(at url: URL) throws {
+        try faults.check("fs.remove:\(url.lastPathComponent)")
+        try wrapped.remove(at: url)
     }
 }
 
