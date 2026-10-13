@@ -210,6 +210,7 @@ impl<'a> PromptCoordinator<'a> {
 
         if let Some(existing) = get_event(&transaction, &event_id).map_err(storage_error)? {
             return if existing.item_id == command.item_id
+                && existing.revision == command.expected_revision
                 && event_matches_response(&existing, command.response)
             {
                 Ok(ResponseOutcome::Applied { replayed: true })

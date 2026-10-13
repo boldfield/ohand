@@ -476,6 +476,31 @@ fn reusing_a_command_id_for_another_response_is_a_conflict() {
 }
 
 #[test]
+fn reusing_a_command_id_at_a_later_revision_is_a_conflict_not_a_replay() {
+    let mut fixture = Fixture::new();
+    let first_revision = fixture.add_item("item-a", "Alpha", Some("action"));
+    fixture
+        .respond("cmd-1", "item-a", first_revision, PromptResponse::NotNow)
+        .unwrap();
+    fixture
+        .clock
+        .advance(NOT_NOW_COOLDOWN + Duration::seconds(1));
+    assert_eq!(fixture.offered_item().as_deref(), Some("item-a"));
+    let later_revision = fixture.revision("item-a");
+    assert_ne!(later_revision, first_revision);
+    let events_before = fixture.event_count();
+
+    let reused = fixture.respond("cmd-1", "item-a", later_revision, PromptResponse::NotNow);
+
+    assert!(matches!(
+        reused,
+        Err(PromptCoordinatorError::CommandConflict { .. })
+    ));
+    assert_eq!(fixture.event_count(), events_before);
+    assert_eq!(fixture.revision("item-a"), later_revision);
+}
+
+#[test]
 fn a_response_to_a_changed_item_is_stale_and_writes_nothing() {
     let mut fixture = Fixture::new();
     let revision = fixture.add_item("item-a", "Alpha", Some("action"));
