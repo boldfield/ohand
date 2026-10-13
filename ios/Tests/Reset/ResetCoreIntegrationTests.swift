@@ -263,7 +263,8 @@ final class ResetCoreIntegrationTests: XCTestCase {
         let reference = try world.addProfile(version: "profile-a-v1")
         let killed = try world.launch()
         let request = try killed.recordTap(.remove)
-        XCTAssertEqual(request.stagedBeforeTheTap.captureIDs, ["cap-staged"])
+        // The seeded voice captures were imported by the core but are still staged, so the tap lists them too.
+        XCTAssertEqual(request.stagedBeforeTheTap.captureIDs, ["cap-1", "cap-2", "cap-staged"])
         var heldOutcome: IngressOutcome?
         killed.submitLater(world.workTextRecord("cap-post-tap")) { heldOutcome = $0 }
         XCTAssertTrue(killed.session.pump(until: { !world.storage.remnants(of: "cap-post-tap").isEmpty }))
