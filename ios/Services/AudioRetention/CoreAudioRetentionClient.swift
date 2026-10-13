@@ -12,7 +12,8 @@ public final class CoreAudioRetentionClient: AudioRetentionCore, @unchecked Send
     /// The first operation identifier this client submits. The core accepts a duplicate operation identifier without
     /// complaint, so every client sharing a handle owns a distinct range or one takes the other's event: shadow review
     /// starts at `1 << 48`, transcription at `1 << 50`, deletion cleanup at `1 << 52`, export at `1 << 54`, reminder
-    /// reconciliation at `1 << 56`, processing health at `1 << 61` and the job runner at `1 << 62`.
+    /// reconciliation at `1 << 56`, notification actions at `1 << 60`, processing health at `1 << 61` and the job
+    /// runner at `1 << 62`.
     public static let firstOperationID: UInt64 = 1 << 58
 
     static let shutDownFailure = CoreFailure(

@@ -11,7 +11,7 @@ import OhAndCoreBridge
 /// `firstOperationID`, far from the ranges the other services use. Call `shutDown()` before closing the core so no
 /// caller is left waiting.
 public final class CoreNotificationActionClient: NotificationActionCore, @unchecked Sendable {
-    public static let firstOperationID: UInt64 = 1 << 58
+    public static let firstOperationID: UInt64 = 1 << 60
 
     static let shutDownFailure = CoreFailure(
         errorClass: .cancelled, code: "client_shut_down", message: "the notification action client was shut down")
