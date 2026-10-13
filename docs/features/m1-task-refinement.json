@@ -1797,6 +1797,32 @@
         "ios/scripts/smoke-simulator.sh",
         "ios/scripts/check_project_config.py"
       ]
+    },
+    {
+      "key": "F10",
+      "parent": null,
+      "title": "Make the simulator UI tests deterministic on hosted runners",
+      "file_scope": [
+        "ios/NotificationProbe/Tests/",
+        "ios/CaptureProbe/UITests/",
+        ".github/workflows/ios.yml",
+        "ios/scripts/"
+      ],
+      "intent": "Root-cause and fix intermittent NotificationProbe and CaptureProbe UI-test timeouts in the simulator job so a red ios.yml means a real defect.",
+      "acceptance": [
+        "Each of four observed failure modes diagnosed with evidence (or labelled hypothesis).",
+        "Causes fixed via known simulator state, correct waits or justified bounds; no skips, retries, success-on-timeout or moving checks out of the required job.",
+        "Simulator job passes 5 consecutive executions on the final head, attempt URLs linked.",
+        "All other checks, artifacts, retention and job timeout unchanged; make check/test pass; macOS CI evidence linked."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/NotificationProbe/Tests/NotificationProbeUITestCase.swift:10",
+        "ios/CaptureProbe/UITests/CaptureProbeHandoffUITests.swift:61",
+        ".github/workflows/ios.yml:90",
+        ".github/workflows/ios.yml:242"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -2346,7 +2372,8 @@
       "P11a",
       "F09"
     ],
-    "F09": []
+    "F09": [],
+    "F10": []
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -2444,6 +2471,14 @@
     {
       "date": "2026-10-12",
       "change": "S02 bounded interpretation after 14 rejections over PRs #188/#193/#197, all one root cause (fired-prompt evidence stored on mutable plan entries): append-only spent-date ledger plus wall-clock high-water mark, settled at one chokepoint before any rebuild/cancel; ambiguity fails toward suppression; capacity displacement before the high-water reaches the instant does not spend a date; property-style interleaving test is the review surface."
+    },
+    {
+      "date": "2026-10-12",
+      "change": "L05a: the 'existing fence hook' is the per-item deletion guard (tombstone + lifecycle rejection in every apply path); allowance for schema v9 reset table and an additive reset tombstone helper in delete_intent; generation boundary is max(items.rowid) at reset start, no clock; L05b drains/purges pre-tap native staging before core reset start."
+    },
+    {
+      "date": "2026-10-12",
+      "change": "Added F10: root-cause the intermittent NotificationProbe/CaptureProbe UI-test timeouts in the simulator job (five flakes on 2026-10-12); no retries or weakened assertions; five consecutive green executions required."
     }
   ]
 }
