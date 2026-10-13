@@ -67,7 +67,9 @@ final class CompositionRootTests: XCTestCase {
     private static let routeID = "route-composition"
     private static let profileVersion = "4b7a1bfe-88ff-4ba7-848e-a45069cf9081"
     private static let requestVersion = "5a1c0000-0000-4000-8000-0000000000a2"
-    private static let captureText = "Remind me 2099-01-15 11:00:00 to call the roofer"
+    /// "about the quarterly estimate" is outside the offline grammar's closed content lexicon, so the offline fast path
+    /// leaves the text to the provider and the job must reach the transport.
+    private static let captureText = "Remind me 2099-01-15 11:00:00 to call the roofer about the quarterly estimate"
 
     private var storageRoot: URL!
     private var baselineHandles = 0
