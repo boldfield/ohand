@@ -298,7 +298,7 @@ final class ResetServiceTests: ResetTestCase {
     }
 
     func testTheBoundaryIsReleasedOnEveryPathThatEndsBeforeTheCoreStarts() async throws {
-        for point in ["staging.purge", "staging.purge.unreadable", "reset.start", "reset.status"] {
+        for point in ["staging.purge", "staging.purge.unreadable", "reset.start"] {
             let world = try makeResetWorld()
             world.staging.stage("cap-stuck")
             world.staging.onSnapshot = { [staging = world.staging] in staging.liveCapture("cap-live") }
@@ -309,6 +309,20 @@ final class ResetServiceTests: ResetTestCase {
             XCTAssertFalse(world.staging.isHolding, "the boundary is released after a fault at \(point)")
             XCTAssertEqual(world.staging.liveImportedCaptureIDs, ["cap-live"], "the waiting capture proceeds: \(point)")
         }
+
+        // The core is asked before the tap is taken, so a core that cannot be asked holds nothing in the first place.
+        let world = try makeResetWorld()
+        world.staging.stage("cap-stuck")
+        world.faults.arm("reset.status")
+
+        let report = await world.makeService().reset(credentialChoice: .keep)
+
+        XCTAssertEqual(report.state, .notStarted)
+        XCTAssertEqual(report.blockers, [.coreUnavailable])
+        XCTAssertEqual(world.staging.snapshotCalls, 0, "no tap is taken when the core cannot be asked")
+        XCTAssertFalse(world.staging.isHolding)
+        world.staging.liveCapture("cap-live")
+        XCTAssertEqual(world.staging.liveImportedCaptureIDs, ["cap-live"], "a capture made afterwards proceeds at once")
     }
 
     func testACancelledResetKeepsTheRecordedTapAndReportsItAsPendingNeverNotStarted() async throws {
@@ -775,7 +789,7 @@ final class ResetServiceTests: ResetTestCase {
         XCTAssertEqual(report.blockers, [.coreUnavailable])
         XCTAssertEqual(world.choice.requested, .remove)
         XCTAssertTrue(world.staging.isHolding)
-        XCTAssertEqual(world.staging.snapshotCalls, 0)
+        XCTAssertEqual(world.staging.snapshotCalls, 1, "the keep tap takes no snapshot of its own; only the earlier tap did")
 
         let resumed = await world.makeService().resume()
 
