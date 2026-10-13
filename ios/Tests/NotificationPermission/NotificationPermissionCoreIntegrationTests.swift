@@ -181,7 +181,8 @@ final class NotificationPermissionCoreIntegrationTests: XCTestCase {
     private func makeRig(
         authorization: NotificationAuthorization,
         prompts: [OptionalPromptCandidate] = [],
-        pendingListGate: SuspensionGate? = nil
+        pendingListGate: SuspensionGate? = nil,
+        metrics: MetricsRecording? = nil
     ) throws -> Rig {
         let session = try Session(path: storePath)
         let center = FakeNotificationCenter()
@@ -193,7 +194,7 @@ final class NotificationPermissionCoreIntegrationTests: XCTestCase {
             effectsCenter = center
         }
         let bridge = NotificationBridge(center: effectsCenter, ingestor: NotificationEventIngestor(handler: { _ in }))
-        let core = try CoreReminderReconciler(core: session.core, bridge: bridge, center: effectsCenter)
+        let core = try CoreReminderReconciler(core: session.core, bridge: bridge, center: effectsCenter, metrics: metrics)
         session.consumer = { core.handle($0) }
         let observations = InMemoryNotificationPermissionObservationStore()
         let reconciler = NotificationPermissionReconciler(
@@ -614,6 +615,43 @@ final class NotificationPermissionCoreIntegrationTests: XCTestCase {
         XCTAssertEqual(usable.reminders.map(\.outlook), [.unscheduled(.installFailed), .unscheduled(.installFailed)])
         let denied = NotificationReadiness.evaluate(permission: .denied, reminders: facts)
         XCTAssertEqual(denied.reminders.map(\.outlook), [.undeliverable(.permissionDenied), .undeliverable(.permissionDenied)])
+    }
+
+    func testSchedulingFailuresAreCountedByReasonAndCountNothingWhenSchedulingSucceeds() throws {
+        let seeded = reminders(count: 2)
+        try prepareStore(seeded)
+        let metrics = RecordingMetrics()
+        let rig = try makeRig(authorization: .denied, metrics: metrics)
+        defer { finish(rig) }
+        let reconciler = rig.reconciler
+
+        _ = try runAsync { try await reconciler.refresh(trigger: .launch) }
+        XCTAssertEqual(
+            metrics.records, [.schedulingFailure(.permissionDenied), .schedulingFailure(.permissionDenied)])
+
+        _ = try runAsync { try await reconciler.refresh(trigger: .foreground) }
+        XCTAssertEqual(metrics.records.count, 2, "a withheld schedule is not attempted again, so it is not counted again")
+
+        rig.center.authorizationStatus = .authorized
+        let regained = try runAsync { try await reconciler.refresh(trigger: .settingsReturn) }
+        XCTAssertEqual(regained.readiness.scheduledCount, 2)
+        XCTAssertEqual(metrics.records.count, 2, "installing the reminders adds no failure")
+    }
+
+    func testEachNativeScheduleFailureMapsToOneClosedLabel() {
+        let mapped: [(Error, CoreMetricsSchedulingFailure?)] = [
+            (NotificationBridgeError.permissionDenied, .permissionDenied),
+            (NotificationBridgeError.dueTimeInPast, .unschedulable),
+            (NotificationBridgeError.invalidPayload, .unschedulable),
+            (NotificationBridgeError.installNotConfirmed, .nativeFailure),
+            (NotificationBridgeError.timedOut, .nativeFailure),
+            (NotificationBridgeError.centerFailed, .nativeFailure),
+            (CancellationError(), nil),
+            (NotificationBridgeError.cancelled, nil),
+        ]
+        for (error, expected) in mapped {
+            XCTAssertEqual(CoreReminderReconciler.schedulingFailure(of: error), expected, "\(error)")
+        }
     }
 
     func testRealCenterPermissionIsReadAndMappedWithoutChangingIt() async throws {

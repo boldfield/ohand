@@ -75,6 +75,10 @@ pub const MIGRATIONS: &[MigrationStep] = &[
         target_version: 8,
         apply: add_reminder_history_events_v8,
     },
+    MigrationStep {
+        target_version: 9,
+        apply: add_reset_generations_v9,
+    },
 ];
 
 /// Database handle with schema validation.
@@ -821,6 +825,32 @@ fn add_reminder_history_events_v8(tx: &Transaction<'_>) -> Result<()> {
             recorded_at TEXT NOT NULL,
             FOREIGN KEY (reminder_id) REFERENCES reminders(reminder_id)
         )",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Step 9 (L05a): the durable global reset boundary. One row per reset generation records the
+/// highest `items.rowid` that existed when the reset started (`boundary_rowid`; 0 for an empty
+/// store), so every item at or below it belongs to the erased past and every later item to a
+/// fresh generation without comparing clocks. Items are never deleted, so rowids only grow. A
+/// reset is `pending` until every required cleanup acknowledgment arrived and then `completed`;
+/// the partial unique index lets at most one generation be pending. The table holds no content.
+fn add_reset_generations_v9(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute(
+        "CREATE TABLE reset_generations (
+            generation INTEGER PRIMARY KEY AUTOINCREMENT,
+            phase TEXT NOT NULL CHECK (phase IN ('pending', 'completed')),
+            boundary_rowid INTEGER NOT NULL CHECK (boundary_rowid >= 0),
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            CHECK ((phase = 'completed') = (completed_at IS NOT NULL))
+        )",
+        [],
+    )?;
+    tx.execute(
+        "CREATE UNIQUE INDEX idx_reset_generations_one_pending
+         ON reset_generations(phase) WHERE phase = 'pending'",
         [],
     )?;
     Ok(())
