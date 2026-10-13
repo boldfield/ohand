@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # Puts a simulator into a known state before a UI-test suite: shut down (which ends every leftover app), optionally
 # erase (which clears installed apps, permissions and recorded notification decisions), boot, wait until the boot has
-# finished, then wait (bounded) until the host CPU has settled. A freshly erased simulator keeps the host saturated for
-# a while after bootstatus reports success (first-boot daemons), and UI tests that start in that window see launches and
-# accessibility reads many times slower. The settle wait is an explicit poll that logs how long it took; the host
+# finished, then wait (bounded) until the simulator answers service calls promptly. A freshly erased simulator keeps the
+# 3-core hosted runner at 0% idle for many minutes after bootstatus reports success (first-boot daemons, Spotlight
+# indexing), so CPU idle never becomes a usable signal; what UI tests actually see is launches and accessibility reads
+# that stall for seconds to a minute. The wait therefore polls the simulator itself and logs how long it took; the host
 # snapshots are diagnostics only. Output goes to stdout only. macOS with Xcode only.
 # Usage: prepare-simulator.sh <simulator-udid> [--erase]
 set -euo pipefail
 
-settle_idle_percent=50
-settle_consecutive_samples=2
-settle_timeout_seconds=300
+responsive_probe_limit_seconds=3
+responsive_probes_required=10
+responsive_timeout_seconds=240
 
 udid="${1:?simulator udid required}"
 erase=0
@@ -35,31 +36,39 @@ host_snapshot() {
   log "simulator-related processes: $(pgrep -fl 'CoreSimulator|launchd_sim|Simulator' | wc -l | tr -d ' ')"
 }
 
-host_idle_percent() {
-  top -l 2 -s 1 -n 0 | grep 'CPU usage' | tail -1 | sed -E 's/.* ([0-9]+)(\.[0-9]+)?% idle.*/\1/'
+now_seconds() {
+  perl -MTime::HiRes=time -e 'printf "%.2f", time'
 }
 
-wait_for_host_to_settle() {
+# One round trip into the simulator's launchd. Prints the elapsed seconds; fails if the call itself fails.
+probe_simulator() {
+  local started finished
+  started="$(now_seconds)"
+  xcrun simctl spawn "${udid}" launchctl list >/dev/null 2>&1 || return 1
+  finished="$(now_seconds)"
+  echo "${finished} ${started}" | awk '{printf "%.2f", $1 - $2}'
+}
+
+wait_for_simulator_to_respond() {
   local started=${SECONDS}
   local consecutive=0
-  local idle
-  while [ $((SECONDS - started)) -lt "${settle_timeout_seconds}" ]; do
-    idle="$(host_idle_percent || true)"
-    case "${idle}" in
-      ''|*[!0-9]*) idle=0 ;;
-    esac
-    if [ "${idle}" -ge "${settle_idle_percent}" ]; then
+  local elapsed
+  local probe_count=0
+  while [ $((SECONDS - started)) -lt "${responsive_timeout_seconds}" ]; do
+    probe_count=$((probe_count + 1))
+    if elapsed="$(probe_simulator)" && awk -v e="${elapsed}" -v l="${responsive_probe_limit_seconds}" 'BEGIN { exit !(e <= l) }'; then
       consecutive=$((consecutive + 1))
     else
       consecutive=0
     fi
-    log "settle poll: host ${idle}% idle (need ${settle_idle_percent}% for ${settle_consecutive_samples} samples in a row, ${consecutive} so far)"
-    if [ "${consecutive}" -ge "${settle_consecutive_samples}" ]; then
-      log "host settled after $((SECONDS - started))s"
+    log "probe ${probe_count}: ${elapsed:-failed}s (need ${responsive_probes_required} in a row within ${responsive_probe_limit_seconds}s, ${consecutive} so far)"
+    if [ "${consecutive}" -ge "${responsive_probes_required}" ]; then
+      log "simulator responsive after $((SECONDS - started))s"
       return 0
     fi
+    sleep 1
   done
-  log "WARNING: host did not settle within ${settle_timeout_seconds}s; continuing anyway"
+  log "WARNING: simulator did not answer ${responsive_probes_required} probes in a row within ${responsive_probe_limit_seconds}s inside ${responsive_timeout_seconds}s; continuing anyway"
 }
 
 step() {
@@ -80,6 +89,6 @@ fi
 step boot xcrun simctl boot "${udid}" 2>/dev/null || true
 step bootstatus xcrun simctl bootstatus "${udid}" -b >/dev/null
 
-wait_for_host_to_settle
-host_snapshot "after boot completed and host settled"
+wait_for_simulator_to_respond
+host_snapshot "after boot completed and simulator responsive"
 log "simulator ${udid} ready"

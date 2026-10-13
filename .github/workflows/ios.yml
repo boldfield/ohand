@@ -93,7 +93,7 @@ jobs:
           SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
         run: |
           set -euo pipefail
-          # Each suite starts from an erased, fully booted and settled simulator: uninstalling the app does not clear a
+          # Each suite starts from an erased, fully booted and responsive simulator: uninstalling the app does not clear a
           # recorded notification decision, and the permission prompt only appears while the decision is undetermined.
           evidence_dir="$(pwd)/ios/.evidence/notification-probe"
           mkdir -p "${evidence_dir}"
