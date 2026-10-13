@@ -533,6 +533,51 @@ final class ResetServiceTests: ResetTestCase {
         XCTAssertFalse(world.choice.isRequested)
     }
 
+    func testAKeepTapAfterAnUnfinishedRemovalCarriesThatRemovalOutBeforeItsOwnGeneration() async throws {
+        for removalFailsAgain in [false, true] {
+            let context = "removal fails again: \(removalFailsAgain)"
+            let world = try makeResetWorld()
+            try await seedVoiceAndTextCaptures(world)
+            configureProfiles(world)
+            world.faults.arm("credentials.delete")
+            let first = await world.makeService().reset(credentialChoice: .remove)
+            XCTAssertEqual(first.blockers, [.credentialRemovalIncomplete], context)
+            XCTAssertEqual(first.progress?.phase, .completed, context)
+            try await world.seedItem("item-between", captureID: "cap-between", stagedRecord: .text)
+            world.staging.stage("cap-staged-between")
+            if removalFailsAgain { world.faults.arm("credentials.delete") }
+
+            var report = await world.makeService().reset(credentialChoice: .keep)
+
+            if removalFailsAgain {
+                XCTAssertEqual(report.state, .pending, context)
+                XCTAssertEqual(report.blockers, [.credentialRemovalIncomplete], context)
+                XCTAssertEqual(report.progress?.generation, 1, context)
+                XCTAssertEqual(world.core.startCalls, 1, "no generation is opened for the keep tap while the removal is owed")
+                XCTAssertTrue(world.choice.isRequested, "the earlier remove choice stays armed: \(context)")
+                XCTAssertEqual(world.choice.recordedRequest?.credentialChoice, .keep, context)
+                XCTAssertEqual(world.choice.recordedRequest?.awaitsEarlierReset, true, context)
+                XCTAssertEqual(world.staging.staged, ["cap-staged-between"], "nothing of the keep tap is drained yet")
+                XCTAssertTrue(world.staging.isHolding, context)
+
+                world.relaunch()
+                report = await world.makeService().resume()
+            }
+
+            XCTAssertTrue(report.isComplete, "\(context): \(report.blockers)")
+            XCTAssertEqual(report.progress?.generation, 2, context)
+            XCTAssertEqual(
+                Set(world.credentials.removedReferences), ["ref-a", "ref-b"],
+                "the earlier remove choice was carried out, not cancelled by the keep tap: \(context)")
+            XCTAssertFalse(world.choice.isRequested, context)
+            XCTAssertFalse(world.choice.isOutstanding, context)
+            XCTAssertNil(world.choice.recordedRequest, context)
+            XCTAssertTrue(world.deletion.core.isDeletionComplete("item-between"), context)
+            XCTAssertEqual(world.staging.staged, [], context)
+            assertEverythingErased(world)
+        }
+    }
+
     func testKeepAfterAnEarlierRemoveRequestWithdrawsIt() async throws {
         let world = try makeResetWorld()
         try await seedVoiceAndTextCaptures(world)

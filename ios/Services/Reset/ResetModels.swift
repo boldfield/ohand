@@ -62,10 +62,12 @@ struct ResetStagingSnapshot: Equatable {
 /// a restart treats exactly what the tap would have as pre-reset input and every later capture as fresh-generation
 /// content.
 ///
-/// A tap made while an earlier generation is still pending `awaitsEarlierReset`: resuming that generation only erases
-/// what existed at the earlier tap, so this tap first lets it finish and then opens a generation of its own for its list.
-/// The flag is what tells a restart that a pending generation is the earlier one rather than one this tap already
-/// started; it is cleared, by recording the tap again without it, once the earlier generation completed.
+/// A tap made while an earlier reset is unfinished (its generation still pending, or native cleanup such as its
+/// credential choice still outstanding) `awaitsEarlierReset`: resuming that generation only erases what existed at the
+/// earlier tap, and its choice must be carried out before this tap's replaces it, so this tap first lets it finish and
+/// then opens a generation of its own for its list. The flag is what tells a restart that a pending generation is the
+/// earlier one rather than one this tap already started; it is cleared, by recording the tap again without it, once the
+/// earlier reset completed.
 struct ResetRequest: Equatable {
     let credentialChoice: ResetCredentialChoice
     let stagedBeforeTheTap: ResetStagingSnapshot

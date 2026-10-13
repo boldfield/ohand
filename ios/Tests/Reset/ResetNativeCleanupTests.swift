@@ -109,6 +109,32 @@ final class ResetNativeCleanupTests: IngressStorageTestCase {
         XCTAssertEqual(filesMentioning("cap-a"), [])
     }
 
+    func testTheRecordOutlivesEveryAudioFileSoAFailedOrInterruptedPurgeIsRetriedAfterARelaunch() async throws {
+        let faults = FaultPlan()
+        let (ingress, service) = try makeIngress(
+            importer: FakeForegroundIngressImporter(), fileSystem: FaultingDeletionFileSystem(faults: faults))
+        withExtendedLifetime(service) {}
+        _ = try stagingStore.stage(try audioRecord("cap-a"))
+        // Finalized audio bound to the capture that its record does not name, as a finalize interrupted after the copy.
+        try Data("synthetic audio".utf8).write(to: finalizedAudioURL("cap-a.m4a"))
+        try Data("synthetic audio".utf8).write(to: finalizedAudioURL("cap-a.wav"))
+        let snapshot = try await ingress.snapshot()
+        ingress.endBoundary()
+        faults.arm("fs.remove:cap-a.wav")
+
+        let first = await ingress.purgeUnimported(from: snapshot)
+        XCTAssertEqual(first, .incomplete(remaining: 1))
+        XCTAssertTrue(exists(finalizedAudioURL("cap-a.wav")))
+        XCTAssertTrue(exists(recordURL("cap-a")), "the record stays while any audio of the capture remains")
+
+        // A relaunch knows the capture only from the recorded list and what is still staged.
+        let (relaunched, relaunchedService) = try makeIngress(importer: FakeForegroundIngressImporter())
+        withExtendedLifetime(relaunchedService) {}
+        let retried = await relaunched.purgeUnimported(from: snapshot)
+        XCTAssertEqual(retried, .purged(count: 1))
+        XCTAssertEqual(filesMentioning("cap-a"), [], "no audio survives the record that named it")
+    }
+
     func testAnUnreadableStagingAreaIsUnknownNeverEmpty() async throws {
         let faults = FaultPlan()
         let (ingress, service) = try makeIngress(

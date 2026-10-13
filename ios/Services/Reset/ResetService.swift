@@ -12,10 +12,12 @@ import Foundation
 ///    pending at the tap. Nothing else is written yet, so an interruption here leaves a request a restart can only honor
 ///    in full, never a half-started reset or a choice acted on early. While a request is recorded the boundary stays
 ///    held, in this process and, because the ingress gate holds it again at launch from the recorded list, in the next.
-/// 3. When the tap found an earlier generation pending, finish that generation first (its cleanup, temporaries and
-///    recorded choice, steps 7 to 10), then, once the core completed it, record the tap again as no longer awaiting it.
-///    Resuming the earlier generation only erases what existed at the earlier tap, so this tap never counts it as its
-///    own: until the core completes it, the tap stays recorded, the boundary stays held and the report says `pending`.
+/// 3. When the tap found an earlier reset unfinished (its generation pending, or native cleanup still outstanding for
+///    it), finish that reset first (its cleanup, temporaries and recorded choice, steps 7 to 10), then, once it
+///    completed, record the tap again as no longer awaiting it. Resuming the earlier generation only erases what existed
+///    at the earlier tap, and its credential choice must be carried out before this tap's replaces it, so this tap never
+///    counts it as its own: until it completes, the tap stays recorded, the boundary stays held and the report says
+///    `pending`.
 /// 4. Unless a generation this tap started is already pending: import the listed records through the production
 ///    ingress path (an imported capture becomes an item the core tombstones), then purge whatever of the list is still
 ///    unimported. A capture staged before the tap has no item for a tombstone to fence, so the purge must finish before
@@ -84,9 +86,13 @@ actor ResetService {
         } catch {
             return withdrawRequest(Self.coreFailed(error, progress: nil))
         }
+        // An earlier reset is unfinished while its generation is pending or, once the core completed it, while native
+        // steps it owes (cleanup, temporaries, its credential choice) are still outstanding. A marker that cannot be read
+        // counts as unfinished; `finishEarlierReset` decides again.
+        let earlierOutstanding = (try? markers.isCleanupOutstanding()) ?? true
         let request = ResetRequest(
             credentialChoice: credentialChoice, stagedBeforeTheTap: snapshot,
-            awaitsEarlierReset: current?.phase == .pending)
+            awaitsEarlierReset: current?.phase == .pending || (current != nil && earlierOutstanding))
         do {
             try markers.recordRequest(request)
         } catch {
@@ -174,8 +180,10 @@ actor ResetService {
         case stopped(ResetReport)
     }
 
-    /// Finishes the generation that was pending when the tap was made. Returns nil once no generation is pending, or the
-    /// `pending` report of what keeps it from completing; the tap stays recorded either way.
+    /// Finishes the reset that was unfinished when the tap was made: its generation and every native step it owes,
+    /// including its credential choice, so a later tap's choice never replaces one that was not yet carried out. Returns
+    /// nil once that reset completed, or the `pending` report of what keeps it from completing; the tap stays recorded
+    /// either way.
     private func finishEarlierReset() async -> ResetReport? {
         let progress: ResetProgress?
         do {
@@ -184,11 +192,15 @@ actor ResetService {
             let blocker: ResetBlocker = Task.isCancelled || error is CancellationError ? .cancelled : .coreUnavailable
             return ResetReport(state: .pending, progress: nil, blockers: [blocker], itemCleanup: nil)
         }
-        guard let progress, progress.phase == .pending else { return nil }
-        // Once the core completed it, native steps still owed to it (cleanup, temporaries) are repeated by this tap's own
-        // finish, and the credential markers take this tap's choice.
+        let outstanding: Bool
+        do {
+            outstanding = try markers.isCleanupOutstanding()
+        } catch {
+            return ResetReport(state: .pending, progress: progress, blockers: [.markerUnreadable], itemCleanup: nil)
+        }
+        guard let progress, progress.phase == .pending || outstanding else { return nil }
         let earlier = await finish(from: progress)
-        return earlier.progress?.phase == .completed ? nil : earlier
+        return earlier.state == .completed ? nil : earlier
     }
 
     /// Drains the pre-tap staging in `snapshot` and starts the core. A generation that is pending here was started by

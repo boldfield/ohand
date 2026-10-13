@@ -274,7 +274,8 @@ final class RealCoreResetRuntime {
         let client = session.resetClient
         let current = try session.run { try await client.status() }
         let request = ResetRequest(
-            credentialChoice: choice, stagedBeforeTheTap: snapshot, awaitsEarlierReset: current?.phase == .pending)
+            credentialChoice: choice, stagedBeforeTheTap: snapshot,
+            awaitsEarlierReset: current?.phase == .pending || (current != nil && (try markers.isCleanupOutstanding())))
         try markers.recordRequest(request)
         return request
     }

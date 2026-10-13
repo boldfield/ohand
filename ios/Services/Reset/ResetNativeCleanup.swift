@@ -66,6 +66,10 @@ final class NativeResetIngress: ResetIngressStaging {
         }
     }
 
+    /// The staging record (or its interrupted write) is the durable retry handle of each listed input, so it goes last:
+    /// every finalized file bound to the capture first, then `clearIngress`, which removes the audio the record names
+    /// before the record itself. An input whose record is gone has no audio left, whether it was imported (the core then
+    /// owns its audio) or purged by an earlier pass, so only inputs that are still staged are visited.
     func purgeUnimported(from snapshot: ResetStagingSnapshot) async -> ResetStagingPurge {
         let stillStaged: Set<String>
         do {
@@ -77,8 +81,8 @@ final class NativeResetIngress: ResetIngressStaging {
         var remaining = 0
         for captureID in snapshot.captureIDs.intersection(stillStaged).sorted() {
             do {
-                try localCleanup.clearIngress(captureID: captureID)
                 try localCleanup.removeAudio(captureID: captureID, audioReference: nil)
+                try localCleanup.clearIngress(captureID: captureID)
                 purged += 1
             } catch {
                 remaining += 1

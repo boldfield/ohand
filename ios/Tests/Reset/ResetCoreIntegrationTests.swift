@@ -473,6 +473,41 @@ final class ResetCoreIntegrationTests: XCTestCase {
         XCTAssertFalse(try world.isCredentialPresent(reference))
         XCTAssertFalse(try second.markers.isRemovalRequested())
     }
+
+    func testAKeepTapNeverCancelsAnEarlierRemovalThatIsStillOwed() throws {
+        let world = try makeWorld()
+        _ = try seedCaptures(world)
+        let reference = try world.addProfile(version: "profile-a-v1")
+        let first = try world.launch()
+        world.keychain.forcedStatus[.remove] = errSecIO
+        let interrupted = try first.reset(.remove)
+        XCTAssertEqual(interrupted.blockers, [.credentialRemovalIncomplete])
+        let earlierGeneration = try XCTUnwrap(interrupted.progress?.generation)
+        XCTAssertEqual(interrupted.progress?.phase, .completed, "the core completed; the native removal is still owed")
+
+        let waiting = try first.reset(.keep)
+
+        XCTAssertEqual(waiting.state, .pending)
+        XCTAssertEqual(waiting.blockers, [.credentialRemovalIncomplete])
+        XCTAssertEqual(waiting.progress?.generation, earlierGeneration, "the keep tap opens no generation while the removal is owed")
+        XCTAssertTrue(try first.markers.isRemovalRequested(), "the earlier remove choice stays armed")
+        XCTAssertEqual(try first.markers.request()?.credentialChoice, .keep, "the keep tap stays recorded")
+        XCTAssertTrue(try world.isCredentialPresent(reference))
+        first.terminate()
+
+        world.keychain.forcedStatus[.remove] = nil
+        let second = try world.launch()
+        let resumed = try second.resume()
+        second.terminate()
+
+        XCTAssertEqual(resumed.state, .completed, "blockers: \(resumed.blockers)")
+        XCTAssertEqual(resumed.progress?.generation, earlierGeneration + 1, "the keep tap's own generation ran once the removal finished")
+        XCTAssertTrue(try world.isProfileRevoked("profile-a-v1"))
+        XCTAssertFalse(try world.isCredentialPresent(reference), "the earlier remove choice was carried out, not cancelled")
+        XCTAssertFalse(try second.markers.isRemovalRequested())
+        XCTAssertFalse(try second.markers.isCleanupOutstanding())
+        XCTAssertNil(try second.markers.request())
+    }
 }
 
 /// Hands the runtime to a hook that is installed before the runtime exists, and collects the outcome it produces.
