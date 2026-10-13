@@ -1823,6 +1823,41 @@
         ".github/workflows/ios.yml:90",
         ".github/workflows/ios.yml:242"
       ]
+    },
+    {
+      "key": "F11",
+      "parent": null,
+      "title": "Give direct test connections to the core store a busy timeout",
+      "file_scope": [
+        "ios/Tests/Deletion/RealCoreDeletionFixture.swift",
+        "ios/Tests/Ingress/IngressCoreImportIntegrationTests.swift",
+        "ios/Tests/ShadowReview/ShadowReviewFixture.swift",
+        "ios/Tests/Health/ProcessingHealthTests.swift",
+        "ios/Tests/NotificationPermission/NotificationPermissionCoreIntegrationTests.swift",
+        "ios/Tests/NotificationActions/NotificationActionCoreIntegrationTests.swift",
+        "ios/Tests/ProviderTransport/ProviderExchangeFixture.swift",
+        "ios/Tests/CoreBridge/CaptureStatusTests.swift",
+        "ios/Tests/CaptureEntry/CaptureEntryCoreIntegrationTests.swift",
+        "ios/Tests/Export/ExportCoreIntegrationTests.swift",
+        "ios/Tests/VoiceCapture/VoiceRecordingCoreIntegrationTests.swift",
+        "ios/Tests/Notifications/NotificationCoreIntegrationTests.swift"
+      ],
+      "intent": "Native integration tests that open the core store directly wait on the core's write lock instead of failing with SQLITE_BUSY.",
+      "acceptance": [
+        "Every direct sqlite3_open connection in owned files sets sqlite3_busy_timeout (at least 5 s, matching core) before its first statement; deliberate-contention connections preserved and listed.",
+        "No assertions removed or relaxed; no skips, retries or BUSY tolerance; production, core and Rust tests unchanged.",
+        "PR states per file whether reads can overlap a running core; no unevidenced flakiness claims.",
+        "Exact-head macOS CI evidence with OhAndTests passing; make check/test pass."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "B02"
+      ],
+      "source_pointers": [
+        "ios/Tests/NotificationActions/NotificationActionCoreIntegrationTests.swift:49",
+        "ios/Tests/NotificationActions/NotificationActionCoreIntegrationTests.swift:71",
+        "core/src/store/schema/mod.rs:115"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -2373,7 +2408,10 @@
       "F09"
     ],
     "F09": [],
-    "F10": []
+    "F10": [],
+    "F11": [
+      "B02"
+    ]
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -2483,6 +2521,10 @@
     {
       "date": "2026-10-13",
       "change": "S02 interpretation item (6): error-path skips. A skip that follows a returned error (lost provenance for an effect that succeeded before the failure) is suppression, not a defect; only replay is blocking. S02 records provenance it holds before its next fallible call (release cancel_where cancels before reconcile_with_capacity) but does not change reconcile_with_capacity's error contract."
+    },
+    {
+      "date": "2026-10-13",
+      "change": "Added F11: 12 native test files open the core store with sqlite3_open and no busy timeout; one (NotificationActionCoreIntegrationTests) failed with SQLITE_BUSY on F10's run 38361190686 attempt 3. F11 adds a busy timeout of at least 5 s to each direct connection; no assertion changes. Depends on B02 (shared file)."
     }
   ]
 }
