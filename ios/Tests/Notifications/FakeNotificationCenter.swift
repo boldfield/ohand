@@ -10,8 +10,6 @@ final class FakeNotificationCenter: NotificationCenterProviding, @unchecked Send
     private var removalCountdown: [String: Int] = [:]
 
     var authorizationStatus: NotificationAuthorization = .authorized
-    var addError: Error?
-    var pendingReadError: Error?
     var retainsAddedRequests = true
     /// Report due instants at whole seconds, as the real center's calendar trigger does.
     var reportsWholeSecondDueInstants = false
@@ -19,8 +17,34 @@ final class FakeNotificationCenter: NotificationCenterProviding, @unchecked Send
     var removalDelayPolls = 0
     var delivered: [NotificationCenterDeliveredNotification] = []
 
-    private(set) var addedRequests: [NotificationCenterRequest] = []
-    private(set) var removedIdentifiers: [String] = []
+    // Tests poll and set these while a late `add` or removal runs on another thread, so every
+    // access goes through the lock; an unguarded array read racing an append can crash the host.
+    private var storedAddError: Error?
+    private var storedPendingReadError: Error?
+    private var recordedAdds: [NotificationCenterRequest] = []
+    private var recordedRemovals: [String] = []
+
+    var addError: Error? {
+        get { lock.lock(); defer { lock.unlock() }; return storedAddError }
+        set { lock.lock(); defer { lock.unlock() }; storedAddError = newValue }
+    }
+
+    var pendingReadError: Error? {
+        get { lock.lock(); defer { lock.unlock() }; return storedPendingReadError }
+        set { lock.lock(); defer { lock.unlock() }; storedPendingReadError = newValue }
+    }
+
+    var addedRequests: [NotificationCenterRequest] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedAdds
+    }
+
+    var removedIdentifiers: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedRemovals
+    }
 
     func authorization() async -> NotificationAuthorization {
         lock.lock()
@@ -31,8 +55,8 @@ final class FakeNotificationCenter: NotificationCenterProviding, @unchecked Send
     func add(_ request: NotificationCenterRequest) async throws {
         lock.lock()
         defer { lock.unlock() }
-        if let addError { throw addError }
-        addedRequests.append(request)
+        if let storedAddError { throw storedAddError }
+        recordedAdds.append(request)
         if retainsAddedRequests {
             pending[request.identifier] = request
             removalCountdown[request.identifier] = nil
@@ -42,7 +66,7 @@ final class FakeNotificationCenter: NotificationCenterProviding, @unchecked Send
     func pendingRequests() async throws -> [NotificationCenterPendingRequest] {
         lock.lock()
         defer { lock.unlock() }
-        if let pendingReadError { throw pendingReadError }
+        if let storedPendingReadError { throw storedPendingReadError }
         for (identifier, remaining) in removalCountdown {
             if remaining <= 0 {
                 pending[identifier] = nil
@@ -71,7 +95,7 @@ final class FakeNotificationCenter: NotificationCenterProviding, @unchecked Send
     func removeImmediately(identifiers: [String]) {
         lock.lock()
         defer { lock.unlock() }
-        removedIdentifiers.append(contentsOf: identifiers)
+        recordedRemovals.append(contentsOf: identifiers)
         for identifier in identifiers where pending[identifier] != nil {
             if removalDelayPolls == 0 {
                 pending[identifier] = nil
