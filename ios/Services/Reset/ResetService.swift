@@ -5,25 +5,29 @@ import Foundation
 /// inputs, export temporaries, notifications, audio files and the optional credential removal.
 ///
 /// A reset runs in this order:
-/// 1. Record the credential choice and that native cleanup is outstanding, so an interruption after the tap still
-///    finishes what the user asked for. The outstanding marker is cleared only when a report says `completed`.
-/// 2. Unless a reset is already pending: snapshot native staging, import it through the production ingress path (an
-///    imported capture becomes an item the core tombstones), then purge whatever of the snapshot is still unimported.
-///    A capture staged before the tap has no item for a tombstone to fence, so the purge must finish before the core
-///    starts; if it cannot, the core is not started and the reset reports why. Inputs staged after the snapshot are
-///    fresh-generation content and are never purged.
+/// 1. Record the tap and its credential choice as one durable request. Nothing else is written yet, so an interruption
+///    here leaves a request a restart can only honor in full, never a half-started reset or a choice acted on early.
+/// 2. Unless a reset is already pending: snapshot native staging, import the snapshot's records through the production
+///    ingress path (an imported capture becomes an item the core tombstones), then purge whatever of the snapshot is
+///    still unimported. A capture staged before the tap has no item for a tombstone to fence, so the purge must finish
+///    before the core starts; if it cannot, the core is not started and the reset reports why. Inputs staged after the
+///    snapshot are fresh-generation content: they are neither imported nor purged. (A capture that the live ingress path
+///    imports before the core records the boundary is, by that boundary, earlier content and is tombstoned.)
 /// 3. Start the core reset (or resume the pending one). The core tombstones every pre-reset item, cancels its jobs and
 ///    reminders and queues one durable cleanup row per effect.
-/// 4. Run the per-item cleanup executors (`DeletionCleanupService`), which perform each effect and ask the core to
+/// 4. Only now carry the choice into its markers, mark native cleanup outstanding and drop the request. The outstanding
+///    marker is cleared only when a report says `completed`.
+/// 5. Run the per-item cleanup executors (`DeletionCleanupService`), which perform each effect and ask the core to
 ///    record only the ones that actually finished.
-/// 5. Remove export and share temporaries.
-/// 6. When the user chose it, revoke every provider profile and remove its credential. Without that choice neither is
-///    touched.
-/// 7. Ask the core to re-evaluate. The report says `completed` only when the core reports the generation completed and
+/// 6. Remove export and share temporaries.
+/// 7. When the user chose it, revoke every provider profile and remove its credential. Without that choice neither is
+///    touched, and nothing is touched before step 3 completed.
+/// 8. Ask the core to re-evaluate. The report says `completed` only when the core reports the generation completed and
 ///    every native step converged; this service never decides success on its own.
 ///
 /// Every step is idempotent. A step that cannot finish is reported with a fixed blocker and repeated by the next
-/// `reset` or `resume` call, so a crash at any point converges. Calls are serialized.
+/// `reset` or `resume` call, so a crash at any point converges: a request that survives a crash before step 4 makes
+/// `resume` run steps 2 to 8 again, and the markers of step 4 make it finish steps 5 to 8. Calls are serialized.
 actor ResetService {
     private let core: ResetCore
     private let staging: ResetIngressStaging
@@ -56,46 +60,34 @@ actor ResetService {
         defer { release() }
 
         do {
-            switch credentialChoice {
-            case .remove: try markers.recordRemovalRequested()
-            case .keep: try markers.clearRemovalRequest()
-            }
-            try markers.recordCleanupOutstanding()
+            try markers.recordRequested(credentialChoice)
         } catch {
             return ResetReport(state: .notStarted, progress: nil, blockers: [.markerNotRecorded], itemCleanup: nil)
         }
-
-        let existing: ResetProgress?
-        do {
-            existing = try await core.status()
-        } catch {
-            return Self.coreFailed(error, progress: nil)
+        let report = await performRequestedReset(credentialChoice)
+        // The user was told this reset did not start, so a restart must not start it behind their back.
+        if report.state == .notStarted, !report.blockers.contains(.cancelled) {
+            try? markers.clearRequested()
         }
-        if existing?.phase != .pending {
-            if let blocker = await prepareStaging() {
-                // Nothing was started, so there is nothing for a restart to finish; the next tap asks again.
-                try? markers.clearRemovalRequest()
-                try? markers.clearCleanupOutstanding()
-                return ResetReport(state: .notStarted, progress: existing, blockers: [blocker], itemCleanup: nil)
-            }
-        }
-        if Task.isCancelled { return Self.cancelled(progress: existing) }
-
-        let started: ResetProgress
-        do {
-            started = try await core.start()
-        } catch {
-            return Self.coreFailed(error, progress: existing)
-        }
-        return await finish(from: started)
+        return report
     }
 
-    /// Finishes an interrupted reset. Safe to call on every launch and foreground, repeatedly. It starts nothing: with no
-    /// pending reset it only completes the native steps a finished one left (temporaries, a recorded credential
-    /// choice).
+    /// Finishes an interrupted reset. Safe to call on every launch and foreground, repeatedly. A tap that was recorded but
+    /// never confirmed by the core is run again in full; otherwise it starts nothing and only completes what a started
+    /// reset left (cleanup, temporaries, a recorded credential choice).
     func resume() async -> ResetReport {
         await acquire()
         defer { release() }
+
+        let requested: ResetCredentialChoice?
+        do {
+            requested = try markers.requestedChoice()
+        } catch {
+            return ResetReport(state: .notStarted, progress: nil, blockers: [.markerUnreadable], itemCleanup: nil)
+        }
+        if let requested {
+            return await performRequestedReset(requested)
+        }
 
         let progress: ResetProgress?
         do {
@@ -112,6 +104,42 @@ actor ResetService {
         return await finish(from: progress)
     }
 
+    /// Steps 2 to 8 for a request that is recorded. The request stays recorded until the core has started.
+    private func performRequestedReset(_ credentialChoice: ResetCredentialChoice) async -> ResetReport {
+        let existing: ResetProgress?
+        do {
+            existing = try await core.status()
+        } catch {
+            return Self.coreFailed(error, progress: nil)
+        }
+        if existing?.phase != .pending {
+            if let blocker = await prepareStaging() {
+                return ResetReport(
+                    state: .notStarted, progress: existing, blockers: [blocker], itemCleanup: nil)
+            }
+        }
+        if Task.isCancelled { return Self.cancelled(progress: existing) }
+
+        let started: ResetProgress
+        do {
+            started = try await core.start()
+        } catch {
+            return Self.coreFailed(error, progress: existing)
+        }
+        do {
+            switch credentialChoice {
+            case .remove: try markers.recordRemovalRequested()
+            case .keep: try markers.clearRemovalRequest()
+            }
+            try markers.recordCleanupOutstanding()
+            try markers.clearRequested()
+        } catch {
+            // The request is still recorded, so the next resume carries the choice over before acting on it.
+            return ResetReport(state: .pending, progress: started, blockers: [.markerNotRecorded], itemCleanup: nil)
+        }
+        return await finish(from: started)
+    }
+
     // MARK: Steps
 
     /// Imports and purges native staging. Returns the reason the core must not start yet, or nil when staging holds
@@ -123,8 +151,8 @@ actor ResetService {
         } catch {
             return .stagingUnreadable
         }
-        // The purge lists staging again, so a listing failure during the import is judged by what remains.
-        _ = await staging.importStaged()
+        // A record that cannot be imported stays staged, and the purge judges what remains.
+        await staging.importSnapshot(snapshot)
         if Task.isCancelled { return .cancelled }
         switch await staging.purgeUnimported(from: snapshot) {
         case .purged: return nil

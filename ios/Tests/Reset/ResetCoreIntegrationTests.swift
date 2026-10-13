@@ -114,6 +114,113 @@ final class ResetCoreIntegrationTests: XCTestCase {
         XCTAssertEqual(runtime.session.importAndWait(world.textRecord("cap-new")), .failed(.itemDeleted))
     }
 
+    func testMixedRouteCapturesAreErasedAndTheirLateCallbacksAreRejected() throws {
+        let world = try makeWorld()
+        let items = try seedCaptures(world)
+        try world.addWorkRoute()
+        let runtime = try world.launch()
+        let personalItem = try runtime.capture(world.textRecord("cap-personal-text"))
+        let workItem = try runtime.capture(world.workTextRecord("cap-work-text"))
+        try world.stageWorkTextRecord(captureID: "cap-work-staged")
+
+        let report = try runtime.reset(.keep)
+
+        XCTAssertEqual(report.state, .completed, "blockers: \(report.blockers)")
+        XCTAssertEqual(report.progress?.generation, 1)
+        XCTAssertEqual(report.progress?.cleanupPending, 0)
+        let captureIDs = ["cap-1", "cap-2", "cap-staged", "cap-personal-text", "cap-work-text", "cap-work-staged"]
+        for captureID in captureIDs {
+            XCTAssertEqual(world.storage.remnants(of: captureID), [], "no file of \(captureID) remains")
+        }
+        let lateCallbacks: [(String, IngressRecord)] = [
+            ("cap-personal-text", world.textRecord("cap-personal-text")),
+            ("cap-work-text", world.workTextRecord("cap-work-text")),
+            ("cap-work-staged", world.workTextRecord("cap-work-staged")),
+        ]
+        for (captureID, record) in lateCallbacks {
+            XCTAssertEqual(
+                runtime.session.importAndWait(record), .failed(.itemDeleted),
+                "a late import of \(captureID) is rejected by the reset fence on either route")
+        }
+        for itemID in Array(items.values) + [personalItem, workItem] {
+            XCTAssertEqual(try runtime.generation(ofItem: itemID), 0, "earlier captures stay in generation 0")
+        }
+
+        let freshWorkItem = try runtime.capture(world.workTextRecord("cap-work-new"))
+        XCTAssertEqual(try runtime.generation(ofItem: freshWorkItem), 1, "a work capture after the reset uses the fresh generation")
+    }
+
+    func testARecordStagedAfterTheSnapshotIsNotImportedByResetAndBelongsToTheFreshGeneration() throws {
+        let world = try makeWorld()
+        _ = try seedCaptures(world)
+        try world.addWorkRoute()
+        let runtime = try world.launch(wrapStaging: { staging in
+            SnapshotHookStaging(staging) { try? world.stageWorkTextRecord(captureID: "cap-post-tap") }
+        })
+
+        let report = try runtime.reset(.keep)
+
+        XCTAssertEqual(report.state, .completed, "blockers: \(report.blockers)")
+        XCTAssertFalse(world.storage.remnants(of: "cap-post-tap").isEmpty, "the post-tap record is still staged")
+        guard case .confirmed(let confirmation)? = runtime.session.importAndWait(world.workTextRecord("cap-post-tap")) else {
+            return XCTFail("a capture staged after the tap must import")
+        }
+        XCTAssertFalse(confirmation.alreadyImported, "reset created no item for it")
+        XCTAssertEqual(try runtime.generation(ofItem: confirmation.itemID), 1)
+    }
+
+    // MARK: Crash after the tap
+
+    func testATapRecordedBeforeTheCoreStartedIsHonoredByTheNextLaunchWithoutEarlyCredentialRemoval() throws {
+        let world = try makeWorld()
+        let items = try seedCaptures(world)
+        let reference = try world.addProfile(version: "profile-a-v1")
+        let killed = try world.launch()
+        try killed.markers.recordRequested(.remove)
+        XCTAssertEqual(try killed.currentGeneration(), 0, "the core never started")
+        XCTAssertTrue(try world.isCredentialPresent(reference))
+        XCTAssertFalse(try killed.markers.isCleanupOutstanding())
+        killed.terminate()
+
+        let relaunched = try world.launch()
+        let resumed = try relaunched.resume()
+
+        XCTAssertEqual(resumed.state, .completed, "blockers: \(resumed.blockers)")
+        XCTAssertEqual(try relaunched.currentGeneration(), 1)
+        XCTAssertTrue(try world.isProfileRevoked("profile-a-v1"))
+        XCTAssertFalse(try world.isCredentialPresent(reference))
+        XCTAssertNil(try relaunched.markers.requestedChoice())
+        XCTAssertFalse(try relaunched.markers.isCleanupOutstanding())
+        for captureID in ["cap-1", "cap-2", "cap-staged"] {
+            XCTAssertEqual(world.storage.remnants(of: captureID), [])
+        }
+        for itemID in items.values {
+            XCTAssertEqual(try relaunched.generation(ofItem: itemID), 0)
+        }
+    }
+
+    func testATapAfterACompletedResetIsNotMistakenForThatResetByTheNextLaunch() throws {
+        let world = try makeWorld()
+        _ = try seedCaptures(world)
+        let reference = try world.addProfile(version: "profile-a-v1")
+        let first = try world.launch()
+        XCTAssertEqual(try first.reset(.keep).state, .completed)
+        let newItem = try first.capture(world.textRecord("cap-new"))
+        try first.markers.recordRequested(.remove)
+        first.terminate()
+
+        let second = try world.launch()
+        XCTAssertTrue(try world.isCredentialPresent(reference), "nothing was removed before the second reset ran")
+        let resumed = try second.resume()
+
+        XCTAssertEqual(resumed.state, .completed, "blockers: \(resumed.blockers)")
+        XCTAssertEqual(resumed.progress?.generation, 2, "the new tap opened its own generation")
+        XCTAssertEqual(try second.currentGeneration(), 2)
+        XCTAssertEqual(world.storage.remnants(of: "cap-new"), [])
+        XCTAssertEqual(try second.generation(ofItem: newItem), 1)
+        XCTAssertFalse(try world.isCredentialPresent(reference))
+    }
+
     // MARK: Interruption
 
     func testAnInterruptedResetStaysPendingThenFinishesAfterARelaunchWithoutRestoringContent() throws {

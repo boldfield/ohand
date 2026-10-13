@@ -127,7 +127,7 @@ final class ResetServiceTests: ResetTestCase {
     func testPreTapStagingIsImportedOrPurgedBeforeTheCoreStartsAndPostTapCapturesAreKept() async throws {
         let world = try makeResetWorld()
         world.makeImportedItemOnImport()
-        world.staging.importable = ["cap-imported"]
+        world.staging.importable = ["cap-imported", "cap-post-tap"]
         world.staging.stage("cap-imported")
         world.staging.stage("cap-stuck")
         world.staging.onSnapshot = { [staging = world.staging] in staging.stage("cap-post-tap") }
@@ -135,7 +135,9 @@ final class ResetServiceTests: ResetTestCase {
         let report = await world.makeService().reset(credentialChoice: .keep)
 
         XCTAssertTrue(report.isComplete)
-        XCTAssertEqual(world.staging.importedCaptureIDs, ["cap-imported"])
+        XCTAssertEqual(
+            world.staging.importedCaptureIDs, ["cap-imported"],
+            "only the snapshot is imported, even though the post-tap capture is a valid, importable record")
         XCTAssertEqual(world.staging.purgedCaptureIDs, ["cap-stuck"])
         XCTAssertEqual(world.staging.staged, ["cap-post-tap"], "a capture that landed after the tap is fresh-generation content")
         let snapshotIndex = try XCTUnwrap(world.log.index(of: "staging.snapshot"))
@@ -300,6 +302,7 @@ final class ResetServiceTests: ResetTestCase {
         XCTAssertEqual(blocked.blockers, [.stagingPurgeIncomplete])
         XCTAssertFalse(world.choice.isRequested)
         XCTAssertFalse(world.choice.isOutstanding)
+        XCTAssertNil(world.choice.requested, "a tap the user was told did not start is not kept for a restart")
 
         let relaunched = await world.makeService().resume()
         XCTAssertEqual(relaunched.state, .notStarted)
@@ -370,9 +373,8 @@ final class ResetServiceTests: ResetTestCase {
         let world = try makeResetWorld()
         try await seedVoiceAndTextCaptures(world)
         configureProfiles(world)
-        world.faults.arm("reset.start")
-        _ = await world.makeService().reset(credentialChoice: .remove)
-        XCTAssertTrue(world.choice.isRequested)
+        await crashDuringReset(world, at: "before.start", choice: .remove)
+        XCTAssertEqual(world.choice.requested, .remove)
 
         let report = await world.makeService().reset(credentialChoice: .keep)
 
@@ -384,7 +386,7 @@ final class ResetServiceTests: ResetTestCase {
     func testAChoiceThatCannotBeRecordedStartsNothing() async throws {
         let world = try makeResetWorld()
         try await seedVoiceAndTextCaptures(world)
-        world.faults.arm("choice.record")
+        world.faults.arm("intent.record")
 
         let report = await world.makeService().reset(credentialChoice: .remove)
 
@@ -392,6 +394,122 @@ final class ResetServiceTests: ResetTestCase {
         XCTAssertEqual(report.blockers, [.markerNotRecorded])
         XCTAssertEqual(world.core.startCalls, 0)
         XCTAssertEqual(world.staging.snapshotCalls, 0)
+    }
+
+    func testAChoiceThatCannotBeCarriedOverAfterTheCoreStartedIsRetriedBeforeAnythingIsRemoved() async throws {
+        let world = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(world)
+        configureProfiles(world)
+        world.faults.arm("choice.record")
+
+        let first = await world.makeService().reset(credentialChoice: .remove)
+
+        XCTAssertEqual(first.state, .pending)
+        XCTAssertEqual(first.blockers, [.markerNotRecorded])
+        XCTAssertEqual(world.choice.requested, .remove, "the request stays until the choice is carried over")
+        XCTAssertEqual(world.credentials.removedReferences, [], "an unrecorded choice is never acted on")
+
+        let relaunched = await world.makeService().resume()
+
+        XCTAssertTrue(relaunched.isComplete)
+        XCTAssertEqual(Set(world.credentials.removedReferences), ["ref-a", "ref-b"])
+        XCTAssertNil(world.choice.requested)
+        XCTAssertEqual(world.core.currentGeneration, 1, "the pending generation was resumed, not replaced")
+    }
+
+    // MARK: Crash before the core confirms the reset
+
+    /// Runs a reset until the armed crash point and abandons it there: nothing after that point runs, including the error
+    /// paths that would clean up, exactly as in a killed process.
+    private func crashDuringReset(
+        _ world: ResetWorld, at point: String, choice: ResetCredentialChoice
+    ) async {
+        world.faults.arm("crash:" + point)
+        let reached = expectation(description: "crash at \(point)")
+        world.crash.notifyOnNextCrash { reached.fulfill() }
+        let service = world.makeService()
+        Task { _ = await service.reset(credentialChoice: choice) }
+        await fulfillment(of: [reached], timeout: 30)
+    }
+
+    func testACrashBeforeTheCoreConfirmsTheResetIsFinishedInFullByTheNextLaunch() async throws {
+        for priorGeneration in [false, true] {
+            for point in ["staging.import", "staging.purge", "before.start", "after.start"] {
+                let world = try makeResetWorld()
+                try await seedVoiceAndTextCaptures(world)
+                configureProfiles(world)
+                if priorGeneration {
+                    let prior = await world.makeService().reset(credentialChoice: .keep)
+                    XCTAssertTrue(prior.isComplete)
+                    try await world.seedItem("item-new", captureID: "cap-new", stagedRecord: .text)
+                }
+                let context = "crash at \(point), prior generation \(priorGeneration)"
+                let generationBefore: Int64 = priorGeneration ? 1 : 0
+
+                await crashDuringReset(world, at: point, choice: .remove)
+
+                XCTAssertEqual(world.choice.requested, .remove, "the tap is recorded: \(context)")
+                if point != "after.start" {
+                    XCTAssertEqual(world.core.currentGeneration, generationBefore, "the core never started: \(context)")
+                    XCTAssertFalse(world.choice.isOutstanding, "no native cleanup is outstanding for a reset that did not begin: \(context)")
+                    XCTAssertFalse(world.choice.isRequested, "the credential choice is not armed before the core started: \(context)")
+                    XCTAssertEqual(world.credentials.removedReferences, [], context)
+                    XCTAssertEqual(world.core.revokedProfileVersions, [], context)
+                }
+
+                let resumed = await world.makeService().resume()
+
+                XCTAssertEqual(resumed.state, .completed, "\(context): \(resumed.blockers)")
+                XCTAssertEqual(
+                    resumed.progress?.generation, priorGeneration ? 2 : 1,
+                    "a prior completed generation is never reported as this reset: \(context)")
+                XCTAssertEqual(Set(world.credentials.removedReferences), ["ref-a", "ref-b"], context)
+                XCTAssertNil(world.choice.requested, context)
+                XCTAssertFalse(world.choice.isRequested, context)
+                XCTAssertFalse(world.choice.isOutstanding, context)
+                assertEverythingErased(world)
+                if priorGeneration {
+                    XCTAssertEqual(world.deletion.remnants(of: "cap-new"), [], "captures since the prior reset are erased: \(context)")
+                }
+            }
+        }
+    }
+
+    func testAResumeThatCannotPrepareStagingKeepsTheRecordedTapForTheNextLaunch() async throws {
+        let world = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(world)
+        configureProfiles(world)
+        world.staging.stage("cap-stuck")
+        await crashDuringReset(world, at: "staging.import", choice: .remove)
+        world.faults.arm("staging.purge")
+
+        let blocked = await world.makeService().resume()
+
+        XCTAssertEqual(blocked.state, .notStarted)
+        XCTAssertEqual(blocked.blockers, [.stagingPurgeIncomplete])
+        XCTAssertEqual(world.choice.requested, .remove, "the user never saw a result, so the tap is kept")
+        XCTAssertEqual(world.core.startCalls, 0)
+        XCTAssertEqual(world.credentials.removedReferences, [])
+
+        let retried = await world.makeService().resume()
+
+        XCTAssertTrue(retried.isComplete)
+        XCTAssertEqual(world.staging.staged, [])
+        XCTAssertEqual(Set(world.credentials.removedReferences), ["ref-a", "ref-b"])
+    }
+
+    func testResumeAfterACrashBeforeTheCoreStartedDoesNotRemoveCredentialsOfAResetThatNeverRan() async throws {
+        let world = try makeResetWorld()
+        configureProfiles(world)
+        await crashDuringReset(world, at: "before.start", choice: .remove)
+        world.faults.arm("reset.start")
+
+        let report = await world.makeService().resume()
+
+        XCTAssertEqual(report.state, .notStarted)
+        XCTAssertEqual(report.blockers, [.coreUnavailable])
+        XCTAssertEqual(world.credentials.removedReferences, [])
+        XCTAssertEqual(world.core.revokedProfileVersions, [])
     }
 
     // MARK: Serialization

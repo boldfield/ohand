@@ -57,14 +57,34 @@ final class ResetNativeCleanupTests: IngressStorageTestCase {
         _ = try stagingStore.stage(textRecord("cap-b"))
         let snapshot = try ingress.snapshot()
 
-        let listed = await ingress.importStaged()
+        await ingress.importSnapshot(snapshot)
         let purge = await ingress.purgeUnimported(from: snapshot)
 
-        XCTAssertTrue(listed)
         XCTAssertEqual(Set(importer.importedRecords.map { $0.captureID }), ["cap-a", "cap-b"])
         XCTAssertEqual(purge, .purged(count: 1), "cap-a imported and its record was removed; cap-b was unimported")
         XCTAssertEqual(filesMentioning("cap-a"), [])
         XCTAssertEqual(filesMentioning("cap-b"), [])
+    }
+
+    func testOnlyTheSnapshotIsImportedAndAValidRecordStagedAfterItStaysForTheFreshGeneration() async throws {
+        let importer = FakeForegroundIngressImporter()
+        importer.results = [
+            FakeForegroundIngressImporter.confirmation("cap-a", itemID: "item-a"),
+            FakeForegroundIngressImporter.confirmation("cap-late", itemID: "item-late"),
+        ]
+        let (ingress, service) = try makeIngress(importer: importer)
+        withExtendedLifetime(service) {}
+        _ = try stagingStore.stage(textRecord("cap-a"))
+        let snapshot = try ingress.snapshot()
+        _ = try stagingStore.stage(textRecord("cap-late"))
+
+        await ingress.importSnapshot(snapshot)
+        let purge = await ingress.purgeUnimported(from: snapshot)
+
+        XCTAssertEqual(importer.importedRecords.map { $0.captureID }, ["cap-a"], "a record staged after the snapshot is never imported by reset")
+        XCTAssertEqual(purge, .purged(count: 0), "the only snapshot record was imported and its staging record removed")
+        XCTAssertTrue(exists(recordURL("cap-late")), "the later capture is still staged, valid and unimported")
+        XCTAssertEqual(try stagingStore.load(captureID: "cap-late"), textRecord("cap-late"))
     }
 
     func testAnInputThatCannotBeRemovedIsReportedAndRetried() async throws {
@@ -121,6 +141,29 @@ final class ResetNativeCleanupTests: IngressStorageTestCase {
     }
 
     // MARK: Markers
+
+    func testTheRecordedTapIsDurableReplaceableAndIndependentOfTheOtherMarkers() throws {
+        let store = FileResetMarkerStore(layout: layout)
+        XCTAssertNil(try store.requestedChoice())
+
+        try store.recordRequested(.remove)
+        try store.recordRequested(.remove)
+        let relaunched = FileResetMarkerStore(layout: layout)
+        XCTAssertEqual(try relaunched.requestedChoice(), .remove, "the tap survives a restart")
+        XCTAssertFalse(try relaunched.isRemovalRequested(), "the choice is not armed by the tap alone")
+        XCTAssertFalse(try relaunched.isCleanupOutstanding(), "cleanup is not outstanding for a reset that has not started")
+
+        try store.recordRequested(.keep)
+        XCTAssertEqual(try relaunched.requestedChoice(), .keep, "the latest tap replaces the earlier one")
+
+        try store.recordRequested(.remove)
+        try Data("1".utf8).write(to: layout.directory(for: .temporaryFiles).appendingPathComponent(FileResetMarkerStore.requestedKeepFileName))
+        XCTAssertEqual(try relaunched.requestedChoice(), .keep, "an interrupted replacement never resolves toward removal")
+
+        try store.clearRequested()
+        try store.clearRequested()
+        XCTAssertNil(try relaunched.requestedChoice())
+    }
 
     func testMarkersAreDurableIdempotentAndIndependent() throws {
         let store = FileResetMarkerStore(layout: layout)

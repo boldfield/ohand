@@ -26,9 +26,10 @@ final class RealCoreResetWorld {
         storage.tearDown()
     }
 
-    /// A process start over the on-disk store: a new core, clients, ingress service and reset service.
-    func launch() throws -> RealCoreResetRuntime {
-        let runtime = try RealCoreResetRuntime(world: self)
+    /// A process start over the on-disk store: a new core, clients, ingress service and reset service. `wrapStaging`
+    /// puts a test decorator around the production staging, to act at a precise moment of the reset.
+    func launch(wrapStaging: ((ResetIngressStaging) -> ResetIngressStaging)? = nil) throws -> RealCoreResetRuntime {
+        let runtime = try RealCoreResetRuntime(world: self, wrapStaging: wrapStaging)
         runtimes.append(runtime)
         return runtime
     }
@@ -44,6 +45,27 @@ final class RealCoreResetWorld {
 
     func textRecord(_ captureID: String) -> IngressRecord {
         IngressRecord(captureID: captureID, text: "buy oat milk", audio: nil, context: captureContext)
+    }
+
+    /// A capture routed to the work route, which `addWorkRoute` must have created before the core imports it.
+    func workTextRecord(_ captureID: String) -> IngressRecord {
+        var context = captureContext
+        context.itemScope = "work"
+        context.routeID = "route-work"
+        return IngressRecord(captureID: captureID, text: "draft the synthetic status note", audio: nil, context: context)
+    }
+
+    /// A work-route text capture written to staging and never imported.
+    func stageWorkTextRecord(captureID: String) throws {
+        _ = try IngressStagingStore(layout: layout, fileSystem: FileManagerIngressFileSystem())
+            .stage(workTextRecord(captureID))
+    }
+
+    /// Creates the work route. No core may be open.
+    func addWorkRoute() throws {
+        try execute(
+            "INSERT INTO routes (route_id, route_name, scope, processing_destinations, created_at) "
+                + "VALUES ('route-work', 'route-work', 'work', '[]', '2026-10-08T09:00:00Z')")
     }
 
     func voiceRecord(_ captureID: String) -> IngressRecord {
@@ -199,7 +221,7 @@ final class RealCoreResetRuntime {
     private(set) var ingress: ForegroundIngressService?
     private(set) var service: ResetService?
 
-    init(world: RealCoreResetWorld) throws {
+    init(world: RealCoreResetWorld, wrapStaging: ((ResetIngressStaging) -> ResetIngressStaging)? = nil) throws {
         session = try RealCoreResetSession(path: world.storage.databasePath)
         markers = FileResetMarkerStore(layout: world.layout)
         let faults = world.storage.faults
@@ -211,9 +233,10 @@ final class RealCoreResetRuntime {
                 notifications: FaultingNotificationCanceller(bridge: world.storage.makeBridge(), faults: faults),
                 localCleanup: DeletionLocalCleanup(
                     layout: world.layout, fileSystem: FaultingDeletionFileSystem(faults: faults)))
+            let nativeStaging = NativeResetIngress(service: ingress, layout: world.layout)
             service = ResetService(
                 core: session.resetClient,
-                staging: NativeResetIngress(service: ingress, layout: world.layout),
+                staging: wrapStaging?(nativeStaging) ?? nativeStaging,
                 itemCleanup: itemCleanup,
                 exportTemporaries: ExportTemporaryCleaner(layout: world.layout),
                 credentials: world.credentials,
@@ -279,5 +302,28 @@ private final class ResetAnswerBox<Value>: @unchecked Sendable {
         lock.lock()
         stored = newValue
         lock.unlock()
+    }
+}
+
+/// The production staging, with a hook that runs right after the snapshot: the moment a capture can land after the tap.
+final class SnapshotHookStaging: ResetIngressStaging {
+    private let wrapped: ResetIngressStaging
+    private let afterSnapshot: () -> Void
+
+    init(_ wrapped: ResetIngressStaging, afterSnapshot: @escaping () -> Void) {
+        self.wrapped = wrapped
+        self.afterSnapshot = afterSnapshot
+    }
+
+    func snapshot() throws -> ResetStagingSnapshot {
+        let taken = try wrapped.snapshot()
+        afterSnapshot()
+        return taken
+    }
+
+    func importSnapshot(_ snapshot: ResetStagingSnapshot) async { await wrapped.importSnapshot(snapshot) }
+
+    func purgeUnimported(from snapshot: ResetStagingSnapshot) async -> ResetStagingPurge {
+        await wrapped.purgeUnimported(from: snapshot)
     }
 }

@@ -171,7 +171,12 @@ fn run(database: &mut Database, command: &Command) -> Result<Value, AbiFailure> 
         Command::RevokeProfile { profile_version } => {
             revoke_profile(database, profile_version, Utc::now()).map_err(|error| {
                 let mapped = store_failure(&error);
-                if mapped == AbiFailure::STORAGE_ERROR {
+                // An unknown version is a plain error without a SQLite cause; a genuine storage failure
+                // keeps its normalized class so it is retried instead of being reported as refused.
+                let has_sqlite_cause = error
+                    .chain()
+                    .any(|cause| cause.downcast_ref::<rusqlite::Error>().is_some());
+                if mapped == AbiFailure::STORAGE_ERROR && !has_sqlite_cause {
                     refused()
                 } else {
                     mapped

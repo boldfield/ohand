@@ -34,6 +34,39 @@ extension FaultPlan {
     }
 }
 
+/// A process kill. The fakes call this at a point a test armed as `crash:<point>`: the awaiting task never resumes, so no
+/// error path, cleanup or later step of that call ever runs, while everything already written stays as it was. The test
+/// then builds a new service over the same durable state, which is the relaunch.
+final class ResetCrashSignal: @unchecked Sendable {
+    private let lock = NSLock()
+    private var reachedPoints: [String] = []
+    private var onReach: (() -> Void)?
+
+    var reached: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return reachedPoints
+    }
+
+    /// Calls `handler` once, the next time a crash point is reached.
+    func notifyOnNextCrash(_ handler: @escaping () -> Void) {
+        lock.lock()
+        onReach = handler
+        lock.unlock()
+    }
+
+    func crashIfArmed(_ point: String, faults: FaultPlan) async {
+        guard faults.fires("crash:" + point) else { return }
+        lock.lock()
+        reachedPoints.append(point)
+        let handler = onReach
+        onReach = nil
+        lock.unlock()
+        handler?()
+        await withUnsafeContinuation { (_: UnsafeContinuation<Void, Never>) in }
+    }
+}
+
 /// The durable reset as the L05a contract defines it, over the deletion fake: starting records a generation whose
 /// boundary is every item registered so far, tombstones those items (queuing their cleanup rows) and completes only when
 /// all of their cleanup is acknowledged. Items registered afterwards belong to the next generation and are never touched.
@@ -42,6 +75,7 @@ final class FakeResetCore: ResetCore, @unchecked Sendable {
     private let deletion: DurableDeletionCore
     private let faults: FaultPlan
     private let log: ResetEventLog
+    let crash: ResetCrashSignal
     private var liveItems: [String] = []
     private var boundary: [String] = []
     private var generation: Int64 = 0
@@ -50,10 +84,14 @@ final class FakeResetCore: ResetCore, @unchecked Sendable {
     private var revokedVersions: [String] = []
     private var starts = 0
 
-    init(deletion: DurableDeletionCore, faults: FaultPlan, log: ResetEventLog = ResetEventLog()) {
+    init(
+        deletion: DurableDeletionCore, faults: FaultPlan, log: ResetEventLog = ResetEventLog(),
+        crash: ResetCrashSignal = ResetCrashSignal()
+    ) {
         self.deletion = deletion
         self.faults = faults
         self.log = log
+        self.crash = crash
     }
 
     // MARK: Test controls
@@ -75,8 +113,9 @@ final class FakeResetCore: ResetCore, @unchecked Sendable {
 
     func start() async throws -> ResetProgress {
         try faults.check("reset.start")
+        await crash.crashIfArmed("before.start", faults: faults)
         log.append("core.start")
-        return locked {
+        let progress = locked { () -> ResetProgress in
             starts += 1
             if phase != .pending {
                 generation += 1
@@ -87,6 +126,8 @@ final class FakeResetCore: ResetCore, @unchecked Sendable {
             }
             return evaluate(promote: true)
         }
+        await crash.crashIfArmed("after.start", faults: faults)
+        return progress
     }
 
     func advance() async throws -> ResetProgress? {
@@ -136,11 +177,13 @@ final class FakeResetCore: ResetCore, @unchecked Sendable {
     }
 }
 
-/// Native ingress staging scripted by capture ID. `importable` inputs import (and become items) when `importStaged`
-/// runs; every other staged input stays unimported until it is purged.
+/// Native ingress staging scripted by capture ID. `importable` inputs that the snapshot names import (and become items)
+/// when `importSnapshot` runs; every other staged input stays unimported until it is purged or, when it was staged after
+/// the snapshot, left alone.
 final class FakeResetStaging: ResetIngressStaging {
     private let faults: FaultPlan
     private let log: ResetEventLog
+    private let crash: ResetCrashSignal
     private(set) var staged: Set<String> = []
     private(set) var importedCaptureIDs: [String] = []
     private(set) var purgedCaptureIDs: [String] = []
@@ -151,9 +194,10 @@ final class FakeResetStaging: ResetIngressStaging {
     /// Called right after the snapshot is taken: the moment a capture can land after the tap.
     var onSnapshot: (() -> Void)?
 
-    init(faults: FaultPlan, log: ResetEventLog) {
+    init(faults: FaultPlan, log: ResetEventLog, crash: ResetCrashSignal) {
         self.faults = faults
         self.log = log
+        self.crash = crash
     }
 
     func stage(_ captureID: String) {
@@ -169,19 +213,20 @@ final class FakeResetStaging: ResetIngressStaging {
         return taken
     }
 
-    func importStaged() async -> Bool {
+    func importSnapshot(_ snapshot: ResetStagingSnapshot) async {
         log.append("staging.import")
-        if faults.fires("staging.import") { return false }
-        for captureID in staged.intersection(importable).sorted() {
+        await crash.crashIfArmed("staging.import", faults: faults)
+        if faults.fires("staging.import") { return }
+        for captureID in staged.intersection(snapshot.captureIDs).intersection(importable).sorted() {
             staged.remove(captureID)
             importedCaptureIDs.append(captureID)
             onImport?(captureID)
         }
-        return true
     }
 
     func purgeUnimported(from snapshot: ResetStagingSnapshot) async -> ResetStagingPurge {
         log.append("staging.purge")
+        await crash.crashIfArmed("staging.purge", faults: faults)
         if faults.fires("staging.purge.unreadable") { return .unknown }
         let targets = snapshot.captureIDs.intersection(staged)
         if faults.fires("staging.purge") { return .incomplete(remaining: targets.count) }
@@ -232,9 +277,22 @@ final class MemoryResetMarkerStore: ResetMarkerStore {
     private let faults: FaultPlan
     private(set) var isRequested = false
     private(set) var isOutstanding = false
+    private(set) var requested: ResetCredentialChoice?
 
     init(faults: FaultPlan) {
         self.faults = faults
+    }
+
+    func requestedChoice() throws -> ResetCredentialChoice? { requested }
+
+    func recordRequested(_ choice: ResetCredentialChoice) throws {
+        if faults.fires("intent.record") { throw WriteFailed() }
+        requested = choice
+    }
+
+    func clearRequested() throws {
+        if faults.fires("intent.clear") { throw WriteFailed() }
+        requested = nil
     }
 
     func isRemovalRequested() throws -> Bool { isRequested }
@@ -269,6 +327,7 @@ final class MemoryResetMarkerStore: ResetMarkerStore {
 final class ResetWorld {
     let deletion: DeletionWorld
     let log = ResetEventLog()
+    let crash = ResetCrashSignal()
     let core: FakeResetCore
     let staging: FakeResetStaging
     let exports: FakeResetExportTemporaries
@@ -279,8 +338,8 @@ final class ResetWorld {
 
     init(deletion: DeletionWorld) {
         self.deletion = deletion
-        core = FakeResetCore(deletion: deletion.core, faults: deletion.faults, log: log)
-        staging = FakeResetStaging(faults: deletion.faults, log: log)
+        core = FakeResetCore(deletion: deletion.core, faults: deletion.faults, log: log, crash: crash)
+        staging = FakeResetStaging(faults: deletion.faults, log: log, crash: crash)
         exports = FakeResetExportTemporaries(faults: deletion.faults)
         credentials = FakeResetCredentials(faults: deletion.faults, log: log)
         choice = MemoryResetMarkerStore(faults: deletion.faults)

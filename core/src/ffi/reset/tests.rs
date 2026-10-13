@@ -277,6 +277,29 @@ fn profiles_list_their_credential_references_and_revocation_is_idempotent() {
 }
 
 #[test]
+fn a_storage_failure_while_revoking_is_not_reported_as_an_unknown_profile() {
+    let _guard = serial();
+    let (directory, path) = store("revoke-storage");
+    let mut session = Session::over(open_file(&path));
+    open_database(&path)
+        .conn()
+        .execute_batch(
+            "CREATE TRIGGER block_revoke BEFORE UPDATE ON provider_profiles
+             BEGIN SELECT RAISE(ABORT, 'synthetic storage failure'); END;",
+        )
+        .unwrap();
+
+    let (_, code) =
+        session.fail(&json!({"command": "revoke_profile", "profile_version": "profile-1@1"}));
+    assert_eq!(code.as_str(), "storage_error");
+    let (_, unknown) =
+        session.fail(&json!({"command": "revoke_profile", "profile_version": "no-such"}));
+    assert_eq!(unknown.as_str(), "reset_profile_refused");
+    session.close();
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
 fn malformed_requests_are_refused_before_anything_is_queued() {
     let _guard = serial();
     let (directory, path) = store("invalid");

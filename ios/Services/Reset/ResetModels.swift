@@ -71,9 +71,10 @@ enum ResetStagingPurge: Equatable {
 /// it: it is imported first (and then tombstoned by the core) or purged.
 protocol ResetIngressStaging {
     func snapshot() throws -> ResetStagingSnapshot
-    /// Imports every staged record through the production ingress path. Returns false when the staging area could not
-    /// be listed.
-    func importStaged() async -> Bool
+    /// Imports the staged records named by `snapshot` through the production ingress path. A record staged after the
+    /// snapshot is never imported here, so it cannot land below the reset boundary. A record that cannot be imported
+    /// stays staged and is left to `purgeUnimported`.
+    func importSnapshot(_ snapshot: ResetStagingSnapshot) async
     /// Removes the records and owned audio of `snapshot` that are still staged. Inputs staged after the snapshot are
     /// never touched.
     func purgeUnimported(from snapshot: ResetStagingSnapshot) async -> ResetStagingPurge
@@ -92,15 +93,23 @@ protocol ResetCredentialRemoving {
 
 extension CredentialService: ResetCredentialRemoving {}
 
-/// What native code still owes a reset, as two small durable markers, so a restart finishes what the user asked for. They
-/// hold a choice and a flag, never a generation or a result: the core alone says whether the reset itself is complete.
+/// What native code still owes a reset, as small durable markers, so a restart finishes what the user asked for. They
+/// hold a choice and flags, never a generation or a result: the core alone says whether the reset itself is complete.
 protocol ResetMarkerStore {
+    /// The user tapped reset and the core has not confirmed that it recorded the reset. A restart that finds it runs the
+    /// whole reset again (staging, core start, cleanup) with this choice. It is replaced by the next tap and cleared once
+    /// the core has started and the two markers below carry the choice.
+    func requestedChoice() throws -> ResetCredentialChoice?
+    func recordRequested(_ choice: ResetCredentialChoice) throws
+    func clearRequested() throws
+
     /// The user chose to remove provider profiles and their credentials.
     func isRemovalRequested() throws -> Bool
     func recordRemovalRequested() throws
     func clearRemovalRequest() throws
 
-    /// A reset was requested and its native steps (cleanup, temporaries, credentials) have not all been confirmed.
+    /// The core started a reset and its native steps (cleanup, temporaries, credentials) have not all been confirmed.
+    /// Set only after the core started, so it never describes a reset that did not begin.
     func isCleanupOutstanding() throws -> Bool
     func recordCleanupOutstanding() throws
     func clearCleanupOutstanding() throws
@@ -110,6 +119,7 @@ protocol ResetMarkerStore {
 enum ResetBlocker: String, Equatable, Sendable {
     case coreUnavailable = "core_unavailable"
     case markerNotRecorded = "reset_marker_not_recorded"
+    case markerUnreadable = "reset_marker_unreadable"
     case markerNotCleared = "reset_marker_not_cleared"
     case stagingUnreadable = "staging_unreadable"
     case stagingPurgeIncomplete = "staging_purge_incomplete"

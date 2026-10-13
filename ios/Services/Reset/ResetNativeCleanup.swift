@@ -1,6 +1,7 @@
 import Foundation
 
-/// Production staging for reset: the foreground ingress path for the import, and `DeletionLocalCleanup` (the per-item
+/// Production staging for reset: the foreground ingress path for the import of the snapshot's records only (never a
+/// fresh listing, which could pull a later capture below the boundary), and `DeletionLocalCleanup` (the per-item
 /// ingress and audio executor) for the purge, so reset removes staged files exactly the way a deleted item's are removed.
 final class NativeResetIngress: ResetIngressStaging {
     private static let incompleteRecordSuffix = "." + IngressRecord.fileExtension + IngressFileSystemNaming.incompleteWriteSuffix
@@ -23,13 +24,16 @@ final class NativeResetIngress: ResetIngressStaging {
         ResetStagingSnapshot(captureIDs: Self.captureIDs(in: try staging.listRecords()))
     }
 
-    func importStaged() async -> Bool {
-        let report = await withCheckedContinuation { (continuation: CheckedContinuation<IngressRecoveryReport, Never>) in
-            DispatchQueue.main.async { [service] in
-                service.recover { continuation.resume(returning: $0) }
+    func importSnapshot(_ snapshot: ResetStagingSnapshot) async {
+        for captureID in snapshot.captureIDs.sorted() {
+            // Unreadable or interrupted writes are not records; the purge that follows removes them.
+            guard let record = try? staging.load(captureID: captureID) else { continue }
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                DispatchQueue.main.async { [service] in
+                    service.submit(record) { _ in continuation.resume() }
+                }
             }
         }
-        return report.listingFailure == nil
     }
 
     func purgeUnimported(from snapshot: ResetStagingSnapshot) async -> ResetStagingPurge {
@@ -93,16 +97,45 @@ final class ExportTemporaryCleaner: ResetExportTemporaries {
 final class FileResetMarkerStore: ResetMarkerStore {
     static let removalFileName = "reset-credential-removal"
     static let outstandingFileName = "reset-cleanup-outstanding"
+    static let requestedKeepFileName = "reset-requested-keep"
+    static let requestedRemoveFileName = "reset-requested-remove"
 
     private let removalURL: URL
     private let outstandingURL: URL
+    private let requestedKeepURL: URL
+    private let requestedRemoveURL: URL
     private let fileSystem: IngressFileSystem
 
     init(layout: ProtectedStorageLayout, fileSystem: IngressFileSystem = FileManagerIngressFileSystem()) {
         let directory = layout.directory(for: .temporaryFiles)
         removalURL = directory.appendingPathComponent(Self.removalFileName)
         outstandingURL = directory.appendingPathComponent(Self.outstandingFileName)
+        requestedKeepURL = directory.appendingPathComponent(Self.requestedKeepFileName)
+        requestedRemoveURL = directory.appendingPathComponent(Self.requestedRemoveFileName)
         self.fileSystem = fileSystem
+    }
+
+    /// When both files exist (a tap interrupted while replacing the earlier one) the choice that removes nothing wins.
+    func requestedChoice() throws -> ResetCredentialChoice? {
+        if fileSystem.fileExists(at: requestedKeepURL) { return .keep }
+        if fileSystem.fileExists(at: requestedRemoveURL) { return .remove }
+        return nil
+    }
+
+    func recordRequested(_ choice: ResetCredentialChoice) throws {
+        switch choice {
+        case .keep:
+            try clear(requestedRemoveURL)
+            try record(requestedKeepURL)
+        case .remove:
+            try clear(requestedKeepURL)
+            try record(requestedRemoveURL)
+        }
+    }
+
+    func clearRequested() throws {
+        try clear(requestedKeepURL)
+        try clear(requestedRemoveURL)
     }
 
     func isRemovalRequested() throws -> Bool { fileSystem.fileExists(at: removalURL) }
