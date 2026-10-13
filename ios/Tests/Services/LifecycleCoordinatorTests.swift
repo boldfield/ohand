@@ -102,7 +102,7 @@ private final class DurableEffects: @unchecked Sendable {
     }
 }
 
-private func waitUntil(timeout: TimeInterval = 10, _ condition: () -> Bool) async -> Bool {
+private func lifecycleWaitUntil(timeout: TimeInterval = 10, _ condition: () -> Bool) async -> Bool {
     let deadline = Date().addingTimeInterval(timeout)
     while Date() < deadline {
         if condition() { return true }
@@ -196,11 +196,11 @@ final class LifecycleCoordinatorTests: XCTestCase {
                 return .completed
             }, for: .ingress)
         coordinator.request(.launch)
-        let began = await waitUntil { log.count(of: "ingress") == 1 }
+        let began = await lifecycleWaitUntil { log.count(of: "ingress") == 1 }
         XCTAssertTrue(began)
         XCTAssertEqual(coordinator.finishedPassCount, 0, "the caller got control back while the step was still running")
         gate.open()
-        let finished = await waitUntil { coordinator.finishedPassCount == 1 }
+        let finished = await lifecycleWaitUntil { coordinator.finishedPassCount == 1 }
         XCTAssertTrue(finished)
     }
 
@@ -219,11 +219,11 @@ final class LifecycleCoordinatorTests: XCTestCase {
             }, for: .ingress)
 
         let first = Task { await coordinator.reconcile(.launch) }
-        let began = await waitUntil { log.count(of: "ingress") == 1 }
+        let began = await lifecycleWaitUntil { log.count(of: "ingress") == 1 }
         XCTAssertTrue(began)
 
         let overlapping = (0..<4).map { _ in Task { await coordinator.reconcile(.foreground) } }
-        let queued = await waitUntil { coordinator.queuedRequestCount == 4 }
+        let queued = await lifecycleWaitUntil { coordinator.queuedRequestCount == 4 }
         XCTAssertTrue(queued, "every overlapping call waits for the next pass")
         XCTAssertEqual(log.count(of: "ingress"), 1, "nothing starts while a pass runs")
 
@@ -326,10 +326,10 @@ final class LifecycleCoordinatorTests: XCTestCase {
                 return .completed
             }, for: .ingress)
         let running = Task { await coordinator.reconcile(.launch) }
-        let began = await waitUntil { log.count(of: "ingress") == 1 }
+        let began = await lifecycleWaitUntil { log.count(of: "ingress") == 1 }
         XCTAssertTrue(began)
         let waiting = Task { await coordinator.reconcile(.foreground) }
-        let queued = await waitUntil { coordinator.queuedRequestCount == 1 }
+        let queued = await lifecycleWaitUntil { coordinator.queuedRequestCount == 1 }
         XCTAssertTrue(queued)
 
         coordinator.shutDown()
@@ -370,17 +370,17 @@ final class LifecycleCoordinatorTests: XCTestCase {
 
         let trigger = coordinator.timeChangeTrigger
         trigger()
-        let began = await waitUntil { log.count(of: "reminders") == 1 }
+        let began = await lifecycleWaitUntil { log.count(of: "reminders") == 1 }
         XCTAssertTrue(began)
         for _ in 0..<5 {
             trigger()
         }
-        let queued = await waitUntil { coordinator.queuedRequestCount == 5 }
+        let queued = await lifecycleWaitUntil { coordinator.queuedRequestCount == 5 }
         XCTAssertTrue(queued)
         gate.open()
-        let finished = await waitUntil { coordinator.finishedPassCount == 2 }
+        let finished = await lifecycleWaitUntil { coordinator.finishedPassCount == 2 }
         XCTAssertTrue(finished)
-        let settled = await waitUntil { coordinator.queuedRequestCount == 0 }
+        let settled = await lifecycleWaitUntil { coordinator.queuedRequestCount == 0 }
         XCTAssertTrue(settled)
         XCTAssertEqual(log.count(of: "reminders"), 2, "five callbacks during a pass cost one further pass")
         XCTAssertEqual(log.count(of: "ingress"), 0)
@@ -395,12 +395,12 @@ final class LifecycleCoordinatorTests: XCTestCase {
         let coordinator = makeCoordinator(center: center, log: log, steps: [.ingress])
         coordinator.start(isActive: true)
         coordinator.start(isActive: true)
-        let launched = await waitUntil { coordinator.finishedPassCount == 1 }
+        let launched = await lifecycleWaitUntil { coordinator.finishedPassCount == 1 }
         XCTAssertTrue(launched)
         XCTAssertEqual(coordinator.lastReport?.triggers, [.launch], "starting twice launches once")
 
         center.post(name: UIApplication.didBecomeActiveNotification, object: nil)
-        let foregrounded = await waitUntil { coordinator.finishedPassCount == 2 }
+        let foregrounded = await lifecycleWaitUntil { coordinator.finishedPassCount == 2 }
         XCTAssertTrue(foregrounded)
         XCTAssertEqual(coordinator.lastReport?.triggers, [.foreground])
 
@@ -418,7 +418,7 @@ final class LifecycleCoordinatorTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 100_000_000)
         XCTAssertEqual(coordinator.finishedPassCount, 0)
         center.post(name: UIApplication.didBecomeActiveNotification, object: nil)
-        let foregrounded = await waitUntil { coordinator.finishedPassCount == 1 }
+        let foregrounded = await lifecycleWaitUntil { coordinator.finishedPassCount == 1 }
         XCTAssertTrue(foregrounded)
         coordinator.shutDown()
     }
@@ -529,7 +529,7 @@ final class LifecycleCoordinatorRealCoreTests: XCTestCase {
         coordinator.start(isActive: false)
 
         lifecycle.post(name: UIApplication.didBecomeActiveNotification, object: nil)
-        let reconciled = await waitUntil { coordinator.finishedPassCount >= 1 }
+        let reconciled = await lifecycleWaitUntil { coordinator.finishedPassCount >= 1 }
         XCTAssertTrue(reconciled)
         XCTAssertEqual(coordinator.lastReport?.triggers, [.foreground])
         XCTAssertEqual(coordinator.lastReport?.outcome(of: .ingress), .completed)
