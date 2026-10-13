@@ -1,0 +1,412 @@
+import XCTest
+@testable import OhAndServices
+
+/// Native reset orchestration against the L05a reset contract (`FakeResetCore`), real protected-storage files and the
+/// production per-item cleanup executors over a fake OS notification center. An interruption is an injected failure at
+/// one step; a relaunch is a new `ResetService` over the same disk, core, staging and choice. The production core client
+/// over the real Rust core is covered by `ResetCoreIntegrationTests`.
+final class ResetServiceTests: ResetTestCase {
+    private func seedVoiceAndTextCaptures(_ world: ResetWorld) async throws {
+        try await world.seedItem(
+            "item-1", captureID: "cap-1", finalizedAudio: true, stagedRecord: .audio, interruptedRecordWrite: true,
+            reminders: ["reminder-1": [1, 2]])
+        try await world.seedItem(
+            "item-2", captureID: "cap-2", finalizedAudio: false, stagedRecord: .text, reminders: ["reminder-2": [1]])
+    }
+
+    private func assertEverythingErased(_ world: ResetWorld, file: StaticString = #filePath, line: UInt = #line) {
+        let deletion = world.deletion
+        for captureID in ["cap-1", "cap-2"] {
+            XCTAssertEqual(deletion.remnants(of: captureID), [], "no file of \(captureID) remains", file: file, line: line)
+        }
+        XCTAssertEqual(deletion.pendingNotificationIdentifiers(ofReminder: "reminder-1"), [], file: file, line: line)
+        XCTAssertEqual(deletion.pendingNotificationIdentifiers(ofReminder: "reminder-2"), [], file: file, line: line)
+        XCTAssertTrue(deletion.core.isDeletionComplete("item-1"), file: file, line: line)
+        XCTAssertTrue(deletion.core.isDeletionComplete("item-2"), file: file, line: line)
+    }
+
+    // MARK: Cleanup of captured content
+
+    func testResetErasesMixedCapturesAndReportsCompletionOnlyAfterTheCoreDoes() async throws {
+        let world = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(world)
+
+        let report = await world.makeService().reset(credentialChoice: .keep)
+
+        XCTAssertEqual(report.state, .completed)
+        XCTAssertTrue(report.isComplete)
+        XCTAssertEqual(report.blockers, [])
+        XCTAssertEqual(report.progress?.phase, .completed)
+        XCTAssertEqual(report.progress?.generation, 1)
+        XCTAssertEqual(report.itemCleanup?.converged, true)
+        assertEverythingErased(world)
+        XCTAssertEqual(world.exports.removeCalls, 1)
+    }
+
+    func testCleanupIsAcknowledgedBeforeTheCoreIsAskedToComplete() async throws {
+        let world = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(world)
+
+        let initial = try await world.core.start()
+        XCTAssertEqual(initial.phase, .pending, "tombstoning alone is not completion")
+        XCTAssertGreaterThan(initial.cleanupPending, 0)
+        XCTAssertFalse(world.deletion.core.isDeletionComplete("item-1"))
+
+        let report = await world.makeService().resume()
+
+        XCTAssertTrue(report.isComplete)
+        assertEverythingErased(world)
+    }
+
+    func testARequiredFailureKeepsTheResetPendingAndARetryAfterRelaunchConverges() async throws {
+        let world = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(world)
+        world.faults.arm("fs.remove:cap-1.m4a")
+
+        let first = await world.makeService().reset(credentialChoice: .keep)
+
+        XCTAssertEqual(first.state, .pending)
+        XCTAssertFalse(first.isComplete)
+        XCTAssertTrue(first.blockers.contains(.itemCleanupIncomplete))
+        XCTAssertTrue(first.blockers.contains(.coreResetPending))
+        XCTAssertEqual(first.progress?.phase, .pending)
+        XCTAssertEqual(world.faults.firedPoints, ["fs.remove:cap-1.m4a"])
+        XCTAssertFalse(world.deletion.core.isDeletionComplete("item-1"), "the core records only cleanup that completed")
+        XCTAssertEqual(
+            world.deletion.pendingNotificationIdentifiers(ofReminder: "reminder-1"), [],
+            "effects that did complete are not undone by the failure")
+
+        let relaunched = await world.makeService().resume()
+
+        XCTAssertTrue(relaunched.isComplete)
+        XCTAssertEqual(world.core.startCalls, 1, "a retry resumes the pending generation and never starts another")
+        XCTAssertEqual(world.core.currentGeneration, 1)
+        assertEverythingErased(world)
+    }
+
+    func testACrashBetweenCancellingANotificationAndRecordingItCannotRestoreTheReminder() async throws {
+        let world = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(world)
+        world.faults.arm("notifier.cancel.afterEffect")
+
+        let first = await world.makeService().reset(credentialChoice: .keep)
+        XCTAssertFalse(first.isComplete)
+
+        let scheduledBefore = world.deletion.center.pendingIdentifiers
+        let relaunched = await world.makeService().resume()
+
+        XCTAssertTrue(relaunched.isComplete)
+        XCTAssertTrue(
+            Set(world.deletion.center.pendingIdentifiers).isSubset(of: Set(scheduledBefore)),
+            "a retry never schedules a reminder")
+        assertEverythingErased(world)
+    }
+
+    func testEveryInterruptionPointConvergesOnTheNextLaunch() async throws {
+        let points = [
+            "staging.snapshot", "staging.import", "staging.purge", "reset.start", "core.itemsWithPendingCleanup",
+            "core.pendingCleanup", "notifier.cancel", "core.recordCancelled", "core.complete.cancel_notifications",
+            "fs.remove:cap-1-recording.m4a", "fs.remove:cap-1.json", "core.complete.remove_audio", "exports.remove",
+            "reset.advance",
+        ]
+        for point in points {
+            let world = try makeResetWorld()
+            try await seedVoiceAndTextCaptures(world)
+            world.faults.arm(point)
+
+            _ = await world.makeService().reset(credentialChoice: .keep)
+            let converged = await world.makeService().reset(credentialChoice: .keep)
+
+            XCTAssertTrue(converged.isComplete, "converges after a fault at \(point): \(converged.blockers)")
+            assertEverythingErased(world)
+        }
+    }
+
+    // MARK: Native ingress staging
+
+    func testPreTapStagingIsImportedOrPurgedBeforeTheCoreStartsAndPostTapCapturesAreKept() async throws {
+        let world = try makeResetWorld()
+        world.makeImportedItemOnImport()
+        world.staging.importable = ["cap-imported"]
+        world.staging.stage("cap-imported")
+        world.staging.stage("cap-stuck")
+        world.staging.onSnapshot = { [staging = world.staging] in staging.stage("cap-post-tap") }
+
+        let report = await world.makeService().reset(credentialChoice: .keep)
+
+        XCTAssertTrue(report.isComplete)
+        XCTAssertEqual(world.staging.importedCaptureIDs, ["cap-imported"])
+        XCTAssertEqual(world.staging.purgedCaptureIDs, ["cap-stuck"])
+        XCTAssertEqual(world.staging.staged, ["cap-post-tap"], "a capture that landed after the tap is fresh-generation content")
+        let snapshotIndex = try XCTUnwrap(world.log.index(of: "staging.snapshot"))
+        let purgeIndex = try XCTUnwrap(world.log.index(of: "staging.purge"))
+        let startIndex = try XCTUnwrap(world.log.index(of: "core.start"))
+        XCTAssertLessThan(snapshotIndex, purgeIndex)
+        XCTAssertLessThan(purgeIndex, startIndex, "staging is drained before the core records the reset")
+        XCTAssertTrue(world.deletion.core.isDeletionComplete("item-cap-imported"), "an imported capture is tombstoned and cleaned")
+    }
+
+    func testStagingThatCannotBePurgedKeepsTheCoreFromStartingAndIsRetried() async throws {
+        let world = try makeResetWorld()
+        world.staging.stage("cap-stuck")
+        world.faults.arm("staging.purge")
+
+        let blocked = await world.makeService().reset(credentialChoice: .keep)
+
+        XCTAssertEqual(blocked.state, .notStarted)
+        XCTAssertEqual(blocked.blockers, [.stagingPurgeIncomplete])
+        XCTAssertEqual(world.core.startCalls, 0, "a leftover staged capture could land above the boundary after the reset")
+        XCTAssertEqual(world.staging.staged, ["cap-stuck"])
+
+        let retried = await world.makeService().reset(credentialChoice: .keep)
+
+        XCTAssertTrue(retried.isComplete)
+        XCTAssertEqual(world.staging.staged, [])
+    }
+
+    func testUnreadableStagingIsAnUnknownAndNeverNothingToDo() async throws {
+        let world = try makeResetWorld()
+        world.faults.arm("staging.snapshot")
+        let snapshotFailed = await world.makeService().reset(credentialChoice: .keep)
+        XCTAssertEqual(snapshotFailed.blockers, [.stagingUnreadable])
+        XCTAssertEqual(world.core.startCalls, 0)
+
+        world.faults.arm("staging.purge.unreadable")
+        let purgeUnknown = await world.makeService().reset(credentialChoice: .keep)
+        XCTAssertEqual(purgeUnknown.blockers, [.stagingUnreadable])
+        XCTAssertEqual(world.core.startCalls, 0)
+    }
+
+    func testAPendingResetIsResumedWithoutTouchingStagingAgain() async throws {
+        let world = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(world)
+        world.faults.arm("fs.remove:cap-1.m4a")
+        _ = await world.makeService().reset(credentialChoice: .keep)
+        XCTAssertEqual(world.staging.snapshotCalls, 1)
+
+        world.staging.stage("cap-post-tap")
+        let second = await world.makeService().reset(credentialChoice: .keep)
+
+        XCTAssertTrue(second.isComplete)
+        XCTAssertEqual(world.staging.snapshotCalls, 1, "staging written after the first tap is not drained by a retry")
+        XCTAssertEqual(world.staging.staged, ["cap-post-tap"])
+        XCTAssertEqual(world.core.currentGeneration, 1, "a second tap while pending never opens another generation")
+    }
+
+    // MARK: Fresh generation
+
+    func testCapturesAfterCompletionBelongToTheNextGenerationAndAreNeverCleaned() async throws {
+        let world = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(world)
+        let completed = await world.makeService().reset(credentialChoice: .keep)
+        XCTAssertTrue(completed.isComplete)
+
+        try await world.seedItem("item-new", captureID: "cap-new", stagedRecord: .text, reminders: ["reminder-new": [1]])
+        let resumed = await world.makeService().resume()
+
+        XCTAssertTrue(resumed.isComplete)
+        XCTAssertEqual(world.core.startCalls, 1, "resume never starts a reset")
+        XCTAssertTrue(world.deletion.exists(.finalizedAudio, "cap-new.m4a"))
+        XCTAssertTrue(world.deletion.exists(.ingressStagingRecords, "cap-new.json"))
+        XCTAssertEqual(world.deletion.pendingNotificationIdentifiers(ofReminder: "reminder-new"), ["reminder-new#1"])
+        XCTAssertNil(world.deletion.core.status("item-new", .removeAudio), "no cleanup was queued for the new capture")
+    }
+
+    func testASecondResetAfterCompletionOpensTheNextGeneration() async throws {
+        let world = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(world)
+        _ = await world.makeService().reset(credentialChoice: .keep)
+        try await world.seedItem("item-new", captureID: "cap-new", stagedRecord: .text)
+
+        let second = await world.makeService().reset(credentialChoice: .keep)
+
+        XCTAssertTrue(second.isComplete)
+        XCTAssertEqual(second.progress?.generation, 2)
+        XCTAssertEqual(world.deletion.remnants(of: "cap-new"), [])
+    }
+
+    func testResumeWithNothingToDoStartsNothing() async throws {
+        let world = try makeResetWorld()
+
+        let report = await world.makeService().resume()
+
+        XCTAssertEqual(report.state, .notStarted)
+        XCTAssertEqual(report.blockers, [])
+        XCTAssertEqual(world.core.startCalls, 0)
+        XCTAssertEqual(world.staging.snapshotCalls, 0)
+    }
+
+    func testAnUnreachableCoreIsReportedAndStartsNothing() async throws {
+        let world = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(world)
+        world.faults.arm("reset.start")
+
+        let failed = await world.makeService().reset(credentialChoice: .keep)
+
+        XCTAssertEqual(failed.state, .notStarted)
+        XCTAssertEqual(failed.blockers, [.coreUnavailable])
+        XCTAssertTrue(world.deletion.exists(.finalizedAudio, "cap-1.m4a"), "no content is removed before the core records the reset")
+        XCTAssertEqual(world.deletion.pendingNotificationIdentifiers(ofReminder: "reminder-1").count, 2)
+    }
+
+    func testExportTemporariesThatRemainKeepTheResetPending() async throws {
+        let world = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(world)
+        world.faults.arm("exports.remove")
+
+        let first = await world.makeService().reset(credentialChoice: .keep)
+
+        XCTAssertEqual(first.state, .pending)
+        XCTAssertEqual(first.blockers, [.exportTemporariesRemain])
+        XCTAssertEqual(first.progress?.phase, .completed, "the core has nothing more to do; the native step is outstanding")
+
+        XCTAssertTrue(world.choice.isOutstanding, "the unfinished native step is remembered across a restart")
+
+        let relaunched = await world.makeService().resume()
+
+        XCTAssertTrue(relaunched.isComplete, "resume finishes the native step the core cannot see: \(relaunched.blockers)")
+        XCTAssertEqual(world.exports.removeCalls, 2)
+        XCTAssertFalse(world.choice.isOutstanding)
+        XCTAssertEqual(world.core.startCalls, 1)
+
+        let settled = await world.makeService().resume()
+        XCTAssertEqual(settled.state, .completed)
+        XCTAssertEqual(world.exports.removeCalls, 2, "a finished reset leaves later exports alone")
+    }
+
+    func testTheOutstandingMarkerIsClearedOnlyByACompletedReport() async throws {
+        let world = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(world)
+        world.faults.arm("outstanding.clear")
+
+        let first = await world.makeService().reset(credentialChoice: .keep)
+
+        XCTAssertEqual(first.state, .pending)
+        XCTAssertEqual(first.blockers, [.markerNotCleared])
+        XCTAssertTrue(world.choice.isOutstanding)
+
+        let second = await world.makeService().resume()
+        XCTAssertTrue(second.isComplete)
+        XCTAssertFalse(world.choice.isOutstanding)
+    }
+
+    func testABlockedResetLeavesNoMarkerForARestartToActOn() async throws {
+        let world = try makeResetWorld()
+        configureProfiles(world)
+        world.staging.stage("cap-stuck")
+        world.faults.arm("staging.purge")
+
+        let blocked = await world.makeService().reset(credentialChoice: .remove)
+        XCTAssertEqual(blocked.blockers, [.stagingPurgeIncomplete])
+        XCTAssertFalse(world.choice.isRequested)
+        XCTAssertFalse(world.choice.isOutstanding)
+
+        let relaunched = await world.makeService().resume()
+        XCTAssertEqual(relaunched.state, .notStarted)
+        XCTAssertEqual(world.credentials.removedReferences, [], "credentials are not removed by a reset that never started")
+        XCTAssertEqual(world.core.revokedProfileVersions, [])
+    }
+
+    // MARK: Credential choice
+
+    private func configureProfiles(_ world: ResetWorld) {
+        world.core.setProfiles([
+            ResetProfileCredential(profileVersion: "profile-a-v1", credentialReference: "ref-a", isRevoked: false),
+            ResetProfileCredential(profileVersion: "profile-b-v1", credentialReference: "ref-b", isRevoked: true),
+            ResetProfileCredential(profileVersion: "profile-c-v1", credentialReference: nil, isRevoked: false),
+        ])
+    }
+
+    func testKeepingCredentialsTouchesNoProfileAndNoSecret() async throws {
+        let world = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(world)
+        configureProfiles(world)
+
+        let report = await world.makeService().reset(credentialChoice: .keep)
+
+        XCTAssertTrue(report.isComplete)
+        XCTAssertEqual(world.core.revokedProfileVersions, [])
+        XCTAssertEqual(world.credentials.removedReferences, [])
+        XCTAssertFalse(world.choice.isRequested)
+    }
+
+    func testRemovingCredentialsRevokesProfilesAndDeletesTheirSecrets() async throws {
+        let world = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(world)
+        configureProfiles(world)
+
+        let report = await world.makeService().reset(credentialChoice: .remove)
+
+        XCTAssertTrue(report.isComplete)
+        XCTAssertEqual(world.core.revokedProfileVersions, ["profile-a-v1", "profile-c-v1"], "already revoked profiles are not revoked again")
+        XCTAssertEqual(world.credentials.removedReferences, ["ref-a", "ref-b"])
+        XCTAssertFalse(world.choice.isRequested, "the choice is spent once it was carried out")
+        let revokeIndex = try XCTUnwrap(world.log.index(of: "core.revoke:profile-a-v1"))
+        let deleteIndex = try XCTUnwrap(world.log.index(of: "credentials.delete:ref-a"))
+        XCTAssertLessThan(revokeIndex, deleteIndex, "a profile stops dispatching before its secret goes")
+    }
+
+    func testAFailedSecretRemovalKeepsTheResetPendingAndTheChoiceSurvivesARelaunch() async throws {
+        let world = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(world)
+        configureProfiles(world)
+        world.faults.arm("credentials.delete")
+
+        let first = await world.makeService().reset(credentialChoice: .remove)
+
+        XCTAssertEqual(first.state, .pending)
+        XCTAssertEqual(first.blockers, [.credentialRemovalIncomplete])
+        XCTAssertEqual(first.progress?.phase, .completed)
+        XCTAssertTrue(world.choice.isRequested)
+
+        let relaunched = await world.makeService().resume()
+
+        XCTAssertTrue(relaunched.isComplete)
+        XCTAssertEqual(Set(world.credentials.removedReferences), ["ref-a", "ref-b"])
+        XCTAssertFalse(world.choice.isRequested)
+    }
+
+    func testKeepAfterAnEarlierRemoveRequestWithdrawsIt() async throws {
+        let world = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(world)
+        configureProfiles(world)
+        world.faults.arm("reset.start")
+        _ = await world.makeService().reset(credentialChoice: .remove)
+        XCTAssertTrue(world.choice.isRequested)
+
+        let report = await world.makeService().reset(credentialChoice: .keep)
+
+        XCTAssertTrue(report.isComplete)
+        XCTAssertEqual(world.credentials.removedReferences, [])
+        XCTAssertEqual(world.core.revokedProfileVersions, [])
+    }
+
+    func testAChoiceThatCannotBeRecordedStartsNothing() async throws {
+        let world = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(world)
+        world.faults.arm("choice.record")
+
+        let report = await world.makeService().reset(credentialChoice: .remove)
+
+        XCTAssertEqual(report.state, .notStarted)
+        XCTAssertEqual(report.blockers, [.markerNotRecorded])
+        XCTAssertEqual(world.core.startCalls, 0)
+        XCTAssertEqual(world.staging.snapshotCalls, 0)
+    }
+
+    // MARK: Serialization
+
+    func testOverlappingResetsAreSerialized() async throws {
+        let world = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(world)
+        let service = world.makeService()
+
+        async let first = service.reset(credentialChoice: .keep)
+        async let second = service.reset(credentialChoice: .keep)
+        let reports = await [first, second]
+
+        XCTAssertTrue(reports.allSatisfy { $0.isComplete })
+        XCTAssertEqual(world.core.currentGeneration, 2, "the second call ran after the first finished, never interleaved with it")
+        assertEverythingErased(world)
+    }
+}
