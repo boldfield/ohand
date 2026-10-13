@@ -8,16 +8,23 @@ import XCTest
 /// reference, and reads of the revocation column. Captures come from the real ingress import and the reset itself is the
 /// real core operation; nothing here writes a reset generation, a tombstone or a cleanup row.
 final class RealCoreResetWorld {
+    static let credentialServiceName = "ohand.reset.tests"
+
     let storage: RealCoreDeletionWorld
     let keychain = FakeKeychain()
+    /// The fake Keychain as both the credential service and reset see it: one store, with the identity of every secret.
+    let secretKeychain: IdentityTrackingKeychain
     let credentials: CredentialService
+    let resetCredentials: KeychainResetCredentialRemover
     private var runtimes: [RealCoreResetRuntime] = []
 
     var layout: ProtectedStorageLayout { storage.layout }
 
     init() throws {
         storage = try RealCoreDeletionWorld()
-        credentials = CredentialService(serviceName: "ohand.reset.tests", keychain: keychain)
+        secretKeychain = IdentityTrackingKeychain(wrapping: keychain)
+        credentials = CredentialService(serviceName: Self.credentialServiceName, keychain: secretKeychain)
+        resetCredentials = KeychainResetCredentialRemover(serviceName: Self.credentialServiceName, keychain: secretKeychain)
     }
 
     func tearDown() {
@@ -84,10 +91,11 @@ final class RealCoreResetWorld {
             .stage(textRecord(captureID))
     }
 
-    /// Adds a provider profile whose credential lives in the fake Keychain, and returns the credential reference.
+    /// Adds a provider profile whose credential lives in the fake Keychain, and returns the credential reference. With
+    /// `reference`, the profile holds that existing reference instead, as an edit that mints a new version does.
     @discardableResult
-    func addProfile(version: String) throws -> String {
-        let reference = try credentials.addCredential(Data("synthetic secret for \(version)".utf8))
+    func addProfile(version: String, reference existing: String? = nil) throws -> String {
+        let reference = try existing ?? credentials.addCredential(Data("synthetic secret for \(version)".utf8))
         try execute(
             "INSERT INTO provider_profiles (profile_version, profile_id, provider_type, endpoint, model, "
                 + "credential_ref, timeout_seconds, retry_policy, authorized_destinations, capabilities, created_at) "
@@ -100,6 +108,17 @@ final class RealCoreResetWorld {
 
     func isCredentialPresent(_ reference: String) throws -> Bool {
         try credentials.credentialStatus(reference: reference) == .present
+    }
+
+    /// The user enters a new secret behind an existing reference.
+    func replaceSecret(reference: String) throws -> Data {
+        let replacement = Data("synthetic replacement secret \(UUID().uuidString)".utf8)
+        try credentials.updateCredential(replacement, reference: reference)
+        return replacement
+    }
+
+    func storedSecret(_ reference: String) throws -> Data {
+        try credentials.resolveSecret(reference: reference)
     }
 
     func isProfileRevoked(_ version: String) throws -> Bool {
@@ -229,11 +248,14 @@ final class RealCoreResetRuntime {
     private(set) var staging: NativeResetIngress?
     private(set) var service: ResetService?
 
+    private let resetCredentials: KeychainResetCredentialRemover
+
     init(
         world: RealCoreResetWorld,
         markerFileSystem: IngressFileSystem? = nil,
         wrapStaging: ((ResetIngressStaging) -> ResetIngressStaging)? = nil
     ) throws {
+        resetCredentials = world.resetCredentials
         session = try RealCoreResetSession(path: world.storage.databasePath)
         markers = FileResetMarkerStore(layout: world.layout, fileSystem: markerFileSystem ?? FileManagerIngressFileSystem())
         let faults = world.storage.faults
@@ -254,7 +276,7 @@ final class RealCoreResetRuntime {
                 staging: wrapStaging?(nativeStaging) ?? nativeStaging,
                 itemCleanup: itemCleanup,
                 exportTemporaries: ExportTemporaryCleaner(layout: world.layout),
-                credentials: world.credentials,
+                credentials: world.resetCredentials,
                 markers: markers)
         } catch {
             session.close()
@@ -284,7 +306,8 @@ final class RealCoreResetRuntime {
         let earlierOutstanding = try markers.isCleanupOutstanding()
         var removal: ResetCredentialRemoval?
         if choice == .remove {
-            removal = ResetCredentialRemoval(binding: try session.run { try await client.profileCredentials() })
+            let profiles = try session.run { try await client.profileCredentials() }
+            removal = try ResetCredentialRemoval(binding: profiles) { try resetCredentials.secretIdentity(reference: $0) }
         }
         let request = ResetRequest(
             credentialChoice: choice, credentialRemoval: removal, stagedBeforeTheTap: snapshot,
@@ -411,5 +434,59 @@ final class SnapshotHookStaging: ResetIngressStaging {
 
     func purgeUnimported(from snapshot: ResetStagingSnapshot) async -> ResetStagingPurge {
         await wrapped.purgeUnimported(from: snapshot)
+    }
+}
+
+/// `FakeKeychain` as one store for both sides of the credential boundary: `CredentialService` writes through it, and
+/// reset reads the identity of each secret from it. Like the real Keychain it moves the identity on every write (the
+/// modification mark on an overwrite, both marks on an add) and removes an item only while it has the named identity.
+/// Every status the wrapped fake forces or scripts still applies, so a test can fail exactly one Keychain call.
+final class IdentityTrackingKeychain: KeychainBoundary, ResetSecretKeychain {
+    private let wrapped: FakeKeychain
+    private var identities: [KeychainItemKey: ResetSecretIdentity] = [:]
+    private var nextWrite: UInt64 = 1
+
+    init(wrapping wrapped: FakeKeychain) {
+        self.wrapped = wrapped
+    }
+
+    func insert(key: KeychainItemKey, secret: Data, accessibility: KeychainAccessibility) -> OSStatus {
+        let status = wrapped.insert(key: key, secret: secret, accessibility: accessibility)
+        if status == errSecSuccess {
+            identities[key] = ResetSecretIdentity(createdAtBits: nextWrite, modifiedAtBits: nextWrite)
+            nextWrite += 1
+        }
+        return status
+    }
+
+    func replace(key: KeychainItemKey, secret: Data, accessibility: KeychainAccessibility) -> OSStatus {
+        let status = wrapped.replace(key: key, secret: secret, accessibility: accessibility)
+        if status == errSecSuccess {
+            let created = identities[key]?.createdAtBits ?? nextWrite
+            identities[key] = ResetSecretIdentity(createdAtBits: created, modifiedAtBits: nextWrite)
+            nextWrite += 1
+        }
+        return status
+    }
+
+    func inspect(key: KeychainItemKey) -> OSStatus { wrapped.inspect(key: key) }
+
+    func read(key: KeychainItemKey) -> KeychainReadResult { wrapped.read(key: key) }
+
+    func remove(key: KeychainItemKey) -> OSStatus {
+        let status = wrapped.remove(key: key)
+        if status == errSecSuccess { identities[key] = nil }
+        return status
+    }
+
+    func identity(of key: KeychainItemKey) -> ResetSecretLookup {
+        let status = wrapped.inspect(key: key)
+        guard status == errSecSuccess else { return ResetSecretLookup(status: status, identity: nil) }
+        return ResetSecretLookup(status: status, identity: identities[key])
+    }
+
+    func remove(_ key: KeychainItemKey, identity: ResetSecretIdentity) -> OSStatus {
+        guard identities[key] == identity else { return errSecItemNotFound }
+        return remove(key: key)
     }
 }

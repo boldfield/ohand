@@ -534,6 +534,98 @@ final class ResetCoreIntegrationTests: XCTestCase {
         XCTAssertFalse(try second.markers.isRemovalRequested())
     }
 
+    func testARetriedRemovalNeverDeletesASecretEnteredAfterTheTapBehindTheSameReference() throws {
+        for retriedBy in ["resume", "keep tap"] {
+            let context = "retried by \(retriedBy)"
+            let world = try makeWorld()
+            _ = try seedCaptures(world)
+            let reference = try world.addProfile(version: "profile-a-v1")
+            let first = try world.launch()
+            world.keychain.forcedStatus[.remove] = errSecIO
+            let interrupted = try first.reset(.remove)
+            XCTAssertEqual(interrupted.blockers, [.credentialRemovalIncomplete], context)
+            XCTAssertEqual(interrupted.progress?.phase, .completed, context)
+            XCTAssertEqual(
+                try first.markers.removalRequest()?.secrets.map(\.credentialReference), [reference],
+                "the owed removal binds the secret stored at the tap: \(context)")
+            first.terminate()
+
+            // In the fresh generation, with the removal still owed, the user enters a new secret behind the same stable
+            // reference and edits the profile, which mints a new version that holds that reference.
+            let replacement = try world.replaceSecret(reference: reference)
+            try world.addProfile(version: "profile-a-v2", reference: reference)
+            world.keychain.forcedStatus[.remove] = nil
+            let second = try world.launch()
+            let report = try retriedBy == "resume" ? second.resume() : second.reset(.keep)
+            second.terminate()
+
+            XCTAssertEqual(report.state, .completed, "\(context): \(report.blockers)")
+            XCTAssertTrue(try world.isProfileRevoked("profile-a-v1"), "the profile bound at the tap is revoked: \(context)")
+            XCTAssertFalse(try world.isProfileRevoked("profile-a-v2"), "the version minted after the tap is not: \(context)")
+            XCTAssertEqual(try world.storedSecret(reference), replacement, "the secret entered after the tap stays: \(context)")
+            XCTAssertEqual(world.keychain.callCount(.remove), 1, "nothing is removed once the bound secret is gone: \(context)")
+            XCTAssertFalse(try second.markers.isRemovalRequested(), "the removal is spent: \(context)")
+            XCTAssertFalse(try second.markers.isCleanupOutstanding(), context)
+            XCTAssertNil(try second.markers.request(), context)
+        }
+    }
+
+    func testARetriedRemovalLeavesAnUnchangedSecretThatAProfileConfiguredAfterTheTapHolds() throws {
+        for retriedBy in ["resume", "keep tap"] {
+            let context = "retried by \(retriedBy)"
+            let world = try makeWorld()
+            _ = try seedCaptures(world)
+            let reference = try world.addProfile(version: "profile-a-v1")
+            let other = try world.addProfile(version: "profile-b-v1")
+            let first = try world.launch()
+            world.keychain.forcedStatus[.remove] = errSecIO
+            let interrupted = try first.reset(.remove)
+            XCTAssertEqual(interrupted.blockers, [.credentialRemovalIncomplete], context)
+            first.terminate()
+
+            // The user edits the revoked profile a without entering a new secret: the new version holds the reference,
+            // and the secret behind it is still the one that was stored at the tap.
+            try world.addProfile(version: "profile-a-v2", reference: reference)
+            world.keychain.forcedStatus[.remove] = nil
+            let second = try world.launch()
+            let report = try retriedBy == "resume" ? second.resume() : second.reset(.keep)
+            second.terminate()
+
+            XCTAssertEqual(report.state, .completed, "\(context): \(report.blockers)")
+            XCTAssertTrue(try world.isProfileRevoked("profile-a-v1"), context)
+            XCTAssertTrue(try world.isProfileRevoked("profile-b-v1"), context)
+            XCTAssertFalse(try world.isProfileRevoked("profile-a-v2"), context)
+            XCTAssertTrue(try world.isCredentialPresent(reference), "a secret a profile configured after the tap holds stays: \(context)")
+            XCTAssertFalse(try world.isCredentialPresent(other), "the other bound secret goes: \(context)")
+            XCTAssertFalse(try second.markers.isRemovalRequested(), context)
+        }
+    }
+
+    func testARemoveTapThatCannotIdentifyTheStoredSecretsStartsNothing() throws {
+        let world = try makeWorld()
+        _ = try seedCaptures(world)
+        let reference = try world.addProfile(version: "profile-a-v1")
+        let runtime = try world.launch()
+        world.keychain.forcedStatus[.inspect] = errSecIO
+
+        let report = try runtime.reset(.remove)
+
+        XCTAssertEqual(report.state, .notStarted)
+        XCTAssertEqual(report.blockers, [.credentialsUnreadable])
+        XCTAssertNil(try runtime.markers.request(), "a tap whose choice cannot be bound is not recorded")
+        XCTAssertEqual(try runtime.currentGeneration(), 0, "the core started nothing")
+        XCTAssertFalse(try world.isProfileRevoked("profile-a-v1"))
+        world.keychain.forcedStatus[.inspect] = nil
+        XCTAssertTrue(try world.isCredentialPresent(reference))
+
+        let retried = try runtime.reset(.remove)
+        runtime.terminate()
+
+        XCTAssertEqual(retried.state, .completed, "blockers: \(retried.blockers)")
+        XCTAssertTrue(try world.isProfileRevoked("profile-a-v1"))
+        XCTAssertFalse(try world.isCredentialPresent(reference))
+    }
+
     func testAKeepTapAfterARemoveTapInterruptedRightAfterTheCoreStartedCarriesTheRemovalOutFirst() throws {
         for interruption in ["process death after start", "carry-over failure"] {
             let context = interruption

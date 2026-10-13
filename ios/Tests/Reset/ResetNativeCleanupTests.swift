@@ -181,10 +181,18 @@ final class ResetNativeCleanupTests: IngressStorageTestCase {
 
     // MARK: Markers
 
-    private static let boundProfiles = ResetCredentialRemoval(profiles: [
-        ResetBoundProfile(profileVersion: "profile-a-v1", credentialReference: "ref-a"),
-        ResetBoundProfile(profileVersion: "profile-b-v1", credentialReference: nil),
-    ])
+    private static let secretA = ResetBoundSecret(
+        credentialReference: "ref-a",
+        identity: ResetSecretIdentity(
+            createdAtBits: Date(timeIntervalSinceReferenceDate: 812_345_678.123_456).timeIntervalSinceReferenceDate.bitPattern,
+            modifiedAtBits: Date(timeIntervalSinceReferenceDate: 812_345_679.654_321).timeIntervalSinceReferenceDate.bitPattern))
+
+    private static let boundProfiles = ResetCredentialRemoval(
+        profiles: [
+            ResetBoundProfile(profileVersion: "profile-a-v1", credentialReference: "ref-a"),
+            ResetBoundProfile(profileVersion: "profile-b-v1", credentialReference: nil),
+        ],
+        secrets: [secretA])
 
     /// A tap; a `remove` tap binds `boundProfiles`.
     private func tap(_ choice: ResetCredentialChoice, _ captureIDs: Set<String>) -> ResetRequest {
@@ -208,6 +216,9 @@ final class ResetNativeCleanupTests: IngressStorageTestCase {
             try relaunched.request(), tap(.remove, ["cap-a", "cap-b"]),
             "the tap, the profiles its choice binds and its list survive a restart")
         XCTAssertEqual(try relaunched.request()?.credentialRemoval, Self.boundProfiles)
+        XCTAssertEqual(
+            try relaunched.request()?.credentialRemoval?.secrets.first?.identity.modifiedAt, Self.secretA.identity.modifiedAt,
+            "the identity of a bound secret survives a restart to the exact instant")
         XCTAssertFalse(try relaunched.isRemovalRequested(), "the choice is not armed by the tap alone")
         XCTAssertFalse(try relaunched.isCleanupOutstanding(), "cleanup is not outstanding for a reset that has not started")
 
@@ -315,6 +326,12 @@ final class ResetNativeCleanupTests: IngressStorageTestCase {
             .write(to: directory.appendingPathComponent(FileResetMarkerStore.requestFilePrefix + "1"))
         XCTAssertThrowsError(
             try store.request(), "a remove tap that does not say which profiles it binds is unreadable, never unbounded")
+
+        try store.clearRequest()
+        try Data(#"{"credentialChoice":"remove","profilesToRemove":[],"stagedBeforeTheTap":[]}"#.utf8)
+            .write(to: directory.appendingPathComponent(FileResetMarkerStore.requestFilePrefix + "1"))
+        XCTAssertThrowsError(
+            try store.request(), "a remove tap that does not say which secrets it binds is unreadable, never every secret")
     }
 
     func testTheRemovalMarkerKeepsWhatTheChoiceBindsAndIsNeverReadAsUnbounded() throws {
@@ -324,11 +341,15 @@ final class ResetNativeCleanupTests: IngressStorageTestCase {
 
         try store.recordRemovalRequested(Self.boundProfiles)
         let relaunched = FileResetMarkerStore(layout: layout)
-        XCTAssertEqual(try relaunched.removalRequest(), Self.boundProfiles, "the bound profiles survive a restart")
+        XCTAssertEqual(try relaunched.removalRequest(), Self.boundProfiles, "the bound profiles and secrets survive a restart")
 
-        let widened = ResetCredentialRemoval(profiles: Self.boundProfiles.profiles + [
-            ResetBoundProfile(profileVersion: "profile-c-v1", credentialReference: "ref-c"),
-        ])
+        let widened = ResetCredentialRemoval(
+            profiles: Self.boundProfiles.profiles + [
+                ResetBoundProfile(profileVersion: "profile-c-v1", credentialReference: "ref-c"),
+            ],
+            secrets: Self.boundProfiles.secrets + [
+                ResetBoundSecret(credentialReference: "ref-c", identity: ResetSecretIdentity(createdAtBits: 7, modifiedAtBits: 9)),
+            ])
         try store.recordRemovalRequested(widened)
         XCTAssertEqual(
             try relaunched.removalRequest(), Self.boundProfiles,
@@ -344,6 +365,12 @@ final class ResetNativeCleanupTests: IngressStorageTestCase {
         XCTAssertThrowsError(
             try relaunched.removalRequest(), "a marker that does not say what it binds is unreadable, never every profile")
         XCTAssertThrowsError(try relaunched.isRemovalRequested())
+
+        try Data(#"{"profiles":[{"profileVersion":"profile-a-v1","credentialReference":"ref-a"}]}"#.utf8)
+            .write(to: directory.appendingPathComponent(FileResetMarkerStore.removalFileName))
+        XCTAssertThrowsError(
+            try relaunched.removalRequest(),
+            "a marker that names references without the identity of their secrets is unreadable, never whatever is stored now")
     }
 
     func testMarkersAreDurableIdempotentAndIndependent() throws {

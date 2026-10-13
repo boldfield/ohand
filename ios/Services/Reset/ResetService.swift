@@ -8,11 +8,12 @@ import Foundation
 /// 1. The tap. In one step, native staging is listed and the ingress boundary is held: a capture made from this moment
 ///    on is fresh-generation content, so its import waits (it stays staged and durable) and it is neither listed,
 ///    imported nor purged. Everything listed is by definition from before the tap.
-/// 2. Record the tap as one durable request: the credential choice, the profiles a `remove` choice applies to (those the
-///    core lists at the tap), the list and whether an earlier generation is still pending at the tap. Nothing else is
-///    written yet, so an interruption here leaves a request a restart can only honor in full, never a half-started reset
-///    or a choice acted on early. While a request is recorded the boundary stays held, in this process and, because the
-///    ingress gate holds it again at launch from the recorded list, in the next.
+/// 2. Record the tap as one durable request: the credential choice, what a `remove` choice applies to (the profiles the
+///    core lists at the tap and, for each of their references, the identity of the secret the Keychain holds at the
+///    tap), the list and whether an earlier generation is still pending at the tap. Nothing else is written yet, so an
+///    interruption here leaves a request a restart can only honor in full, never a half-started reset or a choice acted
+///    on early. While a request is recorded the boundary stays held, in this process and, because the ingress gate holds
+///    it again at launch from the recorded list, in the next.
 /// 3. When the tap found an earlier reset unfinished (its generation pending, or native cleanup still outstanding for
 ///    it), finish that reset first (its cleanup, temporaries and recorded choice, steps 7 to 10), then, once it
 ///    completed, record the tap again as no longer awaiting it. Resuming the earlier generation only erases what existed
@@ -33,9 +34,11 @@ import Foundation
 /// 7. Run the per-item cleanup executors (`DeletionCleanupService`), which perform each effect and ask the core to
 ///    record only the ones that actually finished.
 /// 8. Remove export and share temporaries.
-/// 9. When the user chose it, revoke every provider profile that existed at the tap and remove its credential. Without
-///    that choice neither is touched, nothing is touched before step 5 completed, and a profile or secret configured
-///    after the tap is never touched, not even by a retry of a removal that failed or was interrupted.
+/// 9. When the user chose it, revoke every provider profile that existed at the tap and remove the secret that was
+///    stored at the tap behind its reference. Without that choice neither is touched, nothing is touched before step 5
+///    completed, and a profile or secret configured after the tap is never touched, not even by a retry of a removal
+///    that failed or was interrupted: the removal is conditioned on the secret's identity at the tap, and a bound
+///    reference that a profile configured after the tap holds keeps its secret.
 /// 10. Ask the core to re-evaluate. The report says `completed` only when the core reports the generation completed
 ///    and every native step converged; this service never decides success on its own.
 ///
@@ -122,14 +125,23 @@ actor ResetService {
         // steps it owes (cleanup, temporaries, its credential choice) are still outstanding. A marker that cannot be read
         // counts as unfinished; `finishEarlierReset` decides again.
         let earlierOutstanding = (try? markers.isCleanupOutstanding()) ?? true
-        // A remove choice applies to the profiles that exist now, at the tap. They are recorded with it, so neither a
-        // retry nor a restart can widen it to a profile configured later.
+        // A remove choice applies to the profiles that exist now, at the tap, and to the secrets stored now behind their
+        // references. Both are recorded with it, so neither a retry nor a restart can widen it to a profile configured
+        // or a secret entered later.
         var removal: ResetCredentialRemoval?
         if credentialChoice == .remove {
+            let profiles: [ResetProfileCredential]
             do {
-                removal = ResetCredentialRemoval(binding: try await core.profileCredentials())
+                profiles = try await core.profileCredentials()
             } catch {
                 return withdrawRequest(Self.coreFailed(error, progress: current), earlierOwed: earlierStarted)
+            }
+            do {
+                removal = try ResetCredentialRemoval(binding: profiles) { try credentials.secretIdentity(reference: $0) }
+            } catch {
+                return withdrawRequest(
+                    ResetReport(state: .notStarted, progress: current, blockers: [.credentialsUnreadable], itemCleanup: nil),
+                    earlierOwed: earlierStarted)
             }
         }
         let request = ResetRequest(
@@ -355,9 +367,12 @@ actor ResetService {
         return ResetReport(state: state, progress: latest, blockers: blockers, itemCleanup: cleanup)
     }
 
-    /// Carries out an owed `remove` choice on exactly the profiles it binds. The core's current listing only tells which
-    /// of them still need revoking; a profile it lists that the choice did not bind was configured after the tap and is
-    /// left alone, with its secret.
+    /// Carries out an owed `remove` choice on exactly the profiles and secrets it binds. The core's current listing tells
+    /// which bound profiles still need revoking; a profile it lists that the choice did not bind was configured after the
+    /// tap and is left alone, with its secret. Each bound secret is removed only while it is still the one stored at the
+    /// tap (the Keychain conditions the removal on its identity), so a secret the user entered since behind the same
+    /// reference stays; and a bound reference that a profile configured after the tap holds is in use by that fresh
+    /// profile, so its secret stays too, unchanged or not.
     private func removeCredentialsIfChosen() async -> ResetBlocker? {
         let removal: ResetCredentialRemoval?
         do {
@@ -383,9 +398,12 @@ actor ResetService {
                 incomplete = true
             }
         }
-        for reference in removal.credentialReferences.sorted() {
+        let heldByLaterProfiles = Set(
+            profiles.filter { !bound.contains($0.profileVersion) }.compactMap(\.credentialReference))
+        for secret in removal.secrets.sorted(by: { $0.credentialReference < $1.credentialReference })
+        where !heldByLaterProfiles.contains(secret.credentialReference) {
             do {
-                try credentials.deleteCredential(reference: reference)
+                try credentials.deleteCredential(reference: secret.credentialReference, identity: secret.identity)
             } catch CredentialError.invalidReference {
                 // A reference that names no Keychain item has no secret to remove.
             } catch {

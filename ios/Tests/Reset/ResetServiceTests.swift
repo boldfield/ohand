@@ -586,6 +586,110 @@ final class ResetServiceTests: ResetTestCase {
         }
     }
 
+    func testARetriedRemovalLeavesASecretEnteredAfterTheTapBehindABoundReferenceAlone() async throws {
+        for retriedBy in ["resume", "keep tap"] {
+            let context = "retried by \(retriedBy)"
+            let world = try makeResetWorld()
+            try await seedVoiceAndTextCaptures(world)
+            configureProfiles(world)
+            world.faults.arm("credentials.delete")
+            let first = await world.makeService().reset(credentialChoice: .remove)
+            XCTAssertEqual(first.blockers, [.credentialRemovalIncomplete], context)
+            XCTAssertEqual(
+                world.choice.removal?.secrets.map(\.credentialReference), ["ref-a", "ref-b"],
+                "the owed removal binds the secrets stored at the tap: \(context)")
+
+            // With the removal still owed, the user enters a new secret behind the bound reference ref-a (the reference
+            // is stable and mutable), as the first step of editing the profile; ref-b is left as it was at the tap.
+            world.credentials.update("ref-a")
+            let report: ResetReport
+            if retriedBy == "resume" {
+                report = await world.makeService().resume()
+            } else {
+                report = await world.makeService().reset(credentialChoice: .keep)
+            }
+
+            XCTAssertTrue(report.isComplete, "\(context): \(report.blockers)")
+            XCTAssertEqual(world.core.revokedProfileVersions, ["profile-a-v1", "profile-c-v1"], context)
+            XCTAssertEqual(world.credentials.removedReferences, ["ref-b"], "only the secret still stored as at the tap goes: \(context)")
+            XCTAssertEqual(world.credentials.keptReferences, ["ref-a"], "the secret entered since stays: \(context)")
+            XCTAssertTrue(world.credentials.isPresent("ref-a"), context)
+            XCTAssertFalse(world.choice.isRequested, "the removal is spent: nothing of what it bound remains: \(context)")
+            XCTAssertNil(world.choice.recordedRequest, context)
+        }
+    }
+
+    func testARetriedRemovalLeavesABoundSecretThatAProfileConfiguredAfterTheTapHoldsAlone() async throws {
+        for retriedBy in ["resume", "keep tap"] {
+            let context = "retried by \(retriedBy)"
+            let world = try makeResetWorld()
+            try await seedVoiceAndTextCaptures(world)
+            configureProfiles(world)
+            world.faults.arm("credentials.delete")
+            let first = await world.makeService().reset(credentialChoice: .remove)
+            XCTAssertEqual(first.blockers, [.credentialRemovalIncomplete], context)
+
+            // With the removal still owed, the user edits the revoked profile a: the edit mints a new version that holds
+            // the same reference, and the secret behind it is unchanged.
+            world.core.addProfile(ResetProfileCredential(profileVersion: "profile-a-v2", credentialReference: "ref-a", isRevoked: false))
+            let report: ResetReport
+            if retriedBy == "resume" {
+                report = await world.makeService().resume()
+            } else {
+                report = await world.makeService().reset(credentialChoice: .keep)
+            }
+
+            XCTAssertTrue(report.isComplete, "\(context): \(report.blockers)")
+            XCTAssertEqual(world.core.revokedProfileVersions, ["profile-a-v1", "profile-c-v1"], context)
+            XCTAssertEqual(world.core.isProfileRevoked("profile-a-v2"), false, "the later version is not bound: \(context)")
+            XCTAssertEqual(world.credentials.removedReferences, ["ref-b"], "a secret a later profile holds stays: \(context)")
+            XCTAssertTrue(world.credentials.isPresent("ref-a"), context)
+            XCTAssertFalse(world.choice.isRequested, context)
+        }
+    }
+
+    func testARemoveTapBindsNoSecretBehindAReferenceThatHoldsNoneAndASecretEnteredThereLaterStays() async throws {
+        let world = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(world)
+        configureProfiles(world)
+        world.credentials.markAbsent("ref-b")
+        world.faults.arm("credentials.delete")
+        let first = await world.makeService().reset(credentialChoice: .remove)
+        XCTAssertEqual(first.blockers, [.credentialRemovalIncomplete])
+        XCTAssertEqual(world.choice.removal?.secrets.map(\.credentialReference), ["ref-a"], "ref-b held nothing at the tap")
+        // After the tap, the user enters a secret behind the (revoked) profile b's reference.
+        world.credentials.update("ref-b")
+
+        let resumed = await world.makeService().resume()
+
+        XCTAssertTrue(resumed.isComplete, "blockers: \(resumed.blockers)")
+        XCTAssertEqual(world.credentials.removedReferences, ["ref-a"])
+        XCTAssertTrue(world.credentials.isPresent("ref-b"), "a secret entered after the tap is fresh-generation state")
+        XCTAssertFalse(world.choice.isRequested)
+    }
+
+    func testARemoveTapWhoseSecretsCannotBeIdentifiedStartsNothingAndIsRetried() async throws {
+        let world = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(world)
+        configureProfiles(world)
+        world.faults.arm("credentials.identity")
+
+        let report = await world.makeService().reset(credentialChoice: .remove)
+
+        XCTAssertEqual(report.state, .notStarted)
+        XCTAssertEqual(report.blockers, [.credentialsUnreadable])
+        XCTAssertNil(world.choice.recordedRequest, "a tap whose choice cannot be bound is not recorded")
+        XCTAssertFalse(world.staging.isHolding, "the boundary is released with the withdrawn tap")
+        XCTAssertEqual(world.core.startCalls, 0)
+        XCTAssertEqual(world.core.revokedProfileVersions, [])
+        XCTAssertEqual(world.credentials.removedReferences, [])
+
+        let retried = await world.makeService().reset(credentialChoice: .remove)
+
+        XCTAssertTrue(retried.isComplete, "blockers: \(retried.blockers)")
+        XCTAssertEqual(Set(world.credentials.removedReferences), ["ref-a", "ref-b"])
+    }
+
     func testATapThatWaitsForARestartBindsOnlyTheProfilesThatExistedAtTheTap() async throws {
         let world = try makeResetWorld()
         try await seedVoiceAndTextCaptures(world)

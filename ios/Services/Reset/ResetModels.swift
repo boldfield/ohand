@@ -30,32 +30,74 @@ enum ResetCredentialChoice: Equatable, Sendable {
     case remove
 }
 
-/// A provider profile as a `remove` choice binds it: the version to revoke and the reference whose secret to delete.
+/// A provider profile as a `remove` choice binds it: the version to revoke and the reference its credential lives under.
 struct ResetBoundProfile: Hashable, Sendable {
     let profileVersion: String
     let credentialReference: String?
 }
 
-/// What a `remove` choice applies to: exactly the profiles present at the tap that made it, revoked ones included (their
-/// secret is still stored). The reset revokes these and deletes their secrets, on the first attempt or on a retry after a
-/// failure or a crash, and never touches a profile or a secret configured after the tap: that is fresh-generation state,
-/// like a capture made after the tap.
-struct ResetCredentialRemoval: Equatable, Sendable {
-    let profiles: [ResetBoundProfile]
+/// Which secret is stored behind a credential reference at one moment. A reference is stable and mutable (an update
+/// overwrites the secret behind the same reference, a missing item is re-bound to a new one), so the reference alone
+/// cannot say whether the secret a `remove` choice applied to is still the one stored. The identity is Keychain metadata
+/// only: the instants the Keychain itself records for the item's creation and its last modification, which every write
+/// moves. It is never secret bytes nor anything derived from them, so a marker may hold it.
+struct ResetSecretIdentity: Hashable, Sendable {
+    /// `Date.timeIntervalSinceReferenceDate` as its exact bit pattern, so a stored identity compares exactly.
+    let createdAtBits: UInt64
+    let modifiedAtBits: UInt64
 
-    init(profiles: [ResetBoundProfile]) {
-        self.profiles = profiles
+    init(createdAtBits: UInt64, modifiedAtBits: UInt64) {
+        self.createdAtBits = createdAtBits
+        self.modifiedAtBits = modifiedAtBits
     }
 
-    /// Binds the profiles the core lists at the tap.
-    init(binding profiles: [ResetProfileCredential]) {
+    init(createdAt: Date, modifiedAt: Date) {
+        self.init(
+            createdAtBits: createdAt.timeIntervalSinceReferenceDate.bitPattern,
+            modifiedAtBits: modifiedAt.timeIntervalSinceReferenceDate.bitPattern)
+    }
+
+    var createdAt: Date { Date(timeIntervalSinceReferenceDate: Double(bitPattern: createdAtBits)) }
+    var modifiedAt: Date { Date(timeIntervalSinceReferenceDate: Double(bitPattern: modifiedAtBits)) }
+}
+
+/// A secret as a `remove` choice binds it: the reference and the identity of the secret stored behind it at the tap.
+struct ResetBoundSecret: Hashable, Sendable {
+    let credentialReference: String
+    let identity: ResetSecretIdentity
+}
+
+/// What a `remove` choice applies to: exactly the profiles present at the tap that made it, revoked ones included, and
+/// exactly the secrets stored at the tap behind their references. The reset revokes these profiles and deletes these
+/// secrets, on the first attempt or on a retry after a failure or a crash, and never touches a profile or a secret
+/// configured after the tap: that is fresh-generation state, like a capture made after the tap. A secret updated after
+/// the tap behind a bound reference is one of those, and so is a reference that had no secret at the tap and gained one
+/// since.
+struct ResetCredentialRemoval: Equatable, Sendable {
+    let profiles: [ResetBoundProfile]
+    let secrets: [ResetBoundSecret]
+
+    init(profiles: [ResetBoundProfile], secrets: [ResetBoundSecret] = []) {
+        self.profiles = profiles
+        self.secrets = secrets
+    }
+
+    /// Binds the profiles the core lists at the tap and, through `identityOf`, the secret stored at the tap behind each
+    /// of their references (none when `identityOf` answers nil: nothing is stored there to remove).
+    init(binding profiles: [ResetProfileCredential], identityOf: (String) throws -> ResetSecretIdentity?) rethrows {
         self.profiles = profiles.map {
             ResetBoundProfile(profileVersion: $0.profileVersion, credentialReference: $0.credentialReference)
         }
+        var secrets: [ResetBoundSecret] = []
+        for reference in Set(profiles.compactMap(\.credentialReference)).sorted() {
+            if let identity = try identityOf(reference) {
+                secrets.append(ResetBoundSecret(credentialReference: reference, identity: identity))
+            }
+        }
+        self.secrets = secrets
     }
 
     var profileVersions: Set<String> { Set(profiles.map(\.profileVersion)) }
-    var credentialReferences: Set<String> { Set(profiles.compactMap(\.credentialReference)) }
 }
 
 /// The durable reset operation as native code uses it (`core/src/lifecycle/reset`). The core owns the generation, the
@@ -174,12 +216,16 @@ protocol ResetExportTemporaries {
     func removeAll() -> Bool
 }
 
+/// The Keychain as reset needs it: which secret is behind a reference now, and removal of exactly that secret.
+/// `KeychainResetCredentialRemover` is the production implementation.
 protocol ResetCredentialRemoving {
-    /// Removes the secret behind a reference. Removing an absent credential succeeds.
-    func deleteCredential(reference: String) throws
+    /// The identity of the secret stored behind `reference` now; nil when none is stored. Throws when the Keychain
+    /// cannot answer (a storage failure, or the device is locked), never for an absent item.
+    func secretIdentity(reference: String) throws -> ResetSecretIdentity?
+    /// Removes the secret behind `reference` only while it is still the one with `identity`. Succeeds, removing nothing,
+    /// when no secret is stored there or a different one is: nothing of the bound secret remains either way.
+    func deleteCredential(reference: String, identity: ResetSecretIdentity) throws
 }
-
-extension CredentialService: ResetCredentialRemoving {}
 
 /// What native code still owes a reset, as small durable markers, so a restart finishes what the user asked for. They
 /// hold a choice, what it binds, flags and, with a tap, a reference to the core's generation at that tap; never a
@@ -198,7 +244,8 @@ protocol ResetMarkerStore {
 
     /// The user chose to remove provider profiles and their credentials, and what that choice binds: nil when no removal
     /// is owed. Set only after the core started the reset that carries the choice, and cleared once every bound profile
-    /// is revoked and every bound secret is gone, so a retry acts on exactly the profiles the choice applied to.
+    /// is revoked and every bound secret is gone, so a retry acts on exactly the profiles and secrets the choice applied
+    /// to.
     func removalRequest() throws -> ResetCredentialRemoval?
     func recordRemovalRequested(_ removal: ResetCredentialRemoval) throws
     func clearRemovalRequest() throws
@@ -226,6 +273,8 @@ enum ResetBlocker: String, Equatable, Sendable {
     case itemCleanupIncomplete = "item_cleanup_incomplete"
     case exportTemporariesRemain = "export_temporaries_remain"
     case credentialRemovalIncomplete = "credential_removal_incomplete"
+    /// A `remove` tap could not learn which secrets are stored behind the profiles it binds, so it started nothing.
+    case credentialsUnreadable = "credentials_unreadable"
     case coreResetPending = "core_reset_pending"
     case cancelled = "cancelled"
 }

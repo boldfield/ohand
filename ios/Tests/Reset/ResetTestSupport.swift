@@ -326,22 +326,61 @@ final class FakeResetExportTemporaries: ResetExportTemporaries {
     }
 }
 
+/// A credential store that, like the Keychain, identifies the secret behind each reference by write: every reference
+/// holds a secret until it is removed, and `update` puts a new secret (a new identity) behind the same reference.
 final class FakeResetCredentials: ResetCredentialRemoving {
     struct DeleteFailed: Error {}
+    struct LookupFailed: Error {}
+
+    private static let initial = ResetSecretIdentity(createdAtBits: 1, modifiedAtBits: 1)
 
     private let faults: FaultPlan
     private let log: ResetEventLog
+    private var identities: [String: ResetSecretIdentity] = [:]
+    private var absent: Set<String> = []
+    private var nextWrite: UInt64 = 2
     private(set) var removedReferences: [String] = []
+    /// References whose bound secret was left alone because a different one is stored now.
+    private(set) var keptReferences: [String] = []
 
     init(faults: FaultPlan, log: ResetEventLog) {
         self.faults = faults
         self.log = log
     }
 
-    func deleteCredential(reference: String) throws {
+    func isPresent(_ reference: String) -> Bool { !absent.contains(reference) }
+
+    /// No secret is stored behind `reference`, as after a restore from backup.
+    func markAbsent(_ reference: String) {
+        absent.insert(reference)
+    }
+
+    /// The user enters a new secret behind `reference` (re-binding it when it was removed).
+    func update(_ reference: String) {
+        let created = absent.contains(reference) ? nextWrite : (identities[reference] ?? Self.initial).createdAtBits
+        identities[reference] = ResetSecretIdentity(createdAtBits: created, modifiedAtBits: nextWrite)
+        nextWrite += 1
+        absent.remove(reference)
+        log.append("credentials.update:\(reference)")
+    }
+
+    func secretIdentity(reference: String) throws -> ResetSecretIdentity? {
+        if faults.fires("credentials.identity") { throw LookupFailed() }
+        if absent.contains(reference) { return nil }
+        return identities[reference] ?? Self.initial
+    }
+
+    func deleteCredential(reference: String, identity: ResetSecretIdentity) throws {
         if faults.fires("credentials.delete") { throw DeleteFailed() }
+        guard !absent.contains(reference) else { return }
+        guard (identities[reference] ?? Self.initial) == identity else {
+            log.append("credentials.keep:\(reference)")
+            keptReferences.append(reference)
+            return
+        }
         log.append("credentials.delete:\(reference)")
         removedReferences.append(reference)
+        absent.insert(reference)
     }
 }
 
