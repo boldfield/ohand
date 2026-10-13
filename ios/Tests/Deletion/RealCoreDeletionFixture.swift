@@ -4,6 +4,9 @@ import XCTest
 @testable import OhAndCoreBridge
 @testable import OhAndServices
 
+/// Wait at least as long as the core's own 5 s busy timeout (core/src/store/schema/mod.rs) for its write lock.
+private let coreStoreBusyTimeoutMilliseconds: Int32 = 5_000
+
 /// Raw SQL is confined to this file. The deletion intent itself (tombstone, search removal, cancel operations) is
 /// recorded by `mark_deletion_intent` in the Rust core, which has no export yet; `seedDeletedState` writes the rows that
 /// call leaves behind for one item with a reminder whose second schedule generation has an unrecorded cancel. The core's
@@ -206,6 +209,7 @@ final class RealCoreDeletionWorld {
     private func execute(_ statement: String) throws {
         var database: OpaquePointer?
         guard sqlite3_open(databasePath, &database) == SQLITE_OK else { throw StorageSetupFailed() }
+        sqlite3_busy_timeout(database, coreStoreBusyTimeoutMilliseconds)
         defer { sqlite3_close(database) }
         let status = sqlite3_exec(database, statement, nil, nil, nil)
         XCTAssertEqual(status, SQLITE_OK, "\(String(cString: sqlite3_errmsg(database))): \(statement)")
@@ -215,6 +219,7 @@ final class RealCoreDeletionWorld {
     private func query(_ sql: String, row: (OpaquePointer?) -> Void) throws {
         var database: OpaquePointer?
         guard sqlite3_open(databasePath, &database) == SQLITE_OK else { throw StorageSetupFailed() }
+        sqlite3_busy_timeout(database, coreStoreBusyTimeoutMilliseconds)
         defer { sqlite3_close(database) }
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else { throw StorageSetupFailed() }

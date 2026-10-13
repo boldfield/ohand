@@ -4,6 +4,9 @@ import XCTest
 @testable import OhAndCoreBridge
 @testable import OhAndServices
 
+/// Wait at least as long as the core's own 5 s busy timeout (core/src/store/schema/mod.rs) for its write lock.
+private let coreStoreBusyTimeoutMilliseconds: Int32 = 5_000
+
 /// Synthetic stored state for one provider job, written the way the import and profile installation will: rows for
 /// the profile, capture, item, route, route authorization and job. Everything is fixture data.
 struct ProviderExchangeScenario {
@@ -46,6 +49,7 @@ enum ProviderExchangeSeed {
     private static func seed(path: String, scenario: ProviderExchangeScenario) throws {
         var database: OpaquePointer?
         XCTAssertEqual(sqlite3_open(path, &database), SQLITE_OK)
+        sqlite3_busy_timeout(database, coreStoreBusyTimeoutMilliseconds)
         defer { sqlite3_close(database) }
         let revokedAt = scenario.profileRevoked ? "'2026-10-08T09:40:00Z'" : "NULL"
         let profileDestinations = quote(json([ProviderExchangeScenario.vendorOrigin]))

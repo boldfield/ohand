@@ -4,6 +4,9 @@ import XCTest
 @testable import OhAndCoreBridge
 @testable import OhAndServices
 
+/// Wait at least as long as the core's own 5 s busy timeout (core/src/store/schema/mod.rs) for its write lock.
+private let coreStoreBusyTimeoutMilliseconds: Int32 = 5_000
+
 /// Reads item status from the real Rust core with `CoreHandle.startItemStatus`, the way a composition root must. The
 /// importer owns the writer core's single event handler, so reads go through a second handle on the same store file.
 final class CoreStatusProgressReader: CaptureProgressReading {
@@ -66,6 +69,7 @@ final class CaptureEntryCoreIntegrationTests: IngressStorageTestCase {
         seedCore.close()
         var database: OpaquePointer?
         XCTAssertEqual(sqlite3_open(layout.databaseURL.path, &database), SQLITE_OK)
+        sqlite3_busy_timeout(database, coreStoreBusyTimeoutMilliseconds)
         let statement = "INSERT INTO routes (route_id, route_name, scope, processing_destinations, created_at) "
             + "VALUES ('route-personal', 'route-personal', 'personal', '[]', '2026-10-08T09:00:00Z')"
         XCTAssertEqual(sqlite3_exec(database, statement, nil, nil, nil), SQLITE_OK)
