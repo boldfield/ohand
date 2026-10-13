@@ -71,6 +71,47 @@ private final class RecordingModule: CompositionModule {
     }
 }
 
+/// Owns the processing health client, which claims every identifier of its interval, and is registered before others.
+private final class HealthOwningModule: CompositionModule {
+    let identifier = "health.owner"
+    let firstOperationID: UInt64 = 1 << 42
+    private(set) var health: ProcessingHealthService?
+
+    func attach(to context: CompositionContext) throws {
+        health = try context.clients.processingHealth()
+    }
+
+    func handle(_ event: CoreEvent) -> Bool {
+        health?.handle(event) ?? false
+    }
+
+    func shutDown() {}
+}
+
+/// Takes the fixed-range core clients it names when it attaches.
+private final class ClientTakingModule: CompositionModule {
+    let identifier: String
+    let firstOperationID: UInt64
+    private let take: (CompositionCoreClients) throws -> Void
+    private(set) var isShutDown = false
+
+    init(identifier: String, firstOperationID: UInt64, take: @escaping (CompositionCoreClients) throws -> Void) {
+        self.identifier = identifier
+        self.firstOperationID = firstOperationID
+        self.take = take
+    }
+
+    func attach(to context: CompositionContext) throws {
+        try take(context.clients)
+    }
+
+    func handle(_ event: CoreEvent) -> Bool { false }
+
+    func shutDown() {
+        isShutDown = true
+    }
+}
+
 final class CompositionRootTests: XCTestCase {
     private static let routeID = "route-composition"
     /// The core requires a proposal's zone to equal the capture's, so the reply reads the identifier the root stamps.
@@ -170,7 +211,7 @@ final class CompositionRootTests: XCTestCase {
 
     func testModuleJoinsWithoutEditingTheRoot() throws {
         let module = RecordingModule(
-            identifier: "optional.capability", firstOperationID: 1 << 58, jobTypes: ["optional_capability_job"])
+            identifier: "optional.capability", firstOperationID: 1 << 44, jobTypes: ["optional_capability_job"])
         let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), modules: [module])
         XCTAssertNotNil(module.context, "attach receives the open core")
         try module.askCore()
@@ -180,7 +221,7 @@ final class CompositionRootTests: XCTestCase {
     }
 
     func testModuleContextCarriesOnlyGatedAndCoreMediatedCapabilities() throws {
-        let module = RecordingModule(identifier: "boundary.probe", firstOperationID: 1 << 58)
+        let module = RecordingModule(identifier: "boundary.probe", firstOperationID: 1 << 44)
         let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), modules: [module])
         defer { root.shutDown() }
         let context = try XCTUnwrap(module.context)
@@ -197,7 +238,7 @@ final class CompositionRootTests: XCTestCase {
 
     func testModuleReadIsRefusedWhileTheSessionIsLocked() throws {
         let (session, _) = makeSession(authenticated: false)
-        let module = RecordingModule(identifier: "locked.reader", firstOperationID: 1 << 58)
+        let module = RecordingModule(identifier: "locked.reader", firstOperationID: 1 << 44)
         let root = try makeTestRoot(
             sender: ScriptedProviderSender(reply: Data()), readSession: session, modules: [module])
         defer { root.shutDown() }
@@ -211,7 +252,7 @@ final class CompositionRootTests: XCTestCase {
 
     func testModuleAnswerArrivingAfterARelockIsRefusedAdmission() throws {
         let (session, _) = makeSession(authenticated: true)
-        let module = RecordingModule(identifier: "relocked.reader", firstOperationID: 1 << 58)
+        let module = RecordingModule(identifier: "relocked.reader", firstOperationID: 1 << 44)
         let root = try makeTestRoot(
             sender: ScriptedProviderSender(reply: Data()), readSession: session, modules: [module])
         defer { root.shutDown() }
@@ -222,7 +263,7 @@ final class CompositionRootTests: XCTestCase {
     }
 
     func testModuleAnswerIsAdmittedWhileTheSessionStaysAuthenticated() throws {
-        let module = RecordingModule(identifier: "authenticated.reader", firstOperationID: 1 << 58)
+        let module = RecordingModule(identifier: "authenticated.reader", firstOperationID: 1 << 44)
         let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), modules: [module])
         defer { root.shutDown() }
         try module.askCore()
@@ -230,16 +271,64 @@ final class CompositionRootTests: XCTestCase {
         XCTAssertTrue(module.admissionRefusals.isEmpty)
     }
 
-    func testModuleJustBelowTheJobRunnerRangeReceivesItsEvents() throws {
+    func testModuleJustBelowTheProcessingHealthIntervalReceivesItsEvents() throws {
         let module = RecordingModule(
             identifier: "highest.accepted",
-            firstOperationID: JobRunnerService.firstOperationID - ServiceCompositionRoot.operationRangeWidth)
+            firstOperationID: ProcessingHealthService.firstOperationID - ServiceCompositionRoot.operationRangeWidth)
         let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), modules: [module])
         defer { root.shutDown() }
         try module.askCore()
         XCTAssertTrue(
             pump(until: { !module.receivedEvents.isEmpty }),
             "an accepted module at the top of the allowed range is not shadowed by the job runner")
+    }
+
+    func testModuleAboveAProcessingHealthOwnerReceivesItsResponse() throws {
+        let healthOwner = HealthOwningModule()
+        let upper = RecordingModule(
+            identifier: "upper.module",
+            firstOperationID: ProcessingHealthService.firstOperationID - ServiceCompositionRoot.operationRangeWidth)
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), modules: [healthOwner, upper])
+        defer { root.shutDown() }
+        let health = try XCTUnwrap(healthOwner.health)
+        health.refresh()
+        try upper.askCore()
+        XCTAssertTrue(
+            pump(until: { !upper.receivedEvents.isEmpty && health.latestOutcome != nil }),
+            "the health client, routed first, answers its own read without swallowing the later module's answer")
+        XCTAssertTrue(upper.admissionRefusals.isEmpty)
+    }
+
+    func testEveryFixedRangeCoreClientCanBeTakenOnce() throws {
+        let module = ClientTakingModule(identifier: "all.clients", firstOperationID: 1 << 44) { clients in
+            _ = try clients.audioRetention()
+            _ = try clients.deletionCleanup()
+            _ = try clients.processingHealth()
+            _ = try clients.shadowReview()
+        }
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), modules: [module])
+        root.shutDown()
+        XCTAssertTrue(module.isShutDown)
+    }
+
+    func testAFixedRangeCoreClientTakenTwiceIsRefusedAndReleasesEverything() throws {
+        let sender = ScriptedProviderSender(reply: Data())
+        let takers: [(String, (CompositionCoreClients) throws -> Void)] = [
+            (ServiceCompositionRoot.audioRetentionClientName, { _ = try $0.audioRetention() }),
+            (ServiceCompositionRoot.deletionCleanupClientName, { _ = try $0.deletionCleanup() }),
+            (ServiceCompositionRoot.processingHealthClientName, { _ = try $0.processingHealth() }),
+            (ServiceCompositionRoot.shadowReviewClientName, { _ = try $0.shadowReview() }),
+        ]
+        for (name, take) in takers {
+            let first = ClientTakingModule(identifier: "first", firstOperationID: 1 << 44, take: take)
+            let second = ClientTakingModule(identifier: "second", firstOperationID: 1 << 45, take: take)
+            XCTAssertThrowsError(try makeTestRoot(sender: sender, modules: [first, second]), name) {
+                XCTAssertEqual($0 as? CompositionError, .coreClientAlreadyTaken(name))
+            }
+            XCTAssertTrue(first.isShutDown, "\(name): the module that attached is shut down when assembly fails")
+        }
+        let again = try makeTestRoot(sender: sender)
+        again.shutDown()
     }
 
     func testModuleOperationRangesThatCollideAreRefused() throws {
@@ -251,11 +340,43 @@ final class CompositionRootTests: XCTestCase {
             ("above the job runner start", [RecordingModule(identifier: "a", firstOperationID: 1 << 63)]),
             ("the highest identifier", [RecordingModule(identifier: "a", firstOperationID: UInt64.max)]),
             ("the reminder range", [RecordingModule(identifier: "a", firstOperationID: 1 << 56)]),
+            ("the audio retention client range", [RecordingModule(identifier: "a", firstOperationID: 1 << 58)]),
+            ("the deletion cleanup client range", [RecordingModule(identifier: "a", firstOperationID: 1 << 52)]),
+            ("the shadow review client range", [RecordingModule(identifier: "a", firstOperationID: 1 << 48)]),
+            (
+                "ending inside the shadow review client range",
+                [RecordingModule(identifier: "a", firstOperationID: (1 << 48) - (1 << 39))]
+            ),
+            ("the notification action range", [RecordingModule(identifier: "a", firstOperationID: 1 << 60)]),
+            (
+                "inside the processing health interval",
+                [
+                    RecordingModule(
+                        identifier: "a",
+                        firstOperationID: ProcessingHealthService.firstOperationID
+                            + ServiceCompositionRoot.operationRangeWidth)
+                ]
+            ),
+            (
+                "straddling the job runner start",
+                [
+                    RecordingModule(
+                        identifier: "a",
+                        firstOperationID: JobRunnerService.firstOperationID - ServiceCompositionRoot.operationRangeWidth)
+                ]
+            ),
+            (
+                "overlapping the end of another module's range",
+                [
+                    RecordingModule(identifier: "a", firstOperationID: 1 << 44),
+                    RecordingModule(identifier: "b", firstOperationID: (1 << 44) + (1 << 39)),
+                ]
+            ),
             (
                 "another module's range",
                 [
-                    RecordingModule(identifier: "a", firstOperationID: 1 << 58),
-                    RecordingModule(identifier: "b", firstOperationID: 1 << 58),
+                    RecordingModule(identifier: "a", firstOperationID: 1 << 44),
+                    RecordingModule(identifier: "b", firstOperationID: 1 << 44),
                 ]
             ),
         ]
@@ -270,8 +391,8 @@ final class CompositionRootTests: XCTestCase {
 
     func testDuplicateModuleIdentifiersAreRefused() throws {
         let modules: [CompositionModule] = [
-            RecordingModule(identifier: "same", firstOperationID: 1 << 58),
-            RecordingModule(identifier: "same", firstOperationID: 1 << 59),
+            RecordingModule(identifier: "same", firstOperationID: 1 << 44),
+            RecordingModule(identifier: "same", firstOperationID: 1 << 45),
         ]
         XCTAssertThrowsError(try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), modules: modules)) {
             XCTAssertEqual($0 as? CompositionError, .duplicateModule("same"))
@@ -281,7 +402,7 @@ final class CompositionRootTests: XCTestCase {
     func testJobTypeConflictFailsCleanlyAndReleasesEverything() throws {
         let sender = ScriptedProviderSender(reply: Data())
         let module = RecordingModule(
-            identifier: "clash", firstOperationID: 1 << 58, jobTypes: [TranscriptionJobHandler.transcriptionJobType])
+            identifier: "clash", firstOperationID: 1 << 44, jobTypes: [TranscriptionJobHandler.transcriptionJobType])
         XCTAssertThrowsError(try makeTestRoot(sender: sender, modules: [module])) {
             XCTAssertEqual($0 as? CompositionError, .jobTypeConflict(TranscriptionJobHandler.transcriptionJobType))
         }

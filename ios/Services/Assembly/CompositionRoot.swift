@@ -15,6 +15,8 @@ public enum CompositionError: Error, Equatable {
     case operationRangeConflict(String)
     /// Two job capabilities claim the same job type.
     case jobTypeConflict(String)
+    /// A core client with a fixed operation range was asked for a second time; two instances would share identifiers.
+    case coreClientAlreadyTaken(String)
 }
 
 // MARK: - Configuration
@@ -141,7 +143,11 @@ public struct CompositionContext {
 }
 
 /// Builds the core-backed clients a module owns, without handing the module the core handle itself. Each client takes
-/// the operation identifier range it documents; a module forwards the events of that range to the client's `handle`.
+/// the fixed operation identifier range it documents, not the module's `firstOperationID`; a module forwards events to
+/// the client's `handle`. The root reserves every one of these ranges (`ServiceCompositionRoot.reservedOperationRanges`)
+/// whether or not a module takes the client, so no module's own range can overlap one, and each client can be taken
+/// once per root: a second request throws `coreClientAlreadyTaken`, because two instances would issue the same
+/// identifiers and take each other's answers.
 ///
 /// Only clients whose callers cannot claim a read authorization they do not hold belong here. The raw export and
 /// metrics clients take the caller's word that reads are authenticated, and the raw notification action client
@@ -149,14 +155,41 @@ public struct CompositionContext {
 /// offered: a capability that needs one is built over the root's read session, never from this factory.
 public struct CompositionCoreClients {
     fileprivate let core: CoreHandle
+    fileprivate let taken = TakenCoreClients()
 
-    public func audioRetention() -> CoreAudioRetentionClient { CoreAudioRetentionClient(core: core) }
-    public func deletionCleanup() -> CoreDeletionCleanupClient { CoreDeletionCleanupClient(core: core) }
-    public func processingHealth(stallAfterSeconds: UInt32 = 0, leaseGraceSeconds: UInt32 = 0) -> ProcessingHealthService {
-        ProcessingHealthService(core: core, stallAfterSeconds: stallAfterSeconds, leaseGraceSeconds: leaseGraceSeconds)
+    public func audioRetention() throws -> CoreAudioRetentionClient {
+        try taken.take(ServiceCompositionRoot.audioRetentionClientName)
+        return CoreAudioRetentionClient(core: core)
     }
-    public func shadowReview(configuration: ShadowReviewConfiguration = .off) -> ShadowReviewService {
-        ShadowReviewService(core: core, configuration: configuration)
+
+    public func deletionCleanup() throws -> CoreDeletionCleanupClient {
+        try taken.take(ServiceCompositionRoot.deletionCleanupClientName)
+        return CoreDeletionCleanupClient(core: core)
+    }
+
+    public func processingHealth(
+        stallAfterSeconds: UInt32 = 0, leaseGraceSeconds: UInt32 = 0
+    ) throws -> ProcessingHealthService {
+        try taken.take(ServiceCompositionRoot.processingHealthClientName)
+        return ProcessingHealthService(
+            core: core, stallAfterSeconds: stallAfterSeconds, leaseGraceSeconds: leaseGraceSeconds)
+    }
+
+    public func shadowReview(configuration: ShadowReviewConfiguration = .off) throws -> ShadowReviewService {
+        try taken.take(ServiceCompositionRoot.shadowReviewClientName)
+        return ShadowReviewService(core: core, configuration: configuration)
+    }
+}
+
+/// The fixed-range core clients already handed out by one root's factory.
+private final class TakenCoreClients {
+    private let lock = NSLock()
+    private var names = Set<String>()
+
+    func take(_ name: String) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard names.insert(name).inserted else { throw CompositionError.coreClientAlreadyTaken(name) }
     }
 }
 
@@ -219,9 +252,12 @@ public enum CompositionAuthenticationOutcome: Equatable, Sendable {
 /// its own operation identifier range, may contribute native job capabilities, and receives the core events that
 /// answer its operations.
 ///
-/// The root refuses a module whose `firstOperationID` is below `ServiceCompositionRoot.minimumModuleOperationID`, at or
-/// above `JobRunnerService.firstOperationID` (the job runner claims every event from there up), or within `ServiceCompositionRoot.operationRangeWidth` of the range of the root's own clients or another module, so
-/// two clients can never take each other's events. Modules are attached in the order given, after the job runner.
+/// A module's own range is `[firstOperationID, firstOperationID + ServiceCompositionRoot.operationRangeWidth)`. The
+/// root refuses a module whose `firstOperationID` is below `ServiceCompositionRoot.minimumModuleOperationID`, or whose
+/// range overlaps one of `ServiceCompositionRoot.reservedOperationRanges` (the root's own clients, every fixed-range
+/// client `CompositionCoreClients` can hand out, processing health's whole interval and the job runner's interval up to
+/// the highest identifier) or another module's range, so two clients can never take each other's events. Modules are
+/// attached in the order given, after the job runner.
 public protocol CompositionModule: AnyObject {
     var identifier: String { get }
     var firstOperationID: UInt64 { get }
@@ -511,8 +547,52 @@ private final class ForegroundState: @unchecked Sendable {
 public final class ServiceCompositionRoot {
     /// The smallest first operation identifier a module may use; below it lie the capture importer's identifiers.
     public static let minimumModuleOperationID: UInt64 = 1 << 32
-    /// How far apart two clients' first operation identifiers must be.
+    /// The width of a module's own operation range and of each fixed-range client's reserved range.
     public static let operationRangeWidth: UInt64 = 1 << 40
+
+    static let audioRetentionClientName = "audio retention"
+    static let deletionCleanupClientName = "deletion cleanup"
+    static let processingHealthClientName = "processing health"
+    static let shadowReviewClientName = "shadow review"
+    /// `ShadowReviewService` keeps its first operation identifier private; this is its value.
+    static let shadowReviewFirstOperationID: UInt64 = 1 << 48
+
+    /// One half-open interval of operation identifiers `[start, end)` that a client claims.
+    public struct OperationRange: Equatable, Sendable {
+        public let name: String
+        public let start: UInt64
+        public let end: UInt64
+
+        func overlaps(_ other: OperationRange) -> Bool {
+            start < other.end && other.start < end
+        }
+    }
+
+    private static func fixedWidthRange(_ name: String, from start: UInt64) -> OperationRange {
+        OperationRange(name: name, start: start, end: start + operationRangeWidth)
+    }
+
+    /// Every interval a module's range may not overlap: the importer's identifiers below
+    /// `minimumModuleOperationID`, the root's own clients, every fixed-range client a module can take from
+    /// `CompositionCoreClients` or that another service builds over the core (export, notification actions, metrics),
+    /// and the intervals whose `handle` claims every identifier in them rather than only those it issued: processing
+    /// health up to the job runner, and the job runner up to the highest identifier.
+    public static let reservedOperationRanges: [OperationRange] = [
+        OperationRange(name: "importer", start: 0, end: minimumModuleOperationID),
+        fixedWidthRange(shadowReviewClientName, from: shadowReviewFirstOperationID),
+        fixedWidthRange("transcription", from: TranscriptionCoreClient.firstOperationID),
+        fixedWidthRange(deletionCleanupClientName, from: CoreDeletionCleanupClient.firstOperationID),
+        fixedWidthRange("export", from: CoreExportClient.firstOperationID),
+        fixedWidthRange("reminders", from: CoreReminderReconciler.firstOperationID),
+        fixedWidthRange("item status", from: CoreItemStatusReader.firstOperationID),
+        fixedWidthRange(audioRetentionClientName, from: CoreAudioRetentionClient.firstOperationID),
+        fixedWidthRange("metrics", from: CoreMetricsClient.firstOperationID),
+        fixedWidthRange("notification actions", from: CoreNotificationActionClient.firstOperationID),
+        OperationRange(
+            name: processingHealthClientName, start: ProcessingHealthService.firstOperationID,
+            end: JobRunnerService.firstOperationID),
+        OperationRange(name: "job runner", start: JobRunnerService.firstOperationID, end: UInt64.max),
+    ]
 
     public let configuration: CompositionConfiguration
     public var adapterSet: CompositionAdapterSet { adapters.kind }
@@ -837,32 +917,24 @@ public final class ServiceCompositionRoot {
         let foreground: ForegroundState
     }
 
-    /// First operation identifiers of the root's own clients; the importer's identifiers start at 1.
-    private static let ownOperationRanges: [(name: String, start: UInt64)] = [
-        ("transcription", TranscriptionCoreClient.firstOperationID),
-        ("reminders", CoreReminderReconciler.firstOperationID),
-        ("item status", CoreItemStatusReader.firstOperationID),
-        ("job runner", JobRunnerService.firstOperationID),
-    ]
-
     private static func validate(modules: [CompositionModule]) throws {
         var identifiers = Set<String>()
-        var claimed: [(name: String, start: UInt64)] = ownOperationRanges
+        var claimed = reservedOperationRanges
         for module in modules {
             guard identifiers.insert(module.identifier).inserted else {
                 throw CompositionError.duplicateModule(module.identifier)
             }
             let start = module.firstOperationID
-            guard start >= minimumModuleOperationID, start < JobRunnerService.firstOperationID else {
+            // A start this high overlaps the job runner's reserved interval anyway; refusing it first keeps the end
+            // below from overflowing.
+            guard start < JobRunnerService.firstOperationID else {
                 throw CompositionError.operationRangeConflict(module.identifier)
             }
-            for other in claimed {
-                let distance = start > other.start ? start - other.start : other.start - start
-                if distance < operationRangeWidth {
-                    throw CompositionError.operationRangeConflict(module.identifier)
-                }
+            let range = OperationRange(name: module.identifier, start: start, end: start + operationRangeWidth)
+            guard !claimed.contains(where: { $0.overlaps(range) }) else {
+                throw CompositionError.operationRangeConflict(module.identifier)
             }
-            claimed.append((module.identifier, start))
+            claimed.append(range)
         }
     }
 
