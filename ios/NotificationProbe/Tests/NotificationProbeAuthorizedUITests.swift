@@ -55,9 +55,23 @@ final class NotificationProbeAuthorizedUITests: NotificationProbeUITestCase {
             XCTAssertEqual(calendar["past.pendingContainsRequest"], "false", "a one-shot calendar trigger in the past is not retained")
         }
 
+        XCTContext.runActivity(named: "pending request capacity") { _ in
+            let capacity = run("capacity")
+            XCTAssertEqual(capacity["requestsAdded"], "100")
+            XCTAssertEqual(capacity["addErrorCount"], "0")
+            XCTAssertEqual(capacity["pendingCount"], "64", "the OS keeps at most 64 pending requests per app")
+            XCTAssertEqual(
+                capacity["retainedAmongLastAdded64"], "64",
+                "observed retention keeps the most recently added 64 (not the soonest-firing 64); see docs/validation/notification-probe.md"
+            )
+        }
+
         XCTContext.runActivity(named: "foreground delivery reaches the delegate") { _ in
             let foreground = run("foregroundDelivery")
-            XCTAssertEqual(foreground["willPresentCalled"], "true")
+            XCTAssertEqual(
+                foreground["willPresentCalled"], "true",
+                "add took \(foreground["addMilliseconds"] ?? "nil") ms for a \(foreground["intervalSeconds"] ?? "nil") s trigger; delivered=\(foreground["deliveredContainsRequest"] ?? "nil") pending=\(foreground["pendingContainsRequest"] ?? "nil")"
+            )
         }
 
         XCTContext.runActivity(named: "delivery while the app is terminated") { _ in
@@ -73,18 +87,6 @@ final class NotificationProbeAuthorizedUITests: NotificationProbeUITestCase {
             XCTAssertEqual(report["willPresentCallbackCountSinceLaunch"], "0", "no foreground callback occurs for a delivery made while terminated")
             let cleared = run("clearDelivered")
             XCTAssertEqual(cleared["deliveredAfterRemoval"], "0")
-        }
-
-        // Last on purpose: its 100-request churn may leave the notification daemon slow for the delivery scenarios (hypothesis).
-        XCTContext.runActivity(named: "pending request capacity") { _ in
-            let capacity = run("capacity")
-            XCTAssertEqual(capacity["requestsAdded"], "100")
-            XCTAssertEqual(capacity["addErrorCount"], "0")
-            XCTAssertEqual(capacity["pendingCount"], "64", "the OS keeps at most 64 pending requests per app")
-            XCTAssertEqual(
-                capacity["retainedAmongLastAdded64"], "64",
-                "observed retention keeps the most recently added 64 (not the soonest-firing 64); see docs/validation/notification-probe.md"
-            )
         }
     }
 }
