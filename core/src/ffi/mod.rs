@@ -23,5 +23,6 @@ pub mod transcription_attachment;
 
 pub mod job_health;
 pub mod job_runner;
+pub mod notification_actions;
 pub mod notification_reconciliation;
 pub mod reset;
