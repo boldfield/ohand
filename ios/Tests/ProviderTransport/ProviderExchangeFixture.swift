@@ -15,6 +15,9 @@ struct ProviderExchangeScenario {
     static let vendorOrigin = "https://api.anthropic.com"
     static let otherVendorOrigin = "https://api.openai.com"
 
+    /// The profile's request timeout, which bounds every exchange the native transport performs.
+    static let profileTimeoutSeconds = 30
+
     var credentialReference: String
     var routeDestinations: [String] = [ProviderExchangeScenario.vendorOrigin]
     var authorizedDestinations: [String] = [ProviderExchangeScenario.vendorOrigin]
@@ -63,7 +66,7 @@ enum ProviderExchangeSeed {
             INSERT INTO provider_profiles (profile_version, profile_id, provider_type, endpoint, model, \
             credential_ref, timeout_seconds, retry_policy, authorized_destinations, capabilities, created_at, \
             revoked_at) VALUES (\(profileVersion), 'synthetic-profile', 'anthropic', NULL, 'synthetic-model', \
-            \(credentialReference), 30, \(quote(retryPolicy)), \(profileDestinations), \(quote(capabilities)), \
+            \(credentialReference), \(ProviderExchangeScenario.profileTimeoutSeconds), \(quote(retryPolicy)), \(profileDestinations), \(quote(capabilities)), \
             '2026-10-08T09:00:00Z', \(revokedAt))
             """,
             """
