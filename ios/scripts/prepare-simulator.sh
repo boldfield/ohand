@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Puts a simulator into a known state before a UI-test suite: shut down (which ends every leftover app), optionally
 # erase (which clears installed apps, permissions and recorded notification decisions), boot, wait until the boot has
-# finished, then wait (bounded) until the simulator answers service calls promptly. A freshly erased simulator keeps the
+# finished, then wait (bounded; each probe is bounded too) until the simulator answers service calls promptly, failing the preparation if it never does. A freshly erased simulator keeps the
 # 3-core hosted runner at 0% idle for many minutes after bootstatus reports success (first-boot daemons, Spotlight
 # indexing), so CPU idle never becomes a usable signal; what UI tests actually see is launches and accessibility reads
 # that stall for seconds to a minute. The wait therefore polls the simulator itself and logs how long it took; the host
@@ -12,6 +12,7 @@ set -euo pipefail
 responsive_probe_limit_seconds=3
 responsive_probes_required=10
 responsive_timeout_seconds=240
+probe_hard_limit_seconds=10
 
 udid="${1:?simulator udid required}"
 erase=0
@@ -40,11 +41,12 @@ now_seconds() {
   perl -MTime::HiRes=time -e 'printf "%.2f", time'
 }
 
-# One round trip into the simulator's launchd. Prints the elapsed seconds; fails if the call itself fails.
+# One round trip into the simulator's launchd. Prints the elapsed seconds; fails if the call itself fails or does not
+# finish within the hard limit (the alarm survives exec, so a hung simctl is killed rather than blocking the readiness loop).
 probe_simulator() {
   local started finished
   started="$(now_seconds)"
-  xcrun simctl spawn "${udid}" launchctl list >/dev/null 2>&1 || return 1
+  perl -e 'alarm shift; exec @ARGV' "${probe_hard_limit_seconds}" xcrun simctl spawn "${udid}" launchctl list >/dev/null 2>&1 || return 1
   finished="$(now_seconds)"
   echo "${finished} ${started}" | awk '{printf "%.2f", $1 - $2}'
 }
@@ -68,7 +70,8 @@ wait_for_simulator_to_respond() {
     fi
     sleep 1
   done
-  log "WARNING: simulator did not answer ${responsive_probes_required} probes in a row within ${responsive_probe_limit_seconds}s inside ${responsive_timeout_seconds}s; continuing anyway"
+  log "ERROR: simulator did not answer ${responsive_probes_required} probes in a row within ${responsive_probe_limit_seconds}s inside ${responsive_timeout_seconds}s"
+  return 1
 }
 
 step() {
@@ -89,6 +92,9 @@ fi
 step boot xcrun simctl boot "${udid}" 2>/dev/null || true
 step bootstatus xcrun simctl bootstatus "${udid}" -b >/dev/null
 
-wait_for_simulator_to_respond
+if ! wait_for_simulator_to_respond; then
+  host_snapshot "simulator never became responsive"
+  exit 1
+fi
 host_snapshot "after boot completed and simulator responsive"
 log "simulator ${udid} ready"

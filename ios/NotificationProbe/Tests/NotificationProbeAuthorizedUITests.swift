@@ -68,10 +68,7 @@ final class NotificationProbeAuthorizedUITests: NotificationProbeUITestCase {
 
         XCTContext.runActivity(named: "foreground delivery reaches the delegate") { _ in
             let foreground = run("foregroundDelivery")
-            XCTAssertEqual(
-                foreground["willPresentCalled"], "true",
-                "add took \(foreground["addMilliseconds"] ?? "nil") ms for a \(foreground["intervalSeconds"] ?? "nil") s trigger; delivered=\(foreground["deliveredContainsRequest"] ?? "nil") pending=\(foreground["pendingContainsRequest"] ?? "nil")"
-            )
+            XCTAssertEqual(foreground["willPresentCalled"], "true")
         }
 
         XCTContext.runActivity(named: "delivery while the app is terminated") { _ in

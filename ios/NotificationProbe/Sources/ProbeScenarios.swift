@@ -45,9 +45,6 @@ final class NotificationProbeScenarios {
     static let capacityRequestCount = 100
     static let closedAppIdentifier = "probe.closed"
     static let closedAppIntervalSeconds: TimeInterval = 5
-    /// Wider than add() latency on a loaded host: a one-shot trigger already in the past when scheduled is dropped without an error.
-    static let foregroundIntervalSeconds: TimeInterval = 15
-    static let foregroundPollCount = 120
 
     private let center = UNUserNotificationCenter.current()
     private let authorizationOptions: UNAuthorizationOptions = [.alert, .sound, .badge]
@@ -336,11 +333,9 @@ final class NotificationProbeScenarios {
 
     private func foregroundDelivery() async throws -> [String: String] {
         let identifier = "probe.foreground"
-        let addStarted = Date()
-        try await center.add(intervalRequest(identifier: identifier, title: "Foreground", interval: Self.foregroundIntervalSeconds))
-        let addMilliseconds = Int(Date().timeIntervalSince(addStarted) * 1000)
+        try await center.add(intervalRequest(identifier: identifier, title: "Foreground", interval: 2))
         var presented = false
-        for _ in 0..<Self.foregroundPollCount {
+        for _ in 0..<40 {
             if ForegroundPresentationRecorder.shared.identifiers.contains(identifier) {
                 presented = true
                 break
@@ -353,8 +348,6 @@ final class NotificationProbeScenarios {
             "willPresentCalled": String(presented),
             "deliveredContainsRequest": String(delivered.contains { $0.request.identifier == identifier }),
             "pendingContainsRequest": String(pending.contains { $0.identifier == identifier }),
-            "addMilliseconds": String(addMilliseconds),
-            "intervalSeconds": String(Int(Self.foregroundIntervalSeconds)),
         ]
         center.removeDeliveredNotifications(withIdentifiers: [identifier])
         return observations
