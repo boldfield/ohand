@@ -5,6 +5,9 @@ import XCTest
 @testable import OhAndCoreBridge
 @testable import OhAndServices
 
+/// Wait at least as long as the core's own 5 s busy timeout (core/src/store/schema/mod.rs) for its write lock.
+private let coreStoreBusyTimeoutMilliseconds: Int32 = 5_000
+
 /// Drives the recording controller over the real ingress service and the real Rust core on the simulator, with a
 /// synthetic recorder. A process death is simulated by discarding every object and closing the core: only files
 /// survive. Device lock, real interruptions and termination are physical-matrix evidence, not shown here.
@@ -95,6 +98,7 @@ final class VoiceRecordingCoreIntegrationTests: IngressStorageTestCase {
     private func withDatabase(_ body: (OpaquePointer?) throws -> Void) throws {
         var database: OpaquePointer?
         XCTAssertEqual(sqlite3_open(layout.databaseURL.path, &database), SQLITE_OK)
+        sqlite3_busy_timeout(database, coreStoreBusyTimeoutMilliseconds)
         defer { sqlite3_close(database) }
         try body(database)
     }
