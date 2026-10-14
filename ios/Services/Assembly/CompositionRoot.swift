@@ -423,6 +423,9 @@ public enum CompositionRecordingOutcome: Equatable, Sendable {
     case keptOnDevice(captureID: String)
     /// Nothing was staged; the recording remains in the in-progress store.
     case notStaged(captureID: String)
+    /// A record is staged, but the audio could not be moved into the finalized store (for example the in-progress file is
+    /// missing or unreadable). Not saved, and nothing proves the audio is durable.
+    case audioUnavailable(captureID: String)
     case itemDeleted(captureID: String)
 }
 
@@ -1216,6 +1219,8 @@ public final class ServiceCompositionRoot {
             return .saved(
                 captureID: acknowledgment.captureID, itemID: acknowledgment.itemID, savedAt: acknowledgment.savedAt,
                 alreadySaved: acknowledgment.alreadyImported)
+        case .keptForRetry(let captureID, .sourceUnavailable):
+            return .audioUnavailable(captureID: captureID)
         case .keptForRetry(let captureID, _):
             return .keptOnDevice(captureID: captureID)
         case .notStaged(let captureID, _):

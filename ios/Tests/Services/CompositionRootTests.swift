@@ -735,13 +735,13 @@ final class CompositionRootTests: XCTestCase {
         XCTAssertEqual(scalar("SELECT CAST(COUNT(*) AS TEXT) FROM items"), "1")
     }
 
-    func testHandoffOfAMissingRecordingIsNotStagedAndNeverReportedSaved() throws {
+    func testHandoffOfAMissingRecordingIsReportedUnavailableAndNeverSaved() throws {
         let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))
         defer { root.shutDown() }
         var outcome: CompositionRecordingOutcome?
         root.saveRecording(makeHandoff()) { outcome = $0 }
         XCTAssertTrue(pump(until: { outcome != nil }))
-        XCTAssertEqual(outcome, .notStaged(captureID: Self.recordingCaptureID))
+        XCTAssertEqual(outcome, .audioUnavailable(captureID: Self.recordingCaptureID))
         XCTAssertEqual(scalar("SELECT CAST(COUNT(*) AS TEXT) FROM items"), "0")
     }
 
