@@ -1410,7 +1410,7 @@ public final class ServiceCompositionRoot {
                 core: promptScheduleClient, timeZone: environment.timeZone,
                 install: { trigger in
                     guard let root = rootReference.root else { throw CancellationError() }
-                    return try await root.reconcileReminders(trigger: trigger)
+                    return try await root.reminderReconciler.refresh(trigger: trigger)
                 })
 
             let notificationActions = NotificationActionClients(
