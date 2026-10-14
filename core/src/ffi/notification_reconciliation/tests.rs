@@ -678,6 +678,26 @@ fn optional_prompts_use_the_slots_left_and_are_withheld_without_permission() {
 }
 
 #[test]
+fn a_failed_prompt_install_is_counted_and_the_pass_is_not_converged() {
+    let _guard = serial();
+    let mut session = Session::open("prompt-failure", 0);
+    seed_prompt_schedule(&session);
+    session.native.center().deny = true;
+
+    let denied = session.pass(json!({"allow_optional_prompts": true}));
+    assert!(count(&denied, "failures") > 0, "{denied}");
+    assert_eq!(count(&denied, "prompts_installed"), 0);
+    assert!(!denied["converged"].as_bool().unwrap(), "{denied}");
+
+    session.native.center().deny = false;
+    let recovered = session.pass(json!({"allow_optional_prompts": true}));
+    assert_eq!(count(&recovered, "failures"), 0, "{recovered}");
+    assert!(count(&recovered, "prompts_installed") > 0);
+    assert!(recovered["converged"].as_bool().unwrap(), "{recovered}");
+    session.close();
+}
+
+#[test]
 fn caller_supplied_prompt_candidates_never_cause_installs() {
     let _guard = serial();
     let mut session = Session::open("candidates", 3);

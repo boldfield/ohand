@@ -662,7 +662,7 @@ fn reconcile_job(
             let report = pass.capacity;
             summary.prompts_installed = pass.prompts_installed;
             summary.prompts_withheld = pass.prompts_withheld;
-            summary.converged = report.converged();
+            summary.converged = report.converged() && pass.prompt_failures == 0;
             summary.installed = report.reconcile.installed.len();
             summary.already_installed = report.reconcile.already_installed.len();
             summary.removed = report.reconcile.removed.len();
