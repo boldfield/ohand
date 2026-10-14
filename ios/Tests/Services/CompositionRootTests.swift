@@ -112,6 +112,30 @@ private final class ClientTakingModule: CompositionModule {
     }
 }
 
+/// Takes shadow review through the typed client factory, the only way a module reaches the provider transport.
+private final class ShadowReviewTakingModule: CompositionModule {
+    let identifier = "shadow.review.taker"
+    let firstOperationID: UInt64 = 1 << 44
+    let configuration: ShadowReviewConfiguration
+    private(set) var service: ShadowReviewService?
+
+    init(configuration: ShadowReviewConfiguration) {
+        self.configuration = configuration
+    }
+
+    func attach(to context: CompositionContext) throws {
+        service = try context.clients.shadowReview(configuration: configuration)
+    }
+
+    func handle(_ event: CoreEvent) -> Bool {
+        service?.handle(event) ?? false
+    }
+
+    func shutDown() {}
+}
+
+private struct TransportAttachRefused: Error {}
+
 final class CompositionRootTests: XCTestCase {
     private static let routeID = "route-composition"
     /// The core requires a proposal's zone to equal the capture's, so the reply reads the identifier the root stamps.
@@ -484,6 +508,79 @@ final class CompositionRootTests: XCTestCase {
         }
     }
 
+    // MARK: provider transport
+
+    func testModuleShadowReviewDispatchesThroughTheTransportTheRootAttached() throws {
+        try prepareShadowReviewStore()
+        let sender = ScriptedProviderSender(reply: try shadowReviewReply())
+        let module = ShadowReviewTakingModule(configuration: shadowReviewConfiguration())
+        let root = try makeTestRoot(sender: sender, modules: [module])
+        defer { root.shutDown() }
+        let service = try XCTUnwrap(module.service)
+
+        let jobID = try selectCase(service)
+        var run: ShadowReviewRunResult?
+        service.review(jobID: jobID) { run = $0 }
+        XCTAssertTrue(pump(until: { run != nil }), "the review completes")
+
+        guard case .completed(let record, nil)? = run else {
+            return XCTFail("expected a completed review, got \(String(describing: run))")
+        }
+        XCTAssertEqual(record.outcome, .reviewed)
+        XCTAssertEqual(record.verdict, .agreement)
+        XCTAssertEqual(sender.requests.count, 1, "the one review request reached the sender the root was given")
+        XCTAssertEqual(sender.requests.first?.authorization.capability, .review)
+        XCTAssertEqual(sender.requests.first?.url.host, "api.anthropic.com")
+    }
+
+    func testRootAttachesTheTransportOnceToItsOwnCoreWithTheAdapterSender() throws {
+        try prepareShadowReviewStore()
+        let sender = ScriptedProviderSender(reply: try shadowReviewReply())
+        var attachments: [(core: CoreHandle, sender: ProviderRequestSender)] = []
+        let root = try makeTestRoot(
+            sender: sender,
+            attachProviderTransport: { core, sender in
+                attachments.append((core, sender))
+                return try ProviderExchangeCoordinator.attach(to: core, sender: sender)
+            })
+        defer { root.shutDown() }
+        XCTAssertEqual(attachments.count, 1)
+        XCTAssertTrue(attachments.first?.core === root.coreHandle, "attached to the root's own core handle")
+        XCTAssertTrue(attachments.first?.sender === sender, "attached with the sender the adapters carry")
+    }
+
+    func testFailedTransportAttachUndoesAssemblyAndTheCoreRefusesDispatchWithoutATransport() throws {
+        try prepareShadowReviewStore()
+        let sender = ScriptedProviderSender(reply: try shadowReviewReply())
+        let module = ShadowReviewTakingModule(configuration: shadowReviewConfiguration())
+        var attempts = 0
+        XCTAssertThrowsError(
+            try makeTestRoot(
+                sender: sender,
+                attachProviderTransport: { _, _ in
+                    attempts += 1
+                    throw TransportAttachRefused()
+                },
+                modules: [module])
+        ) { XCTAssertTrue($0 is TransportAttachRefused) }
+        XCTAssertEqual(attempts, 1)
+        XCTAssertNil(module.service, "no module attaches over a core without a transport")
+
+        let bareCore = try CoreHandle(path: databasePath)
+        defer { bareCore.close() }
+        let bareService = ShadowReviewService(core: bareCore, configuration: shadowReviewConfiguration())
+        try bareCore.setEventHandler { _ = bareService.handle($0) }
+        let jobID = try selectCase(bareService)
+        var run: ShadowReviewRunResult?
+        bareService.review(jobID: jobID) { run = $0 }
+        XCTAssertTrue(pump(until: { run != nil }))
+        XCTAssertEqual(run, .failed(code: "transport_not_registered"))
+        XCTAssertTrue(sender.requests.isEmpty, "a dispatch without a transport sends nothing")
+
+        let reassembled = try makeTestRoot(sender: sender)
+        reassembled.shutDown()
+    }
+
     // MARK: private read gate
 
     func testStatusReadIsRefusedWhileTheSessionIsLockedAndNeverReachesTheCore() throws {
@@ -607,6 +704,9 @@ final class CompositionRootTests: XCTestCase {
         notifications: NotificationCenterProviding = FakeNotificationCenter(),
         readSession: ReadAuthenticationSession? = nil,
         lifecycleNotifications: NotificationCenter = NotificationCenter(),
+        attachProviderTransport: @escaping (CoreHandle, ProviderRequestSender) throws -> ProviderExchangeCoordinator = {
+            try ProviderExchangeCoordinator.attach(to: $0, sender: $1)
+        },
         modules: [CompositionModule] = []
     ) throws -> ServiceCompositionRoot {
         let session = readSession ?? makeSession(authenticated: true).0
@@ -615,7 +715,7 @@ final class CompositionRootTests: XCTestCase {
             environment: CompositionEnvironment(
                 timeZone: { Self.captureTimeZone }, locale: { Locale(identifier: "en_US") }),
             adapters: .injectedForTests(
-                sender: sender, readSession: session, notificationCenter: notifications,
+                sender: sender, attachProviderTransport: attachProviderTransport, readSession: session, notificationCenter: notifications,
                 reachability: FakeReachability(reachable: true), lifecycleNotifications: lifecycleNotifications),
             modules: modules)
     }
@@ -676,6 +776,54 @@ final class CompositionRootTests: XCTestCase {
             '2026-10-08T09:00:00Z', NULL)
             """,
         ])
+    }
+
+    private func shadowReviewConfiguration() -> ShadowReviewConfiguration {
+        ShadowReviewConfiguration(
+            reviewProfileVersion: ShadowReviewScenario.profileVersion,
+            policy: ShadowReviewPolicy(
+                isEnabled: true, samplePerMille: 1000, windowSeconds: 3600, maxRequestsPerWindow: 4,
+                maxAttemptsPerSample: 2))
+    }
+
+    /// Seeds the root's store with a finished interpretation, a route with a review grant and a review profile.
+    private func prepareShadowReviewStore() throws {
+        let layout = ProtectedStorageLayout(rootDirectory: storageRoot)
+        _ = ProtectedStorageService(layout: layout).prepare()
+        _ = try ShadowReviewSeed.makeStore(
+            in: layout.directory(for: .database),
+            scenario: ShadowReviewScenario(credentialReference: "synthetic-credential"))
+    }
+
+    private func selectCase(_ service: ShadowReviewService) throws -> String {
+        var selection: ShadowReviewSelectionResult?
+        service.offer(
+            itemID: ShadowReviewScenario.itemID, sourceRevision: 0, requestVersion: ShadowReviewScenario.requestVersion
+        ) { selection = $0 }
+        XCTAssertTrue(pump(until: { selection != nil }), "the offer is answered")
+        guard case .selected(let record)? = selection else {
+            XCTFail("expected the case to be selected, got \(String(describing: selection))")
+            throw XCTSkip("no selected case")
+        }
+        return record.jobID
+    }
+
+    private func shadowReviewReply() throws -> Data {
+        let proposal: [String: Any] = [
+            "operation": ["kind": "annotate"],
+            "item_type": "action",
+            "source_spans": [["start": 0, "end": 4]],
+        ]
+        let reply: [String: Any] = [
+            "id": "msg_composition_review_01",
+            "type": "message",
+            "role": "assistant",
+            "model": ShadowReviewScenario.reviewModel,
+            "content": [["type": "tool_use", "id": "toolu_composition_review_01", "name": "interpret", "input": proposal]],
+            "stop_reason": "tool_use",
+            "usage": ["input_tokens": 42, "output_tokens": 17],
+        ]
+        return try JSONSerialization.data(withJSONObject: reply)
     }
 
     private func insertInterpretationJob(itemID: String) throws {
