@@ -14,6 +14,8 @@ use serde_json::{json, Value};
 use std::sync::mpsc::Receiver;
 
 const ORIGIN: &str = "https://api.anthropic.com";
+const SELF_HOSTED_ORIGIN: &str = "https://spark.example.test";
+const SELF_HOSTED_ENDPOINT: &str = "https://spark.example.test/v1";
 const CREDENTIAL_REFERENCE: &str = "credential-ref/synthetic-reviewer";
 const NOTE_TEXT: &str = "call the roofer tomorrow at 9";
 const CAPTURE_ID: &str = "5a1c0000-0000-4000-8000-0000000000c1";
@@ -77,9 +79,32 @@ fn review_profile() -> ProviderProfile {
     .expect("valid profile")
 }
 
+fn self_hosted_review_profile() -> ProviderProfile {
+    ProviderProfileBuilder::new(
+        "synthetic-self-hosted-review-profile",
+        ProviderProtocol::SelfHosted,
+        REVIEW_MODEL,
+    )
+    .credential_ref(CREDENTIAL_REFERENCE)
+    .timeout_seconds(30)
+    .endpoint(SELF_HOSTED_ENDPOINT)
+    .authorized_destination(SELF_HOSTED_ORIGIN)
+    .capability(
+        CapabilityMetadata::supported(
+            ProviderCapability::TextInterpretation,
+            "ffi-fixtures:shadow_review",
+        )
+        .with_input_size_limit(500)
+        .with_structured_output(StructuredOutputMode::JsonSchema),
+    )
+    .build()
+    .expect("valid profile")
+}
+
 #[derive(Clone)]
 struct Scenario {
     profile: ProviderProfile,
+    stored_endpoint_missing: bool,
     review_granted: bool,
     with_primary: bool,
     /// A voice capture whose effective text is this on-device transcript.
@@ -90,9 +115,17 @@ impl Scenario {
     fn standard() -> Scenario {
         Scenario {
             profile: review_profile(),
+            stored_endpoint_missing: false,
             review_granted: true,
             with_primary: true,
             transcript: None,
+        }
+    }
+
+    fn self_hosted() -> Scenario {
+        Scenario {
+            profile: self_hosted_review_profile(),
+            ..Scenario::standard()
         }
     }
 
@@ -111,15 +144,20 @@ fn seed(path: &str, scenario: &Scenario) {
     let transaction = database.transaction().unwrap();
     let record = serde_json::to_value(&scenario.profile).unwrap();
     let text_of = |key: &str| record[key].to_string();
+    let origin = scenario.profile.authorized_destinations()[0].clone();
     transaction
         .execute(
             "INSERT INTO provider_profiles (profile_version, profile_id, provider_type, endpoint, \
              model, credential_ref, timeout_seconds, retry_policy, authorized_destinations, \
-             capabilities, created_at, revoked_at) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL)",
+             capabilities, created_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
             rusqlite::params![
                 scenario.profile.profile_version(),
                 scenario.profile.profile_id(),
                 record["protocol"].as_str().unwrap(),
+                scenario
+                    .profile
+                    .endpoint()
+                    .filter(|_| !scenario.stored_endpoint_missing),
                 scenario.profile.model(),
                 CREDENTIAL_REFERENCE,
                 scenario.profile.timeout_seconds(),
@@ -174,7 +212,7 @@ fn seed(path: &str, scenario: &Scenario) {
         .execute(
             "INSERT INTO routes (route_id, route_name, scope, processing_destinations, \
              created_at) VALUES (?, 'synthetic', 'personal', ?, '2026-10-08T09:00:00Z')",
-            rusqlite::params![ROUTE_ID, json!([ORIGIN]).to_string()],
+            rusqlite::params![ROUTE_ID, json!([origin]).to_string()],
         )
         .unwrap();
     transaction
@@ -182,7 +220,7 @@ fn seed(path: &str, scenario: &Scenario) {
             "INSERT INTO route_authorizations (auth_id, route_id, capability, \
              authorized_destinations, created_at) VALUES ('auth-interpret', ?, \
              'text_interpretation', ?, '2026-10-08T09:00:00Z')",
-            rusqlite::params![ROUTE_ID, json!([ORIGIN]).to_string()],
+            rusqlite::params![ROUTE_ID, json!([origin]).to_string()],
         )
         .unwrap();
     if scenario.review_granted {
@@ -191,7 +229,7 @@ fn seed(path: &str, scenario: &Scenario) {
                 "INSERT INTO route_authorizations (auth_id, route_id, capability, \
                  authorized_destinations, created_at) VALUES ('auth-review', ?, 'review', ?, \
                  '2026-10-08T09:00:00Z')",
-                rusqlite::params![ROUTE_ID, json!([ORIGIN]).to_string()],
+                rusqlite::params![ROUTE_ID, json!([origin]).to_string()],
             )
             .unwrap();
     }
@@ -609,6 +647,79 @@ fn an_agreeing_review_is_one_request_and_records_a_verdict_without_changing_auth
     assert_eq!(stored["record"], record);
     assert_eq!(session.authoritative_state(), before);
     session.assert_no_command();
+    session.close();
+}
+
+fn self_hosted_reply(item_type: &str) -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "id": "chatcmpl-synthetic-01",
+        "object": "chat.completion",
+        "model": REVIEW_MODEL,
+        "choices": [{
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+                "role": "assistant",
+                "content": json!({
+                    "operation": { "kind": "annotate" },
+                    "item_type": item_type,
+                    "source_spans": [{ "start": 0, "end": 4 }],
+                })
+                .to_string(),
+            },
+        }],
+    }))
+    .unwrap()
+}
+
+#[test]
+fn a_self_hosted_review_is_one_request_to_its_own_endpoint_and_records_a_verdict() {
+    let _guard = serial();
+    let session = Session::open("self-hosted-agree", &Scenario::self_hosted());
+    session.register_native();
+    let job_id = session.select(1);
+    let before = session.authoritative_state();
+
+    let send = session.dispatch(2, &job_id);
+    assert_eq!(
+        send["url"],
+        "https://spark.example.test/v1/chat/completions"
+    );
+    assert_eq!(send["authorized_origins"], json!([SELF_HOSTED_ORIGIN]));
+    assert_eq!(send["capability"], "review");
+    assert_eq!(
+        send["credential"],
+        json!({
+            "reference": CREDENTIAL_REFERENCE,
+            "header": "Authorization",
+            "scheme": "Bearer",
+        })
+    );
+    assert!(send["body"].as_str().unwrap().contains(NOTE_TEXT));
+
+    session.complete(2, &self_hosted_reply("action"));
+    let record = session.final_record(2);
+    assert_eq!(record["outcome"], "reviewed");
+    assert_eq!(record["verdict"], "agreement");
+    assert_eq!(record["attempts_used"], 1);
+    assert_redacted(std::slice::from_ref(&record));
+    assert_eq!(session.authoritative_state(), before);
+    session.assert_no_command();
+    session.close();
+}
+
+#[test]
+fn a_self_hosted_review_without_its_own_endpoint_is_refused_with_nothing_sent() {
+    let _guard = serial();
+    let mut scenario = Scenario::self_hosted();
+    scenario.stored_endpoint_missing = true;
+    let session = Session::open("self-hosted-no-endpoint", &scenario);
+    session.register_native();
+    let payload = session.select_with(1, Session::policy(4, 2));
+    assert_eq!(payload["selection"], "skipped", "{payload}");
+    assert_eq!(payload["denial"], "malformed_profile", "{payload}");
+    session.assert_no_command();
+    wait_until_idle(session.handle);
     session.close();
 }
 

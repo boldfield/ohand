@@ -532,9 +532,6 @@ fn prepare_review(connection: &Connection, job_id: &str) -> Result<Prepared, Abi
         return Err(shadow_failures::NOT_SHADOW_JOB);
     }
     let profile = load_profile(connection, &target.profile_version)?;
-    if profile.protocol() == ProviderProtocol::SelfHosted {
-        return Err(failures::UNSUPPORTED_PROTOCOL);
-    }
     if target.credential_ref.as_deref() != Some(profile.credential_ref().as_str()) {
         return Err(failures::MALFORMED_PROFILE);
     }
