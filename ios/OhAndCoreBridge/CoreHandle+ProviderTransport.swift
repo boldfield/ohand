@@ -101,6 +101,32 @@ public struct ProviderExchangeEvent: Decodable, Equatable, Sendable {
     }
 }
 
+/// A provider wire protocol the host may enable for dispatch. The names are the core's.
+public enum CoreProviderProtocol: String, Codable, Equatable, Sendable {
+    case anthropic
+    case openAI = "open_ai"
+    case selfHosted = "self_hosted"
+}
+
+/// The answer to a provider-profile status read: existence, protocol, revocation and whether the profile serves
+/// a given model. It carries no endpoint, credential or content.
+public struct ProviderProfileStatus: Decodable, Equatable, Sendable {
+    public let operationID: UInt64
+    public let exists: Bool
+    /// Nil when the profile does not exist.
+    public let providerProtocol: CoreProviderProtocol?
+    public let revoked: Bool
+    public let servesModel: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case operationID = "operation_id"
+        case exists
+        case providerProtocol = "protocol"
+        case revoked
+        case servesModel = "serves_model"
+    }
+}
+
 /// Keeps one native transport handler registered with a core. The handler runs on a core exchange thread and
 /// must return promptly (start the request and return). `invalidate()` waits for a running handler invocation, so
 /// it must not be called from inside the handler.
@@ -192,6 +218,28 @@ extension CoreHandle {
         let requestBytes = Array(try JSONEncoder().encode(["job_id": jobID]))
         let rawResult = requestBytes.withUnsafeBufferPointer { buffer in
             ohand_core_start_provider_exchange(handleIdentifier, operationID, buffer.baseAddress, buffer.count)
+        }
+        _ = try consumeCoreResult(rawResult)
+    }
+
+    /// Replaces the provider protocols the core may dispatch (the interpretation exchange, the job-runner drain
+    /// and shadow review). The default is Anthropic and OpenAI; self-hosted stays off until the host enables it.
+    /// A job of a protocol that is not enabled is refused as `protocol_not_enabled` with nothing sent, and the
+    /// job runner keeps it queued without spending a retry until the protocol is enabled.
+    public func setEnabledProviderProtocols(_ enabledProtocols: Set<CoreProviderProtocol>) throws {
+        let requestBytes = Array(try JSONEncoder().encode(enabledProtocols.map(\.rawValue).sorted()))
+        let rawResult = requestBytes.withUnsafeBufferPointer { buffer in
+            ohand_core_set_enabled_provider_protocols(handleIdentifier, buffer.baseAddress, buffer.count)
+        }
+        _ = try consumeCoreResult(rawResult)
+    }
+
+    /// Queues a read of the stored provider profile `profileVersion`. The completion event for `operationID`
+    /// decodes as `ProviderProfileStatus`.
+    public func startProviderProfileStatus(operationID: UInt64, profileVersion: String, model: String) throws {
+        let requestBytes = Array(try JSONEncoder().encode(["profile_version": profileVersion, "model": model]))
+        let rawResult = requestBytes.withUnsafeBufferPointer { buffer in
+            ohand_core_start_provider_profile_status(handleIdentifier, operationID, buffer.baseAddress, buffer.count)
         }
         _ = try consumeCoreResult(rawResult)
     }
