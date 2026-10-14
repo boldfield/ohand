@@ -828,6 +828,39 @@ final class ResetServiceTests: ResetTestCase {
         XCTAssertEqual(Set(world.credentials.removedReferences), ["ref-a", "ref-b"])
     }
 
+    func testARemoveTapBindsBeforeTheBoundaryAndWhatIsWrittenInBetweenIsLaterState() async throws {
+        let world = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(world)
+        configureProfiles(world)
+        let requestedInTheWindow = ResetEventLog()
+        // Between the binding and the tap boundary: an edit mints a new version of profile a that holds its reference
+        // without re-entering the secret, and the user enters a new secret behind profile b's reference.
+        world.staging.beforeSnapshot = { [world] in
+            requestedInTheWindow.append(world.choice.recordedRequest == nil ? "no request yet" : "request recorded")
+            try? world.core.addProfile(
+                ResetProfileCredential(profileVersion: "profile-a-v2", credentialReference: "ref-a", isRevoked: false))
+            world.credentials.update("ref-b")
+        }
+
+        let report = await world.makeService().reset(credentialChoice: .remove)
+
+        XCTAssertTrue(report.isComplete, "blockers: \(report.blockers)")
+        XCTAssertEqual(requestedInTheWindow.events, ["no request yet"], "the window precedes the recorded tap")
+        let profilesIndex = try XCTUnwrap(world.log.index(of: "core.profiles"))
+        let identityIndex = try XCTUnwrap(world.log.index(of: "credentials.identity:ref-a"))
+        let snapshotIndex = try XCTUnwrap(world.log.index(of: "staging.snapshot"))
+        XCTAssertLessThan(profilesIndex, snapshotIndex, "the profiles are bound before the boundary")
+        XCTAssertLessThan(identityIndex, snapshotIndex, "the secret identities are bound before the boundary")
+        XCTAssertEqual(world.core.revokedProfileVersions, ["profile-a-v1", "profile-c-v1"], "the bound profiles are revoked")
+        XCTAssertEqual(world.core.isProfileRevoked("profile-a-v2"), false, "a profile written after the binding is later state")
+        XCTAssertEqual(world.credentials.removedReferences, [], "neither secret is the one the choice bound")
+        XCTAssertTrue(world.credentials.isPresent("ref-a"), "ref-a is held by the later profile and was never claimed")
+        XCTAssertTrue(world.credentials.isPresent("ref-b"), "the secret entered after the binding stays")
+        XCTAssertEqual(world.credentials.keptReferences, ["ref-b"], "ref-b was claimed, but its identity no longer matches")
+        XCTAssertFalse(world.choice.isRequested)
+        XCTAssertNil(world.choice.recordedRequest)
+    }
+
     func testAKeepTapAfterAnUnfinishedRemovalCarriesThatRemovalOutBeforeItsOwnGeneration() async throws {
         for removalFailsAgain in [false, true] {
             let context = "removal fails again: \(removalFailsAgain)"

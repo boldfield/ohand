@@ -167,6 +167,7 @@ final class FakeResetCore: ResetCore, @unchecked Sendable {
     }
 
     func profileCredentials() async throws -> [ResetProfileCredential] {
+        log.append("core.profiles")
         try faults.check("reset.profiles")
         let listed = locked { profiles }
         afterProfileCredentials?()
@@ -245,6 +246,9 @@ final class FakeResetStaging: ResetIngressStaging {
     var importable: Set<String> = []
     /// Called with the capture ID when an input imports, so the test can create the item the core would hold.
     var onImport: ((String) -> Void)?
+    /// Called right before the snapshot is taken: for a `remove` tap, the moment after the choice was bound and before
+    /// the tap boundary is set.
+    var beforeSnapshot: (() -> Void)?
     /// Called right after the snapshot is taken: the moment a capture can land after the tap.
     var onSnapshot: (() -> Void)?
     /// Called at the start of `importSnapshot`, on the task that runs the reset.
@@ -287,6 +291,7 @@ final class FakeResetStaging: ResetIngressStaging {
     }
 
     func snapshot() async throws -> ResetStagingSnapshot {
+        beforeSnapshot?()
         snapshotCalls += 1
         log.append("staging.snapshot")
         try faults.check("staging.snapshot")
@@ -412,6 +417,7 @@ final class FakeResetCredentials: ResetCredentialRemoving {
     }
 
     func secretIdentity(reference: String) throws -> ResetSecretIdentity? {
+        log.append("credentials.identity:\(reference)")
         if faults.fires("credentials.identity") { throw LookupFailed() }
         if absent.contains(reference) { return nil }
         return identities[reference] ?? Self.initial

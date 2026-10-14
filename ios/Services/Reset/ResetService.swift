@@ -5,55 +5,60 @@ import Foundation
 /// inputs, export temporaries, notifications, audio files and the optional credential removal.
 ///
 /// A reset runs in this order:
-/// 1. The tap. In one step, native staging is listed and the ingress boundary is held: a capture made from this moment
+/// 1. Bind the choice. A `remove` choice applies to the profiles the core lists now and, for each of their references,
+///    to the secret the Keychain holds now (its identity is read). This happens before the tap boundary is set, so a
+///    profile or secret written between this binding and the boundary is later state: the claim step leaves it alone
+///    (its reference is held by a profile the choice did not bind, or its identity no longer matches), and a bound
+///    profile or secret that disappears in that window needs nothing (revoke and the identity-conditioned deletion
+///    are no-ops for it). Erring this way keeps data. A `keep` choice binds nothing.
+/// 2. The tap. In one step, native staging is listed and the ingress boundary is held: a capture made from this moment
 ///    on is fresh-generation content, so its import waits (it stays staged and durable) and it is neither listed,
 ///    imported nor purged. Everything listed is by definition from before the tap.
-/// 2. Record the tap as one durable request: the credential choice, what a `remove` choice applies to (the profiles the
-///    core lists at the tap and, for each of their references, the identity of the secret the Keychain holds at the
-///    tap), the list and whether an earlier generation is still pending at the tap. Nothing else is written yet, so an
-///    interruption here leaves a request a restart can only honor in full, never a half-started reset or a choice acted
-///    on early. While a request is recorded the boundary stays held, in this process and, because the ingress gate holds
-///    it again at launch from the recorded list, in the next.
-/// 3. When the tap found an earlier reset unfinished (its generation pending, or native cleanup still outstanding for
-///    it), finish that reset first (its cleanup, temporaries and recorded choice, steps 7 to 10), then, once it
+/// 3. Record the tap as one durable request: the credential choice with what it binds, the list and whether an earlier
+///    generation is still pending at the tap. Nothing else is written yet, so an interruption here leaves a request a
+///    restart can only honor in full, never a half-started reset or a choice acted on early. While a request is
+///    recorded the boundary stays held, in this process and, because the ingress gate holds it again at launch from the
+///    recorded list, in the next.
+/// 4. When the tap found an earlier reset unfinished (its generation pending, or native cleanup still outstanding for
+///    it), finish that reset first (its cleanup, temporaries and recorded choice, steps 8 to 11), then, once it
 ///    completed, record the tap again as no longer awaiting it. Resuming the earlier generation only erases what existed
 ///    at the earlier tap, and its credential choice must be carried out before this tap's replaces it, so this tap never
 ///    counts it as its own: until it completes, the tap stays recorded, the boundary stays held and the report says
 ///    `pending`.
-/// 4. Unless a generation this tap started is already pending: import the listed records through the production
+/// 5. Unless a generation this tap started is already pending: import the listed records through the production
 ///    ingress path (an imported capture becomes an item the core tombstones), then purge whatever of the list is still
 ///    unimported. A capture staged before the tap has no item for a tombstone to fence, so the purge must finish before
 ///    the core starts; if it cannot, the core is not started and the reset reports why.
-/// 5. Start the core reset (or resume the pending one this tap started). The core tombstones every pre-reset item,
+/// 6. Start the core reset (or resume the pending one this tap started). The core tombstones every pre-reset item,
 ///    cancels its jobs and reminders and queues one durable cleanup row per effect.
-/// 6. Only now carry the choice, with the profiles it binds, into its marker, mark native cleanup outstanding and clear
+/// 7. Only now carry the choice, with the profiles it binds, into its marker, mark native cleanup outstanding and clear
 ///    the request. Then release
 ///    the ingress boundary: the captures that waited import into the fresh generation. No item can be created while a
 ///    request is recorded, so a restart that starts the core again for that request finds no fresh capture to tombstone.
 ///    The outstanding marker is cleared only when a report says `completed`.
-/// 7. Run the per-item cleanup executors (`DeletionCleanupService`), which perform each effect and ask the core to
+/// 8. Run the per-item cleanup executors (`DeletionCleanupService`), which perform each effect and ask the core to
 ///    record only the ones that actually finished.
-/// 8. Remove export and share temporaries.
-/// 9. When the user chose it, revoke every provider profile that existed at the tap and remove the secret that was
-///    stored at the tap behind its reference, behind the core's credential-claim fence (`removeCredentialsIfChosen`):
-///    claim, revoke, delete only what was claimed, release. Without that choice neither is touched, nothing is touched
-///    before step 5 completed, and a profile or secret configured after the tap is never touched, not even by a retry
-///    of a removal that failed or was interrupted: the removal is conditioned on the secret's identity at the tap, a
-///    bound reference that a profile configured after the tap holds is never claimed and keeps its secret, and while a
-///    reference is claimed storage refuses any profile that would start holding it.
-/// 10. Ask the core to re-evaluate. The report says `completed` only when the core reports the generation completed
+/// 9. Remove export and share temporaries.
+/// 10. When the user chose it, revoke every provider profile the choice bound and remove the secret that was stored
+///    behind its reference when the choice was bound, behind the core's credential-claim fence
+///    (`removeCredentialsIfChosen`): claim, revoke, delete only what was claimed, release. Without that choice neither
+///    is touched, nothing is touched before step 6 completed, and a profile or secret configured after the binding is
+///    never touched, not even by a retry of a removal that failed or was interrupted: the removal is conditioned on the
+///    secret's identity at the binding, a bound reference that a profile configured since holds is never claimed and
+///    keeps its secret, and while a reference is claimed storage refuses any profile that would start holding it.
+/// 11. Ask the core to re-evaluate. The report says `completed` only when the core reports the generation completed
 ///    and every native step converged; this service never decides success on its own.
 ///
 /// Every step is idempotent. A step that cannot finish is reported with a fixed blocker and repeated by the next
-/// `reset` or `resume` call, so a crash at any point converges: a request that survives a crash before step 6 makes
-/// `resume` hold the boundary at the recorded list and run steps 3 to 10; the markers of step 6 make it finish steps 7
-/// to 10. A `reset` that ends before the core started withdraws the request (every recorded tap, so no earlier choice is
+/// `reset` or `resume` call, so a crash at any point converges: a request that survives a crash before step 7 makes
+/// `resume` hold the boundary at the recorded list and run steps 4 to 11; the markers of step 7 make it finish steps 8
+/// to 11. A `reset` that ends before the core started withdraws the request (every recorded tap, so no earlier choice is
 /// left armed) and releases the boundary; when it cannot, or when the call was cancelled or was a `resume`, the request
 /// stays recorded, the boundary stays held and the report says `pending`, never `notStarted`. Calls are serialized.
 ///
 /// A tap that finds an earlier tap still recorded asks the core first whether that tap's reset started (the recorded
 /// tap notes the core's generation at its moment; a newer one is its own). A recorded tap the core never started is
-/// superseded by the new explicit choice. One the core did start (step 5 ran, but the interruption came before step 6
+/// superseded by the new explicit choice. One the core did start (step 6 ran, but the interruption came before step 7
 /// carried its choice over) is carried over now, before anything else: its choice, with the profiles it binds, goes
 /// into the markers and native cleanup is marked outstanding, so the new tap awaits it like any unfinished earlier reset
 /// and its choice is carried out before the new one applies, whether the new tap is recorded, withdrawn or fails.
@@ -115,21 +120,11 @@ actor ResetService {
             earlierStarted = true
         }
 
-        let snapshot: ResetStagingSnapshot
-        do {
-            snapshot = try await staging.snapshot()
-        } catch {
-            return withdrawRequest(
-                ResetReport(state: .notStarted, progress: current, blockers: [.stagingUnreadable], itemCleanup: nil),
-                earlierOwed: earlierStarted)
-        }
-        // An earlier reset is unfinished while its generation is pending or, once the core completed it, while native
-        // steps it owes (cleanup, temporaries, its credential choice) are still outstanding. A marker that cannot be read
-        // counts as unfinished; `finishEarlierReset` decides again.
-        let earlierOutstanding = (try? markers.isCleanupOutstanding()) ?? true
-        // A remove choice applies to the profiles that exist now, at the tap, and to the secrets stored now behind their
-        // references. Both are recorded with it, so neither a retry nor a restart can widen it to a profile configured
-        // or a secret entered later.
+        // A remove choice is bound before the tap boundary is set: it applies to the profiles that exist now and to the
+        // secrets stored now behind their references, and both are recorded with it. Neither a retry nor a restart can
+        // widen it to a profile configured or a secret entered later, and nothing written between this binding and the
+        // boundary below is ever treated as tap-time state: the claim step leaves such a profile's reference unclaimed
+        // and such a secret's changed identity unmatched.
         var removal: ResetCredentialRemoval?
         if credentialChoice == .remove {
             let profiles: [ResetProfileCredential]
@@ -146,6 +141,19 @@ actor ResetService {
                     earlierOwed: earlierStarted)
             }
         }
+        // The tap: the list and the boundary, in one step.
+        let snapshot: ResetStagingSnapshot
+        do {
+            snapshot = try await staging.snapshot()
+        } catch {
+            return withdrawRequest(
+                ResetReport(state: .notStarted, progress: current, blockers: [.stagingUnreadable], itemCleanup: nil),
+                earlierOwed: earlierStarted)
+        }
+        // An earlier reset is unfinished while its generation is pending or, once the core completed it, while native
+        // steps it owes (cleanup, temporaries, its credential choice) are still outstanding. A marker that cannot be read
+        // counts as unfinished; `finishEarlierReset` decides again.
+        let earlierOutstanding = (try? markers.isCleanupOutstanding()) ?? true
         let request = ResetRequest(
             credentialChoice: credentialChoice, credentialRemoval: removal, stagedBeforeTheTap: snapshot,
             awaitsEarlierReset: current?.phase == .pending || (current != nil && earlierOutstanding),
@@ -198,7 +206,7 @@ actor ResetService {
         return await finish(from: progress)
     }
 
-    /// Steps 3 to 10 for a recorded request, with the boundary held. The request stays recorded, and the boundary held,
+    /// Steps 4 to 11 for a recorded request, with the boundary held. The request stays recorded, and the boundary held,
     /// until the core has started a generation for it and the choice is carried over.
     private func performRequestedReset(_ recorded: ResetRequest) async -> ResetReport {
         var request = recorded
@@ -232,7 +240,7 @@ actor ResetService {
         return await finish(from: started)
     }
 
-    /// Step 6 for a tap whose reset the core has started: its choice, with the profiles it binds, becomes the removal
+    /// Step 7 for a tap whose reset the core has started: its choice, with the profiles it binds, becomes the removal
     /// marker (or clears one that a `keep` choice replaces), and native cleanup is marked outstanding. Idempotent: an
     /// owed removal already recorded for the same started reset stays as it is.
     private func carryOver(_ request: ResetRequest) throws {
@@ -372,14 +380,14 @@ actor ResetService {
     /// Carries out an owed `remove` choice on exactly the profiles and secrets it binds, behind the core's
     /// credential-claim fence (schema v10), so that no profile can come to hold a secret this removal deletes:
     /// 1. Claim. One core transaction claims each bound secret's reference that no profile outside the bound ones holds.
-    ///    Such a profile was configured after the tap (or the choice never bound it), so its secret stays, unchanged or
-    ///    not. From the claim until step 4, storage refuses any profile insert or edit that would take a claimed
+    ///    Such a profile was configured after the choice was bound (or the choice never bound it), so its secret stays,
+    ///    unchanged or not. From the claim until step 4, storage refuses any profile insert or edit that would take a claimed
     ///    reference. On a retry the core returns the persisted claim set unchanged: it is the authority, never a new
     ///    snapshot.
     /// 2. Revoke the bound profiles the core still lists as not revoked, so their jobs retire and nothing dispatches
     ///    before a secret goes.
-    /// 3. Delete the Keychain item behind each claimed reference, conditioned on the identity the secret had at the tap:
-    ///    a secret the user entered since behind the same reference stays.
+    /// 3. Delete the Keychain item behind each claimed reference, conditioned on the identity the secret had when the
+    ///    choice was bound: a secret the user entered since behind the same reference stays.
     /// 4. Release the claims, then clear the removal marker, only once every deletion was acknowledged. An interruption
     ///    between the two leaves the marker, so the next pass claims again; every claimed secret is gone by then, so that
     ///    pass deletes nothing and only releases and clears.

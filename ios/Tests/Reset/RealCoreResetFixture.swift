@@ -351,21 +351,22 @@ final class RealCoreResetRuntime {
         return try session.run { await service.resume() }
     }
 
-    /// The tap exactly as `ResetService.reset` performs it before anything else: production staging lists and holds the
-    /// boundary in one step, then the request is recorded. A process killed right after this has recorded the tap and
-    /// nothing more.
+    /// The tap exactly as `ResetService.reset` performs it before anything else: a `remove` choice is bound (the profiles
+    /// the core lists and the identity of each secret behind their references), then production staging lists and holds
+    /// the boundary in one step, then the request is recorded. A process killed right after this has recorded the tap
+    /// and nothing more.
     @discardableResult
     func recordTap(_ choice: ResetCredentialChoice) throws -> ResetRequest {
-        let staging = ResetUncheckedBox(try XCTUnwrap(self.staging))
-        let snapshot = try session.run { try await staging.value.snapshot() }
         let client = session.resetClient
         let current = try session.run { try await client.status() }
-        let earlierOutstanding = try markers.isCleanupOutstanding()
         var removal: ResetCredentialRemoval?
         if choice == .remove {
             let profiles = try session.run { try await client.profileCredentials() }
             removal = try ResetCredentialRemoval(binding: profiles) { try resetCredentials.secretIdentity(reference: $0) }
         }
+        let staging = ResetUncheckedBox(try XCTUnwrap(self.staging))
+        let snapshot = try session.run { try await staging.value.snapshot() }
+        let earlierOutstanding = try markers.isCleanupOutstanding()
         let request = ResetRequest(
             credentialChoice: choice, credentialRemoval: removal, stagedBeforeTheTap: snapshot,
             awaitsEarlierReset: current?.phase == .pending || (current != nil && earlierOutstanding),
@@ -473,17 +474,25 @@ private final class ResetAnswerBox<Value>: @unchecked Sendable {
     }
 }
 
-/// The production staging, with a hook that runs right after the snapshot: the moment a capture can land after the tap.
+/// The production staging, with hooks around the snapshot. `beforeSnapshot` runs right before it: for a `remove` tap,
+/// the moment after the choice was bound and before the tap boundary is set. `afterSnapshot` runs right after it: the
+/// moment a capture can land after the tap.
 final class SnapshotHookStaging: ResetIngressStaging {
     private let wrapped: ResetIngressStaging
+    private let beforeSnapshot: () -> Void
     private let afterSnapshot: () -> Void
 
-    init(_ wrapped: ResetIngressStaging, afterSnapshot: @escaping () -> Void) {
+    init(
+        _ wrapped: ResetIngressStaging, beforeSnapshot: @escaping () -> Void = {},
+        afterSnapshot: @escaping () -> Void = {}
+    ) {
         self.wrapped = wrapped
+        self.beforeSnapshot = beforeSnapshot
         self.afterSnapshot = afterSnapshot
     }
 
     func snapshot() async throws -> ResetStagingSnapshot {
+        beforeSnapshot()
         let taken = try await wrapped.snapshot()
         afterSnapshot()
         return taken

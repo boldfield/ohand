@@ -617,6 +617,63 @@ final class ResetCoreIntegrationTests: XCTestCase {
         }
     }
 
+    func testAProfileWrittenOrASecretReenteredBetweenTheBindingAndTheTapBoundaryIsLaterStateAndSurvives() throws {
+        for written in ["profile", "secret", "both"] {
+            let context = "written in the window: \(written)"
+            let world = try makeWorld()
+            _ = try seedCaptures(world)
+            let reference = try world.addProfile(version: "profile-a-v1")
+            let other = try world.addProfile(version: "profile-b-v1")
+            let window = ResetEventLog()
+            let runtimeReference = RuntimeReference()
+            // The deterministic window of a remove tap: after the choice was bound (profiles listed, secret identities
+            // read) and before the staging snapshot sets the tap boundary. An edit mints a new version of profile a that
+            // holds its reference without re-entering the secret, and/or the user enters a new secret behind it.
+            let runtime = try world.launch(wrapStaging: { staging in
+                SnapshotHookStaging(staging, beforeSnapshot: {
+                    let recorded = (try? runtimeReference.runtime?.markers.request()) ?? nil
+                    window.append(recorded == nil ? "no request yet" : "request recorded")
+                    window.append("claims \((try? world.claimsOnDisk().count) ?? -1)")
+                    if written != "secret" {
+                        let outcome = (try? world.writeProfile(version: "profile-a-v2", reference: reference)).map { "\($0)" }
+                        window.append("a-v2: \(outcome ?? "failed")")
+                    }
+                    if written != "profile" {
+                        runtimeReference.replacementSecret = try? world.replaceSecret(reference: reference)
+                        window.append(runtimeReference.replacementSecret == nil ? "secret: failed" : "secret: re-entered")
+                    }
+                })
+            })
+            runtimeReference.runtime = runtime
+
+            let report = try runtime.reset(.remove)
+            runtimeReference.runtime = nil
+            runtime.terminate()
+
+            XCTAssertEqual(report.state, .completed, "\(context): \(report.blockers)")
+            var expectedWindow = ["no request yet", "claims 0"]
+            if written != "secret" { expectedWindow.append("a-v2: written") }
+            if written != "profile" { expectedWindow.append("secret: re-entered") }
+            XCTAssertEqual(window.events, expectedWindow, "the window precedes the tap, the claim and the fence: \(context)")
+            XCTAssertTrue(try world.isProfileRevoked("profile-a-v1"), "the profile bound before the boundary is revoked: \(context)")
+            XCTAssertTrue(try world.isProfileRevoked("profile-b-v1"), context)
+            XCTAssertFalse(try world.isCredentialPresent(other), "the other bound secret goes: \(context)")
+            if written != "secret" {
+                XCTAssertTrue(try world.profileExists("profile-a-v2"), context)
+                XCTAssertFalse(try world.isProfileRevoked("profile-a-v2"), "a profile written after the binding is later state: \(context)")
+            }
+            XCTAssertTrue(try world.isCredentialPresent(reference), "the secret behind the reference survives: \(context)")
+            if let replacement = runtimeReference.replacementSecret {
+                XCTAssertEqual(try world.storedSecret(reference), replacement, "the secret entered after the binding stays: \(context)")
+            }
+            XCTAssertEqual(world.keychain.callCount(.remove), 1, "only the other bound secret was removed: \(context)")
+            XCTAssertEqual(try world.claimsOnDisk(), [], context)
+            XCTAssertFalse(try runtime.markers.isRemovalRequested(), "the removal is spent: \(context)")
+            XCTAssertFalse(try runtime.markers.isCleanupOutstanding(), context)
+            XCTAssertNil(try runtime.markers.request(), context)
+        }
+    }
+
     func testAProfileThatWouldTakeAClaimedReferenceIsRefusedBetweenTheClaimAndTheDeletion() throws {
         let world = try makeWorld()
         _ = try seedCaptures(world)
@@ -828,8 +885,10 @@ final class ResetCoreIntegrationTests: XCTestCase {
     }
 }
 
-/// Hands the runtime to a hook that is installed before the runtime exists, and collects the outcome it produces.
+/// Hands the runtime to a hook that is installed before the runtime exists, and collects what the hook produces: an
+/// ingress outcome, or the secret it re-entered.
 private final class RuntimeReference: @unchecked Sendable {
     var runtime: RealCoreResetRuntime?
     var outcome: IngressOutcome?
+    var replacementSecret: Data?
 }
