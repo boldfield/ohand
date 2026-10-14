@@ -516,6 +516,7 @@ final class LifecycleCoordinatorRealCoreTests: XCTestCase {
         let root = try makeRoot(modules: [coordinator])
         defer { root.shutDown() }
         try coordinator.connect(to: root)
+        root.setAppActiveForTests(true)
 
         let launch = await coordinator.reconcile(.launch)
         XCTAssertEqual(launch.outcome(of: .ingress), .completed)
@@ -683,6 +684,38 @@ final class LifecycleCoordinatorRealCoreTests: XCTestCase {
         XCTAssertTrue(foregrounded)
         XCTAssertEqual(coordinator.lastReport?.triggers, [.foreground])
         XCTAssertEqual(coordinator.lastReport?.outcome(of: .promptEligibility), .completed)
+    }
+
+    func testASlowLaunchPassNeverReactivatesTheJobRunnerAfterTheAppWentToTheBackground() async throws {
+        let layout = ProtectedStorageLayout(rootDirectory: storageRoot)
+        try prepareStore(layout)
+        let lifecycle = NotificationCenter()
+        let coordinator = LifecycleCoordinator(stepTimeoutSeconds: 30)
+        let root = try makeRoot(modules: [coordinator], lifecycleNotifications: lifecycle, reachable: false)
+        defer { root.shutDown() }
+        try coordinator.connect(to: root)
+        let ingressGate = Gate()
+        coordinator.setAction({ _ in await ingressGate.wait(); return .completed }, for: .ingress)
+
+        root.start(isActive: true)
+        XCTAssertTrue(root.isAppActive)
+        lifecycle.post(name: UIApplication.didEnterBackgroundNotification, object: nil)
+        let backgrounded = await lifecycleWaitUntil { !root.isAppActive }
+        XCTAssertTrue(backgrounded)
+        ingressGate.open()
+
+        let finished = await lifecycleWaitUntil { coordinator.finishedPassCount == 1 }
+        XCTAssertTrue(finished)
+        XCTAssertEqual(
+            coordinator.lastReport?.outcome(of: .jobs), .deferred("app_not_active"),
+            "the stale pass leaves a suspended runner suspended")
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(root.jobRunner.startedDrainCount, 0, "no drain started in the background")
+
+        lifecycle.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        let foregrounded = await lifecycleWaitUntil { coordinator.finishedPassCount == 2 }
+        XCTAssertTrue(foregrounded)
+        XCTAssertEqual(coordinator.lastReport?.outcome(of: .jobs), .requested, "the next activation starts the runner")
     }
 
     func testARootWithNoLifecycleModuleStillRunsItsOwnLaunchRecovery() async throws {

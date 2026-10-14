@@ -763,6 +763,17 @@ public final class ServiceCompositionRoot {
         }
     }
 
+    /// Whether the app is active right now. Read it on the main queue, where the lifecycle notifications that change it
+    /// are delivered, when the answer must be ordered against a background transition.
+    var isAppActive: Bool { foreground.isActive }
+
+    #if DEBUG
+    /// Debug builds only: stands in for the activation state of a root a test does not start.
+    func setAppActiveForTests(_ active: Bool) {
+        foreground.set(active)
+    }
+    #endif
+
     /// Imports every capture a previous run left staged and reports what was found; `nil` once the root is shut down.
     /// Safe to repeat. Call on the main queue; the completion arrives there.
     func recoverStagedIngress(completion: @escaping (IngressRecoveryReport?) -> Void) {

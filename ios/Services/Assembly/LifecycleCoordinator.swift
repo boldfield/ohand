@@ -129,6 +129,7 @@ public final class LifecycleCoordinator: CompositionLifecycleOwner, @unchecked S
     private var foregroundObserverCenter: NotificationCenter?
     private weak var connectedRoot: ServiceCompositionRoot?
     private var reminderReportForPrompts: NotificationPermissionReport?
+    private var reminderReportGeneration = 0
     private var healthWaiters: [CheckedContinuation<ProcessingHealthOutcome, Never>] = []
     private var healthObserver: (@Sendable (ProcessingHealthOutcome) -> Void)?
     private var deletionService: DeletionCleanupService?
@@ -242,7 +243,9 @@ public final class LifecycleCoordinator: CompositionLifecycleOwner, @unchecked S
 
     /// The processing-health service over the client this coordinator took from the root, or `nil` before it is
     /// attached. Health is pull-only: the launch and foreground passes read it, and a status surface reads
-    /// `latestHealth` or asks this service to `refresh()`.
+    /// `latestHealth` or asks this service to `refresh()`. The coordinator owns the service's observer: observe
+    /// through `setHealthObserver`, never `ProcessingHealthService.setObserver`, which would make every later health
+    /// step wait out its bound and report `timedOut`.
     public var processingHealth: ProcessingHealthService? {
         lock.lock()
         defer { lock.unlock() }
@@ -549,20 +552,34 @@ extension LifecycleCoordinator {
             }, for: .ingress)
         setAction(
             { [weak root] _ in
-                guard let root else { return .deferred("root_unavailable") }
-                root.jobRunner.activate()
-                return .requested
+                // The check and the activation run together on the main queue, where the background notification
+                // suspends the runner, so a pass delayed by slow earlier steps never wakes a runner the app has
+                // already suspended. The next foreground activation's pass activates it.
+                await withCheckedContinuation { continuation in
+                    DispatchQueue.main.async {
+                        guard let root else {
+                            continuation.resume(returning: .deferred("root_unavailable"))
+                            return
+                        }
+                        guard root.isAppActive else {
+                            continuation.resume(returning: .deferred("app_not_active"))
+                            return
+                        }
+                        root.jobRunner.activate()
+                        continuation.resume(returning: .requested)
+                    }
+                }
             }, for: .jobs)
         setAction({ _ in Self.outcome(ofDeletion: await deletion.reconcile()) }, for: .deletion)
         setAction(
             { [weak self, weak root] triggers in
                 guard let root else { return .deferred("root_unavailable") }
-                self?.recordReminderReport(nil)
+                let generation = self?.beginReminderReport()
                 let trigger: NotificationReconcileTrigger =
                     triggers.contains(.launch) ? .launch : (triggers.contains(.foreground) ? .foreground : .explicit)
                 do {
                     let report = try await root.reconcileReminders(trigger: trigger)
-                    self?.recordReminderReport(report)
+                    self?.recordReminderReport(report, generation: generation)
                     return Self.outcome(ofReminders: report)
                 } catch is CancellationError {
                     return .deferred("reminders_cancelled")
@@ -592,9 +609,22 @@ extension LifecycleCoordinator {
 
     // MARK: Step support
 
-    private func recordReminderReport(_ report: NotificationPermissionReport?) {
+    /// Clears the report left by an earlier pass and returns the generation the new reminder step records under.
+    private func beginReminderReport() -> Int {
         lock.lock()
-        reminderReportForPrompts = report
+        defer { lock.unlock() }
+        reminderReportGeneration += 1
+        reminderReportForPrompts = nil
+        return reminderReportGeneration
+    }
+
+    /// Stores `report` unless a later pass has begun, so a reminder step that outlived its time bound cannot hand the
+    /// next pass a stale report.
+    private func recordReminderReport(_ report: NotificationPermissionReport, generation: Int?) {
+        lock.lock()
+        if generation == reminderReportGeneration {
+            reminderReportForPrompts = report
+        }
         lock.unlock()
     }
 
