@@ -184,7 +184,6 @@ final class NotificationPermissionCoreIntegrationTests: XCTestCase {
 
     private func makeRig(
         authorization: NotificationAuthorization,
-        prompts: [OptionalPromptCandidate] = [],
         pendingListGate: SuspensionGate? = nil,
         metrics: MetricsRecording? = nil
     ) throws -> Rig {
@@ -202,7 +201,7 @@ final class NotificationPermissionCoreIntegrationTests: XCTestCase {
         session.consumer = { core.handle($0) }
         let observations = InMemoryNotificationPermissionObservationStore()
         let reconciler = NotificationPermissionReconciler(
-            center: center, reconciliation: core, observations: observations, promptCandidates: { prompts })
+            center: center, reconciliation: core, observations: observations, promptCandidates: { [] })
         return Rig(session: session, center: center, core: core, observations: observations, reconciler: reconciler)
     }
 
@@ -379,15 +378,42 @@ final class NotificationPermissionCoreIntegrationTests: XCTestCase {
         XCTAssertTrue(rig.session.events.isEmpty, "no event went unclaimed")
     }
 
+    /// A planned prompt as the core names it: the pending-request identifier and its fire time.
+    private struct PlannedPrompt {
+        let identifier: String
+        let fireAt: Date
+    }
+
+    /// Turns on a daily prompt in the core's store through the production bridge and returns the three occurrences the
+    /// core plans from its own clock, soonest first. Prompts reach the reminder pass only this way.
+    private func configurePromptSchedule(_ rig: Rig) throws -> [PlannedPrompt] {
+        let session = rig.session
+        let outcome = try session.run {
+            try session.core.startConfigurePromptSchedule(
+                operationID: $0, setting: .daily(hour: 9, minute: 0), timeZoneIdentifier: "UTC")
+        }.decode(PromptScheduleOutcome.self)
+        XCTAssertTrue(outcome.enabled)
+        XCTAssertEqual(outcome.time, PromptScheduleOutcome.Time(hour: 9, minute: 0))
+        let formatter = ISO8601DateFormatter()
+        let dateFormatter = DateFormatter()
+        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+        dateFormatter.timeZone = TimeZone(identifier: "UTC")
+        dateFormatter.dateFormat = "yyyy-MM-dd"
+        let next = try XCTUnwrap(outcome.next)
+        let first = try XCTUnwrap(formatter.date(from: next.fireAt))
+        XCTAssertEqual(next.localDate, dateFormatter.string(from: first))
+        return (0..<3).map { offset in
+            let fireAt = first.addingTimeInterval(86_400 * Double(offset))
+            return PlannedPrompt(identifier: "prompt:\(dateFormatter.string(from: fireAt))", fireAt: fireAt)
+        }
+    }
+
     func testCapacityHoldsOverflowRemindersAndOptionalPromptsNeverTakeTheirSlots() throws {
         let seeded = reminders(count: 62)
         try prepareStore(seeded)
-        let prompts = (0..<3).map { index in
-            OptionalPromptCandidate(
-                notificationID: "prompt-\(index)", fireAt: Date().addingTimeInterval(3600 * Double(index + 1)))
-        }
-        let rig = try makeRig(authorization: .authorized, prompts: prompts)
+        let rig = try makeRig(authorization: .authorized)
         defer { finish(rig) }
+        _ = try configurePromptSchedule(rig)
         let reconciler = rig.reconciler
 
         let report = try runAsync(timeout: 90) { try await reconciler.refresh(trigger: .launch) }
@@ -409,21 +435,14 @@ final class NotificationPermissionCoreIntegrationTests: XCTestCase {
         XCTAssertEqual(rig.center.addedRequests.count, 60, "no request was installed twice")
     }
 
-    private func promptCandidates(count: Int) -> [OptionalPromptCandidate] {
-        (0..<count).map { index in
-            OptionalPromptCandidate(
-                notificationID: "prompt-\(index)", fireAt: Date().addingTimeInterval(3600 * Double(index + 1)))
-        }
-    }
-
     func testPendingPromptsYieldEverySlotToExplicitRemindersAndAreCancelledOnce() throws {
         let seeded = reminders(count: 60)
         try prepareStore(seeded)
-        let prompts = promptCandidates(count: 3)
-        let rig = try makeRig(authorization: .authorized, prompts: prompts)
+        let rig = try makeRig(authorization: .authorized)
         defer { finish(rig) }
+        let prompts = try configurePromptSchedule(rig)
         for prompt in prompts {
-            rig.center.installForeignRequest(identifier: prompt.notificationID, dueInstant: prompt.fireAt)
+            rig.center.installForeignRequest(identifier: prompt.identifier, dueInstant: prompt.fireAt)
         }
         XCTAssertEqual(rig.center.pendingIdentifiers.count, 3)
         let reconciler = rig.reconciler
@@ -434,7 +453,7 @@ final class NotificationPermissionCoreIntegrationTests: XCTestCase {
         XCTAssertEqual(report.promptsGranted, 0, "explicit reminders take every usable slot")
         XCTAssertEqual(report.promptsDeferred, 3)
         XCTAssertEqual(
-            rig.center.removedIdentifiers.sorted(), prompts.map(\.notificationID).sorted(),
+            rig.center.removedIdentifiers.sorted(), prompts.map(\.identifier).sorted(),
             "each pending prompt was cancelled through the production cancel path")
         XCTAssertEqual(rig.center.pendingIdentifiers, seeded.map { "\($0.reminderID)#1" }.sorted())
         XCTAssertEqual(rig.center.addedRequests.count, 60)
@@ -449,11 +468,11 @@ final class NotificationPermissionCoreIntegrationTests: XCTestCase {
     func testPendingPromptsKeepOnlyTheSlotsTheRemindersLeave() throws {
         let seeded = reminders(count: 58)
         try prepareStore(seeded)
-        let prompts = promptCandidates(count: 3)
-        let rig = try makeRig(authorization: .authorized, prompts: prompts)
+        let rig = try makeRig(authorization: .authorized)
         defer { finish(rig) }
+        let prompts = try configurePromptSchedule(rig)
         for prompt in prompts {
-            rig.center.installForeignRequest(identifier: prompt.notificationID, dueInstant: prompt.fireAt)
+            rig.center.installForeignRequest(identifier: prompt.identifier, dueInstant: prompt.fireAt)
         }
         let reconciler = rig.reconciler
 
@@ -462,14 +481,14 @@ final class NotificationPermissionCoreIntegrationTests: XCTestCase {
         XCTAssertEqual(report.readiness.scheduledCount, 58)
         XCTAssertEqual(report.promptsGranted, 2)
         XCTAssertEqual(report.promptsDeferred, 1)
-        XCTAssertEqual(rig.center.removedIdentifiers, ["prompt-2"], "only the latest prompt loses its slot")
+        XCTAssertEqual(rig.center.removedIdentifiers, [prompts[2].identifier], "only the latest prompt loses its slot")
         XCTAssertEqual(rig.center.pendingIdentifiers.count, 60)
-        XCTAssertTrue(rig.center.pendingIdentifiers.contains("prompt-0"))
-        XCTAssertTrue(rig.center.pendingIdentifiers.contains("prompt-1"))
+        XCTAssertTrue(rig.center.pendingIdentifiers.contains(prompts[0].identifier))
+        XCTAssertTrue(rig.center.pendingIdentifiers.contains(prompts[1].identifier))
 
         let repeated = try runAsync(timeout: 90) { try await reconciler.refresh(trigger: .foreground) }
         XCTAssertEqual(repeated.promptsGranted, 2)
-        XCTAssertEqual(rig.center.removedIdentifiers, ["prompt-2"])
+        XCTAssertEqual(rig.center.removedIdentifiers, [prompts[2].identifier])
         XCTAssertEqual(rig.center.addedRequests.count, 58)
         XCTAssertEqual(rig.center.pendingIdentifiers.count, 60)
     }
@@ -493,9 +512,9 @@ final class NotificationPermissionCoreIntegrationTests: XCTestCase {
     func testPendingRequestsTheCoreCannotNameStillHoldTheirSlotsAndAreNeverCancelled() throws {
         let seeded = reminders(count: 60)
         try prepareStore(seeded)
-        let prompts = promptCandidates(count: 2)
-        let rig = try makeRig(authorization: .authorized, prompts: prompts)
+        let rig = try makeRig(authorization: .authorized)
         defer { finish(rig) }
+        _ = try configurePromptSchedule(rig)
         // Five identifiers one byte over the core's bound and an empty one exhaust the four-slot headroom on their
         // own; a short foreign request is counted beside them.
         let overlong = (0..<5).map { index in String(index) + String(repeating: "x", count: 128) }
@@ -511,7 +530,7 @@ final class NotificationPermissionCoreIntegrationTests: XCTestCase {
         XCTAssertEqual(report.readiness.scheduledCount, 53, "each of the seven foreign requests holds a usable slot")
         XCTAssertEqual(report.readiness.reminders.filter { $0.outlook == .unscheduled(.capacityExceeded) }.count, 7)
         XCTAssertEqual(report.promptsGranted, 0)
-        XCTAssertEqual(report.promptsDeferred, 2)
+        XCTAssertEqual(report.promptsDeferred, 3)
         XCTAssertTrue(rig.center.removedIdentifiers.isEmpty, "no foreign request is cancelled")
         XCTAssertEqual(rig.center.pendingIdentifiers.count, 60, "the pending set stays within the usable budget")
         XCTAssertTrue(Set(foreign).isSubset(of: Set(rig.center.pendingIdentifiers)))
@@ -524,67 +543,62 @@ final class NotificationPermissionCoreIntegrationTests: XCTestCase {
         XCTAssertEqual(rig.center.pendingIdentifiers.count, 60)
     }
 
-    func testUnnameablePendingRequestsNeverAliasOfferedPromptsAndPromptsOfAnyNameYieldTheirSlots() throws {
+    func testUnnameablePendingRequestsNeverAliasPromptsAndOnlyPendingPromptsYieldTheirSlots() throws {
         let seeded = reminders(count: 60)
         try prepareStore(seeded)
-        // Prompt identifiers chosen to equal any stand-in name native might have invented for an unnameable request.
-        let promptIDs = ["ohand.unattributable.0", "ohand.unattributable.1", "ohand.unattributable.2", "unattributable"]
-        let prompts = promptIDs.enumerated().map { index, identifier in
-            OptionalPromptCandidate(notificationID: identifier, fireAt: Date().addingTimeInterval(3600 * Double(index + 1)))
-        }
-        let rig = try makeRig(authorization: .authorized, prompts: prompts)
+        let rig = try makeRig(authorization: .authorized)
         defer { finish(rig) }
+        let prompts = try configurePromptSchedule(rig)
+        // Foreign requests named like the stand-ins the core invents for unnameable ones are still only foreign.
         let unnameable = (0..<3).map { index in String(index) + String(repeating: "x", count: 128) } + [""]
-        for identifier in unnameable {
+        let lookalikes = ["ohand.unattributable.0", "ohand.unattributable.1"]
+        for identifier in unnameable + lookalikes {
             rig.center.installForeignRequest(identifier: identifier, dueInstant: Date().addingTimeInterval(7200))
         }
-        let pendingPrompts = Array(prompts.prefix(2))
-        for prompt in pendingPrompts {
-            rig.center.installForeignRequest(identifier: prompt.notificationID, dueInstant: prompt.fireAt)
-        }
-        XCTAssertEqual(rig.center.pendingIdentifiers.count, 6)
+        rig.center.installForeignRequest(identifier: prompts[0].identifier, dueInstant: prompts[0].fireAt)
+        XCTAssertEqual(rig.center.pendingIdentifiers.count, 7)
         let reconciler = rig.reconciler
 
         let report = try runAsync(timeout: 90) { try await reconciler.refresh(trigger: .launch) }
 
         XCTAssertNil(report.reconciliationFailure)
-        XCTAssertEqual(report.readiness.scheduledCount, 56, "each of the four unnameable requests holds a slot")
-        XCTAssertEqual(report.readiness.reminders.filter { $0.outlook == .unscheduled(.capacityExceeded) }.count, 4)
-        XCTAssertEqual(report.promptsGranted, 0, "no unnameable request is mistaken for an offered prompt")
-        XCTAssertEqual(report.promptsDeferred, 4)
+        XCTAssertEqual(report.readiness.scheduledCount, 54, "each of the six foreign requests holds a slot")
+        XCTAssertEqual(report.readiness.reminders.filter { $0.outlook == .unscheduled(.capacityExceeded) }.count, 6)
+        XCTAssertEqual(report.promptsGranted, 0, "no foreign request is mistaken for a planned prompt")
+        XCTAssertEqual(report.promptsDeferred, 3)
         XCTAssertEqual(
-            rig.center.removedIdentifiers.sorted(), pendingPrompts.map(\.notificationID).sorted(),
-            "pending prompts yield their slots to explicit reminders whatever their names")
+            rig.center.removedIdentifiers, [prompts[0].identifier],
+            "the pending prompt yields its slot to explicit reminders; nothing else is cancelled")
         XCTAssertEqual(rig.center.pendingIdentifiers.count, 60, "the pending set stays within the usable budget")
-        XCTAssertTrue(Set(unnameable).isSubset(of: Set(rig.center.pendingIdentifiers)), "no foreign request is cancelled")
-        XCTAssertEqual(rig.center.addedRequests.count, 56)
+        XCTAssertTrue(
+            Set(unnameable + lookalikes).isSubset(of: Set(rig.center.pendingIdentifiers)), "no foreign request is cancelled")
+        XCTAssertEqual(rig.center.addedRequests.count, 54)
 
         let repeated = try runAsync(timeout: 90) { try await reconciler.refresh(trigger: .foreground) }
-        XCTAssertEqual(repeated.readiness.scheduledCount, 56)
+        XCTAssertEqual(repeated.readiness.scheduledCount, 54)
         XCTAssertEqual(repeated.promptsGranted, 0)
-        XCTAssertEqual(rig.center.removedIdentifiers.count, 2, "a repeated foreground cancels nothing again")
-        XCTAssertEqual(rig.center.addedRequests.count, 56, "and installs nothing twice")
+        XCTAssertEqual(rig.center.removedIdentifiers.count, 1, "a repeated foreground cancels nothing again")
+        XCTAssertEqual(rig.center.addedRequests.count, 54, "and installs nothing twice")
         XCTAssertEqual(rig.center.pendingIdentifiers.count, 60)
     }
 
     func testOptionalPromptsUseTheRemainingSlotsWhenPermissionIsUsable() throws {
         let seeded = reminders(count: 4)
         try prepareStore(seeded)
-        let prompts = (0..<9).map { index in
-            OptionalPromptCandidate(
-                notificationID: "prompt-\(index)", fireAt: Date().addingTimeInterval(3600 * Double(index + 1)))
-        }
-        let rig = try makeRig(authorization: .authorized, prompts: prompts)
+        let rig = try makeRig(authorization: .authorized)
         defer { finish(rig) }
+        _ = try configurePromptSchedule(rig)
         let reconciler = rig.reconciler
 
         let report = try runAsync { try await reconciler.refresh(trigger: .launch) }
 
         XCTAssertEqual(report.readiness.scheduledCount, 4)
-        XCTAssertEqual(report.promptsGranted, 7, "at most seven prompts within the horizon")
-        XCTAssertEqual(report.promptsDeferred, 2)
+        XCTAssertEqual(report.promptsGranted, 3, "the planning horizon is three occurrences")
+        XCTAssertEqual(report.promptsDeferred, 0)
         XCTAssertEqual(report.promptsWithheld, 0)
-        XCTAssertEqual(rig.center.addedRequests.count, 4, "granting a prompt installs nothing; no prompt scheduler exists yet")
+        XCTAssertEqual(
+            rig.center.addedRequests.count, 4,
+            "the reminders are installed; the native prompt installer is a separate service, so the bridge adds no prompt")
     }
 
     func testAnUnavailablePassStillReportsTheCoresStoredRemindersUnderRevocation() throws {
