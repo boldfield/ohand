@@ -142,6 +142,13 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
     - (1) One appended migration step in `core/src/store/schema/mod.rs`, the next version after v10. It creates a single-row `prompt_schedule` table holding the serialized `PromptSchedule` and `updated_at`, and it gets a migration test in `core/tests/migrations/`.
     - (2) In `core/src/ffi/notification_reconciliation.rs`, only what makes the reminder pass take its prompt demands from the persisted schedule through S02's `reconcile_prompts`, and persist the schedule in the same call. Native-supplied prompt candidates stop being a source of installs.
 
+    - (3) **Native effect path**, added 2026-10-14 after PR #219 round 1, where both reviewers found that the native effect handler refuses every prompt command the core now issues.
+      - The files: `NotificationIdentifier`/`NotificationModels.swift`, `NotificationBridge.swift`, `NotificationEventIngestor.swift`, `ReminderNativeEffects.swift` and `CoreReminderReconciler.swift`, with their tests under `ios/Tests/Notifications/` and `ios/Tests/NotificationPermission/`.
+      - What it covers: accepting core-issued `prompt:<local date>` identifiers as a separate prompt identifier kind. That kind must be schedulable and cancellable, and it must appear in the pending and delivered listings the core reads. Today `NotificationBridge.swift:173` drops non-reminder identifiers from the pending listing, so the core would treat an installed prompt as gone and spend its date.
+      - Reminder identifier validation stays exactly as strict.
+      - A delivered or tapped prompt is recognized as a prompt event and is neither journaled as a reminder action nor reported as invalid. Routing a prompt tap to the S03 activation belongs to U08b.
+      - The real-core test must assert that the granted prompts are in the fake centre, that the pass converges and that no scheduling failure is recorded.
+
     Nothing else outside S05a's paths is covered.
 - T11 prerequisites, round 2 (coordinator, 2026-10-14, after PR #216 round 1). Both reviewers found that T11's self-hosted "registration" is inert. `OptionalCapabilitiesModule.selfHosted` has no consumer. Because T11a registered `SelfHosted` unconditionally in the job runner, a root without the module still dispatches a stored `supported` self-hosted profile (the PR's own test shows it). So "absent capability stays disabled" fails. T11 blocked itself, correctly: no module seam can switch a provider protocol on or off.
   - The coordinator chose a core-enforced gate over redefining the stored profile as the registration. T05 requires a capability to be absent or disabled for the base trial until its own canaries pass. That has to be a build-level decision the core enforces, not a property of user data that U05 may later write.
@@ -149,6 +156,8 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
     - **T11c (core):** the host declares which provider protocols may dispatch. Self-hosted is off by default. T11c also adds a typed provider-profile status read.
     - **T11d (root):** modules declare enabled protocols, the root passes the union to the core at assembly, and modules get the status read as a typed client.
   - **Serialization.** The root edits are chained on `CompositionRoot.swift`: U01b → U01c → S05b → T11d. U01 is the critical path, B05 comes next, and T11 is off the M1 critical path. T11 now depends on T11c and T11d.
+- C04c added (coordinator, 2026-10-14, after U01c PR #218 round 1). Opus approved U01c. GPT rejected it, correctly in substance. The root's `CompositionRecordingOutcome.audioUnavailable` (a record is staged but the audio is missing or unreadable) has no honest mapping into C04's voice contract. `VoiceHandoffResult` has only `saved`, `keptForRetry` (asserts the audio is durable), `notStaged` (asserts the audio remains) and `itemDeleted`, and `VoiceRecordingController.outcome(for:)` turns the first two into `keptForRetry`. The root seam itself is correct and meets U01c's acceptance. The gap is in the consumer contract, so C04c owns it. U01c lands as is, and U01 depends on C04c so its adapter can map honestly. `VoiceCaptureOutcome.unrecoverable(captureID:end:fileRetained:)` already exists.
+- F13 and F14 added (coordinator, 2026-10-14). These are intermittent failures that reviewers saw and that no task owns. F13: `ProviderExchangeBoundaryTests.testUntrustedCertificateIsRefusedAndDiagnosticsStayProtected` got no final event within 10 s (run 38534729949, attempt 1, job 115754735518, `:357`). F14: the `tools/bench` test `fake_run_with_an_unverified_self_hosted_arm_skips_every_case_and_sends_nothing` failed once in `make test` (seen by the Opus reviewer on L05b, 2026-10-13).
 - V06 and V07 now depend on V01 alone: they implement Rust adapters against its transport interface using fixtures. V05 is the native effect implementation and remains required by app composition/integration, not by independent protocol adapter implementation. This is an explicit dependency override for those retained tasks.
 
 ## Why some tasks stay together
@@ -825,6 +834,61 @@ Acceptance:
    Existing tests pass. The exact-head macOS CI run is linked.
 
 Source pointers: `ios/Services/Assembly/CompositionRoot.swift:156`, `:261`.
+
+### C04c
+
+Give the voice handoff an honest result for unavailable audio
+
+Extend the voice handoff contract so a recording whose audio could not be made durable is reported as unrecoverable, never as kept.
+
+Owned paths: `ios/Capture/Voice/VoiceRecordingTypes.swift`, `ios/Capture/Voice/VoiceRecordingController.swift`, `ios/Tests/VoiceCapture/`.
+
+Dependencies: none.
+
+Acceptance:
+
+1. `VoiceHandoffResult` gains an explicit case for "staged but the audio is unavailable".
+2. `VoiceRecordingController` maps that case to `VoiceCaptureOutcome.unrecoverable`, with `fileRetained` reflecting whether the in-progress file still exists on disk. Nothing in that path claims the audio is kept, saved or retryable. Every exhaustive switch is updated. The existing outcomes are unchanged.
+3. The test handoff adapter (`VoiceTestSupport.swift`) maps an ingress `sourceUnavailable` to the new case, not to `keptForRetry`.
+4. Controller tests cover the new case with the file present and absent, and check the user-facing recovery state for each. Existing voice tests pass. The exact-head macOS CI run is linked.
+
+Source pointers: `ios/Capture/Voice/VoiceRecordingTypes.swift:93`; `ios/Capture/Voice/VoiceRecordingController.swift:398`; `ios/Capture/Voice/VoiceRecordingTypes.swift:132`; `ios/Tests/VoiceCapture/VoiceTestSupport.swift`.
+
+### F13
+
+Make the untrusted-certificate exchange test deterministic
+
+Find why `testUntrustedCertificateIsRefusedAndDiagnosticsStayProtected` sometimes gets no final event, and fix the cause.
+
+Owned paths: `ios/Tests/ProviderTransport/`. If the cause is in the transport (`ios/Services/ProviderTransport/`) and not in the test, block and name it. Do not mask it.
+
+Dependencies: none.
+
+Acceptance:
+
+1. **Diagnosis.** The PR states the cause with evidence from job 115754735518 (log lines around 08:34:45–08:35:10) or from a reproduction: the handshake failure was not delivered, delivered late, or lost by the fixture's event pump. A cause the evidence cannot confirm is labelled as a hypothesis.
+2. **The fix addresses the cause.** No retries, no skipped or weakened assertions. A wait may be raised only if the PR shows the operation legitimately takes that long on a hosted runner. If the transport can fail to report a refused handshake, that is a product defect. Block and name it.
+3. The F10 counting rule applies to this test. On the final head it passes in 5 consecutive executions of the `simulator` job's `OhAndTests` step. Executions where an earlier unrelated step failed are neutral. The run URLs are linked. `make check` and `make test` pass.
+
+Source pointers: `ios/Tests/ProviderTransport/ProviderExchangeBoundaryTests.swift:347`, `:357`; `ios/Tests/ProviderTransport/ProviderExchangeFixture.swift:213`; `ios/Tests/ProviderTransport/FixtureTLSServer.swift:86`.
+
+### F14
+
+Make the bench unverified-self-hosted CLI test deterministic
+
+Find why `fake_run_with_an_unverified_self_hosted_arm_skips_every_case_and_sends_nothing` failed intermittently in `make test`, and fix the cause.
+
+Owned paths: `tools/bench/src/cli/tests.rs`. A cause outside it (for example shared process state in `tools/bench/src/cli/`) is in scope only for that fix, and the PR names it.
+
+Dependencies: none.
+
+Acceptance:
+
+1. **Diagnosis.** The PR states the cause with evidence: a reproduction, for example `cargo test` looped or run under parallel load, plus the failing assertion. Candidates include shared environment variables or working directories across parallel tests, temp-path reuse, and time-dependent journal content. A cause the evidence cannot confirm is labelled as a hypothesis.
+2. **The fix addresses the cause.** No retries, no `#[ignore]`, no weakened assertion, and no forcing of `--test-threads=1` across the suite.
+3. The test passes 200 consecutive times under parallel `cargo test` on the final head, run with the loop command written in the PR. `make check` and `make test` pass.
+
+Source pointers: `tools/bench/src/cli/tests.rs:1849`.
 
 ### I05b
 

@@ -484,6 +484,7 @@ fn a_ready_job_is_sent_to_the_pinned_destination_off_the_worker_and_completes() 
 fn a_self_hosted_job_is_sent_only_to_its_own_endpoint_and_completes() {
     let _guard = serial();
     let session = Session::open_with_profile("self-hosted", self_hosted_profile());
+    protocols::enable_for_test(session.handle, &["anthropic", "open_ai", "self_hosted"]);
     assert_eq!(session.register_host(&[]).status, OHAND_CORE_STATUS_OK);
 
     assert_eq!(session.start(22).status, OHAND_CORE_STATUS_OK);
@@ -521,6 +522,58 @@ fn a_self_hosted_job_is_sent_only_to_its_own_endpoint_and_completes() {
 
     wait_until_idle(session.handle);
     session.assert_no_command();
+    session.close();
+}
+
+#[test]
+fn a_self_hosted_job_waits_until_the_host_enables_the_protocol_and_stops_when_it_is_disabled() {
+    let _guard = serial();
+    let session = Session::open_with_profile("self-hosted-gate", self_hosted_profile());
+    assert_eq!(session.register_host(&[]).status, OHAND_CORE_STATUS_OK);
+
+    session.start(161);
+    let summary = payload_of(&session.event(161));
+    assert_eq!(summary["stop"], "idle", "{summary}");
+    assert_eq!(only_job(&summary)["settlement"], "backed_off", "{summary}");
+    session.assert_no_command();
+    let deferred = session.job(JOB_ID);
+    assert_eq!(deferred.status, JobStatus::Queued);
+    assert_eq!(deferred.attempt_count, 1, "only the claim, no failure");
+    assert_eq!(
+        deferred.failure_reason.as_deref(),
+        Some(PROTOCOL_DEFERRED_REASON)
+    );
+    wait_for_drain_to_end(session.handle);
+
+    protocols::enable_for_test(session.handle, &["anthropic", "open_ai", "self_hosted"]);
+    session.start(162);
+    let send = session.command();
+    assert_eq!(send.command, OHAND_JOB_HOST_COMMAND_SEND);
+    session.complete(send.request_id, 200, &self_hosted_reply());
+    let summary = payload_of(&session.event(162));
+    assert_eq!(only_job(&summary)["settlement"], "completed", "{summary}");
+    assert_eq!(session.job(JOB_ID).status, JobStatus::Completed);
+    wait_until_idle(session.handle);
+    session.close();
+}
+
+#[test]
+fn disabling_a_protocol_again_stops_new_dispatches() {
+    let _guard = serial();
+    let session = Session::open_with_profile("self-hosted-disable", self_hosted_profile());
+    protocols::enable_for_test(session.handle, &["anthropic", "open_ai", "self_hosted"]);
+    session.register_host(&[]);
+    protocols::enable_for_test(session.handle, &["anthropic", "open_ai"]);
+
+    session.start(163);
+    let summary = payload_of(&session.event(163));
+    assert_eq!(only_job(&summary)["settlement"], "backed_off", "{summary}");
+    session.assert_no_command();
+    assert_eq!(session.job(JOB_ID).status, JobStatus::Queued);
+    assert_eq!(
+        session.job(JOB_ID).failure_reason.as_deref(),
+        Some(PROTOCOL_DEFERRED_REASON)
+    );
     session.close();
 }
 

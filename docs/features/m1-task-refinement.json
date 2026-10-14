@@ -2013,14 +2013,22 @@
       "file_scope": [
         "core/src/ffi/prompt_schedule.rs",
         "core/src/ffi/prompt_schedule/",
-        "ios/OhAndCoreBridge/CoreHandle+PromptSchedule.swift"
+        "ios/OhAndCoreBridge/CoreHandle+PromptSchedule.swift",
+        "ios/Services/Notifications/NotificationModels.swift",
+        "ios/Services/Notifications/NotificationBridge.swift",
+        "ios/Services/Notifications/NotificationEventIngestor.swift",
+        "ios/Services/NotificationPermission/ReminderNativeEffects.swift",
+        "ios/Services/NotificationPermission/CoreReminderReconciler.swift",
+        "ios/Tests/Notifications/",
+        "ios/Tests/NotificationPermission/"
       ],
       "intent": "Core is the sole durable holder of the S02 PromptSchedule; reminder pass sources prompt demands only from it via reconcile_prompts.",
       "acceptance": [
         "Schedule loaded/saved from new table; entry points use core clock, caller zone, persist before return.",
         "Exports configure/refresh/read (no content).",
         "Reminder pass takes prompt demands only from persisted schedule; caller candidates no longer install; reminders keep priority.",
-        "Rust tests: reopen survival, no replay after backward clock, no second prompt after reopen+west travel, unattempted not spent, DST, idempotent refresh, migration; make check/test; macOS CI."
+        "Rust tests: reopen survival, no replay after backward clock, no second prompt after reopen+west travel, unattempted not spent, DST, idempotent refresh, migration; make check/test; macOS CI.",
+        "Native effect path accepts prompt:<date> as a distinct identifier kind (schedule, cancel, pending/delivered listing); reminder validation unchanged; prompt delivery/tap recognized, not journaled as reminder action; real-core test asserts granted prompts installed, converged, no scheduling failure."
       ],
       "covers_parent_criteria": [],
       "depends_on": [],
@@ -2104,6 +2112,66 @@
       "source_pointers": [
         "ios/Services/Assembly/CompositionRoot.swift:156",
         "ios/Services/Assembly/CompositionRoot.swift:261"
+      ]
+    },
+    {
+      "key": "C04c",
+      "parent": "C04",
+      "title": "Give the voice handoff an honest result for unavailable audio",
+      "file_scope": [
+        "ios/Capture/Voice/VoiceRecordingTypes.swift",
+        "ios/Capture/Voice/VoiceRecordingController.swift",
+        "ios/Tests/VoiceCapture/"
+      ],
+      "intent": "VoiceHandoffResult gains an unavailable-audio case mapped to VoiceCaptureOutcome.unrecoverable(fileRetained:), so the root's audioUnavailable outcome has an honest consumer.",
+      "acceptance": [
+        "New VoiceHandoffResult case.",
+        "Controller maps it to unrecoverable with fileRetained from disk; no kept/saved claim; switches updated.",
+        "Test adapter maps sourceUnavailable to it.",
+        "Controller tests for file present/absent; existing pass; macOS CI."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/Capture/Voice/VoiceRecordingController.swift:398"
+      ]
+    },
+    {
+      "key": "F13",
+      "parent": null,
+      "title": "Make the untrusted-certificate exchange test deterministic",
+      "file_scope": [
+        "ios/Tests/ProviderTransport/"
+      ],
+      "intent": "Diagnose and fix the intermittent missing final event in ProviderExchangeBoundaryTests untrusted-certificate test; product defects block, not masked.",
+      "acceptance": [
+        "Cause stated with evidence or labelled hypothesis.",
+        "Fix the cause; no retries/skips/weakening; transport defect blocks.",
+        "5 consecutive counting OhAndTests executions on final head (F10 rule); make check/test."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/Tests/ProviderTransport/ProviderExchangeBoundaryTests.swift:357"
+      ]
+    },
+    {
+      "key": "F14",
+      "parent": null,
+      "title": "Make the bench unverified-self-hosted CLI test deterministic",
+      "file_scope": [
+        "tools/bench/src/cli/tests.rs"
+      ],
+      "intent": "Diagnose and fix the intermittent tools/bench CLI test failure under parallel cargo test.",
+      "acceptance": [
+        "Cause stated with reproduction evidence or labelled hypothesis.",
+        "Fix the cause; no retries/ignore/weakening/single-threading.",
+        "200 consecutive parallel passes with the stated loop; make check/test."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "tools/bench/src/cli/tests.rs:1849"
       ]
     }
   ],
@@ -2463,6 +2531,7 @@
     ],
     "U01": [
       "B03",
+      "C04c",
       "N07",
       "P10",
       "U01a",
@@ -2691,7 +2760,10 @@
     "T11d": [
       "T11c",
       "S05b"
-    ]
+    ],
+    "F13": [],
+    "F14": [],
+    "C04c": []
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -2821,6 +2893,10 @@
     {
       "date": "2026-10-14",
       "change": "B05 blocked: no native daily-prompt pipeline exists (S02 PromptSchedule unexposed, unpersisted, nothing installs prompts). Added S05a (core persists schedule, migration after v10, reminder pass sources prompts from it) and S05b (native prompt service as LifecycleCoordinator promptEligibility action); B05 depends on S05b and drops its Swift schedule copy. T11 blocked: self-hosted registration inert because the core dispatches SelfHosted unconditionally. Added T11c (core enabled-protocol gate, self-hosted off by default, profile status read) and T11d (root collects module-declared protocols). Root chain: U01b, U01c, S05b, T11d."
+    },
+    {
+      "date": "2026-10-14",
+      "change": "S05a allowance (3): native effect path accepts core-issued prompt identifiers (NotificationModels, NotificationBridge incl. pending listing, NotificationEventIngestor, ReminderNativeEffects, CoreReminderReconciler + tests). Added C04c (VoiceHandoffResult unavailable-audio case mapped to unrecoverable); U01c lands as is, U01 depends on C04c. Added F13 (untrusted-certificate exchange test missing final event) and F14 (tools/bench unverified self-hosted CLI test)."
     }
   ]
 }
