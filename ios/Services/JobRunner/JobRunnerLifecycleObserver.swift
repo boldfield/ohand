@@ -29,11 +29,15 @@ public final class ApplicationBackgroundExecutionGrant: BackgroundExecutionGrant
 /// stop at a checkpoint and holds a background-execution grant open until the core confirms it stopped (or the
 /// system takes the grant back); termination takes the same checkpoint. Every notification is idempotent, so
 /// repeated activations cannot start duplicate drainers. All hooks are removed by `stop()`.
+///
+/// With `drivesActivation` false the observer leaves launch and foreground activation to another owner (the
+/// lifecycle coordinator, which orders it after recovery) and keeps only reachability, background and termination.
 public final class JobRunnerLifecycleObserver {
     private let service: JobRunnerService
     private let notificationCenter: NotificationCenter
     private let reachability: NetworkReachability?
     private let backgroundGrant: BackgroundExecutionGrant?
+    private let drivesActivation: Bool
     private var tokens: [NSObjectProtocol] = []
     private var isStarted = false
 
@@ -41,12 +45,14 @@ public final class JobRunnerLifecycleObserver {
         service: JobRunnerService,
         notificationCenter: NotificationCenter = .default,
         reachability: NetworkReachability? = nil,
-        backgroundGrant: BackgroundExecutionGrant? = nil
+        backgroundGrant: BackgroundExecutionGrant? = nil,
+        drivesActivation: Bool = true
     ) {
         self.service = service
         self.notificationCenter = notificationCenter
         self.reachability = reachability
         self.backgroundGrant = backgroundGrant
+        self.drivesActivation = drivesActivation
     }
 
     /// Registers the hooks and, when `isActive`, runs the launch drain at once. Notifications are expected on the
@@ -56,10 +62,12 @@ public final class JobRunnerLifecycleObserver {
         guard !isStarted else { return }
         isStarted = true
 
-        tokens.append(
-            notificationCenter.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) {
-                [service] _ in service.activate()
-            })
+        if drivesActivation {
+            tokens.append(
+                notificationCenter.addObserver(
+                    forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+                ) { [service] _ in service.activate() })
+        }
         tokens.append(
             notificationCenter.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) {
                 [weak self] _ in self?.enterBackground()
@@ -71,7 +79,7 @@ public final class JobRunnerLifecycleObserver {
         reachability?.startMonitoring { [service] reachable in
             service.reachabilityChanged(reachable)
         }
-        if isActive {
+        if isActive && drivesActivation {
             service.activate()
         }
     }
