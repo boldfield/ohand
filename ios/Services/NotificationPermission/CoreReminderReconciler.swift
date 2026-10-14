@@ -60,9 +60,9 @@ public final class CoreReminderReconciler: ReminderReconciling, @unchecked Senda
     private var nextOperationID: UInt64
     private var registration: NotificationEffectsRegistration?
 
-    /// `center` must be the center `bridge` was built on: the bridge installs and cancels reminder requests, and
-    /// the same center is read and cancelled directly for optional-prompt requests, whose identifiers the
-    /// bridge does not carry.
+    /// `center` must be the center `bridge` was built on: the bridge installs and cancels reminder and
+    /// optional-prompt (`prompt:<local date>`) requests, and the same center is read directly for the pending
+    /// list and cancelled directly for any other identifier.
     public init(
         core: CoreHandle, bridge: NotificationBridge, center: NotificationCenterProviding,
         effectTimeout: TimeInterval = 10, removalPollInterval: TimeInterval = 0.05, maximumRemovalPolls: Int = 20,
@@ -196,17 +196,24 @@ public final class CoreReminderReconciler: ReminderReconciling, @unchecked Senda
         do {
             switch command {
             case .schedule(let schedule):
-                guard let identifier = NotificationIdentifier(rawValue: schedule.notificationID),
-                      let dueInstant = formatter.date(from: schedule.fireAt),
-                      schedule.payloadKind == NotificationPayloadKind.generic.rawValue,
-                      let target = OpaqueIdentifier(schedule.opaqueTargetID)
+                guard let dueInstant = formatter.date(from: schedule.fireAt),
+                      schedule.payloadKind == NotificationPayloadKind.generic.rawValue
                 else {
                     metrics?.recordSchedulingFailure(.unschedulable)
                     return invalidPayload
                 }
                 do {
-                    _ = try await effects.bridge.schedule(
-                        .generic(identifier: identifier, dueInstant: dueInstant, opaqueTargetID: target))
+                    if let prompt = PromptIdentifier(rawValue: schedule.notificationID) {
+                        _ = try await effects.bridge.schedulePrompt(
+                            PromptScheduleRequest(identifier: prompt, dueInstant: dueInstant))
+                    } else if let identifier = NotificationIdentifier(rawValue: schedule.notificationID),
+                              let target = OpaqueIdentifier(schedule.opaqueTargetID) {
+                        _ = try await effects.bridge.schedule(
+                            .generic(identifier: identifier, dueInstant: dueInstant, opaqueTargetID: target))
+                    } else {
+                        metrics?.recordSchedulingFailure(.unschedulable)
+                        return invalidPayload
+                    }
                 } catch {
                     if let reason = schedulingFailure(of: error) { metrics?.recordSchedulingFailure(reason) }
                     throw error

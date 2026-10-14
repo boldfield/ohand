@@ -76,4 +76,60 @@ final class NotificationEventIngestionTests: XCTestCase {
         XCTAssertNil(event.opaqueTargetID)
         XCTAssertEqual(event.identifier.rawValue, "reminder-1#4")
     }
+
+    func testAPromptIsAPromptEventAndNeverAReminderEvent() throws {
+        let prompts = PromptEventRecorder()
+        let reminders = recorder
+        let now = currentTime
+        let promptIngestor = NotificationEventIngestor(
+            now: { now }, handler: { reminders.record($0) }, promptHandler: { prompts.record($0) })
+        let deliveredAt = currentTime.addingTimeInterval(-30)
+
+        let delivered = promptIngestor.ingestDelivered(
+            requestIdentifier: "prompt:2026-10-15", userInfo: ["ohand.kind": "prompt"], deliveredAt: deliveredAt)
+        let opened = promptIngestor.ingestResponse(
+            requestIdentifier: "prompt:2026-10-15", actionIdentifier: UNNotificationDefaultActionIdentifier,
+            userInfo: ["ohand.kind": "prompt"])
+
+        XCTAssertTrue(delivered)
+        XCTAssertTrue(opened)
+        XCTAssertTrue(reminders.events.isEmpty, "a prompt is never journaled as a reminder event")
+        let identifier = try XCTUnwrap(PromptIdentifier(rawValue: "prompt:2026-10-15"))
+        XCTAssertEqual(prompts.events, [
+            PromptNotificationEvent(identifier: identifier, kind: .delivered, occurredAt: deliveredAt),
+            PromptNotificationEvent(identifier: identifier, kind: .opened, occurredAt: currentTime),
+        ])
+    }
+
+    func testAPromptActionThatIsNotATapIsDroppedAndNotForwardedAsAReminderAction() {
+        let prompts = PromptEventRecorder()
+        let reminders = recorder
+        let now = currentTime
+        let promptIngestor = NotificationEventIngestor(
+            now: { now }, handler: { reminders.record($0) }, promptHandler: { prompts.record($0) })
+
+        let forwarded = promptIngestor.ingestResponse(
+            requestIdentifier: "prompt:2026-10-15", actionIdentifier: "action.acknowledge", userInfo: [:])
+
+        XCTAssertFalse(forwarded)
+        XCTAssertTrue(reminders.events.isEmpty)
+        XCTAssertTrue(prompts.events.isEmpty)
+    }
+}
+
+private final class PromptEventRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [PromptNotificationEvent] = []
+
+    func record(_ event: PromptNotificationEvent) {
+        lock.lock()
+        defer { lock.unlock() }
+        recorded.append(event)
+    }
+
+    var events: [PromptNotificationEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded
+    }
 }

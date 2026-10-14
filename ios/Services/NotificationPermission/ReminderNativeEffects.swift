@@ -2,12 +2,12 @@ import Foundation
 
 /// The OS work the core's capacity pass asks for, with identifiers carried exactly as the OS holds them.
 ///
-/// `NotificationBridge` lists and cancels only requests whose identifier is a reminder's
-/// `<reminder-id>#<generation>`. The capacity pass must also see optional-prompt requests, whose identifiers
-/// are independent raw strings, to count them against the OS budget and to cancel them when explicit
-/// reminders need their slots. So the pending list and the cancel of a non-reminder identifier go to the
-/// center directly, each call bounded by `effectTimeout` and confirmed like the bridge's own cancel. Reminder
-/// schedules and reminder cancels still go through the bridge and its desired-state ledger.
+/// `NotificationBridge` lists only requests whose identifier is a reminder's `<reminder-id>#<generation>`. The
+/// capacity pass must also see optional-prompt requests to count them against the OS budget and to cancel them
+/// when explicit reminders need their slots. So the pending list goes to the center directly, bounded by
+/// `effectTimeout`, and carries every identifier the OS holds. Reminder and prompt (`prompt:<local date>`)
+/// schedules and cancels go through the bridge and its desired-state ledger; the cancel of any other identifier
+/// goes to the center directly and is confirmed like the bridge's own cancel.
 struct ReminderNativeEffects: Sendable {
     /// The core rejects longer identifiers, so a request this long cannot be one the core created.
     static let maximumIdentifierBytes = 128
@@ -50,6 +50,10 @@ struct ReminderNativeEffects: Sendable {
     func cancel(_ rawIdentifier: String) async throws {
         if let reminderIdentifier = NotificationIdentifier(rawValue: rawIdentifier) {
             try await bridge.cancel(reminderIdentifier)
+            return
+        }
+        if let promptIdentifier = PromptIdentifier(rawValue: rawIdentifier) {
+            try await bridge.cancelPrompt(promptIdentifier)
             return
         }
         let center = self.center

@@ -585,20 +585,37 @@ final class NotificationPermissionCoreIntegrationTests: XCTestCase {
     func testOptionalPromptsUseTheRemainingSlotsWhenPermissionIsUsable() throws {
         let seeded = reminders(count: 4)
         try prepareStore(seeded)
-        let rig = try makeRig(authorization: .authorized)
+        let metrics = RecordingMetrics()
+        let rig = try makeRig(authorization: .authorized, metrics: metrics)
         defer { finish(rig) }
-        _ = try configurePromptSchedule(rig)
+        let prompts = try configurePromptSchedule(rig)
         let reconciler = rig.reconciler
 
         let report = try runAsync { try await reconciler.refresh(trigger: .launch) }
 
+        XCTAssertNil(report.reconciliationFailure)
+        XCTAssertTrue(report.converged, "every install the core asked for was performed")
         XCTAssertEqual(report.readiness.scheduledCount, 4)
         XCTAssertEqual(report.promptsGranted, 3, "the planning horizon is three occurrences")
         XCTAssertEqual(report.promptsDeferred, 0)
         XCTAssertEqual(report.promptsWithheld, 0)
-        XCTAssertEqual(
-            rig.center.addedRequests.count, 4,
-            "the reminders are installed; the native prompt installer is a separate service, so the bridge adds no prompt")
+        XCTAssertEqual(rig.center.addedRequests.count, 7, "four reminders and the three granted prompts")
+        let installedPrompts = rig.center.addedRequests.filter { $0.identifier.hasPrefix("prompt:") }
+        XCTAssertEqual(installedPrompts.map(\.identifier).sorted(), prompts.map(\.identifier).sorted())
+        for prompt in prompts {
+            XCTAssertTrue(rig.center.pendingIdentifiers.contains(prompt.identifier), "\(prompt.identifier) is in the centre")
+            let installed = try XCTUnwrap(installedPrompts.first { $0.identifier == prompt.identifier })
+            XCTAssertEqual(installed.dueInstant.timeIntervalSince1970, prompt.fireAt.timeIntervalSince1970, accuracy: 1)
+            XCTAssertEqual(installed.content.title, PromptNotificationWording.title)
+            XCTAssertEqual(installed.content.body, PromptNotificationWording.body)
+            XCTAssertNil(installed.content.categoryIdentifier, "a prompt offers no reminder actions")
+        }
+        XCTAssertTrue(metrics.records.isEmpty, "no scheduling failure is recorded")
+
+        let repeated = try runAsync { try await reconciler.refresh(trigger: .foreground) }
+        XCTAssertTrue(repeated.converged)
+        XCTAssertEqual(rig.center.addedRequests.count, 7, "a repeated pass installs nothing twice")
+        XCTAssertTrue(rig.center.removedIdentifiers.isEmpty)
     }
 
     func testAnUnavailablePassStillReportsTheCoresStoredRemindersUnderRevocation() throws {
