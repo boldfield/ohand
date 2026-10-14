@@ -4,6 +4,9 @@ import XCTest
 import OhandCoreC
 @testable import OhAndCoreBridge
 
+/// Wait at least as long as the core's own 5 s busy timeout (core/src/store/schema/mod.rs) for its write lock.
+private let coreStoreBusyTimeoutMilliseconds: Int32 = 5_000
+
 /// Saves and reads real captures and statuses through `CoreHandle` against the real Rust core
 /// on the simulator. Outcomes are events delivered on the main queue, where XCTest runs.
 ///
@@ -52,6 +55,7 @@ final class CaptureStatusTests: XCTestCase {
     private func seed(_ statements: [String]) throws {
         var database: OpaquePointer?
         XCTAssertEqual(sqlite3_open(storePath, &database), SQLITE_OK)
+        sqlite3_busy_timeout(database, coreStoreBusyTimeoutMilliseconds)
         defer { sqlite3_close(database) }
         for statement in statements {
             var message: UnsafeMutablePointer<CChar>?
@@ -240,6 +244,7 @@ final class CaptureStatusTests: XCTestCase {
         var blocker: OpaquePointer?
         XCTAssertEqual(sqlite3_open(storePath, &blocker), SQLITE_OK)
         defer { sqlite3_close(blocker) }
+        sqlite3_busy_timeout(blocker, coreStoreBusyTimeoutMilliseconds)
         XCTAssertEqual(sqlite3_exec(blocker, "BEGIN IMMEDIATE", nil, nil, nil), SQLITE_OK)
 
         let capture = makeCapture(id: "capture-blocked", text: "must not be acknowledged")

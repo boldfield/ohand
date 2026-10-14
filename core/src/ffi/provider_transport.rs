@@ -45,6 +45,7 @@ use crate::providers::contracts::{
     TextBasis, TransportError, PROFILE_SCHEMA_VERSION,
 };
 use crate::providers::openai::{HttpTransport, OpenAiAdapter};
+use crate::providers::self_hosted::SelfHostedAdapter;
 use crate::store::events::current_transcript;
 use crate::time::TimeContext;
 use chrono::{DateTime, Utc};
@@ -689,9 +690,6 @@ fn prepare(connection: &Connection, job_id: &str) -> Result<Prepared, AbiFailure
         return Err(failures::UNSUPPORTED_JOB);
     }
     let profile = load_profile(connection, &target.profile_version)?;
-    if profile.protocol() == ProviderProtocol::SelfHosted {
-        return Err(failures::UNSUPPORTED_PROTOCOL);
-    }
     if target.credential_ref.as_deref() != Some(profile.credential_ref().as_str()) {
         return Err(failures::MALFORMED_PROFILE);
     }
@@ -758,7 +756,7 @@ fn run_exchange(
             AnthropicSettings::default(),
         )),
         ProviderProtocol::OpenAi => Box::new(OpenAiAdapter::new(transport)),
-        ProviderProtocol::SelfHosted => return Err(failures::UNSUPPORTED_PROTOCOL),
+        ProviderProtocol::SelfHosted => Box::new(SelfHostedAdapter::new(transport)),
     };
     let clock = SystemClock::new();
     let output = dispatch(

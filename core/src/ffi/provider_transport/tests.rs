@@ -16,6 +16,8 @@ use std::sync::mpsc::Receiver;
 
 const ANTHROPIC_ORIGIN: &str = "https://api.anthropic.com";
 const OPENAI_ORIGIN: &str = "https://api.openai.com";
+const SELF_HOSTED_ORIGIN: &str = "https://spark.example.test";
+const SELF_HOSTED_ENDPOINT: &str = "https://spark.example.test/v1";
 const CREDENTIAL_REFERENCE: &str = "credential-ref/synthetic-primary";
 const NOTE_TEXT: &str = "call the roofer tomorrow at 9";
 const CAPTURE_ID: &str = "5a1c0000-0000-4000-8000-0000000000c1";
@@ -70,7 +72,7 @@ fn temporary_store(name: &str) -> (std::path::PathBuf, String) {
 }
 
 fn profile_for(protocol: ProviderProtocol, origin: &str) -> ProviderProfile {
-    ProviderProfileBuilder::new("synthetic-profile", protocol, "synthetic-model")
+    let builder = ProviderProfileBuilder::new("synthetic-profile", protocol, "synthetic-model")
         .credential_ref(CREDENTIAL_REFERENCE)
         .timeout_seconds(30)
         .authorized_destination(origin)
@@ -81,9 +83,13 @@ fn profile_for(protocol: ProviderProtocol, origin: &str) -> ProviderProfile {
             )
             .with_input_size_limit(500)
             .with_structured_output(StructuredOutputMode::JsonSchema),
-        )
-        .build()
-        .expect("valid profile")
+        );
+    let builder = if protocol == ProviderProtocol::SelfHosted {
+        builder.endpoint(SELF_HOSTED_ENDPOINT)
+    } else {
+        builder
+    };
+    builder.build().expect("valid profile")
 }
 
 #[derive(Clone)]
@@ -92,6 +98,7 @@ struct Scenario {
     route_destinations: Vec<String>,
     authorized_destinations: Vec<String>,
     revoked: bool,
+    stored_endpoint_missing: bool,
     item_revision: i64,
     job_source_revision: i64,
     text: Option<&'static str>,
@@ -108,6 +115,13 @@ impl Scenario {
         Scenario::over(profile_for(ProviderProtocol::OpenAi, OPENAI_ORIGIN))
     }
 
+    fn self_hosted() -> Scenario {
+        Scenario::over(profile_for(
+            ProviderProtocol::SelfHosted,
+            SELF_HOSTED_ORIGIN,
+        ))
+    }
+
     fn over(profile: ProviderProfile) -> Scenario {
         let origins = profile.authorized_destinations().to_vec();
         Scenario {
@@ -115,6 +129,7 @@ impl Scenario {
             route_destinations: origins.clone(),
             authorized_destinations: origins,
             revoked: false,
+            stored_endpoint_missing: false,
             item_revision: 0,
             job_source_revision: 0,
             text: Some(NOTE_TEXT),
@@ -136,11 +151,15 @@ fn seed(path: &str, scenario: &Scenario) {
         .execute(
             "INSERT INTO provider_profiles (profile_version, profile_id, provider_type, endpoint, \
              model, credential_ref, timeout_seconds, retry_policy, authorized_destinations, \
-             capabilities, created_at, revoked_at) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)",
+             capabilities, created_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rusqlite::params![
                 scenario.profile.profile_version(),
                 scenario.profile.profile_id(),
                 record["protocol"].as_str().unwrap(),
+                scenario
+                    .profile
+                    .endpoint()
+                    .filter(|_| !scenario.stored_endpoint_missing),
                 scenario.profile.model(),
                 CREDENTIAL_REFERENCE,
                 scenario.profile.timeout_seconds(),
@@ -425,6 +444,20 @@ fn anthropic_reply(proposal: Value) -> Vec<u8> {
     .unwrap()
 }
 
+fn self_hosted_reply(proposal: Value) -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "id": "chatcmpl-synthetic-01",
+        "object": "chat.completion",
+        "model": "synthetic-model",
+        "choices": [{
+            "index": 0,
+            "finish_reason": "stop",
+            "message": { "role": "assistant", "content": proposal.to_string() },
+        }],
+    }))
+    .unwrap()
+}
+
 fn valid_proposal() -> Value {
     json!({
         "operation": { "kind": "annotate" },
@@ -629,6 +662,92 @@ fn an_openai_job_attaches_its_credential_as_a_bearer_reference() {
     let (status, class, _) = failure_of(&rejected);
     assert_eq!((status, class.as_str()), (3, "unauthorized"));
     session.close();
+}
+
+#[test]
+fn a_self_hosted_job_is_sent_only_to_its_own_endpoint_and_completes() {
+    let _guard = serial();
+    let scenario = Scenario::self_hosted();
+    let session = Session::open("self-hosted", &scenario);
+    session.register_native();
+
+    assert_eq!(session.start(22, JOB_ID).status, OHAND_CORE_STATUS_OK);
+    assert_eq!(session.event(22).status, OHAND_CORE_STATUS_OK);
+    let send = send_description(&session.command(22));
+    assert_eq!(
+        send["url"],
+        "https://spark.example.test/v1/chat/completions"
+    );
+    assert_eq!(send["method"], "POST");
+    assert_eq!(send["authorized_origins"], json!([SELF_HOSTED_ORIGIN]));
+    assert_eq!(send["capability"], "text_interpretation");
+    assert_eq!(
+        send["credential"],
+        json!({
+            "reference": CREDENTIAL_REFERENCE,
+            "header": "Authorization",
+            "scheme": "Bearer",
+        })
+    );
+    let body = send["body"].as_str().unwrap();
+    assert!(body.contains(NOTE_TEXT));
+    assert!(body.contains("synthetic-model"));
+
+    let answer = session.complete(22, 200, &self_hosted_reply(valid_proposal()));
+    assert_eq!(answer.status, OHAND_CORE_STATUS_OK);
+    let completed = session.event(22);
+    assert_eq!(
+        completed.status, OHAND_CORE_STATUS_OK,
+        "{:?}",
+        completed.payload
+    );
+    let payload = payload_of(&completed);
+    assert_eq!(payload["phase"], "completed");
+    assert_eq!(payload["output"]["proposal"], valid_proposal());
+
+    wait_until_idle(session.handle);
+    session.assert_no_command();
+    session.close();
+}
+
+#[test]
+fn a_self_hosted_job_that_is_denied_or_has_no_endpoint_never_reaches_native() {
+    let _guard = serial();
+    let mut off_route = Scenario::self_hosted();
+    off_route.route_destinations = vec![OPENAI_ORIGIN.to_string()];
+    off_route.authorized_destinations = vec![OPENAI_ORIGIN.to_string()];
+    let mut unauthorized_capability = Scenario::self_hosted();
+    unauthorized_capability.authorized_destinations = vec![OPENAI_ORIGIN.to_string()];
+    let mut revoked = Scenario::self_hosted();
+    revoked.revoked = true;
+    let mut no_endpoint = Scenario::self_hosted();
+    no_endpoint.stored_endpoint_missing = true;
+
+    let cases: [(&str, Scenario, &str, u32); 4] = [
+        ("sh-off-route", off_route, "destination_not_in_route", 3),
+        (
+            "sh-capability",
+            unauthorized_capability,
+            "destination_not_authorized",
+            3,
+        ),
+        ("sh-revoked", revoked, "profile_revoked", 3),
+        ("sh-no-endpoint", no_endpoint, "malformed_profile", 2),
+    ];
+    for (name, scenario, expected_code, expected_status) in cases {
+        let session = Session::open(name, &scenario);
+        session.register_native();
+        assert_eq!(session.start(52, JOB_ID).status, OHAND_CORE_STATUS_OK);
+        let (status, _, code) = failure_of(&session.event(52));
+        assert_eq!(
+            (status, code.as_str()),
+            (expected_status, expected_code),
+            "{name}"
+        );
+        session.assert_no_command();
+        wait_until_idle(session.handle);
+        session.close();
+    }
 }
 
 #[test]

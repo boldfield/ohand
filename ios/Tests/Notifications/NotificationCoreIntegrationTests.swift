@@ -5,6 +5,9 @@ import XCTest
 @testable import OhAndCoreBridge
 @testable import OhAndServices
 
+/// Wait at least as long as the core's own 5 s busy timeout (core/src/store/schema/mod.rs) for its write lock.
+private let coreStoreBusyTimeoutMilliseconds: Int32 = 5_000
+
 /// Drives the notification bridge with identifiers read from the real Rust core on the simulator,
 /// and runs the real OS request builder and permission check.
 ///
@@ -45,6 +48,7 @@ final class NotificationCoreIntegrationTests: XCTestCase {
     private func seed(_ statements: [String]) throws {
         var database: OpaquePointer?
         XCTAssertEqual(sqlite3_open(storePath, &database), SQLITE_OK)
+        sqlite3_busy_timeout(database, coreStoreBusyTimeoutMilliseconds)
         defer { sqlite3_close(database) }
         for statement in statements {
             var message: UnsafeMutablePointer<CChar>?
