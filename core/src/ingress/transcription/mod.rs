@@ -12,7 +12,8 @@
 //! * for a transcript, records it in `transcript_attachments` with its provenance and writes a
 //!   `transcript` event through the event API (so the revision check, history and search index
 //!   see it), moves the transcription state to `transcribed`, completes the job and, only when
-//!   the new job is authorized, enqueues the requested interpretation job at the new revision;
+//!   the new job is authorized, enqueues the interpretation job at the new revision (pinned to the
+//!   profile the core chooses; a native request naming any other pin is refused);
 //! * for unsupported, failed or empty (abstained) recognition, writes no text: the audio stays the
 //!   sole source, the transcription state says why, and the job ends with a content-free reason.
 //!
@@ -41,6 +42,7 @@ use crate::domain::items::{
     load_item_state, validate_state_transition, StateTransition, TransitionValidity,
 };
 use crate::domain::status::TranscriptionState;
+use crate::interpretation::enqueue::plan_interpretation;
 use crate::jobs::queue::{complete_job_in_tx, enqueue_job_in_tx, get_job_internal, Job, JobStatus};
 use crate::privacy::routing::{
     authorize_job, AuthorizationDecision, DenialReason, JOB_TYPE_INTERPRET,
@@ -201,6 +203,9 @@ pub enum TranscriptionErrorKind {
     },
     /// Processing of this job is not authorized.
     NotAuthorized(DenialReason),
+    /// The caller named a profile pin for the interpretation job that the core does not choose.
+    /// Nothing was written.
+    InterpretationPinRefused,
     /// The same job already attached a different result.
     ConflictingResult,
     Storage(anyhow::Error),
@@ -256,6 +261,10 @@ impl fmt::Display for TranscriptionError {
             TranscriptionErrorKind::NotAuthorized(reason) => {
                 write!(f, "transcription not authorized: {reason}")?
             }
+            TranscriptionErrorKind::InterpretationPinRefused => write!(
+                f,
+                "the requested interpretation profile pin is not the core's choice"
+            )?,
             TranscriptionErrorKind::ConflictingResult => {
                 write!(f, "the job already attached a different transcript")?
             }
@@ -364,9 +373,8 @@ pub(crate) fn apply_with_fault_points(
             }
         }
         Resolved::Transcript(transcript) => {
-            if let Some(request) = &outcome.interpretation {
-                require_unused_job_id(&transaction, request)?;
-            }
+            let request = interpretation_request_for(&transaction, &job, &item, outcome)?;
+            require_unused_job_id(&transaction, &request)?;
             let revision = attach_transcript(
                 &transaction,
                 &job,
@@ -378,16 +386,13 @@ pub(crate) fn apply_with_fault_points(
             )?;
             complete_job_in_tx(&transaction, &job.job_id, outcome.lease_attempt)?;
             fault_point(TranscriptionStage::JobSettled)?;
-            let interpretation = match &outcome.interpretation {
-                Some(request) => queue_interpretation(
-                    &transaction,
-                    &job.item_id,
-                    revision,
-                    request,
-                    transcribed_at,
-                )?,
-                None => InterpretationQueued::NotRequested,
-            };
+            let interpretation = queue_interpretation(
+                &transaction,
+                &job.item_id,
+                revision,
+                &request,
+                transcribed_at,
+            )?;
             fault_point(TranscriptionStage::InterpretationQueued)?;
             TranscriptionDisposition::Attached {
                 revision,
@@ -937,6 +942,30 @@ fn attach_transcript(
     )?;
     fault_point(TranscriptionStage::StateUpdated)?;
     Ok(attached_revision)
+}
+
+/// The interpretation job to queue once the transcript is attached. The core plans it: its pin
+/// comes from the resolver. A native-supplied request is accepted only when it names exactly the
+/// resolver's pin; native code cannot choose where text may go.
+fn interpretation_request_for(
+    transaction: &Transaction<'_>,
+    job: &Job,
+    item: &ItemRow,
+    outcome: &TranscriptionOutcome,
+) -> Result<InterpretationRequest, TranscriptionError> {
+    let attached_revision = item.revision + 1;
+    let plan = plan_interpretation(transaction, &job.item_id, attached_revision)?;
+    match &outcome.interpretation {
+        None => Ok(InterpretationRequest {
+            job_id: plan.job_id,
+            profile_version: plan.profile_version,
+            request_version: plan.request_version,
+        }),
+        Some(request) if request.profile_version == plan.profile_version => Ok(request.clone()),
+        Some(_) => Err(TranscriptionError::not_committed(
+            TranscriptionErrorKind::InterpretationPinRefused,
+        )),
+    }
 }
 
 /// Queue the interpretation job at the post-transcript revision, and keep it only if the core
