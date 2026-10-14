@@ -2115,7 +2115,7 @@
       ]
     },
     {
-      "key": "C04b",
+      "key": "C04c",
       "parent": "C04",
       "title": "Give the voice handoff an honest result for unavailable audio",
       "file_scope": [
@@ -2453,7 +2453,9 @@
       "C02b",
       "D05"
     ],
-    "C04b": [],
+    "C04b": [
+      "C04a"
+    ],
     "C05a": [
       "P04",
       "C04b",
@@ -2529,7 +2531,7 @@
     ],
     "U01": [
       "B03",
-      "C04b",
+      "C04c",
       "N07",
       "P10",
       "U01a",
@@ -2760,7 +2762,8 @@
       "S05b"
     ],
     "F13": [],
-    "F14": []
+    "F14": [],
+    "C04c": []
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -2893,7 +2896,7 @@
     },
     {
       "date": "2026-10-14",
-      "change": "S05a allowance (3): native effect path accepts core-issued prompt identifiers (NotificationModels, NotificationBridge incl. pending listing, NotificationEventIngestor, ReminderNativeEffects, CoreReminderReconciler + tests). Added C04b (VoiceHandoffResult unavailable-audio case mapped to unrecoverable); U01c lands as is, U01 depends on C04b. Added F13 (untrusted-certificate exchange test missing final event) and F14 (tools/bench unverified self-hosted CLI test)."
+      "change": "S05a allowance (3): native effect path accepts core-issued prompt identifiers (NotificationModels, NotificationBridge incl. pending listing, NotificationEventIngestor, ReminderNativeEffects, CoreReminderReconciler + tests). Added C04c (VoiceHandoffResult unavailable-audio case mapped to unrecoverable); U01c lands as is, U01 depends on C04c. Added F13 (untrusted-certificate exchange test missing final event) and F14 (tools/bench unverified self-hosted CLI test)."
     }
   ]
 }

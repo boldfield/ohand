@@ -156,7 +156,7 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
     - **T11c (core):** the host declares which provider protocols may dispatch. Self-hosted is off by default. T11c also adds a typed provider-profile status read.
     - **T11d (root):** modules declare enabled protocols, the root passes the union to the core at assembly, and modules get the status read as a typed client.
   - **Serialization.** The root edits are chained on `CompositionRoot.swift`: U01b → U01c → S05b → T11d. U01 is the critical path, B05 comes next, and T11 is off the M1 critical path. T11 now depends on T11c and T11d.
-- C04b added (coordinator, 2026-10-14, after U01c PR #218 round 1). Opus approved U01c. GPT rejected it, correctly in substance. The root's `CompositionRecordingOutcome.audioUnavailable` (a record is staged but the audio is missing or unreadable) has no honest mapping into C04's voice contract. `VoiceHandoffResult` has only `saved`, `keptForRetry` (asserts the audio is durable), `notStaged` (asserts the audio remains) and `itemDeleted`, and `VoiceRecordingController.outcome(for:)` turns the first two into `keptForRetry`. The root seam itself is correct and meets U01c's acceptance. The gap is in the consumer contract, so C04b owns it. U01c lands as is, and U01 depends on C04b so its adapter can map honestly. `VoiceCaptureOutcome.unrecoverable(captureID:end:fileRetained:)` already exists.
+- C04c added (coordinator, 2026-10-14, after U01c PR #218 round 1). Opus approved U01c. GPT rejected it, correctly in substance. The root's `CompositionRecordingOutcome.audioUnavailable` (a record is staged but the audio is missing or unreadable) has no honest mapping into C04's voice contract. `VoiceHandoffResult` has only `saved`, `keptForRetry` (asserts the audio is durable), `notStaged` (asserts the audio remains) and `itemDeleted`, and `VoiceRecordingController.outcome(for:)` turns the first two into `keptForRetry`. The root seam itself is correct and meets U01c's acceptance. The gap is in the consumer contract, so C04c owns it. U01c lands as is, and U01 depends on C04c so its adapter can map honestly. `VoiceCaptureOutcome.unrecoverable(captureID:end:fileRetained:)` already exists.
 - F13 and F14 added (coordinator, 2026-10-14). These are intermittent failures that reviewers saw and that no task owns. F13: `ProviderExchangeBoundaryTests.testUntrustedCertificateIsRefusedAndDiagnosticsStayProtected` got no final event within 10 s (run 38534729949, attempt 1, job 115754735518, `:357`). F14: the `tools/bench` test `fake_run_with_an_unverified_self_hosted_arm_skips_every_case_and_sends_nothing` failed once in `make test` (seen by the Opus reviewer on L05b, 2026-10-13).
 - V06 and V07 now depend on V01 alone: they implement Rust adapters against its transport interface using fixtures. V05 is the native effect implementation and remains required by app composition/integration, not by independent protocol adapter implementation. This is an explicit dependency override for those retained tasks.
 
@@ -835,7 +835,7 @@ Acceptance:
 
 Source pointers: `ios/Services/Assembly/CompositionRoot.swift:156`, `:261`.
 
-### C04b
+### C04c
 
 Give the voice handoff an honest result for unavailable audio
 
