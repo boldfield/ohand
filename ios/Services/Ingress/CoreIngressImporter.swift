@@ -3,8 +3,8 @@ import OhAndCoreBridge
 
 /// Connects `ForegroundIngressService` to the real Rust core's transactional import. It contains no ingress policy,
 /// only the mapping from the core's events to `IngressImportResult`. A result is `confirmed` only for a success event,
-/// which the core sends after the import transaction committed. It owns the core's event handler, so an assembly that
-/// needs other event consumers must multiplex above it.
+/// which the core sends after the import transaction committed. `init(core:)` owns the core's event handler; an
+/// assembly that needs other event consumers builds it with `init(attachedTo:)` and forwards each event to `handle(_:)`.
 final class CoreIngressImporter: ForegroundIngressImporting {
     private let core: CoreHandle
     private var pendingByOperationID: [UInt64: (IngressImportResult) -> Void] = [:]
@@ -12,7 +12,20 @@ final class CoreIngressImporter: ForegroundIngressImporting {
 
     init(core: CoreHandle) throws {
         self.core = core
-        try core.setEventHandler { [weak self] event in self?.deliver(event) }
+        try core.setEventHandler { [weak self] event in _ = self?.handle(event) }
+    }
+
+    /// Leaves the core's event handler to the caller, which must forward every event to `handle(_:)`.
+    init(attachedTo core: CoreHandle) {
+        self.core = core
+    }
+
+    /// Takes the event if it answers one of this importer's imports.
+    @discardableResult
+    func handle(_ event: CoreEvent) -> Bool {
+        guard let completion = pendingByOperationID.removeValue(forKey: event.operationID) else { return false }
+        completion(Self.result(for: event))
+        return true
     }
 
     func importRecord(_ record: IngressRecord, completion: @escaping (IngressImportResult) -> Void) {
@@ -39,11 +52,6 @@ final class CoreIngressImporter: ForegroundIngressImporting {
             pendingByOperationID[operationID] = nil
             completion(.failed(.coreUnavailable))
         }
-    }
-
-    private func deliver(_ event: CoreEvent) {
-        guard let completion = pendingByOperationID.removeValue(forKey: event.operationID) else { return }
-        completion(Self.result(for: event))
     }
 
     static func result(for event: CoreEvent) -> IngressImportResult {
