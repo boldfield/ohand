@@ -18,6 +18,10 @@
 //!   deferred without cost while the drain moves on to on-device and local jobs. Work that never
 //!   reaches the transport, such as a fast-path interpretation of a remotely routed capture,
 //!   completes offline.
+//! * **The host decides which protocols dispatch.** A job whose pinned profile uses a protocol the
+//!   host has not enabled (`ohand_core_set_enabled_provider_protocols`) sends nothing: it is put back
+//!   without spending retry budget, labelled `protocol_not_enabled`, and the drain moves on. Enabling
+//!   the protocol lets the next drain run it. Jobs that never reach the provider are unaffected.
 //! * **Cancellation is a checkpoint.** `ohand_core_cancel_job_drain` fires the runner's
 //!   `CancelToken`. A provider call in flight is abandoned and its job is re-queued at once
 //!   without spending retry budget; the drain ends with `stop: "cancelled"` (or `"interrupted"`).
@@ -45,6 +49,7 @@
 use super::core_handle::exports::{guarded, OhandCoreHandle, OhandCoreResult};
 use super::core_handle::failure::AbiFailure;
 use super::core_handle::instance::{self, lock, JobFn};
+use super::provider_transport::protocols::{self, PROTOCOL_NOT_ENABLED};
 use crate::interpretation::dispatch::{AdapterRegistry, InterpretationDispatcher};
 use crate::jobs::configuration::{resolve_execution_target, ExecutionResolution};
 use crate::jobs::queue::{get_job, Job, JobStatus};
@@ -57,7 +62,8 @@ use crate::providers::anthropic::{
     AnthropicAdapter, AnthropicSettings, AnthropicTransport, HttpRequest, HttpResponse,
 };
 use crate::providers::contracts::{
-    CancelToken, Clock, ErrorClass, ProviderProtocol, SystemClock, TransportError,
+    AdapterCall, CancelToken, Clock, ErrorClass, ProviderAdapter, ProviderProtocol, SystemClock,
+    TransportError,
 };
 use crate::providers::openai::{HttpTransport, OpenAiAdapter};
 use crate::providers::self_hosted::SelfHostedAdapter;
@@ -121,6 +127,8 @@ const CAPABILITY_DEADLINE: Duration = Duration::from_secs(240);
 const OFFLINE_DEFERRED_REASON: &str = "offline_deferred";
 /// What the dispatcher records on a job whose provider request was cancelled.
 const CANCELLED_REASON: &str = "cancelled";
+/// Recorded on a provider job put back because the host has not enabled its protocol.
+const PROTOCOL_DEFERRED_REASON: &str = PROTOCOL_NOT_ENABLED;
 /// How long an offline-deferred job waits; the next drain that starts with a network releases it
 /// at once, so this only bounds the wait if that release could not be written.
 const OFFLINE_DEFERRAL: chrono::Duration = chrono::Duration::seconds(30);
@@ -480,6 +488,42 @@ impl HttpTransport for HostTransport {
     }
 }
 
+/// Lets an adapter send only while the host has its protocol enabled, checked at each call so a
+/// protocol disabled mid-drain stops dispatching. A refusal sends nothing and reports a cancelled
+/// call, which the dispatcher puts back at once; [`ScopedInterpretation`] then relabels the job.
+struct EnabledOnly<A> {
+    inner: A,
+    handle: u64,
+    protocol: ProviderProtocol,
+    refused_protocol: Arc<AtomicBool>,
+}
+
+impl<A> EnabledOnly<A> {
+    fn new(
+        inner: A,
+        handle: u64,
+        protocol: ProviderProtocol,
+        refused_protocol: &Arc<AtomicBool>,
+    ) -> EnabledOnly<A> {
+        EnabledOnly {
+            inner,
+            handle,
+            protocol,
+            refused_protocol: Arc::clone(refused_protocol),
+        }
+    }
+}
+
+impl<A: ProviderAdapter> ProviderAdapter for EnabledOnly<A> {
+    fn invoke(&self, call: &AdapterCall<'_>) -> Result<Vec<u8>, TransportError> {
+        if !protocols::is_enabled(self.handle, self.protocol) {
+            self.refused_protocol.store(true, Ordering::SeqCst);
+            return Err(TransportError::Cancelled);
+        }
+        self.inner.invoke(call)
+    }
+}
+
 /// Interpretation jobs, with the origins the provider may be sent to taken from the job's stored
 /// route authorization immediately before it runs. Fast-path and local jobs never reach the
 /// transport, so they leave the set unused and run whether or not the device is online. Only a
@@ -489,6 +533,7 @@ struct ScopedInterpretation<'a> {
     inner: InterpretationCapability<'a>,
     authorized_origins: Arc<Mutex<Vec<String>>>,
     refused_offline: Arc<AtomicBool>,
+    refused_protocol: Arc<AtomicBool>,
 }
 
 impl JobCapability for ScopedInterpretation<'_> {
@@ -513,25 +558,34 @@ impl JobCapability for ScopedInterpretation<'_> {
         };
         *lock(&self.authorized_origins) = destinations;
         self.refused_offline.store(false, Ordering::SeqCst);
+        self.refused_protocol.store(false, Ordering::SeqCst);
         let outcome = self.inner.run(db, claimed, cancel, now)?;
-        if self.refused_offline.swap(false, Ordering::SeqCst)
-            && matches!(outcome, CapabilityOutcome::Settled(Settlement::Interrupted))
-        {
-            return defer_until_network(db, claimed, now)
+        let refused_protocol = self.refused_protocol.swap(false, Ordering::SeqCst);
+        let refused_offline = self.refused_offline.swap(false, Ordering::SeqCst);
+        let reason = if refused_protocol {
+            PROTOCOL_DEFERRED_REASON
+        } else if refused_offline {
+            OFFLINE_DEFERRED_REASON
+        } else {
+            return Ok(outcome);
+        };
+        if matches!(outcome, CapabilityOutcome::Settled(Settlement::Interrupted)) {
+            return defer_while_refused(db, claimed, reason, now)
                 .map(|deferred| deferred.unwrap_or(outcome));
         }
         Ok(outcome)
     }
 }
 
-/// The dispatcher put a job back at once after its provider request was refused for lack of a
-/// network (a cancelled request costs nothing but would end the drain). Move that job to a short
-/// wait instead, so on-device and local jobs queued behind it still run while the device is
-/// offline. `None` when the job is no longer in that state, which leaves the dispatcher's result
-/// to stand.
-fn defer_until_network(
+/// The dispatcher put a job back at once after its provider request was refused, for lack of a
+/// network or because the host has not enabled its protocol (a cancelled request costs nothing
+/// but would end the drain). Move that job to a short wait labelled `reason` instead, so
+/// on-device and local jobs queued behind it still run. `None` when the job is no longer in that
+/// state, which leaves the dispatcher's result to stand.
+fn defer_while_refused(
     db: &mut Database,
     claimed: &Job,
+    reason: &str,
     now: DateTime<Utc>,
 ) -> Result<Option<CapabilityOutcome>, CapabilityError> {
     let retry_at = now + OFFLINE_DEFERRAL;
@@ -541,7 +595,7 @@ fn defer_until_network(
             "UPDATE jobs SET failure_reason = ?, next_attempt_at = ?
               WHERE job_id = ? AND status = ? AND failure_reason = ? AND attempt_count = ?",
             rusqlite::params![
-                OFFLINE_DEFERRED_REASON,
+                reason,
                 retry_at.to_rfc3339(),
                 claimed.job_id,
                 JobStatus::Queued.as_str(),
@@ -557,13 +611,17 @@ fn defer_until_network(
     )
 }
 
-/// Makes the jobs an offline drain deferred ready again; called when a drain starts with a network.
-fn release_offline_deferred(db: &Database, now: DateTime<Utc>) {
+/// Makes the jobs a drain deferred ready again. Jobs deferred for lack of a network are released
+/// only when the drain starts with one; jobs deferred because their protocol was not enabled are
+/// released by every drain, and are deferred again, without cost, if it still is not.
+fn release_deferred(db: &Database, network_available: bool, now: DateTime<Utc>) {
     let _ = db.conn().execute(
-        "UPDATE jobs SET next_attempt_at = ? WHERE status = ? AND failure_reason = ?",
+        "UPDATE jobs SET next_attempt_at = ? WHERE status = ? AND (failure_reason = ? OR (? AND failure_reason = ?))",
         rusqlite::params![
             now.to_rfc3339(),
             JobStatus::Queued.as_str(),
+            PROTOCOL_DEFERRED_REASON,
+            network_available,
             OFFLINE_DEFERRED_REASON
         ],
     );
@@ -762,12 +820,15 @@ fn run_drain(
     let store_clock = Arc::new(StoreClock);
     let mut database = Database::open(path, store_clock.clone())
         .map_err(|error| AbiFailure::from_store(&error, AbiFailure::STORE_UNAVAILABLE))?;
-    if host.network_available.load(Ordering::SeqCst) {
-        release_offline_deferred(&database, Utc::now());
-    }
+    release_deferred(
+        &database,
+        host.network_available.load(Ordering::SeqCst),
+        Utc::now(),
+    );
 
     let authorized_origins = Arc::new(Mutex::new(Vec::new()));
     let refused_offline = Arc::new(AtomicBool::new(false));
+    let refused_protocol = Arc::new(AtomicBool::new(false));
     let transport = HostTransport {
         handle,
         host: Arc::clone(&host),
@@ -777,15 +838,30 @@ fn run_drain(
     let registry = AdapterRegistry::new()
         .with_adapter(
             ProviderProtocol::Anthropic,
-            AnthropicAdapter::new(Arc::new(transport.clone()), AnthropicSettings::default()),
+            EnabledOnly::new(
+                AnthropicAdapter::new(Arc::new(transport.clone()), AnthropicSettings::default()),
+                handle,
+                ProviderProtocol::Anthropic,
+                &refused_protocol,
+            ),
         )
         .with_adapter(
             ProviderProtocol::OpenAi,
-            OpenAiAdapter::new(transport.clone()),
+            EnabledOnly::new(
+                OpenAiAdapter::new(transport.clone()),
+                handle,
+                ProviderProtocol::OpenAi,
+                &refused_protocol,
+            ),
         )
         .with_adapter(
             ProviderProtocol::SelfHosted,
-            SelfHostedAdapter::new(transport),
+            EnabledOnly::new(
+                SelfHostedAdapter::new(transport),
+                handle,
+                ProviderProtocol::SelfHosted,
+                &refused_protocol,
+            ),
         );
     let provider_clock = SystemClock::new();
     let mut capabilities = JobCapabilities::new().with(ScopedInterpretation {
@@ -796,6 +872,7 @@ fn run_drain(
         )),
         authorized_origins,
         refused_offline,
+        refused_protocol,
     });
     for job_type in &host.native_job_types {
         capabilities = capabilities.with(HostCapability {

@@ -1,6 +1,7 @@
 import Foundation
 import SQLite3
 import UIKit
+import UserNotifications
 import XCTest
 @testable import OhAndCoreBridge
 @testable import OhAndServices
@@ -111,6 +112,30 @@ private final class ClientTakingModule: CompositionModule {
         isShutDown = true
     }
 }
+
+/// Takes shadow review through the typed client factory, the only way a module reaches the provider transport.
+private final class ShadowReviewTakingModule: CompositionModule {
+    let identifier = "shadow.review.taker"
+    let firstOperationID: UInt64 = 1 << 44
+    let configuration: ShadowReviewConfiguration
+    private(set) var service: ShadowReviewService?
+
+    init(configuration: ShadowReviewConfiguration) {
+        self.configuration = configuration
+    }
+
+    func attach(to context: CompositionContext) throws {
+        service = try context.clients.shadowReview(configuration: configuration)
+    }
+
+    func handle(_ event: CoreEvent) -> Bool {
+        service?.handle(event) ?? false
+    }
+
+    func shutDown() {}
+}
+
+private struct TransportAttachRefused: Error {}
 
 final class CompositionRootTests: XCTestCase {
     private static let routeID = "route-composition"
@@ -484,6 +509,79 @@ final class CompositionRootTests: XCTestCase {
         }
     }
 
+    // MARK: provider transport
+
+    func testModuleShadowReviewDispatchesThroughTheTransportTheRootAttached() throws {
+        try prepareShadowReviewStore()
+        let sender = ScriptedProviderSender(reply: try shadowReviewReply())
+        let module = ShadowReviewTakingModule(configuration: shadowReviewConfiguration())
+        let root = try makeTestRoot(sender: sender, modules: [module])
+        defer { root.shutDown() }
+        let service = try XCTUnwrap(module.service)
+
+        let jobID = try selectCase(service)
+        var run: ShadowReviewRunResult?
+        service.review(jobID: jobID) { run = $0 }
+        XCTAssertTrue(pump(until: { run != nil }), "the review completes")
+
+        guard case .completed(let record, nil)? = run else {
+            return XCTFail("expected a completed review, got \(String(describing: run))")
+        }
+        XCTAssertEqual(record.outcome, .reviewed)
+        XCTAssertEqual(record.verdict, .agreement)
+        XCTAssertEqual(sender.requests.count, 1, "the one review request reached the sender the root was given")
+        XCTAssertEqual(sender.requests.first?.authorization.capability, .review)
+        XCTAssertEqual(sender.requests.first?.url.host, "api.anthropic.com")
+    }
+
+    func testRootAttachesTheTransportOnceToItsOwnCoreWithTheAdapterSender() throws {
+        try prepareShadowReviewStore()
+        let sender = ScriptedProviderSender(reply: try shadowReviewReply())
+        var attachments: [(core: CoreHandle, sender: ProviderRequestSender)] = []
+        let root = try makeTestRoot(
+            sender: sender,
+            attachProviderTransport: { core, sender in
+                attachments.append((core, sender))
+                return try ProviderExchangeCoordinator.attach(to: core, sender: sender)
+            })
+        defer { root.shutDown() }
+        XCTAssertEqual(attachments.count, 1)
+        XCTAssertTrue(attachments.first?.core === root.coreHandle, "attached to the root's own core handle")
+        XCTAssertTrue(attachments.first?.sender === sender, "attached with the sender the adapters carry")
+    }
+
+    func testFailedTransportAttachUndoesAssemblyAndTheCoreRefusesDispatchWithoutATransport() throws {
+        try prepareShadowReviewStore()
+        let sender = ScriptedProviderSender(reply: try shadowReviewReply())
+        let module = ShadowReviewTakingModule(configuration: shadowReviewConfiguration())
+        var attempts = 0
+        XCTAssertThrowsError(
+            try makeTestRoot(
+                sender: sender,
+                attachProviderTransport: { _, _ in
+                    attempts += 1
+                    throw TransportAttachRefused()
+                },
+                modules: [module])
+        ) { XCTAssertTrue($0 is TransportAttachRefused) }
+        XCTAssertEqual(attempts, 1)
+        XCTAssertNil(module.service, "no module attaches over a core without a transport")
+
+        let bareCore = try CoreHandle(path: databasePath)
+        defer { bareCore.close() }
+        let bareService = ShadowReviewService(core: bareCore, configuration: shadowReviewConfiguration())
+        try bareCore.setEventHandler { _ = bareService.handle($0) }
+        let jobID = try selectCase(bareService)
+        var run: ShadowReviewRunResult?
+        bareService.review(jobID: jobID) { run = $0 }
+        XCTAssertTrue(pump(until: { run != nil }))
+        XCTAssertEqual(run, .failed(code: "transport_not_registered"))
+        XCTAssertTrue(sender.requests.isEmpty, "a dispatch without a transport sends nothing")
+
+        let reassembled = try makeTestRoot(sender: sender)
+        reassembled.shutDown()
+    }
+
     // MARK: private read gate
 
     func testStatusReadIsRefusedWhileTheSessionIsLockedAndNeverReachesTheCore() throws {
@@ -578,6 +676,407 @@ final class CompositionRootTests: XCTestCase {
         XCTAssertEqual(session.lastRelockReason, .enteredBackground)
     }
 
+    // MARK: capture route and notification actions
+
+    private static let reminderID = "4a2b8c1e-5d4a-4e0b-9a77-000000000001"
+
+    func testFreshStoreSavesThroughAProductionConfiguredRootOnAProvisionedLocalOnlyRoute() throws {
+        let root = try ServiceCompositionRoot(configuration: makeConfiguration())
+        defer { root.shutDown() }
+        let itemID = try saveSyntheticCapture(root)
+        XCTAssertEqual(scalar("SELECT item_id FROM items"), itemID, "the item exists")
+        XCTAssertEqual(scalar("SELECT CAST(COUNT(*) AS TEXT) FROM items"), "1")
+        XCTAssertEqual(scalar("SELECT processing_destinations FROM routes WHERE route_id = '\(Self.routeID)'"), "[]")
+        XCTAssertEqual(scalar("SELECT scope FROM routes WHERE route_id = '\(Self.routeID)'"), "personal")
+        XCTAssertEqual(
+            scalar("SELECT CAST(COUNT(*) AS TEXT) FROM route_authorizations"), "0",
+            "provisioning the route authorizes no upload")
+    }
+
+    // MARK: voice ingress seam
+
+    private static let recordingCaptureID = "voice-root-1"
+    private static let recordingBytes = Data("synthetic recording".utf8)
+
+    func testRecordingHandedOffIsSavedAsAnAudioCaptureWithItsItemAndNothingIsUploaded() throws {
+        let sender = ScriptedProviderSender(reply: Data())
+        let root = try makeTestRoot(sender: sender)
+        defer { root.shutDown() }
+        let layout = ProtectedStorageLayout(rootDirectory: storageRoot)
+        XCTAssertEqual(
+            root.inProgressAudioDirectory.standardizedFileURL, layout.directory(for: .ingressInProgressAudio).standardizedFileURL)
+        let recordingURL = root.inProgressAudioDirectory.appendingPathComponent("\(Self.recordingCaptureID).wav")
+        try Self.recordingBytes.write(to: recordingURL)
+
+        var outcome: CompositionRecordingOutcome?
+        root.saveRecording(makeHandoff()) { outcome = $0 }
+        XCTAssertTrue(pump(until: { outcome != nil }), "the handoff completes")
+        guard case .saved(let captureID, let itemID, let savedAt, let alreadySaved)? = outcome else {
+            return XCTFail("expected a confirmed save, got \(String(describing: outcome))")
+        }
+        XCTAssertEqual(captureID, Self.recordingCaptureID)
+        XCTAssertFalse(savedAt.isEmpty)
+        XCTAssertFalse(alreadySaved)
+
+        XCTAssertEqual(scalar("SELECT item_id FROM items WHERE capture_id = '\(Self.recordingCaptureID)'"), itemID)
+        XCTAssertEqual(
+            scalar("SELECT audio_reference FROM captures WHERE capture_id = '\(Self.recordingCaptureID)'"),
+            "\(StoreProtectionPolicy.policy(for: .finalizedAudio).directoryName)/\(Self.recordingCaptureID).wav")
+        XCTAssertEqual(
+            scalar("SELECT COALESCE(text, 'none') FROM captures WHERE capture_id = '\(Self.recordingCaptureID)'"), "none")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: recordingURL.path), "the audio was moved, not copied")
+        XCTAssertEqual(
+            try Data(contentsOf: layout.directory(for: .finalizedAudio).appendingPathComponent("\(Self.recordingCaptureID).wav")),
+            Self.recordingBytes)
+        XCTAssertTrue(sender.requests.isEmpty, "nothing was sent to a provider")
+        XCTAssertEqual(scalar("SELECT processing_destinations FROM routes WHERE route_id = '\(Self.routeID)'"), "[]")
+        XCTAssertEqual(scalar("SELECT CAST(COUNT(*) AS TEXT) FROM route_authorizations"), "0")
+
+        XCTAssertEqual(scalar("SELECT CAST(COUNT(*) AS TEXT) FROM items"), "1")
+    }
+
+    func testHandoffOfAMissingRecordingIsReportedUnavailableAndNeverSaved() throws {
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))
+        defer { root.shutDown() }
+        var outcome: CompositionRecordingOutcome?
+        root.saveRecording(makeHandoff()) { outcome = $0 }
+        XCTAssertTrue(pump(until: { outcome != nil }))
+        XCTAssertEqual(outcome, .audioUnavailable(captureID: Self.recordingCaptureID))
+        XCTAssertEqual(scalar("SELECT CAST(COUNT(*) AS TEXT) FROM items"), "0")
+    }
+
+    func testHandoffAfterShutDownIsNotStaged() throws {
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))
+        root.shutDown()
+        var outcome: CompositionRecordingOutcome?
+        root.saveRecording(makeHandoff()) { outcome = $0 }
+        XCTAssertEqual(outcome, .notStaged(captureID: Self.recordingCaptureID))
+        var completed = false
+        var report: CompositionRecoveryReport?
+        root.recoverRecordings {
+            report = $0
+            completed = true
+        }
+        XCTAssertTrue(completed)
+        XCTAssertNil(report, "recovery on a shut-down root reports nil")
+    }
+
+    func testHandoffInterruptedBeforeImportIsRecoveredOnTheNextAssembly() throws {
+        let layout = ProtectedStorageLayout(rootDirectory: storageRoot)
+        XCTAssertTrue(ProtectedStorageService(layout: layout).prepare().isFullyConfigured)
+        let inProgressURL = layout.directory(for: .ingressInProgressAudio)
+            .appendingPathComponent("\(Self.recordingCaptureID).wav")
+        try Self.recordingBytes.write(to: inProgressURL)
+        let record = IngressRecord(
+            captureID: Self.recordingCaptureID, text: nil,
+            audio: IngressAudioHandoff(
+                inProgressFileName: "\(Self.recordingCaptureID).wav",
+                finalizedFileName: "\(Self.recordingCaptureID).wav"),
+            context: IngressCaptureContext(
+                captureInstant: "2026-10-08T09:30:00Z", timezoneID: "UTC", utcOffsetMinutes: 0, locale: "en_US",
+                calendar: "gregorian", itemScope: makeConfiguration().captureItemScope, routeID: Self.routeID,
+                entryLocked: false, createdAt: "2026-10-08T09:30:00Z", sessionTopic: nil))
+        _ = try IngressStagingStore(layout: layout, fileSystem: FileManagerIngressFileSystem()).stage(record)
+
+        let sender = ScriptedProviderSender(reply: Data())
+        let root = try makeTestRoot(sender: sender)
+        defer { root.shutDown() }
+        XCTAssertEqual(scalar("SELECT CAST(COUNT(*) AS TEXT) FROM items"), "0", "nothing imported before recovery")
+
+        var completed = false
+        var report: CompositionRecoveryReport?
+        root.recoverRecordings {
+            report = $0
+            completed = true
+        }
+        XCTAssertTrue(pump(until: { completed }), "recovery completes")
+        let found = try XCTUnwrap(report)
+        XCTAssertEqual(found.confirmedCaptureIDs, [Self.recordingCaptureID])
+        XCTAssertTrue(found.pending.isEmpty)
+        XCTAssertTrue(found.deletedItemCaptureIDs.isEmpty)
+        XCTAssertEqual(found.unclaimedInProgressFileNames, [])
+        XCTAssertEqual(scalar("SELECT CAST(COUNT(*) AS TEXT) FROM items WHERE capture_id = '\(Self.recordingCaptureID)'"), "1")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: inProgressURL.path))
+        XCTAssertTrue(sender.requests.isEmpty, "nothing was sent to a provider")
+        XCTAssertEqual(scalar("SELECT CAST(COUNT(*) AS TEXT) FROM route_authorizations"), "0")
+    }
+
+    func testUnclaimedInProgressFileIsReportedNotImported() throws {
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))
+        defer { root.shutDown() }
+        let orphanURL = root.inProgressAudioDirectory.appendingPathComponent("orphan-recording.wav")
+        try Self.recordingBytes.write(to: orphanURL)
+
+        var completed = false
+        var report: CompositionRecoveryReport?
+        root.recoverRecordings {
+            report = $0
+            completed = true
+        }
+        XCTAssertTrue(pump(until: { completed }))
+        let found = try XCTUnwrap(report)
+        XCTAssertEqual(found.unclaimedInProgressFileNames, ["orphan-recording.wav"])
+        XCTAssertTrue(found.confirmedCaptureIDs.isEmpty)
+        XCTAssertTrue(found.pending.isEmpty)
+        XCTAssertEqual(try Data(contentsOf: orphanURL), Self.recordingBytes, "the file is left in place")
+        XCTAssertEqual(scalar("SELECT CAST(COUNT(*) AS TEXT) FROM items"), "0", "nothing was imported")
+        XCTAssertEqual(scalar("SELECT CAST(COUNT(*) AS TEXT) FROM captures"), "0")
+    }
+
+    func testUnclaimedNamesAreNilWhenAStagedRecordCannotBeRead() throws {
+        let layout = ProtectedStorageLayout(rootDirectory: storageRoot)
+        XCTAssertTrue(ProtectedStorageService(layout: layout).prepare().isFullyConfigured)
+        try Data("not json".utf8).write(
+            to: layout.directory(for: .ingressStagingRecords).appendingPathComponent("voice-corrupt-1.json"))
+        try Self.recordingBytes.write(
+            to: layout.directory(for: .ingressInProgressAudio).appendingPathComponent("maybe-owned.wav"))
+
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))
+        defer { root.shutDown() }
+        var completed = false
+        var report: CompositionRecoveryReport?
+        root.recoverRecordings {
+            report = $0
+            completed = true
+        }
+        XCTAssertTrue(pump(until: { completed }))
+        let found = try XCTUnwrap(report)
+        XCTAssertNil(found.unclaimedInProgressFileNames, "unknown ownership is nil, never an empty list")
+        XCTAssertEqual(found.pending.map(\.captureID), ["voice-corrupt-1"])
+        XCTAssertEqual(found.pending.first?.reason, .stagingRecordUnreadable)
+        XCTAssertEqual(scalar("SELECT CAST(COUNT(*) AS TEXT) FROM items"), "0")
+    }
+
+    private func makeHandoff() -> CompositionRecordingHandoff {
+        CompositionRecordingHandoff(
+            captureID: Self.recordingCaptureID, inProgressFileName: "\(Self.recordingCaptureID).wav",
+            finalizedFileName: "\(Self.recordingCaptureID).wav", startedAt: Date(timeIntervalSince1970: 1_790_000_000))
+    }
+
+    func testRouteScopeMismatchFailsAssemblyWithADistinctErrorAndReleasesEverything() throws {
+        let layout = ProtectedStorageLayout(rootDirectory: storageRoot)
+        _ = ProtectedStorageService(layout: layout).prepare()
+        try CoreHandle(path: layout.databaseURL.path).close()
+        try execute([
+            """
+            INSERT INTO routes (route_id, route_name, scope, processing_destinations, created_at) VALUES \
+            ('\(Self.routeID)', 'synthetic', 'work', '[]', '2026-10-08T09:00:00Z')
+            """
+        ])
+        XCTAssertThrowsError(try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))) { error in
+            XCTAssertEqual(error as? CompositionError, .captureRouteUnavailable("route_scope_mismatch"))
+        }
+        XCTAssertEqual(scalar("SELECT scope FROM routes WHERE route_id = '\(Self.routeID)'"), "work", "nothing changed")
+    }
+
+    func testProvisioningKeepsARouteTheUserAlreadyConfigured() throws {
+        try prepareStore()
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))
+        defer { root.shutDown() }
+        XCTAssertEqual(
+            scalar("SELECT processing_destinations FROM routes WHERE route_id = '\(Self.routeID)'"),
+            #"["https://api.anthropic.com"]"#)
+        XCTAssertEqual(scalar("SELECT CAST(COUNT(*) AS TEXT) FROM route_authorizations"), "1")
+    }
+
+    func testCompleteResponseReachesTheCoreOnceAndADuplicateDoesNotMutateAgain() throws {
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))
+        defer { root.shutDown() }
+        let itemID = try saveSyntheticCapture(root)
+        try seedReminder(itemID: itemID)
+        let baselineRevision = try XCTUnwrap(Int(itemRevision(itemID)))
+        XCTAssertEqual(itemLifecycle(itemID), "active")
+
+        deliver(NotificationActionIdentifier.complete, to: root, itemID: itemID)
+        reconcileActions(root)
+        XCTAssertEqual(itemLifecycle(itemID), "completed")
+        XCTAssertEqual(itemRevision(itemID), String(baselineRevision + 1), "one revisioned completion event")
+        XCTAssertEqual(scalar("SELECT CAST(COUNT(*) AS TEXT) FROM events WHERE event_type = 'completion'"), "1")
+
+        deliver(NotificationActionIdentifier.complete, to: root, itemID: itemID)
+        reconcileActions(root)
+        XCTAssertEqual(itemRevision(itemID), String(baselineRevision + 1), "a duplicate does not mutate again")
+        XCTAssertEqual(scalar("SELECT CAST(COUNT(*) AS TEXT) FROM events WHERE event_type = 'completion'"), "1")
+        XCTAssertEqual(try actionJournal.pending(), [])
+    }
+
+    func testResponseReceivedWhileUnauthenticatedWaitsInTheJournalAndRunsAtReconcileAfterAuthentication() throws {
+        let (session, _) = makeSession(authenticated: false)
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), readSession: session)
+        defer { root.shutDown() }
+        let itemID = try saveSyntheticCapture(root)
+        try seedReminder(itemID: itemID)
+
+        deliver(NotificationActionIdentifier.complete, to: root, itemID: itemID)
+        reconcileActions(root)
+        XCTAssertEqual(itemLifecycle(itemID), "active", "no mutation while the session is capture-only")
+        XCTAssertEqual(try actionJournal.pending().count, 1, "the response waits in the journal")
+
+        XCTAssertEqual(authenticateReadsAndWait(root), .authenticated)
+        reconcileActions(root)
+        XCTAssertEqual(itemLifecycle(itemID), "completed")
+        XCTAssertEqual(scalar("SELECT CAST(COUNT(*) AS TEXT) FROM events WHERE event_type = 'completion'"), "1")
+        XCTAssertEqual(try actionJournal.pending(), [])
+    }
+
+    func testTapCallsTheOpenItemHandlerWithTheCoreResolvedIdentifier() throws {
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))
+        defer { root.shutDown() }
+        let itemID = try saveSyntheticCapture(root)
+        try seedReminder(itemID: itemID)
+        let opened = OpenedItemsBox()
+        root.setOpenItemHandler { opened.add($0) }
+
+        deliver(UNNotificationDefaultActionIdentifier, to: root, itemID: itemID)
+        reconcileActions(root)
+        XCTAssertEqual(opened.all, [itemID])
+        XCTAssertEqual(itemLifecycle(itemID), "active", "opening changes nothing")
+    }
+
+    func testEventsAlsoReachTheEnvironmentHandlerTheCallerSupplied() throws {
+        let received = ReceivedEventsBox()
+        let session = makeSession(authenticated: true).0
+        let root = try ServiceCompositionRoot(
+            testing: makeConfiguration(),
+            environment: CompositionEnvironment(notificationEvents: { received.add($0) }),
+            adapters: .injectedForTests(
+                sender: ScriptedProviderSender(reply: Data()), readSession: session,
+                notificationCenter: FakeNotificationCenter(), reachability: FakeReachability(reachable: true)))
+        defer { root.shutDown() }
+        deliver(NotificationActionIdentifier.acknowledge, to: root, itemID: UUID().uuidString.lowercased())
+        XCTAssertEqual(received.count, 1)
+        XCTAssertNotNil(root.notificationCenterDelegate as? NotificationEventReceiver)
+    }
+
+    private final class OpenedItemsBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var items: [String] = []
+
+        func add(_ item: String) {
+            lock.lock()
+            items.append(item)
+            lock.unlock()
+        }
+
+        var all: [String] {
+            lock.lock()
+            defer { lock.unlock() }
+            return items
+        }
+    }
+
+    private final class ReceivedEventsBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var events: [NotificationEvent] = []
+
+        func add(_ event: NotificationEvent) {
+            lock.lock()
+            events.append(event)
+            lock.unlock()
+        }
+
+        var count: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return events.count
+        }
+    }
+
+    private final class FinishedFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var finished = false
+
+        func finish() {
+            lock.lock()
+            finished = true
+            lock.unlock()
+        }
+
+        var isFinished: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return finished
+        }
+    }
+
+    private var notificationID: String {
+        NotificationIdentifier(reminderID: Self.reminderID, scheduleGeneration: 2)!.rawValue
+    }
+
+    private var actionJournal: FileNotificationActionJournal {
+        FileNotificationActionJournal(
+            directory: ProtectedStorageLayout(rootDirectory: storageRoot).directory(for: .temporaryFiles)
+                .appendingPathComponent(NotificationActionClients.journalDirectoryName, isDirectory: true))
+    }
+
+    private func saveSyntheticCapture(_ root: ServiceCompositionRoot) throws -> String {
+        var outcome: CompositionSaveOutcome?
+        root.saveText(captureID: UUID().uuidString.lowercased(), text: "synthetic capture", capturedAt: Date()) {
+            outcome = $0
+        }
+        XCTAssertTrue(pump(until: { outcome != nil }), "the save completes")
+        guard case .saved(_, let itemID, _)? = outcome else {
+            XCTFail("expected a confirmed save, got \(String(describing: outcome))")
+            throw CoreFailure.handleClosed
+        }
+        return itemID
+    }
+
+    /// Adds the reminder the notification belongs to: schedule generation 2 is current and generation 1 was superseded.
+    private func seedReminder(itemID: String) throws {
+        var statements = [
+            "INSERT INTO reminders (reminder_id, item_id, request_state, schedule_state, delivery_state, "
+                + "acknowledgment_state, resolved_instant, timezone_id, schedule_generation, created_at, updated_at) "
+                + "VALUES ('\(Self.reminderID)', '\(itemID)', 'resolved', 'scheduled', 'unknown', 'not_acknowledged', "
+                + "'2090-01-01T09:00:00Z', 'UTC', 2, '2026-10-08T09:31:00Z', '2026-10-08T09:32:00Z')"
+        ]
+        for generation in 1...2 {
+            let identifier = "\(Self.reminderID)#\(generation)"
+            statements.append(
+                "INSERT INTO reminder_operations (operation_id, reminder_id, operation_type, operation_state, "
+                    + "effect_identity, external_id, created_at) VALUES ('schedule:\(identifier)', "
+                    + "'\(Self.reminderID)', 'schedule', 'acknowledged', 'schedule:\(identifier)', '\(identifier)', "
+                    + "'2026-10-08T09:32:00Z')")
+        }
+        try execute(statements)
+    }
+
+    /// Feeds one OS response through the same ingestor the installed delegate uses.
+    private func deliver(_ actionIdentifier: String, to root: ServiceCompositionRoot, itemID: String) {
+        root.notificationIngestor.ingestResponse(
+            requestIdentifier: notificationID, actionIdentifier: actionIdentifier,
+            userInfo: [NotificationContent.targetKey: itemID])
+    }
+
+    private func reconcileActions(_ root: ServiceCompositionRoot) {
+        let finished = FinishedFlag()
+        Task {
+            await root.reconcileNotificationActions()
+            finished.finish()
+        }
+        XCTAssertTrue(pump(until: { finished.isFinished }), "the reconcile pass finished")
+    }
+
+    private func itemLifecycle(_ itemID: String) -> String {
+        scalar("SELECT lifecycle_state FROM items WHERE item_id = '\(itemID)'")
+    }
+
+    private func itemRevision(_ itemID: String) -> String {
+        scalar("SELECT CAST(revision AS TEXT) FROM items WHERE item_id = '\(itemID)'")
+    }
+
+    private func scalar(_ sql: String) -> String {
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(databasePath, &database), SQLITE_OK)
+        defer { sqlite3_close(database) }
+        sqlite3_busy_timeout(database, 5000)
+        var statement: OpaquePointer?
+        XCTAssertEqual(sqlite3_prepare_v2(database, sql, -1, &statement, nil), SQLITE_OK)
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW, let text = sqlite3_column_text(statement, 0) else { return "" }
+        return String(cString: text)
+    }
+
     // MARK: helpers
 
     private func authenticateReadsAndWait(_ root: ServiceCompositionRoot) -> CompositionAuthenticationOutcome? {
@@ -607,6 +1106,9 @@ final class CompositionRootTests: XCTestCase {
         notifications: NotificationCenterProviding = FakeNotificationCenter(),
         readSession: ReadAuthenticationSession? = nil,
         lifecycleNotifications: NotificationCenter = NotificationCenter(),
+        attachProviderTransport: @escaping (CoreHandle, ProviderRequestSender) throws -> ProviderExchangeCoordinator = {
+            try ProviderExchangeCoordinator.attach(to: $0, sender: $1)
+        },
         modules: [CompositionModule] = []
     ) throws -> ServiceCompositionRoot {
         let session = readSession ?? makeSession(authenticated: true).0
@@ -615,7 +1117,7 @@ final class CompositionRootTests: XCTestCase {
             environment: CompositionEnvironment(
                 timeZone: { Self.captureTimeZone }, locale: { Locale(identifier: "en_US") }),
             adapters: .injectedForTests(
-                sender: sender, readSession: session, notificationCenter: notifications,
+                sender: sender, attachProviderTransport: attachProviderTransport, readSession: session, notificationCenter: notifications,
                 reachability: FakeReachability(reachable: true), lifecycleNotifications: lifecycleNotifications),
             modules: modules)
     }
@@ -676,6 +1178,54 @@ final class CompositionRootTests: XCTestCase {
             '2026-10-08T09:00:00Z', NULL)
             """,
         ])
+    }
+
+    private func shadowReviewConfiguration() -> ShadowReviewConfiguration {
+        ShadowReviewConfiguration(
+            reviewProfileVersion: ShadowReviewScenario.profileVersion,
+            policy: ShadowReviewPolicy(
+                isEnabled: true, samplePerMille: 1000, windowSeconds: 3600, maxRequestsPerWindow: 4,
+                maxAttemptsPerSample: 2))
+    }
+
+    /// Seeds the root's store with a finished interpretation, a route with a review grant and a review profile.
+    private func prepareShadowReviewStore() throws {
+        let layout = ProtectedStorageLayout(rootDirectory: storageRoot)
+        _ = ProtectedStorageService(layout: layout).prepare()
+        _ = try ShadowReviewSeed.makeStore(
+            in: layout.directory(for: .database),
+            scenario: ShadowReviewScenario(credentialReference: "synthetic-credential"))
+    }
+
+    private func selectCase(_ service: ShadowReviewService) throws -> String {
+        var selection: ShadowReviewSelectionResult?
+        service.offer(
+            itemID: ShadowReviewScenario.itemID, sourceRevision: 0, requestVersion: ShadowReviewScenario.requestVersion
+        ) { selection = $0 }
+        XCTAssertTrue(pump(until: { selection != nil }), "the offer is answered")
+        guard case .selected(let record)? = selection else {
+            XCTFail("expected the case to be selected, got \(String(describing: selection))")
+            throw XCTSkip("no selected case")
+        }
+        return record.jobID
+    }
+
+    private func shadowReviewReply() throws -> Data {
+        let proposal: [String: Any] = [
+            "operation": ["kind": "annotate"],
+            "item_type": "action",
+            "source_spans": [["start": 0, "end": 4]],
+        ]
+        let reply: [String: Any] = [
+            "id": "msg_composition_review_01",
+            "type": "message",
+            "role": "assistant",
+            "model": ShadowReviewScenario.reviewModel,
+            "content": [["type": "tool_use", "id": "toolu_composition_review_01", "name": "interpret", "input": proposal]],
+            "stop_reason": "tool_use",
+            "usage": ["input_tokens": 42, "output_tokens": 17],
+        ]
+        return try JSONSerialization.data(withJSONObject: reply)
     }
 
     private func insertInterpretationJob(itemID: String) throws {

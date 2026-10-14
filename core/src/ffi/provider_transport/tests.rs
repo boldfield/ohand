@@ -281,6 +281,9 @@ impl Session {
         assert_eq!(outcome.status, OHAND_CORE_STATUS_OK);
         let (recorder, events) = recorder();
         register(handle, &recorder);
+        if scenario.profile.protocol() == ProviderProtocol::SelfHosted {
+            protocols::enable_for_test(handle, &["anthropic", "open_ai", "self_hosted"]);
+        }
         let (sender, commands) = std::sync::mpsc::channel();
         Session {
             handle,
@@ -748,6 +751,181 @@ fn a_self_hosted_job_that_is_denied_or_has_no_endpoint_never_reaches_native() {
         wait_until_idle(session.handle);
         session.close();
     }
+}
+
+#[test]
+fn a_self_hosted_job_is_refused_unless_the_host_enabled_the_protocol() {
+    let _guard = serial();
+    let session = Session::open("sh-gate", &Scenario::self_hosted());
+    session.register_native();
+
+    protocols::enable_for_test(session.handle, &["anthropic", "open_ai"]);
+    assert_eq!(session.start(61, JOB_ID).status, OHAND_CORE_STATUS_OK);
+    let (status, class, code) = failure_of(&session.event(61));
+    assert_eq!(
+        (status, class.as_str(), code.as_str()),
+        (
+            OHAND_CORE_STATUS_UNSUPPORTED,
+            "unsupported",
+            "protocol_not_enabled"
+        )
+    );
+    session.assert_no_command();
+
+    protocols::enable_for_test(session.handle, &["anthropic", "open_ai", "self_hosted"]);
+    assert_eq!(session.start(62, JOB_ID).status, OHAND_CORE_STATUS_OK);
+    assert_eq!(session.event(62).status, OHAND_CORE_STATUS_OK);
+    let send = send_description(&session.command(62));
+    assert_eq!(
+        send["url"],
+        "https://spark.example.test/v1/chat/completions"
+    );
+    session.complete(62, 200, &self_hosted_reply(valid_proposal()));
+    assert_eq!(session.event(62).status, OHAND_CORE_STATUS_OK);
+    wait_until_idle(session.handle);
+
+    protocols::enable_for_test(session.handle, &["anthropic", "open_ai"]);
+    assert_eq!(session.start(63, JOB_ID).status, OHAND_CORE_STATUS_OK);
+    let (_, _, code) = failure_of(&session.event(63));
+    assert_eq!(code, "protocol_not_enabled");
+    session.assert_no_command();
+    session.close();
+}
+
+#[test]
+fn the_default_enables_the_base_protocols_only_and_an_empty_set_disables_all() {
+    let _guard = serial();
+    let anthropic = Session::open("default-anthropic", &Scenario::anthropic());
+    anthropic.register_native();
+    assert!(protocols::is_enabled(
+        anthropic.handle,
+        ProviderProtocol::Anthropic
+    ));
+    assert!(protocols::is_enabled(
+        anthropic.handle,
+        ProviderProtocol::OpenAi
+    ));
+    assert!(!protocols::is_enabled(
+        anthropic.handle,
+        ProviderProtocol::SelfHosted
+    ));
+    assert_eq!(anthropic.start(71, JOB_ID).status, OHAND_CORE_STATUS_OK);
+    assert_eq!(anthropic.event(71).status, OHAND_CORE_STATUS_OK);
+    send_description(&anthropic.command(71));
+    anthropic.cancel(71);
+    assert_eq!(anthropic.command(71).command, OHAND_PROVIDER_COMMAND_CANCEL);
+    anthropic.event(71);
+    wait_until_idle(anthropic.handle);
+
+    protocols::enable_for_test(anthropic.handle, &[]);
+    assert_eq!(anthropic.start(72, JOB_ID).status, OHAND_CORE_STATUS_OK);
+    let (_, _, code) = failure_of(&anthropic.event(72));
+    assert_eq!(code, "protocol_not_enabled");
+    anthropic.assert_no_command();
+
+    let unknown = serde_json::to_vec(&["carrier_pigeon"]).unwrap();
+    let outcome = consume(unsafe {
+        protocols::ohand_core_set_enabled_provider_protocols(
+            anthropic.handle,
+            unknown.as_ptr(),
+            unknown.len(),
+        )
+    });
+    assert_eq!(outcome.code(), "invalid_request");
+    assert!(!protocols::is_enabled(
+        anthropic.handle,
+        ProviderProtocol::Anthropic
+    ));
+    assert!(!protocols::is_enabled(
+        anthropic.handle,
+        ProviderProtocol::OpenAi
+    ));
+    anthropic.close();
+}
+
+fn profile_status(
+    session: &Session,
+    operation_id: u64,
+    profile_version: &str,
+    model: &str,
+) -> Value {
+    let request =
+        serde_json::to_vec(&json!({ "profile_version": profile_version, "model": model })).unwrap();
+    let outcome = consume(unsafe {
+        protocols::ohand_core_start_provider_profile_status(
+            session.handle,
+            operation_id,
+            request.as_ptr(),
+            request.len(),
+        )
+    });
+    assert_eq!(outcome.status, OHAND_CORE_STATUS_OK);
+    let event = session.event(operation_id);
+    assert_eq!(event.status, OHAND_CORE_STATUS_OK);
+    payload_of(&event)
+}
+
+#[test]
+fn the_profile_status_read_reports_existence_protocol_revocation_and_model_only() {
+    let _guard = serial();
+    let self_hosted = Scenario::self_hosted();
+    let version = self_hosted.profile.profile_version().to_string();
+    let session = Session::open("status-self-hosted", &self_hosted);
+    assert_eq!(
+        profile_status(&session, 81, &version, "synthetic-model"),
+        json!({
+            "operation_id": 81,
+            "exists": true,
+            "protocol": "self_hosted",
+            "revoked": false,
+            "serves_model": true,
+        })
+    );
+    let other_model = profile_status(&session, 82, &version, "another-model");
+    assert_eq!(other_model["exists"], true);
+    assert_eq!(other_model["serves_model"], false);
+    assert_eq!(
+        profile_status(&session, 83, "no-such-profile-version", "synthetic-model"),
+        json!({
+            "operation_id": 83,
+            "exists": false,
+            "protocol": null,
+            "revoked": false,
+            "serves_model": false,
+        })
+    );
+    let mut keys: Vec<_> = other_model.as_object().unwrap().keys().cloned().collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "exists",
+            "operation_id",
+            "protocol",
+            "revoked",
+            "serves_model"
+        ]
+    );
+    session.close();
+
+    let mut revoked = Scenario::anthropic();
+    revoked.revoked = true;
+    let revoked_version = revoked.profile.profile_version().to_string();
+    let session = Session::open("status-revoked", &revoked);
+    let status = profile_status(&session, 85, &revoked_version, "synthetic-model");
+    assert_eq!(status["exists"], true);
+    assert_eq!(status["revoked"], true);
+    assert_eq!(status["protocol"], "anthropic");
+    session.close();
+
+    let openai = Scenario::openai();
+    let openai_version = openai.profile.profile_version().to_string();
+    let session = Session::open("status-wrong-protocol", &openai);
+    let status = profile_status(&session, 86, &openai_version, "synthetic-model");
+    assert_eq!(status["protocol"], "open_ai");
+    assert_ne!(status["protocol"], "self_hosted");
+    assert_eq!(status["revoked"], false);
+    session.close();
 }
 
 #[test]

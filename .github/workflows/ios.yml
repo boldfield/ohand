@@ -93,7 +93,31 @@ jobs:
           SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
         run: |
           set -euo pipefail
-          ios/NotificationProbe/scripts/run-evidence.sh "${SIMULATOR_UDID}" ios/.evidence/notification-probe
+          # Each suite starts from an erased, fully booted and responsive simulator: uninstalling the app does not clear a
+          # recorded notification decision, and the permission prompt only appears while the decision is undetermined.
+          evidence_dir="$(pwd)/ios/.evidence/notification-probe"
+          mkdir -p "${evidence_dir}"
+          cd ios
+          overall_status=0
+          for suite in NotificationProbeAuthorizedUITests NotificationProbeDeniedUITests; do
+            ./scripts/prepare-simulator.sh "${SIMULATOR_UDID}" --erase
+            rm -rf "${evidence_dir}/${suite}.xcresult"
+            suite_status=0
+            xcodebuild test \
+              -project OhAnd.xcodeproj \
+              -scheme NotificationProbeUITests \
+              -configuration Debug \
+              -sdk iphonesimulator \
+              -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
+              -derivedDataPath .derived \
+              -resultBundlePath "${evidence_dir}/${suite}.xcresult" \
+              -only-testing:"NotificationProbeUITests/${suite}" \
+              CODE_SIGNING_ALLOWED=NO 2>&1 | tee "${evidence_dir}/${suite}.log" || suite_status=$?
+            if [ "${suite_status}" -ne 0 ]; then
+              overall_status="${suite_status}"
+            fi
+          done
+          exit "${overall_status}"
 
       - name: Build BridgeProbe
         shell: bash

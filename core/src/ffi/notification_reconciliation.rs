@@ -22,12 +22,14 @@
 //!   "fire_at"}],"facts_only"}`. `rearm_rejected_schedules` re-opens the current generation's
 //!   `rejected` schedules before the pass, which a regained permission (or first observation)
 //!   asks for; re-arming an already re-armed schedule changes nothing, so a repeated request
-//!   cannot duplicate it. `allow_optional_prompts` false withholds every prompt candidate from the
-//!   pass; explicit reminders never depend on it. `facts_only` reads the reminders and runs no
+//!   cannot duplicate it. Prompts come only from the persisted prompt schedule (see
+//!   `prompt_schedule`): `prompts` candidates are still validated, so a malformed one is refused,
+//!   but they never cause an install. `allow_optional_prompts` false withholds every planned
+//!   prompt from the pass and cancels the ones pending; explicit reminders never depend on it. `facts_only` reads the reminders and runs no
 //!   pass, so status stays readable while the OS or the pass is unavailable.
 //! * The outcome event is `{"operation_id","rearmed","converged","installed","already_installed",
 //!   "removed","withheld","failures","demoted","refilled","expired","prompts_granted",
-//!   "prompts_deferred","prompts_withheld","reminders":[{"item_id","request_state",
+//!   "prompts_deferred","prompts_withheld","prompts_installed","reminders":[{"item_id","request_state",
 //!   "schedule_state","delivery_state","acknowledgment_state","unschedulable_reason"}]}` or a
 //!   normalized failure. Counts and machine labels only: no text, no native identifier.
 //!   `reminders` are the stored facts of active items after the pass. Delivery and acknowledgment
@@ -44,8 +46,9 @@
 use super::core_handle::exports::{guarded, OhandCoreHandle, OhandCoreResult};
 use super::core_handle::failure::AbiFailure;
 use super::core_handle::instance::{self, lock, JobFn};
+use super::prompt_schedule::{self, PassFailure};
 use crate::providers::contracts::ErrorClass;
-use crate::reminders::capacity::{reconcile_with_capacity, CapacityPolicy, PromptDemand};
+use crate::reminders::capacity::CapacityPolicy;
 use crate::reminders::reconcile::{
     retry_rejected_schedule, NotificationEffectError, NotificationEffects, PendingRequest,
     ReconcileError, ScheduleRequest,
@@ -256,7 +259,6 @@ struct ReconcileRequest {
 struct ValidatedRequest {
     rearm_rejected_schedules: bool,
     allow_optional_prompts: bool,
-    prompts: Vec<PromptDemand>,
     facts_only: bool,
 }
 
@@ -264,25 +266,19 @@ fn validate(request: ReconcileRequest) -> Result<ValidatedRequest, AbiFailure> {
     if request.prompts.len() > MAX_PROMPT_CANDIDATES {
         return Err(AbiFailure::INVALID_REQUEST);
     }
-    let mut prompts = Vec::with_capacity(request.prompts.len());
-    for candidate in request.prompts {
+    // Candidates are checked so a malformed request is still refused, but they are never a
+    // source of installs: the persisted schedule is.
+    for candidate in &request.prompts {
         if candidate.notification_id.is_empty()
             || candidate.notification_id.len() > MAX_IDENTIFIER_BYTES
+            || DateTime::parse_from_rfc3339(&candidate.fire_at).is_err()
         {
             return Err(AbiFailure::INVALID_REQUEST);
         }
-        let fire_at = DateTime::parse_from_rfc3339(&candidate.fire_at)
-            .map_err(|_| AbiFailure::INVALID_REQUEST)?
-            .with_timezone(&Utc);
-        prompts.push(PromptDemand {
-            notification_id: candidate.notification_id,
-            fire_at,
-        });
     }
     Ok(ValidatedRequest {
         rearm_rejected_schedules: request.rearm_rejected_schedules,
         allow_optional_prompts: request.allow_optional_prompts,
-        prompts,
         facts_only: request.facts_only,
     })
 }
@@ -555,6 +551,7 @@ struct PassSummary {
     prompts_granted: usize,
     prompts_deferred: usize,
     prompts_withheld: usize,
+    prompts_installed: usize,
 }
 
 #[derive(Serialize)]
@@ -646,32 +643,33 @@ fn reconcile_job(
             if request.rearm_rejected_schedules {
                 summary.rearmed = rearm_rejected(&mut database)?;
             }
-            let offered: &[PromptDemand] = if request.allow_optional_prompts {
-                &request.prompts
-            } else {
-                summary.prompts_withheld = request.prompts.len();
-                &[]
-            };
             let mut effects = NativeEffects {
                 handle,
                 registration,
                 deadline,
             };
-            let report = reconcile_with_capacity(
+            let pass = prompt_schedule::reconcile_reminders_and_prompts(
                 &mut database,
                 &SystemClock,
                 &mut effects,
                 &CapacityPolicy::default(),
-                offered,
+                request.allow_optional_prompts,
             )
-            .map_err(reconcile_failure)?;
-            summary.converged = report.converged();
+            .map_err(|failure| match failure {
+                PassFailure::Reconcile(error) => reconcile_failure(error),
+                PassFailure::Storage(failure) => failure,
+            })?;
+            let report = pass.capacity;
+            summary.prompts_installed = pass.prompts_installed;
+            summary.prompts_withheld = pass.prompts_withheld;
+            summary.converged = report.converged() && pass.prompt_failures == 0;
             summary.installed = report.reconcile.installed.len();
             summary.already_installed = report.reconcile.already_installed.len();
             summary.removed = report.reconcile.removed.len();
             summary.withheld = report.reconcile.withheld.len();
-            summary.failures =
-                report.reconcile.failures.len() + report.prompt_cancel_failures.len();
+            summary.failures = report.reconcile.failures.len()
+                + report.prompt_cancel_failures.len()
+                + pass.prompt_failures;
             summary.demoted = report.demoted.len();
             summary.refilled = report.refilled.len();
             summary.expired = report.expired.len() + report.reconcile.expired.len();
