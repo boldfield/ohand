@@ -181,6 +181,16 @@ final class TimeChangeRealCoreTests: XCTestCase {
                     + "acknowledgment_state, resolved_instant, timezone_id, schedule_generation, created_at, updated_at) "
                     + "VALUES ('\(reminderID)', '\(itemID)', 'resolved', 'pending_schedule', 'unknown', "
                     + "'not_acknowledged', '\(Self.isoText(due))', 'UTC', 2, '\(created)', '\(created)')")
+            if suffix == "future" {
+                // Resolving a reminder records its pending schedule operation; the core marks the reminder
+                // scheduled only when the install completes against that operation.
+                let notificationID = "\(reminderID)#2"
+                statements.append(
+                    "INSERT INTO reminder_operations (operation_id, reminder_id, operation_type, operation_state, "
+                        + "effect_identity, external_id, scheduled_for, created_at) VALUES "
+                        + "('schedule:\(notificationID)', '\(reminderID)', 'schedule', 'pending', "
+                        + "'schedule:\(notificationID)', '\(notificationID)', '\(Self.isoText(due))', '\(created)')")
+            }
         }
         var database: OpaquePointer?
         XCTAssertEqual(sqlite3_open(layout.databaseURL.path, &database), SQLITE_OK)
