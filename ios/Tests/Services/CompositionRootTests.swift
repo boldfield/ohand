@@ -693,6 +693,166 @@ final class CompositionRootTests: XCTestCase {
             "provisioning the route authorizes no upload")
     }
 
+    // MARK: voice ingress seam
+
+    private static let recordingCaptureID = "voice-root-1"
+    private static let recordingBytes = Data("synthetic recording".utf8)
+
+    func testRecordingHandedOffIsSavedAsAnAudioCaptureWithItsItemAndNothingIsUploaded() throws {
+        let sender = ScriptedProviderSender(reply: Data())
+        let root = try makeTestRoot(sender: sender)
+        defer { root.shutDown() }
+        let layout = ProtectedStorageLayout(rootDirectory: storageRoot)
+        XCTAssertEqual(
+            root.inProgressAudioDirectory.standardizedFileURL, layout.directory(for: .ingressInProgressAudio).standardizedFileURL)
+        let recordingURL = root.inProgressAudioDirectory.appendingPathComponent("\(Self.recordingCaptureID).wav")
+        try Self.recordingBytes.write(to: recordingURL)
+
+        var outcome: CompositionRecordingOutcome?
+        root.saveRecording(makeHandoff()) { outcome = $0 }
+        XCTAssertTrue(pump(until: { outcome != nil }), "the handoff completes")
+        guard case .saved(let captureID, let itemID, let savedAt, let alreadySaved)? = outcome else {
+            return XCTFail("expected a confirmed save, got \(String(describing: outcome))")
+        }
+        XCTAssertEqual(captureID, Self.recordingCaptureID)
+        XCTAssertFalse(savedAt.isEmpty)
+        XCTAssertFalse(alreadySaved)
+
+        XCTAssertEqual(scalar("SELECT item_id FROM items WHERE capture_id = '\(Self.recordingCaptureID)'"), itemID)
+        XCTAssertEqual(
+            scalar("SELECT audio_reference FROM captures WHERE capture_id = '\(Self.recordingCaptureID)'"),
+            "\(StoreProtectionPolicy.policy(for: .finalizedAudio).directoryName)/\(Self.recordingCaptureID).wav")
+        XCTAssertEqual(
+            scalar("SELECT COALESCE(text, 'none') FROM captures WHERE capture_id = '\(Self.recordingCaptureID)'"), "none")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: recordingURL.path), "the audio was moved, not copied")
+        XCTAssertEqual(
+            try Data(contentsOf: layout.directory(for: .finalizedAudio).appendingPathComponent("\(Self.recordingCaptureID).wav")),
+            Self.recordingBytes)
+        XCTAssertTrue(sender.requests.isEmpty, "nothing was sent to a provider")
+        XCTAssertEqual(scalar("SELECT processing_destinations FROM routes WHERE route_id = '\(Self.routeID)'"), "[]")
+        XCTAssertEqual(scalar("SELECT CAST(COUNT(*) AS TEXT) FROM route_authorizations"), "0")
+
+        XCTAssertEqual(scalar("SELECT CAST(COUNT(*) AS TEXT) FROM items"), "1")
+    }
+
+    func testHandoffOfAMissingRecordingIsNotStagedAndNeverReportedSaved() throws {
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))
+        defer { root.shutDown() }
+        var outcome: CompositionRecordingOutcome?
+        root.saveRecording(makeHandoff()) { outcome = $0 }
+        XCTAssertTrue(pump(until: { outcome != nil }))
+        XCTAssertEqual(outcome, .notStaged(captureID: Self.recordingCaptureID))
+        XCTAssertEqual(scalar("SELECT CAST(COUNT(*) AS TEXT) FROM items"), "0")
+    }
+
+    func testHandoffAfterShutDownIsNotStaged() throws {
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))
+        root.shutDown()
+        var outcome: CompositionRecordingOutcome?
+        root.saveRecording(makeHandoff()) { outcome = $0 }
+        XCTAssertEqual(outcome, .notStaged(captureID: Self.recordingCaptureID))
+        var completed = false
+        var report: CompositionRecoveryReport?
+        root.recoverRecordings {
+            report = $0
+            completed = true
+        }
+        XCTAssertTrue(completed)
+        XCTAssertNil(report, "recovery on a shut-down root reports nil")
+    }
+
+    func testHandoffInterruptedBeforeImportIsRecoveredOnTheNextAssembly() throws {
+        let layout = ProtectedStorageLayout(rootDirectory: storageRoot)
+        XCTAssertTrue(ProtectedStorageService(layout: layout).prepare().isFullyConfigured)
+        let inProgressURL = layout.directory(for: .ingressInProgressAudio)
+            .appendingPathComponent("\(Self.recordingCaptureID).wav")
+        try Self.recordingBytes.write(to: inProgressURL)
+        let record = IngressRecord(
+            captureID: Self.recordingCaptureID, text: nil,
+            audio: IngressAudioHandoff(
+                inProgressFileName: "\(Self.recordingCaptureID).wav",
+                finalizedFileName: "\(Self.recordingCaptureID).wav"),
+            context: IngressCaptureContext(
+                captureInstant: "2026-10-08T09:30:00Z", timezoneID: "UTC", utcOffsetMinutes: 0, locale: "en_US",
+                calendar: "gregorian", itemScope: makeConfiguration().captureItemScope, routeID: Self.routeID,
+                entryLocked: false, createdAt: "2026-10-08T09:30:00Z", sessionTopic: nil))
+        _ = try IngressStagingStore(layout: layout, fileSystem: FileManagerIngressFileSystem()).stage(record)
+
+        let sender = ScriptedProviderSender(reply: Data())
+        let root = try makeTestRoot(sender: sender)
+        defer { root.shutDown() }
+        XCTAssertEqual(scalar("SELECT CAST(COUNT(*) AS TEXT) FROM items"), "0", "nothing imported before recovery")
+
+        var completed = false
+        var report: CompositionRecoveryReport?
+        root.recoverRecordings {
+            report = $0
+            completed = true
+        }
+        XCTAssertTrue(pump(until: { completed }), "recovery completes")
+        let found = try XCTUnwrap(report)
+        XCTAssertEqual(found.confirmedCaptureIDs, [Self.recordingCaptureID])
+        XCTAssertTrue(found.pending.isEmpty)
+        XCTAssertTrue(found.deletedItemCaptureIDs.isEmpty)
+        XCTAssertEqual(found.unclaimedInProgressFileNames, [])
+        XCTAssertEqual(scalar("SELECT CAST(COUNT(*) AS TEXT) FROM items WHERE capture_id = '\(Self.recordingCaptureID)'"), "1")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: inProgressURL.path))
+        XCTAssertTrue(sender.requests.isEmpty, "nothing was sent to a provider")
+        XCTAssertEqual(scalar("SELECT CAST(COUNT(*) AS TEXT) FROM route_authorizations"), "0")
+    }
+
+    func testUnclaimedInProgressFileIsReportedNotImported() throws {
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))
+        defer { root.shutDown() }
+        let orphanURL = root.inProgressAudioDirectory.appendingPathComponent("orphan-recording.wav")
+        try Self.recordingBytes.write(to: orphanURL)
+
+        var completed = false
+        var report: CompositionRecoveryReport?
+        root.recoverRecordings {
+            report = $0
+            completed = true
+        }
+        XCTAssertTrue(pump(until: { completed }))
+        let found = try XCTUnwrap(report)
+        XCTAssertEqual(found.unclaimedInProgressFileNames, ["orphan-recording.wav"])
+        XCTAssertTrue(found.confirmedCaptureIDs.isEmpty)
+        XCTAssertTrue(found.pending.isEmpty)
+        XCTAssertEqual(try Data(contentsOf: orphanURL), Self.recordingBytes, "the file is left in place")
+        XCTAssertEqual(scalar("SELECT CAST(COUNT(*) AS TEXT) FROM items"), "0", "nothing was imported")
+        XCTAssertEqual(scalar("SELECT CAST(COUNT(*) AS TEXT) FROM captures"), "0")
+    }
+
+    func testUnclaimedNamesAreNilWhenAStagedRecordCannotBeRead() throws {
+        let layout = ProtectedStorageLayout(rootDirectory: storageRoot)
+        XCTAssertTrue(ProtectedStorageService(layout: layout).prepare().isFullyConfigured)
+        try Data("not json".utf8).write(
+            to: layout.directory(for: .ingressStagingRecords).appendingPathComponent("voice-corrupt-1.json"))
+        try Self.recordingBytes.write(
+            to: layout.directory(for: .ingressInProgressAudio).appendingPathComponent("maybe-owned.wav"))
+
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))
+        defer { root.shutDown() }
+        var completed = false
+        var report: CompositionRecoveryReport?
+        root.recoverRecordings {
+            report = $0
+            completed = true
+        }
+        XCTAssertTrue(pump(until: { completed }))
+        let found = try XCTUnwrap(report)
+        XCTAssertNil(found.unclaimedInProgressFileNames, "unknown ownership is nil, never an empty list")
+        XCTAssertEqual(found.pending.map(\.captureID), ["voice-corrupt-1"])
+        XCTAssertEqual(found.pending.first?.reason, .stagingRecordUnreadable)
+        XCTAssertEqual(scalar("SELECT CAST(COUNT(*) AS TEXT) FROM items"), "0")
+    }
+
+    private func makeHandoff() -> CompositionRecordingHandoff {
+        CompositionRecordingHandoff(
+            captureID: Self.recordingCaptureID, inProgressFileName: "\(Self.recordingCaptureID).wav",
+            finalizedFileName: "\(Self.recordingCaptureID).wav", startedAt: Date(timeIntervalSince1970: 1_790_000_000))
+    }
+
     func testRouteScopeMismatchFailsAssemblyWithADistinctErrorAndReleasesEverything() throws {
         let layout = ProtectedStorageLayout(rootDirectory: storageRoot)
         _ = ProtectedStorageService(layout: layout).prepare()

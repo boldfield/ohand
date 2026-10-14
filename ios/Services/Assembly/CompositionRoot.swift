@@ -399,6 +399,59 @@ public enum CompositionSaveOutcome: Equatable, Sendable {
     case itemDeleted(captureID: String)
 }
 
+/// A finished recording offered to the root: the recorder's in-progress file and the finalized name bound to the
+/// capture ID (it must start with `<captureID>.`).
+public struct CompositionRecordingHandoff: Equatable, Sendable {
+    public var captureID: String
+    public var inProgressFileName: String
+    public var finalizedFileName: String
+    public var startedAt: Date
+
+    public init(captureID: String, inProgressFileName: String, finalizedFileName: String, startedAt: Date) {
+        self.captureID = captureID
+        self.inProgressFileName = inProgressFileName
+        self.finalizedFileName = finalizedFileName
+        self.startedAt = startedAt
+    }
+}
+
+/// What handing off a recording came to, with the same honesty rules as `CompositionSaveOutcome`.
+public enum CompositionRecordingOutcome: Equatable, Sendable {
+    /// The core confirmed the import. The only outcome that may be shown as saved.
+    case saved(captureID: String, itemID: String, savedAt: String, alreadySaved: Bool)
+    /// Durable on this device and waiting for the core to confirm.
+    case keptOnDevice(captureID: String)
+    /// Nothing was staged; the recording remains in the in-progress store.
+    case notStaged(captureID: String)
+    case itemDeleted(captureID: String)
+}
+
+/// Why a staged capture is not confirmed saved. The capture itself is durable on the device in every case.
+public enum CompositionPendingReason: Equatable, Sendable {
+    case importUnconfirmed
+    case coreRejected(code: String)
+    case audioUnavailable
+    case stagingRecordUnreadable
+}
+
+public struct CompositionPendingCapture: Equatable, Sendable {
+    public var captureID: String
+    public var reason: CompositionPendingReason
+}
+
+/// What a restart recovery pass found.
+public struct CompositionRecoveryReport: Equatable, Sendable {
+    /// Staged captures whose import is still unconfirmed. They are retained, never reported as saved.
+    public var pending: [CompositionPendingCapture] = []
+    /// Staged captures the core confirmed during this pass.
+    public var confirmedCaptureIDs: [String] = []
+    /// Staged captures whose item the user had deleted; nothing was re-imported.
+    public var deletedItemCaptureIDs: [String] = []
+    /// Files in the in-progress audio store that no staged capture owns, left in place and never imported. nil means
+    /// ownership could not be fully determined and must never be read as "none".
+    public var unclaimedInProgressFileNames: [String]?
+}
+
 // MARK: - Event routing
 
 /// Hands each core event to the clients in turn until one claims it. The core has one event handler, and every client
@@ -990,6 +1043,42 @@ public final class ServiceCompositionRoot {
         }
     }
 
+    /// The directory the recorder must write in-progress audio to. Recordings handed off from here are moved, never
+    /// copied, into the finalized audio store.
+    public var inProgressAudioDirectory: URL { layout.directory(for: .ingressInProgressAudio) }
+
+    /// Saves a finished recording: staged durably first, finalized by move, then imported into the core in one
+    /// transaction. Call and completion are on the main queue. Handing off the same capture again converges on the
+    /// same item.
+    public func saveRecording(
+        _ handoff: CompositionRecordingHandoff,
+        completion: @escaping (CompositionRecordingOutcome) -> Void
+    ) {
+        stateLock.lock()
+        let service = ingress
+        stateLock.unlock()
+        guard let service else {
+            completion(.notStaged(captureID: handoff.captureID))
+            return
+        }
+        let record = IngressRecord(
+            captureID: handoff.captureID, text: nil,
+            audio: IngressAudioHandoff(
+                inProgressFileName: handoff.inProgressFileName, finalizedFileName: handoff.finalizedFileName),
+            context: captureContext(at: handoff.startedAt))
+        service.submit(record) { outcome in
+            completion(Self.recordingOutcome(for: outcome))
+        }
+    }
+
+    /// Imports every capture a previous run left staged and reports it; `nil` once the root is shut down. Safe to
+    /// repeat. Call on the main queue; the completion arrives there.
+    public func recoverRecordings(completion: @escaping (CompositionRecoveryReport?) -> Void) {
+        recoverStagedIngress { report in
+            completion(report.map(Self.recoveryReport(from:)))
+        }
+    }
+
     // MARK: Read authentication
 
     /// Whether private reads are currently allowed. Every launch starts `captureOnly`.
@@ -1118,6 +1207,52 @@ public final class ServiceCompositionRoot {
             return .notStaged(captureID: captureID)
         case .itemDeleted(let captureID):
             return .itemDeleted(captureID: captureID)
+        }
+    }
+
+    private static func recordingOutcome(for outcome: IngressOutcome) -> CompositionRecordingOutcome {
+        switch outcome {
+        case .saved(let acknowledgment):
+            return .saved(
+                captureID: acknowledgment.captureID, itemID: acknowledgment.itemID, savedAt: acknowledgment.savedAt,
+                alreadySaved: acknowledgment.alreadyImported)
+        case .keptForRetry(let captureID, _):
+            return .keptOnDevice(captureID: captureID)
+        case .notStaged(let captureID, _):
+            return .notStaged(captureID: captureID)
+        case .itemDeleted(let captureID):
+            return .itemDeleted(captureID: captureID)
+        }
+    }
+
+    private static func recoveryReport(from ingress: IngressRecoveryReport) -> CompositionRecoveryReport {
+        var report = CompositionRecoveryReport()
+        for entry in ingress.entries {
+            switch entry.outcome {
+            case .saved:
+                report.confirmedCaptureIDs.append(entry.captureID)
+            case .itemDeleted:
+                report.deletedItemCaptureIDs.append(entry.captureID)
+            case .keptForRetry(_, let problem):
+                report.pending.append(
+                    CompositionPendingCapture(captureID: entry.captureID, reason: pendingReason(for: problem)))
+            case .notStaged:
+                report.pending.append(
+                    CompositionPendingCapture(captureID: entry.captureID, reason: .audioUnavailable))
+            }
+        }
+        let ownershipKnown = ingress.listingFailure == nil && ingress.unclaimedAudioListingFailure == nil
+            && !ingress.unclaimedAudioNotEvaluated
+        report.unclaimedInProgressFileNames = ownershipKnown ? ingress.unclaimedInProgressAudio : nil
+        return report
+    }
+
+    private static func pendingReason(for problem: IngressPendingProblem) -> CompositionPendingReason {
+        switch problem {
+        case .notCommitted, .commitUnknown, .coreUnavailable, .conflictingReuse: return .importUnconfirmed
+        case .rejected(let code): return .coreRejected(code: code)
+        case .sourceUnavailable: return .audioUnavailable
+        case .recordUnreadable: return .stagingRecordUnreadable
         }
     }
 
