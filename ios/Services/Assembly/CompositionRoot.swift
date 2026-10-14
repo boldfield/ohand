@@ -274,6 +274,19 @@ public extension CompositionModule {
     var jobCapabilities: [JobCapabilityHandler] { [] }
 }
 
+/// A module that owns the ordered launch and foreground reconciliation (staged-capture recovery, job activation and
+/// the reminder pass). When one is attached, `ServiceCompositionRoot.start(isActive:)` leaves those triggers to it, so
+/// they run once, in its order, through its serialization, instead of also running unordered from the root's own
+/// observers. The root keeps what is not ordered recovery work: foreground state, relocking, reachability, background
+/// time and suspension. If several modules conform, the first one attached owns the lifecycle.
+public protocol CompositionLifecycleOwner: CompositionModule {
+    /// Connects the module to the built root before the root starts. Returns `false` when it cannot take the
+    /// lifecycle, and the root then runs its own launch and foreground work as if no owner were attached.
+    func connectLifecycle(to root: ServiceCompositionRoot) -> Bool
+    /// Starts the module's launch and foreground triggers, in place of the root's own. Called on the main queue.
+    func beginLifecycle(isActive: Bool)
+}
+
 // MARK: - Adapters
 
 /// Which family of adapters a root was built with.
@@ -691,6 +704,12 @@ public final class ServiceCompositionRoot {
     /// Registers the launch, foreground, reachability and suspension hooks and recovers captures a previous run left
     /// staged. With `isActive` the launch drain and the launch reminder pass run at once. Call it once, on the main
     /// queue.
+    ///
+    /// When a `CompositionLifecycleOwner` module is attached (the `LifecycleCoordinator`), the recovery, job
+    /// activation and reminder work of launch and of every foreground activation belongs to it alone and runs as its
+    /// single serialized pass; the root then registers no observer of its own for them. Reachability, background
+    /// time, suspension, relocking and foreground state stay with the root. Without an owner the root runs that work
+    /// itself, unordered.
     public func start(isActive: Bool) {
         stateLock.lock()
         guard !isShutDown, !hasStarted else {
@@ -698,6 +717,8 @@ public final class ServiceCompositionRoot {
             return
         }
         hasStarted = true
+        let lifecycleOwner = modules.lazy.compactMap { $0 as? CompositionLifecycleOwner }.first
+        let ownsLifecycle = lifecycleOwner?.connectLifecycle(to: self) ?? false
         let center = adapters.lifecycleNotifications
         let foregroundState = foreground
         foregroundState.set(isActive)
@@ -722,18 +743,24 @@ public final class ServiceCompositionRoot {
         }
         let jobObserver = JobRunnerLifecycleObserver(
             service: jobRunner, notificationCenter: center, reachability: adapters.reachability,
-            backgroundGrant: adapters.backgroundGrant)
-        let permissionObserver = NotificationPermissionLifecycleObserver(
-            reconciler: reminderReconciler, notificationCenter: center,
-            onReport: { [weak self] report in self?.recordReminderReport(report) })
+            backgroundGrant: adapters.backgroundGrant, drivesActivation: !ownsLifecycle)
+        let permissionObserver: NotificationPermissionLifecycleObserver? =
+            ownsLifecycle
+            ? nil
+            : NotificationPermissionLifecycleObserver(
+                reconciler: reminderReconciler, notificationCenter: center,
+                onReport: { [weak self] report in self?.recordReminderReport(report) })
         self.jobObserver = jobObserver
         self.permissionObserver = permissionObserver
-        let recovering = ingress
+        let recovering = ownsLifecycle ? nil : ingress
         stateLock.unlock()
 
         recovering?.recover { _ in }
         jobObserver.start(isActive: isActive)
-        permissionObserver.start(isActive: isActive)
+        permissionObserver?.start(isActive: isActive)
+        if ownsLifecycle {
+            lifecycleOwner?.beginLifecycle(isActive: isActive)
+        }
     }
 
     /// Imports every capture a previous run left staged and reports what was found; `nil` once the root is shut down.

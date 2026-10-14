@@ -92,11 +92,24 @@ public enum LifecycleCoordinatorError: Error, Equatable {
 ///   `timedOut` and the pass goes on. A step that only starts work (a job drain, a health read) returns `requested`.
 /// * **Failures are local.** One step failing or deferring never stops the steps after it.
 ///
-/// It joins the root as a `CompositionModule` so it can own the deletion, retention and health clients and receive
-/// their events. Build it, pass it in `modules`, then call `connect(to:)` with the root and `start(isActive:)`.
-/// The clock/zone-change handling owned elsewhere raises `timeChangeTrigger`. No prompt-eligibility reconciliation
-/// exists in the native layer yet, so that step reports `notConfigured` until an action is set for it.
-public final class LifecycleCoordinator: CompositionModule, @unchecked Sendable {
+/// It joins the root as a `CompositionLifecycleOwner` module so it can own the deletion, retention and health clients
+/// and receive their events. Build it and pass it in `modules`; `ServiceCompositionRoot.start(isActive:)` then connects
+/// it and starts it, and from then on it is the only launch and foreground driver of ingress recovery, job activation
+/// and the reminder pass: the root registers no competing observer for them, so each runs once per pass, in order.
+/// (The root still owns reachability, background time, suspension and relocking, which are not ordered recovery.)
+/// Tests and tools that do not start a root may call `connect(to:)` and `start(isActive:)` themselves.
+/// The clock/zone-change handling owned elsewhere raises `timeChangeTrigger`.
+///
+/// **Prompt eligibility.** The native layer has no prompt-schedule effect yet: the core's daily prompt schedule is not
+/// exposed through the bridge. The step reconciles what native code does own: whether the permission lets optional
+/// prompts alert and whether the same pass's reminder reconciliation gave candidates capacity. Whatever later owns
+/// prompt scheduling replaces it with `setAction(_:for: .promptEligibility)`.
+///
+/// **Owned services.** The root hands each fixed-range core client out once, so the coordinator takes the processing
+/// health, deletion and retention clients and keeps the services built over them reachable: `processingHealth`
+/// (with `latestHealth` and `setHealthObserver`) for a status surface, and `deletionCleanup` and `audioRetention` for
+/// code in this module, such as an immediate cleanup after a delete. Nothing else may take those clients from the root.
+public final class LifecycleCoordinator: CompositionLifecycleOwner, @unchecked Sendable {
     public static let defaultStepTimeoutSeconds: TimeInterval = 30
 
     public let identifier = "lifecycle"
@@ -113,6 +126,13 @@ public final class LifecycleCoordinator: CompositionModule, @unchecked Sendable 
     private var activeRace: StepRace?
     private var isStopped = false
     private var foregroundObserver: NSObjectProtocol?
+    private var foregroundObserverCenter: NotificationCenter?
+    private weak var connectedRoot: ServiceCompositionRoot?
+    private var reminderReportForPrompts: NotificationPermissionReport?
+    private var healthWaiters: [CheckedContinuation<ProcessingHealthOutcome, Never>] = []
+    private var healthObserver: (@Sendable (ProcessingHealthOutcome) -> Void)?
+    private var deletionService: DeletionCleanupService?
+    private var retentionService: AudioRetentionService?
     private var latest: LifecyclePassReport?
     private var passCount = 0
     private var deletionClient: CoreDeletionCleanupClient?
@@ -182,11 +202,13 @@ public final class LifecycleCoordinator: CompositionModule, @unchecked Sendable 
             lock.unlock()
             return
         }
-        foregroundObserver = notificationCenter.addObserver(
+        let center = notificationCenter
+        foregroundObserver = center.addObserver(
             forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in
             self?.foregroundActivated()
         }
+        foregroundObserverCenter = center
         lock.unlock()
         if isActive {
             launch()
@@ -214,6 +236,45 @@ public final class LifecycleCoordinator: CompositionModule, @unchecked Sendable 
         lock.lock()
         defer { lock.unlock() }
         return queuedWaiters.count
+    }
+
+    // MARK: Owned services
+
+    /// The processing-health service over the client this coordinator took from the root, or `nil` before it is
+    /// attached. Health is pull-only: the launch and foreground passes read it, and a status surface reads
+    /// `latestHealth` or asks this service to `refresh()`.
+    public var processingHealth: ProcessingHealthService? {
+        lock.lock()
+        defer { lock.unlock() }
+        return healthService
+    }
+
+    /// The most recent completed health read, if any.
+    public var latestHealth: ProcessingHealthOutcome? {
+        processingHealth?.latestOutcome
+    }
+
+    /// Called with every completed health read, whoever asked for it. Replaces any earlier observer. It runs on the
+    /// thread that delivered the core event.
+    public func setHealthObserver(_ observer: (@Sendable (ProcessingHealthOutcome) -> Void)?) {
+        lock.lock()
+        healthObserver = observer
+        lock.unlock()
+    }
+
+    /// Deletion cleanup over the client this coordinator took; available once connected. A caller that has just deleted
+    /// an item calls `cleanUp(itemID:)` for it at once instead of waiting for the next pass.
+    var deletionCleanup: DeletionCleanupService? {
+        lock.lock()
+        defer { lock.unlock() }
+        return deletionService
+    }
+
+    /// Audio retention over the client this coordinator took; available once connected.
+    var audioRetention: AudioRetentionService? {
+        lock.lock()
+        defer { lock.unlock() }
+        return retentionService
     }
 
     // MARK: Actions
@@ -259,15 +320,23 @@ public final class LifecycleCoordinator: CompositionModule, @unchecked Sendable 
         }
         isStopped = true
         let observer = foregroundObserver
+        let center = foregroundObserverCenter
         foregroundObserver = nil
+        foregroundObserverCenter = nil
         let race = activeRace
         let deletion = deletionClient
         let retention = retentionClient
-        let center = notificationCenter
+        let health = healthService
+        let waiting = healthWaiters
+        healthWaiters = []
         lock.unlock()
 
         if let observer {
-            center.removeObserver(observer)
+            center?.removeObserver(observer)
+        }
+        health?.setObserver(nil)
+        for waiter in waiting {
+            waiter.resume(returning: .failed(CoreFailure.handleClosed))
         }
         race?.finish(.interrupted)
         deletion?.shutDown()
@@ -435,17 +504,20 @@ private final class StepRace: @unchecked Sendable {
 
 extension LifecycleCoordinator {
     /// Connects the steps to the services of a built root: staged-capture recovery, the job runner, deletion cleanup,
-    /// the reminder pass, audio retention and the health read. The coordinator must already be one of the root's
-    /// modules. Call it before `start(isActive:)`, which then listens on the root's notification center.
+    /// the reminder pass, audio retention, prompt eligibility and the health read. The coordinator must already be one
+    /// of the root's modules. `ServiceCompositionRoot.start(isActive:)` does this itself; call it directly only when
+    /// the root is not started through that entry point. Repeating it for the same root changes nothing.
     public func connect(to root: ServiceCompositionRoot) throws {
         lock.lock()
         let deletionClient = self.deletionClient
         let retentionClient = self.retentionClient
         let health = self.healthService
+        let alreadyConnected = connectedRoot === root
         lock.unlock()
         guard let deletionClient, let retentionClient, let health else {
             throw LifecycleCoordinatorError.notAttached
         }
+        if alreadyConnected { return }
 
         let layout = ProtectedStorageLayout(
             rootDirectory: URL(fileURLWithPath: root.configuration.storageRootPath, isDirectory: true))
@@ -457,7 +529,12 @@ extension LifecycleCoordinator {
 
         lock.lock()
         notificationCenter = root.adapters.lifecycleNotifications
+        deletionService = deletion
+        retentionService = retention
+        connectedRoot = root
         lock.unlock()
+
+        health.setObserver { [weak self] outcome in self?.healthRead(outcome) }
 
         setAction(
             { [weak root] _ in
@@ -478,12 +555,15 @@ extension LifecycleCoordinator {
             }, for: .jobs)
         setAction({ _ in Self.outcome(ofDeletion: await deletion.reconcile()) }, for: .deletion)
         setAction(
-            { [weak root] triggers in
+            { [weak self, weak root] triggers in
                 guard let root else { return .deferred("root_unavailable") }
+                self?.recordReminderReport(nil)
                 let trigger: NotificationReconcileTrigger =
                     triggers.contains(.launch) ? .launch : (triggers.contains(.foreground) ? .foreground : .explicit)
                 do {
-                    return Self.outcome(ofReminders: try await root.reconcileReminders(trigger: trigger))
+                    let report = try await root.reconcileReminders(trigger: trigger)
+                    self?.recordReminderReport(report)
+                    return Self.outcome(ofReminders: report)
                 } catch is CancellationError {
                     return .deferred("reminders_cancelled")
                 } catch {
@@ -492,10 +572,65 @@ extension LifecycleCoordinator {
             }, for: .reminders)
         setAction({ _ in Self.outcome(ofRetention: await retention.sweep()) }, for: .retention)
         setAction(
-            { _ in
-                health.refresh()
-                return .requested
+            { [weak self] _ in Self.outcome(ofPrompts: self?.reminderReportOfThisPass()) }, for: .promptEligibility)
+        setAction(
+            { [weak self] _ in
+                guard let self else { return .deferred("coordinator_unavailable") }
+                return Self.outcome(ofHealth: await self.readHealth(health))
             }, for: .health)
+    }
+
+    // MARK: CompositionLifecycleOwner
+
+    public func connectLifecycle(to root: ServiceCompositionRoot) -> Bool {
+        (try? connect(to: root)) != nil
+    }
+
+    public func beginLifecycle(isActive: Bool) {
+        start(isActive: isActive)
+    }
+
+    // MARK: Step support
+
+    private func recordReminderReport(_ report: NotificationPermissionReport?) {
+        lock.lock()
+        reminderReportForPrompts = report
+        lock.unlock()
+    }
+
+    /// The report of the reminder step that ran earlier in the same pass, or `nil` if it did not finish one.
+    private func reminderReportOfThisPass() -> NotificationPermissionReport? {
+        lock.lock()
+        defer { lock.unlock() }
+        return reminderReportForPrompts
+    }
+
+    /// Asks for a fresh health snapshot and waits for the answer (or, if a read was already outstanding, for that one).
+    /// The step's time bound and `shutDown()` both end the wait.
+    private func readHealth(_ service: ProcessingHealthService) async -> ProcessingHealthOutcome {
+        await withCheckedContinuation { (continuation: CheckedContinuation<ProcessingHealthOutcome, Never>) in
+            lock.lock()
+            if isStopped {
+                lock.unlock()
+                continuation.resume(returning: .failed(CoreFailure.handleClosed))
+                return
+            }
+            healthWaiters.append(continuation)
+            lock.unlock()
+            service.refresh()
+        }
+    }
+
+    private func healthRead(_ outcome: ProcessingHealthOutcome) {
+        lock.lock()
+        let waiting = healthWaiters
+        healthWaiters = []
+        let observer = healthObserver
+        lock.unlock()
+        for waiter in waiting {
+            waiter.resume(returning: outcome)
+        }
+        observer?(outcome)
     }
 
     static func outcome(ofIngress report: IngressRecoveryReport?) -> LifecycleStepOutcome {
@@ -522,5 +657,21 @@ extension LifecycleCoordinator {
     static func outcome(ofRetention report: AudioRetentionSweepReport) -> LifecycleStepOutcome {
         if report.listingFailure != nil { return .deferred("retention_listing_failed") }
         return report.converged ? .completed : .deferred("retention_unfinished")
+    }
+
+    static func outcome(ofPrompts report: NotificationPermissionReport?) -> LifecycleStepOutcome {
+        guard let report else { return .deferred("prompts_awaiting_reminder_pass") }
+        if report.reconciliationFailure != nil { return .deferred("prompts_pass_incomplete") }
+        if !report.readiness.optionalPromptsAllowed { return .deferred("prompts_not_permitted") }
+        if report.promptsWithheld > 0 { return .deferred("prompts_withheld") }
+        if report.promptsDeferred > 0 { return .deferred("prompts_awaiting_capacity") }
+        return .completed
+    }
+
+    static func outcome(ofHealth outcome: ProcessingHealthOutcome) -> LifecycleStepOutcome {
+        switch outcome {
+        case .snapshot: return .completed
+        case .failed: return .deferred("health_read_failed")
+        }
     }
 }

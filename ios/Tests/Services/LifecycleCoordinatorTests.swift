@@ -443,6 +443,35 @@ final class LifecycleCoordinatorTests: XCTestCase {
                 ofRetention: AudioRetentionSweepReport(listingFailure: nil, pressure: .normal, items: [])),
             .completed)
     }
+
+    func testPromptEligibilityOutcomeNamesWhyItHasNotConverged() {
+        func report(
+            permission: NotificationPermissionState = .usable, granted: Int = 0, deferred: Int = 0,
+            withheld: Int = 0, failure: ReminderReconciliationFailure? = nil
+        ) -> NotificationPermissionReport {
+            NotificationPermissionReport(
+                permission: permission, transition: .unchanged, trigger: .launch,
+                readiness: NotificationReadiness.evaluate(permission: permission, reminders: []),
+                promptsGranted: granted, promptsDeferred: deferred, promptsWithheld: withheld,
+                reconciliationFailure: failure, converged: failure == nil)
+        }
+        XCTAssertEqual(LifecycleCoordinator.outcome(ofPrompts: nil), .deferred("prompts_awaiting_reminder_pass"))
+        XCTAssertEqual(LifecycleCoordinator.outcome(ofPrompts: report()), .completed)
+        XCTAssertEqual(LifecycleCoordinator.outcome(ofPrompts: report(granted: 2)), .completed)
+        XCTAssertEqual(
+            LifecycleCoordinator.outcome(ofPrompts: report(deferred: 1)), .deferred("prompts_awaiting_capacity"))
+        XCTAssertEqual(LifecycleCoordinator.outcome(ofPrompts: report(withheld: 1)), .deferred("prompts_withheld"))
+        XCTAssertEqual(
+            LifecycleCoordinator.outcome(ofPrompts: report(permission: .denied)), .deferred("prompts_not_permitted"))
+        XCTAssertEqual(
+            LifecycleCoordinator.outcome(ofPrompts: report(failure: .coreUnavailable)),
+            .deferred("prompts_pass_incomplete"))
+    }
+
+    func testHealthOutcomeSeparatesASnapshotFromAFailedRead() {
+        XCTAssertEqual(
+            LifecycleCoordinator.outcome(ofHealth: .failed(CoreFailure.handleClosed)), .deferred("health_read_failed"))
+    }
 }
 
 // MARK: - Real Rust core
@@ -494,8 +523,12 @@ final class LifecycleCoordinatorRealCoreTests: XCTestCase {
         XCTAssertEqual(launch.outcome(of: .deletion), .completed)
         XCTAssertEqual(launch.outcome(of: .reminders), .completed)
         XCTAssertEqual(launch.outcome(of: .retention), .completed)
-        XCTAssertEqual(launch.outcome(of: .promptEligibility), .notConfigured)
-        XCTAssertEqual(launch.outcome(of: .health), .requested)
+        XCTAssertEqual(launch.outcome(of: .promptEligibility), .completed)
+        XCTAssertEqual(launch.outcome(of: .health), .completed)
+        if case .snapshot? = coordinator.latestHealth {
+        } else {
+            XCTFail("the health step left no snapshot to read, got \(String(describing: coordinator.latestHealth))")
+        }
         XCTAssertEqual(try staging.listRecords().recordCaptureIDs, [], "the staged capture was imported and cleared")
         XCTAssertNotNil(root.lastReminderReport, "the reminder step ran the root's reminder pass")
 
@@ -511,6 +544,8 @@ final class LifecycleCoordinatorRealCoreTests: XCTestCase {
         }
 
         let again = await coordinator.reconcile(.foreground)
+        XCTAssertEqual(again.outcome(of: .promptEligibility), .completed)
+        XCTAssertEqual(again.outcome(of: .health), .completed)
         XCTAssertEqual(again.outcome(of: .ingress), .completed)
         XCTAssertEqual(again.outcome(of: .deletion), .completed)
         XCTAssertEqual(again.outcome(of: .retention), .completed)
@@ -544,6 +579,162 @@ final class LifecycleCoordinatorRealCoreTests: XCTestCase {
         }
     }
 
+
+    func testTheCoordinatorKeepsTheClientsItTookReachableForOtherCode() async throws {
+        let layout = ProtectedStorageLayout(rootDirectory: storageRoot)
+        try prepareStore(layout)
+        let coordinator = LifecycleCoordinator(stepTimeoutSeconds: 30)
+        XCTAssertNil(coordinator.processingHealth)
+        let root = try makeRoot(modules: [coordinator])
+        defer { root.shutDown() }
+        try coordinator.connect(to: root)
+        try coordinator.connect(to: root)
+
+        XCTAssertNotNil(coordinator.processingHealth, "a status surface reads health through the coordinator")
+        XCTAssertNotNil(coordinator.deletionCleanup)
+        XCTAssertNotNil(coordinator.audioRetention)
+        let observed = ObservedHealth()
+        coordinator.setHealthObserver { observed.record($0) }
+
+        let report = await coordinator.reconcile(.foreground)
+        XCTAssertEqual(report.outcome(of: .health), .completed)
+        let notified = await lifecycleWaitUntil { observed.count >= 1 }
+        XCTAssertTrue(notified, "the observer hears the read a pass made")
+        XCTAssertEqual(observed.last, coordinator.latestHealth)
+
+        coordinator.processingHealth?.refresh()
+        let again = await lifecycleWaitUntil { observed.count >= 2 }
+        XCTAssertTrue(again, "a read the status surface asks for reaches the same observer")
+        let cleaned = await coordinator.deletionCleanup?.cleanUp(itemID: "item-that-was-never-deleted")
+        XCTAssertNotNil(cleaned, "the owned deletion service answers an immediate cleanup")
+    }
+
+    func testStartingTheRootDrivesLaunchAndForegroundOnlyThroughTheCoordinator() async throws {
+        let layout = ProtectedStorageLayout(rootDirectory: storageRoot)
+        try prepareStore(layout)
+        let captureID = UUID().uuidString.lowercased()
+        let staging = IngressStagingStore(layout: layout, fileSystem: FileManagerIngressFileSystem())
+        _ = try staging.stage(
+            IngressRecord(
+                captureID: captureID, text: "Water the synthetic fern", audio: nil,
+                context: captureContext(at: Date())))
+
+        let lifecycle = NotificationCenter()
+        let coordinator = LifecycleCoordinator(stepTimeoutSeconds: 30)
+        let root = try makeRoot(modules: [coordinator], lifecycleNotifications: lifecycle, reachable: false)
+        defer { root.shutDown() }
+        // Stand in for the three steps the root's own observers would otherwise also run, so a second driver shows.
+        try coordinator.connect(to: root)
+        let ran = StepCounter()
+        for step in [LifecycleStep.ingress, .jobs, .reminders] {
+            coordinator.setAction({ _ in ran.increment(step.rawValue); return .completed }, for: step)
+        }
+
+        root.start(isActive: true)
+        let launched = await lifecycleWaitUntil { coordinator.finishedPassCount == 1 }
+        XCTAssertTrue(launched)
+        XCTAssertEqual(coordinator.lastReport?.triggers, [.launch])
+
+        lifecycle.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        let foregrounded = await lifecycleWaitUntil { coordinator.finishedPassCount == 2 }
+        XCTAssertTrue(foregrounded)
+        XCTAssertEqual(coordinator.lastReport?.triggers, [.foreground])
+        try? await Task.sleep(nanoseconds: 500_000_000)
+
+        XCTAssertEqual(coordinator.finishedPassCount, 2, "one pass per activation")
+        for step in [LifecycleStep.ingress, .jobs, .reminders] {
+            XCTAssertEqual(ran.count(of: step.rawValue), 2, "\(step) ran once per pass")
+        }
+        XCTAssertEqual(try staging.listRecords().recordCaptureIDs, [captureID], "the root did not recover ingress itself")
+        XCTAssertEqual(root.jobRunner.startedDrainCount, 0, "the root did not activate the job runner itself")
+        XCTAssertNil(root.lastReminderReport, "the root did not run a reminder pass itself")
+    }
+
+    func testStartingTheRootRunsTheRealOrderedPassOnLaunchAndForeground() async throws {
+        let layout = ProtectedStorageLayout(rootDirectory: storageRoot)
+        try prepareStore(layout)
+        let captureID = UUID().uuidString.lowercased()
+        let staging = IngressStagingStore(layout: layout, fileSystem: FileManagerIngressFileSystem())
+        _ = try staging.stage(
+            IngressRecord(
+                captureID: captureID, text: "Renew the synthetic library card", audio: nil,
+                context: captureContext(at: Date())))
+
+        let lifecycle = NotificationCenter()
+        let coordinator = LifecycleCoordinator(stepTimeoutSeconds: 30)
+        let root = try makeRoot(modules: [coordinator], lifecycleNotifications: lifecycle)
+        defer { root.shutDown() }
+        root.start(isActive: true)
+
+        let launched = await lifecycleWaitUntil { coordinator.finishedPassCount >= 1 }
+        XCTAssertTrue(launched)
+        let launch = try XCTUnwrap(coordinator.lastReport)
+        XCTAssertEqual(launch.triggers, [.launch])
+        XCTAssertEqual(launch.results.map(\.step), LifecycleStep.allCases)
+        XCTAssertEqual(launch.outcome(of: .ingress), .completed)
+        XCTAssertEqual(launch.outcome(of: .reminders), .completed)
+        XCTAssertEqual(launch.outcome(of: .promptEligibility), .completed)
+        XCTAssertEqual(launch.outcome(of: .health), .completed)
+        XCTAssertEqual(try staging.listRecords().recordCaptureIDs, [], "the launch pass imported the staged capture")
+        XCTAssertNotNil(root.lastReminderReport)
+
+        lifecycle.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        let foregrounded = await lifecycleWaitUntil { coordinator.finishedPassCount >= 2 }
+        XCTAssertTrue(foregrounded)
+        XCTAssertEqual(coordinator.lastReport?.triggers, [.foreground])
+        XCTAssertEqual(coordinator.lastReport?.outcome(of: .promptEligibility), .completed)
+    }
+
+    func testARootWithNoLifecycleModuleStillRunsItsOwnLaunchRecovery() async throws {
+        let layout = ProtectedStorageLayout(rootDirectory: storageRoot)
+        try prepareStore(layout)
+        let captureID = UUID().uuidString.lowercased()
+        let staging = IngressStagingStore(layout: layout, fileSystem: FileManagerIngressFileSystem())
+        _ = try staging.stage(
+            IngressRecord(
+                captureID: captureID, text: "Book the synthetic dentist", audio: nil,
+                context: captureContext(at: Date())))
+        let root = try makeRoot(modules: [], reachable: false)
+        defer { root.shutDown() }
+        root.start(isActive: true)
+
+        XCTAssertTrue(
+            pump { (try? staging.listRecords().recordCaptureIDs) == [] && root.lastReminderReport != nil },
+            "without a lifecycle module the root recovers and reconciles by itself")
+        XCTAssertTrue(pump { root.jobRunner.startedDrainCount >= 1 }, "and activates the job runner")
+    }
+
+    func testPromptEligibilityWaitsWhileNotificationPermissionIsDenied() async throws {
+        let layout = ProtectedStorageLayout(rootDirectory: storageRoot)
+        try prepareStore(layout)
+        let center = FakeNotificationCenter()
+        center.authorizationStatus = .denied
+        let coordinator = LifecycleCoordinator(stepTimeoutSeconds: 30)
+        let root = try makeRoot(modules: [coordinator], notificationCenter: center)
+        defer { root.shutDown() }
+        try coordinator.connect(to: root)
+
+        let report = await coordinator.reconcile(.launch)
+        XCTAssertEqual(report.outcome(of: .promptEligibility), .deferred("prompts_not_permitted"))
+        XCTAssertEqual(report.outcome(of: .ingress), .completed, "a denied permission does not stop the other steps")
+    }
+
+    func testTimeChangeTriggerRunsTheRealReminderAndPromptStepsOnly() async throws {
+        let layout = ProtectedStorageLayout(rootDirectory: storageRoot)
+        try prepareStore(layout)
+        let coordinator = LifecycleCoordinator(stepTimeoutSeconds: 30)
+        let root = try makeRoot(modules: [coordinator])
+        defer { root.shutDown() }
+        try coordinator.connect(to: root)
+
+        coordinator.timeChangeTrigger()
+        let finished = await lifecycleWaitUntil { coordinator.finishedPassCount == 1 }
+        XCTAssertTrue(finished)
+        XCTAssertEqual(coordinator.lastReport?.results.map(\.step), [.reminders, .promptEligibility])
+        XCTAssertEqual(coordinator.lastReport?.outcome(of: .reminders), .completed)
+        XCTAssertEqual(coordinator.lastReport?.outcome(of: .promptEligibility), .completed)
+    }
+
     // MARK: helpers
 
     private func makeConfiguration() -> CompositionConfiguration {
@@ -553,7 +744,9 @@ final class LifecycleCoordinatorRealCoreTests: XCTestCase {
 
     private func makeRoot(
         modules: [CompositionModule],
-        lifecycleNotifications: NotificationCenter = NotificationCenter()
+        lifecycleNotifications: NotificationCenter = NotificationCenter(),
+        notificationCenter: FakeNotificationCenter = FakeNotificationCenter(),
+        reachable: Bool = true
     ) throws -> ServiceCompositionRoot {
         let session = ReadAuthenticationSession(boundary: FakeReadAuthenticationBoundary())
         return try ServiceCompositionRoot(
@@ -561,8 +754,8 @@ final class LifecycleCoordinatorRealCoreTests: XCTestCase {
             environment: CompositionEnvironment(
                 timeZone: { Self.timeZone }, locale: { Locale(identifier: "en_US") }),
             adapters: .injectedForTests(
-                sender: UnusedProviderSender(), readSession: session, notificationCenter: FakeNotificationCenter(),
-                reachability: FakeReachability(reachable: true), lifecycleNotifications: lifecycleNotifications),
+                sender: UnusedProviderSender(), readSession: session, notificationCenter: notificationCenter,
+                reachability: FakeReachability(reachable: reachable), lifecycleNotifications: lifecycleNotifications),
             modules: modules)
     }
 
@@ -612,6 +805,46 @@ final class LifecycleCoordinatorRealCoreTests: XCTestCase {
             XCTAssertEqual(code, SQLITE_OK, "seed failed: \(detail)")
             if code != SQLITE_OK { throw CompositionError.storageUnavailable }
         }
+    }
+}
+
+private final class StepCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var counts: [String: Int] = [:]
+
+    func increment(_ name: String) {
+        lock.lock()
+        counts[name, default: 0] += 1
+        lock.unlock()
+    }
+
+    func count(of name: String) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return counts[name] ?? 0
+    }
+}
+
+private final class ObservedHealth: @unchecked Sendable {
+    private let lock = NSLock()
+    private var outcomes: [ProcessingHealthOutcome] = []
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return outcomes.count
+    }
+
+    var last: ProcessingHealthOutcome? {
+        lock.lock()
+        defer { lock.unlock() }
+        return outcomes.last
+    }
+
+    func record(_ outcome: ProcessingHealthOutcome) {
+        lock.lock()
+        outcomes.append(outcome)
+        lock.unlock()
     }
 }
 
