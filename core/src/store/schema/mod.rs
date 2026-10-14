@@ -79,6 +79,10 @@ pub const MIGRATIONS: &[MigrationStep] = &[
         target_version: 9,
         apply: add_reset_generations_v9,
     },
+    MigrationStep {
+        target_version: 10,
+        apply: add_reset_credential_claims_v10,
+    },
 ];
 
 /// Database handle with schema validation.
@@ -851,6 +855,46 @@ fn add_reset_generations_v9(tx: &Transaction<'_>) -> Result<()> {
     tx.execute(
         "CREATE UNIQUE INDEX idx_reset_generations_one_pending
          ON reset_generations(phase) WHERE phase = 'pending'",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Step 10 (L05b): the credential-claim fence behind an explicit "remove credentials" reset choice.
+/// A claim names a credential reference whose Keychain secret the native reset is about to remove
+/// for `generation`. While the claim exists, storage refuses any provider profile that would start
+/// holding that reference (a new profile, or an edit that moves a profile onto it) with
+/// `credential_pending_removal`, so a profile configured after the choice can never lose a secret
+/// the reset then deletes. Revoking a profile updates `revoked_at`, not `credential_ref`, and stays
+/// allowed. The table holds references only, never secrets.
+fn add_reset_credential_claims_v10(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute(
+        "CREATE TABLE reset_credential_claims (
+            credential_ref TEXT PRIMARY KEY,
+            generation INTEGER NOT NULL REFERENCES reset_generations(generation)
+        )",
+        [],
+    )?;
+    tx.execute(
+        "CREATE TRIGGER trg_provider_profiles_refuse_claimed_insert
+         BEFORE INSERT ON provider_profiles
+         WHEN NEW.credential_ref IS NOT NULL
+              AND EXISTS (SELECT 1 FROM reset_credential_claims
+                          WHERE credential_ref = NEW.credential_ref)
+         BEGIN
+             SELECT RAISE(ABORT, 'credential_pending_removal');
+         END",
+        [],
+    )?;
+    tx.execute(
+        "CREATE TRIGGER trg_provider_profiles_refuse_claimed_update
+         BEFORE UPDATE OF credential_ref ON provider_profiles
+         WHEN NEW.credential_ref IS NOT NULL
+              AND EXISTS (SELECT 1 FROM reset_credential_claims
+                          WHERE credential_ref = NEW.credential_ref)
+         BEGIN
+             SELECT RAISE(ABORT, 'credential_pending_removal');
+         END",
         [],
     )?;
     Ok(())
