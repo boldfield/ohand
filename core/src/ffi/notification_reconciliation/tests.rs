@@ -11,6 +11,7 @@ use crate::store::events::{
     save_event, Correction, CorrectionKind, Event as StoredEvent, EventPayload, EventType,
 };
 use crate::store::schema::Clock;
+use crate::suggestions::schedule::{PromptSettings, PromptTime};
 use chrono::Duration as ChronoDuration;
 use serde_json::{json, Value};
 use std::sync::mpsc::Receiver;
@@ -408,7 +409,6 @@ fn unprompted() -> ValidatedRequest {
     ValidatedRequest {
         rearm_rejected_schedules: false,
         allow_optional_prompts: true,
-        prompts: Vec::new(),
         facts_only: false,
     }
 }
@@ -434,7 +434,7 @@ fn states(outcome: &Value, key: &str) -> Vec<String> {
         .collect()
 }
 
-fn prompts(number: usize) -> Vec<Value> {
+fn candidates(number: usize) -> Vec<Value> {
     (0..number)
         .map(|index| {
             json!({
@@ -444,6 +444,29 @@ fn prompts(number: usize) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+/// Configures a daily prompt in the session's store and returns the pending-request name and
+/// fire time of its next planned occurrence.
+fn seed_prompt_schedule(session: &Session) -> (String, DateTime<Utc>) {
+    let path = session.directory.join("core.sqlite");
+    let database = Database::open(&path.to_string_lossy(), Arc::new(SystemClock)).unwrap();
+    prompt_schedule::configure(
+        &database,
+        &SystemClock,
+        PromptSettings::Daily {
+            time: PromptTime::new(9, 0).unwrap(),
+        },
+        chrono_tz::Tz::UTC,
+    )
+    .unwrap();
+    let schedule = prompt_schedule::load(&database).unwrap().unwrap();
+    let next = schedule
+        .demands(Utc::now())
+        .into_iter()
+        .next()
+        .expect("a planned occurrence");
+    (next.notification_id, next.fire_at)
 }
 
 #[test]
@@ -532,10 +555,9 @@ fn capacity_overflow_is_held_back_and_reminders_win_over_prompts() {
     let _guard = serial();
     let mut session = Session::open("capacity", 62);
 
-    let outcome = session.pass(json!({
-        "allow_optional_prompts": true,
-        "prompts": prompts(3),
-    }));
+    seed_prompt_schedule(&session);
+
+    let outcome = session.pass(json!({"allow_optional_prompts": true}));
     assert_eq!(count(&outcome, "installed"), 60);
     assert_eq!(count(&outcome, "demoted"), 2);
     assert_eq!(count(&outcome, "prompts_granted"), 0);
@@ -558,23 +580,9 @@ fn capacity_overflow_is_held_back_and_reminders_win_over_prompts() {
 fn unattributable_requests_hold_slots_without_aliasing_any_prompt_or_being_cancelled() {
     let _guard = serial();
     let mut session = Session::open("unattributable", 60);
-    // Pending prompts and offered prompts are named exactly as the placeholders of other
-    // identifier schemes would be; none may be mistaken for an unattributable request.
-    let offered: Vec<Value> = [
-        "unattributable",
-        "ohand.unattributable.0",
-        "ohand.unattributable.1",
-    ]
-    .iter()
-    .enumerate()
-    .map(|(index, id)| {
-        json!({
-            "notification_id": id,
-            "fire_at": (Utc::now() + ChronoDuration::hours(index as i64 + 1))
-                .to_rfc3339_opts(SecondsFormat::Secs, true),
-        })
-    })
-    .collect();
+    // Pending requests named like the placeholders of other identifier schemes are foreign:
+    // none may be mistaken for an unattributable request, and all yield their slots.
+    seed_prompt_schedule(&session);
     {
         let mut center = session.native.center();
         center.unattributable = 4;
@@ -585,40 +593,31 @@ fn unattributable_requests_hold_slots_without_aliasing_any_prompt_or_being_cance
         }
     }
 
-    let outcome = session.pass(json!({
-        "allow_optional_prompts": true,
-        "prompts": offered,
-    }));
+    let outcome = session.pass(json!({"allow_optional_prompts": true}));
     assert_eq!(
         count(&outcome, "installed"),
-        56,
-        "four unattributable slots are charged"
+        54,
+        "four unattributable and two foreign slots are charged"
     );
-    assert_eq!(count(&outcome, "demoted"), 4);
+    assert_eq!(count(&outcome, "demoted"), 6);
     assert_eq!(count(&outcome, "prompts_granted"), 0);
     assert_eq!(count(&outcome, "prompts_deferred"), 3);
     assert_eq!(count(&outcome, "failures"), 0);
     {
         let center = session.native.center();
-        let mut cancels = center.cancels.clone();
-        cancels.sort();
-        assert_eq!(
-            cancels,
-            ["ohand.unattributable.0", "ohand.unattributable.1"],
-            "pending prompts yield their slots whatever their names"
+        assert!(
+            center.cancels.is_empty(),
+            "requests the schedule did not make are never cancelled, whatever their names"
         );
         assert_eq!(center.pending.len() + center.unattributable, 60);
     }
 
-    let repeat = session.pass(json!({
-        "allow_optional_prompts": true,
-        "prompts": offered,
-    }));
+    let repeat = session.pass(json!({"allow_optional_prompts": true}));
     assert_eq!(count(&repeat, "installed"), 0);
     assert_eq!(count(&repeat, "prompts_granted"), 0);
     let center = session.native.center();
-    assert_eq!(center.cancels.len(), 2, "a repeat cancels nothing again");
-    assert_eq!(center.schedules.len(), 56, "and installs nothing twice");
+    assert!(center.cancels.is_empty(), "a repeat cancels nothing either");
+    assert_eq!(center.schedules.len(), 54, "and installs nothing twice");
     drop(center);
     session.close();
 }
@@ -650,29 +649,47 @@ fn unattributable_placeholders_are_distinct_and_cannot_be_offered_as_prompts() {
 #[test]
 fn optional_prompts_use_the_slots_left_and_are_withheld_without_permission() {
     let _guard = serial();
-    let mut session = Session::open("prompts", 10);
+    let mut session = Session::open("prompts", 58);
+    seed_prompt_schedule(&session);
 
-    let allowed = session.pass(json!({
-        "allow_optional_prompts": true,
-        "prompts": prompts(9),
-    }));
-    assert_eq!(count(&allowed, "installed"), 10);
-    assert_eq!(count(&allowed, "prompts_granted"), 7);
-    assert_eq!(count(&allowed, "prompts_deferred"), 2);
+    let allowed = session.pass(json!({"allow_optional_prompts": true}));
+    assert_eq!(count(&allowed, "installed"), 58);
+    assert_eq!(session.native.center().schedules.len(), 60);
+    assert_eq!(count(&allowed, "prompts_granted"), 2);
+    assert_eq!(count(&allowed, "prompts_deferred"), 1);
+    assert_eq!(count(&allowed, "prompts_installed"), 2);
     assert_eq!(count(&allowed, "prompts_withheld"), 0);
 
-    let withheld = session.pass(json!({
-        "allow_optional_prompts": false,
-        "prompts": prompts(9),
-    }));
+    let withheld = session.pass(json!({"allow_optional_prompts": false}));
     assert_eq!(count(&withheld, "prompts_granted"), 0);
-    assert_eq!(count(&withheld, "prompts_withheld"), 9);
+    assert_eq!(count(&withheld, "prompts_installed"), 0);
+    assert_eq!(count(&withheld, "prompts_withheld"), 3);
     assert_eq!(
         states(&withheld, "schedule_state"),
-        ["scheduled"; 10],
+        ["scheduled"; 58],
         "reminders do not depend on prompts"
     );
-    assert_eq!(session.native.center().schedules.len(), 10);
+    assert_eq!(
+        session.native.center().pending.len(),
+        58,
+        "withheld prompts are cancelled"
+    );
+    session.close();
+}
+
+#[test]
+fn caller_supplied_prompt_candidates_never_cause_installs() {
+    let _guard = serial();
+    let mut session = Session::open("candidates", 3);
+
+    let outcome = session.pass(json!({
+        "allow_optional_prompts": true,
+        "prompts": candidates(5),
+    }));
+    assert_eq!(count(&outcome, "installed"), 3);
+    assert_eq!(count(&outcome, "prompts_granted"), 0);
+    assert_eq!(count(&outcome, "prompts_installed"), 0);
+    assert_eq!(session.native.center().schedules.len(), 3);
     session.close();
 }
 
@@ -803,17 +820,14 @@ fn bad_requests_and_answers_are_refused_with_normalized_failures() {
 fn answers_that_do_not_fit_the_command_are_refused_and_the_command_waits_for_a_valid_one() {
     let _guard = serial();
     let mut session = Session::open("mismatch", 60);
-    let offered = prompts(1);
+    let (prompt_id, prompt_fire_at) = seed_prompt_schedule(&session);
     {
         let mut center = session.native.center();
         center.mismatch = true;
-        center.pending.push((
-            "prompt-0".to_string(),
-            Utc::now() + ChronoDuration::hours(1),
-        ));
+        center.pending.push((prompt_id.clone(), prompt_fire_at));
     }
 
-    let request = json!({"allow_optional_prompts": true, "prompts": offered});
+    let request = json!({"allow_optional_prompts": true});
     let outcome = session.pass(request.clone());
     assert_eq!(count(&outcome, "installed"), 60);
     assert_eq!(count(&outcome, "failures"), 0);
@@ -822,7 +836,7 @@ fn answers_that_do_not_fit_the_command_are_refused_and_the_command_waits_for_a_v
         let center = session.native.center();
         assert_eq!(
             center.cancels,
-            ["prompt-0"],
+            [prompt_id],
             "the pending prompt yields once"
         );
         let listing_refusals =
