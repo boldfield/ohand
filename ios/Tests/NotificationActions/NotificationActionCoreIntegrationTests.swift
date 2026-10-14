@@ -3,6 +3,9 @@ import XCTest
 @testable import OhAndCoreBridge
 @testable import OhAndServices
 
+/// Wait at least as long as the core's own 5 s busy timeout (core/src/store/schema/mod.rs) for its write lock.
+private let coreStoreBusyTimeoutMilliseconds: Int32 = 5_000
+
 /// Runs the action handler over the real Rust core on the simulator, through the production
 /// `CoreNotificationActionClient`, the durable file journal and the real read-authentication session. Only the
 /// authentication prompt is a stand-in (`FakeReadAuthenticationBoundary`); every state asserted here is read back from
@@ -49,6 +52,7 @@ final class NotificationActionCoreIntegrationTests: XCTestCase {
     private func withDatabase<Value>(_ body: (OpaquePointer?) throws -> Value) rethrows -> Value {
         var database: OpaquePointer?
         XCTAssertEqual(sqlite3_open(storePath, &database), SQLITE_OK)
+        sqlite3_busy_timeout(database, coreStoreBusyTimeoutMilliseconds)
         defer { sqlite3_close(database) }
         return try body(database)
     }

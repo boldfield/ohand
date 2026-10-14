@@ -60,6 +60,7 @@ use crate::providers::contracts::{
     CancelToken, Clock, ErrorClass, ProviderProtocol, SystemClock, TransportError,
 };
 use crate::providers::openai::{HttpTransport, OpenAiAdapter};
+use crate::providers::self_hosted::SelfHostedAdapter;
 use crate::store::schema::{Database, SystemClock as StoreClock};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -778,7 +779,14 @@ fn run_drain(
             ProviderProtocol::Anthropic,
             AnthropicAdapter::new(Arc::new(transport.clone()), AnthropicSettings::default()),
         )
-        .with_adapter(ProviderProtocol::OpenAi, OpenAiAdapter::new(transport));
+        .with_adapter(
+            ProviderProtocol::OpenAi,
+            OpenAiAdapter::new(transport.clone()),
+        )
+        .with_adapter(
+            ProviderProtocol::SelfHosted,
+            SelfHostedAdapter::new(transport),
+        );
     let provider_clock = SystemClock::new();
     let mut capabilities = JobCapabilities::new().with(ScopedInterpretation {
         handle,

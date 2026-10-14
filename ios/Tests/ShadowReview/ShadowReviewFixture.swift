@@ -4,6 +4,9 @@ import XCTest
 @testable import OhAndCoreBridge
 @testable import OhAndServices
 
+/// Wait at least as long as the core's own 5 s busy timeout (core/src/store/schema/mod.rs) for its write lock.
+private let coreStoreBusyTimeoutMilliseconds: Int32 = 5_000
+
 /// Synthetic stored state for one finished interpretation and a separately approved review profile: the profile,
 /// capture, item, route, route grants and the primary proposal a review is compared against. Fixture data only.
 struct ShadowReviewScenario {
@@ -46,6 +49,7 @@ enum ShadowReviewSeed {
     static func authoritativeSnapshot(path: String) throws -> [String] {
         var database: OpaquePointer?
         guard sqlite3_open_v2(path, &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else { throw SeedFailure.open }
+        sqlite3_busy_timeout(database, coreStoreBusyTimeoutMilliseconds)
         defer { sqlite3_close(database) }
         var rows: [String] = []
         for table in ["items", "proposals", "corrections", "route_authorizations", "provider_profiles", "captures"] {
@@ -120,6 +124,7 @@ enum ShadowReviewSeed {
     private static func execute(path: String, statements: [String]) throws {
         var database: OpaquePointer?
         guard sqlite3_open(path, &database) == SQLITE_OK else { throw SeedFailure.open }
+        sqlite3_busy_timeout(database, coreStoreBusyTimeoutMilliseconds)
         defer { sqlite3_close(database) }
         for statement in statements {
             var message: UnsafeMutablePointer<CChar>?

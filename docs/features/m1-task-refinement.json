@@ -1812,7 +1812,7 @@
       "acceptance": [
         "Each of four observed failure modes diagnosed with evidence (or labelled hypothesis).",
         "Causes fixed via known simulator state, correct waits or justified bounds; no skips, retries, success-on-timeout or moving checks out of the required job.",
-        "Simulator job passes 5 consecutive executions on the final head, attempt URLs linked.",
+        "Simulator job's targeted UI steps (NotificationProbe UI, CaptureProbe handoff UI) pass in 5 consecutive counting executions on the final head; out-of-scope failures that skip them are neutral (listed, routed to owner); targeted failures reset and need a cause; attempt URLs linked.",
         "All other checks, artifacts, retention and job timeout unchanged; make check/test pass; macOS CI evidence linked."
       ],
       "covers_parent_criteria": [],
@@ -1857,6 +1857,78 @@
         "ios/Tests/NotificationActions/NotificationActionCoreIntegrationTests.swift:49",
         "ios/Tests/NotificationActions/NotificationActionCoreIntegrationTests.swift:71",
         "core/src/store/schema/mod.rs:115"
+      ]
+    },
+    {
+      "key": "F12",
+      "parent": null,
+      "title": "Diagnose and fix the NotificationBridgeBoundednessTests host restart",
+      "file_scope": [
+        "ios/Tests/Notifications/NotificationBridgeBoundednessTests.swift",
+        "ios/Services/Notifications/NotificationBridge.swift"
+      ],
+      "intent": "Find why the OhAndTests host crashed, hung or timed out in testAScheduleThatFailsWhileAnEarlierRestoreIsSuspendedKeepsTheRecordedRequest and fix the cause.",
+      "acceptance": [
+        "Cause diagnosed from the xcresult or a reproduction (crash stack, blocked wait, or allowance), else labelled hypothesis.",
+        "Fix the cause: test race via correct waits; bridge defect via fix plus failing-first regression; no skips, retries, relaxed assertions or unjustified timeouts.",
+        "200 consecutive iterations of the test pass (linked); exact-head ios.yml passes.",
+        "make check/test pass; macOS CI evidence linked."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/Tests/Notifications/NotificationBridgeBoundednessTests.swift:449",
+        "ios/Services/Notifications/NotificationBridge.swift"
+      ]
+    },
+    {
+      "key": "T11a",
+      "parent": "T11",
+      "title": "Dispatch the verified self-hosted protocol through the core FFI",
+      "file_scope": [
+        "core/src/ffi/provider_transport.rs",
+        "core/src/ffi/provider_transport/",
+        "core/src/ffi/job_runner.rs",
+        "core/src/ffi/job_runner/"
+      ],
+      "intent": "Self-hosted profiles dispatch through SelfHostedAdapter in provider exchange, shadow review and the job runner under the same routing/credential rules; no default endpoint.",
+      "acceptance": [
+        "SelfHosted dispatched via SelfHostedAdapter in prepare/run_exchange, shadow review and the job-runner registry; unsupported_protocol refusals removed.",
+        "Same checks as other protocols; profile without its own valid https endpoint rejected before send; no fallback endpoint.",
+        "Synthetic-transport tests for success in all three paths and refusals (missing endpoint, unauthorized destination, revoked profile); other protocols unchanged; make check/test pass."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "V09"
+      ],
+      "source_pointers": [
+        "core/src/ffi/provider_transport.rs:692",
+        "core/src/ffi/provider_transport.rs:761",
+        "core/src/ffi/provider_transport/shadow_review.rs:535",
+        "core/src/ffi/job_runner.rs:776"
+      ]
+    },
+    {
+      "key": "T11b",
+      "parent": "T11",
+      "title": "Attach core-mediated provider transport at the composition root",
+      "file_scope": [
+        "ios/Services/Assembly/CompositionRoot.swift",
+        "ios/Tests/Services/CompositionRootTests.swift"
+      ],
+      "intent": "Root attaches ProviderExchangeCoordinator to its CoreHandle so core-mediated exchanges (shadow review) can dispatch, without exposing a raw CoreHandle to modules.",
+      "acceptance": [
+        "Root attaches once during assembly under undo-on-failure; DEBUG path injects a fake sender.",
+        "Modules get no raw CoreHandle or sender; shadow review via typed clients; private reads stay gated.",
+        "Tests: module shadowReview dispatch through fake sender; pre-attach/failed-attach refused cleanly; existing tests pass; macOS CI evidence."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "B03"
+      ],
+      "source_pointers": [
+        "ios/Services/ProviderTransport/ProviderExchangeCoordinator.swift:33",
+        "ios/Services/Assembly/CompositionRoot.swift"
       ]
     }
   ],
@@ -2207,8 +2279,10 @@
     ],
     "T11": [
       "B02",
-      "V09",
-      "E03b"
+      "E03b",
+      "T11a",
+      "T11b",
+      "V09"
     ],
     "U01": [
       "P10",
@@ -2411,6 +2485,13 @@
     "F10": [],
     "F11": [
       "B02"
+    ],
+    "F12": [],
+    "T11a": [
+      "V09"
+    ],
+    "T11b": [
+      "B03"
     ]
   },
   "retained_dependency_overrides": {
@@ -2525,6 +2606,14 @@
     {
       "date": "2026-10-13",
       "change": "Added F11: 12 native test files open the core store with sqlite3_open and no busy timeout; one (NotificationActionCoreIntegrationTests) failed with SQLITE_BUSY on F10's run 38361190686 attempt 3. F11 adds a busy timeout of at least 5 s to each direct connection; no assertion changes. Depends on B02 (shared file)."
+    },
+    {
+      "date": "2026-10-13",
+      "change": "F10 criterion 3 amended: the streak counts F10's targeted UI steps; executions where an out-of-scope OhAndTests failure skipped them are neutral (listed and routed: F11 SQLITE_BUSY, F12 bridge host restart). Added F12: diagnose/fix the OhAndTests host restart in NotificationBridgeBoundednessTests (run 38462101769 attempt 1)."
+    },
+    {
+      "date": "2026-10-13",
+      "change": "L05b credential-claim fence: schema v10 allowance (reset_credential_claims + BEFORE INSERT/UPDATE triggers on provider_profiles raising credential_pending_removal); claim-revoke-delete-release protocol with the persisted claim set as resume authority. Added T11a (core FFI dispatches SelfHosted) and T11b (root attaches provider exchange transport); T11 depends on both."
     }
   ]
 }

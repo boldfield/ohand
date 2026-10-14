@@ -4,6 +4,9 @@ import XCTest
 @testable import OhAndCoreBridge
 @testable import OhAndServices
 
+/// Wait at least as long as the core's own 5 s busy timeout (core/src/store/schema/mod.rs) for its write lock.
+private let coreStoreBusyTimeoutMilliseconds: Int32 = 5_000
+
 /// Runs the permission reconciler over the real Rust core on the simulator, through the production
 /// `CoreReminderReconciler` and `NotificationBridge`. Only the OS notification center is a stand-in
 /// (`FakeNotificationCenter`), so the core's own capacity pass, its re-arm of rejected schedules and its
@@ -44,6 +47,7 @@ final class NotificationPermissionCoreIntegrationTests: XCTestCase {
     private func seed(_ statements: [String]) throws {
         var database: OpaquePointer?
         XCTAssertEqual(sqlite3_open(storePath, &database), SQLITE_OK)
+        sqlite3_busy_timeout(database, coreStoreBusyTimeoutMilliseconds)
         defer { sqlite3_close(database) }
         for statement in statements {
             var message: UnsafeMutablePointer<CChar>?
