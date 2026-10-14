@@ -134,15 +134,11 @@ final class RecordingProviderSender: ProviderRequestSender, @unchecked Sendable 
     }
 
     var requests: [ProviderHTTPRequest] {
-        lock.lock()
-        defer { lock.unlock() }
-        return recorded
+        lock.withLock { recorded }
     }
 
     func send(_ request: ProviderHTTPRequest) async throws -> ProviderHTTPResponse {
-        lock.lock()
-        recorded.append(request)
-        lock.unlock()
+        lock.withLock { recorded.append(request) }
         guard let host = request.url.host, let body = repliesByHost[host] else {
             throw ProviderTransportError.destinationNotAuthorized
         }
@@ -246,14 +242,16 @@ class OptionalCapabilitiesTestCase: XCTestCase {
         _ = try ShadowReviewSeed.makeStore(in: layout.directory(for: .database), scenario: scenario)
     }
 
-    func makeRoot(sender: ProviderRequestSender, modules: [CompositionModule]) throws -> ServiceCompositionRoot {
+    func makeRoot(
+        sender: ProviderRequestSender, modules: [CompositionModule], captureRouteID: String = SelfHostedScenario.routeID
+    ) throws -> ServiceCompositionRoot {
         let boundary = FakeReadAuthenticationBoundary()
         authenticationBoundaries.append(boundary)
         let session = ReadAuthenticationSession(boundary: boundary)
         XCTAssertEqual(authenticateAndWait(session), .authenticated)
         return try ServiceCompositionRoot(
             testing: CompositionConfiguration(
-                storageRootPath: storageRoot.path, captureRouteID: SelfHostedScenario.routeID,
+                storageRootPath: storageRoot.path, captureRouteID: captureRouteID,
                 jobRetryDelaySeconds: 3600),
             environment: CompositionEnvironment(
                 timeZone: { TimeZone(identifier: "UTC")! }, locale: { Locale(identifier: "en_US") }),
@@ -277,7 +275,9 @@ class OptionalCapabilitiesTestCase: XCTestCase {
     /// Lets the job runner finish a full drain after `root.start`, so "nothing was sent" is asserted after the work
     /// was given its chance rather than before it began.
     func waitForDrain(_ root: ServiceCompositionRoot) -> Bool {
-        pump(until: { root.jobRunner.finishedDrainCount >= 1 }, timeout: 30)
+        let finished = pump(until: { root.jobRunner.finishedDrainCount >= 1 }, timeout: 30)
+        settle(0.3)
+        return finished
     }
 
     func jobStatus() -> String? {

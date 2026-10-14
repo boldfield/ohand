@@ -254,7 +254,7 @@ final class OptionalCapabilitiesIntegrationTests: OptionalCapabilitiesTestCase {
         let sender = FailingSender(.connectionFailed)
         let module = OptionalCapabilitiesModule(
             configuration: OptionalCapabilitiesConfiguration(shadowReview: shadowReviewConfiguration()))
-        let root = try makeRoot(sender: sender, modules: [module])
+        let root = try makeRoot(sender: sender, modules: [module], captureRouteID: ShadowReviewScenario.routeID)
         defer { root.shutDown() }
         let service = try XCTUnwrap(module.shadowReview)
         guard case .saved? = save(root) else { return XCTFail("capture is not blocked by the reviewer") }
