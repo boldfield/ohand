@@ -135,7 +135,9 @@ public struct CompositionEnvironment: Sendable {
 /// that enforce their own authentication where they must) and `privateReads` (the gated read verbs). It carries no
 /// storage location either, since the root's directory holds the core's protected stores, and no provider transport:
 /// the transport sends whatever origins a caller claims, so a module reaches a provider only through the job
-/// capabilities it contributes, which the job runner drives from the core's own route, grant and revocation decision.
+/// capabilities it contributes, which the job runner drives from the core's own route, grant and revocation decision,
+/// and through `clients.shadowReview()`, whose requests the core builds and authorizes before the transport the root
+/// attached to its own core handle sends them.
 public struct CompositionContext {
     public let clients: CompositionCoreClients
     public let privateReads: CompositionPrivateReads
@@ -302,6 +304,9 @@ public enum CompositionAdapterSet: Equatable, Sendable {
 struct CompositionAdapters {
     let kind: CompositionAdapterSet
     let sender: ProviderRequestSender
+    /// Registers `sender` as the transport of the root's own core handle. Production uses the real coordinator; a
+    /// debug test may substitute one that fails.
+    let attachProviderTransport: (CoreHandle, ProviderRequestSender) throws -> ProviderExchangeCoordinator
     let notificationCenter: NotificationCenterProviding
     let permissionObservations: NotificationPermissionObservationStore
     let reachability: NetworkReachability
@@ -315,6 +320,7 @@ struct CompositionAdapters {
     fileprivate init(
         kind: CompositionAdapterSet,
         sender: ProviderRequestSender,
+        attachProviderTransport: @escaping (CoreHandle, ProviderRequestSender) throws -> ProviderExchangeCoordinator,
         notificationCenter: NotificationCenterProviding,
         permissionObservations: NotificationPermissionObservationStore,
         reachability: NetworkReachability,
@@ -325,6 +331,7 @@ struct CompositionAdapters {
     ) {
         self.kind = kind
         self.sender = sender
+        self.attachProviderTransport = attachProviderTransport
         self.notificationCenter = notificationCenter
         self.permissionObservations = permissionObservations
         self.reachability = reachability
@@ -339,6 +346,7 @@ struct CompositionAdapters {
         return CompositionAdapters(
             kind: .production,
             sender: ProviderHTTPTransport(credentials: credentials),
+            attachProviderTransport: { try ProviderExchangeCoordinator.attach(to: $0, sender: $1) },
             notificationCenter: SystemNotificationCenter(),
             permissionObservations: UserDefaultsNotificationPermissionObservationStore(),
             reachability: SystemNetworkReachability(),
@@ -353,6 +361,9 @@ struct CompositionAdapters {
     /// test states whether its reads are authenticated.
     static func injectedForTests(
         sender: ProviderRequestSender,
+        attachProviderTransport: @escaping (CoreHandle, ProviderRequestSender) throws -> ProviderExchangeCoordinator = {
+            try ProviderExchangeCoordinator.attach(to: $0, sender: $1)
+        },
         readSession: ReadAuthenticationSession,
         notificationCenter: NotificationCenterProviding,
         permissionObservations: NotificationPermissionObservationStore = InMemoryNotificationPermissionObservationStore(),
@@ -362,7 +373,8 @@ struct CompositionAdapters {
         recognizer: OnDeviceRecognizing? = nil
     ) -> CompositionAdapters {
         CompositionAdapters(
-            kind: .injectedForTests, sender: sender, notificationCenter: notificationCenter,
+            kind: .injectedForTests, sender: sender, attachProviderTransport: attachProviderTransport,
+            notificationCenter: notificationCenter,
             permissionObservations: permissionObservations, reachability: reachability,
             backgroundGrant: backgroundGrant, lifecycleNotifications: lifecycleNotifications,
             recognizer: recognizer, readSession: readSession)
@@ -553,6 +565,9 @@ private final class ForegroundState: @unchecked Sendable {
 ///   `init(testing:...)` takes substitutes; there is no configuration value that selects one.
 /// * **Reminders.** A finished drain asks the notification reconciler for a pass, so a reminder the core derived from an
 ///   interpretation reaches the scheduler without waiting for the next foreground.
+/// * **Provider transport.** The root attaches the native provider transport to its own core handle during assembly
+///   (and unregisters it on shutdown), so core-mediated exchanges such as shadow review can dispatch. Without it the
+///   core refuses them with `transport_not_registered`.
 /// * **Extension seam.** `CompositionModule`s attach after the job runner without any edit here.
 ///
 /// Build it on the main queue and call `shutDown()` before releasing it: that stops the job runner, ends waiting
@@ -623,6 +638,7 @@ public final class ServiceCompositionRoot {
     private let protectionFailureTotal: Int
     private let statusReader: CoreItemStatusReader
     private let reminderCore: CoreReminderReconciler
+    private let providerTransport: ProviderExchangeCoordinator
     private let modules: [CompositionModule]
     private let foreground: ForegroundState
     private let stateLock = NSLock()
@@ -677,6 +693,7 @@ public final class ServiceCompositionRoot {
         jobRunner = assembly.jobRunner
         transcription = assembly.transcription
         reminderCore = assembly.reminderCore
+        providerTransport = assembly.providerTransport
         reminderReconciler = assembly.permissionReconciler
         foreground = assembly.foreground
         jobRunner.setDrainIdleObserver { [weak self] in self?.runReminderPassAfterDrain() }
@@ -812,6 +829,7 @@ public final class ServiceCompositionRoot {
         for module in modules.reversed() {
             module.shutDown()
         }
+        providerTransport.shutDown()
         jobRunner.shutDown()
         transcription.shutDown()
         reminderCore.invalidate()
@@ -964,6 +982,7 @@ public final class ServiceCompositionRoot {
         let jobRunner: JobRunnerService
         let transcription: TranscriptionCapability
         let reminderCore: CoreReminderReconciler
+        let providerTransport: ProviderExchangeCoordinator
         let permissionReconciler: NotificationPermissionReconciler
         let foreground: ForegroundState
     }
@@ -1059,6 +1078,9 @@ public final class ServiceCompositionRoot {
             undo.append { jobRunner.shutDown() }
             router.register { jobRunner.handle($0) }
 
+            let providerTransport = try adapters.attachProviderTransport(core, adapters.sender)
+            undo.append { providerTransport.shutDown() }
+
             let context = CompositionContext(
                 clients: CompositionCoreClients(core: core), privateReads: CompositionPrivateReads(gate: readGate),
                 now: environment.now)
@@ -1071,7 +1093,8 @@ public final class ServiceCompositionRoot {
             return Assembly(
                 layout: layout, protectionFailureTotal: report.failures.count, core: core, ingress: ingress,
                 statusReader: statusReader, jobRunner: jobRunner, transcription: transcription,
-                reminderCore: reminderCore, permissionReconciler: permissionReconciler, foreground: foreground)
+                reminderCore: reminderCore, providerTransport: providerTransport,
+                permissionReconciler: permissionReconciler, foreground: foreground)
         } catch {
             for step in undo.reversed() {
                 step()
