@@ -295,7 +295,7 @@ final class VoiceRecoveryTests: VoiceCaptureTestCase {
         failingFileSystem.failing = [.move]
         _ = try startRecording()
         controller.stop()
-        guard case .keptForRetry(_, .importUnconfirmed) = try lastOutcome() else { return XCTFail("expected keptForRetry") }
+        guard case .unrecoverable(_, _, fileRetained: true) = try lastOutcome() else { return XCTFail("expected unrecoverable") }
         XCTAssertTrue(exists(recordURL("voice-test-1")))
         XCTAssertTrue(exists(recordingFile("voice-test-1")), "the audio could not move, so the staged record still owns it")
         restart()
@@ -658,7 +658,7 @@ final class VoiceRecoveryTests: VoiceCaptureTestCase {
         failingFileSystem.failing = [.move]
         _ = try startRecording()
         controller.stop()
-        guard case .keptForRetry(_, .importUnconfirmed) = try lastOutcome() else { return XCTFail("expected keptForRetry") }
+        guard case .unrecoverable(_, _, fileRetained: true) = try lastOutcome() else { return XCTFail("expected unrecoverable") }
         restart()
 
         XCTAssertEqual(failure(try finishResult(staleRecording("voice-test-1"))), .ownedByStagedCapture)

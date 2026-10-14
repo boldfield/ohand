@@ -25,6 +25,7 @@ pub mod job_health;
 pub mod job_runner;
 pub mod notification_actions;
 pub mod notification_reconciliation;
+pub mod prompt_schedule;
 pub mod reset;
 pub mod route_policy;
 pub mod route_provisioning;
