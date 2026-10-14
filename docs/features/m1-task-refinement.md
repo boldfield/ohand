@@ -117,6 +117,16 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
     - No other change to the boundary or to ingress staging is authorized.
 - T11 prerequisites (coordinator, 2026-10-13, after T11 blocked itself on main 67f85fd). The core FFI never dispatches the self-hosted protocol. `core/src/ffi/provider_transport.rs:692` and `:761` and `shadow_review.rs:535` return `unsupported_protocol`, and `core/src/ffi/job_runner.rs:776` registers only the Anthropic and OpenAI adapters. Also, `ServiceCompositionRoot` never calls `ProviderExchangeCoordinator.attach`, so a module cannot dispatch a shadow review. Both gaps are outside T11's owned paths. T11a (core) and T11b (root seam) close them, and T11 now depends on both.
 
+- U01 prerequisites and allowance (coordinator, 2026-10-14, after PR #212 round 1). Both reviewers accepted U01's criterion 1, the capture-first shell. Both rejected criterion 2: the release app does not resolve real services. U01 blocked itself, correctly, because none of the three gaps can be closed inside `app/` and `ios/AppAssembly/`.
+  - (1) **Notification actions.** No production code constructs `ActionHandler` or `NotificationEventReceiver`. `ActionHandler` is internal to `OhAndServices`, the root's `CoreHandle` is not exposed (B02 rule), and `CompositionEnvironment.notificationEvents` defaults to `{ _ in }`. So reminder Acknowledge and Complete, delivered and opened facts, and taps never reach the core, and journaled callbacks are never reconciled.
+  - (2) **Fresh-install route.** Nothing in production writes the `routes` table (`core/src/privacy/routing/mod.rs:11`: "A fresh install has no routes or grants"). `require_route` (`core/src/ingress/import.rs:320`) rejects the configured `universal` route as unknown, so every fresh-install save stays staged. Every earlier test seeded routes by SQL under the native-boundary export allowance. This gap belongs to the plan, not to U01.
+  - (3) **Voice.** The root exposes only `saveText`. `IngressAudioHandoff` and `recoverStagedIngress` are internal, so the release app cannot give `VoiceRecordingController` a durable handoff or recovery receiver, and injects `VoiceRecorderUnavailable`.
+  - **New tasks.** U01a (core: provision the local-only capture route), U01b (root: route at open plus notification-action composition) and U01c (root: voice ingress seam). U01b and U01c serialize on `CompositionRoot.swift` after T11b. U01 now depends on all three.
+  - **U01 allowance.**
+    - (a) `ios/Tests/AppAssembly/` for U01's own tests.
+    - (b) In `ios/Tests/ProjectSmoke/ProjectSmokeTests.swift`, only the `ContentView` assertion that U01's shell replaces. Any other assertion is out.
+    - (c) In `ios/project.yml`, exactly one `OhAndApp` sources entry, for the repository's `app/` directory: `optional: true`, `createIntermediateGroups: true`, placeholders excluded. Without it no target compiles the `app/<slice>/` directories the UI slices own. If `ios/scripts/check_project_config.py` rejects the entry, U01 blocks and names the check. It does not edit the check.
+  - **Still owed in U01.** Retry a failed launch from `sceneWillEnterForeground` and `willConnectTo` when no services exist. `launch()` is idempotent. A test covers it (Opus round 1, finding 2).
 - V06 and V07 now depend on V01 alone: they implement Rust adapters against its transport interface using fixtures. V05 is the native effect implementation and remains required by app composition/integration, not by independent protocol adapter implementation. This is an explicit dependency override for those retained tasks.
 
 ## Why some tasks stay together
@@ -604,6 +614,91 @@ Acceptance:
 3. A root test shows that a module calling `shadowReview()` can dispatch a review through the attached transport to a fake sender. A test shows a dispatch before attach, or with attach failing, is refused (`transport_not_registered`) and leaves the root assembled or cleanly undone. Existing `CompositionRootTests` pass. Required macOS CI evidence per AGENTS.md is linked.
 
 Source pointers: `ios/Services/ProviderTransport/ProviderExchangeCoordinator.swift:33`; `ios/Services/Assembly/CompositionRoot.swift`.
+
+### U01a
+
+Provision the fresh-install local-only capture route
+
+Give the core an idempotent operation that makes sure the configured capture route exists, so a fresh install can save before any processing policy is set up. Create the route with no processing destinations, so creating it never authorizes upload.
+
+Owned paths: `core/src/ffi/route_provisioning.rs`, `core/src/ffi/route_provisioning/`, its single `pub mod` line in `core/src/ffi/mod.rs`, `ios/OhAndCoreBridge/CoreHandle+RouteProvisioning.swift`. These follow the native-boundary export conventions.
+
+Dependencies: none.
+
+Acceptance:
+
+1. `ensure_local_capture_route(route_id, route_name, scope)` runs in one transaction.
+   - When the route is absent, it inserts it with an empty destination set (the representation `authorize_job` parses as no destinations), `preview_safe = 0` and `created_at` from the core clock. It writes no `route_authorizations`.
+   - When the route is present with the same scope, it changes nothing: destinations, name and `preview_safe` stay as the user configured them.
+   - When the route is present with a different scope, it fails with a normalized `route_scope_mismatch` and changes nothing.
+   - Repeated and concurrent calls are safe.
+2. Rust tests cover all of these on a freshly migrated store:
+   - after provisioning, a capture on the route imports and creates its item;
+   - `authorize_job` for any remote capability on the route is denied;
+   - an existing route with configured destinations and `preview_safe` is untouched;
+   - a scope mismatch is refused;
+   - a second call is a no-op.
+3. The Swift bridge exposes the operation with its normalized failure. `make check` and `make test` pass. The macOS CI run for the exact head is linked: the bridge must compile.
+
+Source pointers: `core/src/ingress/import.rs:320`; `core/src/privacy/routing/mod.rs:11`, `:267`; `core/src/store/schema/mod.rs:420`.
+
+### U01b
+
+Provision the route at open and compose notification actions at the root
+
+Connect notification actions and the configured capture route through the production root, so U01 can install them without a raw `CoreHandle`.
+
+Owned paths: `ios/Services/Assembly/CompositionRoot.swift`, `ios/Tests/Services/CompositionRootTests.swift`.
+
+Dependencies: T11b (shared file), U01a.
+
+Acceptance:
+
+1. During assembly, under the existing undo-on-failure and before ingress accepts or recovers a save, the root calls `ensure_local_capture_route` with the configuration's `captureRouteID` and `captureItemScope`. A failure fails assembly with a distinct `CompositionError`. No save is ever reported as saved on an unprovisioned route.
+2. The root builds the production `ActionHandler` over its own core (`CoreNotificationActionClient`), a durable `NotificationActionJournal` under the storage root, the root's read-authentication session as `ActionAuthorizing`, and a `NotificationEventReceiver` whose ingestor feeds the handler's `eventHandler`. It also forwards each event to any `CompositionEnvironment.notificationEvents` the caller supplied. It attaches the handler to the read session.
+3. The root's public surface gives the app exactly:
+   - the receiver, as a `UNUserNotificationCenterDelegate` to install;
+   - an async reconcile for launch;
+   - a way to set the authenticated open-item callback, which receives the item identifier the core resolved.
+
+   No `CoreHandle`, journal or handler type becomes public.
+4. Real-core root tests:
+   - on a fresh store, `saveText` through a production-configured root returns saved and the item exists;
+   - a simulated Complete response reaches the core once, and a duplicate does not mutate twice;
+   - a response received while unauthenticated waits in the journal, and runs at reconcile after authentication;
+   - a tap calls the open-item callback with the core-resolved identifier.
+
+   Existing `CompositionRootTests` pass. The macOS CI run for the exact head is linked.
+
+Source pointers: `ios/Services/NotificationActions/ActionHandler.swift:72`; `ios/Services/Notifications/NotificationEventIngestor.swift:76`; `ios/Services/Assembly/CompositionRoot.swift:111`, `:139`.
+
+### U01c
+
+Expose the voice ingress handoff and recovery at the root
+
+Give the app a public, durable path for finished recordings and for restart recovery, so U01 can wire `VoiceRecordingController` and `VoiceRecoveryCoordinator` in place of `VoiceRecorderUnavailable`.
+
+Owned paths: `ios/Services/Assembly/CompositionRoot.swift`, `ios/Tests/Services/CompositionRootTests.swift`.
+
+Dependencies: U01b (shared file).
+
+Acceptance:
+
+1. The root publicly exposes three things:
+   - **Saving a recording.** It saves a finished recording from the in-progress audio store through the existing `ForegroundIngressService` audio path: stage, finalize by move, import. It reports saved, kept for retry or failed with the same honesty rules as `saveText`.
+   - **Restart recovery.** It runs restart recovery and reports the staged captures it re-imported plus the unclaimed in-progress audio file names. The names are nil whenever ownership is not fully known.
+   - **The store location.** It provides the in-progress audio location the recorder must write to.
+
+   No ingress, staging or core type becomes public beyond the value types these need.
+2. Real-core root tests:
+   - a synthetic recording handed off is saved as an audio capture with its item;
+   - a handoff interrupted before import is recovered on the next assembly;
+   - an unclaimed in-progress file is reported, not imported;
+   - nothing is uploaded.
+
+   Existing tests pass. The macOS CI run for the exact head is linked.
+
+Source pointers: `ios/Services/Ingress/ForegroundIngressService.swift`; `ios/Services/Ingress/IngressRecord.swift:20`; `ios/Services/Assembly/CompositionRoot.swift:779`, `:826`; `ios/Capture/Voice/VoiceRecordingTypes.swift:105`; `ios/Capture/Voice/VoiceRecoveryTypes.swift:32`.
 
 ### I05b
 
