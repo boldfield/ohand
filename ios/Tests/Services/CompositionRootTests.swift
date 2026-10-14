@@ -1,6 +1,7 @@
 import Foundation
 import SQLite3
 import UIKit
+import UserNotifications
 import XCTest
 @testable import OhAndCoreBridge
 @testable import OhAndServices
@@ -673,6 +674,247 @@ final class CompositionRootTests: XCTestCase {
         lifecycle.post(name: UIApplication.didEnterBackgroundNotification, object: nil)
         XCTAssertEqual(root.readScope, .captureOnly)
         XCTAssertEqual(session.lastRelockReason, .enteredBackground)
+    }
+
+    // MARK: capture route and notification actions
+
+    private static let reminderID = "4a2b8c1e-5d4a-4e0b-9a77-000000000001"
+
+    func testFreshStoreSavesThroughAProductionConfiguredRootOnAProvisionedLocalOnlyRoute() throws {
+        let root = try ServiceCompositionRoot(configuration: makeConfiguration())
+        defer { root.shutDown() }
+        let itemID = try saveSyntheticCapture(root)
+        XCTAssertEqual(scalar("SELECT item_id FROM items"), itemID, "the item exists")
+        XCTAssertEqual(scalar("SELECT CAST(COUNT(*) AS TEXT) FROM items"), "1")
+        XCTAssertEqual(scalar("SELECT processing_destinations FROM routes WHERE route_id = '\(Self.routeID)'"), "[]")
+        XCTAssertEqual(scalar("SELECT scope FROM routes WHERE route_id = '\(Self.routeID)'"), "personal")
+        XCTAssertEqual(
+            scalar("SELECT CAST(COUNT(*) AS TEXT) FROM route_authorizations"), "0",
+            "provisioning the route authorizes no upload")
+    }
+
+    func testRouteScopeMismatchFailsAssemblyWithADistinctErrorAndReleasesEverything() throws {
+        let layout = ProtectedStorageLayout(rootDirectory: storageRoot)
+        _ = ProtectedStorageService(layout: layout).prepare()
+        try CoreHandle(path: layout.databaseURL.path).close()
+        try execute([
+            """
+            INSERT INTO routes (route_id, route_name, scope, processing_destinations, created_at) VALUES \
+            ('\(Self.routeID)', 'synthetic', 'work', '[]', '2026-10-08T09:00:00Z')
+            """
+        ])
+        XCTAssertThrowsError(try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))) { error in
+            XCTAssertEqual(error as? CompositionError, .captureRouteUnavailable("route_scope_mismatch"))
+        }
+        XCTAssertEqual(scalar("SELECT scope FROM routes WHERE route_id = '\(Self.routeID)'"), "work", "nothing changed")
+    }
+
+    func testProvisioningKeepsARouteTheUserAlreadyConfigured() throws {
+        try prepareStore()
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))
+        defer { root.shutDown() }
+        XCTAssertEqual(
+            scalar("SELECT processing_destinations FROM routes WHERE route_id = '\(Self.routeID)'"),
+            #"["https://api.anthropic.com"]"#)
+        XCTAssertEqual(scalar("SELECT CAST(COUNT(*) AS TEXT) FROM route_authorizations"), "1")
+    }
+
+    func testCompleteResponseReachesTheCoreOnceAndADuplicateDoesNotMutateAgain() throws {
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))
+        defer { root.shutDown() }
+        let itemID = try saveSyntheticCapture(root)
+        try seedReminder(itemID: itemID)
+        let baselineRevision = try XCTUnwrap(Int(itemRevision(itemID)))
+        XCTAssertEqual(itemLifecycle(itemID), "active")
+
+        deliver(NotificationActionIdentifier.complete, to: root, itemID: itemID)
+        reconcileActions(root)
+        XCTAssertEqual(itemLifecycle(itemID), "completed")
+        XCTAssertEqual(itemRevision(itemID), String(baselineRevision + 1), "one revisioned completion event")
+        XCTAssertEqual(scalar("SELECT CAST(COUNT(*) AS TEXT) FROM events WHERE event_type = 'completion'"), "1")
+
+        deliver(NotificationActionIdentifier.complete, to: root, itemID: itemID)
+        reconcileActions(root)
+        XCTAssertEqual(itemRevision(itemID), String(baselineRevision + 1), "a duplicate does not mutate again")
+        XCTAssertEqual(scalar("SELECT CAST(COUNT(*) AS TEXT) FROM events WHERE event_type = 'completion'"), "1")
+        XCTAssertEqual(try actionJournal.pending(), [])
+    }
+
+    func testResponseReceivedWhileUnauthenticatedWaitsInTheJournalAndRunsAtReconcileAfterAuthentication() throws {
+        let (session, _) = makeSession(authenticated: false)
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), readSession: session)
+        defer { root.shutDown() }
+        let itemID = try saveSyntheticCapture(root)
+        try seedReminder(itemID: itemID)
+
+        deliver(NotificationActionIdentifier.complete, to: root, itemID: itemID)
+        reconcileActions(root)
+        XCTAssertEqual(itemLifecycle(itemID), "active", "no mutation while the session is capture-only")
+        XCTAssertEqual(try actionJournal.pending().count, 1, "the response waits in the journal")
+
+        XCTAssertEqual(authenticateReadsAndWait(root), .authenticated)
+        reconcileActions(root)
+        XCTAssertEqual(itemLifecycle(itemID), "completed")
+        XCTAssertEqual(scalar("SELECT CAST(COUNT(*) AS TEXT) FROM events WHERE event_type = 'completion'"), "1")
+        XCTAssertEqual(try actionJournal.pending(), [])
+    }
+
+    func testTapCallsTheOpenItemHandlerWithTheCoreResolvedIdentifier() throws {
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))
+        defer { root.shutDown() }
+        let itemID = try saveSyntheticCapture(root)
+        try seedReminder(itemID: itemID)
+        let opened = OpenedItemsBox()
+        root.setOpenItemHandler { opened.add($0) }
+
+        deliver(UNNotificationDefaultActionIdentifier, to: root, itemID: itemID)
+        reconcileActions(root)
+        XCTAssertEqual(opened.all, [itemID])
+        XCTAssertEqual(itemLifecycle(itemID), "active", "opening changes nothing")
+    }
+
+    func testEventsAlsoReachTheEnvironmentHandlerTheCallerSupplied() throws {
+        let received = ReceivedEventsBox()
+        let session = makeSession(authenticated: true).0
+        let root = try ServiceCompositionRoot(
+            testing: makeConfiguration(),
+            environment: CompositionEnvironment(notificationEvents: { received.add($0) }),
+            adapters: .injectedForTests(
+                sender: ScriptedProviderSender(reply: Data()), readSession: session,
+                notificationCenter: FakeNotificationCenter(), reachability: FakeReachability(reachable: true)))
+        defer { root.shutDown() }
+        deliver(NotificationActionIdentifier.acknowledge, to: root, itemID: UUID().uuidString.lowercased())
+        XCTAssertEqual(received.count, 1)
+        XCTAssertNotNil(root.notificationCenterDelegate as? NotificationEventReceiver)
+    }
+
+    private final class OpenedItemsBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var items: [String] = []
+
+        func add(_ item: String) {
+            lock.lock()
+            items.append(item)
+            lock.unlock()
+        }
+
+        var all: [String] {
+            lock.lock()
+            defer { lock.unlock() }
+            return items
+        }
+    }
+
+    private final class ReceivedEventsBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var events: [NotificationEvent] = []
+
+        func add(_ event: NotificationEvent) {
+            lock.lock()
+            events.append(event)
+            lock.unlock()
+        }
+
+        var count: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return events.count
+        }
+    }
+
+    private final class FinishedFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var finished = false
+
+        func finish() {
+            lock.lock()
+            finished = true
+            lock.unlock()
+        }
+
+        var isFinished: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return finished
+        }
+    }
+
+    private var notificationID: String {
+        NotificationIdentifier(reminderID: Self.reminderID, scheduleGeneration: 2)!.rawValue
+    }
+
+    private var actionJournal: FileNotificationActionJournal {
+        FileNotificationActionJournal(
+            directory: ProtectedStorageLayout(rootDirectory: storageRoot).directory(for: .temporaryFiles)
+                .appendingPathComponent(NotificationActionClients.journalDirectoryName, isDirectory: true))
+    }
+
+    private func saveSyntheticCapture(_ root: ServiceCompositionRoot) throws -> String {
+        var outcome: CompositionSaveOutcome?
+        root.saveText(captureID: UUID().uuidString.lowercased(), text: "synthetic capture", capturedAt: Date()) {
+            outcome = $0
+        }
+        XCTAssertTrue(pump(until: { outcome != nil }), "the save completes")
+        guard case .saved(_, let itemID, _)? = outcome else {
+            XCTFail("expected a confirmed save, got \(String(describing: outcome))")
+            throw CoreFailure.handleClosed
+        }
+        return itemID
+    }
+
+    /// Adds the reminder the notification belongs to: schedule generation 2 is current and generation 1 was superseded.
+    private func seedReminder(itemID: String) throws {
+        var statements = [
+            "INSERT INTO reminders (reminder_id, item_id, request_state, schedule_state, delivery_state, "
+                + "acknowledgment_state, resolved_instant, timezone_id, schedule_generation, created_at, updated_at) "
+                + "VALUES ('\(Self.reminderID)', '\(itemID)', 'resolved', 'scheduled', 'unknown', 'not_acknowledged', "
+                + "'2090-01-01T09:00:00Z', 'UTC', 2, '2026-10-08T09:31:00Z', '2026-10-08T09:32:00Z')"
+        ]
+        for generation in 1...2 {
+            let identifier = "\(Self.reminderID)#\(generation)"
+            statements.append(
+                "INSERT INTO reminder_operations (operation_id, reminder_id, operation_type, operation_state, "
+                    + "effect_identity, external_id, created_at) VALUES ('schedule:\(identifier)', "
+                    + "'\(Self.reminderID)', 'schedule', 'acknowledged', 'schedule:\(identifier)', '\(identifier)', "
+                    + "'2026-10-08T09:32:00Z')")
+        }
+        try execute(statements)
+    }
+
+    /// Feeds one OS response through the same ingestor the installed delegate uses.
+    private func deliver(_ actionIdentifier: String, to root: ServiceCompositionRoot, itemID: String) {
+        root.notificationIngestor.ingestResponse(
+            requestIdentifier: notificationID, actionIdentifier: actionIdentifier,
+            userInfo: [NotificationContent.targetKey: itemID])
+    }
+
+    private func reconcileActions(_ root: ServiceCompositionRoot) {
+        let finished = FinishedFlag()
+        Task {
+            await root.reconcileNotificationActions()
+            finished.finish()
+        }
+        XCTAssertTrue(pump(until: { finished.isFinished }), "the reconcile pass finished")
+    }
+
+    private func itemLifecycle(_ itemID: String) -> String {
+        scalar("SELECT lifecycle_state FROM items WHERE item_id = '\(itemID)'")
+    }
+
+    private func itemRevision(_ itemID: String) -> String {
+        scalar("SELECT CAST(revision AS TEXT) FROM items WHERE item_id = '\(itemID)'")
+    }
+
+    private func scalar(_ sql: String) -> String {
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(databasePath, &database), SQLITE_OK)
+        defer { sqlite3_close(database) }
+        sqlite3_busy_timeout(database, 5000)
+        var statement: OpaquePointer?
+        XCTAssertEqual(sqlite3_prepare_v2(database, sql, -1, &statement, nil), SQLITE_OK)
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW, let text = sqlite3_column_text(statement, 0) else { return "" }
+        return String(cString: text)
     }
 
     // MARK: helpers
