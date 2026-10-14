@@ -159,6 +159,13 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
 - C04c added (coordinator, 2026-10-14, after U01c PR #218 round 1). Opus approved U01c. GPT rejected it, correctly in substance. The root's `CompositionRecordingOutcome.audioUnavailable` (a record is staged but the audio is missing or unreadable) has no honest mapping into C04's voice contract. `VoiceHandoffResult` has only `saved`, `keptForRetry` (asserts the audio is durable), `notStaged` (asserts the audio remains) and `itemDeleted`, and `VoiceRecordingController.outcome(for:)` turns the first two into `keptForRetry`. The root seam itself is correct and meets U01c's acceptance. The gap is in the consumer contract, so C04c owns it. U01c lands as is, and U01 depends on C04c so its adapter can map honestly. `VoiceCaptureOutcome.unrecoverable(captureID:end:fileRetained:)` already exists.
 - F13 and F14 added (coordinator, 2026-10-14). These are intermittent failures that reviewers saw and that no task owns. F13: `ProviderExchangeBoundaryTests.testUntrustedCertificateIsRefusedAndDiagnosticsStayProtected` got no final event within 10 s (run 38534729949, attempt 1, job 115754735518, `:357`). F14: the `tools/bench` test `fake_run_with_an_unverified_self_hosted_arm_skips_every_case_and_sends_nothing` failed once in `make test` (seen by the Opus reviewer on L05b, 2026-10-13).
 - V06 and V07 now depend on V01 alone: they implement Rust adapters against its transport interface using fixtures. V05 is the native effect implementation and remains required by app composition/integration, not by independent protocol adapter implementation. This is an explicit dependency override for those retained tasks.
+- Tier-2 prerequisites added (coordinator, 2026-10-14, at the maintainer's direction, before U02a, U05a, U05b and U06a were claimed). Checking those four against main at 164f722 found five gaps that no task owns:
+  - **Nothing queues interpretation for a saved capture.** `import_foreground_ingress` (`core/src/ingress/import.rs:147`) stores the capture, item and index row and queues no job. The only production enqueue of an `interpret` job is the transcription attachment (`core/src/ingress/transcription/mod.rs:952`), and only when the native caller supplies an `InterpretationRequest`; the root never does (`TranscriptionCapability` defaults to `{ _ in nil }`). So no capture from the app is interpreted, and even the offline fast path (which runs only inside an interpret job) never sees it. I08 owns this.
+  - **No production code writes a provider profile, a default or a route grant.** `INSERT INTO provider_profiles` and `INSERT INTO route_authorizations` appear only in tests. No default-profile concept exists. U05a's "existing versioned profile service" does not exist. V01b owns profiles and defaults; V02b owns route grants.
+  - **No connection check exists** for U05b's "explicitly authorized connection test". V01c owns it.
+  - **Retrieval is not exported.** `scoped_query`/`scoped_list` (`core/src/retrieval/query/mod.rs:76`, `:97`) have no FFI export, and `PrivateReadGate` admits only store check, get capture and item status. R04 owns the export.
+  - **The root offers none of these to `app/` modules** (B02 rule: modules get typed clients only through `CompositionCoreClients`/`CompositionPrivateReads`). U01d adds the gated retrieval reads; U01e adds the configuration clients and the credential service. Both join the root-file chain after T11d (U01b → U01c → S05b → T11d → U01d → U01e), so S05b and T11d are not disturbed.
+  - Dependency edits: U02a also depends on U01d; U05a on U01e; U06a on U01e and U02a (its criterion 1 retrieves before provider setup, which needs U02a's search).
 
 ## Why some tasks stay together
 
@@ -889,6 +896,137 @@ Acceptance:
 3. The test passes 200 consecutive times under parallel `cargo test` on the final head, run with the loop command written in the PR. `make check` and `make test` pass.
 
 Source pointers: `tools/bench/src/cli/tests.rs:1849`.
+
+### I08
+
+Queue interpretation for every saved capture
+
+Make the core queue an interpretation job when a capture with text is imported and when a transcript attaches, with the profile pin chosen by the core, so the offline fast path and any authorized provider see app captures.
+
+Owned paths: `core/src/interpretation/enqueue/` (new; its `pub mod` line in `core/src/interpretation/mod.rs`), `core/src/ingress/import.rs`, the interpretation-queueing code in `core/src/ingress/transcription/mod.rs` and the request wire in `core/src/ffi/transcription_attachment.rs`, their existing tests, and `core/tests/interpretation_enqueue/` (new).
+
+Dependencies: none.
+
+Acceptance:
+
+1. **One resolver decides the pin.** `core/src/interpretation/enqueue/` exposes one function that, inside the caller's transaction, returns the profile version a new `interpret` job for an item is pinned to, or none. Until V01b lands it always returns none (an unpinned job runs the fast path only and is `Local` under `authorize_job`). V01b replaces its body; no other code chooses a pin.
+2. **Text imports queue a job in the import transaction.** A foreground import whose capture has text enqueues one `interpret` job at the item's initial revision, with request version `M1_INSTRUCTION_VERSION` and the resolver's pin, in the same IMMEDIATE transaction, so the acknowledgment still means "saved". Job identity is deterministic over item and revision, so a retried import of the same capture (already imported, or `ItemDeleted`) never adds a second job. An audio-only capture with no text queues nothing here.
+3. **Transcripts queue a job without a native request.** When a transcript attaches and the caller supplied no interpretation request, the core queues one with the resolver's pin, through the existing authorize-then-keep savepoint. A native-supplied request whose pin differs from the resolver's is refused with a fixed failure and nothing is queued; native code cannot choose a destination. Existing attachment tests are updated only where they relied on the caller choosing the pin.
+4. **End-to-end through the existing dispatcher.** Rust tests: a text capture "remind me tomorrow at 9am"-style command imported with no profiles is applied by the fast path and produces its reminder; an unrecognized capture with no profile ends `uninterpreted` and stays searchable; import retry does not duplicate jobs; a voice capture's transcript queues exactly one job. Capture save never waits on interpretation. `make check` and `make test` pass.
+
+Out of scope: retroactively interpreting captures saved before a provider is configured (U06b's requeue controls), and any `ios/` edit.
+
+Source pointers: `core/src/ingress/import.rs:147`; `core/src/ingress/transcription/mod.rs:99`, `:944`; `core/src/interpretation/dispatch/mod.rs:221`, `:247`; `core/src/privacy/routing/mod.rs:226`; `core/src/interpretation/instructions/text.rs:12`.
+
+### V01b
+
+Store versioned provider profiles and the default per capability
+
+Give the core a production write path for provider profiles: create immutable versions, choose the default profile per processing capability, and list them, with an FFI export.
+
+Owned paths: `core/src/providers/profiles/` (new; its `pub mod` line in `core/src/providers/mod.rs`), one migration step appended to `MIGRATIONS` in `core/src/store/schema/mod.rs` (the next version after S05a's), the body of I08's pin resolver in `core/src/interpretation/enqueue/`, `core/tests/provider_profiles/` (new), and under the native-boundary allowance `core/src/ffi/provider_profiles.rs` (with its `pub mod` line) and `ios/OhAndCoreBridge/CoreHandle+ProviderProfiles.swift`.
+
+Dependencies: S05a (shared schema file), I08 (resolver).
+
+Acceptance:
+
+1. **Versioned create.** Creating or editing a profile writes a new immutable `provider_profiles` row (same `profile_id`, new `profile_version`); existing rows are never updated except by the existing revocation. Validation rejects, with fixed failure codes that never echo input: unknown protocol; missing or malformed endpoint where the protocol needs one (self-hosted) or a caller-supplied endpoint where it does not; empty model; capabilities the protocol's adapter does not support; a cloud profile with no credential reference; timeout or retry values outside the contract's bounds. A credential reference claimed by a pending reset is refused through the existing L05b trigger as `credential_pending_removal`.
+2. **Defaults.** A durable default per processing capability points at one profile version; setting it to a revoked or missing version is refused; clearing it is allowed. Changing the default never touches existing jobs (test: a queued job keeps its pin).
+3. **The resolver uses the default only when it would dispatch.** I08's resolver returns the default version for text interpretation when one is set, unrevoked and `authorize_job` would authorize it on the item's route; otherwise none, so an unconfigured route still gets the offline fast path instead of a job that only waits.
+4. **Listing** returns each profile's versions, protocol, endpoint, model, capabilities, whether a credential reference is bound (never the reference's secret), revocation and default flags. The FFI export covers create, set/clear default and list, following the B01 conventions. Rust tests cover each validation failure, versioning, defaults and resolver cases; `make check` and `make test` pass. Native tests are U01e's.
+
+Source pointers: `core/src/store/schema/mod.rs:508`, `:879`; `core/src/jobs/configuration/mod.rs:29`, `:136`; `core/src/privacy/routing/mod.rs:183`; `core/src/providers/contracts/mod.rs:1`.
+
+### V01c
+
+Check a provider profile's connection on explicit request
+
+Add a core operation that, only when called, sends one fixed synthetic request to a stored profile's own destination and reports a redacted classification.
+
+Owned paths: `core/src/ffi/provider_connection_check.rs` (with its `pub mod` line) and `ios/OhAndCoreBridge/CoreHandle+ProviderConnectionCheck.swift` under the native-boundary allowance, and their tests.
+
+Dependencies: V01b.
+
+Acceptance:
+
+1. The request is built by the profile's own protocol adapter from a fixed synthetic payload that contains no capture, query or user text; it goes only to the destinations `contacted_destinations` derives from that profile version, through the existing provider transport, off the core worker thread, cancellable through `CancelToken`. It does not require a route grant (the user is testing before granting) and it never runs in the background or on a schedule.
+2. The outcome is one of a fixed set, at least: `ok`, `credential_missing`, `credential_rejected`, `unreachable`, `tls_failure`, `timeout`, `capability_mismatch` (for example an unknown model), `protocol_not_enabled` (T11c gate). No secret, response body, header or endpoint is echoed in the outcome, logs or failure strings.
+3. Rust tests over the fake transport cover each outcome and show the payload contains no text from a seeded capture. `make check` and `make test` pass.
+
+Source pointers: `core/src/ffi/provider_transport.rs`; `core/src/ffi/provider_transport/protocols.rs:65`; `core/src/providers/contracts/dispatch.rs:154`.
+
+### V02b
+
+Grant and revoke route processing permissions
+
+Give the core a production write path for route processing policy: a deliberate, per-capability grant whose destinations come from a stored profile, its revocation, and a readable policy listing, with an FFI export.
+
+Owned paths: `core/src/privacy/routing/grants.rs` (new; its `mod`/`pub use` lines in `core/src/privacy/routing/mod.rs`), `core/tests/route_grants/` (new), and under the native-boundary allowance `core/src/ffi/route_policy.rs` (with its `pub mod` line) and `ios/OhAndCoreBridge/CoreHandle+RoutePolicy.swift`.
+
+Dependencies: none.
+
+Acceptance:
+
+1. **Grant.** Granting capability C on route R for profile version P derives the destinations from P in the core (the caller cannot name destinations), adds them to R's `processing_destinations` ceiling and to C's `route_authorizations` row, in one transaction. A revoked or missing P, an unknown route or a transcription grant (on-device only) is refused with a fixed failure. Repeating a grant is idempotent.
+2. **Isolation.** Tests through `authorize_job` show that granting one capability does not authorize another, and granting one route does not authorize another route.
+3. **Revoke.** Revoking C on R removes C's grant; queued jobs then fail authorization at dispatch with the existing denial, never falling back to another destination. Destinations no remaining grant on R uses leave the ceiling.
+4. **Listing** returns each route's name, scope, granted capabilities and destination classes. Nothing here runs from a classifier or any inferred signal; only the explicit operation grants. Rust tests cover each case; `make check` and `make test` pass.
+
+Source pointers: `core/src/privacy/routing/mod.rs:183`, `:266`; `core/src/store/schema/mod.rs:424`, `:438`; `core/src/ffi/route_provisioning.rs:1`.
+
+### R04
+
+Export scoped retrieval over the core boundary
+
+Expose the existing scoped search and list operations to native code.
+
+Owned paths: `core/src/ffi/retrieval.rs` (with its `pub mod` line) and `ios/OhAndCoreBridge/CoreHandle+Retrieval.swift` under the native-boundary allowance, and their tests.
+
+Dependencies: none.
+
+Acceptance:
+
+1. Exports run `scoped_query` and `scoped_list` with the existing `QueryFilter` (scopes, date bounds, session topics) and bounded pagination on the core worker, returning per hit the item and capture identifiers, scope, current text, text basis, original text where corrected, matched span and capture date, plus the accessible total. Query text never leaves the device and is never echoed in failures.
+2. The caller states the read scopes it is authorized for; the export cannot widen them. Authentication itself is enforced natively by U01d's gate.
+3. Rust tests cover text search, date bounds, session-topic filtering, scope exclusion (no count or snippet from an excluded scope), pagination limits and invalid filters. `make check` and `make test` pass.
+
+Source pointers: `core/src/retrieval/query/mod.rs:22`, `:65`, `:76`, `:97`; `core/src/retrieval/index/mod.rs:112`.
+
+### U01d
+
+Offer gated retrieval reads at the composition root
+
+Add search and list to the root's private read gate so `app/` modules can retrieve without a core handle.
+
+Owned paths: `ios/Services/Assembly/CompositionRoot.swift`, `ios/Services/Authentication/PrivateReadGate.swift`, `ios/Tests/Services/CompositionRootTests.swift`, `ios/Tests/Authentication/`.
+
+Dependencies: T11d (shared root file), R04.
+
+Acceptance:
+
+1. `PrivateReadGate` and `CompositionPrivateReads` gain search and list verbs over R04's exports, refused with `unauthorized` while capture-only, with answers admitted through the existing `admit` so a result arriving after a relock is discarded. The verbs pass the session's authorized scopes; a module cannot pass wider ones.
+2. Typed request and result models live in `OhAndServices`; no `CoreHandle` becomes public.
+3. Real-core root tests: search before authentication is refused; after authentication returns a seeded capture's text; a relock between request and answer discards the answer; scope exclusion holds. Existing tests pass. The exact-head macOS CI run is linked.
+
+Source pointers: `ios/Services/Assembly/CompositionRoot.swift:145`, `:203`; `ios/Services/Authentication/PrivateReadGate.swift:18`, `:63`.
+
+### U01e
+
+Offer provider and route configuration clients at the composition root
+
+Give `app/` modules typed clients for provider profiles, connection checks, route policy and credential entry.
+
+Owned paths: `ios/Services/Assembly/CompositionRoot.swift`, new client files under `ios/Services/ProviderConfiguration/`, `ios/Tests/Services/CompositionRootTests.swift`, `ios/Tests/ProviderConfiguration/` (new).
+
+Dependencies: U01d (shared root file), V01b, V01c, V02b.
+
+Acceptance:
+
+1. `CompositionCoreClients` (or `CompositionContext`) gains typed clients over V01b (create, default, list), V01c (connection check) and V02b (grant, revoke, list), each taken once per root with its own reserved operation range, and the root's `CredentialService` behind a narrow interface that can add, update, delete and report status of a credential but never return a secret. No `CoreHandle` becomes public.
+2. Profile writes and grants that change what leaves the device require an authenticated read session; capture-only callers are refused.
+3. Real-core root tests: create a profile with a credential, set it default, grant interpretation on the capture route, and see a newly imported capture's job pinned to it (I08 + V01b resolver); the connection check against the fixture server reports `credential_rejected` for a bad key without the key appearing in any output; revoking the grant makes the job's dispatch fail authorization. Existing tests pass. The exact-head macOS CI run is linked.
+
+Source pointers: `ios/Services/Assembly/CompositionRoot.swift:162`, `:349`; `ios/Services/Credentials/CredentialService.swift:58`.
 
 ### I05b
 
