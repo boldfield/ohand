@@ -1806,7 +1806,9 @@
         "ios/NotificationProbe/Tests/",
         "ios/CaptureProbe/UITests/",
         ".github/workflows/ios.yml",
-        "ios/scripts/"
+        "ios/scripts/",
+        "ios/NotificationProbe/Sources/ProbeScenarios.swift",
+        "docs/validation/notification-probe.md"
       ],
       "intent": "Root-cause and fix intermittent NotificationProbe and CaptureProbe UI-test timeouts in the simulator job so a red ios.yml means a real defect.",
       "acceptance": [
@@ -1821,7 +1823,8 @@
         "ios/NotificationProbe/Tests/NotificationProbeUITestCase.swift:10",
         "ios/CaptureProbe/UITests/CaptureProbeHandoffUITests.swift:61",
         ".github/workflows/ios.yml:90",
-        ".github/workflows/ios.yml:242"
+        ".github/workflows/ios.yml:242",
+        "ios/NotificationProbe/Sources/ProbeScenarios.swift (foregroundDelivery only)"
       ]
     },
     {
@@ -1929,6 +1932,78 @@
       "source_pointers": [
         "ios/Services/ProviderTransport/ProviderExchangeCoordinator.swift:33",
         "ios/Services/Assembly/CompositionRoot.swift"
+      ]
+    },
+    {
+      "key": "U01a",
+      "parent": "U01",
+      "title": "Provision the fresh-install local-only capture route",
+      "file_scope": [
+        "core/src/ffi/route_provisioning.rs",
+        "core/src/ffi/route_provisioning/",
+        "ios/OhAndCoreBridge/CoreHandle+RouteProvisioning.swift"
+      ],
+      "intent": "Idempotent core operation ensuring the configured capture route exists with no processing destinations, so a fresh install saves locally without authorizing upload.",
+      "acceptance": [
+        "Absent route inserted with empty destinations, preview_safe 0, no grants; same-scope existing route untouched; scope mismatch refused; idempotent and concurrency-safe.",
+        "Rust tests: fresh store import succeeds after provisioning; remote authorization denied; configured route untouched; mismatch refused; repeat is no-op.",
+        "Swift bridge exposes it with normalized failure; make check/test pass; exact-head macOS CI linked."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/ingress/import.rs:320",
+        "core/src/privacy/routing/mod.rs:11",
+        "core/src/store/schema/mod.rs:420"
+      ]
+    },
+    {
+      "key": "U01b",
+      "parent": "U01",
+      "title": "Provision the route at open and compose notification actions at the root",
+      "file_scope": [
+        "ios/Services/Assembly/CompositionRoot.swift",
+        "ios/Tests/Services/CompositionRootTests.swift"
+      ],
+      "intent": "Root provisions the configured capture route during assembly and builds ActionHandler, journal and NotificationEventReceiver over its own core, exposing only the delegate, reconcile and open-item callback.",
+      "acceptance": [
+        "Route provisioned under undo-on-failure before ingress saves or recovers; failure fails assembly with a distinct error.",
+        "Root builds ActionHandler (core client, durable journal, read session), receiver feeding its eventHandler and any caller handler; attached to the read session.",
+        "Public surface: delegate, async reconcile, authenticated open-item callback; no CoreHandle/journal/handler made public.",
+        "Real-core tests: fresh-store saveText saved; Complete reaches core once; unauthenticated response deferred then reconciled; tap opens core-resolved item; macOS CI linked."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "T11b",
+        "U01a"
+      ],
+      "source_pointers": [
+        "ios/Services/NotificationActions/ActionHandler.swift:72",
+        "ios/Services/Notifications/NotificationEventIngestor.swift:76",
+        "ios/Services/Assembly/CompositionRoot.swift:111"
+      ]
+    },
+    {
+      "key": "U01c",
+      "parent": "U01",
+      "title": "Expose the voice ingress handoff and recovery at the root",
+      "file_scope": [
+        "ios/Services/Assembly/CompositionRoot.swift",
+        "ios/Tests/Services/CompositionRootTests.swift"
+      ],
+      "intent": "Public root seam for durable recording handoff, restart recovery and the in-progress audio location, so U01 can replace VoiceRecorderUnavailable.",
+      "acceptance": [
+        "Public recording save via ForegroundIngressService audio path with saveText honesty rules; public recovery reporting re-imports and unclaimed in-progress names (nil when unknown); in-progress location exposed; no ingress/core types made public beyond value types.",
+        "Real-core tests: recording saved with item; interrupted handoff recovered next assembly; unclaimed file reported not imported; nothing uploaded; macOS CI linked."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "U01b"
+      ],
+      "source_pointers": [
+        "ios/Services/Ingress/ForegroundIngressService.swift",
+        "ios/Services/Ingress/IngressRecord.swift:20",
+        "ios/Services/Assembly/CompositionRoot.swift:779"
       ]
     }
   ],
@@ -2285,9 +2360,12 @@
       "V09"
     ],
     "U01": [
-      "P10",
       "B03",
-      "N07"
+      "N07",
+      "P10",
+      "U01a",
+      "U01b",
+      "U01c"
     ],
     "B05": [
       "B03",
@@ -2492,6 +2570,14 @@
     ],
     "T11b": [
       "B03"
+    ],
+    "U01a": [],
+    "U01b": [
+      "T11b",
+      "U01a"
+    ],
+    "U01c": [
+      "U01b"
     ]
   },
   "retained_dependency_overrides": {
@@ -2614,6 +2700,10 @@
     {
       "date": "2026-10-13",
       "change": "L05b credential-claim fence: schema v10 allowance (reset_credential_claims + BEFORE INSERT/UPDATE triggers on provider_profiles raising credential_pending_removal); claim-revoke-delete-release protocol with the persisted claim set as resume authority. Added T11a (core FFI dispatches SelfHosted) and T11b (root attaches provider exchange transport); T11 depends on both."
+    },
+    {
+      "date": "2026-10-14",
+      "change": "U01 blocked after PR #212 round 1 on three cross-ownership gaps: no production composition of notification actions, no route provisioning (nothing writes routes; fresh-install saves rejected as UnknownRoute), and no public voice ingress seam. Added U01a (core idempotent local-only capture route), U01b (root: provision route at open + compose ActionHandler/receiver), U01c (root: voice handoff/recovery seam); U01 depends on all three. U01 allowance: ios/Tests/AppAssembly/, the replaced ContentView assertion in ProjectSmokeTests, and one OhAndApp sources entry for app/ in ios/project.yml. F10 granted ProbeScenarios.swift foreground-delivery scenario. L05b item (4): bind removal before the tap boundary."
     }
   ]
 }
