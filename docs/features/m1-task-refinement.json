@@ -965,7 +965,8 @@
       "depends_on": [
         "U01",
         "R03",
-        "C01b"
+        "C01b",
+        "U01d"
       ],
       "source_pointers": [
         "docs/architecture/m1-contracts.md:127",
@@ -1116,7 +1117,8 @@
         "U01",
         "V06",
         "V07",
-        "V04"
+        "V04",
+        "U01e"
       ],
       "source_pointers": [
         "docs/architecture/m1-contracts.md:566",
@@ -1172,7 +1174,9 @@
       "depends_on": [
         "U05b",
         "V02",
-        "V03"
+        "V03",
+        "U01e",
+        "U02a"
       ],
       "source_pointers": [
         "docs/architecture/m1-contracts.md:139",
@@ -2173,6 +2177,183 @@
       "source_pointers": [
         "tools/bench/src/cli/tests.rs:1849"
       ]
+    },
+    {
+      "key": "I08",
+      "parent": "I06",
+      "title": "Queue interpretation for every saved capture",
+      "file_scope": [
+        "core/src/interpretation/enqueue/",
+        "core/src/ingress/import.rs",
+        "core/src/ingress/transcription/mod.rs",
+        "core/src/ffi/transcription_attachment.rs",
+        "core/tests/interpretation_enqueue/"
+      ],
+      "intent": "The core queues an interpret job when a capture with text is imported and when a transcript attaches, with the pin chosen by one core resolver.",
+      "acceptance": [
+        "One resolver decides the pin; returns none until V01b.",
+        "Text imports enqueue one deterministic job in the import transaction; retries never duplicate.",
+        "Transcripts queue a job without a native request; a differing native pin is refused.",
+        "Rust end-to-end: fast-path reminder offline, unrecognized stays uninterpreted and searchable, voice queues one job."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/ingress/import.rs:147",
+        "core/src/ingress/transcription/mod.rs:944",
+        "core/src/interpretation/dispatch/mod.rs:221"
+      ]
+    },
+    {
+      "key": "V01b",
+      "parent": "V01",
+      "title": "Store versioned provider profiles and the default per capability",
+      "file_scope": [
+        "core/src/providers/profiles/",
+        "core/src/store/schema/mod.rs",
+        "core/src/interpretation/enqueue/",
+        "core/tests/provider_profiles/",
+        "core/src/ffi/provider_profiles.rs",
+        "ios/OhAndCoreBridge/CoreHandle+ProviderProfiles.swift"
+      ],
+      "intent": "Production write path for immutable provider-profile versions, a default per capability and listing, with an FFI export.",
+      "acceptance": [
+        "Versioned create with fixed-code validation; L05b claim refusal surfaces.",
+        "Durable default per capability; changing it never touches queued jobs.",
+        "Resolver pins the default only when authorize_job would authorize it.",
+        "Listing without secrets; FFI export; Rust tests."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "S05a",
+        "I08"
+      ],
+      "source_pointers": [
+        "core/src/store/schema/mod.rs:508",
+        "core/src/privacy/routing/mod.rs:183"
+      ]
+    },
+    {
+      "key": "V01c",
+      "parent": "V01",
+      "title": "Check a provider profile's connection on explicit request",
+      "file_scope": [
+        "core/src/ffi/provider_connection_check.rs",
+        "ios/OhAndCoreBridge/CoreHandle+ProviderConnectionCheck.swift"
+      ],
+      "intent": "Explicitly invoked connection check sending a fixed synthetic request to a profile's own destination, with a redacted outcome.",
+      "acceptance": [
+        "Synthetic payload only, profile's own destinations, off the worker thread, cancellable, never background.",
+        "Fixed outcome set with no secret, body, header or endpoint echoed.",
+        "Fake-transport tests per outcome."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "V01b"
+      ],
+      "source_pointers": [
+        "core/src/ffi/provider_transport.rs",
+        "core/src/providers/contracts/dispatch.rs:154"
+      ]
+    },
+    {
+      "key": "V02b",
+      "parent": "V02",
+      "title": "Grant and revoke route processing permissions",
+      "file_scope": [
+        "core/src/privacy/routing/grants.rs",
+        "core/tests/route_grants/",
+        "core/src/ffi/route_policy.rs",
+        "ios/OhAndCoreBridge/CoreHandle+RoutePolicy.swift"
+      ],
+      "intent": "Production write path for per-capability route grants whose destinations come from a stored profile, revocation and listing, with an FFI export.",
+      "acceptance": [
+        "Grant derives destinations from the profile and updates ceiling and authorization in one transaction.",
+        "Granting one capability or route does not authorize another.",
+        "Revoke makes queued jobs fail authorization without fallback.",
+        "Listing; explicit operation only; Rust tests."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/privacy/routing/mod.rs:183",
+        "core/src/store/schema/mod.rs:438"
+      ]
+    },
+    {
+      "key": "R04",
+      "parent": "R03",
+      "title": "Export scoped retrieval over the core boundary",
+      "file_scope": [
+        "core/src/ffi/retrieval.rs",
+        "ios/OhAndCoreBridge/CoreHandle+Retrieval.swift"
+      ],
+      "intent": "Expose scoped_query and scoped_list to native code.",
+      "acceptance": [
+        "Exports with filters, bounded pagination and hit fields; query text never leaves the device.",
+        "Caller-stated scopes cannot be widened.",
+        "Rust tests for search, dates, topics, scope exclusion, pagination."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/retrieval/query/mod.rs:76",
+        "core/src/retrieval/query/mod.rs:97"
+      ]
+    },
+    {
+      "key": "U01d",
+      "parent": "U01",
+      "title": "Offer gated retrieval reads at the composition root",
+      "file_scope": [
+        "ios/Services/Assembly/CompositionRoot.swift",
+        "ios/Services/Authentication/PrivateReadGate.swift",
+        "ios/Tests/Services/CompositionRootTests.swift",
+        "ios/Tests/Authentication/"
+      ],
+      "intent": "Search and list verbs on the root's private read gate.",
+      "acceptance": [
+        "Gate verbs over R04, refused while capture-only, admitted after relock checks.",
+        "Typed models; no public CoreHandle.",
+        "Real-core root tests; macOS CI."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "T11d",
+        "R04"
+      ],
+      "source_pointers": [
+        "ios/Services/Assembly/CompositionRoot.swift:203",
+        "ios/Services/Authentication/PrivateReadGate.swift:18"
+      ]
+    },
+    {
+      "key": "U01e",
+      "parent": "U01",
+      "title": "Offer provider and route configuration clients at the composition root",
+      "file_scope": [
+        "ios/Services/Assembly/CompositionRoot.swift",
+        "ios/Services/ProviderConfiguration/",
+        "ios/Tests/Services/CompositionRootTests.swift",
+        "ios/Tests/ProviderConfiguration/"
+      ],
+      "intent": "Typed root clients for provider profiles, connection checks, route policy and write-only credential entry.",
+      "acceptance": [
+        "Typed clients over V01b, V01c, V02b and a secret-never-returned credential interface.",
+        "Writes require an authenticated session.",
+        "Real-core root tests: configured profile pins a new job; bad key redacted; revoke denies; macOS CI."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "U01d",
+        "V01b",
+        "V01c",
+        "V02b"
+      ],
+      "source_pointers": [
+        "ios/Services/Assembly/CompositionRoot.swift:162",
+        "ios/Services/Credentials/CredentialService.swift:58"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -2547,7 +2728,8 @@
     "U02a": [
       "U01",
       "R03",
-      "C01b"
+      "C01b",
+      "U01d"
     ],
     "U02b": [
       "U02a"
@@ -2570,7 +2752,8 @@
       "U01",
       "V06",
       "V07",
-      "V04"
+      "V04",
+      "U01e"
     ],
     "U05b": [
       "U05a"
@@ -2578,7 +2761,9 @@
     "U06a": [
       "U05b",
       "V02",
-      "V03"
+      "V03",
+      "U01e",
+      "U02a"
     ],
     "U06b": [
       "U06a"
@@ -2763,7 +2948,27 @@
     ],
     "F13": [],
     "F14": [],
-    "C04c": []
+    "C04c": [],
+    "I08": [],
+    "V01b": [
+      "S05a",
+      "I08"
+    ],
+    "V01c": [
+      "V01b"
+    ],
+    "V02b": [],
+    "R04": [],
+    "U01d": [
+      "T11d",
+      "R04"
+    ],
+    "U01e": [
+      "U01d",
+      "V01b",
+      "V01c",
+      "V02b"
+    ]
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -2897,6 +3102,10 @@
     {
       "date": "2026-10-14",
       "change": "S05a allowance (3): native effect path accepts core-issued prompt identifiers (NotificationModels, NotificationBridge incl. pending listing, NotificationEventIngestor, ReminderNativeEffects, CoreReminderReconciler + tests). Added C04c (VoiceHandoffResult unavailable-audio case mapped to unrecoverable); U01c lands as is, U01 depends on C04c. Added F13 (untrusted-certificate exchange test missing final event) and F14 (tools/bench unverified self-hosted CLI test)."
+    },
+    {
+      "date": "2026-10-14",
+      "change": "Tier-2 prerequisites: I08 (queue interpretation for saved captures, core-chosen pin), V01b (versioned provider profiles and defaults), V01c (explicit connection check), V02b (route grants), R04 (retrieval export), U01d (gated retrieval reads at the root, after T11d), U01e (configuration clients at the root). U02a depends on U01d; U05a on U01e; U06a on U01e and U02a."
     }
   ]
 }
