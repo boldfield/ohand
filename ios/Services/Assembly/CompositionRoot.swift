@@ -1,6 +1,7 @@
 import Foundation
 import OhAndCoreBridge
 import UIKit
+import UserNotifications
 
 // MARK: - Errors
 
@@ -17,6 +18,9 @@ public enum CompositionError: Error, Equatable {
     case jobTypeConflict(String)
     /// A core client with a fixed operation range was asked for a second time; two instances would share identifiers.
     case coreClientAlreadyTaken(String)
+    /// The configured capture route could not be provisioned, so no save would be accepted. The label is the core's
+    /// normalized failure code (for example `route_scope_mismatch`) or `route_provisioning_timeout`; never content.
+    case captureRouteUnavailable(String)
 }
 
 // MARK: - Configuration
@@ -553,6 +557,120 @@ private final class ForegroundState: @unchecked Sendable {
     }
 }
 
+/// Holds the callback a resolved tap runs, so the app can set it after the root is built.
+private final class OpenItemRelay: @unchecked Sendable {
+    private let lock = NSLock()
+    private var handler: (@Sendable (String) -> Void)?
+
+    func set(_ handler: (@Sendable (String) -> Void)?) {
+        lock.lock()
+        self.handler = handler
+        lock.unlock()
+    }
+
+    func open(_ itemID: String) {
+        lock.lock()
+        let current = handler
+        lock.unlock()
+        current?(itemID)
+    }
+}
+
+/// The notification-action pieces the root owns: the core client, the durable journal's handler and the delegate.
+/// Nothing here is public; the root exposes the delegate, a reconcile and the open-item setter.
+final class NotificationActionClients: @unchecked Sendable {
+    static let journalDirectoryName = "NotificationActions"
+
+    let client: CoreNotificationActionClient
+    let handler: ActionHandler
+    let ingestor: NotificationEventIngestor
+    let receiver: NotificationEventReceiver
+    fileprivate let openItem: OpenItemRelay
+    private let scopeToken: SessionScopeObserverToken
+
+    init(
+        core: CoreHandle,
+        layout: ProtectedStorageLayout,
+        session: ReadAuthenticationSession,
+        now: @escaping @Sendable () -> Date,
+        forwardTo environmentHandler: @escaping NotificationEventHandler
+    ) {
+        let client = CoreNotificationActionClient(core: core)
+        let journal = FileNotificationActionJournal(
+            directory: layout.directory(for: .temporaryFiles)
+                .appendingPathComponent(Self.journalDirectoryName, isDirectory: true))
+        let relay = OpenItemRelay()
+        let handler = ActionHandler(
+            core: client, journal: journal, authorization: session, openItem: { relay.open($0) })
+        let ingestor = NotificationEventIngestor(
+            now: now,
+            handler: { event in
+                handler.eventHandler(event)
+                environmentHandler(event)
+            })
+        self.client = client
+        self.handler = handler
+        self.ingestor = ingestor
+        openItem = relay
+        receiver = NotificationEventReceiver(ingestor: ingestor)
+        scopeToken = handler.attach(to: session)
+    }
+
+    func shutDown(session: ReadAuthenticationSession) {
+        session.removeScopeObserver(scopeToken)
+        client.shutDown()
+    }
+}
+
+/// Waits for the answer to the route-provisioning request. The core delivers events on the main queue, so a caller on
+/// the main thread has to keep the run loop turning while it waits.
+private final class RouteProvisioningWait: @unchecked Sendable {
+    private let lock = NSLock()
+    private let signal = DispatchSemaphore(value: 0)
+    private var outcome: Result<Void, CoreFailure>?
+
+    func handle(_ event: CoreEvent) -> Bool {
+        guard event.operationID == ServiceCompositionRoot.routeProvisioningOperationID else { return false }
+        let result: Result<Void, CoreFailure>
+        switch event.outcome {
+        case .failure(let failure):
+            result = .failure(failure)
+        case .success:
+            if (try? event.decode(RouteProvisioningOutcome.self)) != nil {
+                result = .success(())
+            } else {
+                result = .failure(
+                    CoreFailure(
+                        errorClass: .permanent, code: "unreadable_event", message: "the core answer could not be read"))
+            }
+        }
+        lock.lock()
+        outcome = outcome ?? result
+        lock.unlock()
+        signal.signal()
+        return true
+    }
+
+    func wait(timeout: TimeInterval) -> Result<Void, CoreFailure>? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let answered = current { return answered }
+            if Thread.isMainThread {
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+            } else {
+                _ = signal.wait(timeout: .now() + 0.05)
+            }
+        }
+        return current
+    }
+
+    private var current: Result<Void, CoreFailure>? {
+        lock.lock()
+        defer { lock.unlock() }
+        return outcome
+    }
+}
+
 // MARK: - Root
 
 /// The one place the production services are connected: the Rust core, the foreground ingress that saves into it, the
@@ -577,6 +695,11 @@ public final class ServiceCompositionRoot {
     public static let minimumModuleOperationID: UInt64 = 1 << 32
     /// The width of a module's own operation range and of each fixed-range client's reserved range.
     public static let operationRangeWidth: UInt64 = 1 << 40
+
+    /// The route-provisioning request's identifier: the top of the importer's interval, which the importer never issues.
+    static let routeProvisioningOperationID: UInt64 = minimumModuleOperationID - 1
+    static let routeProvisioningTimeoutSeconds: TimeInterval = 30
+    static let captureRouteName = "Local capture"
 
     static let audioRetentionClientName = "audio retention"
     static let deletionCleanupClientName = "deletion cleanup"
@@ -632,6 +755,9 @@ public final class ServiceCompositionRoot {
     var readSession: ReadAuthenticationSession { adapters.readSession }
     let coreHandle: CoreHandle
     let transcription: TranscriptionCapability
+    /// The ingestor the delegate hands OS callbacks to; tests feed callbacks through it, since a
+    /// `UNNotificationResponse` cannot be built outside the OS.
+    var notificationIngestor: NotificationEventIngestor { notificationActions.ingestor }
 
     private let environment: CompositionEnvironment
     private let layout: ProtectedStorageLayout
@@ -639,6 +765,7 @@ public final class ServiceCompositionRoot {
     private let statusReader: CoreItemStatusReader
     private let reminderCore: CoreReminderReconciler
     private let providerTransport: ProviderExchangeCoordinator
+    private let notificationActions: NotificationActionClients
     private let modules: [CompositionModule]
     private let foreground: ForegroundState
     private let stateLock = NSLock()
@@ -694,6 +821,7 @@ public final class ServiceCompositionRoot {
         transcription = assembly.transcription
         reminderCore = assembly.reminderCore
         providerTransport = assembly.providerTransport
+        notificationActions = assembly.notificationActions
         reminderReconciler = assembly.permissionReconciler
         foreground = assembly.foreground
         jobRunner.setDrainIdleObserver { [weak self] in self?.runReminderPassAfterDrain() }
@@ -832,6 +960,7 @@ public final class ServiceCompositionRoot {
         providerTransport.shutDown()
         jobRunner.shutDown()
         transcription.shutDown()
+        notificationActions.shutDown(session: adapters.readSession)
         reminderCore.invalidate()
         statusReader.shutDown()
         coreHandle.close()
@@ -903,6 +1032,27 @@ public final class ServiceCompositionRoot {
         completion: @escaping (Result<ItemStatusReport, CoreFailure>) -> Void
     ) {
         statusReader.read(itemID: itemID, completion: completion)
+    }
+
+    // MARK: Notification actions
+
+    /// The delegate to install on `UNUserNotificationCenter`. It stores each delivered, opened and action callback
+    /// durably before anything else happens, so a callback is not lost while the core, the network or a provider is
+    /// unavailable. Completing and opening wait for an authenticated session.
+    public var notificationCenterDelegate: UNUserNotificationCenterDelegate { notificationActions.receiver }
+
+    /// Delivers the callbacks stored by this or an earlier launch that the session now allows. Call it at launch; the
+    /// root repeats it by itself whenever the session authenticates.
+    public func reconcileNotificationActions() async {
+        _ = await notificationActions.handler.reconcile()
+    }
+
+    /// Sets (or clears, with `nil`) what runs when a tap resolves to an item. It receives the identifier the core
+    /// resolved for the notification, never the payload's target, and only while the session that admitted the tap is
+    /// still authenticated. It may run on any thread; set it before installing the delegate, since a tap that
+    /// resolves while none is set is spent.
+    public func setOpenItemHandler(_ handler: (@Sendable (String) -> Void)?) {
+        notificationActions.openItem.set(handler)
     }
 
     // MARK: Reminders
@@ -983,6 +1133,7 @@ public final class ServiceCompositionRoot {
         let transcription: TranscriptionCapability
         let reminderCore: CoreReminderReconciler
         let providerTransport: ProviderExchangeCoordinator
+        let notificationActions: NotificationActionClients
         let permissionReconciler: NotificationPermissionReconciler
         let foreground: ForegroundState
     }
@@ -1005,6 +1156,31 @@ public final class ServiceCompositionRoot {
                 throw CompositionError.operationRangeConflict(module.identifier)
             }
             claimed.append(range)
+        }
+    }
+
+    /// Makes sure the configured capture route exists before ingress can accept or recover a save. A new route has no
+    /// processing destinations and no authorizations, so provisioning never authorizes an upload. Blocks until the core
+    /// answers, which takes a turning main run loop when called on the main thread.
+    private static func provisionCaptureRoute(
+        core: CoreHandle, router: CoreEventRouter, configuration: CompositionConfiguration
+    ) throws {
+        let wait = RouteProvisioningWait()
+        router.register { wait.handle($0) }
+        do {
+            try core.startEnsureLocalCaptureRoute(
+                operationID: routeProvisioningOperationID, routeID: configuration.captureRouteID,
+                routeName: captureRouteName, scope: configuration.captureItemScope)
+        } catch let failure as CoreFailure {
+            throw CompositionError.captureRouteUnavailable(failure.code)
+        }
+        switch wait.wait(timeout: routeProvisioningTimeoutSeconds) {
+        case .success?:
+            return
+        case .failure(let failure)?:
+            throw CompositionError.captureRouteUnavailable(failure.code)
+        case nil:
+            throw CompositionError.captureRouteUnavailable("route_provisioning_timeout")
         }
     }
 
@@ -1031,6 +1207,8 @@ public final class ServiceCompositionRoot {
             let router = CoreEventRouter()
             try core.setEventHandler { [router] event in router.route(event) }
 
+            try provisionCaptureRoute(core: core, router: router, configuration: configuration)
+
             let importer = CoreIngressImporter(attachedTo: core)
             router.register { importer.handle($0) }
             let ingress = try ForegroundIngressService(layout: layout, importer: importer, protection: protection)
@@ -1048,6 +1226,12 @@ public final class ServiceCompositionRoot {
                 core: core, bridge: bridge, center: adapters.notificationCenter)
             undo.append { reminderCore.invalidate() }
             router.register { reminderCore.handle($0) }
+
+            let notificationActions = NotificationActionClients(
+                core: core, layout: layout, session: adapters.readSession, now: environment.now,
+                forwardTo: environment.notificationEvents)
+            undo.append { notificationActions.shutDown(session: adapters.readSession) }
+            router.register { notificationActions.client.handle($0) }
             let permissionReconciler = NotificationPermissionReconciler(
                 center: adapters.notificationCenter, reconciliation: reminderCore,
                 observations: adapters.permissionObservations)
@@ -1094,7 +1278,8 @@ public final class ServiceCompositionRoot {
                 layout: layout, protectionFailureTotal: report.failures.count, core: core, ingress: ingress,
                 statusReader: statusReader, jobRunner: jobRunner, transcription: transcription,
                 reminderCore: reminderCore, providerTransport: providerTransport,
-                permissionReconciler: permissionReconciler, foreground: foreground)
+                notificationActions: notificationActions, permissionReconciler: permissionReconciler,
+                foreground: foreground)
         } catch {
             for step in undo.reversed() {
                 step()
