@@ -71,6 +71,10 @@ final class ResetCrashSignal: @unchecked Sendable {
 /// boundary is every item registered so far, tombstones those items (queuing their cleanup rows) and completes only when
 /// all of their cleanup is acknowledged. Items registered afterwards belong to the next generation and are never touched.
 final class FakeResetCore: ResetCore, @unchecked Sendable {
+    /// Storage refused a profile write: it would take a credential reference a removal has claimed
+    /// (`credential_pending_removal`).
+    struct ProfileRefused: Error {}
+
     private let lock = NSLock()
     private let deletion: DurableDeletionCore
     private let faults: FaultPlan
@@ -82,7 +86,12 @@ final class FakeResetCore: ResetCore, @unchecked Sendable {
     private var phase: ResetPhase?
     private var profiles: [ResetProfileCredential] = []
     private var revokedVersions: [String] = []
+    private var claims: Set<String> = []
     private var starts = 0
+    /// Called right after a claim transaction commits, on the task that runs the reset.
+    var afterClaim: (() -> Void)?
+    /// Called right after the profiles are listed, on the task that runs the reset.
+    var afterProfileCredentials: (() -> Void)?
 
     init(
         deletion: DurableDeletionCore, faults: FaultPlan, log: ResetEventLog = ResetEventLog(),
@@ -105,10 +114,17 @@ final class FakeResetCore: ResetCore, @unchecked Sendable {
         locked { profiles = newProfiles }
     }
 
-    /// The user configures a profile now, whatever generation is current.
-    func addProfile(_ profile: ResetProfileCredential) {
-        locked { profiles.append(profile) }
+    /// The user configures a profile now, whatever generation is current: a profile insert as storage sees it, which the
+    /// claim fence (schema v10) refuses while the reference is claimed.
+    func addProfile(_ profile: ResetProfileCredential) throws {
+        try locked {
+            if let reference = profile.credentialReference, claims.contains(reference) { throw ProfileRefused() }
+            profiles.append(profile)
+        }
     }
+
+    /// The persisted claim set, sorted.
+    var credentialClaimSet: [String] { locked { claims.sorted() } }
 
     func isProfileRevoked(_ profileVersion: String) -> Bool? {
         locked { profiles.first { $0.profileVersion == profileVersion }?.isRevoked }
@@ -152,7 +168,36 @@ final class FakeResetCore: ResetCore, @unchecked Sendable {
 
     func profileCredentials() async throws -> [ResetProfileCredential] {
         try faults.check("reset.profiles")
-        return locked { profiles }
+        let listed = locked { profiles }
+        afterProfileCredentials?()
+        return listed
+    }
+
+    func claimCredentials(credentialReferences: [String], boundProfileVersions: [String]) async throws -> [String] {
+        try faults.check("reset.claim")
+        log.append("core.claim")
+        let bound = Set(boundProfileVersions)
+        let claimed = locked { () -> [String] in
+            if claims.isEmpty {
+                let heldByOtherProfiles = Set(profiles.filter { !bound.contains($0.profileVersion) }.compactMap(\.credentialReference))
+                claims = Set(credentialReferences).subtracting(heldByOtherProfiles)
+            }
+            return claims.sorted()
+        }
+        afterClaim?()
+        return claimed
+    }
+
+    func credentialClaims() async throws -> [String] {
+        try faults.check("reset.claims")
+        return locked { claims.sorted() }
+    }
+
+    func releaseCredentialClaims() async throws {
+        try faults.check("reset.claims.release")
+        await crash.crashIfArmed("before.claims.release", faults: faults)
+        log.append("core.claims.release")
+        locked { claims = [] }
     }
 
     func revokeProfile(profileVersion: String) async throws {
@@ -179,10 +224,10 @@ final class FakeResetCore: ResetCore, @unchecked Sendable {
             itemsAwaitingTombstone: 0, cleanupPending: incomplete, cleanupFailed: failed)
     }
 
-    private func locked<Value>(_ body: () -> Value) -> Value {
+    private func locked<Value>(_ body: () throws -> Value) rethrows -> Value {
         lock.lock()
         defer { lock.unlock() }
-        return body()
+        return try body()
     }
 }
 
@@ -342,6 +387,8 @@ final class FakeResetCredentials: ResetCredentialRemoving {
     private(set) var removedReferences: [String] = []
     /// References whose bound secret was left alone because a different one is stored now.
     private(set) var keptReferences: [String] = []
+    /// Called with the reference right before each deletion: the moment between the claim and the deletion.
+    var beforeDelete: ((String) -> Void)?
 
     init(faults: FaultPlan, log: ResetEventLog) {
         self.faults = faults
@@ -371,6 +418,7 @@ final class FakeResetCredentials: ResetCredentialRemoving {
     }
 
     func deleteCredential(reference: String, identity: ResetSecretIdentity) throws {
+        beforeDelete?(reference)
         if faults.fires("credentials.delete") { throw DeleteFailed() }
         guard !absent.contains(reference) else { return }
         guard (identities[reference] ?? Self.initial) == identity else {

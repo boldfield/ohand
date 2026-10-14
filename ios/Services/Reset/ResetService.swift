@@ -35,10 +35,12 @@ import Foundation
 ///    record only the ones that actually finished.
 /// 8. Remove export and share temporaries.
 /// 9. When the user chose it, revoke every provider profile that existed at the tap and remove the secret that was
-///    stored at the tap behind its reference. Without that choice neither is touched, nothing is touched before step 5
-///    completed, and a profile or secret configured after the tap is never touched, not even by a retry of a removal
-///    that failed or was interrupted: the removal is conditioned on the secret's identity at the tap, and a bound
-///    reference that a profile configured after the tap holds keeps its secret.
+///    stored at the tap behind its reference, behind the core's credential-claim fence (`removeCredentialsIfChosen`):
+///    claim, revoke, delete only what was claimed, release. Without that choice neither is touched, nothing is touched
+///    before step 5 completed, and a profile or secret configured after the tap is never touched, not even by a retry
+///    of a removal that failed or was interrupted: the removal is conditioned on the secret's identity at the tap, a
+///    bound reference that a profile configured after the tap holds is never claimed and keeps its secret, and while a
+///    reference is claimed storage refuses any profile that would start holding it.
 /// 10. Ask the core to re-evaluate. The report says `completed` only when the core reports the generation completed
 ///    and every native step converged; this service never decides success on its own.
 ///
@@ -367,12 +369,20 @@ actor ResetService {
         return ResetReport(state: state, progress: latest, blockers: blockers, itemCleanup: cleanup)
     }
 
-    /// Carries out an owed `remove` choice on exactly the profiles and secrets it binds. The core's current listing tells
-    /// which bound profiles still need revoking; a profile it lists that the choice did not bind was configured after the
-    /// tap and is left alone, with its secret. Each bound secret is removed only while it is still the one stored at the
-    /// tap (the Keychain conditions the removal on its identity), so a secret the user entered since behind the same
-    /// reference stays; and a bound reference that a profile configured after the tap holds is in use by that fresh
-    /// profile, so its secret stays too, unchanged or not.
+    /// Carries out an owed `remove` choice on exactly the profiles and secrets it binds, behind the core's
+    /// credential-claim fence (schema v10), so that no profile can come to hold a secret this removal deletes:
+    /// 1. Claim. One core transaction claims each bound secret's reference that no profile outside the bound ones holds.
+    ///    Such a profile was configured after the tap (or the choice never bound it), so its secret stays, unchanged or
+    ///    not. From the claim until step 4, storage refuses any profile insert or edit that would take a claimed
+    ///    reference. On a retry the core returns the persisted claim set unchanged: it is the authority, never a new
+    ///    snapshot.
+    /// 2. Revoke the bound profiles the core still lists as not revoked, so their jobs retire and nothing dispatches
+    ///    before a secret goes.
+    /// 3. Delete the Keychain item behind each claimed reference, conditioned on the identity the secret had at the tap:
+    ///    a secret the user entered since behind the same reference stays.
+    /// 4. Release the claims, then clear the removal marker, only once every deletion was acknowledged. An interruption
+    ///    between the two leaves the marker, so the next pass claims again; every claimed secret is gone by then, so that
+    ///    pass deletes nothing and only releases and clears.
     private func removeCredentialsIfChosen() async -> ResetBlocker? {
         let removal: ResetCredentialRemoval?
         do {
@@ -382,13 +392,23 @@ actor ResetService {
         }
         guard let removal else { return nil }
 
+        let bound = removal.profileVersions
+        let claimed: Set<String>
+        do {
+            let claimedReferences = try await core.claimCredentials(
+                credentialReferences: removal.secrets.map(\.credentialReference).sorted(),
+                boundProfileVersions: bound.sorted())
+            claimed = Set(claimedReferences)
+        } catch {
+            return .credentialRemovalIncomplete
+        }
+
         let profiles: [ResetProfileCredential]
         do {
             profiles = try await core.profileCredentials()
         } catch {
             return .credentialRemovalIncomplete
         }
-        let bound = removal.profileVersions
         // Revoking first retires queued jobs and stops new dispatch before the secret goes.
         var incomplete = false
         for profile in profiles where bound.contains(profile.profileVersion) && !profile.isRevoked {
@@ -398,10 +418,9 @@ actor ResetService {
                 incomplete = true
             }
         }
-        let heldByLaterProfiles = Set(
-            profiles.filter { !bound.contains($0.profileVersion) }.compactMap(\.credentialReference))
+        // Only a claimed reference is deleted: an unclaimed one is held by a profile the choice did not bind.
         for secret in removal.secrets.sorted(by: { $0.credentialReference < $1.credentialReference })
-        where !heldByLaterProfiles.contains(secret.credentialReference) {
+        where claimed.contains(secret.credentialReference) {
             do {
                 try credentials.deleteCredential(reference: secret.credentialReference, identity: secret.identity)
             } catch CredentialError.invalidReference {
@@ -412,6 +431,7 @@ actor ResetService {
         }
         if incomplete { return .credentialRemovalIncomplete }
         do {
+            try await core.releaseCredentialClaims()
             try markers.clearRemovalRequest()
         } catch {
             return .credentialRemovalIncomplete

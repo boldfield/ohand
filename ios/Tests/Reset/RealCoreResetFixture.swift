@@ -9,6 +9,15 @@ import XCTest
 /// real core operation; nothing here writes a reset generation, a tombstone or a cleanup row.
 final class RealCoreResetWorld {
     static let credentialServiceName = "ohand.reset.tests"
+    /// Direct connections wait at least as long as the core's own connections (5 s) for a lock it holds.
+    static let directConnectionBusyTimeoutMilliseconds: Int32 = 10_000
+
+    /// What storage answered a profile write.
+    enum ProfileWrite: Equatable {
+        case written
+        /// Refused by the credential-claim fence: the reference is claimed by a removal that is still owed.
+        case refusedPendingRemoval
+    }
 
     let storage: RealCoreDeletionWorld
     let keychain = FakeKeychain()
@@ -38,9 +47,13 @@ final class RealCoreResetWorld {
     /// is the file system the marker store writes through (the real one when nil), to fail a marker write.
     func launch(
         markerFileSystem: IngressFileSystem? = nil,
-        wrapStaging: ((ResetIngressStaging) -> ResetIngressStaging)? = nil
+        wrapStaging: ((ResetIngressStaging) -> ResetIngressStaging)? = nil,
+        wrapCore: ((ResetCore) -> ResetCore)? = nil,
+        wrapCredentials: ((ResetCredentialRemoving) -> ResetCredentialRemoving)? = nil
     ) throws -> RealCoreResetRuntime {
-        let runtime = try RealCoreResetRuntime(world: self, markerFileSystem: markerFileSystem, wrapStaging: wrapStaging)
+        let runtime = try RealCoreResetRuntime(
+            world: self, markerFileSystem: markerFileSystem, wrapStaging: wrapStaging, wrapCore: wrapCore,
+            wrapCredentials: wrapCredentials)
         runtimes.append(runtime)
         return runtime
     }
@@ -96,12 +109,47 @@ final class RealCoreResetWorld {
     @discardableResult
     func addProfile(version: String, reference existing: String? = nil) throws -> String {
         let reference = try existing ?? credentials.addCredential(Data("synthetic secret for \(version)".utf8))
-        try execute(
+        let outcome = try writeProfile(version: version, reference: reference)
+        XCTAssertEqual(outcome, .written, "the profile \(version) was not inserted")
+        if outcome != .written { throw StorageSetupFailed() }
+        return reference
+    }
+
+    /// A profile write as a configuration path performs it, through a connection of its own, holding `reference`: the
+    /// edit that mints a new version of a profile without re-entering its secret. Reports what storage answered instead
+    /// of asserting, so a test can expect the credential-claim fence to refuse it.
+    func writeProfile(version: String, reference: String) throws -> ProfileWrite {
+        let (status, message) = try executeReportingStatus(
             "INSERT INTO provider_profiles (profile_version, profile_id, provider_type, endpoint, model, "
                 + "credential_ref, timeout_seconds, retry_policy, authorized_destinations, capabilities, created_at) "
                 + "VALUES ('\(version)', 'profile-\(version)', 'openai', NULL, 'model-a', '\(reference)', 30, '{}', "
                 + "'[]', '[]', '2026-10-10T09:00:00Z')")
-        return reference
+        switch status {
+        case SQLITE_OK:
+            return .written
+        case SQLITE_CONSTRAINT where message.contains("credential_pending_removal"):
+            return .refusedPendingRemoval
+        default:
+            XCTFail("unexpected answer to the profile write: \(status) \(message)")
+            throw StorageSetupFailed()
+        }
+    }
+
+    func profileExists(_ version: String) throws -> Bool {
+        var count = 0
+        try query("SELECT COUNT(*) FROM provider_profiles WHERE profile_version = '\(version)'") { statement in
+            count = Int(sqlite3_column_int(statement, 0))
+        }
+        return count == 1
+    }
+
+    /// The persisted credential-claim set, read from the store directly (so also while no process is running).
+    func claimsOnDisk() throws -> [String] {
+        var claims: [String] = []
+        try query("SELECT credential_ref FROM reset_credential_claims ORDER BY credential_ref") { statement in
+            if let text = sqlite3_column_text(statement, 0) { claims.append(String(cString: text)) }
+        }
+        return claims
     }
 
     // MARK: Inspection
@@ -132,18 +180,25 @@ final class RealCoreResetWorld {
     // MARK: SQLite
 
     private func execute(_ statement: String) throws {
+        let (status, message) = try executeReportingStatus(statement)
+        XCTAssertEqual(status, SQLITE_OK, "\(message): \(statement)")
+        if status != SQLITE_OK { throw StorageSetupFailed() }
+    }
+
+    private func executeReportingStatus(_ statement: String) throws -> (status: Int32, message: String) {
         var database: OpaquePointer?
         guard sqlite3_open(storage.databasePath, &database) == SQLITE_OK else { throw StorageSetupFailed() }
         defer { sqlite3_close(database) }
+        sqlite3_busy_timeout(database, Self.directConnectionBusyTimeoutMilliseconds)
         let status = sqlite3_exec(database, statement, nil, nil, nil)
-        XCTAssertEqual(status, SQLITE_OK, "\(String(cString: sqlite3_errmsg(database))): \(statement)")
-        if status != SQLITE_OK { throw StorageSetupFailed() }
+        return (status, String(cString: sqlite3_errmsg(database)))
     }
 
     private func query(_ sql: String, row: (OpaquePointer?) -> Void) throws {
         var database: OpaquePointer?
         guard sqlite3_open(storage.databasePath, &database) == SQLITE_OK else { throw StorageSetupFailed() }
         defer { sqlite3_close(database) }
+        sqlite3_busy_timeout(database, Self.directConnectionBusyTimeoutMilliseconds)
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK else { throw StorageSetupFailed() }
         defer { sqlite3_finalize(statement) }
@@ -253,7 +308,9 @@ final class RealCoreResetRuntime {
     init(
         world: RealCoreResetWorld,
         markerFileSystem: IngressFileSystem? = nil,
-        wrapStaging: ((ResetIngressStaging) -> ResetIngressStaging)? = nil
+        wrapStaging: ((ResetIngressStaging) -> ResetIngressStaging)? = nil,
+        wrapCore: ((ResetCore) -> ResetCore)? = nil,
+        wrapCredentials: ((ResetCredentialRemoving) -> ResetCredentialRemoving)? = nil
     ) throws {
         resetCredentials = world.resetCredentials
         session = try RealCoreResetSession(path: world.storage.databasePath)
@@ -272,11 +329,11 @@ final class RealCoreResetRuntime {
             let nativeStaging = NativeResetIngress(service: ingress, gate: gate, layout: world.layout)
             staging = nativeStaging
             service = ResetService(
-                core: session.resetClient,
+                core: wrapCore?(session.resetClient) ?? session.resetClient,
                 staging: wrapStaging?(nativeStaging) ?? nativeStaging,
                 itemCleanup: itemCleanup,
                 exportTemporaries: ExportTemporaryCleaner(layout: world.layout),
-                credentials: world.resetCredentials,
+                credentials: wrapCredentials?(world.resetCredentials) ?? world.resetCredentials,
                 markers: markers)
         } catch {
             session.close()
@@ -368,6 +425,12 @@ final class RealCoreResetRuntime {
     func currentGeneration() throws -> Int64 {
         let client = session.resetClient
         return try session.run { try await client.currentGeneration() }
+    }
+
+    /// The persisted credential-claim set as the core reports it.
+    func credentialClaims() throws -> [String] {
+        let client = session.resetClient
+        return try session.run { try await client.credentialClaims() }
     }
 
     /// Ends the process: the core closes, then the ingress service (and its writer lock) goes away. Imports the gate
@@ -488,5 +551,57 @@ final class IdentityTrackingKeychain: KeychainBoundary, ResetSecretKeychain {
     func remove(_ key: KeychainItemKey, identity: ResetSecretIdentity) -> OSStatus {
         guard identities[key] == identity else { return errSecItemNotFound }
         return remove(key: key)
+    }
+}
+
+/// The production credential remover, with a hook that runs right before each deletion: the moment between the claim
+/// and the deletion, after the profiles were listed and revoked.
+final class DeletionHookCredentials: ResetCredentialRemoving {
+    private let wrapped: ResetCredentialRemoving
+    private let beforeDelete: (String) -> Void
+
+    init(_ wrapped: ResetCredentialRemoving, beforeDelete: @escaping (String) -> Void) {
+        self.wrapped = wrapped
+        self.beforeDelete = beforeDelete
+    }
+
+    func secretIdentity(reference: String) throws -> ResetSecretIdentity? {
+        try wrapped.secretIdentity(reference: reference)
+    }
+
+    func deleteCredential(reference: String, identity: ResetSecretIdentity) throws {
+        beforeDelete(reference)
+        try wrapped.deleteCredential(reference: reference, identity: identity)
+    }
+}
+
+/// The production reset client, whose release of the credential claims the fault plan can fail at `reset.claims.release`:
+/// the deletions were acknowledged, but the release never reached the core, as when the process dies in between.
+final class FaultingResetCore: ResetCore, @unchecked Sendable {
+    struct ReleaseFailed: Error {}
+
+    private let wrapped: ResetCore
+    private let faults: FaultPlan
+
+    init(wrapping wrapped: ResetCore, faults: FaultPlan) {
+        self.wrapped = wrapped
+        self.faults = faults
+    }
+
+    func start() async throws -> ResetProgress { try await wrapped.start() }
+    func advance() async throws -> ResetProgress? { try await wrapped.advance() }
+    func status() async throws -> ResetProgress? { try await wrapped.status() }
+    func profileCredentials() async throws -> [ResetProfileCredential] { try await wrapped.profileCredentials() }
+    func revokeProfile(profileVersion: String) async throws { try await wrapped.revokeProfile(profileVersion: profileVersion) }
+
+    func claimCredentials(credentialReferences: [String], boundProfileVersions: [String]) async throws -> [String] {
+        try await wrapped.claimCredentials(credentialReferences: credentialReferences, boundProfileVersions: boundProfileVersions)
+    }
+
+    func credentialClaims() async throws -> [String] { try await wrapped.credentialClaims() }
+
+    func releaseCredentialClaims() async throws {
+        if faults.fires("reset.claims.release") { throw ReleaseFailed() }
+        try await wrapped.releaseCredentialClaims()
     }
 }

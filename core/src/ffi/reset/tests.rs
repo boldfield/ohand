@@ -299,6 +299,152 @@ fn a_storage_failure_while_revoking_is_not_reported_as_an_unknown_profile() {
     let _ = std::fs::remove_dir_all(directory);
 }
 
+fn claims_on_disk(path: &str) -> Vec<String> {
+    let database = open_database(path);
+    let mut statement = database
+        .conn()
+        .prepare("SELECT credential_ref FROM reset_credential_claims ORDER BY credential_ref")
+        .unwrap();
+    statement
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// A profile write as a future configuration path performs it, through a connection of its own.
+fn try_add_profile(path: &str, version: &str, credential_ref: &str) -> Result<(), String> {
+    let database = open_database(path);
+    database
+        .conn()
+        .execute(
+            "INSERT INTO provider_profiles (profile_version, profile_id, provider_type, endpoint,
+                    model, credential_ref, timeout_seconds, retry_policy, authorized_destinations,
+                    capabilities, created_at)
+             VALUES (?, 'profile-later', 'openai', NULL, 'model-a', ?, 30, '{}', '[]', '[]',
+                     '2026-10-10T10:00:00Z')",
+            rusqlite::params![version, credential_ref],
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[test]
+fn claimed_references_refuse_new_profiles_until_the_claims_are_released() {
+    let _guard = serial();
+    let (directory, path) = store("claims");
+    let mut session = Session::over(open_file(&path));
+    session.succeed(&json!({"command": "start"}));
+
+    // The choice bound every profile that existed at the tap; credential-b had a secret at the
+    // tap even though the listing no longer shows a profile for it.
+    let claimed = session.succeed(&json!({
+        "command": "claim_credentials",
+        "credential_refs": ["credential-b", "credential-a", "credential-a"],
+        "bound_profile_versions": ["profile-1@1", "profile-1@2", "profile-1@3"],
+    }));
+    assert_eq!(claimed["claimed"], json!(["credential-a", "credential-b"]));
+    assert_eq!(
+        session.succeed(&json!({"command": "credential_claims"}))["claims"],
+        json!(["credential-a", "credential-b"])
+    );
+    assert_eq!(
+        claims_on_disk(&path),
+        vec!["credential-a", "credential-b"],
+        "the claim set is durable"
+    );
+
+    let refused = try_add_profile(&path, "profile-2@1", "credential-a").unwrap_err();
+    assert!(
+        refused.contains("credential_pending_removal"),
+        "a profile may not take a claimed reference: {refused}"
+    );
+    try_add_profile(&path, "profile-2@2", "credential-c").unwrap();
+    session.succeed(&json!({"command": "revoke_profile", "profile_version": "profile-1@1"}));
+
+    let released = session.succeed(&json!({"command": "release_credential_claims"}));
+    assert_eq!(released["released"], 2);
+    assert_eq!(
+        session.succeed(&json!({"command": "credential_claims"}))["claims"],
+        json!([])
+    );
+    try_add_profile(&path, "profile-2@1", "credential-a").unwrap();
+    assert_eq!(
+        session.succeed(&json!({"command": "release_credential_claims"}))["released"],
+        0,
+        "releasing nothing is fine"
+    );
+    session.close();
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn a_reference_held_by_a_profile_outside_the_choice_is_never_claimed() {
+    let _guard = serial();
+    let (directory, path) = store("claims-held");
+    try_add_profile(&path, "profile-2@1", "credential-a").unwrap();
+    let mut session = Session::over(open_file(&path));
+    session.succeed(&json!({"command": "start"}));
+
+    let claimed = session.succeed(&json!({
+        "command": "claim_credentials",
+        "credential_refs": ["credential-a", "credential-b"],
+        "bound_profile_versions": ["profile-1@1", "profile-1@2", "profile-1@3"],
+    }));
+    assert_eq!(
+        claimed["claimed"],
+        json!(["credential-b"]),
+        "credential-a is in use by a profile the choice does not bind"
+    );
+    assert_eq!(claims_on_disk(&path), vec!["credential-b"]);
+    session.close();
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn an_existing_claim_set_is_returned_unchanged_instead_of_a_new_snapshot() {
+    let _guard = serial();
+    let (directory, path) = store("claims-retry");
+    let mut session = Session::over(open_file(&path));
+    session.succeed(&json!({"command": "start"}));
+    session.succeed(&json!({
+        "command": "claim_credentials",
+        "credential_refs": ["credential-a"],
+        "bound_profile_versions": ["profile-1@1", "profile-1@2"],
+    }));
+
+    let again = session.succeed(&json!({
+        "command": "claim_credentials",
+        "credential_refs": ["credential-b"],
+        "bound_profile_versions": [],
+    }));
+    assert_eq!(again["claimed"], json!(["credential-a"]));
+    assert_eq!(claims_on_disk(&path), vec!["credential-a"]);
+    session.close();
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn a_claim_before_any_reset_started_is_refused_and_claims_nothing() {
+    let _guard = serial();
+    let (directory, path) = store("claims-no-reset");
+    let mut session = Session::over(open_file(&path));
+
+    let (status, code) = session.fail(&json!({
+        "command": "claim_credentials",
+        "credential_refs": ["credential-a"],
+        "bound_profile_versions": ["profile-1@1"],
+    }));
+    assert_eq!((status, code.as_str()), (2, "reset_claim_refused"));
+    assert!(claims_on_disk(&path).is_empty());
+    assert_eq!(
+        session.succeed(&json!({"command": "credential_claims"}))["claims"],
+        json!([])
+    );
+    session.close();
+    let _ = std::fs::remove_dir_all(directory);
+}
+
 #[test]
 fn malformed_requests_are_refused_before_anything_is_queued() {
     let _guard = serial();
@@ -311,6 +457,12 @@ fn malformed_requests_are_refused_before_anything_is_queued() {
         json!({"command": "item_generation", "item_id": ""}),
         json!({"command": "start", "extra": 1}),
         json!({"command": "revoke_profile", "profile_version": "x".repeat(MAX_IDENTIFIER_BYTES + 1)}),
+        json!({"command": "claim_credentials"}),
+        json!({"command": "claim_credentials", "credential_refs": [""], "bound_profile_versions": []}),
+        json!({"command": "claim_credentials", "credential_refs": [], "bound_profile_versions": [""]}),
+        json!({"command": "claim_credentials", "credential_refs": ["a"], "bound_profile_versions": [], "extra": 1}),
+        json!({"command": "claim_credentials", "credential_refs": vec!["a"; MAX_IDENTIFIERS_PER_LIST + 1], "bound_profile_versions": []}),
+        json!({"command": "credential_claims", "extra": 1}),
         json!([]),
     ] {
         let outcome = start(handle, 1, &request);

@@ -522,9 +522,14 @@ final class ResetServiceTests: ResetTestCase {
         XCTAssertEqual(world.core.revokedProfileVersions, ["profile-a-v1", "profile-c-v1"], "already revoked profiles are not revoked again")
         XCTAssertEqual(world.credentials.removedReferences, ["ref-a", "ref-b"])
         XCTAssertFalse(world.choice.isRequested, "the choice is spent once it was carried out")
+        let claimIndex = try XCTUnwrap(world.log.index(of: "core.claim"))
         let revokeIndex = try XCTUnwrap(world.log.index(of: "core.revoke:profile-a-v1"))
         let deleteIndex = try XCTUnwrap(world.log.index(of: "credentials.delete:ref-a"))
+        let releaseIndex = try XCTUnwrap(world.log.index(of: "core.claims.release"))
+        XCTAssertLessThan(claimIndex, revokeIndex, "the references are claimed before anything is touched")
         XCTAssertLessThan(revokeIndex, deleteIndex, "a profile stops dispatching before its secret goes")
+        XCTAssertLessThan(deleteIndex, releaseIndex, "the claims are released only once every secret is gone")
+        XCTAssertEqual(world.core.credentialClaimSet, [])
     }
 
     func testAFailedSecretRemovalKeepsTheResetPendingAndTheChoiceSurvivesARelaunch() async throws {
@@ -565,7 +570,7 @@ final class ResetServiceTests: ResetTestCase {
                 "the owed removal binds the profiles that existed at the tap: \(context)")
 
             // In the fresh generation, with the removal still owed, the user configures a new profile and its secret.
-            world.core.addProfile(Self.laterProfile)
+            try world.core.addProfile(Self.laterProfile)
             let report: ResetReport
             if retriedBy == "resume" {
                 report = await world.makeService().resume()
@@ -619,19 +624,21 @@ final class ResetServiceTests: ResetTestCase {
         }
     }
 
-    func testARetriedRemovalLeavesABoundSecretThatAProfileConfiguredAfterTheTapHoldsAlone() async throws {
+    func testARetriedRemovalLeavesABoundSecretThatAProfileConfiguredBeforeTheClaimHoldsAlone() async throws {
         for retriedBy in ["resume", "keep tap"] {
             let context = "retried by \(retriedBy)"
             let world = try makeResetWorld()
             try await seedVoiceAndTextCaptures(world)
             configureProfiles(world)
-            world.faults.arm("credentials.delete")
-            let first = await world.makeService().reset(credentialChoice: .remove)
-            XCTAssertEqual(first.blockers, [.credentialRemovalIncomplete], context)
+            // The process dies right after the core started the remove tap's reset: the choice is recorded with what it
+            // binds, and nothing is claimed yet.
+            await crashDuringReset(world, at: "after.start", choice: .remove)
+            world.relaunch()
+            XCTAssertEqual(world.core.credentialClaimSet, [], context)
 
-            // With the removal still owed, the user edits the revoked profile a: the edit mints a new version that holds
-            // the same reference, and the secret behind it is unchanged.
-            world.core.addProfile(ResetProfileCredential(profileVersion: "profile-a-v2", credentialReference: "ref-a", isRevoked: false))
+            // Before the removal claims anything, the user edits the revoked profile a: the edit mints a new version that
+            // holds the same reference, and the secret behind it is unchanged.
+            try world.core.addProfile(ResetProfileCredential(profileVersion: "profile-a-v2", credentialReference: "ref-a", isRevoked: false))
             let report: ResetReport
             if retriedBy == "resume" {
                 report = await world.makeService().resume()
@@ -642,10 +649,99 @@ final class ResetServiceTests: ResetTestCase {
             XCTAssertTrue(report.isComplete, "\(context): \(report.blockers)")
             XCTAssertEqual(world.core.revokedProfileVersions, ["profile-a-v1", "profile-c-v1"], context)
             XCTAssertEqual(world.core.isProfileRevoked("profile-a-v2"), false, "the later version is not bound: \(context)")
-            XCTAssertEqual(world.credentials.removedReferences, ["ref-b"], "a secret a later profile holds stays: \(context)")
+            XCTAssertEqual(
+                world.credentials.removedReferences, ["ref-b"],
+                "a reference a profile outside the choice holds is never claimed, so its secret stays: \(context)")
             XCTAssertTrue(world.credentials.isPresent("ref-a"), context)
+            XCTAssertEqual(world.core.credentialClaimSet, [], "the claims are released once the removal is carried out: \(context)")
             XCTAssertFalse(world.choice.isRequested, context)
         }
+    }
+
+    func testAProfileThatWouldTakeAClaimedReferenceIsRefusedBetweenTheClaimAndTheDeletion() async throws {
+        let world = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(world)
+        configureProfiles(world)
+        let laterVersion = ResetProfileCredential(profileVersion: "profile-a-v2", credentialReference: "ref-a", isRevoked: false)
+        // The edit that mints a new version of profile a without re-entering its secret, attempted at every moment
+        // between the claim and the deletion.
+        let attempt: @Sendable (String) -> Void = { [core = world.core, log = world.log] moment in
+            do {
+                try core.addProfile(laterVersion)
+                log.append("profile.written:\(moment)")
+            } catch is FakeResetCore.ProfileRefused {
+                log.append("profile.refused:\(moment)")
+            } catch {
+                log.append("profile.failed:\(moment)")
+            }
+        }
+        world.core.afterClaim = { [core = world.core] in
+            attempt("after the claim")
+            core.afterProfileCredentials = { attempt("after the profiles were listed") }
+        }
+        world.credentials.beforeDelete = { attempt("before deleting \($0)") }
+
+        let report = await world.makeService().reset(credentialChoice: .remove)
+
+        XCTAssertTrue(report.isComplete, "\(report.blockers)")
+        XCTAssertEqual(
+            world.log.events.filter { $0.hasPrefix("profile.") },
+            [
+                "profile.refused:after the claim", "profile.refused:after the profiles were listed",
+                "profile.refused:before deleting ref-a", "profile.refused:before deleting ref-b",
+            ],
+            "storage refuses the profile at every moment while the reference is claimed")
+        XCTAssertNil(world.core.isProfileRevoked("profile-a-v2"), "the refused profile does not exist")
+        XCTAssertEqual(world.core.revokedProfileVersions, ["profile-a-v1", "profile-c-v1"])
+        XCTAssertEqual(world.credentials.removedReferences, ["ref-a", "ref-b"])
+        XCTAssertEqual(world.core.credentialClaimSet, [])
+        // The fence is lifted with the claims: the reference is free again (its secret is gone; the user enters one).
+        try world.core.addProfile(laterVersion)
+    }
+
+    func testACrashBetweenTheDeletionAndTheReleaseIsFinishedFromTheClaimSetWithoutDeletingAgain() async throws {
+        let world = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(world)
+        configureProfiles(world)
+        let laterVersion = ResetProfileCredential(profileVersion: "profile-a-v2", credentialReference: "ref-a", isRevoked: false)
+        await crashDuringReset(world, at: "before.claims.release", choice: .remove)
+
+        XCTAssertEqual(world.credentials.removedReferences, ["ref-a", "ref-b"], "every claimed secret was deleted before the release")
+        XCTAssertEqual(world.core.credentialClaimSet, ["ref-a", "ref-b"], "the claim set survives the process")
+        XCTAssertTrue(world.choice.isRequested, "the removal is still owed")
+        world.relaunch()
+        XCTAssertThrowsError(try world.core.addProfile(laterVersion), "the fence holds until the removal is finished") {
+            XCTAssertTrue($0 is FakeResetCore.ProfileRefused)
+        }
+
+        let resumed = await world.makeService().resume()
+
+        XCTAssertTrue(resumed.isComplete, "\(resumed.blockers)")
+        XCTAssertEqual(world.credentials.removedReferences, ["ref-a", "ref-b"], "the retry works from the claim set and deletes nothing twice")
+        XCTAssertEqual(world.core.credentialClaimSet, [])
+        XCTAssertFalse(world.choice.isRequested)
+        try world.core.addProfile(laterVersion)
+    }
+
+    func testAReleaseThatFailsKeepsTheRemovalOwedAndIsRetried() async throws {
+        let world = try makeResetWorld()
+        try await seedVoiceAndTextCaptures(world)
+        configureProfiles(world)
+        world.faults.arm("reset.claims.release")
+
+        let first = await world.makeService().reset(credentialChoice: .remove)
+
+        XCTAssertEqual(first.state, .pending)
+        XCTAssertEqual(first.blockers, [.credentialRemovalIncomplete])
+        XCTAssertEqual(world.core.credentialClaimSet, ["ref-a", "ref-b"])
+        XCTAssertTrue(world.choice.isRequested, "the removal is spent only once the claims are released")
+
+        let resumed = await world.makeService().resume()
+
+        XCTAssertTrue(resumed.isComplete, "\(resumed.blockers)")
+        XCTAssertEqual(world.credentials.removedReferences, ["ref-a", "ref-b"])
+        XCTAssertEqual(world.core.credentialClaimSet, [])
+        XCTAssertFalse(world.choice.isRequested)
     }
 
     func testARemoveTapBindsNoSecretBehindAReferenceThatHoldsNoneAndASecretEnteredThereLaterStays() async throws {
@@ -700,7 +796,7 @@ final class ResetServiceTests: ResetTestCase {
             "the recorded tap carries the profiles its choice applies to")
         XCTAssertFalse(world.choice.isRequested, "nothing is armed before the core started")
 
-        world.core.addProfile(Self.laterProfile)
+        try world.core.addProfile(Self.laterProfile)
         world.relaunch()
         let resumed = await world.makeService().resume()
 

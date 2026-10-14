@@ -15,6 +15,17 @@
 //!   for an unknown item.
 //! * `profile_credentials` -> `profiles`: `{profile_version, credential_ref, revoked}` rows.
 //! * `revoke_profile` (`profile_version`): revoke one profile version and retire its jobs.
+//! * `claim_credentials` (`credential_refs`, `bound_profile_versions`) -> `claimed`: the
+//!   credential-claim fence of an explicit "remove credentials" choice. In one transaction, every
+//!   named reference that no profile outside the bound versions holds is claimed for the latest
+//!   reset generation; a reference some other profile holds is in use by fresh-generation state
+//!   and is left unclaimed. While a claim exists, storage refuses any profile insert or edit that
+//!   would take the reference (`credential_pending_removal`, schema v10). When claims already
+//!   exist they are returned as they are: the persisted claim set is the authority for a retry,
+//!   never a new snapshot.
+//! * `credential_claims` -> `claims`: the persisted claim set.
+//! * `release_credential_claims` -> `released`: removes every claim, once every claimed secret
+//!   is gone.
 //!
 //! `status` is `{generation, phase, boundary_rowid, items_awaiting_tombstone, cleanup_pending,
 //! cleanup_failed, started_at, completed_at}` with `phase` `pending` or `completed`. The phase
@@ -38,10 +49,13 @@ use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::borrow::Cow;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Mutex;
 
 /// Longest identifier accepted in a command, in bytes.
 const MAX_IDENTIFIER_BYTES: usize = 512;
+/// Most identifiers accepted in one list of a command.
+const MAX_IDENTIFIERS_PER_LIST: usize = 1024;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
@@ -50,27 +64,54 @@ enum Command {
     Advance {},
     Status {},
     CurrentGeneration {},
-    ItemGeneration { item_id: String },
+    ItemGeneration {
+        item_id: String,
+    },
     ProfileCredentials {},
-    RevokeProfile { profile_version: String },
+    RevokeProfile {
+        profile_version: String,
+    },
+    ClaimCredentials {
+        credential_refs: Vec<String>,
+        bound_profile_versions: Vec<String>,
+    },
+    CredentialClaims {},
+    ReleaseCredentialClaims {},
 }
 
 impl Command {
     fn validate(&self) -> Result<(), AbiFailure> {
-        let identifier = match self {
+        match self {
             Command::Start {}
             | Command::Advance {}
             | Command::Status {}
             | Command::CurrentGeneration {}
-            | Command::ProfileCredentials {} => return Ok(()),
-            Command::ItemGeneration { item_id } => item_id,
-            Command::RevokeProfile { profile_version } => profile_version,
-        };
-        if identifier.is_empty() || identifier.len() > MAX_IDENTIFIER_BYTES {
-            return Err(AbiFailure::INVALID_REQUEST);
+            | Command::ProfileCredentials {}
+            | Command::CredentialClaims {}
+            | Command::ReleaseCredentialClaims {} => Ok(()),
+            Command::ItemGeneration { item_id } => validate_identifier(item_id),
+            Command::RevokeProfile { profile_version } => validate_identifier(profile_version),
+            Command::ClaimCredentials {
+                credential_refs,
+                bound_profile_versions,
+            } => {
+                for list in [credential_refs, bound_profile_versions] {
+                    if list.len() > MAX_IDENTIFIERS_PER_LIST {
+                        return Err(AbiFailure::INVALID_REQUEST);
+                    }
+                    list.iter().try_for_each(|id| validate_identifier(id))?;
+                }
+                Ok(())
+            }
         }
-        Ok(())
     }
+}
+
+fn validate_identifier(identifier: &str) -> Result<(), AbiFailure> {
+    if identifier.is_empty() || identifier.len() > MAX_IDENTIFIER_BYTES {
+        return Err(AbiFailure::INVALID_REQUEST);
+    }
+    Ok(())
 }
 
 fn store_failure(error: &anyhow::Error) -> AbiFailure {
@@ -87,6 +128,15 @@ const fn refused() -> AbiFailure {
         class: ErrorClass::Permanent,
         code: "reset_profile_refused",
         message: Cow::Borrowed("the provider profile cannot be revoked"),
+    }
+}
+
+/// A credential claim core refused: no reset generation has started, so no removal can own it.
+const fn claim_refused() -> AbiFailure {
+    AbiFailure {
+        class: ErrorClass::Permanent,
+        code: "reset_claim_refused",
+        message: Cow::Borrowed("no reset generation has started"),
     }
 }
 
@@ -144,6 +194,96 @@ fn profile_credentials(database: &Database) -> Result<Value, AbiFailure> {
     Ok(json!({ "profiles": profiles }))
 }
 
+fn claims_in_tx(tx: &rusqlite::Transaction<'_>) -> Result<Vec<String>, AbiFailure> {
+    let mut statement = tx
+        .prepare("SELECT credential_ref FROM reset_credential_claims ORDER BY credential_ref")
+        .map_err(sqlite_failure)?;
+    let claims = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(sqlite_failure)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sqlite_failure)?;
+    Ok(claims)
+}
+
+/// The claim step of a "remove credentials" choice, as one transaction: reading the profiles,
+/// deciding which of the choice's references are free to claim and writing the claims happen
+/// under one write lock, so no profile can start holding a reference between the decision and
+/// the claim. A reference some profile outside `bound_profile_versions` holds belongs to that
+/// profile (configured after the choice, or never part of it) and is never claimed, so its
+/// secret is never deleted. An existing claim set is returned unchanged.
+fn claim_credentials(
+    database: &mut Database,
+    credential_refs: &[String],
+    bound_profile_versions: &[String],
+) -> Result<Value, AbiFailure> {
+    let tx = database
+        .immediate_transaction()
+        .map_err(|e| store_failure(&e))?;
+    let existing = claims_in_tx(&tx)?;
+    if !existing.is_empty() {
+        tx.commit().map_err(sqlite_failure)?;
+        return Ok(json!({ "claimed": existing }));
+    }
+    let generation: Option<i64> = tx
+        .query_row("SELECT MAX(generation) FROM reset_generations", [], |row| {
+            row.get(0)
+        })
+        .map_err(sqlite_failure)?;
+    let Some(generation) = generation else {
+        return Err(claim_refused());
+    };
+    let bound: HashSet<&str> = bound_profile_versions.iter().map(String::as_str).collect();
+    let held_by_other_profiles: HashSet<String> = {
+        let mut statement = tx
+            .prepare(
+                "SELECT profile_version, credential_ref FROM provider_profiles \
+                 WHERE credential_ref IS NOT NULL",
+            )
+            .map_err(sqlite_failure)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(sqlite_failure)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sqlite_failure)?;
+        rows.into_iter()
+            .filter(|(version, _)| !bound.contains(version.as_str()))
+            .map(|(_, reference)| reference)
+            .collect()
+    };
+    let claimed: BTreeSet<&str> = credential_refs
+        .iter()
+        .map(String::as_str)
+        .filter(|reference| !held_by_other_profiles.contains(*reference))
+        .collect();
+    for reference in &claimed {
+        tx.execute(
+            "INSERT INTO reset_credential_claims (credential_ref, generation) VALUES (?, ?)",
+            rusqlite::params![reference, generation],
+        )
+        .map_err(sqlite_failure)?;
+    }
+    tx.commit().map_err(sqlite_failure)?;
+    Ok(json!({ "claimed": claimed.into_iter().collect::<Vec<_>>() }))
+}
+
+fn credential_claims(database: &mut Database) -> Result<Value, AbiFailure> {
+    let tx = database.transaction().map_err(|e| store_failure(&e))?;
+    let claims = claims_in_tx(&tx)?;
+    tx.commit().map_err(sqlite_failure)?;
+    Ok(json!({ "claims": claims }))
+}
+
+fn release_credential_claims(database: &mut Database) -> Result<Value, AbiFailure> {
+    let released = database
+        .conn()
+        .execute("DELETE FROM reset_credential_claims", [])
+        .map_err(sqlite_failure)?;
+    Ok(json!({ "released": released }))
+}
+
 fn run(database: &mut Database, command: &Command) -> Result<Value, AbiFailure> {
     match command {
         Command::Start {} => {
@@ -184,6 +324,12 @@ fn run(database: &mut Database, command: &Command) -> Result<Value, AbiFailure> 
             })?;
             Ok(json!({}))
         }
+        Command::ClaimCredentials {
+            credential_refs,
+            bound_profile_versions,
+        } => claim_credentials(database, credential_refs, bound_profile_versions),
+        Command::CredentialClaims {} => credential_claims(database),
+        Command::ReleaseCredentialClaims {} => release_credential_claims(database),
     }
 }
 

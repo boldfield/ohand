@@ -112,6 +112,15 @@ protocol ResetCore: Sendable {
     func status() async throws -> ResetProgress?
     func profileCredentials() async throws -> [ResetProfileCredential]
     func revokeProfile(profileVersion: String) async throws
+    /// The claim step of a `remove` choice, in one core transaction: every reference in `credentialReferences` that no
+    /// profile outside `boundProfileVersions` holds is claimed, and storage refuses any profile insert or edit that
+    /// would take a claimed reference until `releaseCredentialClaims`. Returns the persisted claim set: when claims
+    /// already exist they are returned unchanged, so a retry acts on what was claimed, never on a new snapshot.
+    func claimCredentials(credentialReferences: [String], boundProfileVersions: [String]) async throws -> [String]
+    /// The persisted claim set, sorted; empty when nothing is claimed.
+    func credentialClaims() async throws -> [String]
+    /// Releases every claim. Called only once every claimed secret is gone.
+    func releaseCredentialClaims() async throws
 }
 
 /// The per-item cleanup executors (notifications, ingress, audio). `DeletionCleanupService` is the production

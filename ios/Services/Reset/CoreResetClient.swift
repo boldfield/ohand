@@ -52,6 +52,21 @@ final class CoreResetClient: ResetCore, @unchecked Sendable {
         _ = try await ask(.revokeProfile(profileVersion: profileVersion), as: ResetProfileRevoked.self)
     }
 
+    func claimCredentials(credentialReferences: [String], boundProfileVersions: [String]) async throws -> [String] {
+        try await ask(
+            .claimCredentials(credentialReferences: credentialReferences, boundProfileVersions: boundProfileVersions),
+            as: ResetCredentialsClaimedAnswer.self
+        ).claimed
+    }
+
+    func credentialClaims() async throws -> [String] {
+        try await ask(.credentialClaims, as: ResetCredentialClaimsAnswer.self).claims
+    }
+
+    func releaseCredentialClaims() async throws {
+        _ = try await ask(.releaseCredentialClaims, as: ResetCredentialClaimsReleasedAnswer.self)
+    }
+
     /// The generation new captures belong to right now: the latest started reset, or 0.
     func currentGeneration() async throws -> Int64 {
         guard let generation = try await ask(.currentGeneration, as: ResetGenerationAnswer.self).generation else {
