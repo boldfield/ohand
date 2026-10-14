@@ -127,6 +127,28 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
     - (b) In `ios/Tests/ProjectSmoke/ProjectSmokeTests.swift`, only the `ContentView` assertion that U01's shell replaces. Any other assertion is out.
     - (c) In `ios/project.yml`, exactly one `OhAndApp` sources entry, for the repository's `app/` directory: `optional: true`, `createIntermediateGroups: true`, placeholders excluded. Without it no target compiles the `app/<slice>/` directories the UI slices own. If `ios/scripts/check_project_config.py` rejects the entry, U01 blocks and names the check. It does not edit the check.
   - **Still owed in U01.** Retry a failed launch from `sceneWillEnterForeground` and `willConnectTo` when no services exist. `launch()` is idempotent. A test covers it (Opus round 1, finding 2).
+- B05 prerequisites: the native daily-prompt pipeline (coordinator, 2026-10-14, after PR #213 round 1). Both reviewers rejected B05's Swift `DailyPromptSchedule`. It is an in-memory copy of S02's `PromptSchedule` that diverges from it:
+  - Opus: it replays a prompt delivered while the app was not observing, after the clock is set back.
+  - Opus: it replans the same local date after a relaunch and westward travel.
+  - GPT: it spends a date that core never attempted.
+  - GPT: no production path installs a prompt at all.
+
+  B05 blocked itself, correctly. S02 and S03 built the core schedule and coordinator, but nothing exposes `PromptSchedule` through the FFI, nothing persists it (`reconcile_prompts` says "persist it after every pass"), and nothing native installs prompts (`NotificationPermissionModels.swift:163`: "Installing them belongs to the prompt scheduler"; `LifecycleCoordinator.swift:103`: "the core's daily prompt schedule is not exposed through the bridge"). No task owned this. Without it, optional daily prompts never fire in M1, whatever U08a configures.
+  - **New tasks.**
+    - **S05a (core):** the core persists the schedule and owns it end to end. Native code supplies only the time zone, the permission state and the triggers.
+    - **S05b (native):** a prompt service driven by the lifecycle, connected through the root.
+    - **B05** then depends on S05b and drops its Swift copy. Its prompt half becomes "forward clock and zone changes to the core schedule and run a pass", tested against the real core. Its reminder half (PR #213: debouncing, absolute instants, `TimeChangeRealCoreTests`) was sound and is kept.
+  - **S05a allowance.**
+    - (1) One appended migration step in `core/src/store/schema/mod.rs`, the next version after v10. It creates a single-row `prompt_schedule` table holding the serialized `PromptSchedule` and `updated_at`, and it gets a migration test in `core/tests/migrations/`.
+    - (2) In `core/src/ffi/notification_reconciliation.rs`, only what makes the reminder pass take its prompt demands from the persisted schedule through S02's `reconcile_prompts`, and persist the schedule in the same call. Native-supplied prompt candidates stop being a source of installs.
+
+    Nothing else outside S05a's paths is covered.
+- T11 prerequisites, round 2 (coordinator, 2026-10-14, after PR #216 round 1). Both reviewers found that T11's self-hosted "registration" is inert. `OptionalCapabilitiesModule.selfHosted` has no consumer. Because T11a registered `SelfHosted` unconditionally in the job runner, a root without the module still dispatches a stored `supported` self-hosted profile (the PR's own test shows it). So "absent capability stays disabled" fails. T11 blocked itself, correctly: no module seam can switch a provider protocol on or off.
+  - The coordinator chose a core-enforced gate over redefining the stored profile as the registration. T05 requires a capability to be absent or disabled for the base trial until its own canaries pass. That has to be a build-level decision the core enforces, not a property of user data that U05 may later write.
+  - **New tasks.**
+    - **T11c (core):** the host declares which provider protocols may dispatch. Self-hosted is off by default. T11c also adds a typed provider-profile status read.
+    - **T11d (root):** modules declare enabled protocols, the root passes the union to the core at assembly, and modules get the status read as a typed client.
+  - **Serialization.** The root edits are chained on `CompositionRoot.swift`: U01b → U01c → S05b → T11d. U01 is the critical path, B05 comes next, and T11 is off the M1 critical path. T11 now depends on T11c and T11d.
 - V06 and V07 now depend on V01 alone: they implement Rust adapters against its transport interface using fixtures. V05 is the native effect implementation and remains required by app composition/integration, not by independent protocol adapter implementation. This is an explicit dependency override for those retained tasks.
 
 ## Why some tasks stay together
@@ -699,6 +721,110 @@ Acceptance:
    Existing tests pass. The macOS CI run for the exact head is linked.
 
 Source pointers: `ios/Services/Ingress/ForegroundIngressService.swift`; `ios/Services/Ingress/IngressRecord.swift:20`; `ios/Services/Assembly/CompositionRoot.swift:779`, `:826`; `ios/Capture/Voice/VoiceRecordingTypes.swift:105`; `ios/Capture/Voice/VoiceRecoveryTypes.swift:32`.
+
+### S05a
+
+Persist the daily prompt schedule in the core and expose it through the FFI
+
+Make the core the only holder of the S02 prompt schedule, durable across relaunches, and run prompt installs from it inside the reminder pass.
+
+Owned paths: `core/src/ffi/prompt_schedule.rs`, `core/src/ffi/prompt_schedule/`, its single `pub mod` line in `core/src/ffi/mod.rs`, `ios/OhAndCoreBridge/CoreHandle+PromptSchedule.swift`. It also holds the allowance in "B05 prerequisites": one migration step, and the prompt-source change in `core/src/ffi/notification_reconciliation.rs`.
+
+Dependencies: none (L05b's v10 has landed).
+
+Acceptance:
+
+1. The core loads and saves `PromptSchedule` from the new table. Every exported entry point that takes `now` reads the core clock, takes the IANA zone from the caller and persists the schedule before it returns.
+2. Exports:
+   - configure (off, or a daily local time);
+   - refresh (S02's `RefreshTrigger`: launch, foreground, time or zone change, settings change);
+   - read the current settings and next planned occurrence, without content.
+3. With optional prompts allowed and the schedule enabled, the reminder pass takes its prompt demands only from the persisted schedule, through `reconcile_prompts`, and records the capacity pass in the ledger. Prompt candidates supplied by the caller no longer cause installs. Reminders keep priority over prompts.
+4. Rust tests on a migrated store cover:
+   - the schedule survives reopening the store;
+   - a prompt the OS delivered while nothing was observing is not reinstalled after the clock is set back;
+   - after a reopen and westward zone travel, no second prompt for an already-held local date;
+   - a planned occurrence that permission or capacity kept from being attempted is not spent, and a later time the same day schedules;
+   - DST gap and fold use S02's local-time rules;
+   - repeated refreshes do not duplicate an install;
+   - the migration test.
+
+   `make check` and `make test` pass. The exact-head macOS CI run is linked: the bridge must compile.
+
+Source pointers: `core/src/suggestions/schedule/plan.rs:167`, `:213`, `:222`, `:299`; `core/src/suggestions/schedule/apply.rs:119`; `core/src/ffi/notification_reconciliation.rs:21`, `:249`.
+
+### S05b
+
+Drive the daily prompt schedule from the app lifecycle
+
+Connect the core prompt schedule to launch, foreground, permission changes and settings, so a configured daily prompt is actually installed and kept current.
+
+Owned paths: `ios/Services/Prompts/`, `ios/Tests/Prompts/`, `ios/Services/Assembly/CompositionRoot.swift` (only the prompt service's construction and its typed client), `ios/Tests/Services/CompositionRootTests.swift`.
+
+Dependencies: S05a, U01c (shared file).
+
+Acceptance:
+
+1. A prompt service over a root-provided typed client exposes configure, read, and a time-change entry that refreshes with the current zone. The root installs it as the `LifecycleCoordinator` `.promptEligibility` action, so every launch, foreground and time-change pass refreshes the schedule and the same pass installs or cancels prompts through the core. U08a's settings UI calls configure; that UI is not built here.
+2. Prompts stay off until configured. Turning them off cancels any installed prompt. Permission denied or provisional follows N04b's existing rules. No prompt content appears in any payload beyond S03's rules.
+3. Real-core simulator tests with the fake notification centre:
+   - configure, then launch, installs exactly one prompt for the next eligible local date;
+   - a foreground pass does not duplicate it;
+   - turning prompts off cancels it;
+   - a relaunch keeps the ledger: no second prompt for a held date.
+
+   Existing tests pass. The exact-head macOS CI run is linked.
+
+Source pointers: `ios/Services/Assembly/LifecycleCoordinator.swift:101`-`:106`, `:592`; `ios/Services/NotificationPermission/NotificationPermissionReconciler.swift:38`; `ios/Services/Assembly/CompositionRoot.swift:1051`.
+
+### T11c
+
+Let the host decide which provider protocols the core may dispatch
+
+Gate provider-protocol dispatch in the core on an explicit host declaration, so an optional protocol is disabled unless the build registers it. Add a typed provider-profile status read.
+
+Owned paths: `core/src/ffi/provider_transport.rs`, `core/src/ffi/provider_transport/`, `core/src/ffi/job_runner.rs`, `core/src/ffi/job_runner/`, `ios/OhAndCoreBridge/CoreHandle+JobRunner.swift`, `ios/OhAndCoreBridge/CoreHandle+ProviderTransport.swift`.
+
+Dependencies: none.
+
+Acceptance:
+
+1. A core-handle call sets the enabled provider protocols. The job-runner drain, `prepare` and `run_exchange`, and shadow-review dispatch refuse a protocol that is not enabled, with a normalized `protocol_not_enabled` and nothing sent.
+2. The default is Anthropic and OpenAI enabled and self-hosted disabled. That keeps today's behaviour for the base protocols. Enabling self-hosted changes no other check (T11a rules).
+3. A status read for a provider-profile version returns only whether it exists, its protocol, whether it is revoked, and whether it serves a given model. It returns no endpoint, credential or content.
+4. Tests:
+   - a stored `supported` self-hosted profile and job, with self-hosted not enabled, sends nothing in all three paths;
+   - enabled, it dispatches;
+   - disabling it again stops new dispatches;
+   - the status read covers revoked, missing and wrong-protocol profiles;
+   - existing tests pass, with fixtures enabling self-hosted where they rely on it.
+
+   `make check` and `make test` pass. The exact-head macOS CI run is linked.
+
+Source pointers: `core/src/ffi/job_runner.rs:776`; `core/src/ffi/provider_transport.rs:692`; `core/src/ffi/provider_transport/shadow_review.rs`.
+
+### T11d
+
+Let modules enable provider protocols at the composition root
+
+Give `CompositionModule` a typed way to declare the provider protocols it enables, and give modules the provider-profile status read as a typed client.
+
+Owned paths: `ios/Services/Assembly/CompositionRoot.swift`, `ios/Tests/Services/CompositionRootTests.swift`.
+
+Dependencies: T11c, S05b (shared file).
+
+Acceptance:
+
+1. `CompositionModule` gains `enabledProviderProtocols`, which defaults to empty. During assembly, under undo-on-failure, the root passes the base protocols plus the union of the modules' declarations to T11c's call. A root with no module declaring self-hosted leaves it disabled.
+2. `CompositionCoreClients` gains a typed provider-profile status client. No `CoreHandle` becomes public.
+3. Root tests:
+   - with no declaring module, a stored self-hosted job sends nothing;
+   - a module declaring self-hosted enables dispatch;
+   - the status client reports revoked and missing profiles.
+
+   Existing tests pass. The exact-head macOS CI run is linked.
+
+Source pointers: `ios/Services/Assembly/CompositionRoot.swift:156`, `:261`.
 
 ### I05b
 

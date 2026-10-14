@@ -2005,6 +2005,106 @@
         "ios/Services/Ingress/IngressRecord.swift:20",
         "ios/Services/Assembly/CompositionRoot.swift:779"
       ]
+    },
+    {
+      "key": "S05a",
+      "parent": "B05",
+      "title": "Persist the daily prompt schedule in the core and expose it through the FFI",
+      "file_scope": [
+        "core/src/ffi/prompt_schedule.rs",
+        "core/src/ffi/prompt_schedule/",
+        "ios/OhAndCoreBridge/CoreHandle+PromptSchedule.swift"
+      ],
+      "intent": "Core is the sole durable holder of the S02 PromptSchedule; reminder pass sources prompt demands only from it via reconcile_prompts.",
+      "acceptance": [
+        "Schedule loaded/saved from new table; entry points use core clock, caller zone, persist before return.",
+        "Exports configure/refresh/read (no content).",
+        "Reminder pass takes prompt demands only from persisted schedule; caller candidates no longer install; reminders keep priority.",
+        "Rust tests: reopen survival, no replay after backward clock, no second prompt after reopen+west travel, unattempted not spent, DST, idempotent refresh, migration; make check/test; macOS CI."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/suggestions/schedule/plan.rs:167",
+        "core/src/suggestions/schedule/apply.rs:119",
+        "core/src/ffi/notification_reconciliation.rs:249"
+      ]
+    },
+    {
+      "key": "S05b",
+      "parent": "B05",
+      "title": "Drive the daily prompt schedule from the app lifecycle",
+      "file_scope": [
+        "ios/Services/Prompts/",
+        "ios/Tests/Prompts/",
+        "ios/Services/Assembly/CompositionRoot.swift",
+        "ios/Tests/Services/CompositionRootTests.swift"
+      ],
+      "intent": "Native prompt service over a typed root client, installed as LifecycleCoordinator's promptEligibility action, so configured prompts are installed and kept current.",
+      "acceptance": [
+        "Service exposes configure/read/time-change; root installs it as the .promptEligibility action.",
+        "Off until configured; off cancels; permission per N04b; no extra content.",
+        "Real-core sim tests: one install, no duplicate on foreground, off cancels, relaunch keeps ledger; macOS CI."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "S05a",
+        "U01c"
+      ],
+      "source_pointers": [
+        "ios/Services/Assembly/LifecycleCoordinator.swift:101",
+        "ios/Services/Assembly/CompositionRoot.swift:1051"
+      ]
+    },
+    {
+      "key": "T11c",
+      "parent": "T11",
+      "title": "Let the host decide which provider protocols the core may dispatch",
+      "file_scope": [
+        "core/src/ffi/provider_transport.rs",
+        "core/src/ffi/provider_transport/",
+        "core/src/ffi/job_runner.rs",
+        "core/src/ffi/job_runner/",
+        "ios/OhAndCoreBridge/CoreHandle+JobRunner.swift",
+        "ios/OhAndCoreBridge/CoreHandle+ProviderTransport.swift"
+      ],
+      "intent": "Core-enforced enabled-protocol set (self-hosted off by default) across job runner, exchange and shadow review, plus a content-free provider-profile status read.",
+      "acceptance": [
+        "Host call sets enabled protocols; disabled protocol refused with protocol_not_enabled, nothing sent, in all three paths.",
+        "Default Anthropic+OpenAI on, self-hosted off; enabling changes no other check.",
+        "Status read: exists, protocol, revoked, serves model; nothing else.",
+        "Tests for disabled/enabled/re-disabled and status cases; existing pass; make check/test; macOS CI."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/ffi/job_runner.rs:776",
+        "core/src/ffi/provider_transport.rs:692"
+      ]
+    },
+    {
+      "key": "T11d",
+      "parent": "T11",
+      "title": "Let modules enable provider protocols at the composition root",
+      "file_scope": [
+        "ios/Services/Assembly/CompositionRoot.swift",
+        "ios/Tests/Services/CompositionRootTests.swift"
+      ],
+      "intent": "CompositionModule.enabledProviderProtocols collected by the root and passed to the core at assembly; typed provider-profile status client.",
+      "acceptance": [
+        "Modules declare protocols (default empty); root passes base+union under undo-on-failure.",
+        "Typed status client; no public CoreHandle.",
+        "Root tests: no declaring module sends nothing; declaring module enables; status reports revoked/missing; macOS CI."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "T11c",
+        "S05b"
+      ],
+      "source_pointers": [
+        "ios/Services/Assembly/CompositionRoot.swift:156",
+        "ios/Services/Assembly/CompositionRoot.swift:261"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -2357,6 +2457,8 @@
       "E03b",
       "T11a",
       "T11b",
+      "T11c",
+      "T11d",
       "V09"
     ],
     "U01": [
@@ -2370,7 +2472,8 @@
     "B05": [
       "B03",
       "N06",
-      "S03"
+      "S03",
+      "S05b"
     ],
     "U02a": [
       "U01",
@@ -2578,6 +2681,16 @@
     ],
     "U01c": [
       "U01b"
+    ],
+    "S05a": [],
+    "S05b": [
+      "S05a",
+      "U01c"
+    ],
+    "T11c": [],
+    "T11d": [
+      "T11c",
+      "S05b"
     ]
   },
   "retained_dependency_overrides": {
@@ -2704,6 +2817,10 @@
     {
       "date": "2026-10-14",
       "change": "U01 blocked after PR #212 round 1 on three cross-ownership gaps: no production composition of notification actions, no route provisioning (nothing writes routes; fresh-install saves rejected as UnknownRoute), and no public voice ingress seam. Added U01a (core idempotent local-only capture route), U01b (root: provision route at open + compose ActionHandler/receiver), U01c (root: voice handoff/recovery seam); U01 depends on all three. U01 allowance: ios/Tests/AppAssembly/, the replaced ContentView assertion in ProjectSmokeTests, and one OhAndApp sources entry for app/ in ios/project.yml. F10 granted ProbeScenarios.swift foreground-delivery scenario. L05b item (4): bind removal before the tap boundary."
+    },
+    {
+      "date": "2026-10-14",
+      "change": "B05 blocked: no native daily-prompt pipeline exists (S02 PromptSchedule unexposed, unpersisted, nothing installs prompts). Added S05a (core persists schedule, migration after v10, reminder pass sources prompts from it) and S05b (native prompt service as LifecycleCoordinator promptEligibility action); B05 depends on S05b and drops its Swift schedule copy. T11 blocked: self-hosted registration inert because the core dispatches SelfHosted unconditionally. Added T11c (core enabled-protocol gate, self-hosted off by default, profile status read) and T11d (root collects module-declared protocols). Root chain: U01b, U01c, S05b, T11d."
     }
   ]
 }
