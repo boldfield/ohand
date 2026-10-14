@@ -244,6 +244,7 @@ final class CaptureStatusTests: XCTestCase {
         var blocker: OpaquePointer?
         XCTAssertEqual(sqlite3_open(storePath, &blocker), SQLITE_OK)
         defer { sqlite3_close(blocker) }
+        sqlite3_busy_timeout(blocker, coreStoreBusyTimeoutMilliseconds)
         XCTAssertEqual(sqlite3_exec(blocker, "BEGIN IMMEDIATE", nil, nil, nil), SQLITE_OK)
 
         let capture = makeCapture(id: "capture-blocked", text: "must not be acknowledged")
