@@ -58,4 +58,23 @@ final class NotificationIdentifierTests: XCTestCase {
             XCTAssertNil(OpaqueIdentifier(candidate), "\(candidate.debugDescription) must be rejected")
         }
     }
+
+    func testPromptIdentifierIsAKindOfItsOwnAndNeverAReminderIdentifier() throws {
+        let prompt = try XCTUnwrap(PromptIdentifier(rawValue: "prompt:2026-10-15"))
+        XCTAssertEqual(prompt.localDate, "2026-10-15")
+        XCTAssertEqual(prompt.rawValue, "prompt:2026-10-15")
+        XCTAssertNil(NotificationIdentifier(rawValue: prompt.rawValue), "reminder validation stays as strict")
+        XCTAssertNil(PromptIdentifier(rawValue: "reminder-1#1"))
+    }
+
+    func testPromptIdentifierAcceptsOnlyTheCanonicalDateForm() {
+        let rejected = [
+            "", "prompt:", "prompt:2026-10-1", "prompt:2026-10-155", "prompt:2026-13-01", "prompt:2026-00-01",
+            "prompt:2026-10-00", "prompt:2026-10-32", "prompt:2026/10/15", "prompt:2026-10-15#1", "prompt:20261015",
+            "Prompt:2026-10-15", " prompt:2026-10-15", "prompt:2026-10-15 ", "prompt:2o26-10-15", "prompt:2026-1\u{0663}-15",
+        ]
+        for rawValue in rejected {
+            XCTAssertNil(PromptIdentifier(rawValue: rawValue), "\(rawValue.debugDescription) must be rejected")
+        }
+    }
 }

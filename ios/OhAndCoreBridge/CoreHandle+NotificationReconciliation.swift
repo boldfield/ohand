@@ -75,6 +75,8 @@ public struct CoreReminderReconcileRequest: Encodable, Equatable, Sendable {
 
     public let rearmRejectedSchedules: Bool
     public let allowOptionalPrompts: Bool
+    /// Ignored by the core, which takes its prompt demands only from the persisted prompt schedule (see
+    /// `startConfigurePromptSchedule`). Candidates are still validated, so a malformed one is refused.
     public let prompts: [Prompt]
     public let factsOnly: Bool
 
