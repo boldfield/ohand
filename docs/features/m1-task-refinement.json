@@ -1806,7 +1806,9 @@
         "ios/NotificationProbe/Tests/",
         "ios/CaptureProbe/UITests/",
         ".github/workflows/ios.yml",
-        "ios/scripts/"
+        "ios/scripts/",
+        "ios/NotificationProbe/Sources/ProbeScenarios.swift",
+        "docs/validation/notification-probe.md"
       ],
       "intent": "Root-cause and fix intermittent NotificationProbe and CaptureProbe UI-test timeouts in the simulator job so a red ios.yml means a real defect.",
       "acceptance": [
@@ -1821,7 +1823,8 @@
         "ios/NotificationProbe/Tests/NotificationProbeUITestCase.swift:10",
         "ios/CaptureProbe/UITests/CaptureProbeHandoffUITests.swift:61",
         ".github/workflows/ios.yml:90",
-        ".github/workflows/ios.yml:242"
+        ".github/workflows/ios.yml:242",
+        "ios/NotificationProbe/Sources/ProbeScenarios.swift (foregroundDelivery only)"
       ]
     },
     {
