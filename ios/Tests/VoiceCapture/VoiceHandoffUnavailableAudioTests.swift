@@ -83,7 +83,10 @@ final class VoiceHandoffUnavailableAudioTests: VoiceCaptureTestCase {
                 IngressVoiceHandoff.result(for: .keptForRetry(captureID: captureID, problem: .sourceUnavailable(problem))),
                 .stagedAudioUnavailable, "\(problem)")
         }
+        // A storage error while moving leaves the audio in the in-progress store under the staging record, which
+        // ingress retries, so that audio is still durable and stays kept-for-retry.
         let otherProblems: [IngressPendingProblem] = [
+            .sourceUnavailable(.storage(IngressStorageError(CocoaError(.fileWriteUnknown)))),
             .notCommitted, .commitUnknown, .coreUnavailable, .conflictingReuse, .rejected(code: "x"),
             .recordUnreadable(.corruptRecord),
         ]

@@ -170,7 +170,9 @@ final class IngressVoiceHandoff: VoiceRecordingHandoffReceiving {
             return .saved(
                 itemID: acknowledgment.itemID, savedAt: acknowledgment.savedAt,
                 alreadyImported: acknowledgment.alreadyImported)
-        case .keptForRetry(_, .sourceUnavailable):
+        case .keptForRetry(_, .sourceUnavailable(.audioSourceMissing)),
+             .keptForRetry(_, .sourceUnavailable(.audioSourceEmpty)),
+             .keptForRetry(_, .sourceUnavailable(.audioDestinationConflict)):
             return .stagedAudioUnavailable
         case .keptForRetry:
             return .keptForRetry
