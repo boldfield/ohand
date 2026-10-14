@@ -16,6 +16,8 @@ use serde_json::{json, Value};
 use std::sync::mpsc::Receiver;
 
 const ANTHROPIC_ORIGIN: &str = "https://api.anthropic.com";
+const SELF_HOSTED_ORIGIN: &str = "https://spark.example.test";
+const SELF_HOSTED_ENDPOINT: &str = "https://spark.example.test/v1";
 const CREDENTIAL_REFERENCE: &str = "credential-ref/synthetic-primary";
 const NOTE_TEXT: &str = "call the roofer tomorrow at 9";
 const CAPTURE_ID: &str = "5a1c0000-0000-4000-8000-0000000000c1";
@@ -87,9 +89,35 @@ fn anthropic_profile() -> ProviderProfile {
     .expect("valid profile")
 }
 
+fn self_hosted_profile() -> ProviderProfile {
+    ProviderProfileBuilder::new(
+        "synthetic-self-hosted-profile",
+        ProviderProtocol::SelfHosted,
+        "synthetic-model",
+    )
+    .credential_ref(CREDENTIAL_REFERENCE)
+    .timeout_seconds(30)
+    .endpoint(SELF_HOSTED_ENDPOINT)
+    .authorized_destination(SELF_HOSTED_ORIGIN)
+    .capability(
+        CapabilityMetadata::supported(
+            ProviderCapability::TextInterpretation,
+            "ffi-fixtures:job_runner",
+        )
+        .with_input_size_limit(500)
+        .with_structured_output(StructuredOutputMode::JsonSchema),
+    )
+    .build()
+    .expect("valid profile")
+}
+
 /// Stands in for the import and profile installation, which create these rows in production.
 fn seed(path: &str, with_native_job: bool, note_text: &str) {
-    let profile = anthropic_profile();
+    seed_profile(path, anthropic_profile(), with_native_job, note_text);
+}
+
+fn seed_profile(path: &str, profile: ProviderProfile, with_native_job: bool, note_text: &str) {
+    let origins = json!(profile.authorized_destinations()).to_string();
     let mut database =
         Database::open(path, std::sync::Arc::new(crate::store::schema::SystemClock)).unwrap();
     let transaction = database.transaction().unwrap();
@@ -99,11 +127,12 @@ fn seed(path: &str, with_native_job: bool, note_text: &str) {
         .execute(
             "INSERT INTO provider_profiles (profile_version, profile_id, provider_type, endpoint, \
              model, credential_ref, timeout_seconds, retry_policy, authorized_destinations, \
-             capabilities, created_at, revoked_at) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL)",
+             capabilities, created_at, revoked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
             rusqlite::params![
                 profile.profile_version(),
                 profile.profile_id(),
                 record["protocol"].as_str().unwrap(),
+                profile.endpoint(),
                 profile.model(),
                 CREDENTIAL_REFERENCE,
                 profile.timeout_seconds(),
@@ -137,14 +166,14 @@ fn seed(path: &str, with_native_job: bool, note_text: &str) {
         .execute(
             "INSERT INTO routes (route_id, route_name, scope, processing_destinations, \
              created_at) VALUES (?, 'synthetic', 'personal', ?, '2026-10-08T09:00:00Z')",
-            rusqlite::params![ROUTE_ID, json!([ANTHROPIC_ORIGIN]).to_string()],
+            rusqlite::params![ROUTE_ID, origins],
         )
         .unwrap();
     transaction
         .execute(
             "INSERT INTO route_authorizations (route_id, capability, authorized_destinations, \
              created_at) VALUES (?, 'text_interpretation', ?, '2026-10-08T09:00:00Z')",
-            rusqlite::params![ROUTE_ID, json!([ANTHROPIC_ORIGIN]).to_string()],
+            rusqlite::params![ROUTE_ID, origins],
         )
         .unwrap();
     transaction
@@ -185,8 +214,16 @@ impl Session {
     }
 
     fn open_with_text(name: &str, with_native_job: bool, note_text: &str) -> Session {
+        Session::open_seeded(name, |path| seed(path, with_native_job, note_text))
+    }
+
+    fn open_with_profile(name: &str, profile: ProviderProfile) -> Session {
+        Session::open_seeded(name, |path| seed_profile(path, profile, false, NOTE_TEXT))
+    }
+
+    fn open_seeded(name: &str, seed_store: impl FnOnce(&str)) -> Session {
         let (directory, path) = temporary_store(name);
-        seed(&path, with_native_job, note_text);
+        seed_store(&path);
         let mut handle = 0;
         let outcome = consume(unsafe { ohand_core_open(path.as_ptr(), path.len(), &mut handle) });
         assert_eq!(outcome.status, OHAND_CORE_STATUS_OK);
@@ -362,6 +399,28 @@ fn anthropic_reply() -> Vec<u8> {
     .unwrap()
 }
 
+fn self_hosted_reply() -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "id": "chatcmpl-synthetic-01",
+        "object": "chat.completion",
+        "model": "synthetic-model",
+        "choices": [{
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+                "role": "assistant",
+                "content": json!({
+                    "operation": { "kind": "annotate" },
+                    "item_type": "action",
+                    "source_spans": [{ "start": 0, "end": 4 }],
+                })
+                .to_string(),
+            },
+        }],
+    }))
+    .unwrap()
+}
+
 fn only_job(summary: &Value) -> &Value {
     let jobs = summary["jobs"].as_array().unwrap();
     assert_eq!(jobs.len(), 1, "{summary}");
@@ -417,6 +476,50 @@ fn a_ready_job_is_sent_to_the_pinned_destination_off_the_worker_and_completes() 
         session.complete(command.request_id, 200, b"{}").code(),
         "not_found"
     );
+    session.assert_no_command();
+    session.close();
+}
+
+#[test]
+fn a_self_hosted_job_is_sent_only_to_its_own_endpoint_and_completes() {
+    let _guard = serial();
+    let session = Session::open_with_profile("self-hosted", self_hosted_profile());
+    assert_eq!(session.register_host(&[]).status, OHAND_CORE_STATUS_OK);
+
+    assert_eq!(session.start(22).status, OHAND_CORE_STATUS_OK);
+    let command = session.command();
+    assert_eq!(command.command, OHAND_JOB_HOST_COMMAND_SEND);
+    let send: Value = serde_json::from_slice(&command.data).unwrap();
+    assert_eq!(
+        send["url"],
+        "https://spark.example.test/v1/chat/completions"
+    );
+    assert_eq!(send["method"], "POST");
+    assert_eq!(send["authorized_origins"], json!([SELF_HOSTED_ORIGIN]));
+    assert_eq!(send["capability"], "text_interpretation");
+    assert_eq!(
+        send["credential"],
+        json!({
+            "reference": CREDENTIAL_REFERENCE,
+            "header": "Authorization",
+            "scheme": "Bearer",
+        })
+    );
+    assert!(send["body"].as_str().unwrap().contains(NOTE_TEXT));
+
+    assert_eq!(
+        session
+            .complete(command.request_id, 200, &self_hosted_reply())
+            .status,
+        OHAND_CORE_STATUS_OK
+    );
+    let summary = payload_of(&session.event(22));
+    let job = only_job(&summary);
+    assert_eq!(job["result"], "settled", "{summary}");
+    assert_eq!(job["settlement"], "completed", "{summary}");
+    assert_eq!(session.job(JOB_ID).status, JobStatus::Completed);
+
+    wait_until_idle(session.handle);
     session.assert_no_command();
     session.close();
 }

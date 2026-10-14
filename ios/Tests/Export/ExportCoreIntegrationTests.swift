@@ -5,6 +5,9 @@ import XCTest
 @testable import OhAndCoreBridge
 @testable import OhAndServices
 
+/// Wait at least as long as the core's own 5 s busy timeout (core/src/store/schema/mod.rs) for its write lock.
+private let coreStoreBusyTimeoutMilliseconds: Int32 = 5_000
+
 /// One "process": a real core over the on-disk store with the production export client attached to its single event
 /// handler. Events arrive on the main queue, where XCTest runs synchronous tests, so waiting pumps the run loop.
 final class RealCoreExportSession {
@@ -359,6 +362,7 @@ final class ExportCoreIntegrationTests: XCTestCase {
     private static func execute(_ databasePath: String, _ statement: String) throws {
         var database: OpaquePointer?
         guard sqlite3_open(databasePath, &database) == SQLITE_OK else { throw StorageSetupFailed() }
+        sqlite3_busy_timeout(database, coreStoreBusyTimeoutMilliseconds)
         defer { sqlite3_close(database) }
         let status = sqlite3_exec(database, statement, nil, nil, nil)
         XCTAssertEqual(status, SQLITE_OK, "\(String(cString: sqlite3_errmsg(database))): \(statement)")

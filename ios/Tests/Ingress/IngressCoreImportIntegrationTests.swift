@@ -3,6 +3,9 @@ import XCTest
 @testable import OhAndCoreBridge
 @testable import OhAndServices
 
+/// Wait at least as long as the core's own 5 s busy timeout (core/src/store/schema/mod.rs) for its write lock.
+private let coreStoreBusyTimeoutMilliseconds: Int32 = 5_000
+
 /// Drives `ForegroundIngressService` against the real Rust core on the simulator, over the protected store locations.
 /// A process interruption is simulated by discarding the service and closing the core, then reopening both from disk:
 /// nothing but the files survives, exactly as after a kill. The simulator does not lock, so lock-state behavior is
@@ -66,6 +69,7 @@ final class IngressCoreImportIntegrationTests: IngressStorageTestCase {
     private func withDatabase(_ body: (OpaquePointer?) throws -> Void) throws {
         var database: OpaquePointer?
         XCTAssertEqual(sqlite3_open(layout.databaseURL.path, &database), SQLITE_OK)
+        sqlite3_busy_timeout(database, coreStoreBusyTimeoutMilliseconds)
         defer { sqlite3_close(database) }
         try body(database)
     }
