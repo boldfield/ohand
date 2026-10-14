@@ -54,11 +54,12 @@ final class CaptureProbeHandoffUITests: XCTestCase {
 
     private func sendAppToBackground() {
         XCUIDevice.shared.press(.home)
-        let leftForeground = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "state != %d", XCUIApplication.State.runningForeground.rawValue),
-            object: app
-        )
-        XCTAssertEqual(XCTWaiter().wait(for: [leftForeground], timeout: 15), .completed, "app never left the foreground")
+        // Spin the run loop: XCTest delivers app state changes on the main queue, and a predicate wait can lose its deadline to an accessibility snapshot.
+        let deadline = Date().addingTimeInterval(15)
+        while app.state == .runningForeground && Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        }
+        XCTAssertNotEqual(app.state, .runningForeground, "app never left the foreground")
     }
 
     private var statusLabel: XCUIElement { app.staticTexts["capture-status"] }

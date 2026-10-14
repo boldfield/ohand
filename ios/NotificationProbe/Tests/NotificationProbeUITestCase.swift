@@ -24,11 +24,16 @@ class NotificationProbeUITestCase: XCTestCase {
         XCTAssertTrue(button.waitForExistence(timeout: 15), "button for \(scenario) missing")
         button.tap()
         whileRunning?()
-        let published = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "label != %@ AND label CONTAINS %@", previousResult, "\"scenario\":\"\(scenario)\""),
-            object: resultLabel
-        )
-        XCTAssertEqual(XCTWaiter().wait(for: [published], timeout: timeout), .completed, "\(scenario) never published")
+        // Judge the value that was read: a failed predicate expectation takes a slow debug snapshot that can eat its deadline.
+        let scenarioMarker = "\"scenario\":\"\(scenario)\""
+        let deadline = Date().addingTimeInterval(timeout)
+        var published = false
+        repeat {
+            let currentResult = resultLabel.label
+            published = currentResult != previousResult && currentResult.contains(scenarioMarker)
+            if !published { RunLoop.current.run(until: Date().addingTimeInterval(0.5)) }
+        } while !published && Date() < deadline
+        XCTAssertTrue(published, "\(scenario) never published")
         let json = resultLabel.label
         print("PROBE-RESULT \(json)")
         add(XCTAttachment(string: json))
