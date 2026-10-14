@@ -6,7 +6,8 @@ struct AppLauncherView: View {
 
     var body: some View {
         if let services = launcher.services {
-            AppRootView(navigation: services.navigation, captureEntry: services.captureEntry)
+            AppRootView(
+                navigation: services.navigation, captureEntry: services.captureEntry, context: services.managementContext)
         } else {
             AppUnavailableView(retry: { launcher.launch() })
         }

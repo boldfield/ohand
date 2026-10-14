@@ -18,6 +18,9 @@ final class ManagementNavigationModel: ObservableObject {
     @Published var path: [String] = []
     @Published private(set) var notice: String?
     @Published private(set) var isAuthenticating = false
+    /// The item a reminder notification tap resolved to, waiting for an item screen to present it. The root reports a
+    /// tap only while its session is authenticated, and this is dropped as soon as reads stop being authenticated.
+    @Published private(set) var requestedItemID: String?
 
     private let readScope: () -> CompositionReadScope
     private let authenticate: (_ reason: String, _ completion: @escaping (CompositionAuthenticationOutcome) -> Void) -> Void
@@ -60,11 +63,18 @@ final class ManagementNavigationModel: ObservableObject {
         }
     }
 
+    /// Records the item a notification tap resolved to. No item screen exists in the shell yet, so this changes
+    /// nothing on display; the screen that presents items takes the identifier from `requestedItemID`.
+    func openItem(itemID: String) {
+        requestedItemID = itemID
+    }
+
     /// Call when the app returns to the foreground or the session may have changed. Leaves every management screen
     /// once reads are no longer authenticated.
     func revalidate() {
-        if readScope() != .authenticated, !path.isEmpty {
-            path = []
+        if readScope() != .authenticated {
+            if !path.isEmpty { path = [] }
+            requestedItemID = nil
         }
         readAccessDidChange()
     }

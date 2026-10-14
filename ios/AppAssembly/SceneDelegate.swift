@@ -14,6 +14,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         options connectionOptions: UIScene.ConnectionOptions
     ) {
         guard let windowScene = (scene as? UIWindowScene), let launcher = launcher else { return }
+        launcher.launch()
 
         let window = UIWindow(windowScene: windowScene)
         window.rootViewController = UIHostingController(rootView: AppLauncherView(launcher: launcher))
@@ -26,7 +27,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
 
     func sceneWillEnterForeground(_ scene: UIScene) {
-        launcher?.services?.sceneWillEnterForeground()
+        launcher?.sceneWillEnterForeground()
     }
 
     func sceneDidEnterBackground(_ scene: UIScene) {

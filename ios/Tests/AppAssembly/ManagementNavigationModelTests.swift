@@ -115,6 +115,28 @@ final class ManagementNavigationModelTests: XCTestCase {
         XCTAssertEqual(model.path, [ManagementCatalog.settingsEntryID])
     }
 
+    func testAnOpenedItemIsRequestedWithoutChangingTheScreenOnDisplay() {
+        scope = .authenticated
+        model.open(entryID: ManagementCatalog.settingsEntryID)
+
+        model.openItem(itemID: "item-1")
+
+        XCTAssertEqual(model.requestedItemID, "item-1")
+        XCTAssertEqual(model.path, [ManagementCatalog.settingsEntryID])
+    }
+
+    func testLosingTheSessionDropsTheRequestedItem() {
+        scope = .authenticated
+        model.openItem(itemID: "item-1")
+        model.revalidate()
+        XCTAssertEqual(model.requestedItemID, "item-1", "an authenticated session keeps the request")
+
+        scope = .captureOnly
+        model.revalidate()
+
+        XCTAssertNil(model.requestedItemID)
+    }
+
     func testTheCatalogListsSearchAndSettingsAsSecondaryEntries() {
         XCTAssertEqual(ManagementCatalog.secondaryEntries.map(\.id), ["search", "settings"])
         XCTAssertNotNil(ManagementCatalog.entry(withID: "search"))

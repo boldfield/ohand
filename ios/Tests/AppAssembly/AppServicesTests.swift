@@ -29,13 +29,16 @@ final class AppServicesTests: XCTestCase {
     private func makeServices(
         handoff: CaptureEntryHandoff = CaptureEntryHandoff(notificationCenter: NotificationCenter()),
         notificationCenter: NotificationCenter = NotificationCenter(),
+        voice: VoiceCaptureServices? = nil,
         protectedDataAvailable: Bool = true
     ) throws -> AppServices {
         let lifecycle = LifecycleCoordinator()
         let root = try ServiceCompositionRoot(
             configuration: AppConfiguration.production(storageRoot: storageRoot), modules: [lifecycle])
         let services = AppServices(
-            root: root, lifecycle: lifecycle, handoff: handoff, notificationCenter: notificationCenter,
+            root: root, lifecycle: lifecycle, handoff: handoff, voice: voice,
+            notificationHooks: NotificationHooks(installDelegate: { _ in }, reconcile: { _ in }),
+            notificationCenter: notificationCenter,
             isProtectedDataAvailable: { protectedDataAvailable })
         created.append(services)
         return services
@@ -92,14 +95,6 @@ final class AppServicesTests: XCTestCase {
 
         XCTAssertEqual(services.captureEntry.textModel.text, "remind me to call the roofer")
         XCTAssertEqual(services.captureEntry.acknowledgment?.save, .notSaved)
-    }
-
-    func testVoiceCannotStartYetAndSaysSo() throws {
-        let services = try makeServices()
-        services.captureEntry.switchMode(to: .voice)
-        services.captureEntry.startRecording()
-        XCTAssertEqual(services.captureEntry.recorderState, .idle)
-        XCTAssertNotNil(services.captureEntry.voiceNotice)
     }
 
     // MARK: entries
@@ -199,6 +194,33 @@ final class AppServicesTests: XCTestCase {
         launcher.launch()
 
         XCTAssertEqual(launcher.services?.captureEntry.mode, .voice)
+    }
+
+    func testAForegroundAfterAFailedBuildRetriesAndPresentsAPendingEntry() throws {
+        struct Unavailable: Error {}
+        let handoff = CaptureEntryHandoff(notificationCenter: NotificationCenter())
+        handoff.register(source: .shortcutURL, requestedMode: .voice)
+        var attempts = 0
+        let launcher = AppLauncher(
+            makeServices: { [unowned self] in
+                attempts += 1
+                if attempts == 1 { throw Unavailable() }
+                return try self.makeServices(handoff: handoff)
+            },
+            startServices: { _, _ in },
+            isApplicationActive: { false })
+
+        launcher.launch()
+        XCTAssertNil(launcher.services)
+
+        launcher.sceneWillEnterForeground()
+
+        XCTAssertNotNil(launcher.services, "the foreground retried the build")
+        XCTAssertEqual(attempts, 2)
+        XCTAssertEqual(launcher.services?.captureEntry.mode, .voice, "the foreground event the build missed was delivered")
+
+        launcher.sceneWillEnterForeground()
+        XCTAssertEqual(attempts, 2, "with services present a foreground does not rebuild")
     }
 
     func testTheProductionStorageRootIsInsideApplicationSupport() throws {

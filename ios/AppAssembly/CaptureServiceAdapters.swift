@@ -99,19 +99,3 @@ final class RootCaptureProgressReader: CaptureProgressReading {
         }
     }
 }
-
-/// Stands in for the recorder until a voice save path exists. The composition root saves text only: it has no audio
-/// ingress, so a recording made now could not be imported. Starting says so, and nothing is recorded.
-final class VoiceRecorderUnavailable: VoiceRecordingControlling {
-    var state: VoiceRecorderState { .idle }
-    var onStateChange: ((VoiceRecorderState) -> Void)?
-    var onOutcome: ((VoiceCaptureOutcome) -> Void)?
-
-    func start(completion: @escaping (Result<VoiceRecordingStarted, VoiceStartFailure>) -> Void) {
-        completion(.failure(.recorderUnavailable))
-    }
-
-    func stop() {}
-
-    func cancel() {}
-}

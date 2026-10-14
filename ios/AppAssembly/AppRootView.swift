@@ -8,6 +8,7 @@ struct AppRootView: View {
 
     @ObservedObject var navigation: ManagementNavigationModel
     let captureEntry: CaptureEntryModel
+    let context: ManagementContext
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -18,7 +19,7 @@ struct AppRootView: View {
                 .safeAreaInset(edge: .bottom) { managementLinks }
                 .navigationDestination(for: String.self) { entryID in
                     if let entry = ManagementCatalog.entry(withID: entryID) {
-                        entry.makeView()
+                        entry.makeView(context)
                     } else {
                         Text("This screen is not available.").padding()
                     }

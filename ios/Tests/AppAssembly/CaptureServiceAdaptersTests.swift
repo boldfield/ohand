@@ -1,6 +1,6 @@
 import XCTest
 import OhAndCoreBridge
-import OhAndServices
+@testable import OhAndServices
 @testable import OhAnd
 
 final class CaptureServiceAdaptersTests: XCTestCase {
@@ -105,30 +105,70 @@ final class CaptureServiceAdaptersTests: XCTestCase {
 
     // MARK: voice
 
-    func testTheVoiceStandInRefusesToStartAndRecordsNothing() {
-        let voice = VoiceRecorderUnavailable()
-        XCTAssertEqual(voice.state, .idle)
-
-        var result: Result<VoiceRecordingStarted, VoiceStartFailure>?
-        voice.start { result = $0 }
-        XCTAssertEqual(result, .failure(.recorderUnavailable))
-        XCTAssertEqual(voice.state, .idle)
-        voice.stop()
-        voice.cancel()
-        XCTAssertEqual(voice.state, .idle)
+    func testEveryRootRecordingOutcomeMapsToTheRecordersHonestResult() {
+        let saved = CompositionRecordingOutcome.saved(
+            captureID: "voice-1", itemID: "item-1", savedAt: "2026-10-14T09:00:00Z", alreadySaved: true)
+        XCTAssertEqual(
+            RootVoiceHandoff.result(for: saved),
+            .saved(itemID: "item-1", savedAt: "2026-10-14T09:00:00Z", alreadyImported: true))
+        XCTAssertEqual(RootVoiceHandoff.result(for: .keptOnDevice(captureID: "voice-1")), .keptForRetry)
+        XCTAssertEqual(RootVoiceHandoff.result(for: .notStaged(captureID: "voice-1")), .notStaged)
+        XCTAssertEqual(
+            RootVoiceHandoff.result(for: .audioUnavailable(captureID: "voice-1")), .stagedAudioUnavailable,
+            "missing staged audio is never reported as kept")
+        XCTAssertEqual(RootVoiceHandoff.result(for: .itemDeleted(captureID: "voice-1")), .itemDeleted)
     }
 
-    func testStartingTheVoiceStandInTellsTheUserNothingWasRecorded() {
-        let model = CaptureEntryModel(
-            textIngress: RootTextCaptureIngress(save: { id, _, _, completion in completion(.notStaged(captureID: id)) }),
-            voice: VoiceRecorderUnavailable(), defaultMode: .voice,
-            access: { CaptureEntryAccess(protectedDataAvailable: true, readAuthorized: false) })
+    func testTheVoiceHandoffPassesTheRecordingToTheRootUnchanged() {
+        var received: [CompositionRecordingHandoff] = []
+        let handoff = RootVoiceHandoff(save: { recording, completion in
+            received.append(recording)
+            completion(.keptOnDevice(captureID: recording.captureID))
+        })
+        let startedAt = Date(timeIntervalSince1970: 1_790_000_000)
 
-        model.startRecording()
+        var result: VoiceHandoffResult?
+        handoff.handOff(
+            VoiceRecordingHandoff(
+                captureID: "voice-2", inProgressFileName: "voice-2.wav", finalizedFileName: "voice-2.wav",
+                startedAt: startedAt, durationSeconds: 3, fileSizeBytes: 96_000, end: .stoppedByUser)
+        ) { result = $0 }
 
-        XCTAssertEqual(model.recorderState, .idle)
-        XCTAssertEqual(model.voiceNotice, CaptureEntryModel.startFailureMessage(.recorderUnavailable))
-        XCTAssertNil(model.acknowledgment, "no recording means no acknowledgment of a save")
+        XCTAssertEqual(
+            received,
+            [CompositionRecordingHandoff(
+                captureID: "voice-2", inProgressFileName: "voice-2.wav", finalizedFileName: "voice-2.wav",
+                startedAt: startedAt)])
+        XCTAssertEqual(result, .keptForRetry)
+    }
+
+    func testRecoveryKeepsUnknownOwnershipUnknown() {
+        var unknown = CompositionRecoveryReport()
+        unknown.unclaimedInProgressFileNames = nil
+        XCTAssertNil(RootVoiceRecovery.report(for: unknown).unclaimedInProgressFileNames)
+        XCTAssertNil(
+            RootVoiceRecovery.report(for: nil).unclaimedInProgressFileNames,
+            "a stopped root inspected nothing, so nothing is claimed to be absent")
+
+        var known = CompositionRecoveryReport()
+        known.unclaimedInProgressFileNames = ["voice-3.wav"]
+        known.confirmedCaptureIDs = ["voice-4"]
+        known.deletedItemCaptureIDs = ["voice-5"]
+        let report = RootVoiceRecovery.report(for: known)
+        XCTAssertEqual(report.unclaimedInProgressFileNames, ["voice-3.wav"])
+        XCTAssertEqual(report.confirmedCaptureIDs, ["voice-4"])
+        XCTAssertEqual(report.deletedItemCaptureIDs, ["voice-5"])
+    }
+
+    func testRecoveryRunsTheRootsPassAndReportsInTheRecordersTerms() {
+        let ingress = RootVoiceRecovery(recover: { completion in
+            var report = CompositionRecoveryReport()
+            report.unclaimedInProgressFileNames = []
+            completion(report)
+        })
+        var report: VoiceIngressRecoveryReport?
+        ingress.recoverStagedCaptures { report = $0 }
+        XCTAssertEqual(report?.unclaimedInProgressFileNames, [])
     }
 
     // MARK: support
