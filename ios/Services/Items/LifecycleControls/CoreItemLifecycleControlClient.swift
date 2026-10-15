@@ -16,7 +16,7 @@ protocol ItemLifecycleControlCore: Sendable {
 /// the event answered one of this client's operations. Operation IDs start at `firstOperationID`, far from the ranges
 /// the other services use. Call `shutDown()` before closing the core so no completion is left waiting.
 public final class CoreItemLifecycleControlClient: ItemLifecycleControlCore, @unchecked Sendable {
-    public static let firstOperationID: UInt64 = 1 << 55
+    public static let firstOperationID: UInt64 = 1 << 49
 
     static let shutDownFailure = CoreFailure(
         errorClass: .cancelled, code: "client_shut_down", message: "the item lifecycle control client was shut down")
