@@ -787,6 +787,7 @@ public final class ServiceCompositionRoot {
     static let shadowReviewFirstOperationID: UInt64 = 1 << 48
     static let itemCorrectionClientName = "item corrections"
     static let itemDetailClientName = "item detail"
+    static let jobConfigurationClientName = "job configuration"
 
     /// One half-open interval of operation identifiers `[start, end)` that a client claims.
     public struct OperationRange: Equatable, Sendable {
@@ -821,6 +822,7 @@ public final class ServiceCompositionRoot {
         fixedWidthRange("notification actions", from: CoreNotificationActionClient.firstOperationID),
         fixedWidthRange(itemCorrectionClientName, from: CoreItemCorrectionClient.firstOperationID),
         fixedWidthRange(itemDetailClientName, from: CoreItemDetailClient.firstOperationID),
+        fixedWidthRange(jobConfigurationClientName, from: CoreJobConfigurationClient.firstOperationID),
         OperationRange(
             name: processingHealthClientName, start: ProcessingHealthService.firstOperationID,
             end: JobRunnerService.firstOperationID),
@@ -835,6 +837,9 @@ public final class ServiceCompositionRoot {
     public let itemCorrections: ItemCorrectionService
     /// Reads one item's full detail; needs an authenticated read session.
     public let itemDetails: ItemDetailService
+    /// Re-pins waiting work, requeues a job, revokes a profile and lists the jobs pinned to one; needs an authenticated
+    /// read session.
+    public let jobConfiguration: JobConfigurationService
 
     let adapters: CompositionAdapters
     /// The session whose scope gates every private read the root performs.
@@ -854,6 +859,7 @@ public final class ServiceCompositionRoot {
     private let notificationActions: NotificationActionClients
     private let itemCorrectionClient: CoreItemCorrectionClient
     private let itemDetailClient: CoreItemDetailClient
+    private let jobConfigurationClient: CoreJobConfigurationClient
     private let modules: [CompositionModule]
     private let foreground: ForegroundState
     private let stateLock = NSLock()
@@ -914,6 +920,8 @@ public final class ServiceCompositionRoot {
         itemCorrections = assembly.itemCorrections
         itemDetailClient = assembly.itemDetailClient
         itemDetails = assembly.itemDetails
+        jobConfigurationClient = assembly.jobConfigurationClient
+        jobConfiguration = assembly.jobConfiguration
         reminderReconciler = assembly.permissionReconciler
         foreground = assembly.foreground
         jobRunner.setDrainIdleObserver { [weak self] in self?.runReminderPassAfterDrain() }
@@ -1055,6 +1063,7 @@ public final class ServiceCompositionRoot {
         notificationActions.shutDown(session: adapters.readSession)
         itemCorrectionClient.shutDown()
         itemDetailClient.shutDown()
+        jobConfigurationClient.shutDown()
         reminderCore.invalidate()
         statusReader.shutDown()
         coreHandle.close()
@@ -1316,6 +1325,8 @@ public final class ServiceCompositionRoot {
         let itemCorrections: ItemCorrectionService
         let itemDetailClient: CoreItemDetailClient
         let itemDetails: ItemDetailService
+        let jobConfigurationClient: CoreJobConfigurationClient
+        let jobConfiguration: JobConfigurationService
         let permissionReconciler: NotificationPermissionReconciler
         let foreground: ForegroundState
     }
@@ -1422,6 +1433,11 @@ public final class ServiceCompositionRoot {
             router.register { itemDetailClient.handle($0) }
             undo.append { itemDetailClient.shutDown() }
             let itemDetails = ItemDetailService(core: itemDetailClient)
+            let jobConfigurationClient = CoreJobConfigurationClient(core: core)
+            router.register { jobConfigurationClient.handle($0) }
+            undo.append { jobConfigurationClient.shutDown() }
+            let jobConfiguration = JobConfigurationService(
+                core: jobConfigurationClient, session: adapters.readSession)
             let permissionReconciler = NotificationPermissionReconciler(
                 center: adapters.notificationCenter, reconciliation: reminderCore,
                 observations: adapters.permissionObservations)
@@ -1470,6 +1486,7 @@ public final class ServiceCompositionRoot {
                 reminderCore: reminderCore, providerTransport: providerTransport,
                 notificationActions: notificationActions, itemCorrectionClient: itemCorrectionClient,
                 itemCorrections: itemCorrections, itemDetailClient: itemDetailClient, itemDetails: itemDetails,
+                jobConfigurationClient: jobConfigurationClient, jobConfiguration: jobConfiguration,
                 permissionReconciler: permissionReconciler,
                 foreground: foreground)
         } catch {
