@@ -9,6 +9,8 @@ struct AppRootView: View {
     @ObservedObject var navigation: ManagementNavigationModel
     let captureEntry: CaptureEntryModel
     let context: ManagementContext
+    var destinations = ManagementCatalog.destinations
+    var presentationReporter: ((ManagementPresentationEvent) -> Void)?
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -17,12 +19,8 @@ struct AppRootView: View {
                 .navigationTitle("Oh And")
                 .navigationBarTitleDisplayMode(.inline)
                 .safeAreaInset(edge: .bottom) { managementLinks }
-                .navigationDestination(for: String.self) { entryID in
-                    if let entry = ManagementCatalog.entry(withID: entryID) {
-                        entry.makeView(context)
-                    } else {
-                        Text("This screen is not available.").padding()
-                    }
+                .navigationDestination(for: String.self) { pathComponent in
+                    destinationView(for: ManagementRoute(pathComponent: pathComponent))
                 }
         }
         .onChange(of: scenePhase) { phase in
@@ -32,6 +30,12 @@ struct AppRootView: View {
             default: break
             }
         }
+    }
+
+    private func destinationView(for route: ManagementRoute) -> some View {
+        destinations.view(for: route, context: context)
+            .onAppear { presentationReporter?(.appeared(route, isPlaceholder: !destinations.isRegistered(route))) }
+            .onDisappear { presentationReporter?(.disappeared(route)) }
     }
 
     private var managementLinks: some View {
