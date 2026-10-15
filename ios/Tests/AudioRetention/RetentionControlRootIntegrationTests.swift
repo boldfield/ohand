@@ -52,7 +52,7 @@ final class RetentionControlRootIntegrationTests: XCTestCase {
         XCTAssertEqual(entry.itemID, sole.itemID)
         XCTAssertEqual(entry.capturedAt, "2026-10-01T08:00:00Z")
         XCTAssertEqual(entry.reason, .transcriptionPending)
-        XCTAssertEqual(Set(entry.options), [.retryTranscription, .deleteAudio])
+        XCTAssertEqual(entry.options, [.deleteAudio], "retry is offered only when no transcription job is pending")
     }
 
     func testAStoredPeriodSurvivesAReopenedRootAndAnOutOfBoundsPeriodChangesNothing() async throws {
