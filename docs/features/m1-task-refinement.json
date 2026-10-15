@@ -2359,6 +2359,48 @@
         "ios/Services/Assembly/CompositionRoot.swift:162",
         "ios/Services/Credentials/CredentialService.swift:58"
       ]
+    },
+    {
+      "key": "F15",
+      "title": "Find and fix the memory corruption in the notification reconciliation FFI tests",
+      "file_scope": [
+        "core/src/ffi/notification_reconciliation.rs",
+        "core/src/ffi/notification_reconciliation/"
+      ],
+      "intent": "Diagnose and fix intermittent SIGSEGV/heap corruption in notification_reconciliation FFI tests.",
+      "acceptance": [
+        "Diagnosis under Linux parallel load covering both failures.",
+        "Fix the cause (product defect if callback/buffer use after unregister/close/abandon); panic-safe Session teardown; no retries/ignore/single-threading.",
+        "50 consecutive loaded full lib runs."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/ffi/notification_reconciliation.rs:173",
+        "core/src/ffi/notification_reconciliation/tests.rs:401"
+      ],
+      "parent": null
+    },
+    {
+      "key": "F16",
+      "title": "Make the notification probe's foreground delivery deterministic",
+      "file_scope": [
+        "ios/NotificationProbe/Tests/",
+        "ios/NotificationProbe/Sources/ProbeScenarios.swift",
+        "docs/validation/notification-probe.md"
+      ],
+      "intent": "Diagnose and fix the foreground-delivery request vanishing after a timely add.",
+      "acceptance": [
+        "Diagnosis with evidence.",
+        "Fix the cause; no retries or weakened assertions; validation doc accurate.",
+        "F10 counting rule, 5 consecutive executions."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/NotificationProbe/Tests/NotificationProbeAuthorizedUITests.swift:71"
+      ],
+      "parent": null
     }
   ],
   "effective_dependencies": {
@@ -2973,7 +3015,9 @@
       "V01b",
       "V01c",
       "V02b"
-    ]
+    ],
+    "F15": [],
+    "F16": []
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -3115,6 +3159,10 @@
     {
       "date": "2026-10-14",
       "change": "I08 amended after PR #225 round 1: UUID request version derived from M1_INSTRUCTION_VERSION; no-profile non-match stays unprocessed/AwaitingConfiguration and searchable; existing-test fixture adaptations for the auto-queued job granted."
+    },
+    {
+      "date": "2026-10-15",
+      "change": "Added F15 (notification_reconciliation FFI test SIGSEGV/heap corruption) and F16 (NotificationProbe foreground delivery vanishing after a timely add)."
     }
   ]
 }

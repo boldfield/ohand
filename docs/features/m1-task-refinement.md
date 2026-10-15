@@ -167,6 +167,9 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
   - **The root offers none of these to `app/` modules** (B02 rule: modules get typed clients only through `CompositionCoreClients`/`CompositionPrivateReads`). U01d adds the gated retrieval reads; U01e adds the configuration clients and the credential service. Both join the root-file chain after T11d (U01b → U01c → S05b → T11d → U01d → U01e), so S05b and T11d are not disturbed.
   - I08 amended after round 1 (PR #225): criteria 2 and 4 as first written were coordinator errors. The request version must be a UUID, and a no-profile non-match waits for configuration (`unprocessed`, `AwaitingConfiguration`) rather than ending `uninterpreted`. Both now name the contract they follow, criterion 4 asserts more than before, and test-fixture adaptations for the auto-queued job are granted.
   - Dependency edits: U02a also depends on U01d; U05a on U01e; U06a on U01e and U02a (its criterion 1 retrieves before provider setup, which needs U02a's search).
+- F15 and F16 added (coordinator, 2026-10-15). Two intermittent failures that no task owns. Both rejected otherwise-approved work.
+  - F15: memory-safety failures in the `notification_reconciliation` FFI tests on Linux reviewer pods. (a) F14 round 2, merged with `d3dafb3`: `answers_that_do_not_fit_the_command_are_refused_and_the_command_waits_for_a_valid_one` failed, then the `ohand_core` test process died with SIGSEGV. (b) S05b round 1, merged with `fefb034`: the lib test binary aborted with glibc `corrupted size vs. prev_size in fastbins` during `optional_prompts_use_the_slots_left_and_are_withheld_without_permission`, with no Rust change in the PR. The coordinator ran 8 consecutive full `cargo test --lib` runs on `d3dafb3` on macOS, all clean, so the failure is load- or platform-dependent. One confirmed hazard: the tests' `Session` has no `Drop`, so a panicking assertion skips `close()` and leaves the core handle open with the native-effects callback registered against a freed context. That explains (a)'s SIGSEGV after a failure, but not (b), which had no reported failure first.
+  - F16: `NotificationProbeAuthorizedUITests.testAuthorizedSchedulingBehavior`, foreground-delivery activity (`:71`): "add took 99 ms for a 15 s trigger; delivered=false pending=false" (run 38666074347, job 116198215493, PR #223 head `49f0f8f`, 2026-10-15). F10's fix for a trigger that is already in the past by the time `add()` returns does not cover this. The request was added in good time and then vanished.
 
 ## Why some tasks stay together
 
@@ -1028,6 +1031,42 @@ Acceptance:
 3. Real-core root tests: create a profile with a credential, set it default, grant interpretation on the capture route, and see a newly imported capture's job pinned to it (I08 + V01b resolver); the connection check against the fixture server reports `credential_rejected` for a bad key without the key appearing in any output; revoking the grant makes the job's dispatch fail authorization. Existing tests pass. The exact-head macOS CI run is linked.
 
 Source pointers: `ios/Services/Assembly/CompositionRoot.swift:162`, `:349`; `ios/Services/Credentials/CredentialService.swift:58`.
+
+### F15
+
+Find and fix the memory corruption in the notification reconciliation FFI tests
+
+Find why the `notification_reconciliation` FFI tests intermittently crash the test process (SIGSEGV, heap corruption), and fix the cause, in the product code if it is there.
+
+Owned paths: `core/src/ffi/notification_reconciliation.rs` and `core/src/ffi/notification_reconciliation/` (including its tests). If the cause is in the shared core-handle lifecycle (`core/src/ffi/core_handle/`), block and name it with evidence instead of working around it.
+
+Dependencies: none.
+
+Acceptance:
+
+1. **Diagnosis.** The PR names the cause with evidence: a reproduction on Linux under parallel load (for example a CPU-saturating background load while looping `cargo test --locked --lib ffi::notification_reconciliation`), or a sanitizer or Miri finding where the toolchain on the worker supports it. A cause the evidence cannot confirm is labelled as a hypothesis. It must account for both recorded failures, including the heap corruption that had no failing assertion first.
+2. **The fix addresses the cause.** If the core can call the native-effects callback, or read or write native buffers, after unregistration, after `ohand_core_close`, or after a command is abandoned, that is a product defect. Fix it here with a regression test. The test `Session` also tears down safely when a test panics: close the handle and unregister before the context is freed. That second fix alone does not satisfy this criterion. No retries, no `#[ignore]`, no weakened assertion, and no forcing of `--test-threads=1`.
+3. 50 consecutive full `cargo test --locked --lib` runs under the same parallel load pass on the final head, using the loop command written in the PR. `make check` and `make test` pass.
+
+Source pointers: `core/src/ffi/notification_reconciliation.rs:83`, `:92`, `:127`, `:173`, `:699`, `:792`; `core/src/ffi/notification_reconciliation/tests.rs:365`, `:401`, `:840`.
+
+### F16
+
+Make the notification probe's foreground delivery deterministic
+
+Find why the foreground-delivery request in `testAuthorizedSchedulingBehavior` is sometimes neither delivered nor pending after a timely `add()`, and fix the cause.
+
+Owned paths: `ios/NotificationProbe/Tests/`; in `ios/NotificationProbe/Sources/ProbeScenarios.swift`, the foreground-delivery scenario and any cleanup between the capacity scenario and it; the matching rows of `docs/validation/notification-probe.md`.
+
+Dependencies: none.
+
+Acceptance:
+
+1. **Diagnosis.** The PR states the cause with evidence from run 38666074347 or a reproduction. One hypothesis to check: the capacity scenario adds 100 requests against the 64-request OS limit, and an add that completes late evicts the foreground request. A cause the evidence cannot confirm is labelled as a hypothesis.
+2. **The fix addresses the cause.** No retries, no skipped or weakened assertions. Recorded OS behaviour in `docs/validation/notification-probe.md` stays accurate. If the fix changes a step, the matching row is updated.
+3. The F10 counting rule applies. On the final head the test passes in 5 consecutive executions of its step. Executions where an earlier unrelated step failed are neutral. The run URLs are linked. `make check` and `make test` pass.
+
+Source pointers: `ios/NotificationProbe/Tests/NotificationProbeAuthorizedUITests.swift:56`, `:66`, `:71`; `ios/NotificationProbe/Sources/ProbeScenarios.swift`.
 
 ### I05b
 
