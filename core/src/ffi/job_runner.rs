@@ -50,6 +50,7 @@ use super::core_handle::exports::{guarded, OhandCoreHandle, OhandCoreResult};
 use super::core_handle::failure::AbiFailure;
 use super::core_handle::instance::{self, lock, JobFn};
 use super::provider_transport::protocols::{self, PROTOCOL_NOT_ENABLED};
+use crate::ingress::transcription::queue::backfill_missing_jobs;
 use crate::interpretation::dispatch::{AdapterRegistry, InterpretationDispatcher};
 use crate::jobs::configuration::{resolve_execution_target, ExecutionResolution};
 use crate::jobs::queue::{get_job, Job, JobStatus};
@@ -825,6 +826,9 @@ fn run_drain(
         host.network_available.load(Ordering::SeqCst),
         Utc::now(),
     );
+    // A failure here must not stop the drain: the jobs that exist still run, and the next drain
+    // retries the backfill.
+    let _ = backfill_missing_jobs(&mut database, Utc::now());
 
     let authorized_origins = Arc::new(Mutex::new(Vec::new()));
     let refused_offline = Arc::new(AtomicBool::new(false));
