@@ -320,6 +320,10 @@ fn malformed_requests_are_refused_before_anything_is_queued() {
         json!({"command": "begin_removal", "item_id": "item", "audio_reference": "a",
                "audio_path": "/tmp/a"}),
         json!({"command": "remove_audio", "item_id": "item", "audio_reference": "a"}),
+        json!({"command": "begin_user_removal", "item_id": "item"}),
+        json!({"command": "begin_user_removal", "item_id": "", "audio_reference": "a"}),
+        json!({"command": "begin_user_removal", "item_id": "item", "audio_reference": "a",
+               "period_seconds": 60}),
     ] {
         let outcome = start(handle, 1, &request);
         assert_eq!(outcome.status, OHAND_CORE_STATUS_PERMANENT, "{request}");
@@ -467,7 +471,7 @@ fn a_pinned_lease_cannot_expire_while_the_effect_runs() {
         std::path::Path::new(&path),
         9,
         &SystemClock,
-        &RetentionPolicy::default(),
+        lease::Authorization::Expired(&RetentionPolicy::default()),
         &items.expired,
         EXPIRED_AUDIO,
         duration,
@@ -548,7 +552,7 @@ fn concurrent_begins_never_exceed_the_live_lease_limit() {
                     std::path::Path::new(&path),
                     11,
                     &SystemClock,
-                    &RetentionPolicy::default(),
+                    lease::Authorization::Expired(&RetentionPolicy::default()),
                     &item,
                     EXPIRED_AUDIO,
                     std::time::Duration::from_millis(20),
@@ -617,7 +621,7 @@ fn a_lease_that_is_not_released_expires_and_frees_the_store() {
         store_path,
         7,
         &SystemClock,
-        &RetentionPolicy::default(),
+        lease::Authorization::Expired(&RetentionPolicy::default()),
         &items.expired,
         EXPIRED_AUDIO,
         std::time::Duration::from_millis(300),
@@ -726,4 +730,158 @@ fn a_store_without_a_file_cannot_be_leased() {
     assert_eq!(failure["code"], "store_unavailable");
 
     session.close();
+}
+
+fn begin_user(session: &mut Session, item_id: &str, reference: &str) -> Value {
+    session.succeed(&json!({
+        "command": "begin_user_removal", "item_id": item_id, "audio_reference": reference,
+    }))
+}
+
+const TYPED_AUDIO: &str = "FinalizedAudio/typed.m4a";
+
+/// A voice item with typed text beside its audio and no transcript.
+fn typed_voice_item(path: &str) -> String {
+    let mut database = Database::open(path, Arc::new(SystemClock)).unwrap();
+    let capture = Capture::new(
+        "capture-typed".to_string(),
+        Some("water the ferns".to_string()),
+        Some(TYPED_AUDIO.to_string()),
+        "2026-10-01T08:00:00Z".to_string(),
+        "UTC".to_string(),
+        0,
+        "en_US".to_string(),
+        "gregorian".to_string(),
+        "personal".to_string(),
+        "route-personal".to_string(),
+        false,
+        "2026-10-01T08:00:01Z".to_string(),
+        None,
+    )
+    .unwrap();
+    import_foreground_ingress(&mut database, &capture)
+        .unwrap()
+        .item_id
+}
+
+fn clear_text(connection: &rusqlite::Connection, item_id: &str) -> rusqlite::Result<usize> {
+    connection.execute(
+        "INSERT INTO corrections (correction_id, item_id, revision, kind, old_value, new_value,
+                created_at)
+         VALUES (?1, ?2, 1000, 'text', 'water the ferns', '', '2026-10-04T09:00:00Z')",
+        rusqlite::params![format!("clear-{item_id}"), item_id],
+    )
+}
+
+#[test]
+fn a_user_removal_is_approved_for_audio_with_a_transcript_or_typed_text_and_ignores_the_clock() {
+    let _guard = serial();
+    let (directory, path, items) = store("user-approved");
+    let typed = typed_voice_item(&path);
+    let mut session = Session::over(open_file(&path));
+
+    // Transcribed a day ago, so the automatic path refuses it as not yet expired.
+    assert_eq!(
+        begin(&mut session, &items.retained, RETAINED_AUDIO)["reason"],
+        "not_yet_expired"
+    );
+    for (item_id, reference) in [(&items.retained, RETAINED_AUDIO), (&typed, TYPED_AUDIO)] {
+        let granted = begin_user(&mut session, item_id, reference);
+        assert_eq!(granted["decision"], "approved");
+        assert_eq!(granted["expired_at"], Value::Null);
+        assert_eq!(granted["lease_millis"], 3000);
+        let lease_id = granted["lease_id"].as_u64().expect("a lease");
+        assert_eq!(
+            release(session.handle, lease_id).status,
+            OHAND_CORE_STATUS_OK
+        );
+    }
+
+    session.close();
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn a_user_removal_is_denied_for_sole_source_deleted_and_changed_audio_and_holds_nothing() {
+    let _guard = serial();
+    let (directory, path, items) = store("user-denied");
+    let mut session = Session::over(open_file(&path));
+    let other = raw_connection(&path, std::time::Duration::from_millis(100));
+
+    for (item_id, reference, reason) in [
+        (&items.sole_source, SOLE_SOURCE_AUDIO, "sole_source"),
+        (&items.retained, EXPIRED_AUDIO, "audio_reference_mismatch"),
+        (&"no-such-item".to_string(), EXPIRED_AUDIO, "item_not_found"),
+    ] {
+        let denied = begin_user(&mut session, item_id, reference);
+        assert_eq!(denied["decision"], "denied");
+        assert_eq!(denied["reason"], reason);
+        assert_eq!(denied["lease_id"], Value::Null);
+    }
+
+    assert_eq!(protect(&other, &items.retained).unwrap(), 1);
+    let deleted = begin_user(&mut session, &items.retained, RETAINED_AUDIO);
+    assert_eq!(deleted["reason"], "deletion_owns_cleanup");
+    assert_eq!(deleted["lease_id"], Value::Null);
+    assert_eq!(
+        other
+            .execute(
+                "UPDATE items SET revision = revision WHERE item_id = ?",
+                [&items.sole_source]
+            )
+            .unwrap(),
+        1,
+        "a denial must not keep the store locked"
+    );
+    assert_eq!(lease::live_leases(), 0);
+
+    session.close();
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
+fn a_correction_cannot_make_audio_sole_source_between_a_user_approval_and_the_effect() {
+    let _guard = serial();
+    let (directory, path, _items) = store("user-race");
+    let typed = typed_voice_item(&path);
+    let mut session = Session::over(open_file(&path));
+
+    let granted = begin_user(&mut session, &typed, TYPED_AUDIO);
+    assert_eq!(granted["decision"], "approved");
+    let lease_id = granted["lease_id"].as_u64().expect("a lease");
+
+    // The text-clearing correction arrives after the approval; it waits behind the lease and
+    // commits only once the effect has finished and the lease is released.
+    let (finished_sender, finished) = std::sync::mpsc::channel();
+    let writer_path = path.clone();
+    let writer_item = typed.clone();
+    let writer = std::thread::spawn(move || {
+        let connection = raw_connection(&writer_path, std::time::Duration::from_secs(10));
+        let result = clear_text(&connection, &writer_item);
+        finished_sender.send(std::time::Instant::now()).unwrap();
+        result.unwrap()
+    });
+    assert!(
+        finished
+            .recv_timeout(std::time::Duration::from_millis(400))
+            .is_err(),
+        "the correction must wait while the lease is held"
+    );
+    let released_at = std::time::Instant::now();
+    assert_eq!(
+        release(session.handle, lease_id).status,
+        OHAND_CORE_STATUS_OK
+    );
+    let committed_at = finished.recv_timeout(WAIT).expect("the correction commits");
+    assert!(committed_at >= released_at);
+    assert_eq!(writer.join().unwrap(), 1);
+
+    // Decided again after the correction, the audio is the only source and is refused.
+    let denied = begin_user(&mut session, &typed, TYPED_AUDIO);
+    assert_eq!(denied["decision"], "denied");
+    assert_eq!(denied["reason"], "sole_source");
+    assert_eq!(denied["lease_id"], Value::Null);
+
+    session.close();
+    let _ = std::fs::remove_dir_all(directory);
 }
