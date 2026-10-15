@@ -5,7 +5,7 @@
 use super::*;
 use crate::ffi::core_handle::exports::*;
 use crate::ffi::core_handle::failure::*;
-use crate::ffi::core_handle::tests::{consume, recorder, register, serial, Event, Outcome, WAIT};
+use crate::ffi::core_handle::tests::{consume, recorder, register, serial, Event, Outcome};
 use crate::reminders::state::{apply_user_time_correction, get_reminder, UserTimeCorrection};
 use crate::store::events::{
     save_event, Correction, CorrectionKind, Event as StoredEvent, EventPayload, EventType,
@@ -14,7 +14,14 @@ use crate::store::schema::Clock;
 use crate::suggestions::schedule::{PromptSettings, PromptTime};
 use chrono::Duration as ChronoDuration;
 use serde_json::{json, Value};
-use std::sync::mpsc::Receiver;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::mpsc::{channel, Receiver, Sender};
+
+/// Only a guard against a pass that never finishes. Each command of a pass commits to SQLite,
+/// and with the CPU oversubscribed every fsync wake-up queues behind other threads, so a pass
+/// over 60 reminders takes tens of seconds; the core's own deadlines, not this wait, decide when
+/// a command has failed.
+const PASS_WAIT: Duration = Duration::from_secs(120);
 
 const CAPTURE_TIME: &str = "2026-01-15T10:30:00Z";
 
@@ -140,9 +147,17 @@ struct Center {
     refused: usize,
 }
 
+/// Parks the next listing command inside the callback until `release` is signalled, so a test
+/// can act while a pass is waiting on native.
+struct Hold {
+    entered: Sender<()>,
+    release: Receiver<()>,
+}
+
 struct NativeSide {
     handle: AtomicU64,
     center: Mutex<Center>,
+    hold: Mutex<Option<Hold>>,
 }
 
 impl NativeSide {
@@ -150,6 +165,7 @@ impl NativeSide {
         Box::new(NativeSide {
             handle: AtomicU64::new(0),
             center: Mutex::new(Center::default()),
+            hold: Mutex::new(None),
         })
     }
 
@@ -219,6 +235,13 @@ unsafe extern "C" fn native_command(
     len: usize,
 ) {
     let native = &*(context as *const NativeSide);
+    if command == OHAND_NOTIFICATION_COMMAND_LIST_PENDING {
+        let hold = lock(&native.hold).take();
+        if let Some(hold) = hold {
+            let _ = hold.entered.send(());
+            let _ = hold.release.recv_timeout(PASS_WAIT);
+        }
+    }
     let body: Value = if len == 0 {
         Value::Null
     } else {
@@ -309,6 +332,23 @@ struct Session {
     _recorder: Box<crate::ffi::core_handle::tests::Recorder>,
     directory: std::path::PathBuf,
     next_operation: u64,
+    closed: bool,
+}
+
+/// The core's worker thread calls `native` and `_recorder` through raw pointers, so a test that
+/// panics mid-pass must stop the worker and unregister both before the fields are freed.
+impl Drop for Session {
+    fn drop(&mut self) {
+        if !self.closed {
+            let _ = consume(ohand_core_close(self.handle));
+        }
+        consume(ohand_core_set_notification_effects(
+            self.handle,
+            None,
+            std::ptr::null_mut(),
+        ));
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
 }
 
 impl Session {
@@ -339,6 +379,7 @@ impl Session {
             _recorder: recorder,
             directory,
             next_operation: 1,
+            closed: false,
         }
     }
 
@@ -357,7 +398,7 @@ impl Session {
     }
 
     fn event(&self, operation_id: u64) -> Event {
-        let event = self.events.recv_timeout(WAIT).expect("an event");
+        let event = self.events.recv_timeout(PASS_WAIT).expect("an event");
         assert_eq!(event.operation_id, operation_id);
         event
     }
@@ -398,10 +439,9 @@ impl Session {
         self.event(operation_id)
     }
 
-    fn close(self) {
+    fn close(mut self) {
         assert_eq!(consume(ohand_core_close(self.handle)).status, 0);
-        let _ = ohand_core_set_notification_effects(self.handle, None, std::ptr::null_mut());
-        let _ = std::fs::remove_dir_all(&self.directory);
+        self.closed = true;
     }
 }
 
@@ -1032,4 +1072,112 @@ fn reminders_seeded_by_plain_sql_are_installed_and_re_armed_like_core_written_on
         .iter()
         .all(|(id, _)| id.ends_with("#1") && id.starts_with("4a2b8c1e")));
     session.close();
+}
+
+fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
+    let deadline = Instant::now() + PASS_WAIT;
+    while !ready() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn closing_the_handle_stops_a_pass_before_its_next_native_command() {
+    let _guard = serial();
+    let mut session = Session::open("close-mid-pass", 4);
+    let (entered_sender, entered) = channel();
+    let (release_sender, release) = channel();
+    *lock(&session.native.hold) = Some(Hold {
+        entered: entered_sender,
+        release,
+    });
+
+    let (_, started) = session.start_raw(&serde_json::to_vec(&plain()).unwrap());
+    assert_eq!(started.status, OHAND_CORE_STATUS_OK);
+    entered
+        .recv_timeout(PASS_WAIT)
+        .expect("the pass reached native");
+
+    let handle = session.handle;
+    let closer = std::thread::spawn(move || consume(ohand_core_close(handle)).status);
+    wait_until("the handle to leave the registry", || {
+        instance::lookup(handle).is_err()
+    });
+    release_sender.send(()).unwrap();
+    assert_eq!(closer.join().unwrap(), OHAND_CORE_STATUS_OK);
+
+    let center = session.native.center();
+    assert_eq!(center.lists, 1, "the parked listing was answered");
+    assert!(
+        center.schedules.is_empty() && center.cancels.is_empty() && center.abandoned == 0,
+        "no native command begins once the handle is closed"
+    );
+    assert!(lock(&WAITING).keys().all(|(waiting, _)| *waiting != handle));
+}
+
+#[test]
+fn clearing_the_registration_ends_a_waiting_command_without_calling_native_again() {
+    let _guard = serial();
+    let mut session = Session::open("cleared-mid-pass", 1);
+    session.native.center().silent = true;
+
+    let operation_id = session.next_operation;
+    session.next_operation += 1;
+    let job = reconcile_job(
+        session.handle,
+        operation_id,
+        unprompted(),
+        lock(&REGISTRATIONS).get(&session.handle).cloned(),
+        Duration::from_secs(3600),
+    );
+    instance::lookup(session.handle)
+        .unwrap()
+        .submit(operation_id, job)
+        .unwrap();
+    wait_until("the listing to reach native", || {
+        !session.native.center().unanswered.is_empty()
+    });
+    let cleared = consume(ohand_core_set_notification_effects(
+        session.handle,
+        None,
+        std::ptr::null_mut(),
+    ));
+    assert_eq!(cleared.status, OHAND_CORE_STATUS_OK);
+
+    let event = session.event(operation_id);
+    assert_eq!(event.status, OHAND_CORE_STATUS_TRANSIENT);
+    let failure: Value = serde_json::from_slice(&event.payload).unwrap();
+    assert_eq!(failure["code"], "pending_list_unavailable");
+    let center = session.native.center();
+    assert_eq!(center.lists, 0);
+    assert_eq!(center.abandoned, 0, "native is not called once cleared");
+    drop(center);
+    session.close();
+}
+
+#[test]
+fn a_panicking_test_closes_the_handle_and_unregisters_before_its_context_is_freed() {
+    let _guard = serial();
+    let handle = std::cell::Cell::new(0);
+    let directory = std::cell::RefCell::new(std::path::PathBuf::new());
+    let unwound = catch_unwind(AssertUnwindSafe(|| {
+        let mut session = Session::open("panicking", 4);
+        handle.set(session.handle);
+        directory.replace(session.directory.clone());
+        let (_, started) = session.start_raw(&serde_json::to_vec(&plain()).unwrap());
+        assert_eq!(started.status, OHAND_CORE_STATUS_OK);
+        panic!("an assertion failed while the pass was running");
+    }));
+    assert!(unwound.is_err());
+
+    let handle = handle.get();
+    assert_ne!(handle, 0);
+    assert!(instance::lookup(handle).is_err(), "the handle is closed");
+    assert!(
+        lock(&REGISTRATIONS).get(&handle).is_none(),
+        "the effects are unregistered"
+    );
+    assert!(lock(&WAITING).keys().all(|(waiting, _)| *waiting != handle));
+    assert!(!directory.borrow().exists());
 }
