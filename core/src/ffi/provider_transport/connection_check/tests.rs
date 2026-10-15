@@ -577,6 +577,32 @@ fn a_protocol_the_host_has_not_enabled_is_reported_and_nothing_is_sent() {
 }
 
 #[test]
+fn a_protocol_disabled_after_preparation_and_before_the_send_is_not_sent() {
+    let _guard = serial();
+    let session = Session::open("disabled-before-send", Kind::Anthropic);
+    session.register_native();
+    *lock(&BEFORE_SEND) = Some(|handle| protocols::enable_for_test(handle, &["open_ai"]));
+    let started = session.start(32);
+    assert_eq!(started.status, OHAND_CORE_STATUS_OK);
+    let dispatched = session.event(32);
+    assert_eq!(dispatched.status, OHAND_CORE_STATUS_OK);
+    let completed = session.event(32);
+    *lock(&BEFORE_SEND) = None;
+    assert_eq!(completed.status, OHAND_CORE_STATUS_OK);
+    assert_eq!(
+        payload_of(&completed),
+        json!({
+            "operation_id": 32,
+            "phase": "completed",
+            "outcome": "protocol_not_enabled",
+        })
+    );
+    session.assert_no_command();
+    wait_until_idle(session.handle);
+    session.close();
+}
+
+#[test]
 fn cancelling_the_exchange_abandons_the_send_and_reports_cancelled() {
     let _guard = serial();
     let session = Session::open("cancel", Kind::Anthropic);

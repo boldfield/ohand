@@ -272,12 +272,29 @@ fn prepare_check(connection: &Connection, profile_version: &str) -> Result<Check
     })
 }
 
+#[cfg(test)]
+static BEFORE_SEND: Mutex<Option<fn(u64)>> = Mutex::new(None);
+
+#[cfg(test)]
+fn before_send_hook(handle: u64) {
+    let hook = *lock(&BEFORE_SEND);
+    if let Some(hook) = hook {
+        hook(handle);
+    }
+}
+
 fn run_check(
     plan: &CheckPlan,
     end: Arc<ExchangeEnd>,
     cancel: &CancelToken,
 ) -> Result<Vec<u8>, AbiFailure> {
     let operation_id = end.operation_id;
+    #[cfg(test)]
+    before_send_hook(end.handle);
+    // The host may disable the protocol between preparation on the worker and this send.
+    if !protocols::is_enabled(end.handle, plan.profile.protocol()) {
+        return completed_event(operation_id, ConnectionOutcome::ProtocolNotEnabled);
+    }
     let observed: ObservedSlot = Arc::new(Mutex::new(None));
     let transport = RecordingTransport {
         inner: NativeTransport { end },
