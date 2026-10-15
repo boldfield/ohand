@@ -87,6 +87,10 @@ pub const MIGRATIONS: &[MigrationStep] = &[
         target_version: 11,
         apply: add_prompt_schedule_v11,
     },
+    MigrationStep {
+        target_version: 12,
+        apply: add_default_provider_profiles_v12,
+    },
 ];
 
 /// Database handle with schema validation.
@@ -912,6 +916,22 @@ fn add_prompt_schedule_v11(tx: &Transaction<'_>) -> Result<()> {
         "CREATE TABLE prompt_schedule (
             singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
             schedule TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )",
+        [],
+    )?;
+    Ok(())
+}
+
+/// The default provider profile version per processing capability (V01b). One row per capability
+/// names the version a new job of that capability is pinned to. There is deliberately no foreign
+/// key: a profile can be removed independently, and the resolver then treats the default as
+/// unavailable instead of blocking the removal. Existing jobs keep the pin they were created with.
+fn add_default_provider_profiles_v12(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute(
+        "CREATE TABLE default_provider_profiles (
+            capability TEXT PRIMARY KEY CHECK (capability IN ('text_interpretation', 'review')),
+            profile_version TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )",
         [],
