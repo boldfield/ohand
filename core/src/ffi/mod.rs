@@ -28,4 +28,6 @@ pub mod notification_actions;
 pub mod notification_reconciliation;
 pub mod prompt_schedule;
 pub mod reset;
+pub mod retrieval;
+pub mod route_policy;
 pub mod route_provisioning;
