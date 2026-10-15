@@ -11,6 +11,7 @@ struct AppRootView: View {
     let context: ManagementContext
     var destinations = ManagementCatalog.destinations
     var presentationReporter: ((ManagementPresentationEvent) -> Void)?
+    var placeholderFrameReporter: (([String: CGRect]) -> Void)?
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -36,6 +37,7 @@ struct AppRootView: View {
         destinations.view(for: route, context: context)
             .onAppear { presentationReporter?(.appeared(route, isPlaceholder: !destinations.isRegistered(route))) }
             .onDisappear { presentationReporter?(.disappeared(route)) }
+            .onPreferenceChange(ManagementPlaceholderFrameKey.self) { placeholderFrameReporter?($0) }
     }
 
     private var managementLinks: some View {

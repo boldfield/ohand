@@ -5,6 +5,23 @@ struct ManagementContext {
     let voiceRecovery: VoiceRecoveryModel
 }
 
+/// Frames of the placeholder screens, keyed by accessibility identifier, so a hosted test can see that they render.
+struct ManagementPlaceholderFrameKey: PreferenceKey {
+    static var defaultValue: [String: CGRect] = [:]
+
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue()) { _, latest in latest }
+    }
+}
+
+private extension View {
+    func reportPlaceholderFrame(_ identifier: String) -> some View {
+        background(GeometryReader { proxy in
+            Color.clear.preference(key: ManagementPlaceholderFrameKey.self, value: [identifier: proxy.frame(in: .global)])
+        })
+    }
+}
+
 /// A destination host event, reported to an optional observer so tests (and only tests) can see what is on display.
 enum ManagementPresentationEvent: Equatable {
     case appeared(ManagementRoute, isPlaceholder: Bool)
@@ -100,13 +117,14 @@ struct ItemPlaceholderView: View {
     static let identifier = "management.item.placeholder"
 
     var body: some View {
-        Text("This item's details are not available in this version yet. Your capture is saved.")
+        Text("This item's details are not available in this version yet.")
             .font(.body)
             .foregroundColor(.secondary)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding()
             .accessibilityIdentifier(Self.identifier)
+            .reportPlaceholderFrame(Self.identifier)
             .navigationTitle("Item")
             .navigationBarTitleDisplayMode(.inline)
     }
@@ -124,6 +142,7 @@ struct SuggestionPlaceholderView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding()
             .accessibilityIdentifier(Self.identifier)
+            .reportPlaceholderFrame(Self.identifier)
             .navigationTitle("Suggestion")
             .navigationBarTitleDisplayMode(.inline)
     }

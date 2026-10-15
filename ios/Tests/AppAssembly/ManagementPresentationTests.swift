@@ -18,6 +18,7 @@ final class ManagementPresentationTests: XCTestCase {
     private var pendingCompletions: [(CompositionAuthenticationOutcome) -> Void] = []
     private var navigation: ManagementNavigationModel!
     private var events: [ManagementPresentationEvent] = []
+    private var placeholderFrames: [String: CGRect] = [:]
 
     override func setUpWithError() throws {
         storageRoot = FileManager.default.temporaryDirectory
@@ -36,6 +37,7 @@ final class ManagementPresentationTests: XCTestCase {
         scope = .captureOnly
         pendingCompletions = []
         events = []
+        placeholderFrames = [:]
         navigation = ManagementNavigationModel(
             readScope: { [unowned self] in self.scope },
             authenticate: { [unowned self] _, completion in self.pendingCompletions.append(completion) })
@@ -55,7 +57,8 @@ final class ManagementPresentationTests: XCTestCase {
     private func host(_ destinations: ManagementDestinations) {
         let root = AppRootView(
             navigation: navigation, captureEntry: services.captureEntry, context: services.managementContext,
-            destinations: destinations, presentationReporter: { [unowned self] in events.append($0) })
+            destinations: destinations, presentationReporter: { [unowned self] in events.append($0) },
+            placeholderFrameReporter: { [unowned self] in placeholderFrames = $0 })
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
         window.rootViewController = UIHostingController(rootView: root)
         window.makeKeyAndVisible()
@@ -70,6 +73,16 @@ final class ManagementPresentationTests: XCTestCase {
             retainedWindow?.rootViewController?.view.layoutIfNeeded()
             RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
         } while !condition() && Date() < deadline
+    }
+
+    private let windowBounds = CGRect(x: 0, y: 0, width: 390, height: 844)
+
+    private func assertPlaceholderIsVisible(_ identifier: String, file: StaticString = #filePath, line: UInt = #line) {
+        settle { placeholderFrames[identifier] != nil }
+        let frame = placeholderFrames[identifier] ?? .zero
+        XCTAssertGreaterThan(frame.width, 0, "the placeholder has width", file: file, line: line)
+        XCTAssertGreaterThan(frame.height, 0, "the placeholder has height", file: file, line: line)
+        XCTAssertTrue(windowBounds.intersects(frame), "the placeholder is on screen", file: file, line: line)
     }
 
     private func authenticate(_ outcome: CompositionAuthenticationOutcome, grantingScope: Bool) {
@@ -88,6 +101,8 @@ final class ManagementPresentationTests: XCTestCase {
         settle { events.contains(.appeared(.item("item-1"), isPlaceholder: true)) }
 
         XCTAssertTrue(events.contains(.appeared(.item("item-1"), isPlaceholder: true)))
+        assertPlaceholderIsVisible(ItemPlaceholderView.identifier)
+        XCTAssertNil(placeholderFrames[SuggestionPlaceholderView.identifier])
     }
 
     func testATapAfterAuthenticationPresentsAtOnce() {
@@ -98,6 +113,7 @@ final class ManagementPresentationTests: XCTestCase {
         settle { events.contains(.appeared(.item("item-2"), isPlaceholder: true)) }
 
         XCTAssertTrue(events.contains(.appeared(.item("item-2"), isPlaceholder: true)))
+        assertPlaceholderIsVisible(ItemPlaceholderView.identifier)
         XCTAssertTrue(pendingCompletions.isEmpty, "an authenticated session is not asked again")
     }
 
@@ -116,6 +132,7 @@ final class ManagementPresentationTests: XCTestCase {
 
         XCTAssertTrue(events.contains(.appeared(.item("item-3"), isPlaceholder: false)))
         XCTAssertEqual(Set(builtFor), ["item-3"])
+        XCTAssertNil(placeholderFrames[ItemPlaceholderView.identifier], "a registered destination replaces the placeholder")
     }
 
     func testTheSuggestionShowsAPlaceholderUntilADestinationIsRegistered() {
@@ -126,6 +143,8 @@ final class ManagementPresentationTests: XCTestCase {
         settle { events.contains(.appeared(.suggestion, isPlaceholder: true)) }
 
         XCTAssertTrue(events.contains(.appeared(.suggestion, isPlaceholder: true)))
+        assertPlaceholderIsVisible(SuggestionPlaceholderView.identifier)
+        XCTAssertNil(placeholderFrames[ItemPlaceholderView.identifier])
     }
 
     func testARegisteredSuggestionDestinationIsPresented() {
@@ -138,6 +157,7 @@ final class ManagementPresentationTests: XCTestCase {
         settle { events.contains(.appeared(.suggestion, isPlaceholder: false)) }
 
         XCTAssertTrue(events.contains(.appeared(.suggestion, isPlaceholder: false)))
+        XCTAssertNil(placeholderFrames[SuggestionPlaceholderView.identifier], "a registered destination replaces the placeholder")
     }
 
     func testRelockingWhilePresentedLeavesTheScreen() {
