@@ -6,19 +6,24 @@
 //! the transcript attachment can never queue a second job for the same source.
 //!
 //! [`resolve_profile_pin`] is the one place that chooses the provider profile version a new job is
-//! pinned to. Native code and the callers in `ingress` never choose a destination. Until stored
-//! provider profiles exist it returns `None`, and an unpinned job runs only the offline fast path
-//! and is `Local` under `privacy::routing::authorize_job`.
+//! pinned to. Native code and the callers in `ingress` never choose a destination. It returns the
+//! stored default profile for text interpretation only when `privacy::routing::authorize_job`
+//! would authorize a job pinned to it on the item's route; otherwise it returns `None`, and an
+//! unpinned job runs only the offline fast path and is `Local` under `authorize_job`.
 //!
 //! Queueing never waits on interpretation and never reaches a provider; it only writes the job row
 //! inside the caller's transaction.
 
 use crate::interpretation::instructions::M1_INSTRUCTION_VERSION;
+use crate::jobs::configuration::is_profile_available;
 use crate::jobs::queue::{enqueue_job_in_tx, get_job_internal, Job};
-use crate::privacy::routing::JOB_TYPE_INTERPRET;
-use anyhow::Result;
+use crate::privacy::routing::{
+    authorize_job, AuthorizationDecision, ProcessingCapability, JOB_TYPE_INTERPRET,
+};
+use crate::providers::profiles::default_profile_version;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::Transaction;
+use rusqlite::{OptionalExtension, Transaction};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -39,12 +44,70 @@ pub struct InterpretationPlan {
 /// The profile version a new `interpret` job for `item_id` is pinned to, or `None`.
 ///
 /// This is the only function that chooses a pin. It runs inside the caller's transaction so the
-/// choice and the job commit together.
-pub fn resolve_profile_pin(
-    _transaction: &Transaction<'_>,
-    _item_id: &str,
-) -> Result<Option<String>> {
-    Ok(None)
+/// choice and the job commit together. The stored default for text interpretation is used only
+/// when it is unrevoked and the real authorization check would let a job pinned to it dispatch on
+/// the item's route, so an unconfigured or ungranted route still gets the offline fast path
+/// instead of a job that can only wait.
+pub fn resolve_profile_pin(transaction: &Transaction<'_>, item_id: &str) -> Result<Option<String>> {
+    let Some(profile_version) =
+        default_profile_version(transaction, ProcessingCapability::TextInterpretation)?
+    else {
+        return Ok(None);
+    };
+    if !is_profile_available(transaction, &profile_version)? {
+        return Ok(None);
+    }
+    if would_dispatch(transaction, item_id, &profile_version)? {
+        Ok(Some(profile_version))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Whether `authorize_job` authorizes an `interpret` job for `item_id` pinned to
+/// `profile_version`. The decision is taken on a probe job row that exists only inside a
+/// savepoint that is always rolled back, so the real authorization code is the only judge and
+/// nothing is left behind.
+fn would_dispatch(
+    transaction: &Transaction<'_>,
+    item_id: &str,
+    profile_version: &str,
+) -> Result<bool> {
+    let item_exists = transaction
+        .query_row("SELECT 1 FROM items WHERE item_id = ?", [item_id], |_| {
+            Ok(())
+        })
+        .optional()
+        .context("looking up item")?
+        .is_some();
+    if !item_exists {
+        return Ok(false);
+    }
+    transaction
+        .execute_batch("SAVEPOINT pin_probe")
+        .context("opening pin probe")?;
+    let probe_job_id = Uuid::new_v4().to_string();
+    let decision = transaction
+        .execute(
+            "INSERT INTO jobs (job_id, job_schema_version, item_id, job_type, source_revision, \
+             profile_version, status, created_at) VALUES (?, ?, ?, ?, 0, ?, 'queued', ?)",
+            rusqlite::params![
+                probe_job_id,
+                INTERPRETATION_JOB_SCHEMA_VERSION,
+                item_id,
+                JOB_TYPE_INTERPRET,
+                profile_version,
+                Utc::now().to_rfc3339(),
+            ],
+        )
+        .context("inserting pin probe")
+        .and_then(|_| authorize_job(transaction, &probe_job_id));
+    let closed = transaction
+        .execute_batch("ROLLBACK TO pin_probe; RELEASE pin_probe")
+        .context("closing pin probe");
+    let decision = decision?;
+    closed?;
+    Ok(matches!(decision, AuthorizationDecision::Authorized(_)))
 }
 
 /// The job identity for interpreting `item_id` at `source_revision`: a UUID derived from both.
