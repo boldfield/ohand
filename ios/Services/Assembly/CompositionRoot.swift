@@ -221,6 +221,20 @@ public final class CompositionPrivateReads {
         try gated { try gate.startItemStatus(operationID: operationID, itemID: itemID) }
     }
 
+    /// Full-text search over the items the session may read. The answer decodes as `PrivateRetrievalAnswer`, after
+    /// `admit`.
+    public func startSearch(
+        operationID: UInt64, query: String, filters: PrivateRetrievalFilters = PrivateRetrievalFilters()
+    ) throws {
+        try gated { try gate.startSearch(operationID: operationID, query: query, filters: filters) }
+    }
+
+    /// Every item the session may read that satisfies the filters. The answer
+    /// decodes as `PrivateRetrievalAnswer`, after `admit`.
+    public func startList(operationID: UInt64, filters: PrivateRetrievalFilters = PrivateRetrievalFilters()) throws {
+        try gated { try gate.startList(operationID: operationID, filters: filters) }
+    }
+
     /// Returns normally only while the read this event answers is still authorized. On a throw the caller discards the
     /// event without decoding it. Each answer is admitted at most once.
     public func admit(operationID: UInt64) throws {
@@ -498,6 +512,10 @@ private final class CoreHandleReadSource: PrivateReadSource {
     func startItemStatus(operationID: UInt64, itemID: String) throws {
         try core.startItemStatus(operationID: operationID, itemID: itemID)
     }
+
+    func startRetrieval(operationID: UInt64, request: CoreRetrievalRequest) throws {
+        try core.startRetrieval(operationID: operationID, request: request)
+    }
 }
 
 /// Reads an item's independent status facts from the core, only through the private read gate: a capture-only session
@@ -763,6 +781,7 @@ public final class ServiceCompositionRoot {
     static let shadowReviewClientName = "shadow review"
     /// `ShadowReviewService` keeps its first operation identifier private; this is its value.
     static let shadowReviewFirstOperationID: UInt64 = 1 << 48
+    static let itemCorrectionClientName = "item corrections"
 
     /// One half-open interval of operation identifiers `[start, end)` that a client claims.
     public struct OperationRange: Equatable, Sendable {
@@ -795,6 +814,7 @@ public final class ServiceCompositionRoot {
         fixedWidthRange(audioRetentionClientName, from: CoreAudioRetentionClient.firstOperationID),
         fixedWidthRange("metrics", from: CoreMetricsClient.firstOperationID),
         fixedWidthRange("notification actions", from: CoreNotificationActionClient.firstOperationID),
+        fixedWidthRange(itemCorrectionClientName, from: CoreItemCorrectionClient.firstOperationID),
         OperationRange(
             name: processingHealthClientName, start: ProcessingHealthService.firstOperationID,
             end: JobRunnerService.firstOperationID),
@@ -805,6 +825,8 @@ public final class ServiceCompositionRoot {
     public var adapterSet: CompositionAdapterSet { adapters.kind }
     public let jobRunner: JobRunnerService
     public let reminderReconciler: NotificationPermissionReconciler
+    /// Corrects an item's text, type or session topic; needs an authenticated read session.
+    public let itemCorrections: ItemCorrectionService
 
     let adapters: CompositionAdapters
     /// The session whose scope gates every private read the root performs.
@@ -822,6 +844,7 @@ public final class ServiceCompositionRoot {
     private let reminderCore: CoreReminderReconciler
     private let providerTransport: ProviderExchangeCoordinator
     private let notificationActions: NotificationActionClients
+    private let itemCorrectionClient: CoreItemCorrectionClient
     private let modules: [CompositionModule]
     private let foreground: ForegroundState
     private let stateLock = NSLock()
@@ -878,6 +901,8 @@ public final class ServiceCompositionRoot {
         reminderCore = assembly.reminderCore
         providerTransport = assembly.providerTransport
         notificationActions = assembly.notificationActions
+        itemCorrectionClient = assembly.itemCorrectionClient
+        itemCorrections = assembly.itemCorrections
         reminderReconciler = assembly.permissionReconciler
         foreground = assembly.foreground
         jobRunner.setDrainIdleObserver { [weak self] in self?.runReminderPassAfterDrain() }
@@ -1017,6 +1042,7 @@ public final class ServiceCompositionRoot {
         jobRunner.shutDown()
         transcription.shutDown()
         notificationActions.shutDown(session: adapters.readSession)
+        itemCorrectionClient.shutDown()
         reminderCore.invalidate()
         statusReader.shutDown()
         coreHandle.close()
@@ -1274,6 +1300,8 @@ public final class ServiceCompositionRoot {
         let reminderCore: CoreReminderReconciler
         let providerTransport: ProviderExchangeCoordinator
         let notificationActions: NotificationActionClients
+        let itemCorrectionClient: CoreItemCorrectionClient
+        let itemCorrections: ItemCorrectionService
         let permissionReconciler: NotificationPermissionReconciler
         let foreground: ForegroundState
     }
@@ -1372,6 +1400,10 @@ public final class ServiceCompositionRoot {
                 forwardTo: environment.notificationEvents)
             undo.append { notificationActions.shutDown(session: adapters.readSession) }
             router.register { notificationActions.client.handle($0) }
+            let itemCorrectionClient = CoreItemCorrectionClient(core: core)
+            router.register { itemCorrectionClient.handle($0) }
+            undo.append { itemCorrectionClient.shutDown() }
+            let itemCorrections = ItemCorrectionService(core: itemCorrectionClient, session: adapters.readSession)
             let permissionReconciler = NotificationPermissionReconciler(
                 center: adapters.notificationCenter, reconciliation: reminderCore,
                 observations: adapters.permissionObservations)
@@ -1418,7 +1450,8 @@ public final class ServiceCompositionRoot {
                 layout: layout, protectionFailureTotal: report.failures.count, core: core, ingress: ingress,
                 statusReader: statusReader, jobRunner: jobRunner, transcription: transcription,
                 reminderCore: reminderCore, providerTransport: providerTransport,
-                notificationActions: notificationActions, permissionReconciler: permissionReconciler,
+                notificationActions: notificationActions, itemCorrectionClient: itemCorrectionClient,
+                itemCorrections: itemCorrections, permissionReconciler: permissionReconciler,
                 foreground: foreground)
         } catch {
             for step in undo.reversed() {

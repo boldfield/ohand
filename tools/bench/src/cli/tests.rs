@@ -1869,8 +1869,10 @@ fn fake_run_with_an_unverified_self_hosted_arm_skips_every_case_and_sends_nothin
         journal_text_content.contains("unverified"),
         "{journal_text_content}"
     );
+    // The journal and the report carry random UUIDs and SHA-256 hex digests, so a bare "8443" shows
+    // up in them by chance. The port can only leak as part of the endpoint, written ":8443".
     for surface in [&outcome.out, &outcome.err, &journal_text_content] {
-        assert!(!surface.contains("tailnet") && !surface.contains("8443"));
+        assert!(!surface.contains("tailnet") && !surface.contains(":8443"));
     }
 
     // another endpoint is another profile: the pinned journal is not silently continued
