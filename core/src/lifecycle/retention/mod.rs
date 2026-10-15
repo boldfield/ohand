@@ -36,6 +36,10 @@
 //!   audio from expiring.
 //! * Deleted items are not assessed: their audio removal is deletion work owned by
 //!   `lifecycle::delete_intent`.
+//! * Automatic cleanup and a user's own request are authorized separately. [`authorize_audio_removal`]
+//!   approves only expired audio. [`authorize_user_audio_removal`] approves any live item's audio
+//!   whose text is recoverable without it, whatever the retention clock says, and never the audio
+//!   that is the item's only source.
 
 use crate::domain::status::TranscriptionState;
 use crate::privacy::routing::JOB_TYPE_TRANSCRIPTION_ATTACHMENT;
@@ -178,12 +182,27 @@ pub enum RemovalDenial {
     Unresolved {
         reason: UnresolvedReason,
     },
+    /// A user-requested removal while the audio is the item's only source: no captured or
+    /// user-written text and no usable transcript would remain.
+    SoleSource,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RemovalDecision {
-    Approved { expired_at: DateTime<Utc> },
+    /// Expired audio that automatic cleanup may remove.
+    Approved {
+        expired_at: DateTime<Utc>,
+    },
+    /// Audio the user asked to remove, whose text is recoverable without it. Carries no expiry
+    /// because the retention clock plays no part.
+    ApprovedByUser,
     Denied(RemovalDenial),
+}
+
+impl RemovalDecision {
+    pub fn is_approved(&self) -> bool {
+        !matches!(self, RemovalDecision::Denied(_))
+    }
 }
 
 struct AudioItemRow {
@@ -265,6 +284,25 @@ fn audio_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AudioItemRow
     })
 }
 
+fn audio_item(connection: &Connection, item_id: &str) -> Result<Option<AudioItemRow>> {
+    Ok(connection
+        .query_row(
+            &format!("{} AND items.item_id = ?", audio_item_select()),
+            [item_id],
+            audio_item_from_row,
+        )
+        .optional()?)
+}
+
+/// Whether the item keeps recoverable text without its audio: its current written text, or a
+/// transcript attached to this very audio. Audio for which this is false is the only source.
+fn recoverable_text_present(row: &AudioItemRow, transcription_state: TranscriptionState) -> bool {
+    let transcript_recoverable = transcription_state == TranscriptionState::Transcribed
+        && row.transcript_audio_reference.as_deref() == Some(row.audio_reference.as_str())
+        && row.transcript_text_present;
+    row.written_text_present || transcript_recoverable
+}
+
 /// The retention status of one item's audio, or `None` when the item does not exist, has no
 /// audio, or is deleted (deletion cleanup owns its audio).
 pub fn assess_audio_retention(
@@ -325,14 +363,7 @@ pub fn authorize_audio_removal(
     audio_reference: &str,
 ) -> Result<RemovalDecision> {
     let now = clock.now();
-    let row = connection
-        .query_row(
-            &format!("{} AND items.item_id = ?", audio_item_select()),
-            [item_id],
-            audio_item_from_row,
-        )
-        .optional()?;
-    let Some(row) = row else {
+    let Some(row) = audio_item(connection, item_id)? else {
         return Ok(RemovalDecision::Denied(RemovalDenial::ItemNotFound));
     };
     if row.lifecycle_state == "deleted" {
@@ -355,6 +386,38 @@ pub fn authorize_audio_removal(
     })
 }
 
+/// Re-checks, at the moment native code is about to remove a file the user asked to remove, that
+/// the item is live, the audio is still the item's audio, and the item keeps recoverable text
+/// without it. The retention clock is not consulted: a user may remove audio before it expires.
+/// Audio that is the item's only source is denied, so a request never destroys the sole record of
+/// a capture; removing everything is item deletion, which `lifecycle::delete_intent` owns.
+pub fn authorize_user_audio_removal(
+    connection: &Connection,
+    item_id: &str,
+    audio_reference: &str,
+) -> Result<RemovalDecision> {
+    let Some(row) = audio_item(connection, item_id)? else {
+        return Ok(RemovalDecision::Denied(RemovalDenial::ItemNotFound));
+    };
+    if row.lifecycle_state == "deleted" {
+        return Ok(RemovalDecision::Denied(RemovalDenial::DeletionOwnsCleanup));
+    }
+    if row.audio_reference != audio_reference {
+        return Ok(RemovalDecision::Denied(
+            RemovalDenial::AudioReferenceMismatch,
+        ));
+    }
+    let transcription_state = row
+        .transcription_state
+        .parse::<TranscriptionState>()
+        .map_err(|error| anyhow!("stored transcription state is invalid: {}", error.0))?;
+    Ok(if recoverable_text_present(&row, transcription_state) {
+        RemovalDecision::ApprovedByUser
+    } else {
+        RemovalDecision::Denied(RemovalDenial::SoleSource)
+    })
+}
+
 enum RetentionClock {
     Started(DateTime<Utc>),
     Unresolved(UnresolvedReason),
@@ -370,10 +433,7 @@ fn assess_row(
         .transcription_state
         .parse::<TranscriptionState>()
         .map_err(|error| anyhow!("stored transcription state is invalid: {}", error.0))?;
-    let transcript_recoverable = transcription_state == TranscriptionState::Transcribed
-        && row.transcript_audio_reference.as_deref() == Some(row.audio_reference.as_str())
-        && row.transcript_text_present;
-    let text_present = row.written_text_present || transcript_recoverable;
+    let text_present = recoverable_text_present(row, transcription_state);
 
     let state = match retention_clock(row, transcription_state, text_present) {
         RetentionClock::Unresolved(reason) => RetentionState::Unresolved { reason },

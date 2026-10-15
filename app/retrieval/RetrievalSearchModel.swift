@@ -23,7 +23,8 @@ enum RetrievalSearchPhase: Equatable {
 ///   and again when its answer arrives; a relock in between empties the screen instead of showing counts or snippets.
 /// * A search needs words or a filter. It never asks a provider or the network anything.
 /// * Selecting a result hands the host a validated `RetrievalItemReference`, never the row's text.
-/// * Leaving the screen, or losing the session, drops every result and the typed words.
+/// * Leaving the screen, or losing the session, drops every result and the typed words. Opening a result's detail
+///   while authenticated is the one exception: the search is still there on return.
 ///
 /// Confined to the main queue.
 final class RetrievalSearchModel: ObservableObject {
@@ -46,6 +47,7 @@ final class RetrievalSearchModel: ObservableObject {
     private let calendar: Calendar
     private var generation = 0
     private var lastRequest: RetrievalSearchRequest?
+    private var handedOffToDetail = false
 
     init(
         searcher: RetrievalSearching,
@@ -84,15 +86,25 @@ final class RetrievalSearchModel: ObservableObject {
             clear()
             return
         }
+        handedOffToDetail = true
         onSelect(row.reference)
     }
 
     /// Call when the screen appears or the app becomes active: a session that is no longer authenticated empties it.
     func revalidate() {
+        handedOffToDetail = false
         if readScope() != .authenticated, phase != .idle {
             clear()
             phase = .locked
         }
+    }
+
+    /// Call when the screen goes away. Going on to a result's detail keeps the search, so coming back finds it, but only
+    /// while the session is still authenticated; any other way of leaving drops everything.
+    func screenDidDisappear() {
+        let keepsSearch = handedOffToDetail && readScope() == .authenticated
+        handedOffToDetail = false
+        if !keepsSearch { clear() }
     }
 
     /// Drops every result and the typed words, and ignores any search still running.

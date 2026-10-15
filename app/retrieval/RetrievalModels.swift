@@ -197,8 +197,10 @@ struct RetrievalResultRow: Identifiable, Equatable {
     let snippet: RetrievalSnippet
     let scopeName: String
     let capturedAt: Date
-    /// Known only when the request filtered to one type: a hit does not carry its item type.
+    /// The item's own type from the gated answer; `nil` while the item has not been classified.
     let itemType: RetrievalItemType?
+
+    var typeTitle: String { itemType?.title ?? "Not yet sorted" }
 
     var basisTitle: String {
         switch basis {
@@ -226,6 +228,11 @@ struct RetrievalPage: Equatable {
             guard let reference = RetrievalItemReference(candidate: hit.itemID),
                 let capturedAt = RetrievalInstant.parse(hit.capturedAt)
             else { throw RetrievalSearchFailure.unreadable }
+            var itemType: RetrievalItemType?
+            if let label = hit.itemType {
+                guard let known = RetrievalItemType(rawValue: label) else { throw RetrievalSearchFailure.unreadable }
+                itemType = known
+            }
             rows.append(
                 RetrievalResultRow(
                     reference: reference,
@@ -236,7 +243,7 @@ struct RetrievalPage: Equatable {
                     snippet: RetrievalSnippet(text: hit.text, span: hit.matched == .current ? hit.matchSpan : nil),
                     scopeName: hit.scope == "work" ? "Work" : "Personal",
                     capturedAt: capturedAt,
-                    itemType: request.itemType))
+                    itemType: itemType))
         }
         return RetrievalPage(totalAccessible: answer.totalAccessible, rows: rows, offset: request.offset)
     }

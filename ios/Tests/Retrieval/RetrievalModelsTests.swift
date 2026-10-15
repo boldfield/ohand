@@ -139,17 +139,17 @@ final class RetrievalModelsTests: XCTestCase {
         let page = try RetrievalPage.make(
             from: try answer("""
                 {"total_accessible": 3, "hits": [
-                  {"item_id": "\(Self.itemID)", "capture_id": "c1", "scope": "work",
+                  {"item_id": "\(Self.itemID)", "capture_id": "c1", "scope": "work", "item_type": "note",
                    "text": "call the roofer", "text_basis": "corrected", "original_text": "call the rooter",
                    "matched": "superseded_original", "match_span": null,
                    "captured_at": "2026-10-08T12:30:00.123456789+00:00"},
                   {"item_id": "\(Self.itemID.replacingOccurrences(of: "0b6c", with: "1b6c"))", "capture_id": "c2",
-                   "scope": "personal", "text": "plain words", "text_basis": "original", "original_text": "ignored",
+                   "scope": "personal", "item_type": "broad_intention", "text": "plain words", "text_basis": "original", "original_text": "ignored",
                    "matched": "current", "match_span": {"start": 6, "end": 11},
                    "captured_at": "2026-10-09T08:00:00Z"}
                 ]}
                 """),
-            for: RetrievalSearchRequest(query: "roofer", itemType: .note, offset: 0))
+            for: RetrievalSearchRequest(query: "roofer", offset: 0))
 
         XCTAssertEqual(page.totalAccessible, 3)
         XCTAssertTrue(page.hasMore)
@@ -169,18 +169,42 @@ final class RetrievalModelsTests: XCTestCase {
         XCTAssertEqual(plain.snippet.match, "words")
         XCTAssertEqual(plain.basisTitle, "Original words")
         XCTAssertEqual(plain.scopeName, "Personal")
+        XCTAssertEqual(plain.itemType, .broadIntention, "the type comes from the hit, not from a filter")
     }
 
-    func testAnItemTypeIsShownOnlyWhenTheRequestFilteredToOne() throws {
+    func testEachHitShowsItsOwnTypeWhateverTheRequestFilteredTo() throws {
+        func answerJSON(itemTypeField: String) -> String {
+            """
+            {"total_accessible": 1, "hits": [{"item_id": "\(Self.itemID)", "capture_id": "c1", "scope": "personal",
+            \(itemTypeField) "text": "t", "text_basis": "transcribed", "original_text": null, "matched": "current",
+            "match_span": null, "captured_at": "2026-10-08T12:30:00Z"}]}
+            """
+        }
+        let typed = try RetrievalPage.make(
+            from: try answer(answerJSON(itemTypeField: #""item_type": "action","#)),
+            for: RetrievalSearchRequest(query: "t", itemType: .idea))
+        XCTAssertEqual(typed.rows[0].itemType, .action, "a filter is not echoed back as the type")
+        XCTAssertEqual(typed.rows[0].typeTitle, "Action")
+        XCTAssertEqual(typed.rows[0].basisTitle, "Transcribed")
+        XCTAssertFalse(typed.hasMore)
+
+        for field in [#""item_type": null,"#, ""] {
+            let unclassified = try RetrievalPage.make(
+                from: try answer(answerJSON(itemTypeField: field)), for: RetrievalSearchRequest(query: "t"))
+            XCTAssertNil(unclassified.rows[0].itemType)
+            XCTAssertEqual(unclassified.rows[0].typeTitle, "Not yet sorted", "an unclassified item says so")
+        }
+    }
+
+    func testATypeLabelTheAppDoesNotKnowMakesThePageUnreadable() throws {
         let json = """
             {"total_accessible": 1, "hits": [{"item_id": "\(Self.itemID)", "capture_id": "c1", "scope": "personal",
-            "text": "t", "text_basis": "transcribed", "original_text": null, "matched": "current", "match_span": null,
-            "captured_at": "2026-10-08T12:30:00Z"}]}
+            "item_type": "mystery", "text": "t", "text_basis": "original", "original_text": null, "matched": "current",
+            "match_span": null, "captured_at": "2026-10-08T12:30:00Z"}]}
             """
-        let unfiltered = try RetrievalPage.make(from: try answer(json), for: RetrievalSearchRequest(query: "t"))
-        XCTAssertNil(unfiltered.rows[0].itemType)
-        XCTAssertEqual(unfiltered.rows[0].basisTitle, "Transcribed")
-        XCTAssertFalse(unfiltered.hasMore)
+        XCTAssertThrowsError(try RetrievalPage.make(from: try answer(json), for: RetrievalSearchRequest(query: "t"))) {
+            XCTAssertEqual($0 as? RetrievalSearchFailure, .unreadable)
+        }
     }
 
     func testAMalformedIdentifierOrDateMakesTheWholePageUnreadable() throws {

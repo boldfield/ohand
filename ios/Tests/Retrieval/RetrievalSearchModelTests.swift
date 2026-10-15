@@ -264,4 +264,59 @@ final class RetrievalSearchModelTests: XCTestCase {
         XCTAssertNil(model.itemType)
         XCTAssertNil(model.since)
     }
+
+    private func showOneResult() throws -> RetrievalResultRow {
+        model.query = "roofer"
+        model.search()
+        let shown = row(Self.firstID)
+        deliver(.success(page([shown])))
+        return shown
+    }
+
+    func testLeavingForAResultsDetailKeepsTheSearchForTheWayBack() throws {
+        let shown = try showOneResult()
+
+        model.select(shown)
+        model.screenDidDisappear()
+        model.revalidate()
+
+        XCTAssertEqual(selected, [shown.reference])
+        XCTAssertEqual(model.phase, .results)
+        XCTAssertEqual(model.rows, [shown])
+        XCTAssertEqual(model.query, "roofer")
+    }
+
+    func testLeavingTheScreenAnyOtherWayDropsTheSearch() throws {
+        _ = try showOneResult()
+
+        model.screenDidDisappear()
+
+        XCTAssertEqual(model.phase, .idle)
+        XCTAssertTrue(model.rows.isEmpty)
+        XCTAssertEqual(model.query, "")
+    }
+
+    func testReturningFromDetailThenLeavingDropsTheSearch() throws {
+        let shown = try showOneResult()
+        model.select(shown)
+        model.screenDidDisappear()
+        model.revalidate()
+
+        model.screenDidDisappear()
+
+        XCTAssertEqual(model.phase, .idle)
+        XCTAssertTrue(model.rows.isEmpty)
+    }
+
+    func testARelockWhileDetailIsOpenDropsTheSearch() throws {
+        let shown = try showOneResult()
+        model.select(shown)
+        scope = .captureOnly
+
+        model.screenDidDisappear()
+
+        XCTAssertEqual(model.phase, .idle)
+        XCTAssertTrue(model.rows.isEmpty)
+        XCTAssertEqual(model.query, "")
+    }
 }

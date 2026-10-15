@@ -242,6 +242,15 @@ final class RetrievalSearchModuleIntegrationTests: XCTestCase {
         XCTAssertEqual(ideas.rows.map(\.reference.value), [ideaID])
         XCTAssertEqual(ideas.rows.first?.itemType, .idea)
         XCTAssertEqual(ideas.totalAccessible, 1)
+
+        let everything = try XCTUnwrap(search(RetrievalSearchRequest(query: "synthetic")).page)
+        XCTAssertEqual(everything.rows.count, 2)
+        XCTAssertEqual(
+            everything.rows.first { $0.reference.value == ideaID }?.itemType, .idea,
+            "an unfiltered search still shows the item's own type")
+        XCTAssertNotEqual(
+            everything.rows.first { $0.reference.value != ideaID }?.itemType, .idea,
+            "the other item keeps its own type")
     }
 
     func testPagingContinuesFromTheOffset() throws {

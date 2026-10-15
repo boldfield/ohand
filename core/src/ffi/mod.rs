@@ -18,8 +18,12 @@ pub mod deletion_cleanup;
 pub mod export_snapshot;
 pub mod ingress_import;
 pub mod item_corrections;
+pub mod item_detail;
+pub mod item_lifecycle_controls;
 pub mod metrics;
+pub mod provider_profiles;
 pub mod provider_transport;
+pub mod reminder_controls;
 pub mod transcription_attachment;
 
 pub mod job_health;
@@ -31,3 +35,4 @@ pub mod reset;
 pub mod retrieval;
 pub mod route_policy;
 pub mod route_provisioning;
+pub mod suggestion_responses;
