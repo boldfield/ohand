@@ -1,5 +1,5 @@
 import Foundation
-import OhAndCoreC
+import OhandCoreC
 
 /// The item types a user may correct to. The raw values are the core's `ItemType` names.
 public enum ItemCorrectionItemType: String, Equatable, Sendable, CaseIterable {
