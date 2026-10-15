@@ -221,6 +221,20 @@ public final class CompositionPrivateReads {
         try gated { try gate.startItemStatus(operationID: operationID, itemID: itemID) }
     }
 
+    /// Full-text search over the items the session may read. The answer decodes as `PrivateRetrievalAnswer`, after
+    /// `admit`.
+    public func startSearch(
+        operationID: UInt64, query: String, filters: PrivateRetrievalFilters = PrivateRetrievalFilters()
+    ) throws {
+        try gated { try gate.startSearch(operationID: operationID, query: query, filters: filters) }
+    }
+
+    /// Every item the session may read that satisfies the filters. The answer
+    /// decodes as `PrivateRetrievalAnswer`, after `admit`.
+    public func startList(operationID: UInt64, filters: PrivateRetrievalFilters = PrivateRetrievalFilters()) throws {
+        try gated { try gate.startList(operationID: operationID, filters: filters) }
+    }
+
     /// Returns normally only while the read this event answers is still authorized. On a throw the caller discards the
     /// event without decoding it. Each answer is admitted at most once.
     public func admit(operationID: UInt64) throws {
@@ -497,6 +511,10 @@ private final class CoreHandleReadSource: PrivateReadSource {
 
     func startItemStatus(operationID: UInt64, itemID: String) throws {
         try core.startItemStatus(operationID: operationID, itemID: itemID)
+    }
+
+    func startRetrieval(operationID: UInt64, request: CoreRetrievalRequest) throws {
+        try core.startRetrieval(operationID: operationID, request: request)
     }
 }
 

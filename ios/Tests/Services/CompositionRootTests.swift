@@ -135,6 +135,48 @@ private final class ShadowReviewTakingModule: CompositionModule {
     func shutDown() {}
 }
 
+/// Retrieves through the gated search and list verbs only, as an `app/` module would: it holds no core handle.
+private final class RetrievalModule: CompositionModule {
+    let identifier = "retrieval.reader"
+    let firstOperationID: UInt64 = 1 << 44
+    private(set) var context: CompositionContext?
+    private var nextOffset: UInt64 = 0
+    /// Every admitted answer, decoded, and every refusal, in arrival order.
+    private(set) var outcomes: [Result<PrivateRetrievalAnswer, CoreFailure>] = []
+
+    func attach(to context: CompositionContext) throws {
+        self.context = context
+    }
+
+    func handle(_ event: CoreEvent) -> Bool {
+        guard event.operationID >= firstOperationID, event.operationID < firstOperationID + nextOffset else {
+            return false
+        }
+        do {
+            try context?.privateReads.admit(operationID: event.operationID)
+            outcomes.append(.success(try event.decode(PrivateRetrievalAnswer.self)))
+        } catch {
+            outcomes.append(.failure((error as? CoreFailure) ?? CoreFailure.handleClosed))
+        }
+        return true
+    }
+
+    func shutDown() {}
+
+    func search(_ query: String, filters: PrivateRetrievalFilters = PrivateRetrievalFilters()) throws {
+        try context?.privateReads.startSearch(operationID: allocateOperationID(), query: query, filters: filters)
+    }
+
+    func list(filters: PrivateRetrievalFilters = PrivateRetrievalFilters()) throws {
+        try context?.privateReads.startList(operationID: allocateOperationID(), filters: filters)
+    }
+
+    private func allocateOperationID() -> UInt64 {
+        defer { nextOffset += 1 }
+        return firstOperationID + nextOffset
+    }
+}
+
 private struct TransportAttachRefused: Error {}
 
 final class CompositionRootTests: XCTestCase {
@@ -294,6 +336,88 @@ final class CompositionRootTests: XCTestCase {
         try module.askCore()
         XCTAssertTrue(pump(until: { !module.receivedEvents.isEmpty }))
         XCTAssertTrue(module.admissionRefusals.isEmpty)
+    }
+
+    func testModuleSearchAndListAreRefusedBeforeAuthenticationAndNeverReachTheCore() throws {
+        let (session, _) = makeSession(authenticated: false)
+        let module = RetrievalModule()
+        let root = try makeTestRoot(
+            sender: ScriptedProviderSender(reply: Data()), readSession: session, modules: [module])
+        defer { root.shutDown() }
+        _ = try saveSyntheticCapture(root)
+
+        for ask in [{ try module.search("synthetic") }, { try module.list() }] {
+            XCTAssertThrowsError(try ask()) { error in
+                let failure = error as? CoreFailure
+                XCTAssertEqual(failure?.errorClass, .unauthorized)
+                XCTAssertEqual(failure?.code, "read_not_authenticated")
+            }
+        }
+        _ = pump(until: { !module.outcomes.isEmpty }, timeout: 0.3)
+        XCTAssertTrue(module.outcomes.isEmpty, "a refused retrieval never reaches the core")
+    }
+
+    func testModuleSearchAndListReturnASeededCaptureAfterAuthentication() throws {
+        let (session, boundary) = makeSession(authenticated: false)
+        let module = RetrievalModule()
+        let root = try makeTestRoot(
+            sender: ScriptedProviderSender(reply: Data()), readSession: session, modules: [module])
+        defer { root.shutDown() }
+        let itemID = try saveSyntheticCapture(root)
+        XCTAssertThrowsError(try module.search("synthetic"))
+
+        boundary.nextOutcome = .succeeded
+        XCTAssertEqual(authenticateAndWait(session), .authenticated)
+        try module.search("synthetic")
+        try module.list()
+        XCTAssertTrue(pump(until: { module.outcomes.count == 2 }))
+        for outcome in module.outcomes {
+            guard case .success(let answer) = outcome else { return XCTFail("authenticated retrieval failed: \(outcome)") }
+            XCTAssertEqual(answer.totalAccessible, 1)
+            XCTAssertEqual(answer.hits.map(\.itemID), [itemID])
+            XCTAssertEqual(answer.hits.first?.text, "synthetic capture")
+            XCTAssertEqual(answer.hits.first?.scope, "personal")
+        }
+    }
+
+    func testModuleRetrievalAnswerArrivingAfterARelockIsDiscarded() throws {
+        let (session, _) = makeSession(authenticated: true)
+        let module = RetrievalModule()
+        let root = try makeTestRoot(
+            sender: ScriptedProviderSender(reply: Data()), readSession: session, modules: [module])
+        defer { root.shutDown() }
+        _ = try saveSyntheticCapture(root)
+
+        try module.search("synthetic")
+        session.relock(.explicit)
+        XCTAssertTrue(pump(until: { !module.outcomes.isEmpty }))
+        guard case .failure(let failure)? = module.outcomes.first else {
+            return XCTFail("a relocked answer must not be delivered: \(module.outcomes)")
+        }
+        XCTAssertEqual(failure.errorClass, .unauthorized)
+        XCTAssertEqual(failure.code, "read_relocked")
+    }
+
+    func testModuleRetrievalExcludesScopesItDoesNotAskFor() throws {
+        let module = RetrievalModule()
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), modules: [module])
+        defer { root.shutDown() }
+        _ = try saveSyntheticCapture(root)
+
+        let workOnly = PrivateRetrievalFilters(scopes: [.work])
+        try module.search("synthetic", filters: workOnly)
+        try module.list(filters: workOnly)
+        XCTAssertTrue(pump(until: { module.outcomes.count == 2 }))
+        for outcome in module.outcomes {
+            guard case .success(let answer) = outcome else { return XCTFail("retrieval failed: \(outcome)") }
+            XCTAssertEqual(answer.totalAccessible, 0, "no count from an excluded scope")
+            XCTAssertTrue(answer.hits.isEmpty, "no text from an excluded scope")
+        }
+
+        try module.search("synthetic", filters: PrivateRetrievalFilters(scopes: [.personal]))
+        XCTAssertTrue(pump(until: { module.outcomes.count == 3 }))
+        guard case .success(let personal)? = module.outcomes.last else { return XCTFail("retrieval failed") }
+        XCTAssertEqual(personal.hits.map(\.text), ["synthetic capture"])
     }
 
     func testModuleJustBelowTheProcessingHealthIntervalReceivesItsEvents() throws {
