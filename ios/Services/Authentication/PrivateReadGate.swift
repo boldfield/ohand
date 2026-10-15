@@ -75,6 +75,8 @@ public struct PrivateRetrievalHit: Decodable, Equatable, Sendable {
     public let captureID: String
     /// `personal` or `work`.
     public let scope: String
+    /// The item's current type, or `nil` while it has not been classified.
+    public let itemType: String?
     public let text: String
     public let textBasis: CoreRetrievalTextBasis
     /// The text as captured; present only when `textBasis` is `corrected`.
@@ -89,6 +91,7 @@ public struct PrivateRetrievalHit: Decodable, Equatable, Sendable {
         case itemID = "item_id"
         case captureID = "capture_id"
         case scope
+        case itemType = "item_type"
         case text
         case textBasis = "text_basis"
         case originalText = "original_text"
