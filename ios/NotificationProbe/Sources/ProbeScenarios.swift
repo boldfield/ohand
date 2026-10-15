@@ -319,7 +319,7 @@ final class NotificationProbeScenarios {
         let soonest = Set((0..<total).filter { rank(of: $0) < 64 }.map(identifier(of:)))
         let firstAdded = Set((0..<64).map(identifier(of:)))
         let lastAdded = Set((max(0, total - 64)..<total).map(identifier(of:)))
-        let observations: [String: String] = [
+        var observations: [String: String] = [
             "requestsAdded": String(total),
             "addErrorCount": String(addErrorCount),
             "pendingCount": String(retained.count),
@@ -328,7 +328,7 @@ final class NotificationProbeScenarios {
             "retainedAmongLastAdded64": String(retained.intersection(lastAdded).count),
             "retainedIdentifiers": retained.sorted().joined(separator: ","),
         ]
-        await clearPending()
+        observations["cleanupSettled"] = String(await clearPendingUntilSettled())
         return observations
     }
 
@@ -336,14 +336,36 @@ final class NotificationProbeScenarios {
 
     private func foregroundDelivery() async throws -> [String: String] {
         let identifier = "probe.foreground"
+        // Start from a center that no earlier scenario (the capacity scenario overfills it) can still be changing.
+        let preflightSettled = await clearPendingUntilSettled()
+        _ = await clearDelivered()
+        let pendingBeforeAdd = await center.pendingNotificationRequests().count
+
         let addStarted = Date()
         try await center.add(intervalRequest(identifier: identifier, title: "Foreground", interval: Self.foregroundIntervalSeconds))
-        let addMilliseconds = Int(Date().timeIntervalSince(addStarted) * 1000)
+        let addCompleted = Date()
+        let addMilliseconds = Int(addCompleted.timeIntervalSince(addStarted) * 1000)
+        func millisecondsSinceAdd() -> Int { Int(Date().timeIntervalSince(addCompleted) * 1000) }
+        let pendingAfterAdd = await waitForPending(timeout: 5) { requests in requests.contains { $0.identifier == identifier } }
+
+        // Once a second, note whether the request is still pending, so a request that vanishes shows when it did.
         var presented = false
-        for _ in 0..<Self.foregroundPollCount {
+        var lastPendingMilliseconds = -1
+        var firstAbsentMilliseconds = -1
+        var presentedMilliseconds = -1
+        for pollIndex in 0..<Self.foregroundPollCount {
             if ForegroundPresentationRecorder.shared.identifiers.contains(identifier) {
                 presented = true
+                presentedMilliseconds = millisecondsSinceAdd()
                 break
+            }
+            if pollIndex % 4 == 0 {
+                let stillPending = await center.pendingNotificationRequests().contains { $0.identifier == identifier }
+                if stillPending {
+                    lastPendingMilliseconds = millisecondsSinceAdd()
+                } else if firstAbsentMilliseconds < 0 {
+                    firstAbsentMilliseconds = millisecondsSinceAdd()
+                }
             }
             try await Task.sleep(nanoseconds: 250_000_000)
         }
@@ -355,6 +377,12 @@ final class NotificationProbeScenarios {
             "pendingContainsRequest": String(pending.contains { $0.identifier == identifier }),
             "addMilliseconds": String(addMilliseconds),
             "intervalSeconds": String(Int(Self.foregroundIntervalSeconds)),
+            "preflightSettled": String(preflightSettled),
+            "pendingBeforeAdd": String(pendingBeforeAdd),
+            "pendingAfterAdd": String(pendingAfterAdd.satisfied),
+            "lastPendingMilliseconds": String(lastPendingMilliseconds),
+            "firstAbsentMilliseconds": String(firstAbsentMilliseconds),
+            "presentedMilliseconds": String(presentedMilliseconds),
         ]
         center.removeDeliveredNotifications(withIdentifiers: [identifier])
         return observations
@@ -416,6 +444,15 @@ final class NotificationProbeScenarios {
     private func clearPending() async {
         center.removeAllPendingNotificationRequests()
         _ = await waitForPending(timeout: 5) { requests in requests.isEmpty }
+    }
+
+    /// Removal runs asynchronously: after the pending list first reads empty, keep reading for a second and require it to stay empty.
+    private func clearPendingUntilSettled() async -> Bool {
+        center.removeAllPendingNotificationRequests()
+        let emptied = await waitForPending(timeout: 5) { requests in requests.isEmpty }
+        guard emptied.satisfied else { return false }
+        let afterSettling = await waitForPending(timeout: 1) { _ in false }
+        return afterSettling.requests.isEmpty
     }
 
     /// removePending... executes asynchronously, so state is polled instead of read once.

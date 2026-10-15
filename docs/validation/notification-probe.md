@@ -97,7 +97,11 @@ Not measured: whether delivered notifications or repeating triggers consume pend
 
 ### Delivery
 
-- **Foreground, delegate installed.** A 2 s request produced a `willPresent` callback (`willPresentCalled = true`); afterwards the request was no longer pending and was listed by `getDeliveredNotifications`.
+- **Foreground, delegate installed.** A 15 s request produced a `willPresent` callback (`willPresentCalled = true`); afterwards the request was no longer pending and was listed by `getDeliveredNotifications`.
+
+  The foreground step first empties the pending list (and requires it to stay empty for a second) and the delivered list, so it does not inherit the 100-request capacity scenario's state. It then adds a 15 s request, reads the pending list back to confirm the request is retained, and once a second records whether the request is still pending. The result carries `preflightSettled`, `pendingBeforeAdd`, `pendingAfterAdd`, `lastPendingMilliseconds`, `firstAbsentMilliseconds` and `presentedMilliseconds` (milliseconds after `add` completed; `-1` means never), so a request that disappears shows whether it did so before or at its fire time.
+
+  One hosted-runner run (`38666074347`, `49f0f8f`) failed this step with `add` taking 99 ms for a 15 s trigger and the request neither delivered nor pending after 30 s. The cause is **not confirmed**; see the PR for the evidence and the hypothesis the step now removes (state left by the capacity scenario). The OS behavior in this document did not change.
 - **App not running.** A 5 s request was scheduled, the app was terminated by the UI test, and the test waited 15 s before relaunching. After relaunch the probe found the request in `getDeliveredNotifications` (delivered date 5 s after scheduling), no longer pending, and the delegate had received **no** `willPresent` callback in the new process. `removeAllDeliveredNotifications()` brought the delivered list to 0.
 
 This is simulator behavior. Whether the iOS simulator's delivery with the app terminated matches a locked physical iPhone (Focus modes, scheduled summary, Low Power Mode, device reboot) is **not** established here.
