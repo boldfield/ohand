@@ -16,7 +16,6 @@ public enum ProviderConnectionOutcome: String, Decodable, Equatable, Sendable {
     case rateLimited = "rate_limited"
     case providerError = "provider_error"
     case unexpectedResponse = "unexpected_response"
-    case invalidProfile = "invalid_profile"
     case cancelled
 }
 

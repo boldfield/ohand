@@ -24,7 +24,7 @@ const CAPTURE_ID: &str = "5a1c0000-0000-4000-8000-0000000000c1";
 const ITEM_ID: &str = "5a1c0000-0000-4000-8000-0000000000e1";
 const ROUTE_ID: &str = "route-synthetic";
 
-const ALL_OUTCOMES: [&str; 13] = [
+const ALL_OUTCOMES: [&str; 12] = [
     "ok",
     "credential_missing",
     "credential_rejected",
@@ -36,7 +36,6 @@ const ALL_OUTCOMES: [&str; 13] = [
     "rate_limited",
     "provider_error",
     "unexpected_response",
-    "invalid_profile",
     "cancelled",
 ];
 

@@ -51,7 +51,6 @@ enum ConnectionOutcome {
     RateLimited,
     ProviderError,
     UnexpectedResponse,
-    InvalidProfile,
     Cancelled,
 }
 
@@ -167,7 +166,7 @@ fn classify(
             FailureKind::CapabilityUnavailable | FailureKind::InputTooLarge => {
                 ConnectionOutcome::CapabilityMismatch
             }
-            _ => ConnectionOutcome::InvalidProfile,
+            _ => ConnectionOutcome::ProviderError,
         },
     }
 }
