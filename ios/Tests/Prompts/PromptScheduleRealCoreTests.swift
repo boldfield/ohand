@@ -11,6 +11,54 @@ private final class PromptTestProviderSender: ProviderRequestSender, @unchecked 
     }
 }
 
+/// A reminder pass that reads the persisted schedule when it starts, can be held before it finishes, and then keeps what
+/// it read as the installed state, the way a pass that began before a later choice would.
+private final class ScheduleMirroringReconciler: ReminderReconciling, @unchecked Sendable {
+    let gate = SuspensionGate()
+    var reportsConverged: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return storedReportsConverged }
+        set { lock.lock(); defer { lock.unlock() }; storedReportsConverged = newValue }
+    }
+    var installedScheduleIsEnabled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return installedEnabled
+    }
+
+    private let core: CorePromptScheduleClient
+    private let lock = NSLock()
+    private var gatesNextPass = false
+    private var installedEnabled = false
+    private var storedReportsConverged = true
+
+    init(core: CorePromptScheduleClient) {
+        self.core = core
+    }
+
+    func gateNextPass() {
+        lock.lock()
+        gatesNextPass = true
+        lock.unlock()
+    }
+
+    func reconcile(_ request: ReminderReconciliationRequest) async throws -> ReminderReconciliationOutcome {
+        let enabledWhenThePassBegan = try await core.read().enabled
+        lock.lock()
+        let held = gatesNextPass
+        gatesNextPass = false
+        lock.unlock()
+        if held { await gate.wait() }
+        lock.lock()
+        installedEnabled = enabledWhenThePassBegan
+        let converged = storedReportsConverged
+        lock.unlock()
+        return ReminderReconciliationOutcome(
+            reminders: [], promptsGranted: 0, promptsDeferred: 0, converged: converged)
+    }
+
+    func storedFacts() async throws -> [ReminderFacts] { [] }
+}
+
 /// Drives the daily prompt schedule through a production-shaped root: the real Rust core, the real lifecycle
 /// coordinator and reminder pass, and a fake only at the operating system's edges (the notification centre and the
 /// provider transport).
@@ -184,53 +232,70 @@ final class PromptScheduleRealCoreTests: XCTestCase {
         XCTAssertEqual(promptIdentifiers(center.addedRequests), installed, "the entry itself installs nothing more")
     }
 
-    func testConfiguringWhileAPassInstallsTheOldScheduleStillCancelsThePrompts() async throws {
-        let inner = FakeNotificationCenter()
-        inner.authorizationStatus = .denied
-        let center = SuspendingNotificationCenter(inner: inner)
-        let (root, _) = try makeStartedRoot(center: center)
-        defer { root.shutDown() }
-        _ = try await root.promptSchedule.configure(.daily(hour: 9, minute: 0))
-        XCTAssertEqual(promptIdentifiers(inner.addedRequests), [], "a denied permission withholds every prompt")
+    func testConfigureAfterJoiningAStalePassStillAppliesTheNewChoice() async throws {
+        let (core, client) = try openCore()
+        defer { client.shutDown(); core.close() }
+        let reconciliation = ScheduleMirroringReconciler(core: client)
+        let reconciler = NotificationPermissionReconciler(
+            center: FakeNotificationCenter(), reconciliation: reconciliation,
+            observations: InMemoryNotificationPermissionObservationStore())
+        let service = PromptScheduleService(
+            core: client, timeZone: { Self.timeZone }, install: { try await reconciler.refresh(trigger: $0) })
 
-        inner.authorizationStatus = .authorized
-        let addGate = SuspensionGate()
-        center.addGate = addGate
-        let staleReminderPass = Task { try await root.reconcileReminders(trigger: .foreground) }
-        try await waitUntil("the stale pass reaches its first install") { addGate.arrivals >= 1 }
+        _ = try await service.configure(.daily(hour: 9, minute: 0))
+        XCTAssertTrue(reconciliation.installedScheduleIsEnabled)
 
-        let configuring = Task { try await root.promptSchedule.configure(.off) }
+        reconciliation.gateNextPass()
+        let stalePass = Task { try await reconciler.refresh(trigger: .foreground) }
+        try await waitUntil("the stale pass has read the enabled schedule") { reconciliation.gate.arrivals >= 1 }
+
+        let turningOff = Task { try await service.configure(.off) }
         try await waitUntil("the choice to turn prompts off is persisted") {
-            let persisted = try await root.promptSchedule.read()
+            let persisted = try await client.read()
             return !persisted.enabled
         }
-        addGate.release()
+        reconciliation.gate.release()
 
-        _ = try await staleReminderPass.value
-        let off = try await configuring.value
+        _ = try await stalePass.value
+        let off = try await turningOff.value
         XCTAssertFalse(off.enabled)
-        XCTAssertEqual(promptIdentifiers(inner.pendingIdentifiers), [], "the stale pass did not leave prompts behind")
+        XCTAssertFalse(
+            reconciliation.installedScheduleIsEnabled,
+            "configure ran a pass that began after the choice was persisted, not only the stale one it joined")
     }
 
     func testConfigureReportsAPassThatDidNotConverge() async throws {
-        let inner = FakeNotificationCenter()
-        let center = SuspendingNotificationCenter(inner: inner)
-        let (root, _) = try makeStartedRoot(center: center)
-        defer { root.shutDown() }
-        inner.addError = URLError(.cannotConnectToHost)
+        let (core, client) = try openCore()
+        defer { client.shutDown(); core.close() }
+        let reconciliation = ScheduleMirroringReconciler(core: client)
+        reconciliation.reportsConverged = false
+        let reconciler = NotificationPermissionReconciler(
+            center: FakeNotificationCenter(), reconciliation: reconciliation,
+            observations: InMemoryNotificationPermissionObservationStore())
+        let service = PromptScheduleService(
+            core: client, timeZone: { Self.timeZone }, install: { try await reconciler.refresh(trigger: $0) })
 
         do {
-            _ = try await root.promptSchedule.configure(.daily(hour: 9, minute: 0))
-            XCTFail("configure reported success although no prompt could be installed")
+            _ = try await service.configure(.daily(hour: 9, minute: 0))
+            XCTFail("configure reported success although its pass did not converge")
         } catch PromptScheduleConfigurationError.installIncomplete(let outcome, let report) {
             XCTAssertTrue(outcome.enabled, "the choice itself was persisted")
             XCTAssertFalse(report.converged)
         }
-        let persisted = try await root.promptSchedule.read()
+        let persisted = try await client.read()
         XCTAssertTrue(persisted.enabled)
     }
 
     // MARK: Helpers
+
+    private func openCore() throws -> (CoreHandle, CorePromptScheduleClient) {
+        let layout = ProtectedStorageLayout(rootDirectory: storageRoot)
+        XCTAssertTrue(ProtectedStorageService(layout: layout).prepare().isFullyConfigured)
+        let core = try CoreHandle(path: layout.databaseURL.path)
+        let client = CorePromptScheduleClient(core: core)
+        try core.setEventHandler { _ = client.handle($0) }
+        return (core, client)
+    }
 
     private func waitUntil(
         _ description: String, timeoutSeconds: TimeInterval = 20, _ condition: () async throws -> Bool
@@ -255,7 +320,7 @@ final class PromptScheduleRealCoreTests: XCTestCase {
     }
 
     private func makeStartedRoot(
-        center: NotificationCenterProviding
+        center: FakeNotificationCenter
     ) throws -> (ServiceCompositionRoot, LifecycleCoordinator) {
         let coordinator = LifecycleCoordinator(stepTimeoutSeconds: 30)
         let session = ReadAuthenticationSession(boundary: FakeReadAuthenticationBoundary())
