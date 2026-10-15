@@ -5,6 +5,60 @@ struct ManagementContext {
     let voiceRecovery: VoiceRecoveryModel
 }
 
+/// Frames of the placeholder screens, keyed by accessibility identifier, so a hosted test can see that they render.
+struct ManagementPlaceholderFrameKey: PreferenceKey {
+    static var defaultValue: [String: CGRect] = [:]
+
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue()) { _, latest in latest }
+    }
+}
+
+private extension View {
+    func reportPlaceholderFrame(_ identifier: String) -> some View {
+        background(GeometryReader { proxy in
+            Color.clear.preference(key: ManagementPlaceholderFrameKey.self, value: [identifier: proxy.frame(in: .global)])
+        })
+    }
+}
+
+/// A destination host event, reported to an optional observer so tests (and only tests) can see what is on display.
+enum ManagementPresentationEvent: Equatable {
+    case appeared(ManagementRoute, isPlaceholder: Bool)
+    case disappeared(ManagementRoute)
+}
+
+/// The screens other slices fill in for requests that come from outside the management lists: an item's source detail
+/// and the current suggestion. A missing screen shows an honest placeholder, never a blank screen.
+struct ManagementDestinations {
+    var item: ((ManagementContext, String) -> AnyView)?
+    var suggestion: ((ManagementContext) -> AnyView)?
+
+    func isRegistered(_ route: ManagementRoute) -> Bool {
+        switch route {
+        case .entry(let entryID): return ManagementCatalog.entry(withID: entryID) != nil
+        case .item: return item != nil
+        case .suggestion: return suggestion != nil
+        }
+    }
+
+    func view(for route: ManagementRoute, context: ManagementContext) -> AnyView {
+        switch route {
+        case .entry(let entryID):
+            if let entry = ManagementCatalog.entry(withID: entryID) {
+                return entry.makeView(context)
+            }
+            return AnyView(Text("This screen is not available.").padding())
+        case .item(let itemID):
+            if let makeItemView = item { return makeItemView(context, itemID) }
+            return AnyView(ItemPlaceholderView())
+        case .suggestion:
+            if let makeSuggestionView = suggestion { return makeSuggestionView(context) }
+            return AnyView(SuggestionPlaceholderView())
+        }
+    }
+}
+
 /// One management screen reachable from capture, or one section of settings. `makeView` is a single reference to the
 /// owning slice's view.
 struct ManagementEntry: Identifiable {
@@ -31,6 +85,11 @@ enum ManagementCatalog {
         ManagementEntry(id: "voice-recovery", title: "Unfinished recordings", systemImage: "waveform") { context in AnyView(VoiceRecoveryView(model: context.voiceRecovery).navigationTitle("Unfinished recordings").navigationBarTitleDisplayMode(.inline)) },
     ]
 
+    /// Where a slice registers the screen for an item or the current suggestion. Set the slice's own line, nothing else.
+    static let destinations = ManagementDestinations(
+        item: nil,
+        suggestion: nil)
+
     static func entry(withID id: String) -> ManagementEntry? {
         secondaryEntries.first { $0.id == id }
     }
@@ -49,6 +108,42 @@ struct SearchPlaceholderView: View {
             .padding()
             .accessibilityIdentifier(Self.identifier)
             .navigationTitle("Search")
+            .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+/// Shown until the item source-detail screen is registered.
+struct ItemPlaceholderView: View {
+    static let identifier = "management.item.placeholder"
+
+    var body: some View {
+        Text("This item's details are not available in this version yet.")
+            .font(.body)
+            .foregroundColor(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
+            .accessibilityIdentifier(Self.identifier)
+            .reportPlaceholderFrame(Self.identifier)
+            .navigationTitle("Item")
+            .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+/// Shown until the suggestion screen is registered.
+struct SuggestionPlaceholderView: View {
+    static let identifier = "management.suggestion.placeholder"
+
+    var body: some View {
+        Text("Suggestions are not available in this version yet.")
+            .font(.body)
+            .foregroundColor(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
+            .accessibilityIdentifier(Self.identifier)
+            .reportPlaceholderFrame(Self.identifier)
+            .navigationTitle("Suggestion")
             .navigationBarTitleDisplayMode(.inline)
     }
 }

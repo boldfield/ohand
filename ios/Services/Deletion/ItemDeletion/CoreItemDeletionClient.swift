@@ -16,7 +16,8 @@ protocol ItemDeletionCore: Sendable {
 /// answered one of this client's operations. Operation IDs start at `firstOperationID`, far from the ranges the other
 /// services use. Call `shutDown()` before closing the core so no completion is left waiting.
 public final class CoreItemDeletionClient: ItemDeletionCore, @unchecked Sendable {
-    public static let firstOperationID: UInt64 = 1 << 59
+    /// Sits above the reminder control range, which starts at `1 << 59`.
+    public static let firstOperationID: UInt64 = (1 << 59) | (1 << 58)
 
     static let shutDownFailure = CoreFailure(
         errorClass: .cancelled, code: "client_shut_down", message: "the item deletion client was shut down")
