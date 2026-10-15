@@ -25,7 +25,7 @@ protocol ReminderControlCore: Sendable {
 /// at `firstOperationID`, far from the ranges the other services use. Call `shutDown()` before closing the core so no
 /// completion is left waiting.
 final class CoreReminderControlClient: ReminderControlCore, @unchecked Sendable {
-    static let firstOperationID: UInt64 = 1 << 55
+    static let firstOperationID: UInt64 = 1 << 49
 
     static let shutDownFailure = CoreFailure(
         errorClass: .cancelled, code: "client_shut_down", message: "the reminder control client was shut down")

@@ -25,6 +25,19 @@ protocol PrivateReadSource: AnyObject {
     func startItemDetail(operationID: UInt64, itemID: String, readScopes: [CoreExportScope]) throws
 }
 
+/// Raised by a read source that does not implement a read added after it was written.
+struct PrivateReadNotSupportedBySource: Error, Equatable {}
+
+extension PrivateReadSource {
+    /// Default so that read sources written before the reminder reads existed (test doubles) keep conforming; the
+    /// core-backed source in the composition root overrides it.
+    func startReminderRead(
+        operationID: UInt64, itemID: String, kind: ReminderReadKind, readScopes: [CoreExportScope]
+    ) throws {
+        throw PrivateReadNotSupportedBySource()
+    }
+}
+
 /// The filters a module may put on a search or list. It has no way to name a read authorization: the gate states the
 /// session's authorized scopes itself, and `scopes` can only narrow them.
 public struct PrivateRetrievalFilters: Equatable, Sendable {
@@ -188,6 +201,11 @@ final class PrivateReadGate {
         try issue(operationID: operationID) {
             try source.startRetrieval(operationID: operationID, request: retrievalRequest(.list, filters: filters))
         }
+    }
+
+    /// Starts a prompt activation, which returns the stored text of the item it offers. `start` queues the core command.
+    func startSuggestionActivation(operationID: UInt64, start: () throws -> Void) throws {
+        try issue(operationID: operationID, start)
     }
 
     /// Returns normally only if the read that `operationID` answers is still authorized; otherwise throws, and the

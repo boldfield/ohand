@@ -56,9 +56,6 @@ private final class RecordingReadSource: PrivateReadSource {
     func startGetCapture(operationID: UInt64, captureID: String) throws {}
     func startItemStatus(operationID: UInt64, itemID: String) throws {}
     func startRetrieval(operationID: UInt64, request: CoreRetrievalRequest) throws {}
-    func startReminderRead(
-        operationID: UInt64, itemID: String, kind: ReminderReadKind, readScopes: [CoreExportScope]
-    ) throws {}
 
     func startItemDetail(operationID: UInt64, itemID: String, readScopes: [CoreExportScope]) throws {
         itemDetailRequests.append(

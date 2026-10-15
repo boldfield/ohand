@@ -71,12 +71,6 @@ final class PrivateReadCoreIntegrationTests: XCTestCase {
             try core.startRetrieval(operationID: operationID, request: request)
         }
 
-        func startReminderRead(
-            operationID: UInt64, itemID: String, kind: ReminderReadKind, readScopes: [CoreExportScope]
-        ) throws {
-            try core.startReminderRead(operationID: operationID, itemID: itemID, kind: kind, readScopes: readScopes)
-        }
-
         func startItemDetail(operationID: UInt64, itemID: String, readScopes: [CoreExportScope]) throws {
             try core.startItemDetail(operationID: operationID, itemID: itemID, readScopes: readScopes)
         }
