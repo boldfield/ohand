@@ -35,8 +35,12 @@ pub const MAX_REPIN_BATCH: usize = 100;
 const REPIN_JOB_ID_DOMAIN: &[u8] = b"ohand.interpretation-repin.v1";
 
 /// Failure reasons that mean a job stopped for configuration rather than for the provider.
-const CONFIGURATION_WAIT_REASONS: [&str; 3] =
-    ["unauthorized", "unsupported", "unsupported_job_version"];
+/// `unsupported_job_version` is deliberately absent: a job fenced for an unknown schema version is
+/// never retried or reinterpreted until a build that supports it reads it.
+const CONFIGURATION_WAIT_REASONS: [&str; 2] = ["unauthorized", "unsupported"];
+
+/// Failure reason of a job fenced for an unknown or newer job schema version.
+const UNSUPPORTED_JOB_VERSION_REASON: &str = "unsupported_job_version";
 
 /// Move the waiting, unpinned interpretation work of `route_id` onto the profile the resolver
 /// selects now, in one transaction, and return how many items moved (at most
@@ -129,13 +133,21 @@ fn waiting_items(
                AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.item_id = i.item_id \
                                AND j.job_type = ?2 AND j.source_revision = i.revision \
                                AND j.profile_version = ?3) \
-             ORDER BY i.rowid LIMIT ?4",
+               AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.item_id = i.item_id \
+                               AND j.job_type = ?2 AND j.failure_reason = ?4) \
+             ORDER BY i.rowid LIMIT ?5",
         )
         .context("preparing the waiting items query")?;
     let limit = i64::try_from(MAX_REPIN_BATCH).unwrap_or(i64::MAX);
     let rows = statement
         .query_map(
-            rusqlite::params![route_id, JOB_TYPE_INTERPRET, profile_version, limit],
+            rusqlite::params![
+                route_id,
+                JOB_TYPE_INTERPRET,
+                profile_version,
+                UNSUPPORTED_JOB_VERSION_REASON,
+                limit
+            ],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .context("querying waiting items")?

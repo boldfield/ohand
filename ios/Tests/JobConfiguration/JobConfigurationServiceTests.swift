@@ -216,3 +216,118 @@ final class JobConfigurationServiceTests: XCTestCase {
             try JobConfigurationAnswer.decode(Data(#"{"operation_id":5}"#.utf8), for: .repinWaitingWork(routeID: "r")))
     }
 }
+
+/// A read source that records which job-configuration reads the gate sent to the core.
+private final class RecordingJobConfigurationReadSource: PrivateReadSource {
+    private(set) var reads: [(operationID: UInt64, command: JobConfigurationCommand)] = []
+
+    func startStoreCheck(operationID: UInt64) throws {}
+    func startGetCapture(operationID: UInt64, captureID: String) throws {}
+    func startItemStatus(operationID: UInt64, itemID: String) throws {}
+    func startRetrieval(operationID: UInt64, request: CoreRetrievalRequest) throws {}
+
+    func startJobConfigurationRead(operationID: UInt64, command: JobConfigurationCommand) throws {
+        reads.append((operationID, command))
+    }
+}
+
+private final class ClientResults: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [Result<JobConfigurationAnswer, CoreFailure>] = []
+
+    func append(_ value: Result<JobConfigurationAnswer, CoreFailure>) {
+        lock.lock()
+        stored.append(value)
+        lock.unlock()
+    }
+
+    var values: [Result<JobConfigurationAnswer, CoreFailure>] {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+}
+
+/// The stored-state reads reach the core only through the private read gate.
+final class CoreJobConfigurationClientGateTests: XCTestCase {
+    private var directory: URL!
+    private var core: CoreHandle!
+
+    override func setUpWithError() throws {
+        directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        core = try CoreHandle(path: directory.appendingPathComponent("store.sqlite").path)
+    }
+
+    override func tearDown() {
+        core?.close()
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    private func makeClient(
+        authenticated: Bool, source: RecordingJobConfigurationReadSource
+    ) -> (CoreJobConfigurationClient, ReadAuthenticationSession) {
+        let session = ReadAuthenticationSession(boundary: FakeReadAuthenticationBoundary())
+        if authenticated {
+            session.authenticate(reason: "test") { _ in }
+            XCTAssertEqual(session.scope, .authenticated)
+        }
+        let gate = PrivateReadGate(session: session, source: source)
+        return (CoreJobConfigurationClient(core: core, gate: gate), session)
+    }
+
+    func testACaptureOnlySessionNeverReachesTheCoreForARead() {
+        let source = RecordingJobConfigurationReadSource()
+        let (client, _) = makeClient(authenticated: false, source: source)
+        let results = ClientResults()
+
+        client.submit(.jobsPinnedToProfile(profileVersion: "p", limit: nil)) { results.append($0) }
+        client.submit(.requeueRecord(jobID: "j")) { results.append($0) }
+
+        XCTAssertTrue(source.reads.isEmpty)
+        XCTAssertEqual(results.values.count, 2)
+        for result in results.values {
+            guard case .failure(let refusal) = result else { return XCTFail("expected a refusal") }
+            XCTAssertEqual(refusal.code, "read_not_authenticated")
+        }
+    }
+
+    func testAReadAnswerAfterARelockIsDroppedUndecoded() throws {
+        let source = RecordingJobConfigurationReadSource()
+        let (client, session) = makeClient(authenticated: true, source: source)
+        let results = ClientResults()
+        client.submit(.requeueRecord(jobID: "j")) { results.append($0) }
+        client.submit(.jobsPinnedToProfile(profileVersion: "p", limit: 5)) { results.append($0) }
+        XCTAssertEqual(
+            source.reads.map(\.command),
+            [.requeueRecord(jobID: "j"), .jobsPinnedToProfile(profileVersion: "p", limit: 5)])
+
+        session.relock(.explicit)
+        let payload = Data(#"{"operation_id":1,"record":null}"#.utf8)
+        for read in source.reads {
+            XCTAssertTrue(client.handle(CoreEvent(operationID: read.operationID, outcome: .success(payload))))
+        }
+
+        XCTAssertEqual(results.values.count, 2)
+        for result in results.values {
+            guard case .failure(let refusal) = result else { return XCTFail("a relocked answer must be dropped") }
+            XCTAssertEqual(refusal.code, "read_relocked")
+        }
+    }
+
+    func testAReadAnswerWhileAuthenticatedIsDelivered() throws {
+        let source = RecordingJobConfigurationReadSource()
+        let (client, _) = makeClient(authenticated: true, source: source)
+        let results = ClientResults()
+        client.submit(.requeueRecord(jobID: "j")) { results.append($0) }
+        let operationID = try XCTUnwrap(source.reads.first?.operationID)
+
+        XCTAssertTrue(
+            client.handle(
+                CoreEvent(operationID: operationID, outcome: .success(Data(#"{"operation_id":1,"record":null}"#.utf8)))))
+
+        XCTAssertEqual(results.values.count, 1)
+        guard case .success(let answer) = results.values[0] else { return XCTFail("expected the answer") }
+        XCTAssertEqual(answer, .requeueRecord(nil))
+    }
+}

@@ -23,6 +23,7 @@ protocol PrivateReadSource: AnyObject {
     func startReminderRead(
         operationID: UInt64, itemID: String, kind: ReminderReadKind, readScopes: [CoreExportScope]) throws
     func startItemDetail(operationID: UInt64, itemID: String, readScopes: [CoreExportScope]) throws
+    func startJobConfigurationRead(operationID: UInt64, command: JobConfigurationCommand) throws
 }
 
 /// Raised by a read source that does not implement a read added after it was written.
@@ -34,6 +35,10 @@ extension PrivateReadSource {
     func startReminderRead(
         operationID: UInt64, itemID: String, kind: ReminderReadKind, readScopes: [CoreExportScope]
     ) throws {
+        throw PrivateReadNotSupportedBySource()
+    }
+
+    func startJobConfigurationRead(operationID: UInt64, command: JobConfigurationCommand) throws {
         throw PrivateReadNotSupportedBySource()
     }
 }
@@ -190,6 +195,20 @@ final class PrivateReadGate {
     func startItemDetail(operationID: UInt64, itemID: String) throws {
         try issue(operationID: operationID) {
             try source.startItemDetail(operationID: operationID, itemID: itemID, readScopes: authorizedScopes)
+        }
+    }
+
+    func startJobsPinnedToProfile(operationID: UInt64, profileVersion: String, limit: Int?) throws {
+        try issue(operationID: operationID) {
+            try source.startJobConfigurationRead(
+                operationID: operationID,
+                command: .jobsPinnedToProfile(profileVersion: profileVersion, limit: limit))
+        }
+    }
+
+    func startRequeueRecord(operationID: UInt64, jobID: String) throws {
+        try issue(operationID: operationID) {
+            try source.startJobConfigurationRead(operationID: operationID, command: .requeueRecord(jobID: jobID))
         }
     }
 

@@ -526,6 +526,10 @@ private final class CoreHandleReadSource: PrivateReadSource {
     func startItemDetail(operationID: UInt64, itemID: String, readScopes: [CoreExportScope]) throws {
         try core.startItemDetail(operationID: operationID, itemID: itemID, readScopes: readScopes)
     }
+
+    func startJobConfigurationRead(operationID: UInt64, command: JobConfigurationCommand) throws {
+        try core.startJobConfiguration(operationID: operationID, command: command)
+    }
 }
 
 /// Reads an item's independent status facts from the core, only through the private read gate: a capture-only session
@@ -1484,7 +1488,7 @@ public final class ServiceCompositionRoot {
             router.register { itemDetailClient.handle($0) }
             undo.append { itemDetailClient.shutDown() }
             let itemDetails = ItemDetailService(core: itemDetailClient)
-            let jobConfigurationClient = CoreJobConfigurationClient(core: core)
+            let jobConfigurationClient = CoreJobConfigurationClient(core: core, gate: readGate)
             router.register { jobConfigurationClient.handle($0) }
             undo.append { jobConfigurationClient.shutDown() }
             let jobConfiguration = JobConfigurationService(

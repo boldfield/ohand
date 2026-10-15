@@ -27,7 +27,7 @@ public enum JobConfigurationError: Error, Equatable, Sendable {
 /// * **Authorized targets only.** A re-pin moves work only to the profile the core selects now and only if that profile
 ///   is authorized for the route; otherwise it moves nothing and says so with a zero count.
 /// * **Authenticated.** The session must be authenticated when a call is made; a capture-only session gets
-///   `notAuthenticated` and the core is not asked. A read whose answer arrives after a relock is dropped. A change the
+///   `notAuthenticated` and the core is not asked. The two reads of stored state go through the private read gate, so an answer that arrives after a relock is dropped undecoded. A change the
 ///   core confirmed is reported truthfully even if the session relocked while it ran.
 public final class JobConfigurationService: @unchecked Sendable {
     private let core: JobConfigurationCore
@@ -107,6 +107,7 @@ public final class JobConfigurationService: @unchecked Sendable {
             switch failure.code {
             case "not_found": throw JobConfigurationError.notFound
             case "invalid_request": throw JobConfigurationError.invalidRequest
+            case "read_not_authenticated", "read_relocked": throw JobConfigurationError.notAuthenticated
             case "job_configuration_refused": throw JobConfigurationError.refused
             default: throw JobConfigurationError.core(failure)
             }

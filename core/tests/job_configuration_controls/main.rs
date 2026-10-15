@@ -610,3 +610,45 @@ fn revoking_a_profile_retires_its_jobs_even_while_a_reset_claims_its_credential(
     );
     assert!(revoke_profile(&mut store.open(), "no-such-profile", now()).is_err());
 }
+
+#[test]
+fn a_job_fenced_for_an_unsupported_version_is_left_untouched_by_a_repin() {
+    let store = Store::new();
+    let fenced_item = store.free_form(1, ROUTE_ID);
+    let waiting_item = store.free_form(2, ROUTE_ID);
+    store.settle_waiting_work(2);
+    store
+        .open()
+        .conn()
+        .execute(
+            "UPDATE jobs SET failure_reason = 'unsupported_job_version' WHERE item_id = ?",
+            [&fenced_item],
+        )
+        .unwrap();
+    store.configure("primary", ROUTE_ID);
+    let fenced_before = store.jobs(&fenced_item);
+    assert_eq!(fenced_before.len(), 1);
+
+    assert_eq!(store.repin(ROUTE_ID), 1, "only the ordinary waiting item");
+
+    assert_eq!(
+        store.jobs(&fenced_item).len(),
+        1,
+        "no job is queued for the fenced item"
+    );
+    let fenced_after = store.job(&fenced_before[0].job_id);
+    assert_eq!(fenced_after.status, JobStatus::Failed);
+    assert_eq!(
+        fenced_after.failure_reason.as_deref(),
+        Some("unsupported_job_version")
+    );
+    assert_eq!(store.processing_state(&fenced_item), "unprocessed");
+    assert_eq!(store.jobs(&waiting_item).len(), 2);
+    assert!(
+        get_requeue_record(store.open().conn(), &fenced_before[0].job_id)
+            .unwrap()
+            .is_none(),
+        "the fenced job is not linked to a replacement"
+    );
+    assert_eq!(store.repin(ROUTE_ID), 0);
+}
