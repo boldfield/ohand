@@ -64,13 +64,18 @@ final class NotificationProbeAuthorizedUITests: NotificationProbeUITestCase {
                 capacity["retainedAmongLastAdded64"], "64",
                 "observed retention keeps the most recently added 64 (not the soonest-firing 64); see docs/validation/notification-probe.md"
             )
+            XCTAssertEqual(capacity["cleanupSettled"], "true", "the 100 requests must be gone, and stay gone, before the next step schedules")
         }
 
         XCTContext.runActivity(named: "foreground delivery reaches the delegate") { _ in
-            let foreground = run("foregroundDelivery")
+            let foreground = run("foregroundDelivery", timeout: 150)
+            func field(_ key: String) -> String { foreground[key] ?? "nil" }
+            XCTAssertEqual(foreground["preflightSettled"], "true", "the pending list must be empty, and stay empty, before the request is added")
+            XCTAssertEqual(foreground["pendingBeforeAdd"], "0", "no request may be pending when the foreground request is added")
+            XCTAssertEqual(foreground["pendingAfterAdd"], "true", "the foreground request must be retained after add")
             XCTAssertEqual(
                 foreground["willPresentCalled"], "true",
-                "add took \(foreground["addMilliseconds"] ?? "nil") ms for a \(foreground["intervalSeconds"] ?? "nil") s trigger; delivered=\(foreground["deliveredContainsRequest"] ?? "nil") pending=\(foreground["pendingContainsRequest"] ?? "nil")"
+                "add took \(field("addMilliseconds")) ms for a \(field("intervalSeconds")) s trigger; delivered=\(field("deliveredContainsRequest")) pending=\(field("pendingContainsRequest")); preflightSettled=\(field("preflightSettled")) pendingBeforeAdd=\(field("pendingBeforeAdd")) pendingAfterAdd=\(field("pendingAfterAdd")); ms after add: lastPending=\(field("lastPendingMilliseconds")) firstAbsent=\(field("firstAbsentMilliseconds")) presented=\(field("presentedMilliseconds"))"
             )
         }
 
