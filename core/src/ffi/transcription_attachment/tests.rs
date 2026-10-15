@@ -67,6 +67,11 @@ fn claimed_store(name: &str) -> (std::path::PathBuf, String, i32) {
     let item_id = crate::ingress::import_foreground_ingress(&mut database, &capture)
         .unwrap()
         .item_id;
+    // The test queues and claims its own job instead of the one import queued.
+    database
+        .conn()
+        .execute("DELETE FROM jobs WHERE item_id = ?", [&item_id])
+        .unwrap();
     let revision: i32 = database
         .conn()
         .query_row(
