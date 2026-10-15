@@ -21,8 +21,9 @@
 //! malformed date) is refused as `invalid_request` before anything is queued, or, for dates and
 //! ranges, before the store is read. The outcome event is `{"operation_id", "total_accessible",
 //! "hits"}`. `total_accessible` counts the items the caller may read that satisfy the filters,
-//! before paging. Each hit is `{"item_id", "capture_id", "scope", "text", "text_basis",
-//! "original_text", "matched", "match_span", "captured_at"}`: `text` is the current text to show
+//! before paging. Each hit is `{"item_id", "capture_id", "scope", "item_type", "text",
+//! "text_basis", "original_text", "matched", "match_span", "captured_at"}`: `item_type` is the
+//! item's current type, or `null` while it is unclassified; `text` is the current text to show
 //! and quote, `text_basis` is `original`, `transcribed` or `corrected`, `original_text` is set
 //! only for a corrected item, `matched` is `current` or `superseded_original` (only the replaced
 //! original matched), and `match_span` is `{"start","end"}` in Unicode scalar offsets into `text`
@@ -323,6 +324,7 @@ fn hit_json(
         "item_id": hit.item_id,
         "capture_id": hit.capture_id,
         "scope": hit.scope.as_str(),
+        "item_type": hit.item_type,
         "text": hit.current_text,
         "text_basis": hit.text_basis.as_str(),
         "original_text": if corrected { hit.original_text.clone() } else { None },
