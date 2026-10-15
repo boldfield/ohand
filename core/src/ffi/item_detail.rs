@@ -22,8 +22,10 @@
 //! * `item_type` and `session_topic` are `null` when unset. `lifecycle_state` is `active`,
 //!   `completed` or `cancelled`. `captured_at` is the capture instant as stored (RFC 3339).
 //! * `audio_reference` is the capture's original audio reference or `null`. `transcript` is the
-//!   provenance of the attached transcript or `null`: `{"transcript_record_id", "text",
-//!   "recognizer", "detected_language", "confidence", "transcribed_at", "attached_revision"}`.
+//!   provenance of the attached transcript or `null`: `{"transcript_record_id", "source_job_id",
+//!   "text", "recognizer", "detected_language", "confidence", "transcribed_at",
+//!   "attached_revision", "audio_sha256"}`. `audio_sha256` binds the transcript to the exact
+//!   original audio the recognizer read and `source_job_id` names the transcription job.
 //! * `history` lists the item's events newest first, at most
 //!   [`OHAND_CORE_ITEM_DETAIL_HISTORY_LIMIT`] of them, and `history_truncated` says whether older
 //!   ones were left out. Each entry is `{"event_id", "revision", "event_type", "happened_at",
@@ -157,12 +159,14 @@ fn read_item_detail(database: &mut Database, request: &Validated) -> Result<Valu
         .map(|provenance| {
             json!({
                 "transcript_record_id": provenance.transcript_record_id,
+                "source_job_id": provenance.source_job_id,
                 "text": provenance.text,
                 "recognizer": provenance.recognizer,
                 "detected_language": provenance.detected_language,
                 "confidence": provenance.confidence,
                 "transcribed_at": provenance.transcribed_at,
                 "attached_revision": provenance.attached_revision,
+                "audio_sha256": provenance.audio_sha256,
             })
         });
 

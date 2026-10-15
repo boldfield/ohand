@@ -148,7 +148,42 @@ final class ItemDetailRootIntegrationTests: XCTestCase {
         }
     }
 
-    func testAnAnswerThatArrivesAfterARelockIsDiscardedBeforeItIsDecoded() throws {
+    func testAnAnswerThatArrivesAfterARelockIsDiscardedThroughTheRoot() throws {
+        let session = authenticatedSession()
+        let root = try makeRoot(session: session)
+        defer { root.shutDown() }
+        let itemID = try saveCapture(root)
+        let details = root.itemDetails
+
+        // The root routes core events on the main run loop, so the answer cannot be delivered while this thread is
+        // not pumping it. Relock after the read has been issued but before the answer is pumped in. If the relock
+        // wins the race with issuing the read, the read is refused as not authenticated and the attempt is repeated.
+        var delay: TimeInterval = 0.05
+        for _ in 0..<6 {
+            if session.scope != .authenticated { session.authenticate(reason: "test") { _ in } }
+            let box = DetailResultBox<CoreItemDetail>()
+            Task {
+                do { box.set(.success(try await details.detail(itemID: itemID))) } catch { box.set(.failure(error)) }
+            }
+            Thread.sleep(forTimeInterval: delay)
+            XCTAssertNil(box.value, "the answer is held until the main run loop is pumped")
+            session.relock(.explicit)
+            XCTAssertTrue(pump(until: { box.value != nil }), "the call never completed")
+            switch try XCTUnwrap(box.value) {
+            case .success:
+                return XCTFail("an answer that arrived after a relock must not be delivered")
+            case .failure(let error):
+                if (error as? ItemDetailError) == .notAuthenticated {
+                    delay *= 2
+                    continue
+                }
+                return XCTAssertEqual(error as? ItemDetailError, .relocked)
+            }
+        }
+        XCTFail("the read was never issued before the relock")
+    }
+
+    func testTheGateOverTheRealCoreDiscardsAnAnswerThatArrivesAfterARelock() throws {
         let seedingRoot = try makeRoot(session: authenticatedSession())
         let itemID = try saveCapture(seedingRoot)
         seedingRoot.shutDown()

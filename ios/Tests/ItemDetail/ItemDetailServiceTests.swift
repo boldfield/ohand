@@ -162,13 +162,13 @@ final class ItemDetailServiceTests: XCTestCase {
         }
     }
 
-    private func detailEvent(_ operationID: UInt64) throws -> CoreEvent {
+    private func detailEvent(_ operationID: UInt64, transcript: Any = NSNull()) throws -> CoreEvent {
         let payload: [String: Any] = [
             "operation_id": operationID, "item_id": "item-1", "capture_id": "capture-1", "revision": 0,
             "item_type": NSNull(), "scope": "personal", "session_topic": NSNull(), "lifecycle_state": "active",
             "captured_at": "2026-10-08T09:30:00Z", "text": "water the ferns", "text_basis": "original",
             "original_text": "water the ferns", "corrected_text": NSNull(), "audio_reference": NSNull(),
-            "transcript": NSNull(), "history": [], "history_truncated": false,
+            "transcript": transcript, "history": [], "history_truncated": false,
         ]
         return CoreEvent(operationID: operationID, outcome: .success(try JSONSerialization.data(withJSONObject: payload)))
     }
@@ -220,6 +220,32 @@ final class ItemDetailServiceTests: XCTestCase {
         XCTAssertEqual(detail.text, "water the ferns")
         XCTAssertEqual(detail.textBasis, .original)
         XCTAssertFalse(client.handle(try detailEvent(operationID)), "an answer is delivered at most once")
+    }
+
+    func testTheTranscriptProvenanceCarriesTheJobAndTheExactAudioDigest() throws {
+        let source = RecordingReadSource()
+        let (gate, _) = makeGate(authenticated: true, source: source)
+        let client = CoreItemDetailClient(gate: gate)
+        let box = ResultsBox()
+        client.read(itemID: "item-1") { box.append($0) }
+        let operationID = try XCTUnwrap(source.itemDetailRequests.first?.operationID)
+        let transcript: [String: Any] = [
+            "transcript_record_id": "record-1", "source_job_id": "job-1", "text": "water the ferns tomorrow",
+            "recognizer": "on-device-recognizer/1", "detected_language": "en-US", "confidence": 0.91,
+            "transcribed_at": "2026-10-08T10:05:00Z", "attached_revision": 3,
+            "audio_sha256": String(repeating: "ab", count: 32),
+        ]
+
+        XCTAssertTrue(client.handle(try detailEvent(operationID, transcript: transcript)))
+
+        guard case .success(let detail)? = box.values.first else { return XCTFail("expected the detail") }
+        XCTAssertEqual(
+            detail.transcript,
+            CoreItemDetailTranscript(
+                transcriptRecordID: "record-1", sourceJobID: "job-1", text: "water the ferns tomorrow",
+                recognizer: "on-device-recognizer/1", detectedLanguage: "en-US", confidence: 0.91,
+                transcribedAt: "2026-10-08T10:05:00Z", attachedRevision: 3,
+                audioSHA256: String(repeating: "ab", count: 32)))
     }
 
     func testAnAnswerThatArrivesAfterARelockIsDiscardedWhetherItIsASuccessOrAFailure() throws {

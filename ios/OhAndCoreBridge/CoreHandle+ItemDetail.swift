@@ -4,6 +4,8 @@ import OhandCoreC
 /// The provenance of a transcript attached to an item, as the core records it.
 public struct CoreItemDetailTranscript: Decodable, Equatable, Sendable {
     public let transcriptRecordID: String
+    /// The transcription job whose result this is.
+    public let sourceJobID: String
     public let text: String
     public let recognizer: String
     public let detectedLanguage: String?
@@ -12,28 +14,34 @@ public struct CoreItemDetailTranscript: Decodable, Equatable, Sendable {
     public let transcribedAt: String
     /// The item revision the transcript was attached at.
     public let attachedRevision: Int
+    /// SHA-256 of the exact original audio the recognizer read.
+    public let audioSHA256: String
 
     public init(
-        transcriptRecordID: String, text: String, recognizer: String, detectedLanguage: String?, confidence: Double?,
-        transcribedAt: String, attachedRevision: Int
+        transcriptRecordID: String, sourceJobID: String, text: String, recognizer: String, detectedLanguage: String?,
+        confidence: Double?, transcribedAt: String, attachedRevision: Int, audioSHA256: String
     ) {
         self.transcriptRecordID = transcriptRecordID
+        self.sourceJobID = sourceJobID
         self.text = text
         self.recognizer = recognizer
         self.detectedLanguage = detectedLanguage
         self.confidence = confidence
         self.transcribedAt = transcribedAt
         self.attachedRevision = attachedRevision
+        self.audioSHA256 = audioSHA256
     }
 
     enum CodingKeys: String, CodingKey {
         case transcriptRecordID = "transcript_record_id"
+        case sourceJobID = "source_job_id"
         case text
         case recognizer
         case detectedLanguage = "detected_language"
         case confidence
         case transcribedAt = "transcribed_at"
         case attachedRevision = "attached_revision"
+        case audioSHA256 = "audio_sha256"
     }
 }
 

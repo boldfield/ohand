@@ -413,6 +413,8 @@ fn a_transcribed_voice_item_reports_its_audio_and_transcript_provenance() {
     let transcript = &body["transcript"];
     assert_eq!(transcript["text"], "water the ferns tomorrow");
     assert_eq!(transcript["recognizer"], "on-device-recognizer/1");
+    assert_eq!(transcript["source_job_id"], "transcription-1");
+    assert_eq!(transcript["audio_sha256"], AUDIO_SHA256);
     assert_eq!(transcript["detected_language"], "en-US");
     assert_eq!(transcript["confidence"], 0.91);
     assert_eq!(
