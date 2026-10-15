@@ -70,6 +70,10 @@ final class PrivateReadCoreIntegrationTests: XCTestCase {
         func startRetrieval(operationID: UInt64, request: CoreRetrievalRequest) throws {
             try core.startRetrieval(operationID: operationID, request: request)
         }
+
+        func startItemDetail(operationID: UInt64, itemID: String, readScopes: [CoreExportScope]) throws {
+            try core.startItemDetail(operationID: operationID, itemID: itemID, readScopes: readScopes)
+        }
     }
 
     /// One app launch: a real core, a fresh (capture-only) session and the gate in front of the core's read verbs.
@@ -270,13 +274,30 @@ final class PrivateReadCoreIntegrationTests: XCTestCase {
         }
         assertRetrievalDenied()
         XCTAssertEqual(authenticateAndWait(launch.session), .authenticated)
-        XCTAssertEqual(try launch.retrieve(query: "synthetic").hits.map(\.text), ["synthetic note behind retrieval"])
+        let answer = try launch.retrieve(query: "synthetic")
+        XCTAssertEqual(answer.hits.map(\.text), ["synthetic note behind retrieval"])
+        XCTAssertNil(answer.hits.first?.itemType, "an unclassified item reports no type")
         let eventsAfterRead = launch.events.count
         launch.session.relock(.enteredBackground)
         assertRetrievalDenied()
         RunLoop.current.run(until: Date().addingTimeInterval(0.2))
         XCTAssertGreaterThan(eventsAfterRead, eventsBefore)
         XCTAssertEqual(launch.events.count, eventsAfterRead, "denied retrievals never reached the core")
+    }
+
+    func testRetrievalHitDecodesATypedAndAnUnclassifiedItemType() throws {
+        func hitJSON(itemType: String) -> String {
+            """
+            {"item_id": "item-1", "capture_id": "capture-1", "scope": "personal", "item_type": \(itemType),
+             "text": "synthetic text", "text_basis": "original", "original_text": null, "matched": "current",
+             "match_span": null, "captured_at": "2026-10-08T09:30:00Z"}
+            """
+        }
+        let decoder = JSONDecoder()
+        let typed = try decoder.decode(PrivateRetrievalHit.self, from: Data(hitJSON(itemType: "\"action\"").utf8))
+        XCTAssertEqual(typed.itemType, "action")
+        let unclassified = try decoder.decode(PrivateRetrievalHit.self, from: Data(hitJSON(itemType: "null").utf8))
+        XCTAssertNil(unclassified.itemType)
     }
 
     func testRetrievalInFlightWhenTheSessionRelocksIsNotDelivered() throws {

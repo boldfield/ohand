@@ -58,6 +58,8 @@ use std::fmt;
 
 pub use crate::ingress::import::CommitStatus;
 
+pub mod queue;
+
 /// Largest transcript accepted, in bytes.
 pub const MAX_TRANSCRIPT_BYTES: usize = 256 * 1024;
 const MAX_RECOGNIZER_BYTES: usize = 128;

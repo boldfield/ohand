@@ -963,9 +963,10 @@
         4
       ],
       "depends_on": [
-        "U01",
-        "R03",
         "C01b",
+        "R03",
+        "R05",
+        "U01",
         "U01d"
       ],
       "source_pointers": [
@@ -2260,7 +2261,8 @@
       "parent": "V01",
       "title": "Check a provider profile's connection on explicit request",
       "file_scope": [
-        "core/src/ffi/provider_connection_check.rs",
+        "core/src/ffi/provider_transport/connection_check.rs",
+        "core/src/ffi/provider_transport.rs",
         "ios/OhAndCoreBridge/CoreHandle+ProviderConnectionCheck.swift"
       ],
       "intent": "Explicitly invoked connection check sending a fixed synthetic request to a profile's own destination, with a redacted outcome.",
@@ -2389,7 +2391,9 @@
         "50 consecutive loaded full lib runs."
       ],
       "covers_parent_criteria": [],
-      "depends_on": [],
+      "depends_on": [
+        "F17"
+      ],
       "source_pointers": [
         "core/src/ffi/notification_reconciliation.rs:173",
         "core/src/ffi/notification_reconciliation/tests.rs:401"
@@ -2611,7 +2615,8 @@
         "ios/Services/AudioRetention/",
         "ios/Tests/AudioRetention/",
         "ios/Services/Assembly/LifecycleCoordinator.swift:277",
-        "core/tests/migrations/main.rs"
+        "core/tests/migrations/main.rs",
+        "core/src/ffi/audio_retention.rs"
       ],
       "intent": "Persist the user's retention period, and expose retention status, the sole-audio cases and their retry and delete actions to `app/`.",
       "acceptance": [
@@ -2624,7 +2629,9 @@
       ],
       "covers_parent_criteria": [],
       "depends_on": [
-        "V01b"
+        "V01b",
+        "A14",
+        "C07"
       ],
       "source_pointers": [
         "ios/Services/Assembly/LifecycleCoordinator.swift:277"
@@ -2743,6 +2750,98 @@
       "depends_on": [],
       "source_pointers": [
         "ios/AppAssembly/ManagementNavigationModel.swift:84"
+      ]
+    },
+    {
+      "key": "F17",
+      "parent": null,
+      "title": "Make the bench transport teardown tests deterministic under load",
+      "file_scope": [
+        "tools/bench/src/transport/tests.rs",
+        "tools/bench/src/transport/"
+      ],
+      "intent": "Wait for the teardown event instead of a 3-second wall-clock window so the bench transport tests pass under load.",
+      "acceptance": [
+        "Diagnosis of the load failure.",
+        "Fix the cause; same assertions, no retries or ignores.",
+        "50 consecutive loaded bench lib runs on the final head."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "tools/bench/src/transport/tests.rs:679"
+      ]
+    },
+    {
+      "key": "R05",
+      "parent": null,
+      "title": "Carry each search hit's item type through the gated retrieval answer",
+      "file_scope": [
+        "core/src/retrieval/index/mod.rs",
+        "core/src/retrieval/query/",
+        "core/src/ffi/retrieval.rs",
+        "ios/OhAndCoreBridge/CoreHandle+Retrieval.swift",
+        "ios/Services/Authentication/PrivateReadGate.swift",
+        "ios/Tests/Authentication/"
+      ],
+      "intent": "Add the item's current type, absent when unclassified, to SearchHit, the retrieval FFI hit and PrivateRetrievalHit.",
+      "acceptance": [
+        "SearchHit carries items.item_type; absent stays absent.",
+        "FFI JSON and PrivateRetrievalHit carry it; scope enforcement unchanged.",
+        "Rust and Swift tests; macOS CI linked."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/retrieval/index/mod.rs:112",
+        "ios/Services/Authentication/PrivateReadGate.swift:73"
+      ]
+    },
+    {
+      "key": "A14",
+      "parent": null,
+      "title": "Let the user remove an item's audio through the removal fence",
+      "file_scope": [
+        "core/src/lifecycle/retention/mod.rs",
+        "core/src/ffi/audio_retention.rs",
+        "core/src/ffi/audio_retention/lease.rs",
+        "ios/OhAndCoreBridge/CoreHandle+AudioRetention.swift"
+      ],
+      "intent": "A user-initiated removal decision inside the L03b fence: approve when recoverable text exists, deny sole-source audio.",
+      "acceptance": [
+        "Approve with transcript or typed text; deny sole-source, deleted or mismatched.",
+        "Decided under the fence's write lock; sweeps unchanged.",
+        "Rust tests including a racing correction."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/lifecycle/retention/mod.rs:320",
+        "core/src/ffi/audio_retention/lease.rs:115"
+      ]
+    },
+    {
+      "key": "C07",
+      "parent": null,
+      "title": "Queue on-device transcription for imported voice captures",
+      "file_scope": [
+        "core/src/ingress/transcription/queue.rs",
+        "core/src/ingress/transcription/mod.rs",
+        "core/src/ingress/import.rs",
+        "core/src/ffi/job_runner.rs"
+      ],
+      "intent": "Enqueue the transcription_attachment job at import, backfill stored audio_pending items at drain start, and provide an explicit requeue.",
+      "acceptance": [
+        "Import enqueues one local transcription job for an audio-only item.",
+        "Idempotent backfill at drain start.",
+        "Explicit requeue with refusals.",
+        "End-to-end Rust test through the apply path."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/ingress/import.rs:366",
+        "core/src/privacy/routing/mod.rs:226"
       ]
     }
   ],
@@ -3116,9 +3215,10 @@
       "S05b"
     ],
     "U02a": [
-      "U01",
-      "R03",
       "C01b",
+      "R03",
+      "R05",
+      "U01",
       "U01d"
     ],
     "U02b": [
@@ -3375,7 +3475,9 @@
       "V01c",
       "V02b"
     ],
-    "F15": [],
+    "F15": [
+      "F17"
+    ],
     "F16": [],
     "A01": [],
     "A02": [],
@@ -3388,6 +3490,8 @@
       "V02b"
     ],
     "A08": [
+      "A14",
+      "C07",
       "V01b"
     ],
     "A09": [
@@ -3402,7 +3506,11 @@
     "A12": [
       "A11"
     ],
-    "A13": []
+    "A13": [],
+    "F17": [],
+    "R05": [],
+    "A14": [],
+    "C07": []
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -3556,6 +3664,10 @@
     {
       "date": "2026-10-15",
       "change": "V01b and A08 granted core/tests/migrations/main.rs (schema-version expectations forced by their appended migration step plus its own migration test), as C05a, L05a, L05b and S05a had."
+    },
+    {
+      "date": "2026-10-15",
+      "change": "Missing seams from blocked tasks: F17 (bench transport teardown flake; F15 depends on it), R05 (item type on retrieval hits; U02a depends on it), A14 (user-initiated audio removal in the fence) and C07 (queue transcription jobs at import, backfill, requeue; no production path created them) added; A08 depends on A14 and C07 and may make Command::policy read the stored setting; V01c's file moved under core/src/ffi/provider_transport/."
     }
   ]
 }

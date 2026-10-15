@@ -242,6 +242,7 @@ fn text_search_returns_the_documented_fields_and_the_accessible_total() {
     assert_eq!(hit["item_id"], fixture.seeded.personal_groceries);
     assert_eq!(hit["capture_id"], "groceries-1");
     assert_eq!(hit["scope"], "personal");
+    assert_eq!(hit["item_type"], "note");
     assert_eq!(hit["text"], "Buy oat milk and apples");
     assert_eq!(hit["text_basis"], "original");
     assert_eq!(hit["original_text"], Value::Null);
@@ -431,6 +432,101 @@ fn item_type_lifecycle_and_route_filters_apply() {
     assert_eq!(
         item_ids(&work_route),
         vec![fixture.seeded.work_budget.clone()]
+    );
+    session.close();
+}
+
+fn hit_for<'a>(body: &'a Value, item_id: &str) -> &'a Value {
+    body["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|hit| hit["item_id"] == item_id)
+        .expect("the item is among the hits")
+}
+
+#[test]
+fn a_hit_carries_its_item_type_or_null_when_unclassified() {
+    let _guard = serial();
+    let fixture = Fixture::new();
+    let session = Session::over(&fixture.store_path);
+    let both = ["personal", "work"];
+
+    let searched = session.succeed(&json!({
+        "op": "search", "query": "milk", "read_scopes": both
+    }));
+    assert_eq!(
+        hit_for(&searched, &fixture.seeded.personal_groceries)["item_type"],
+        "note"
+    );
+    assert_eq!(
+        hit_for(&searched, &fixture.seeded.personal_dentist)["item_type"],
+        "action"
+    );
+    assert_eq!(
+        hit_for(&searched, &fixture.seeded.work_budget)["item_type"],
+        Value::Null,
+        "an unclassified item reports no type rather than a guess"
+    );
+
+    let listed = session.succeed(&json!({"op": "list", "read_scopes": both}));
+    assert_eq!(
+        hit_for(&listed, &fixture.seeded.untopiced_note)["item_type"],
+        "note"
+    );
+    assert_eq!(
+        hit_for(&listed, &fixture.seeded.corrected_plan)["item_type"],
+        Value::Null
+    );
+
+    let personal_only = session.succeed(&json!({
+        "op": "search", "query": "milk", "read_scopes": ["personal"]
+    }));
+    assert!(!personal_only.to_string().contains("budget"));
+    assert!(!item_ids(&personal_only).contains(&fixture.seeded.work_budget));
+    session.close();
+}
+
+#[test]
+fn a_type_correction_is_reflected_on_the_next_search_and_list() {
+    use crate::ffi::item_corrections::{apply_item_correction, CorrectionChange, ItemCorrection};
+    use crate::store::events::ItemType;
+
+    let _guard = serial();
+    let fixture = Fixture::new();
+    let session = Session::over(&fixture.store_path);
+    let request = json!({"op": "search", "query": "oat", "read_scopes": ["personal"]});
+    let before = session.succeed(&request);
+    assert_eq!(before["hits"][0]["item_type"], "note");
+
+    {
+        let mut database = Database::open(&fixture.store_path, Arc::new(SystemClock)).unwrap();
+        let revision: i32 = database
+            .conn()
+            .query_row(
+                "SELECT revision FROM items WHERE item_id = ?",
+                [&fixture.seeded.personal_groceries],
+                |row| row.get(0),
+            )
+            .unwrap();
+        apply_item_correction(
+            &mut database,
+            &ItemCorrection {
+                command_id: "type-correction-1".to_string(),
+                item_id: fixture.seeded.personal_groceries.clone(),
+                expected_revision: revision,
+                change: CorrectionChange::Type(ItemType::Idea),
+            },
+        )
+        .unwrap();
+    }
+
+    let after = session.succeed(&request);
+    assert_eq!(after["hits"][0]["item_type"], "idea");
+    let listed = session.succeed(&json!({"op": "list", "read_scopes": ["personal"]}));
+    assert_eq!(
+        hit_for(&listed, &fixture.seeded.personal_groceries)["item_type"],
+        "idea"
     );
     session.close();
 }
