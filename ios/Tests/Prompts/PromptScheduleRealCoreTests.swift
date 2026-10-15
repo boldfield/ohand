@@ -304,6 +304,14 @@ final class PromptScheduleRealCoreTests: XCTestCase {
         XCTAssertEqual(unconverged, .deferred("prompts_not_converged"))
     }
 
+    func testThePromptScheduleRangeIsReservedAndDisjointFromTheOthers() throws {
+        let ranges = ServiceCompositionRoot.reservedOperationRanges
+        let mine = try XCTUnwrap(ranges.first { $0.name == ServiceCompositionRoot.promptScheduleClientName })
+        XCTAssertEqual(mine.start, CorePromptScheduleClient.firstOperationID)
+        let overlapping = ranges.filter { $0.name != mine.name && $0.start < mine.end && mine.start < $0.end }
+        XCTAssertTrue(overlapping.isEmpty, "overlaps \(overlapping.map(\.name))")
+    }
+
     // MARK: Helpers
 
     private func openCore() throws -> (CoreHandle, CorePromptScheduleClient) {
