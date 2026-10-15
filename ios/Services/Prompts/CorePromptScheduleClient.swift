@@ -10,11 +10,12 @@ import OhAndCoreBridge
 /// core so no caller is left waiting.
 public final class CorePromptScheduleClient: @unchecked Sendable {
     /// The first operation identifier this client submits. Every client sharing a handle owns a distinct range or one
-    /// takes the other's event: shadow review starts at `1 << 48`, transcription at `1 << 50`, deletion cleanup at
-    /// `1 << 52`, export at `1 << 54`, suggestion responses at `1 << 55`, reminder reconciliation at `1 << 56`, the
-    /// item status reader at `1 << 57`, audio retention at `1 << 58`, the prompt schedule at `1 << 59`, notification
-    /// actions at `1 << 60`, processing health at `1 << 61` and the job runner at `1 << 62`.
-    public static let firstOperationID: UInt64 = 1 << 59
+    /// takes the other's event: the prompt schedule starts at `1 << 47`, shadow review at `1 << 48`, item lifecycle
+    /// controls at `1 << 49`, transcription at `1 << 50`, item detail at `1 << 51`, deletion cleanup at `1 << 52`, item
+    /// corrections at `1 << 53`, export at `1 << 54`, suggestion responses at `1 << 55`, reminder reconciliation at
+    /// `1 << 56`, the item status reader at `1 << 57`, audio retention at `1 << 58`, reminder controls at `1 << 59`,
+    /// notification actions at `1 << 60`, processing health at `1 << 61` and the job runner at `1 << 62`.
+    public static let firstOperationID: UInt64 = 1 << 47
 
     static let shutDownFailure = CoreFailure(
         errorClass: .cancelled, code: "client_shut_down", message: "the prompt schedule client was shut down")
