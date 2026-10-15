@@ -787,6 +787,7 @@ public final class ServiceCompositionRoot {
     static let shadowReviewFirstOperationID: UInt64 = 1 << 48
     static let itemCorrectionClientName = "item corrections"
     static let itemDeletionClientName = "item deletion"
+    static let itemLifecycleControlClientName = "item lifecycle controls"
     static let suggestionResponseClientName = "suggestion responses"
     static let itemDetailClientName = "item detail"
 
@@ -823,6 +824,8 @@ public final class ServiceCompositionRoot {
         fixedWidthRange("notification actions", from: CoreNotificationActionClient.firstOperationID),
         fixedWidthRange(itemCorrectionClientName, from: CoreItemCorrectionClient.firstOperationID),
         fixedWidthRange(itemDeletionClientName, from: CoreItemDeletionClient.firstOperationID),
+        fixedWidthRange(
+            itemLifecycleControlClientName, from: CoreItemLifecycleControlClient.firstOperationID),
         fixedWidthRange(suggestionResponseClientName, from: CoreSuggestionResponseClient.firstOperationID),
         fixedWidthRange(itemDetailClientName, from: CoreItemDetailClient.firstOperationID),
         OperationRange(
@@ -839,6 +842,8 @@ public final class ServiceCompositionRoot {
     public let itemCorrections: ItemCorrectionService
     /// Deletes one item and runs its native cleanup at once; needs an authenticated read session.
     public let itemDeletion: ItemDeletionService
+    /// Completes, cancels or quiets an item; needs an authenticated read session.
+    public let itemLifecycleControls: ItemLifecycleControlService
     /// Opens a daily prompt and records the user's answer; needs an authenticated read session.
     public let suggestionResponses: SuggestionResponseService
     /// Reads one item's full detail; needs an authenticated read session.
@@ -862,6 +867,7 @@ public final class ServiceCompositionRoot {
     private let notificationActions: NotificationActionClients
     private let itemCorrectionClient: CoreItemCorrectionClient
     private let itemDeletionClient: CoreItemDeletionClient
+    private let itemLifecycleControlClient: CoreItemLifecycleControlClient
     private let suggestionResponseClient: CoreSuggestionResponseClient
     private let itemDetailClient: CoreItemDetailClient
     private let modules: [CompositionModule]
@@ -924,6 +930,8 @@ public final class ServiceCompositionRoot {
         itemCorrections = assembly.itemCorrections
         itemDeletionClient = assembly.itemDeletionClient
         itemDeletion = assembly.itemDeletion
+        itemLifecycleControlClient = assembly.itemLifecycleControlClient
+        itemLifecycleControls = assembly.itemLifecycleControls
         suggestionResponseClient = assembly.suggestionResponseClient
         suggestionResponses = assembly.suggestionResponses
         itemDetailClient = assembly.itemDetailClient
@@ -1075,6 +1083,7 @@ public final class ServiceCompositionRoot {
         itemCorrectionClient.shutDown()
         itemDeletion.setCleanupProvider(nil)
         itemDeletionClient.shutDown()
+        itemLifecycleControlClient.shutDown()
         suggestionResponseClient.shutDown()
         itemDetailClient.shutDown()
         reminderCore.invalidate()
@@ -1338,6 +1347,8 @@ public final class ServiceCompositionRoot {
         let itemCorrections: ItemCorrectionService
         let itemDeletionClient: CoreItemDeletionClient
         let itemDeletion: ItemDeletionService
+        let itemLifecycleControlClient: CoreItemLifecycleControlClient
+        let itemLifecycleControls: ItemLifecycleControlService
         let suggestionResponseClient: CoreSuggestionResponseClient
         let suggestionResponses: SuggestionResponseService
         let itemDetailClient: CoreItemDetailClient
@@ -1448,6 +1459,11 @@ public final class ServiceCompositionRoot {
             router.register { itemDeletionClient.handle($0) }
             undo.append { itemDeletionClient.shutDown() }
             let itemDeletion = ItemDeletionService(core: itemDeletionClient, session: adapters.readSession)
+            let itemLifecycleControlClient = CoreItemLifecycleControlClient(core: core)
+            router.register { itemLifecycleControlClient.handle($0) }
+            undo.append { itemLifecycleControlClient.shutDown() }
+            let itemLifecycleControls = ItemLifecycleControlService(
+                core: itemLifecycleControlClient, session: adapters.readSession)
             let suggestionResponseClient = CoreSuggestionResponseClient(core: core, gate: readGate)
             router.register { suggestionResponseClient.handle($0) }
             undo.append { suggestionResponseClient.shutDown() }
@@ -1505,7 +1521,9 @@ public final class ServiceCompositionRoot {
                 reminderCore: reminderCore, providerTransport: providerTransport,
                 notificationActions: notificationActions, itemCorrectionClient: itemCorrectionClient,
                 itemCorrections: itemCorrections, itemDeletionClient: itemDeletionClient,
-                itemDeletion: itemDeletion, suggestionResponseClient: suggestionResponseClient,
+                itemDeletion: itemDeletion, itemLifecycleControlClient: itemLifecycleControlClient,
+                itemLifecycleControls: itemLifecycleControls,
+                suggestionResponseClient: suggestionResponseClient,
                 suggestionResponses: suggestionResponses, itemDetailClient: itemDetailClient,
                 itemDetails: itemDetails, permissionReconciler: permissionReconciler,
                 foreground: foreground)
