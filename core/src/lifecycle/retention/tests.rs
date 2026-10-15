@@ -89,9 +89,15 @@ impl Store {
             None,
         )
         .unwrap();
-        import_foreground_ingress(&mut self.open(), &capture)
+        let item_id = import_foreground_ingress(&mut self.open(), &capture)
             .unwrap()
-            .item_id
+            .item_id;
+        // These tests queue and settle their own transcription jobs.
+        self.open()
+            .conn()
+            .execute("DELETE FROM jobs WHERE item_id = ?", [&item_id])
+            .unwrap();
+        item_id
     }
 
     fn voice_item(&self) -> String {
