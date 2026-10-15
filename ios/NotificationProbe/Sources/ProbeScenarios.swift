@@ -47,7 +47,8 @@ final class NotificationProbeScenarios {
     static let closedAppIntervalSeconds: TimeInterval = 5
     /// Wider than add() latency on a loaded host: a one-shot trigger already in the past when scheduled is dropped without an error.
     static let foregroundIntervalSeconds: TimeInterval = 15
-    static let foregroundPollCount = 120
+    /// Polls are 250 ms apart: 320 polls give 80 s, so a delivery delayed by host load has 65 s beyond the 15 s trigger. The UI test's timeout for this scenario must exceed that plus the preflight.
+    static let foregroundPollCount = 320
 
     private let center = UNUserNotificationCenter.current()
     private let authorizationOptions: UNAuthorizationOptions = [.alert, .sound, .badge]
@@ -446,13 +447,17 @@ final class NotificationProbeScenarios {
         _ = await waitForPending(timeout: 5) { requests in requests.isEmpty }
     }
 
-    /// Removal runs asynchronously: after the pending list first reads empty, keep reading for a second and require it to stay empty.
+    /// Removal runs asynchronously: after the pending list first reads empty, sample it for a full second and fail on any non-empty read.
     private func clearPendingUntilSettled() async -> Bool {
         center.removeAllPendingNotificationRequests()
         let emptied = await waitForPending(timeout: 5) { requests in requests.isEmpty }
         guard emptied.satisfied else { return false }
-        let afterSettling = await waitForPending(timeout: 1) { _ in false }
-        return afterSettling.requests.isEmpty
+        let quietDeadline = Date().addingTimeInterval(1)
+        while Date() < quietDeadline {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            if !(await center.pendingNotificationRequests()).isEmpty { return false }
+        }
+        return true
     }
 
     /// removePending... executes asynchronously, so state is polled instead of read once.
