@@ -20,7 +20,22 @@ protocol PrivateReadSource: AnyObject {
     func startGetCapture(operationID: UInt64, captureID: String) throws
     func startItemStatus(operationID: UInt64, itemID: String) throws
     func startRetrieval(operationID: UInt64, request: CoreRetrievalRequest) throws
+    func startReminderRead(
+        operationID: UInt64, itemID: String, kind: ReminderReadKind, readScopes: [CoreExportScope]) throws
     func startItemDetail(operationID: UInt64, itemID: String, readScopes: [CoreExportScope]) throws
+}
+
+/// Raised by a read source that does not implement a read added after it was written.
+struct PrivateReadNotSupportedBySource: Error, Equatable {}
+
+extension PrivateReadSource {
+    /// Default so that read sources written before the reminder reads existed (test doubles) keep conforming; the
+    /// core-backed source in the composition root overrides it.
+    func startReminderRead(
+        operationID: UInt64, itemID: String, kind: ReminderReadKind, readScopes: [CoreExportScope]
+    ) throws {
+        throw PrivateReadNotSupportedBySource()
+    }
 }
 
 /// The filters a module may put on a search or list. It has no way to name a read authorization: the gate states the
@@ -75,6 +90,8 @@ public struct PrivateRetrievalHit: Decodable, Equatable, Sendable {
     public let captureID: String
     /// `personal` or `work`.
     public let scope: String
+    /// The item's current type, or `nil` while it has not been classified.
+    public let itemType: String?
     public let text: String
     public let textBasis: CoreRetrievalTextBasis
     /// The text as captured; present only when `textBasis` is `corrected`.
@@ -89,6 +106,7 @@ public struct PrivateRetrievalHit: Decodable, Equatable, Sendable {
         case itemID = "item_id"
         case captureID = "capture_id"
         case scope
+        case itemType = "item_type"
         case text
         case textBasis = "text_basis"
         case originalText = "original_text"
@@ -151,6 +169,21 @@ final class PrivateReadGate {
     func startItemStatus(operationID: UInt64, itemID: String) throws {
         try issue(operationID: operationID) {
             try source.startItemStatus(operationID: operationID, itemID: itemID)
+        }
+    }
+
+    func startReminder(operationID: UInt64, itemID: String) throws {
+        try startReminderRead(operationID: operationID, itemID: itemID, kind: .reminder)
+    }
+
+    func startReminderHistory(operationID: UInt64, itemID: String) throws {
+        try startReminderRead(operationID: operationID, itemID: itemID, kind: .history)
+    }
+
+    private func startReminderRead(operationID: UInt64, itemID: String, kind: ReminderReadKind) throws {
+        try issue(operationID: operationID) {
+            try source.startReminderRead(
+                operationID: operationID, itemID: itemID, kind: kind, readScopes: authorizedScopes)
         }
     }
 
