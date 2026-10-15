@@ -115,26 +115,142 @@ final class ManagementNavigationModelTests: XCTestCase {
         XCTAssertEqual(model.path, [ManagementCatalog.settingsEntryID])
     }
 
-    func testAnOpenedItemIsRequestedWithoutChangingTheScreenOnDisplay() {
+    // MARK: item and suggestion requests
+
+    func testAnAuthenticatedTapPresentsTheItemWithoutAsking() {
         scope = .authenticated
         model.open(entryID: ManagementCatalog.settingsEntryID)
 
         model.openItem(itemID: "item-1")
 
         XCTAssertEqual(model.requestedItemID, "item-1")
-        XCTAssertEqual(model.path, [ManagementCatalog.settingsEntryID])
+        XCTAssertEqual(model.path.map { ManagementRoute(pathComponent: $0) }, [.item("item-1")])
+        XCTAssertTrue(reasons.isEmpty)
     }
 
-    func testLosingTheSessionDropsTheRequestedItem() {
+    func testATapBeforeAuthenticationAsksFirstAndPresentsOnlyAfterSuccess() {
+        model.openItem(itemID: "item-1")
+
+        XCTAssertEqual(reasons, [ManagementNavigationModel.authenticationReason])
+        XCTAssertNil(model.requestedItemID, "nothing is presented while the device owner has not answered")
+        XCTAssertEqual(model.path, [])
+
+        finishAuthentication(.authenticated, grantingScope: true)
+
+        XCTAssertEqual(model.requestedItemID, "item-1")
+        XCTAssertFalse(model.isAuthenticating)
+    }
+
+    func testASuggestionRequestFollowsTheSameRule() {
+        model.openSuggestion()
+        XCTAssertFalse(model.isSuggestionRequested)
+        XCTAssertEqual(reasons.count, 1)
+
+        finishAuthentication(.authenticated, grantingScope: true)
+
+        XCTAssertTrue(model.isSuggestionRequested)
+        XCTAssertNil(model.requestedItemID)
+    }
+
+    func testAnAuthenticatedSuggestionRequestPresentsWithoutAsking() {
+        scope = .authenticated
+        model.openSuggestion()
+        XCTAssertTrue(model.isSuggestionRequested)
+        XCTAssertTrue(reasons.isEmpty)
+    }
+
+    func testARequestThatAuthenticationDidNotGrantIsDroppedNotRetained() {
+        model.openItem(itemID: "item-1")
+        finishAuthentication(.cancelled, grantingScope: false)
+        XCTAssertNil(model.requestedItemID)
+        XCTAssertNil(model.notice)
+
+        scope = .authenticated
+        model.revalidate()
+        XCTAssertEqual(model.path, [], "a cancelled request does not present later")
+    }
+
+    func testADeniedRequestSaysTheItemsStayLocked() {
+        model.openItem(itemID: "item-1")
+        finishAuthentication(.denied, grantingScope: false)
+        XCTAssertNil(model.requestedItemID)
+        XCTAssertNotNil(model.notice)
+    }
+
+    func testASuccessThatLeftTheSessionLockedDoesNotPresentTheRequest() {
+        model.openItem(itemID: "item-1")
+        finishAuthentication(.authenticated, grantingScope: false)
+        XCTAssertNil(model.requestedItemID)
+    }
+
+    func testATapDuringAnAuthenticationInFlightIsNotLostAndDoesNotAskTwice() {
+        model.open(entryID: ManagementCatalog.settingsEntryID)
+        model.openItem(itemID: "item-1")
+        XCTAssertEqual(reasons.count, 1)
+
+        finishAuthentication(.authenticated, grantingScope: true)
+
+        XCTAssertEqual(model.requestedItemID, "item-1", "the latest request is the one presented")
+    }
+
+    func testRevalidatingWhileTheOwnerIsAnsweringKeepsTheWaitingRequest() {
+        model.openItem(itemID: "item-1")
+        model.revalidate()
+        finishAuthentication(.authenticated, grantingScope: true)
+        XCTAssertEqual(model.requestedItemID, "item-1")
+    }
+
+    func testLosingTheSessionWhileAnItemIsPresentedLeavesIt() {
         scope = .authenticated
         model.openItem(itemID: "item-1")
         model.revalidate()
-        XCTAssertEqual(model.requestedItemID, "item-1", "an authenticated session keeps the request")
+        XCTAssertEqual(model.requestedItemID, "item-1", "an authenticated session keeps the screen")
 
         scope = .captureOnly
         model.revalidate()
 
         XCTAssertNil(model.requestedItemID)
+        XCTAssertEqual(model.path, [])
+    }
+
+    func testLosingTheSessionWhileTheSuggestionIsPresentedLeavesIt() {
+        scope = .authenticated
+        model.openSuggestion()
+        scope = .captureOnly
+        model.revalidate()
+        XCTAssertFalse(model.isSuggestionRequested)
+        XCTAssertEqual(model.path, [])
+    }
+
+    func testReturningToCaptureDropsARequestStillWaitingForAuthentication() {
+        model.openItem(itemID: "item-1")
+
+        model.returnToCapture()
+        finishAuthentication(.authenticated, grantingScope: true)
+
+        XCTAssertEqual(model.path, [], "a capture entry always lands on capture")
+        XCTAssertNil(model.requestedItemID)
+    }
+
+    func testReturningToCaptureLeavesAPresentedItem() {
+        scope = .authenticated
+        model.openItem(itemID: "item-1")
+        model.returnToCapture()
+        XCTAssertNil(model.requestedItemID)
+        XCTAssertEqual(model.path, [])
+    }
+
+    func testRoutesRoundTripThroughThePathAndEntryIdentifiersStayEntries() {
+        for route in [ManagementRoute.entry("search"), .item("item-1"), .item("a:b"), .suggestion] {
+            XCTAssertEqual(ManagementRoute(pathComponent: route.pathComponent), route)
+        }
+        XCTAssertEqual(ManagementRoute(pathComponent: ManagementCatalog.searchEntryID), .entry("search"))
+    }
+
+    func testNoDestinationIsRegisteredYetSoRequestsShowPlaceholders() {
+        XCTAssertFalse(ManagementCatalog.destinations.isRegistered(.item("item-1")))
+        XCTAssertFalse(ManagementCatalog.destinations.isRegistered(.suggestion))
+        XCTAssertTrue(ManagementCatalog.destinations.isRegistered(.entry(ManagementCatalog.searchEntryID)))
     }
 
     func testTheCatalogListsSearchAndSettingsAsSecondaryEntries() {
