@@ -4,9 +4,9 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rcgen::{BasicConstraints, CertificateParams, DistinguishedName, IsCa, KeyPair};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -97,6 +97,56 @@ impl Reply {
     }
 }
 
+#[derive(Default)]
+struct Progress {
+    requests: usize,
+    closed: usize,
+}
+
+/// Cloneable, blocking view of what the fixture has observed, so tests wait for the event itself
+/// instead of polling against a wall-clock window that a loaded machine can exceed.
+#[derive(Clone, Default)]
+pub struct ExchangeEvents {
+    progress: Arc<(Mutex<Progress>, Condvar)>,
+}
+
+impl ExchangeEvents {
+    fn request_received(&self) {
+        let (lock, changed) = &*self.progress;
+        lock.lock().unwrap().requests += 1;
+        changed.notify_all();
+    }
+
+    fn connection_closed(&self) {
+        let (lock, changed) = &*self.progress;
+        lock.lock().unwrap().closed += 1;
+        changed.notify_all();
+    }
+
+    fn wait_until(&self, limit: Duration, reached: impl Fn(&Progress) -> bool) -> bool {
+        let (lock, changed) = &*self.progress;
+        let deadline = Instant::now() + limit;
+        let mut progress = lock.lock().unwrap();
+        while !reached(&progress) {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return false;
+            };
+            progress = changed.wait_timeout(progress, remaining).unwrap().0;
+        }
+        true
+    }
+
+    /// Block until a full request has been read. `limit` only bounds a hang.
+    pub fn wait_for_request(&self, limit: Duration) -> bool {
+        self.wait_until(limit, |progress| progress.requests >= 1)
+    }
+
+    /// Block until a `HoldUntilClosed` reply saw the client close. `limit` only bounds a hang.
+    pub fn wait_for_closed_connection(&self, limit: Duration) -> bool {
+        self.wait_until(limit, |progress| progress.closed >= 1)
+    }
+}
+
 type Handler = dyn Fn(&RecordedRequest) -> Reply + Send + Sync;
 
 pub struct Fixture {
@@ -104,6 +154,7 @@ pub struct Fixture {
     requests: Arc<Mutex<Vec<RecordedRequest>>>,
     connections: Arc<AtomicUsize>,
     closed: Arc<AtomicUsize>,
+    events: ExchangeEvents,
     stop: Arc<AtomicBool>,
     accept_thread: Option<JoinHandle<()>>,
 }
@@ -131,6 +182,7 @@ impl Fixture {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let connections = Arc::new(AtomicUsize::new(0));
         let closed = Arc::new(AtomicUsize::new(0));
+        let events = ExchangeEvents::default();
         let stop = Arc::new(AtomicBool::new(false));
         let handler: Arc<Handler> = Arc::new(handler);
 
@@ -138,6 +190,7 @@ impl Fixture {
             let requests = Arc::clone(&requests);
             let connections = Arc::clone(&connections);
             let closed = Arc::clone(&closed);
+            let events = events.clone();
             let stop = Arc::clone(&stop);
             thread::spawn(move || {
                 while !stop.load(Ordering::SeqCst) {
@@ -148,9 +201,12 @@ impl Fixture {
                             let handler = Arc::clone(&handler);
                             let requests = Arc::clone(&requests);
                             let closed = Arc::clone(&closed);
+                            let events = events.clone();
                             let stop = Arc::clone(&stop);
                             thread::spawn(move || {
-                                serve(stream, config, &*handler, &requests, &closed, &stop)
+                                serve(
+                                    stream, config, &*handler, &requests, &closed, &events, &stop,
+                                )
                             });
                         }
                         Err(_) => thread::sleep(Duration::from_millis(2)),
@@ -163,6 +219,7 @@ impl Fixture {
             requests,
             connections,
             closed,
+            events,
             stop,
             accept_thread: Some(accept_thread),
         }
@@ -185,6 +242,10 @@ impl Fixture {
         self.closed.load(Ordering::SeqCst)
     }
 
+    pub fn events(&self) -> ExchangeEvents {
+        self.events.clone()
+    }
+
     pub fn requests(&self) -> Vec<RecordedRequest> {
         self.requests.lock().unwrap().clone()
     }
@@ -205,6 +266,7 @@ fn serve(
     handler: &Handler,
     requests: &Mutex<Vec<RecordedRequest>>,
     closed: &AtomicUsize,
+    events: &ExchangeEvents,
     stop: &AtomicBool,
 ) {
     stream.set_nonblocking(false).unwrap();
@@ -220,6 +282,7 @@ fn serve(
         return;
     };
     requests.lock().unwrap().push(request.clone());
+    events.request_received();
     match handler(&request) {
         Reply::Full {
             status,
@@ -263,6 +326,7 @@ fn serve(
                 match tls.read(&mut sink) {
                     Ok(0) => {
                         closed.fetch_add(1, Ordering::SeqCst);
+                        events.connection_closed();
                         return;
                     }
                     Ok(_) => {}
@@ -273,6 +337,7 @@ fn serve(
                         ) => {}
                     Err(_) => {
                         closed.fetch_add(1, Ordering::SeqCst);
+                        events.connection_closed();
                         return;
                     }
                 }
