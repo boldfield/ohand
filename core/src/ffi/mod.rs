@@ -17,6 +17,7 @@ pub mod core_handle;
 pub mod deletion_cleanup;
 pub mod export_snapshot;
 pub mod ingress_import;
+pub mod item_corrections;
 pub mod metrics;
 pub mod provider_profiles;
 pub mod provider_transport;
