@@ -2,6 +2,35 @@ import Combine
 import Foundation
 import OhAndServices
 
+/// One place the management host can show. The navigation path stores each route as a string, so a route survives as
+/// plain identifiers: a catalog entry id, `item:<item id>`, or `suggestion`.
+enum ManagementRoute: Equatable {
+    case entry(String)
+    case item(String)
+    case suggestion
+
+    private static let itemPrefix = "item:"
+    private static let suggestionComponent = "suggestion"
+
+    init(pathComponent: String) {
+        if pathComponent == ManagementRoute.suggestionComponent {
+            self = .suggestion
+        } else if pathComponent.hasPrefix(ManagementRoute.itemPrefix) {
+            self = .item(String(pathComponent.dropFirst(ManagementRoute.itemPrefix.count)))
+        } else {
+            self = .entry(pathComponent)
+        }
+    }
+
+    var pathComponent: String {
+        switch self {
+        case .entry(let entryID): return entryID
+        case .item(let itemID): return ManagementRoute.itemPrefix + itemID
+        case .suggestion: return ManagementRoute.suggestionComponent
+        }
+    }
+}
+
 /// Navigation from the capture surface to the management screens. Capture is the root and never waits for this.
 ///
 /// Rules this type keeps:
@@ -9,7 +38,11 @@ import OhAndServices
 ///   asks the device owner first, and only a success opens the screen. Cancelling or failing leaves the user on capture.
 /// * Leaving the authenticated session (the root relocks when the app goes to the background) returns to capture,
 ///   so no management screen stays on display after the session ended.
-/// * Nothing here carries capture text or stored content; the path holds entry identifiers only.
+/// * An item or suggestion request (a notification tap, another screen) follows the same rule: it presents only after
+///   the session is authenticated, waits for the owner's answer when locked, and is dropped if the owner does not
+///   answer successfully, so a tap before authentication is never lost and never shows stored content early.
+/// * A capture entry always lands on capture, and drops any request still waiting for authentication.
+/// * Nothing here carries capture text or stored content; the path holds entry, item and suggestion identifiers only.
 ///
 /// Confined to the main queue.
 final class ManagementNavigationModel: ObservableObject {
@@ -18,9 +51,7 @@ final class ManagementNavigationModel: ObservableObject {
     @Published var path: [String] = []
     @Published private(set) var notice: String?
     @Published private(set) var isAuthenticating = false
-    /// The item a reminder notification tap resolved to, waiting for an item screen to present it. The root reports a
-    /// tap only while its session is authenticated, and this is dropped as soon as reads stop being authenticated.
-    @Published private(set) var requestedItemID: String?
+    private var pendingRoute: ManagementRoute?
 
     private let readScope: () -> CompositionReadScope
     private let authenticate: (_ reason: String, _ completion: @escaping (CompositionAuthenticationOutcome) -> Void) -> Void
@@ -36,22 +67,57 @@ final class ManagementNavigationModel: ObservableObject {
         self.readAccessDidChange = readAccessDidChange
     }
 
+    /// The item whose screen is on display (or a placeholder for it), if any. Empty once the screen is left or reads stop
+    /// being authenticated.
+    var requestedItemID: String? {
+        guard case .item(let itemID)? = displayedRoute else { return nil }
+        return itemID
+    }
+
+    /// True while the suggestion screen (or a placeholder for it) is on display.
+    var isSuggestionRequested: Bool {
+        displayedRoute == ManagementRoute.suggestion
+    }
+
+    private var displayedRoute: ManagementRoute? {
+        path.last.map { ManagementRoute(pathComponent: $0) }
+    }
+
     func open(entryID: String) {
+        present(.entry(entryID))
+    }
+
+    /// Presents the screen for an item a notification tap or another screen resolved to. A locked session asks the
+    /// device owner first; the host shows the registered item destination, or a placeholder when none is registered.
+    func openItem(itemID: String) {
+        present(.item(itemID))
+    }
+
+    /// Presents the current suggestion, under the same authentication rule as an item.
+    func openSuggestion() {
+        present(.suggestion)
+    }
+
+    private func present(_ route: ManagementRoute) {
         notice = nil
         if readScope() == .authenticated {
-            path = [entryID]
+            pendingRoute = nil
+            path = [route.pathComponent]
             return
         }
+        pendingRoute = route
         guard !isAuthenticating else { return }
         isAuthenticating = true
         authenticate(Self.authenticationReason) { [weak self] outcome in
             guard let self = self else { return }
             self.isAuthenticating = false
+            let awaitedRoute = self.pendingRoute
+            self.pendingRoute = nil
             self.readAccessDidChange()
             switch outcome {
             case .authenticated:
-                if self.readScope() == .authenticated {
-                    self.path = [entryID]
+                if let awaitedRoute = awaitedRoute, self.readScope() == .authenticated {
+                    self.path = [awaitedRoute.pathComponent]
                 }
             case .cancelled, .interrupted:
                 break
@@ -63,23 +129,17 @@ final class ManagementNavigationModel: ObservableObject {
         }
     }
 
-    /// Records the item a notification tap resolved to. No item screen exists in the shell yet, so this changes
-    /// nothing on display; the screen that presents items takes the identifier from `requestedItemID`.
-    func openItem(itemID: String) {
-        requestedItemID = itemID
-    }
-
     /// Call when the app returns to the foreground or the session may have changed. Leaves every management screen
     /// once reads are no longer authenticated.
     func revalidate() {
         if readScope() != .authenticated {
             if !path.isEmpty { path = [] }
-            requestedItemID = nil
         }
         readAccessDidChange()
     }
 
     func returnToCapture() {
+        pendingRoute = nil
         path = []
     }
 
