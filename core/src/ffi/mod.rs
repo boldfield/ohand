@@ -24,6 +24,7 @@ pub mod metrics;
 pub mod provider_profiles;
 pub mod provider_transport;
 pub mod reminder_controls;
+pub mod retention_controls;
 pub mod transcription_attachment;
 
 pub mod job_health;

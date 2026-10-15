@@ -86,6 +86,27 @@ impl Default for RetentionPolicy {
     }
 }
 
+/// The retention period the user configured (`retention_settings`, A08), or the built-in default
+/// when none was stored. A stored value outside the policy's bounds is refused rather than
+/// replaced, so a damaged setting is visible instead of silently changing what expires (the
+/// table's CHECK keeps such a value from being written in the first place).
+pub fn stored_retention_policy(connection: &Connection) -> Result<RetentionPolicy> {
+    let stored: Option<i64> = connection
+        .query_row(
+            "SELECT period_seconds FROM retention_settings WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match stored {
+        None => Ok(RetentionPolicy::default()),
+        Some(seconds) => RetentionPolicy::new(
+            Duration::try_seconds(seconds)
+                .ok_or_else(|| anyhow!("stored retention period is out of range"))?,
+        ),
+    }
+}
+
 /// Free-space condition reported by the platform for the audio volume.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StoragePressure {
@@ -349,6 +370,51 @@ pub fn sweep_audio_retention(
     rows.iter()
         .map(|row| assess_row(row, policy, pressure, now))
         .collect()
+}
+
+/// One live item whose audio is its only source, and why no clock runs for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnresolvedSoleAudio {
+    pub item_id: String,
+    /// When the user made the capture (`captures.capture_instant`), as stored.
+    pub captured_at: String,
+    pub reason: UnresolvedReason,
+    pub options: Vec<RetentionOption>,
+}
+
+/// Every live item whose audio is its only source, oldest capture first. These never expire, so
+/// the user decides: retry transcription or delete the item. Reads only.
+pub fn unresolved_sole_audio(connection: &Connection) -> Result<Vec<UnresolvedSoleAudio>> {
+    let policy = stored_retention_policy(connection)?;
+    let assessments = sweep_audio_retention(
+        connection,
+        &crate::store::schema::SystemClock,
+        &policy,
+        StoragePressure::Normal,
+    )?;
+    let mut captured_at = connection.prepare(
+        "SELECT captures.capture_instant FROM items
+         JOIN captures ON captures.capture_id = items.capture_id
+         WHERE items.item_id = ?",
+    )?;
+    let mut cases = Vec::new();
+    for assessment in assessments {
+        let RetentionState::Unresolved { reason } = assessment.state else {
+            continue;
+        };
+        if !assessment.sole_source {
+            continue;
+        }
+        cases.push(UnresolvedSoleAudio {
+            captured_at: captured_at
+                .query_row([&assessment.item_id], |row| row.get(0))
+                .map_err(anyhow::Error::from)?,
+            item_id: assessment.item_id,
+            reason,
+            options: assessment.options,
+        });
+    }
+    Ok(cases)
 }
 
 /// Re-checks, at the moment native code is about to remove a file, that the audio is still
