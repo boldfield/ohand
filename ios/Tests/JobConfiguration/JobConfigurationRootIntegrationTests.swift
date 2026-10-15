@@ -86,18 +86,14 @@ final class JobConfigurationRootIntegrationTests: XCTestCase {
         let root = try makeRoot(authenticated: true, sender: sender)
         defer { root.shutDown() }
         let itemID = try saveCapture(root)
-        try execute([
-            """
-            INSERT INTO jobs (job_id, job_schema_version, item_id, job_type, source_revision, profile_version, \
-            request_version, status, attempt_count, created_at) VALUES ('job-waiting-1', 1, '\(itemID)', \
-            'interpret', 0, NULL, '\(Self.requestVersion)', 'queued', 0, '2026-10-08T09:30:02Z')
-            """
-        ])
+        let waitingJobID = scalar("SELECT job_id FROM jobs WHERE item_id = '\(itemID)'")
+        XCTAssertFalse(waitingJobID.isEmpty, "the capture queued an unpinned interpretation job")
+        XCTAssertEqual(scalar("SELECT COUNT(*) FROM jobs WHERE profile_version IS NOT NULL"), "0")
         root.start(isActive: true)
         root.jobRunner.requestDrain()
         XCTAssertTrue(
-            pump(until: { self.scalar("SELECT status FROM jobs WHERE job_id = 'job-waiting-1'") == "failed" }),
-            "the unpinned job stops for configuration: \(scalar("SELECT status FROM jobs WHERE job_id = 'job-waiting-1'"))")
+            pump(until: { self.scalar("SELECT status FROM jobs WHERE job_id = '\(waitingJobID)'") == "failed" }),
+            "the unpinned job stops for configuration: \(scalar("SELECT status FROM jobs WHERE job_id = '\(waitingJobID)'"))")
         XCTAssertEqual(scalar("SELECT processing_state FROM items WHERE item_id = '\(itemID)'"), "unprocessed")
         XCTAssertTrue(sender.requests.isEmpty, "nothing reached a provider without a configured profile")
 
@@ -113,7 +109,7 @@ final class JobConfigurationRootIntegrationTests: XCTestCase {
         let jobConfiguration = root.jobConfiguration
         let moved = try run { try await jobConfiguration.repinWaitingWork(routeID: Self.routeID) }
         XCTAssertEqual(moved, 1)
-        let link = try run { try await jobConfiguration.requeueRecord(forJob: "job-waiting-1") }
+        let link = try run { try await jobConfiguration.requeueRecord(forJob: waitingJobID) }
         XCTAssertNil(link?.fromProfileVersion)
         XCTAssertEqual(link?.toProfileVersion, profileVersion)
 
@@ -129,7 +125,7 @@ final class JobConfigurationRootIntegrationTests: XCTestCase {
             scalar("SELECT COUNT(*) FROM jobs WHERE item_id = '\(itemID)' AND profile_version = '\(profileVersion)'"),
             "1")
         XCTAssertEqual(
-            scalar("SELECT status FROM jobs WHERE job_id = 'job-waiting-1'"), "failed",
+            scalar("SELECT status FROM jobs WHERE job_id = '\(waitingJobID)'"), "failed",
             "the waiting job is left as it stopped")
 
         let again = try run { try await jobConfiguration.repinWaitingWork(routeID: Self.routeID) }
@@ -147,7 +143,10 @@ final class JobConfigurationRootIntegrationTests: XCTestCase {
         let moved = try run { try await jobConfiguration.repinWaitingWork(routeID: Self.routeID) }
 
         XCTAssertEqual(moved, 0)
-        XCTAssertEqual(scalar("SELECT COUNT(*) FROM jobs"), "0")
+        XCTAssertEqual(
+            scalar("SELECT COUNT(*) FROM jobs WHERE profile_version IS NOT NULL"), "0",
+            "no grant means no job is pinned")
+        XCTAssertEqual(scalar("SELECT COUNT(*) FROM jobs"), "1", "only the capture's own unpinned job exists")
     }
 
     func testACaptureOnlySessionCannotRepinAndNothingChanges() throws {
@@ -164,7 +163,9 @@ final class JobConfigurationRootIntegrationTests: XCTestCase {
         XCTAssertThrowsError(try run { try await jobConfiguration.revokeProfile(profileVersion) }) { error in
             XCTAssertEqual(error as? JobConfigurationError, .notAuthenticated)
         }
-        XCTAssertEqual(scalar("SELECT COUNT(*) FROM jobs"), "0")
+        XCTAssertEqual(
+            scalar("SELECT COUNT(*) FROM jobs WHERE profile_version IS NOT NULL"), "0",
+            "a capture-only session pins nothing")
         XCTAssertEqual(scalar("SELECT COUNT(*) FROM provider_profiles WHERE revoked_at IS NOT NULL"), "0")
     }
 
