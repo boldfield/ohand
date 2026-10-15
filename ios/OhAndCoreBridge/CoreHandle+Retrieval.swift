@@ -124,6 +124,8 @@ public struct CoreRetrievalHit: Decodable, Equatable, Sendable {
     public let captureID: String
     /// `personal` or `work`.
     public let scope: String
+    /// The item's current type, or `nil` while it has not been classified.
+    public let itemType: String?
     /// The current text to show and quote.
     public let text: String
     public let textBasis: CoreRetrievalTextBasis
@@ -138,11 +140,12 @@ public struct CoreRetrievalHit: Decodable, Equatable, Sendable {
     public init(
         itemID: String, captureID: String, scope: String, text: String, textBasis: CoreRetrievalTextBasis,
         originalText: String?, matched: CoreRetrievalMatchedText, matchSpan: CoreRetrievalMatchSpan?,
-        capturedAt: String
+        capturedAt: String, itemType: String? = nil
     ) {
         self.itemID = itemID
         self.captureID = captureID
         self.scope = scope
+        self.itemType = itemType
         self.text = text
         self.textBasis = textBasis
         self.originalText = originalText
@@ -155,6 +158,7 @@ public struct CoreRetrievalHit: Decodable, Equatable, Sendable {
         case itemID = "item_id"
         case captureID = "capture_id"
         case scope
+        case itemType = "item_type"
         case text
         case textBasis = "text_basis"
         case originalText = "original_text"

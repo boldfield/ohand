@@ -116,6 +116,8 @@ pub struct SearchHit {
     pub scope: ItemScope,
     pub route_id: String,
     pub lifecycle_state: String,
+    /// The item's current type from the item projection; `None` until it has been classified.
+    pub item_type: Option<String>,
     /// Current effective text; this is what to display and quote.
     pub current_text: String,
     pub text_basis: TextBasis,
@@ -273,7 +275,8 @@ pub fn list_index(conn: &Connection, allowed_scopes: &[ItemScope]) -> Result<Vec
     let sql = format!(
         "SELECT search_index.item_id, i.capture_id, COALESCE(i.current_scope, c.item_scope),
                 c.route_id, i.lifecycle_state, search_index.current_text,
-                search_index.text_basis, search_index.original_text, c.capture_instant
+                search_index.text_basis, search_index.original_text, c.capture_instant,
+                i.item_type
            FROM search_index
            JOIN items i ON i.item_id = search_index.item_id
            JOIN captures c ON c.capture_id = i.capture_id
@@ -297,6 +300,7 @@ pub fn list_index(conn: &Connection, allowed_scopes: &[ItemScope]) -> Result<Vec
                 row.get::<_, String>(6)?,
                 row.get::<_, Option<String>>(7)?,
                 row.get::<_, String>(8)?,
+                row.get::<_, Option<String>>(9)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -330,6 +334,7 @@ pub fn list_index(conn: &Connection, allowed_scopes: &[ItemScope]) -> Result<Vec
                     text_basis,
                     original_text,
                     _,
+                    item_type,
                 ),
             )| {
                 Ok(SearchHit {
@@ -338,6 +343,7 @@ pub fn list_index(conn: &Connection, allowed_scopes: &[ItemScope]) -> Result<Vec
                     scope: scope.parse::<ItemScope>()?,
                     route_id,
                     lifecycle_state,
+                    item_type,
                     current_text: current_text.unwrap_or_default(),
                     text_basis: TextBasis::parse(&text_basis)?,
                     original_text,
@@ -367,7 +373,7 @@ fn search_table(
     let sql = format!(
         "SELECT {table}.item_id, i.capture_id, COALESCE(i.current_scope, c.item_scope),
                 c.route_id, i.lifecycle_state, {table}.current_text, {table}.text_basis,
-                {table}.original_text
+                {table}.original_text, i.item_type
            FROM {table}
            JOIN items i ON i.item_id = {table}.item_id
            JOIN captures c ON c.capture_id = i.capture_id
@@ -395,6 +401,7 @@ fn search_table(
                 row.get::<_, Option<String>>(5)?,
                 row.get::<_, String>(6)?,
                 row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -419,6 +426,7 @@ fn search_table(
                 current_text,
                 text_basis,
                 original_text,
+                item_type,
             )| {
                 let matched = if current_matches.contains(&item_id) {
                     MatchedText::Current
@@ -431,6 +439,7 @@ fn search_table(
                     scope: scope.parse::<ItemScope>()?,
                     route_id,
                     lifecycle_state,
+                    item_type,
                     current_text: current_text.unwrap_or_default(),
                     text_basis: TextBasis::parse(&text_basis)?,
                     original_text,
