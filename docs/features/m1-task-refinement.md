@@ -185,6 +185,11 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
     - Prompts choose their item at open time (S03), so a preview needs an S02/S03 design change.
 
     S04 is an opt-in feature and no M1 task depends on it. It now depends on T08 and will be re-decomposed after the trial verdict.
+  - **Missing seams found by blocked tasks (coordinator, 2026-10-15).** Four tasks blocked with accurate reports. Each was checked against main `c33b978`.
+    - F15's fix is approved by both reviewers, but its 50-run soak cannot pass while two `tools/bench` transport tests fail under load (3-second polling window). F17 fixes those tests; F15 depends on F17.
+    - V01c's owned file was a sibling of `provider_transport` and could not reach its private transport. Its file moves under `core/src/ffi/provider_transport/`, as `shadow_review` already is.
+    - U02a must show each result's type, but no layer of the retrieval answer carries it. R05 adds it; U02a depends on R05.
+    - A08's "Delete audio" cannot pass the fence, because `authorize_audio_removal` approves only expired audio, and its "Retry transcription" has no job path to reuse. While tracing the second, the coordinator found that **no production code enqueues a `transcription_attachment` job at all**: voice captures stay `audio_pending` and are never transcribed. C07 queues the job at import, backfills stored voice captures at drain start and provides the requeue function; A14 adds the user-initiated removal decision. A08 keeps all its criteria and depends on both.
 
 ## Why some tasks stay together
 
@@ -962,7 +967,7 @@ Check a provider profile's connection on explicit request
 
 Add a core operation that, only when called, sends one fixed synthetic request to a stored profile's own destination and reports a redacted classification.
 
-Owned paths: `core/src/ffi/provider_connection_check.rs` (with its `pub mod` line) and `ios/OhAndCoreBridge/CoreHandle+ProviderConnectionCheck.swift` under the native-boundary allowance, and their tests.
+Owned paths: `core/src/ffi/provider_transport/connection_check.rs` (new; its single `pub mod connection_check;` line in `core/src/ffi/provider_transport.rs`, mirroring `shadow_review`) and `ios/OhAndCoreBridge/CoreHandle+ProviderConnectionCheck.swift` under the native-boundary allowance, and their tests. As a child module it can use the transport's private registration, exchange and profile-loading items directly; nothing else in `provider_transport.rs` changes. (Amended 2026-10-15: the original sibling path could not reach the existing transport.)
 
 Dependencies: V01b.
 
@@ -1010,6 +1015,24 @@ Acceptance:
 3. Rust tests cover text search, date bounds, session-topic filtering, scope exclusion (no count or snippet from an excluded scope), pagination limits and invalid filters. `make check` and `make test` pass.
 
 Source pointers: `core/src/retrieval/query/mod.rs:22`, `:65`, `:76`, `:97`; `core/src/retrieval/index/mod.rs:112`.
+
+### R05
+
+Carry each search hit's item type through the gated retrieval answer
+
+Add the item's type to every retrieval hit so search results can show date, type and source without echoing the request filter.
+
+Owned paths: `core/src/retrieval/index/mod.rs` (only `SearchHit` and the queries that build it), `core/src/retrieval/query/` (only where hits are built), `core/src/ffi/retrieval.rs` and its tests, `ios/OhAndCoreBridge/CoreHandle+Retrieval.swift`, and in `ios/Services/Authentication/PrivateReadGate.swift` only the `PrivateRetrievalHit` field and its decoding, plus the matching tests under `ios/Tests/Authentication/`.
+
+Dependencies: none.
+
+Acceptance:
+
+1. `SearchHit` carries the item's current `item_type` from the item projection (`items.item_type`, `core/src/store/schema/mod.rs:372`), which is absent for an item that has not been classified. Absent is reported as absent, never as a guessed type.
+2. The R04 hit JSON and `PrivateRetrievalHit` carry the same value (an optional string). Scope enforcement is unchanged: an excluded scope still yields no hit, count or type.
+3. Rust tests: a typed item's hit carries its type, an unclassified item's hit carries none, and a type correction (D04) is reflected on the next search. A Swift test decodes both forms. `make check` and `make test` pass. The exact-head macOS CI run is linked.
+
+Source pointers: `core/src/retrieval/index/mod.rs:112`; `core/src/retrieval/query/mod.rs:277`; `ios/Services/Authentication/PrivateReadGate.swift:73`.
 
 ### U01d
 
@@ -1082,6 +1105,24 @@ Acceptance:
 3. The F10 counting rule applies. On the final head the test passes in 5 consecutive executions of its step. Executions where an earlier unrelated step failed are neutral. The run URLs are linked. `make check` and `make test` pass.
 
 Source pointers: `ios/NotificationProbe/Tests/NotificationProbeAuthorizedUITests.swift:56`, `:66`, `:71`; `ios/NotificationProbe/Sources/ProbeScenarios.swift`.
+
+### F17
+
+Make the bench transport teardown tests deterministic under load
+
+Make `tools/bench` transport tests that wait for an exchange to be torn down pass under CPU load, without weakening what they assert.
+
+Owned paths: `tools/bench/src/transport/tests.rs`; in the other files under `tools/bench/src/transport/` (for example `fixture.rs`), only a test-observable teardown signal if the tests need one.
+
+Dependencies: none.
+
+Acceptance:
+
+1. **Diagnosis.** The PR shows the failure under parallel load: `transport::tests::cancellation_returns_promptly_while_the_request_is_in_flight` and `transport::tests::the_dispatch_clock_deadline_ends_a_call_even_with_a_long_relative_budget` fail in `assert_exchange_torn_down`, which polls `closed_connections()` against a 3-second wall-clock window (`tools/bench/src/transport/tests.rs:679`). It states why that window is exceeded under load.
+2. **The fix addresses the cause.** The tests wait for the teardown event itself, for example a channel or condition signalled when the fixture closes the connection, with a generous upper bound that only catches a hang. Both tests still assert that the call returned promptly and that the connection was closed. No retries, no `#[ignore]`, no removed assertion, no forcing of `--test-threads=1`.
+3. 50 consecutive `cargo test --locked -p bench --lib` runs pass under a CPU-saturating background load on the final head, using the loop command written in the PR. `make check` and `make test` pass.
+
+Source pointers: `tools/bench/src/transport/tests.rs:679`.
 
 ### A01
 
@@ -1231,16 +1272,16 @@ Configure retention and act on unresolved sole audio
 
 Persist the user's retention period, and expose retention status, the sole-audio cases and their retry and delete actions to `app/`.
 
-Owned paths: one migration step appended to `MIGRATIONS` in `core/src/store/schema/mod.rs` (the next version after V01b's) and, in `core/tests/migrations/main.rs`, only the schema-version expectations it forces and its own migration test; `core/src/lifecycle/retention/` (only the persisted-setting read and the new status query); `core/src/ffi/retention_controls.rs` and `ios/OhAndCoreBridge/CoreHandle+RetentionControls.swift`; `ios/Services/AudioRetention/`; `ios/Tests/AudioRetention/`; registrations under the capability client allowance, including one `LifecycleCoordinator` accessor for `audioRetention` (`ios/Services/Assembly/LifecycleCoordinator.swift:277`).
+Owned paths: one migration step appended to `MIGRATIONS` in `core/src/store/schema/mod.rs` (the next version after V01b's) and, in `core/tests/migrations/main.rs`, only the schema-version expectations it forces and its own migration test; `core/src/lifecycle/retention/` (only the persisted-setting read and the new status query); `core/src/ffi/retention_controls.rs` and `ios/OhAndCoreBridge/CoreHandle+RetentionControls.swift`; `ios/Services/AudioRetention/`; `ios/Tests/AudioRetention/`; registrations under the capability client allowance, including one `LifecycleCoordinator` accessor for `audioRetention` (`ios/Services/Assembly/LifecycleCoordinator.swift:277`); in `core/src/ffi/audio_retention.rs`, only `Command::policy` reading the stored setting (after A14).
 
-Dependencies: V01b (migration order).
+Dependencies: V01b (migration order), A14 (user-initiated removal decision; shared `ffi/audio_retention.rs`), C07 (transcription requeue).
 
 Acceptance:
 
 1. The retention period is a durable setting with a seven-day default after a successful transcription. Bounds are enforced. The sweep reads the stored setting instead of the init parameter, and changing it never deletes audio whose item is its sole source.
 2. A status read returns the policy, the storage pressure the service already measures, and the unresolved sole-audio cases (item, capture time, reason).
-3. "Retry transcription" re-queues the item's on-device transcription through the existing job path.
-4. "Delete audio" removes only the audio of an item that has a transcript or text, through the existing cleanup ordering. Sole-source audio is refused and pointed to item deletion (A05).
+3. "Retry transcription" re-queues the item's on-device transcription through the existing job path (C07's requeue function).
+4. "Delete audio" removes only the audio of an item that has a transcript or text, through the existing cleanup ordering and A14's user-initiated decision inside the removal fence. Sole-source audio is refused and pointed to item deletion (A05).
 5. Reads are gated and writes require an authenticated session. A sweep never blocks a new capture.
 6. Tests: Rust tests and real-core root tests. `make check` and `make test` pass. The exact-head macOS CI run is linked.
 
@@ -1325,6 +1366,43 @@ Acceptance:
 2. Presenting either requires authentication first. A capture entry still always lands on capture.
 3. The host exposes a single registration point, one line per destination, so that U02b registers source detail and U08b registers the suggestion view without editing host behaviour.
 4. UI and unit tests cover a tap before and after authentication, a relock while presented, and the placeholder. The exact-head macOS CI run is linked.
+
+### A14
+
+Let the user remove an item's audio through the removal fence
+
+Add a user-initiated removal decision to the L03b fence, so the audio of an item that has text can be removed on request and never the audio that is an item's only source.
+
+Owned paths: `core/src/lifecycle/retention/mod.rs` (only the new user-initiated authorization) and its tests; `core/src/ffi/audio_retention.rs` and `core/src/ffi/audio_retention/lease.rs` (only selecting the new authorization for a user-initiated removal); `ios/OhAndCoreBridge/CoreHandle+AudioRetention.swift` if the command shape changes; and their tests.
+
+Dependencies: none.
+
+Acceptance:
+
+1. A user-initiated removal is approved when the item is live, the audio reference still matches, and recoverable text exists: a usable transcript, or captured or user-written text (including `TextWithoutTranscript`). It is denied, with a fixed reason, when the audio is the item's only source, when the item is deleted (deletion owns cleanup), or when the reference no longer matches.
+2. The decision is made inside the existing fence (`begin` in `lease.rs`) under the same store write lock, so a concurrent text correction that makes the audio sole-source cannot race the removal. Automatic sweeps still use `authorize_audio_removal` unchanged.
+3. Rust tests cover approval with transcript, approval with typed text and no transcript, denial for sole-source audio, denial after deletion, denial after an audio-reference change, and a correction racing a begun removal. `make check` and `make test` pass. If the Swift extension changes, the exact-head macOS CI run is linked.
+
+Source pointers: `core/src/lifecycle/retention/mod.rs:320`; `core/src/ffi/audio_retention/lease.rs:115`, `:136`.
+
+### C07
+
+Queue on-device transcription for imported voice captures
+
+Create the `transcription_attachment` job that the native transcription handler (C05b) waits for. Today nothing in production creates one: import stores an audio-only capture as `audio_pending` (`core/src/ingress/import.rs:366`) and queues nothing, so voice captures are never transcribed.
+
+Owned paths: `core/src/ingress/transcription/queue.rs` (new; its `mod` line in `core/src/ingress/transcription/mod.rs`), `core/src/ingress/import.rs` (only the call in the import transaction), one call at the start of each drain in `core/src/ffi/job_runner.rs`, and their tests.
+
+Dependencies: none.
+
+Acceptance:
+
+1. **On import.** The import transaction that creates an audio-only item (`audio_pending`) also enqueues one `transcription_attachment` job for it at the item's revision, with no profile pin (transcription is on-device only and `authorize_job` treats it as local). An import retry that finds the existing item queues nothing new. A capture with text queues no transcription job.
+2. **Backfill.** At the start of each job drain, every non-deleted `audio_pending` item with no queued, running or completed `transcription_attachment` job gets one, idempotently and in bounded batches. This covers voice captures already stored before this fix.
+3. **Explicit retry.** A core function requeues transcription for one item: it moves `transcription_failed` or `transcription_unsupported` back to `audio_pending` and enqueues a new job in one transaction. It refuses a deleted item, an item whose audio was removed, an item already `transcribed` or `not_applicable`, and an item with a queued or running transcription job. It is a plain core function; A08 exports it.
+4. **End to end.** A Rust test imports an audio-only capture, drains with a fake recognizer through the existing transcription apply path, and sees the transcript attached and the interpretation job queued. Further tests cover retry idempotency, backfill idempotency and each refusal. `make check` and `make test` pass.
+
+Source pointers: `core/src/ingress/import.rs:366`; `core/src/privacy/routing/mod.rs:30`, `:226`; `core/src/jobs/queue/mod.rs:162`; `ios/Services/Transcription/TranscriptionJobHandler.swift:23`.
 
 ### I05b
 
