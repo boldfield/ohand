@@ -288,6 +288,14 @@ impl ProcessingWorld {
         let acknowledgment =
             import_foreground_ingress(&mut database, &record.core_capture()).unwrap();
         assert_eq!(acknowledgment.disposition, ImportDisposition::Imported);
+        // These scenarios script their own pinned jobs, so drop the one the import queued.
+        database
+            .conn()
+            .execute(
+                "DELETE FROM jobs WHERE item_id = ? AND job_type = 'interpret'",
+                [&acknowledgment.item_id],
+            )
+            .unwrap();
         let world = ProcessingWorld {
             workspace,
             capture_id: acknowledgment.capture_id,

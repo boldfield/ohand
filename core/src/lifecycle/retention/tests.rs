@@ -119,10 +119,15 @@ impl Store {
             when,
         )
         .unwrap();
-        let job = claim_job_with_lease(&mut database, Duration::seconds(300), when)
-            .unwrap()
-            .expect("the job is eligible");
-        assert_eq!(job.job_id, job_id);
+        // A text capture already holds its own interpretation job; claim past it.
+        let job = loop {
+            let claimed = claim_job_with_lease(&mut database, Duration::seconds(300), when)
+                .unwrap()
+                .expect("the job is eligible");
+            if claimed.job_id == job_id {
+                break claimed;
+            }
+        };
         apply_transcription_outcome(
             &mut database,
             &TranscriptionOutcome {

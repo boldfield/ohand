@@ -265,7 +265,7 @@ fn a_transcript_is_attached_once_and_a_redelivery_converges() {
     let first = success_json(&session.apply(1, &request));
     assert_eq!(first["operation_id"], 1);
     assert_eq!(first["disposition"], "attached");
-    assert_eq!(first["interpretation"]["status"], "not_requested");
+    assert_eq!(first["interpretation"]["status"], "queued");
     let revision = first["revision"].clone();
     assert_eq!(item_state(&path).0, "transcribed");
     assert_eq!(job_row(&path).0, "completed");

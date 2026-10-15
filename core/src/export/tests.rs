@@ -149,9 +149,15 @@ impl Store {
             now,
         )
         .unwrap();
-        let job = claim_job_with_lease(&mut database, Duration::seconds(300), now)
-            .unwrap()
-            .expect("job is claimable");
+        // A text capture already holds its own interpretation job; claim past it.
+        let job = loop {
+            let claimed = claim_job_with_lease(&mut database, Duration::seconds(300), now)
+                .unwrap()
+                .expect("job is claimable");
+            if claimed.job_id == "transcription-1" {
+                break claimed;
+            }
+        };
         apply_transcription_outcome(
             &mut database,
             &TranscriptionOutcome {
