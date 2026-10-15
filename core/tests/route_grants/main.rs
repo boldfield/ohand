@@ -568,11 +568,9 @@ fn revoking_removes_only_the_destinations_no_remaining_grant_uses() {
 
     fixture.revoke("route-a", INTERPRET).unwrap();
 
-    // OpenAI left; Anthropic stays for review; the hand-configured Spark entry is untouched.
-    assert_eq!(
-        fixture.ceiling("route-a"),
-        format!("[\"{SPARK}\",\"{ANTHROPIC}\"]")
-    );
+    // OpenAI left with the revoked grant; the stale Spark entry that no remaining grant uses
+    // left too; Anthropic stays because review still uses it.
+    assert_eq!(fixture.ceiling("route-a"), format!("[\"{ANTHROPIC}\"]"));
     assert_eq!(
         fixture.grant_row("route-a", REVIEW),
         Some(format!("[\"{ANTHROPIC}\"]"))

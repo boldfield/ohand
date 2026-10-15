@@ -242,10 +242,10 @@ pub fn grant_route_capability(
     Ok(GrantOutcome::Granted)
 }
 
-/// Removes `capability`'s grant on `route_id`, then drops from the route ceiling every
-/// destination of that grant which no remaining grant on the route uses. Destinations the
-/// ceiling holds for other reasons are left alone. An unreadable ceiling or grant is not
-/// rewritten (jobs on it are already denied as malformed policy), but the grant is still removed.
+/// Removes `capability`'s grant on `route_id`, then narrows the route ceiling to the destinations
+/// that the remaining grants on the route use; every other ceiling entry leaves. An unreadable
+/// ceiling is not rewritten (jobs on it are already denied as malformed policy), but the grant
+/// is still removed.
 pub fn revoke_route_capability(
     database: &mut Database,
     route_id: &str,
@@ -263,18 +263,17 @@ pub fn revoke_route_capability(
         .context("reading route")?;
     let stored_ceiling = stored_ceiling.ok_or(GrantError::UnknownRoute)?;
 
-    let stored_grant: Option<String> = transaction
+    let grant_exists: Option<i64> = transaction
         .query_row(
-            "SELECT authorized_destinations FROM route_authorizations \
-             WHERE route_id = ? AND capability = ?",
+            "SELECT 1 FROM route_authorizations WHERE route_id = ? AND capability = ?",
             [route_id, capability.as_str()],
             |row| row.get(0),
         )
         .optional()
         .context("reading route authorization")?;
-    let Some(stored_grant) = stored_grant else {
+    if grant_exists.is_none() {
         return Ok(RevokeOutcome::Unchanged);
-    };
+    }
 
     transaction
         .execute(
@@ -283,14 +282,11 @@ pub fn revoke_route_capability(
         )
         .context("removing route authorization")?;
 
-    if let (Some(ceiling), Some(revoked)) = (
-        parse_origin_list(&stored_ceiling),
-        parse_origin_list(&stored_grant),
-    ) {
+    if let Some(ceiling) = parse_origin_list(&stored_ceiling) {
         let still_used = destinations_of_remaining_grants(&transaction, route_id)?;
         let pruned: Vec<String> = ceiling
             .iter()
-            .filter(|origin| !revoked.contains(origin) || still_used.contains(*origin))
+            .filter(|origin| still_used.contains(*origin))
             .cloned()
             .collect();
         if pruned.len() != ceiling.len() {
