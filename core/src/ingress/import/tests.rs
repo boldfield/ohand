@@ -380,6 +380,7 @@ fn failure_before_commit_rolls_back_everything_and_a_retry_succeeds() {
         ImportStage::CaptureWritten,
         ImportStage::ItemWritten,
         ImportStage::IndexWritten,
+        ImportStage::InterpretationQueued,
     ] {
         let store = Store::new();
         let capture = text_capture("renew passport");
@@ -405,6 +406,7 @@ fn failure_before_commit_rolls_back_everything_and_a_retry_succeeds() {
         let database = store.open();
         assert_eq!(count(&database, "items"), 1);
         assert_eq!(count(&database, "search_index"), 1);
+        assert_eq!(count(&database, "jobs"), 1);
     }
 }
 

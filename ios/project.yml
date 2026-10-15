@@ -71,6 +71,11 @@ targets:
         excludes:
           - "**/.placeholder"
           - "Entry/Control/**"
+      - path: ../app
+        createIntermediateGroups: true
+        optional: true
+        excludes:
+          - "**/.placeholder"
     settings:
       PRODUCT_NAME: OhAnd
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.app
