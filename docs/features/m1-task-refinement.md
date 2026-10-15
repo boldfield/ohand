@@ -943,7 +943,7 @@ Store versioned provider profiles and the default per capability
 
 Give the core a production write path for provider profiles: create immutable versions, choose the default profile per processing capability, and list them, with an FFI export.
 
-Owned paths: `core/src/providers/profiles/` (new; its `pub mod` line in `core/src/providers/mod.rs`), one migration step appended to `MIGRATIONS` in `core/src/store/schema/mod.rs` (the next version after S05a's), the body of I08's pin resolver in `core/src/interpretation/enqueue/`, `core/tests/provider_profiles/` (new), and under the native-boundary allowance `core/src/ffi/provider_profiles.rs` (with its `pub mod` line) and `ios/OhAndCoreBridge/CoreHandle+ProviderProfiles.swift`.
+Owned paths: `core/src/providers/profiles/` (new; its `pub mod` line in `core/src/providers/mod.rs`), one migration step appended to `MIGRATIONS` in `core/src/store/schema/mod.rs` (the next version after S05a's), the body of I08's pin resolver in `core/src/interpretation/enqueue/`, `core/tests/provider_profiles/` (new), `core/tests/migrations/main.rs` (only the schema-version expectations the appended step forces and its own migration test; added 2026-10-15 after PR #228 round 1), and under the native-boundary allowance `core/src/ffi/provider_profiles.rs` (with its `pub mod` line) and `ios/OhAndCoreBridge/CoreHandle+ProviderProfiles.swift`.
 
 Dependencies: S05a (shared schema file), I08 (resolver).
 
@@ -1231,7 +1231,7 @@ Configure retention and act on unresolved sole audio
 
 Persist the user's retention period, and expose retention status, the sole-audio cases and their retry and delete actions to `app/`.
 
-Owned paths: one migration step appended to `MIGRATIONS` in `core/src/store/schema/mod.rs` (the next version after V01b's); `core/src/lifecycle/retention/` (only the persisted-setting read and the new status query); `core/src/ffi/retention_controls.rs` and `ios/OhAndCoreBridge/CoreHandle+RetentionControls.swift`; `ios/Services/AudioRetention/`; `ios/Tests/AudioRetention/`; registrations under the capability client allowance, including one `LifecycleCoordinator` accessor for `audioRetention` (`ios/Services/Assembly/LifecycleCoordinator.swift:277`).
+Owned paths: one migration step appended to `MIGRATIONS` in `core/src/store/schema/mod.rs` (the next version after V01b's) and, in `core/tests/migrations/main.rs`, only the schema-version expectations it forces and its own migration test; `core/src/lifecycle/retention/` (only the persisted-setting read and the new status query); `core/src/ffi/retention_controls.rs` and `ios/OhAndCoreBridge/CoreHandle+RetentionControls.swift`; `ios/Services/AudioRetention/`; `ios/Tests/AudioRetention/`; registrations under the capability client allowance, including one `LifecycleCoordinator` accessor for `audioRetention` (`ios/Services/Assembly/LifecycleCoordinator.swift:277`).
 
 Dependencies: V01b (migration order).
 
