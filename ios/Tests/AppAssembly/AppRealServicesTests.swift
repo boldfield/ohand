@@ -138,7 +138,7 @@ final class AppRealServicesTests: XCTestCase {
 
     func testALockedSessionDropsARequestedItem() throws {
         let services = try makeServices()
-        services.navigation.openItem(itemID: "item-1")
+        services.navigation.path = [ManagementRoute.item("item-1").pathComponent]
         XCTAssertEqual(services.root.readScope, .captureOnly)
 
         services.navigation.revalidate()
