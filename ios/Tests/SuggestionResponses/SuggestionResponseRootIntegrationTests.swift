@@ -38,6 +38,7 @@ final class SuggestionResponseRootIntegrationTests: XCTestCase {
 
     private var storageRoot: URL!
     private var session: ReadAuthenticationSession!
+    private var activeStorage: URL!
     private var baselineHandles = 0
     private var baselineBuffers = 0
 
@@ -104,12 +105,12 @@ final class SuggestionResponseRootIntegrationTests: XCTestCase {
             XCTAssertEqual(repeated, SuggestionResponseReceipt(replayed: true), "\(response)")
 
             XCTAssertEqual(
-                scalar("SELECT COUNT(*) FROM events WHERE event_id = 'prompt-response:cmd-1'", storage: storage), "1")
+                scalar("SELECT COUNT(*) FROM events WHERE event_id = 'prompt-response:cmd-1'"), "1")
             XCTAssertEqual(
-                scalar("SELECT event_type FROM events WHERE event_id = 'prompt-response:cmd-1'", storage: storage),
+                scalar("SELECT event_type FROM events WHERE event_id = 'prompt-response:cmd-1'"),
                 eventType)
             XCTAssertEqual(
-                scalar("SELECT lifecycle_state FROM items WHERE item_id = '\(itemID)'", storage: storage), lifecycle)
+                scalar("SELECT lifecycle_state FROM items WHERE item_id = '\(itemID)'"), lifecycle)
         }
     }
 
@@ -170,8 +171,8 @@ final class SuggestionResponseRootIntegrationTests: XCTestCase {
 
     // MARK: helpers
 
-    private func databasePath(storage: URL? = nil) -> String {
-        ProtectedStorageLayout(rootDirectory: storage ?? storageRoot).databaseURL.path
+    private var databasePath: String {
+        ProtectedStorageLayout(rootDirectory: activeStorage).databaseURL.path
     }
 
     private func makeRoot(authenticated: Bool, storage: URL? = nil) throws -> ServiceCompositionRoot {
@@ -181,7 +182,8 @@ final class SuggestionResponseRootIntegrationTests: XCTestCase {
             XCTAssertEqual(readSession.scope, .authenticated)
         }
         session = readSession
-        let rootPath = (storage ?? storageRoot).path
+        activeStorage = storage ?? storageRoot
+        let rootPath = activeStorage.path
         return try ServiceCompositionRoot(
             testing: CompositionConfiguration(
                 storageRootPath: rootPath, captureRouteID: Self.routeID, jobRetryDelaySeconds: 3600),
@@ -237,9 +239,9 @@ final class SuggestionResponseRootIntegrationTests: XCTestCase {
         return try XCTUnwrap(box.value).get()
     }
 
-    private func scalar(_ sql: String, storage: URL? = nil) -> String {
+    private func scalar(_ sql: String) -> String {
         var database: OpaquePointer?
-        XCTAssertEqual(sqlite3_open(databasePath(storage: storage), &database), SQLITE_OK)
+        XCTAssertEqual(sqlite3_open(databasePath, &database), SQLITE_OK)
         defer { sqlite3_close(database) }
         sqlite3_busy_timeout(database, 5000)
         var statement: OpaquePointer?
