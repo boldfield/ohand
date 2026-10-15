@@ -15,10 +15,14 @@ private final class OfflineProviderSender: ProviderRequestSender, @unchecked Sen
         return attempts
     }
 
-    func send(_ request: ProviderHTTPRequest) async throws -> ProviderHTTPResponse {
+    private func recordAttempt() {
         lock.lock()
         attempts += 1
         lock.unlock()
+    }
+
+    func send(_ request: ProviderHTTPRequest) async throws -> ProviderHTTPResponse {
+        recordAttempt()
         throw URLError(.notConnectedToInternet)
     }
 }
@@ -157,12 +161,12 @@ final class RetrievalSearchModuleIntegrationTests: XCTestCase {
     }
 
     func testACorrectedItemShowsTheCorrectionAndFindsTheReplacedOriginal() throws {
+        authenticate()
         let itemID = try saveCapture("synthetic rooter words")
         let start = try revision(of: itemID)
         let corrections = root.itemCorrections
         _ = try runCorrection { try await corrections.correctText(
             commandID: "cmd-text", itemID: itemID, expectedRevision: start, text: "synthetic roofer words") }
-        authenticate()
 
         let current = try XCTUnwrap(search(RetrievalSearchRequest(query: "roofer")).page?.rows.first)
         XCTAssertEqual(current.basis, .corrected)
@@ -201,6 +205,7 @@ final class RetrievalSearchModuleIntegrationTests: XCTestCase {
     }
 
     func testSessionTopicsSinceADateListWithoutWordsOrAnyProvider() throws {
+        authenticate()
         let garageID = try saveCapture("synthetic garage shelf", capturedAt: Date().addingTimeInterval(-2 * 86_400))
         let kitchenID = try saveCapture("synthetic kitchen tap", capturedAt: Date().addingTimeInterval(-2 * 86_400))
         let oldGarageID = try saveCapture("synthetic old garage", capturedAt: Date().addingTimeInterval(-20 * 86_400))
@@ -211,7 +216,6 @@ final class RetrievalSearchModuleIntegrationTests: XCTestCase {
             _ = try runCorrection { try await corrections.correctSessionTopic(
                 commandID: "cmd-topic-\(index)", itemID: pair.0, expectedRevision: start, sessionTopic: pair.1) }
         }
-        authenticate()
         let lastWeek = Date().addingTimeInterval(-7 * 86_400)
 
         XCTAssertEqual(
@@ -226,13 +230,13 @@ final class RetrievalSearchModuleIntegrationTests: XCTestCase {
     }
 
     func testTheTypeFilterNarrowsAndTheRowsNameTheType() throws {
+        authenticate()
         let ideaID = try saveCapture("synthetic idea words")
         _ = try saveCapture("synthetic other words")
         let start = try revision(of: ideaID)
         let corrections = root.itemCorrections
         _ = try runCorrection { try await corrections.correctType(
             commandID: "cmd-type", itemID: ideaID, expectedRevision: start, itemType: .idea) }
-        authenticate()
 
         let ideas = try XCTUnwrap(search(RetrievalSearchRequest(query: "synthetic", itemType: .idea)).page)
         XCTAssertEqual(ideas.rows.map(\.reference.value), [ideaID])
