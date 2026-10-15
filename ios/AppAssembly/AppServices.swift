@@ -40,9 +40,11 @@ final class AppServices {
     ) throws -> AppServices {
         let resolvedStorageRoot = try storageRoot ?? AppConfiguration.productionStorageRoot()
         let lifecycle = LifecycleCoordinator()
+        let retrieval = RetrievalSearchModule()
         let root = try ServiceCompositionRoot(
-            configuration: AppConfiguration.production(storageRoot: resolvedStorageRoot), modules: [lifecycle])
-        return AppServices(root: root, lifecycle: lifecycle, handoff: handoff)
+            configuration: AppConfiguration.production(storageRoot: resolvedStorageRoot),
+            modules: [lifecycle, retrieval])
+        return AppServices(root: root, lifecycle: lifecycle, handoff: handoff, retrieval: retrieval)
     }
 
     init(
@@ -50,6 +52,7 @@ final class AppServices {
         lifecycle: LifecycleCoordinator,
         handoff: CaptureEntryHandoff,
         voice: VoiceCaptureServices? = nil,
+        retrieval: RetrievalSearching = RetrievalSearchModule(),
         notificationHooks: NotificationHooks = .live,
         notificationCenter: NotificationCenter = .default,
         isProtectedDataAvailable: @escaping () -> Bool = { UIApplication.shared.isProtectedDataAvailable }
@@ -59,7 +62,6 @@ final class AppServices {
         self.notificationHooks = notificationHooks
         let voice = voice ?? VoiceCaptureServices(root: root)
         self.voice = voice
-        managementContext = ManagementContext(voiceRecovery: voice.recoveryModel)
 
         let access: () -> CaptureEntryAccess = { [weak root] in
             CaptureEntryAccess(
@@ -74,7 +76,7 @@ final class AppServices {
             defaultMode: defaultMode(),
             access: access)
         self.captureEntry = captureEntry
-        navigation = ManagementNavigationModel(
+        let navigation = ManagementNavigationModel(
             readScope: { [weak root] in root?.readScope ?? .captureOnly },
             authenticate: { [weak root] reason, completion in
                 guard let root else {
@@ -84,6 +86,10 @@ final class AppServices {
                 root.authenticateReads(reason: reason, completion: completion)
             },
             readAccessDidChange: { [weak captureEntry] in captureEntry?.refreshAccess() })
+        self.navigation = navigation
+        managementContext = ManagementContext(
+            voiceRecovery: voice.recoveryModel,
+            retrieval: .assembled(searcher: retrieval, root: root, navigation: navigation))
         entrySession = CaptureEntrySession(
             handoff: handoff, defaultMode: defaultMode, access: access, notificationCenter: notificationCenter)
         entrySession.observeHandoffs { [weak self] presentation in self?.present(presentation) }
