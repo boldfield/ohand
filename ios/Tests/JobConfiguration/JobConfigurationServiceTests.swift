@@ -225,6 +225,7 @@ private final class RecordingJobConfigurationReadSource: PrivateReadSource {
     func startGetCapture(operationID: UInt64, captureID: String) throws {}
     func startItemStatus(operationID: UInt64, itemID: String) throws {}
     func startRetrieval(operationID: UInt64, request: CoreRetrievalRequest) throws {}
+    func startItemDetail(operationID: UInt64, itemID: String, readScopes: [CoreExportScope]) throws {}
 
     func startJobConfigurationRead(operationID: UInt64, command: JobConfigurationCommand) throws {
         reads.append((operationID, command))
