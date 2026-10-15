@@ -16,6 +16,9 @@ public enum AudioRetentionCommand: Equatable, Sendable {
     case sweep(pressure: CoreRetentionPressure, periodSeconds: UInt64)
     case authorizeRemoval(itemID: String, audioReference: String, periodSeconds: UInt64)
     case beginRemoval(itemID: String, audioReference: String, periodSeconds: UInt64)
+    /// Like `beginRemoval`, for audio the user asked to remove: it ignores the retention clock and is approved whenever
+    /// the item keeps text without the audio. Audio that is an item's only source is denied with reason `sole_source`.
+    case beginUserRemoval(itemID: String, audioReference: String)
 
     fileprivate var request: Request {
         switch self {
@@ -29,6 +32,9 @@ public enum AudioRetentionCommand: Equatable, Sendable {
             return Request(
                 command: "begin_removal", itemID: itemID, audioReference: audioReference,
                 periodSeconds: periodSeconds)
+        case .beginUserRemoval(let itemID, let audioReference):
+            return Request(
+                command: "begin_user_removal", itemID: itemID, audioReference: audioReference, periodSeconds: nil)
         }
     }
 
@@ -37,7 +43,7 @@ public enum AudioRetentionCommand: Equatable, Sendable {
         var pressure: String?
         var itemID: String?
         var audioReference: String?
-        var periodSeconds: UInt64
+        var periodSeconds: UInt64?
 
         enum CodingKeys: String, CodingKey {
             case command
