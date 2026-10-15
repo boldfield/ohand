@@ -116,6 +116,13 @@ final class PrivateReadCoreIntegrationTests: XCTestCase {
             return try waitForEvent(operationID).decode(SaveCaptureAcknowledgment.self)
         }
 
+        /// Imports the capture as an item, which is what retrieval searches. Routes must already exist.
+        func importCapture(_ capture: CaptureRecord) throws {
+            let operationID = allocateOperationID()
+            try core.startImportForegroundIngress(operationID: operationID, record: capture)
+            _ = try waitForEvent(operationID).decode(IngressImportAcknowledgment.self)
+        }
+
         /// Starts a gated capture read and returns once the core has answered, without admitting the answer.
         func startGatedCaptureRead(_ captureID: String) throws -> CoreEvent {
             let operationID = allocateOperationID()
@@ -244,7 +251,10 @@ final class PrivateReadCoreIntegrationTests: XCTestCase {
     func testRetrievalIsDeniedBeforeAuthenticationAndAfterRelockWithoutReachingTheCore() throws {
         let launch = try Launch(path: layout.databaseURL.path)
         defer { launch.close() }
-        _ = try launch.save(makeCapture(id: "capture-retrieval-denied", text: "synthetic note behind retrieval"))
+        seedRoutes()
+        try launch.importCapture(
+            makeCapture(
+                id: "capture-retrieval-denied", text: "synthetic note behind retrieval", routeID: "route-personal"))
         let eventsBefore = launch.events.count
 
         func assertRetrievalDenied(file: StaticString = #filePath, line: UInt = #line) {
@@ -272,7 +282,9 @@ final class PrivateReadCoreIntegrationTests: XCTestCase {
     func testRetrievalInFlightWhenTheSessionRelocksIsNotDelivered() throws {
         let launch = try Launch(path: layout.databaseURL.path)
         defer { launch.close() }
-        _ = try launch.save(makeCapture(id: "capture-retrieval-late", text: "synthetic note read during a relock"))
+        seedRoutes()
+        try launch.importCapture(
+            makeCapture(id: "capture-retrieval-late", text: "synthetic note read during a relock", routeID: "route-personal"))
         XCTAssertEqual(authenticateAndWait(launch.session), .authenticated)
 
         let operationID = launch.allocateOperationID()
@@ -288,9 +300,9 @@ final class PrivateReadCoreIntegrationTests: XCTestCase {
         let launch = try Launch(path: layout.databaseURL.path, authorizedScopes: [.personal])
         defer { launch.close() }
         seedRoutes()
-        _ = try launch.save(
+        try launch.importCapture(
             makeCapture(id: "capture-scope-personal", text: "synthetic zebrafinch personal", routeID: "route-personal"))
-        _ = try launch.save(
+        try launch.importCapture(
             makeCapture(
                 id: "capture-scope-work", text: "synthetic zebrafinch work", itemScope: "work", routeID: "route-work"))
         XCTAssertEqual(authenticateAndWait(launch.session), .authenticated)
