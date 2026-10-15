@@ -11,7 +11,7 @@
 //!   * `offer` (`item_id`, `revision` the user is shown, `text` (null when the item has no text,
 //!     for example an untranscribed voice capture), `scope`, `selection_reason`, `responses`).
 //!   * `nothing_to_offer`: no item is eligible any more. It carries no count or backlog.
-//!   A notification identifier that is not a daily prompt is `invalid_request`.
+//!   * A notification identifier that is not a daily prompt is `invalid_request`.
 //! * `respond` (`command_id`, `item_id`, `expected_revision`, `response`: `not_now` |
 //!   `stop_suggesting` | `done`): applies the response to the offered item.
 //!   * `applied` (`replayed`): stored; a repeated `command_id` answers `applied` with `replayed`
