@@ -20,6 +20,7 @@ protocol PrivateReadSource: AnyObject {
     func startGetCapture(operationID: UInt64, captureID: String) throws
     func startItemStatus(operationID: UInt64, itemID: String) throws
     func startRetrieval(operationID: UInt64, request: CoreRetrievalRequest) throws
+    func startItemDetail(operationID: UInt64, itemID: String, readScopes: [CoreExportScope]) throws
 }
 
 /// The filters a module may put on a search or list. It has no way to name a read authorization: the gate states the
@@ -150,6 +151,12 @@ final class PrivateReadGate {
     func startItemStatus(operationID: UInt64, itemID: String) throws {
         try issue(operationID: operationID) {
             try source.startItemStatus(operationID: operationID, itemID: itemID)
+        }
+    }
+
+    func startItemDetail(operationID: UInt64, itemID: String) throws {
+        try issue(operationID: operationID) {
+            try source.startItemDetail(operationID: operationID, itemID: itemID, readScopes: authorizedScopes)
         }
     }
 

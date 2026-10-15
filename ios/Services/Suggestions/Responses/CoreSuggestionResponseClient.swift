@@ -25,7 +25,7 @@ extension PrivateReadGate: SuggestionActivationGate {}
 /// event answered one of this client's operations. Operation IDs start at `firstOperationID`, far from the ranges the
 /// other services use. Call `shutDown()` before closing the core so no completion is left waiting.
 public final class CoreSuggestionResponseClient: SuggestionResponseCore, @unchecked Sendable {
-    public static let firstOperationID: UInt64 = 1 << 51
+    public static let firstOperationID: UInt64 = 1 << 55
 
     static let shutDownFailure = CoreFailure(
         errorClass: .cancelled, code: "client_shut_down", message: "the suggestion response client was shut down")
