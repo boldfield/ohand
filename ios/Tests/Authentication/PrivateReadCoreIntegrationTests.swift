@@ -76,6 +76,10 @@ final class PrivateReadCoreIntegrationTests: XCTestCase {
         ) throws {
             try core.startReminderRead(operationID: operationID, itemID: itemID, kind: kind, readScopes: readScopes)
         }
+
+        func startItemDetail(operationID: UInt64, itemID: String, readScopes: [CoreExportScope]) throws {
+            try core.startItemDetail(operationID: operationID, itemID: itemID, readScopes: readScopes)
+        }
     }
 
     /// One app launch: a real core, a fresh (capture-only) session and the gate in front of the core's read verbs.
