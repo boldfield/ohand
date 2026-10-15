@@ -782,6 +782,7 @@ public final class ServiceCompositionRoot {
     /// `ShadowReviewService` keeps its first operation identifier private; this is its value.
     static let shadowReviewFirstOperationID: UInt64 = 1 << 48
     static let itemCorrectionClientName = "item corrections"
+    static let itemDeletionClientName = "item deletion"
 
     /// One half-open interval of operation identifiers `[start, end)` that a client claims.
     public struct OperationRange: Equatable, Sendable {
@@ -815,6 +816,7 @@ public final class ServiceCompositionRoot {
         fixedWidthRange("metrics", from: CoreMetricsClient.firstOperationID),
         fixedWidthRange("notification actions", from: CoreNotificationActionClient.firstOperationID),
         fixedWidthRange(itemCorrectionClientName, from: CoreItemCorrectionClient.firstOperationID),
+        fixedWidthRange(itemDeletionClientName, from: CoreItemDeletionClient.firstOperationID),
         OperationRange(
             name: processingHealthClientName, start: ProcessingHealthService.firstOperationID,
             end: JobRunnerService.firstOperationID),
@@ -827,6 +829,8 @@ public final class ServiceCompositionRoot {
     public let reminderReconciler: NotificationPermissionReconciler
     /// Corrects an item's text, type or session topic; needs an authenticated read session.
     public let itemCorrections: ItemCorrectionService
+    /// Deletes one item and runs its native cleanup at once; needs an authenticated read session.
+    public let itemDeletion: ItemDeletionService
 
     let adapters: CompositionAdapters
     /// The session whose scope gates every private read the root performs.
@@ -845,6 +849,7 @@ public final class ServiceCompositionRoot {
     private let providerTransport: ProviderExchangeCoordinator
     private let notificationActions: NotificationActionClients
     private let itemCorrectionClient: CoreItemCorrectionClient
+    private let itemDeletionClient: CoreItemDeletionClient
     private let modules: [CompositionModule]
     private let foreground: ForegroundState
     private let stateLock = NSLock()
@@ -903,9 +908,16 @@ public final class ServiceCompositionRoot {
         notificationActions = assembly.notificationActions
         itemCorrectionClient = assembly.itemCorrectionClient
         itemCorrections = assembly.itemCorrections
+        itemDeletionClient = assembly.itemDeletionClient
+        itemDeletion = assembly.itemDeletion
         reminderReconciler = assembly.permissionReconciler
         foreground = assembly.foreground
         jobRunner.setDrainIdleObserver { [weak self] in self?.runReminderPassAfterDrain() }
+        itemDeletion.setCleanupProvider { [weak self] in
+            let coordinator = self?.modules.lazy.compactMap { $0 as? LifecycleCoordinator }.first
+            let cleanup: ItemDeletionCleanup? = coordinator?.deletionCleanup
+            return cleanup
+        }
     }
 
     deinit {
@@ -1043,6 +1055,8 @@ public final class ServiceCompositionRoot {
         transcription.shutDown()
         notificationActions.shutDown(session: adapters.readSession)
         itemCorrectionClient.shutDown()
+        itemDeletion.setCleanupProvider(nil)
+        itemDeletionClient.shutDown()
         reminderCore.invalidate()
         statusReader.shutDown()
         coreHandle.close()
@@ -1302,6 +1316,8 @@ public final class ServiceCompositionRoot {
         let notificationActions: NotificationActionClients
         let itemCorrectionClient: CoreItemCorrectionClient
         let itemCorrections: ItemCorrectionService
+        let itemDeletionClient: CoreItemDeletionClient
+        let itemDeletion: ItemDeletionService
         let permissionReconciler: NotificationPermissionReconciler
         let foreground: ForegroundState
     }
@@ -1404,6 +1420,10 @@ public final class ServiceCompositionRoot {
             router.register { itemCorrectionClient.handle($0) }
             undo.append { itemCorrectionClient.shutDown() }
             let itemCorrections = ItemCorrectionService(core: itemCorrectionClient, session: adapters.readSession)
+            let itemDeletionClient = CoreItemDeletionClient(core: core)
+            router.register { itemDeletionClient.handle($0) }
+            undo.append { itemDeletionClient.shutDown() }
+            let itemDeletion = ItemDeletionService(core: itemDeletionClient, session: adapters.readSession)
             let permissionReconciler = NotificationPermissionReconciler(
                 center: adapters.notificationCenter, reconciliation: reminderCore,
                 observations: adapters.permissionObservations)
@@ -1451,7 +1471,8 @@ public final class ServiceCompositionRoot {
                 statusReader: statusReader, jobRunner: jobRunner, transcription: transcription,
                 reminderCore: reminderCore, providerTransport: providerTransport,
                 notificationActions: notificationActions, itemCorrectionClient: itemCorrectionClient,
-                itemCorrections: itemCorrections, permissionReconciler: permissionReconciler,
+                itemCorrections: itemCorrections, itemDeletionClient: itemDeletionClient,
+                itemDeletion: itemDeletion, permissionReconciler: permissionReconciler,
                 foreground: foreground)
         } catch {
             for step in undo.reversed() {
