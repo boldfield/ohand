@@ -7,8 +7,8 @@ use chrono::{DateTime, Duration, Utc};
 use ohand_core::domain::status::{ItemStatus, ProcessingJobStatus, ProcessingState};
 use ohand_core::ingress::transcription::transcript_provenance;
 use ohand_core::ingress::{
-    apply_transcription_outcome, InterpretationQueued, InterpretationRequest, RecognizedTranscript,
-    RecognizerResult, TranscriptionDisposition, TranscriptionOutcome,
+    apply_transcription_outcome, InterpretationQueued, RecognizedTranscript, RecognizerResult,
+    TranscriptionDisposition, TranscriptionOutcome,
 };
 use ohand_core::interpretation::apply::{ApplyError, ApplyOutcome};
 use ohand_core::interpretation::dispatch::{
@@ -924,7 +924,6 @@ fn an_attached_transcript_is_what_the_provider_sees_with_the_transcript_basis() 
     .unwrap();
     let transcription_job = fixture.claim(now());
     assert_eq!(transcription_job.job_id, transcription_job_id);
-    let interpretation_job_id = Uuid::new_v4().to_string();
     let acknowledgment = apply_transcription_outcome(
         &mut fixture.db,
         &TranscriptionOutcome {
@@ -938,24 +937,28 @@ fn an_attached_transcript_is_what_the_provider_sees_with_the_transcript_basis() 
                 recognizer: "on-device-recognizer/1".to_string(),
                 audio_sha256: "a".repeat(64),
             }),
-            interpretation: Some(InterpretationRequest {
-                job_id: interpretation_job_id.clone(),
-                profile_version: Some(profile.profile_version().to_string()),
-                request_version: Uuid::new_v4().to_string(),
-            }),
+            interpretation: None,
         },
         now(),
     )
     .unwrap();
-    assert_eq!(
-        acknowledgment.disposition,
+    let interpretation_job_id = match acknowledgment.disposition {
         TranscriptionDisposition::Attached {
             revision: 1,
-            interpretation: InterpretationQueued::Queued {
-                job_id: interpretation_job_id.clone()
-            },
-        }
-    );
+            interpretation: InterpretationQueued::Queued { job_id },
+        } => job_id,
+        other => panic!("{other:?}"),
+    };
+    // Only the core chooses a job's profile pin, and it pins nothing until stored profiles
+    // can be defaulted; pin the queued job here the way that resolver eventually will.
+    fixture
+        .db
+        .conn()
+        .execute(
+            "UPDATE jobs SET profile_version = ? WHERE job_id = ?",
+            rusqlite::params![profile.profile_version(), interpretation_job_id],
+        )
+        .unwrap();
     let record_id = transcript_provenance(fixture.db.conn(), &fixture.item_id)
         .unwrap()
         .unwrap()

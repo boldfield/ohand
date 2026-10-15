@@ -1,6 +1,7 @@
 use super::*;
 use crate::domain::items::{load_item_state, verify_state_integrity, ItemState, TextState};
 use crate::ingress::import::import_foreground_ingress;
+use crate::interpretation::enqueue::{interpretation_job_id, interpretation_request_version};
 use crate::jobs::queue::{claim_job_with_lease, enqueue_job, get_job, get_jobs_for_item};
 use crate::lifecycle::delete_intent::mark_deletion_intent;
 use crate::retrieval::index::{search_index, TextBasis as SearchBasis};
@@ -101,11 +102,15 @@ impl Store {
             now(),
         )
         .unwrap();
-        let claimed = claim_job_with_lease(&mut database, Duration::seconds(300), now())
-            .unwrap()
-            .expect("the job is eligible");
-        assert_eq!(claimed.job_id, job_id);
-        claimed
+        // A text capture already holds its own interpretation job; claim past it.
+        loop {
+            let claimed = claim_job_with_lease(&mut database, Duration::seconds(300), now())
+                .unwrap()
+                .expect("the job is eligible");
+            if claimed.job_id == job_id {
+                return claimed;
+            }
+        }
     }
 
     fn scalar_text(&self, sql: &str) -> String {
@@ -367,7 +372,7 @@ fn a_transcript_becomes_the_item_text_with_provenance_in_one_transaction() {
 }
 
 #[test]
-fn attaching_without_an_interpretation_request_queues_no_interpretation() {
+fn attaching_without_an_interpretation_request_queues_the_core_chosen_job() {
     let store = Store::with_voice_capture();
     let job = store.claim_transcription_job("transcription-1");
 
@@ -377,35 +382,77 @@ fn attaching_without_an_interpretation_request_queues_no_interpretation() {
         later(),
     )
     .unwrap();
+    let queued_id = interpretation_job_id(&store.item_id, 1);
     assert_eq!(
         acknowledgment.disposition,
         TranscriptionDisposition::Attached {
             revision: 1,
-            interpretation: InterpretationQueued::NotRequested,
+            interpretation: InterpretationQueued::Queued {
+                job_id: queued_id.clone(),
+            },
         }
     );
-    assert!(store.interpretation_jobs().is_empty());
+    let jobs = store.interpretation_jobs();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].job_id, queued_id);
+    assert_eq!(jobs[0].source_revision, 1);
+    assert_eq!(jobs[0].profile_version, None);
+    assert_eq!(
+        jobs[0].request_version,
+        Some(interpretation_request_version(&store.item_id, 1))
+    );
+
+    let retry = apply_transcription_outcome(
+        &mut store.open(),
+        &outcome(&job, recognized(TRANSCRIPT)),
+        later() + Duration::hours(1),
+    )
+    .unwrap();
+    assert_eq!(
+        retry.disposition,
+        TranscriptionDisposition::AlreadyAttached {
+            revision: 1,
+            interpretation: InterpretationQueued::Queued { job_id: queued_id },
+        }
+    );
+    assert_eq!(store.interpretation_jobs().len(), 1);
 }
 
 #[test]
-fn an_unauthorized_interpretation_is_not_queued_but_the_transcript_is_kept() {
+fn a_native_request_naming_a_pin_the_core_did_not_choose_is_refused_and_nothing_is_written() {
     let store = Store::with_voice_capture();
     let job = store.claim_transcription_job("transcription-1");
     let mut request = with_interpretation(outcome(&job, recognized(TRANSCRIPT)), "interpret-1");
     request.interpretation.as_mut().unwrap().profile_version =
         Some("profile-that-does-not-exist".to_string());
 
-    let acknowledgment = apply_transcription_outcome(&mut store.open(), &request, later()).unwrap();
-    assert_eq!(
-        acknowledgment.disposition,
-        TranscriptionDisposition::Attached {
-            revision: 1,
-            interpretation: InterpretationQueued::NotAuthorized(DenialReason::ProfileUnavailable),
-        }
+    let error = apply_transcription_outcome(&mut store.open(), &request, later()).unwrap_err();
+    assert!(
+        matches!(
+            kind_of(&error),
+            TranscriptionErrorKind::InterpretationPinRefused
+        ),
+        "{error}"
     );
+    assert_eq!(error.commit_status, CommitStatus::NotCommitted);
     assert!(store.interpretation_jobs().is_empty());
-    assert_eq!(store.item_row().2, "transcribed");
-    assert_eq!(store.search("ferns").len(), 1);
+    assert_eq!(store.attachments(), 0);
+    assert_eq!(store.item_row().2, "audio_pending");
+    assert_eq!(store.job(&job.job_id).status, JobStatus::Running);
+
+    let accepted = apply_transcription_outcome(
+        &mut store.open(),
+        &outcome(&job, recognized(TRANSCRIPT)),
+        later(),
+    )
+    .unwrap();
+    assert!(matches!(
+        accepted.disposition,
+        TranscriptionDisposition::Attached {
+            interpretation: InterpretationQueued::Queued { .. },
+            ..
+        }
+    ));
 }
 
 #[test]
