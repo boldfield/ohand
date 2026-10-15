@@ -1504,9 +1504,9 @@ public final class ServiceCompositionRoot {
                 statusReader: statusReader, jobRunner: jobRunner, transcription: transcription,
                 reminderCore: reminderCore, providerTransport: providerTransport,
                 notificationActions: notificationActions, itemCorrectionClient: itemCorrectionClient,
-                itemCorrections: itemCorrections, suggestionResponseClient: suggestionResponseClient,
-                suggestionResponses: suggestionResponses, reminderControlClient: reminderControlClient,
-                reminderControls: reminderControls, itemDetailClient: itemDetailClient,
+                itemCorrections: itemCorrections, reminderControlClient: reminderControlClient,
+                reminderControls: reminderControls, suggestionResponseClient: suggestionResponseClient,
+                suggestionResponses: suggestionResponses, itemDetailClient: itemDetailClient,
                 itemDetails: itemDetails, permissionReconciler: permissionReconciler,
                 foreground: foreground)
         } catch {
