@@ -786,6 +786,7 @@ public final class ServiceCompositionRoot {
     /// `ShadowReviewService` keeps its first operation identifier private; this is its value.
     static let shadowReviewFirstOperationID: UInt64 = 1 << 48
     static let itemCorrectionClientName = "item corrections"
+    static let suggestionResponseClientName = "suggestion responses"
     static let itemDetailClientName = "item detail"
 
     /// One half-open interval of operation identifiers `[start, end)` that a client claims.
@@ -820,6 +821,7 @@ public final class ServiceCompositionRoot {
         fixedWidthRange("metrics", from: CoreMetricsClient.firstOperationID),
         fixedWidthRange("notification actions", from: CoreNotificationActionClient.firstOperationID),
         fixedWidthRange(itemCorrectionClientName, from: CoreItemCorrectionClient.firstOperationID),
+        fixedWidthRange(suggestionResponseClientName, from: CoreSuggestionResponseClient.firstOperationID),
         fixedWidthRange(itemDetailClientName, from: CoreItemDetailClient.firstOperationID),
         OperationRange(
             name: processingHealthClientName, start: ProcessingHealthService.firstOperationID,
@@ -833,6 +835,8 @@ public final class ServiceCompositionRoot {
     public let reminderReconciler: NotificationPermissionReconciler
     /// Corrects an item's text, type or session topic; needs an authenticated read session.
     public let itemCorrections: ItemCorrectionService
+    /// Opens a daily prompt and records the user's answer; needs an authenticated read session.
+    public let suggestionResponses: SuggestionResponseService
     /// Reads one item's full detail; needs an authenticated read session.
     public let itemDetails: ItemDetailService
 
@@ -853,6 +857,7 @@ public final class ServiceCompositionRoot {
     private let providerTransport: ProviderExchangeCoordinator
     private let notificationActions: NotificationActionClients
     private let itemCorrectionClient: CoreItemCorrectionClient
+    private let suggestionResponseClient: CoreSuggestionResponseClient
     private let itemDetailClient: CoreItemDetailClient
     private let modules: [CompositionModule]
     private let foreground: ForegroundState
@@ -912,6 +917,8 @@ public final class ServiceCompositionRoot {
         notificationActions = assembly.notificationActions
         itemCorrectionClient = assembly.itemCorrectionClient
         itemCorrections = assembly.itemCorrections
+        suggestionResponseClient = assembly.suggestionResponseClient
+        suggestionResponses = assembly.suggestionResponses
         itemDetailClient = assembly.itemDetailClient
         itemDetails = assembly.itemDetails
         reminderReconciler = assembly.permissionReconciler
@@ -1054,6 +1061,7 @@ public final class ServiceCompositionRoot {
         transcription.shutDown()
         notificationActions.shutDown(session: adapters.readSession)
         itemCorrectionClient.shutDown()
+        suggestionResponseClient.shutDown()
         itemDetailClient.shutDown()
         reminderCore.invalidate()
         statusReader.shutDown()
@@ -1314,6 +1322,8 @@ public final class ServiceCompositionRoot {
         let notificationActions: NotificationActionClients
         let itemCorrectionClient: CoreItemCorrectionClient
         let itemCorrections: ItemCorrectionService
+        let suggestionResponseClient: CoreSuggestionResponseClient
+        let suggestionResponses: SuggestionResponseService
         let itemDetailClient: CoreItemDetailClient
         let itemDetails: ItemDetailService
         let permissionReconciler: NotificationPermissionReconciler
@@ -1418,6 +1428,11 @@ public final class ServiceCompositionRoot {
             router.register { itemCorrectionClient.handle($0) }
             undo.append { itemCorrectionClient.shutDown() }
             let itemCorrections = ItemCorrectionService(core: itemCorrectionClient, session: adapters.readSession)
+            let suggestionResponseClient = CoreSuggestionResponseClient(core: core, gate: readGate)
+            router.register { suggestionResponseClient.handle($0) }
+            undo.append { suggestionResponseClient.shutDown() }
+            let suggestionResponses = SuggestionResponseService(
+                core: suggestionResponseClient, session: adapters.readSession)
             let itemDetailClient = CoreItemDetailClient(gate: readGate)
             router.register { itemDetailClient.handle($0) }
             undo.append { itemDetailClient.shutDown() }
@@ -1469,8 +1484,9 @@ public final class ServiceCompositionRoot {
                 statusReader: statusReader, jobRunner: jobRunner, transcription: transcription,
                 reminderCore: reminderCore, providerTransport: providerTransport,
                 notificationActions: notificationActions, itemCorrectionClient: itemCorrectionClient,
-                itemCorrections: itemCorrections, itemDetailClient: itemDetailClient, itemDetails: itemDetails,
-                permissionReconciler: permissionReconciler,
+                itemCorrections: itemCorrections, suggestionResponseClient: suggestionResponseClient,
+                suggestionResponses: suggestionResponses, itemDetailClient: itemDetailClient,
+                itemDetails: itemDetails, permissionReconciler: permissionReconciler,
                 foreground: foreground)
         } catch {
             for step in undo.reversed() {
