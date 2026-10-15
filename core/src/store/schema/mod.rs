@@ -83,6 +83,10 @@ pub const MIGRATIONS: &[MigrationStep] = &[
         target_version: 10,
         apply: add_reset_credential_claims_v10,
     },
+    MigrationStep {
+        target_version: 11,
+        apply: add_prompt_schedule_v11,
+    },
 ];
 
 /// Database handle with schema validation.
@@ -895,6 +899,21 @@ fn add_reset_credential_claims_v10(tx: &Transaction<'_>) -> Result<()> {
          BEGIN
              SELECT RAISE(ABORT, 'credential_pending_removal');
          END",
+        [],
+    )?;
+    Ok(())
+}
+
+/// The optional daily prompt schedule (S05a): one row holding the serialized `PromptSchedule`,
+/// ledger included, so the core is its only holder and it survives relaunches. The CHECK keeps
+/// the table to a single row.
+fn add_prompt_schedule_v11(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute(
+        "CREATE TABLE prompt_schedule (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            schedule TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )",
         [],
     )?;
     Ok(())

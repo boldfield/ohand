@@ -63,56 +63,78 @@ public final class NotificationBridge: Sendable {
     public func schedule(_ request: NotificationScheduleRequest) async throws -> InstalledNotification {
         do {
             let content = try Self.content(for: request)
-            guard request.dueInstant.timeIntervalSince(now()) >= 1 else {
-                throw NotificationBridgeError.dueTimeInPast
-            }
-            let center = self.center
-            switch try await bounded({ await center.authorization() }) {
-            case .authorized, .provisional, .ephemeral:
-                break
-            case .notDetermined, .denied:
-                throw NotificationBridgeError.permissionDenied
-            }
-
-            let identifier = request.identifier.rawValue
-            let centerRequest = NotificationCenterRequest(
-                identifier: identifier, dueInstant: request.dueInstant, content: content)
-            return try await exclusively(identifier) {
-                let priorRequest = try await self.bounded { try await center.pendingRequests() }
-                    .first(where: { $0.identifier == identifier })
-                let stateBeforeAttempt = self.restorePoint(for: identifier, observed: priorRequest)
-                // Claim the identifier for this attempt before writing. An older abandoned call
-                // (such as an undo removal that timed out) may complete while this add or its
-                // confirming read is in flight; because the desired state has already moved on,
-                // that late completion re-applies this install instead of being taken as current.
-                self.ledger.setDesired(identifier, .installed(centerRequest))
-                do {
-                    try await self.mutate(identifier, toward: nil) { try await center.add(centerRequest) }
-                } catch {
-                    // A definite failure changed nothing. An abandoned add may still land, and its
-                    // late completion then re-applies the earlier state recorded here.
-                    self.ledger.setDesired(identifier, stateBeforeAttempt)
-                    throw error
-                }
-
-                let installed: NotificationCenterPendingRequest
-                do {
-                    installed = try await self.confirmInstalled(centerRequest)
-                } catch {
-                    // The read failed, or the OS accepted the add without keeping it. The caller
-                    // is told this schedule failed, so the earlier state is wanted again.
-                    self.ledger.setDesired(identifier, stateBeforeAttempt)
-                    self.enforceInBackground(identifier)
-                    throw error
-                }
-                self.ledger.markSettled(identifier)
-                return InstalledNotification(
-                    identifier: request.identifier,
-                    dueInstant: installed.dueInstant ?? request.dueInstant
-                )
-            }
+            let installed = try await install(
+                NotificationCenterRequest(
+                    identifier: request.identifier.rawValue, dueInstant: request.dueInstant, content: content))
+            return InstalledNotification(
+                identifier: request.identifier,
+                dueInstant: installed.dueInstant ?? request.dueInstant
+            )
         } catch {
             throw NotificationBridgeError.normalized(error)
+        }
+    }
+
+    /// Installs the optional daily prompt under its core identifier with the same guarantees as a
+    /// reminder: the permission is read first, a request already due is refused, and the install is
+    /// confirmed from the pending list. The payload is fixed wording with no target and no actions.
+    public func schedulePrompt(_ request: PromptScheduleRequest) async throws -> InstalledPrompt {
+        do {
+            let installed = try await install(
+                NotificationCenterRequest(
+                    identifier: request.identifier.rawValue, dueInstant: request.dueInstant, content: .prompt()))
+            return InstalledPrompt(
+                identifier: request.identifier,
+                dueInstant: installed.dueInstant ?? request.dueInstant
+            )
+        } catch {
+            throw NotificationBridgeError.normalized(error)
+        }
+    }
+
+    private func install(_ centerRequest: NotificationCenterRequest) async throws -> NotificationCenterPendingRequest {
+        guard centerRequest.dueInstant.timeIntervalSince(now()) >= 1 else {
+            throw NotificationBridgeError.dueTimeInPast
+        }
+        let center = self.center
+        switch try await bounded({ await center.authorization() }) {
+        case .authorized, .provisional, .ephemeral:
+            break
+        case .notDetermined, .denied:
+            throw NotificationBridgeError.permissionDenied
+        }
+
+        let identifier = centerRequest.identifier
+        return try await exclusively(identifier) {
+            let priorRequest = try await self.bounded { try await center.pendingRequests() }
+                .first(where: { $0.identifier == identifier })
+            let stateBeforeAttempt = self.restorePoint(for: identifier, observed: priorRequest)
+            // Claim the identifier for this attempt before writing. An older abandoned call
+            // (such as an undo removal that timed out) may complete while this add or its
+            // confirming read is in flight; because the desired state has already moved on,
+            // that late completion re-applies this install instead of being taken as current.
+            self.ledger.setDesired(identifier, .installed(centerRequest))
+            do {
+                try await self.mutate(identifier, toward: nil) { try await center.add(centerRequest) }
+            } catch {
+                // A definite failure changed nothing. An abandoned add may still land, and its
+                // late completion then re-applies the earlier state recorded here.
+                self.ledger.setDesired(identifier, stateBeforeAttempt)
+                throw error
+            }
+
+            let installed: NotificationCenterPendingRequest
+            do {
+                installed = try await self.confirmInstalled(centerRequest)
+            } catch {
+                // The read failed, or the OS accepted the add without keeping it. The caller
+                // is told this schedule failed, so the earlier state is wanted again.
+                self.ledger.setDesired(identifier, stateBeforeAttempt)
+                self.enforceInBackground(identifier)
+                throw error
+            }
+            self.ledger.markSettled(identifier)
+            return installed
         }
     }
 
@@ -120,9 +142,18 @@ public final class NotificationBridge: Sendable {
     /// asynchronous. Idempotent: cancelling an identifier that is not pending succeeds. A cancel
     /// that does not succeed puts back the request that was pending before it.
     public func cancel(_ identifier: NotificationIdentifier) async throws {
+        try await cancel(rawIdentifier: identifier.rawValue)
+    }
+
+    /// Cancels a prompt the same way: removal is confirmed, and a cancel that does not succeed puts back
+    /// the prompt that was pending before it.
+    public func cancelPrompt(_ identifier: PromptIdentifier) async throws {
+        try await cancel(rawIdentifier: identifier.rawValue)
+    }
+
+    private func cancel(rawIdentifier: String) async throws {
         do {
             let center = self.center
-            let rawIdentifier = identifier.rawValue
             try await exclusively(rawIdentifier) {
                 let priorRequest = try await self.bounded { try await center.pendingRequests() }
                     .first(where: { $0.identifier == rawIdentifier })
@@ -176,6 +207,33 @@ public final class NotificationBridge: Sendable {
                 dueInstant: request.dueInstant,
                 opaqueTargetID: request.userInfo[NotificationContent.targetKey].flatMap { OpaqueIdentifier($0) }
             )
+        }
+        .sorted { left, right in
+            switch (left.dueInstant, right.dueInstant) {
+            case let (leftDue?, rightDue?) where leftDue != rightDue:
+                return leftDue < rightDue
+            case (nil, _?):
+                return false
+            case (_?, nil):
+                return true
+            default:
+                return left.identifier.rawValue < right.identifier.rawValue
+            }
+        }
+    }
+
+    /// Pending requests that carry a prompt identifier, soonest first.
+    public func pendingPrompts() async throws -> [PendingPrompt] {
+        let pending: [NotificationCenterPendingRequest]
+        do {
+            let center = self.center
+            pending = try await bounded { try await center.pendingRequests() }
+        } catch {
+            throw NotificationBridgeError.normalized(error)
+        }
+        return pending.compactMap { request -> PendingPrompt? in
+            guard let identifier = PromptIdentifier(rawValue: request.identifier) else { return nil }
+            return PendingPrompt(identifier: identifier, dueInstant: request.dueInstant)
         }
         .sorted { left, right in
             switch (left.dueInstant, right.dueInstant) {
@@ -416,6 +474,10 @@ public final class NotificationBridge: Sendable {
         identifier: String
     ) -> DesiredNotificationState? {
         guard let prior else { return .absent }
+        if PromptIdentifier(rawValue: identifier) != nil {
+            guard let due = prior.dueInstant, prior.userInfo == NotificationContent.prompt().userInfo else { return nil }
+            return .installed(NotificationCenterRequest(identifier: identifier, dueInstant: due, content: .prompt()))
+        }
         guard let due = prior.dueInstant,
               prior.userInfo[NotificationContent.kindKey] == NotificationPayloadKind.generic.rawValue,
               let target = prior.userInfo[NotificationContent.targetKey].flatMap({ OpaqueIdentifier($0) })

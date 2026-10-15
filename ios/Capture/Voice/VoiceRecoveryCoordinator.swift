@@ -213,7 +213,10 @@ final class VoiceRecoveryCoordinator {
             guard !answered else { return }
             answered = true
             busyFileNames.remove(fileName)
-            completion(.success(VoiceRecordingController.outcome(for: result, summary: summary)))
+            let inProgressURL = self.inProgressDirectory.appendingPathComponent(fileName)
+            completion(.success(VoiceRecordingController.outcome(
+                for: result, summary: summary,
+                inProgressFileExists: { FileManager.default.fileExists(atPath: inProgressURL.path) })))
         }
     }
 
