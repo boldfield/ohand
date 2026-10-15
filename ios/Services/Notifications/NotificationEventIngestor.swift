@@ -2,20 +2,29 @@ import Foundation
 import UserNotifications
 
 public typealias NotificationEventHandler = @Sendable (NotificationEvent) -> Void
+public typealias PromptNotificationEventHandler = @Sendable (PromptNotificationEvent) -> Void
 
 /// Turns OS notification facts into events keyed by the core identifier and passes them on.
 /// A fact whose request identifier is not core-derived, or whose action is not an opaque
-/// identifier, is dropped: the bridge never forwards anything it cannot validate.
+/// identifier, is dropped: the bridge never forwards anything it cannot validate. A core-derived
+/// prompt identifier (`prompt:<local date>`) is recognized as a prompt event and goes to the prompt
+/// handler only; it is never journaled as a reminder event.
 ///
 /// The same fact can arrive again (for example the delivered list read on every launch), so
 /// the receiver must treat events as idempotent evidence.
 public struct NotificationEventIngestor: Sendable {
     private let now: @Sendable () -> Date
     private let handler: NotificationEventHandler
+    private let promptHandler: PromptNotificationEventHandler
 
-    public init(now: @escaping @Sendable () -> Date = { Date() }, handler: @escaping NotificationEventHandler) {
+    public init(
+        now: @escaping @Sendable () -> Date = { Date() },
+        handler: @escaping NotificationEventHandler,
+        promptHandler: @escaping PromptNotificationEventHandler = { _ in }
+    ) {
         self.now = now
         self.handler = handler
+        self.promptHandler = promptHandler
     }
 
     @discardableResult
@@ -41,6 +50,11 @@ public struct NotificationEventIngestor: Sendable {
         actionIdentifier: String,
         userInfo: [String: String]
     ) -> Bool {
+        if let prompt = PromptIdentifier(rawValue: requestIdentifier) {
+            guard actionIdentifier == UNNotificationDefaultActionIdentifier else { return false }
+            promptHandler(PromptNotificationEvent(identifier: prompt, kind: .opened, occurredAt: now()))
+            return true
+        }
         let kind: NotificationEventKind
         if actionIdentifier == UNNotificationDefaultActionIdentifier {
             kind = .opened
@@ -58,6 +72,11 @@ public struct NotificationEventIngestor: Sendable {
         userInfo: [String: String],
         occurredAt: Date
     ) -> Bool {
+        if let prompt = PromptIdentifier(rawValue: requestIdentifier) {
+            guard kind == .delivered else { return false }
+            promptHandler(PromptNotificationEvent(identifier: prompt, kind: .delivered, occurredAt: occurredAt))
+            return true
+        }
         guard let identifier = NotificationIdentifier(rawValue: requestIdentifier) else { return false }
         let target = userInfo[NotificationContent.targetKey].flatMap { OpaqueIdentifier($0) }
         handler(NotificationEvent(
