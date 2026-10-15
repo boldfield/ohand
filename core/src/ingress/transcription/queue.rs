@@ -13,15 +13,17 @@
 //!   unsupported or failed.
 //!
 //! Jobs are never pinned to a provider profile: transcription is on device only and
-//! `authorize_job` treats an unpinned transcription job as local. Each job carries its own
-//! identifier as its request version, so a later job for the same item and revision is a distinct
-//! logical job rather than a duplicate of an earlier one.
+//! `authorize_job` treats an unpinned transcription job as local, and they record no request
+//! version either (the job contract marks both as not applicable). The generic queue dedupes on
+//! item, type, revision, profile and request version, which would make a retry at the same revision
+//! collide with the attempt it replaces, so these jobs are inserted here and deduplicated only
+//! against jobs that are still queued or running.
 
 use super::INTERPRETATION_JOB_SCHEMA_VERSION;
 use crate::domain::items::TransitionValidity;
 use crate::domain::items::{load_item_state, validate_state_transition, StateTransition};
 use crate::domain::status::TranscriptionState;
-use crate::jobs::queue::{enqueue_job_in_tx, Job};
+use crate::jobs::queue::{Job, JobStatus};
 use crate::privacy::routing::JOB_TYPE_TRANSCRIPTION_ATTACHMENT;
 use crate::store::schema::Database;
 use anyhow::Context;
@@ -36,25 +38,54 @@ pub const BACKFILL_BATCH_SIZE: usize = 50;
 /// Statuses of a transcription job that mean the work is still wanted or already done.
 const LIVE_OR_DONE_STATUSES: &str = "'queued', 'running', 'completed'";
 
-/// Queue the transcription job of an audio-only item created in `transaction`.
+/// Queue the transcription job of an audio-only item created in `transaction`. Fails if a queued
+/// or running transcription job for the item already exists.
 pub fn enqueue_for_new_item(
     transaction: &Transaction<'_>,
     item_id: &str,
     source_revision: i32,
     now: DateTime<Utc>,
 ) -> anyhow::Result<Job> {
+    let in_flight: bool = transaction.query_row(
+        "SELECT EXISTS (SELECT 1 FROM jobs WHERE item_id = ? AND job_type = ?
+                         AND status IN ('queued', 'running'))",
+        rusqlite::params![item_id, JOB_TYPE_TRANSCRIPTION_ATTACHMENT],
+        |row| row.get(0),
+    )?;
+    if in_flight {
+        anyhow::bail!("a transcription job for item {item_id} is already queued or running");
+    }
     let job_id = Uuid::new_v4().to_string();
-    enqueue_job_in_tx(
-        transaction,
-        job_id.clone(),
-        item_id.to_string(),
-        JOB_TYPE_TRANSCRIPTION_ATTACHMENT.to_string(),
+    transaction.execute(
+        "INSERT INTO jobs (
+            job_id, job_schema_version, item_id, job_type, source_revision,
+            profile_version, request_version, status, attempt_count, created_at
+        ) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, 0, ?)",
+        rusqlite::params![
+            job_id,
+            INTERPRETATION_JOB_SCHEMA_VERSION,
+            item_id,
+            JOB_TYPE_TRANSCRIPTION_ATTACHMENT,
+            source_revision,
+            JobStatus::Queued.as_str(),
+            now.to_rfc3339(),
+        ],
+    )?;
+    Ok(Job {
+        job_id,
+        job_schema_version: INTERPRETATION_JOB_SCHEMA_VERSION,
+        item_id: item_id.to_string(),
+        job_type: JOB_TYPE_TRANSCRIPTION_ATTACHMENT.to_string(),
         source_revision,
-        None,
-        Some(job_id),
-        INTERPRETATION_JOB_SCHEMA_VERSION,
-        now,
-    )
+        profile_version: None,
+        request_version: None,
+        status: JobStatus::Queued,
+        failure_reason: None,
+        attempt_count: 0,
+        next_attempt_at: None,
+        lease_expires_at: None,
+        created_at: now,
+    })
 }
 
 /// Give every non-deleted voice capture that is waiting for transcription, still has its audio,

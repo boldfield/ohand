@@ -90,6 +90,14 @@ impl Store {
                 |row| row.get(0),
             )
             .unwrap();
+        // Replace the job import queued with this one, as a test that scripts its own job.
+        database
+            .conn()
+            .execute(
+                "DELETE FROM jobs WHERE item_id = ? AND job_type = ? AND status = 'queued'",
+                rusqlite::params![self.item_id, JOB_TYPE_TRANSCRIPTION_ATTACHMENT],
+            )
+            .unwrap();
         enqueue_job(
             &mut database,
             job_id.to_string(),
@@ -1717,6 +1725,7 @@ mod queueing {
         assert_eq!(jobs[0].status, JobStatus::Queued);
         assert_eq!(jobs[0].source_revision, 0);
         assert_eq!(jobs[0].profile_version, None);
+        assert_eq!(jobs[0].request_version, None);
         assert_eq!(store.interpretation_jobs().len(), 0);
 
         // An import retry finds the item and queues nothing.
@@ -1832,6 +1841,7 @@ mod queueing {
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].status, JobStatus::Queued);
         assert_eq!(jobs[0].profile_version, None);
+        assert_eq!(jobs[0].request_version, None);
         assert_eq!(jobs[0].source_revision, 0);
 
         assert_eq!(
@@ -1977,6 +1987,7 @@ mod queueing {
             assert_eq!(job.status, JobStatus::Queued);
             assert_eq!(job.source_revision, 0);
             assert_eq!(job.profile_version, None);
+            assert_eq!(job.request_version, None);
             assert_eq!(store.item_row().2, "audio_pending", "{state}");
             assert_eq!(transcription_jobs(&store).len(), 2, "{state}");
         }
