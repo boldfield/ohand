@@ -16,7 +16,7 @@ protocol JobConfigurationCore: Sendable {
 /// the event answered one of this client's operations. Operation IDs start at `firstOperationID`, far from the ranges the
 /// other services use. Call `shutDown()` before closing the core so no completion is left waiting.
 public final class CoreJobConfigurationClient: JobConfigurationCore, @unchecked Sendable {
-    public static let firstOperationID: UInt64 = 1 << 49
+    public static let firstOperationID: UInt64 = 1 << 47
 
     static let shutDownFailure = CoreFailure(
         errorClass: .cancelled, code: "client_shut_down", message: "the job configuration client was shut down")
