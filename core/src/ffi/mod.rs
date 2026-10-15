@@ -32,3 +32,4 @@ pub mod reset;
 pub mod retrieval;
 pub mod route_policy;
 pub mod route_provisioning;
+pub mod suggestion_responses;

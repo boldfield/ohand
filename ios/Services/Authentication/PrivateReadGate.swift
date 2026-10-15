@@ -166,6 +166,11 @@ final class PrivateReadGate {
         }
     }
 
+    /// Starts a prompt activation, which returns the stored text of the item it offers. `start` queues the core command.
+    func startSuggestionActivation(operationID: UInt64, start: () throws -> Void) throws {
+        try issue(operationID: operationID, start)
+    }
+
     /// Returns normally only if the read that `operationID` answers is still authorized; otherwise throws, and the
     /// caller must discard the answer, success or failure, without decoding or logging it. Each answer is admitted at
     /// most once.
