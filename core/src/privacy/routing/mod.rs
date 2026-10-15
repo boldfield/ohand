@@ -11,6 +11,14 @@
 //! A fresh install has no routes or grants, so every job pinned to a remote profile is denied.
 //! Only a job with no profile pin (on-device processing) is authorized without a grant.
 
+mod grants;
+
+pub use grants::{
+    capability_from_key, grant_route_capability, list_route_policy, revoke_route_capability,
+    GrantError, GrantOutcome, GrantedCapability, ListedDestinationClass, RevokeOutcome,
+    RoutePolicy,
+};
+
 use crate::providers::contracts::ProviderProtocol;
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension};
