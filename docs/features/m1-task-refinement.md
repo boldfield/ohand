@@ -170,6 +170,21 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
 - F15 and F16 added (coordinator, 2026-10-15). Two intermittent failures that no task owns. Both rejected otherwise-approved work.
   - F15: memory-safety failures in the `notification_reconciliation` FFI tests on Linux reviewer pods. (a) F14 round 2, merged with `d3dafb3`: `answers_that_do_not_fit_the_command_are_refused_and_the_command_waits_for_a_valid_one` failed, then the `ohand_core` test process died with SIGSEGV. (b) S05b round 1, merged with `fefb034`: the lib test binary aborted with glibc `corrupted size vs. prev_size in fastbins` during `optional_prompts_use_the_slots_left_and_are_withheld_without_permission`, with no Rust change in the PR. The coordinator ran 8 consecutive full `cargo test --lib` runs on `d3dafb3` on macOS, all clean, so the failure is load- or platform-dependent. One confirmed hazard: the tests' `Session` has no `Drop`, so a panicking assertion skips `close()` and leaves the core handle open with the native-effects callback registered against a freed context. That explains (a)'s SIGSEGV after a failure, but not (b), which had no reported failure first.
   - F16: `NotificationProbeAuthorizedUITests.testAuthorizedSchedulingBehavior`, foreground-delivery activity (`:71`): "add took 99 ms for a 15 s trigger; delivered=false pending=false" (run 38666074347, job 116198215493, PR #223 head `49f0f8f`, 2026-10-15). F10's fix for a trigger that is already in the past by the time `add()` returns does not cover this. The request was added in good time and then vanished.
+- App-facing API layer added (coordinator, 2026-10-15, at the maintainer's direction). U07a and U08a blocked themselves on main `fefb034` because the operations they configure are not reachable from `app/`. A read-only audit of the 12 unclaimed UI slices then found that the M1 plan never scheduled the layer between core and UI. Many operations exist as core functions (for example `mark_deletion_intent`, `get_reminder`, `apply_user_time_correction`, `end_item_with_event`, `record_not_now`, `requeue_job_to_new_profile`) but have no user-facing FFI export or root client. `ExportService` and `ResetService` are never constructed in production. Prompt taps are dropped because the root's ingestor has no `promptHandler`. A notification tap records the item but presents nothing. Only U09 was buildable as specified. The coordinator added A01–A13 and the two allowances below, deferred S04, and recorded each slice's new dependencies in `effective_dependencies`:
+  - **Capability client allowance (standing).** This replaces root-file serialization for typed capability clients. A task whose slice cites this allowance may, in addition to its owned paths:
+    1. Add its client and service files under the new `ios/Services/<Area>/` directory its spec names.
+    2. In `ios/Services/Assembly/CompositionRoot.swift`, add one registration for that client: a client-name constant, one entry in `reservedOperationRanges`, its construction in the root assembly with `router.register` and undo, one public property or accessor on `ServiceCompositionRoot`, and one shutdown call. Each is a single line or one contiguous block at the end of its list.
+    3. In `ios/Services/Authentication/PrivateReadGate.swift`, add one gated verb per private read the capability exports, using the existing `issue`/`admit` pattern.
+    4. In `ios/Services/Assembly/LifecycleCoordinator.swift`, add one public accessor exposing an existing internal service, where the spec names it.
+
+    Nothing else in those files changes. Every read of stored history or state derived from it goes through the read gate. Every write that changes stored history, reminders, deletion or what leaves the device requires an authenticated read session, and a capture-only session is refused. Conflicts are resolved by rebasing, and the merger bounces the PR for rework on conflict. Reviewers reject edits beyond these registrations. Root behaviour changes (the ingress path, launch order, notification handling) are not covered; they stay on the serialized root chain S05b → T11d → A10 → A11 → A12. U01d and U01e now register under this allowance, so they no longer wait on T11d or on each other.
+  - **Management context allowance (standing).** Each UI slice may add exactly one field to `ManagementContext` (`ios/AppAssembly/ManagementCatalog.swift`) and one line that builds it in `AppServices` (`ios/AppAssembly/AppServices.swift`). The field carries only seams that already exist on main or in the slice's dependencies. This supplements the shared host allowance. U07c may additionally add exactly one section entry to U02b's source-detail host, for its per-item delete control.
+  - **S04 deferred.** As scoped it cannot be built:
+    - `PayloadKind` has only `Generic` (`core/src/reminders/reconcile/effects.rs:48`), and prompts hard-code it (`core/src/suggestions/schedule/apply.rs:178`).
+    - The preview opt-in has no store, and `routes.preview_safe` is only ever written as 0 (`core/src/ffi/route_provisioning.rs:99`).
+    - Prompts choose their item at open time (S03), so a preview needs an S02/S03 design change.
+
+    S04 is an opt-in feature and no M1 task depends on it. It now depends on T08 and will be re-decomposed after the trial verdict.
 
 ## Why some tasks stay together
 
@@ -1067,6 +1082,249 @@ Acceptance:
 3. The F10 counting rule applies. On the final head the test passes in 5 consecutive executions of its step. Executions where an earlier unrelated step failed are neutral. The run URLs are linked. `make check` and `make test` pass.
 
 Source pointers: `ios/NotificationProbe/Tests/NotificationProbeAuthorizedUITests.swift:56`, `:66`, `:71`; `ios/NotificationProbe/Sources/ProbeScenarios.swift`.
+
+### A01
+
+Read one item's detail through a gated root client
+
+Export a read of one item by opaque identifier, and give `app/` a typed, read-gated client for it.
+
+Owned paths: `core/src/ffi/item_detail.rs` and `ios/OhAndCoreBridge/CoreHandle+ItemDetail.swift` (native-boundary allowance); `ios/Services/Items/Detail/` (new); `ios/Tests/ItemDetail/` (new); registrations under the capability client allowance (root and read gate).
+
+Dependencies: none.
+
+Acceptance:
+
+1. The export returns, for one item ID:
+   - current text with its basis, the original capture text, and the corrected text where one exists;
+   - item revision, type, scope, session topic, lifecycle state and capture time;
+   - the original audio reference, and transcript provenance where present;
+   - the item's event and correction history, newest first and bounded.
+
+   It reuses `load_item_state` (`core/src/domain/items/mod.rs:233`), `get_events_for_item` (`core/src/store/events/mod.rs:916`) and the transcript provenance read (`core/src/ingress/transcription/mod.rs:639`). An unknown or deleted item returns a fixed `not_found`. The caller's read scopes are enforced, and an item outside them is indistinguishable from not found.
+2. The client is a public typed service on the root. It is refused while the session is capture-only and admitted through the read gate, so an answer that arrives after a relock is discarded. The item ID is validated as opaque, and nothing parses meaning out of it.
+3. Tests:
+   - Rust tests for each field, including a corrected item, a transcribed voice item, an excluded scope and a deleted item.
+   - Real-core root tests for refusal before authentication, a relock discard, and a seeded item read end to end.
+   - `make check` and `make test` pass. The exact-head macOS CI run is linked.
+
+### A02
+
+Correct an item's text, type and session topic
+
+Export the user's corrections as compare-and-set commands, and give `app/` a typed client for them.
+
+Owned paths: `core/src/ffi/item_corrections.rs` and `ios/OhAndCoreBridge/CoreHandle+ItemCorrections.swift`; `core/tests/item_corrections/` (new); `ios/Services/Items/Corrections/` (new); `ios/Tests/ItemCorrections/` (new); registrations under the capability client allowance.
+
+Dependencies: none.
+
+Acceptance:
+
+1. Text, type and session-topic corrections each take the item ID, the expected revision and an idempotent command ID.
+   - Each is stored through the existing event path (`save_event`, `core/src/store/events/mod.rs:440`, which re-syncs the search index), never as a direct row edit.
+   - A stale revision is refused with a fixed `stale_revision` failure that reports the current revision.
+   - A repeated command ID reports the first outcome and writes nothing new.
+   - The original capture is never altered.
+2. Correcting the type away from an actionable type is decided in the core, with a test. If the item has a live reminder, it is cancelled through the existing reminder state path, or the correction is refused with a fixed reason. The choice and its contract basis are written in the PR.
+3. A user correction always beats later model output and transcripts. The existing regressions still hold, and one new test covers a correction made while an interpretation job is in flight.
+4. The client requires an authenticated session.
+5. Tests: Rust and real-core root tests. `make check` and `make test` pass. The exact-head macOS CI run is linked.
+
+### A03
+
+Complete, cancel and quiet an item
+
+Export item completion, cancellation, not-now and stop-suggesting as user commands keyed by item, and give `app/` a typed client for them.
+
+Owned paths: `core/src/ffi/item_lifecycle_controls.rs` and `ios/OhAndCoreBridge/CoreHandle+ItemLifecycleControls.swift`; `core/tests/item_lifecycle_controls/` (new); `ios/Services/Items/LifecycleControls/` (new); `ios/Tests/ItemLifecycleControls/` (new); registrations under the capability client allowance.
+
+Dependencies: none.
+
+Acceptance:
+
+1. Complete and cancel reuse `end_item_with_event` (`core/src/reminders/state/mod.rs:817`) with the same outcome as the notification action path (`core/src/ffi/notification_actions.rs:314`), but keyed by item ID and expected revision, not by a notification identifier.
+2. Not-now reuses `record_not_now` (`core/src/suggestions/eligibility/mod.rs:381`), and stop-suggesting reuses the control event and `set_pull_only` (`:414`).
+3. Every command is idempotent by command ID and refuses stale revisions. The resulting reminder and notification changes go through the next reminder pass (`root.reconcileReminders`), never through a direct native effect.
+4. The client requires an authenticated session.
+5. Tests: Rust tests for each command, including on a deleted item. Real-core root tests showing that completing an item with a live reminder leaves no pending notification after the pass. `make check` and `make test` pass. The exact-head macOS CI run is linked.
+
+### A04
+
+Read, edit, cancel and review an item's reminder
+
+Export the reminder read, user time correction, cancellation and history, and give `app/` typed clients for them. Reads are gated.
+
+Owned paths: `core/src/ffi/reminder_controls.rs` and `ios/OhAndCoreBridge/CoreHandle+ReminderControls.swift`; `core/tests/reminder_controls/` (new); `ios/Services/Reminders/Controls/` (new); `ios/Tests/ReminderControls/` (new); registrations under the capability client allowance.
+
+Dependencies: none.
+
+Acceptance:
+
+1. **Read.** Returns the item's reminder: requested and resolved instant, time zone, the states the item status already reports, and any unsupported or ambiguity reason with its state version. It reuses `get_reminder` (`core/src/reminders/state/mod.rs:859`).
+2. **Edit.** Applies `apply_user_time_correction` (`:595`) with the item revision and reminder version (`:384`). A stale version is refused. An edit can never backdate a reminder or silently substitute a different deadline.
+3. **Cancel.** Applies `cancel_reminder` (`:686`).
+4. **History.** Returns the bounded reminder history (`core/src/reminders/history/view.rs:149`).
+5. Reads go through the read gate. Writes require an authenticated session, and their native effects go through the next reminder pass.
+6. Tests: Rust tests, plus real-core root tests for edit and cancel reaching the notification centre after a pass. `make check` and `make test` pass. The exact-head macOS CI run is linked.
+
+### A05
+
+Delete an item and report deletion progress
+
+Export per-item deletion intent and progress, and run the cleanup promptly through the lifecycle coordinator's existing deletion service.
+
+Owned paths: `core/src/ffi/item_deletion.rs` and `ios/OhAndCoreBridge/CoreHandle+ItemDeletion.swift`; `core/tests/item_deletion/` (new); `ios/Services/Deletion/ItemDeletion/` (new); `ios/Tests/ItemDeletion/` (new); registrations under the capability client allowance, including one `LifecycleCoordinator` accessor for `deletionCleanup` (`ios/Services/Assembly/LifecycleCoordinator.swift:270`).
+
+Dependencies: none.
+
+Acceptance:
+
+1. Marking an item deleted reuses `mark_deletion_intent` (`core/src/lifecycle/delete_intent/mod.rs:211`). It tombstones the item, cancels its jobs and reminders, and enqueues cleanup in one transaction, idempotently. Progress reuses `deletion_progress` (`:370`).
+2. After the intent commits, the client triggers the existing deletion cleanup service immediately. It does not wait for the next launch, it never deletes native files itself, and a failure leaves the intent to be resumed by the normal lifecycle pass.
+3. Requires an authenticated session. A deleted item disappears from search and detail reads, and a late job result for it is refused, per the existing tests.
+4. Tests: Rust tests, plus a real-core root test in which deletion removes the item's pending notification and retained audio and reports progress through to completion. `make check` and `make test` pass. The exact-head macOS CI run is linked.
+
+### A06
+
+Activate and answer a suggestion
+
+Export prompt activation and response as user commands, and give `app/` a typed client for them.
+
+Owned paths: `core/src/ffi/suggestion_responses.rs` and `ios/OhAndCoreBridge/CoreHandle+SuggestionResponses.swift`; `core/tests/suggestion_responses/` (new); `ios/Services/Suggestions/Responses/` (new); `ios/Tests/SuggestionResponses/` (new); registrations under the capability client allowance.
+
+Dependencies: none.
+
+Acceptance:
+
+1. Activation reuses `PromptCoordinator::activate` (`core/src/suggestions/coordinator/mod.rs:157`) for a delivered or opened prompt, and returns the chosen item's identifier and the text that may be displayed. It discloses nothing before authentication. A prompt that no longer has an eligible item reports that honestly.
+2. Responses (not now, stop, done) reuse `respond` (`:201`) and are idempotent by command ID.
+3. The client requires an authenticated session.
+4. Tests: Rust tests for each response and for a stale or replaced prompt, plus a real-core root test. `make check` and `make test` pass. The exact-head macOS CI run is linked.
+
+### A07
+
+Control job configuration after policy changes
+
+Export the existing requeue and revocation controls, and add the missing core path that moves waiting unpinned work onto a newly authorized profile.
+
+Owned paths: `core/src/jobs/configuration/` (only for the new re-pin operation and its tests); `core/src/ffi/job_configuration.rs` and `ios/OhAndCoreBridge/CoreHandle+JobConfiguration.swift`; `core/tests/job_configuration_controls/` (new); `ios/Services/JobConfiguration/` (new); `ios/Tests/JobConfiguration/` (new); registrations under the capability client allowance.
+
+Dependencies: V01b, V02b.
+
+Acceptance:
+
+1. Export `requeue_job_to_new_profile` (`core/src/jobs/configuration/mod.rs:239`), `get_requeue_record` (`:201`), and a bounded listing of jobs pinned to a profile (`get_jobs_pinned_to_profile`, `:59`, with item and status only).
+2. Profile revocation is available outside reset. It reuses `revoke_profile` and the job retirement path (`:136`, `:148`) and respects the L05b credential claim fence.
+3. **New: re-pin waiting work.**
+   - An explicit, user-invoked operation re-pins unpinned `interpret` jobs that are waiting for configuration on a route, plus the uninterpreted or unprocessed items of that route that have no live job. They move to the profile the I08/V01b resolver now selects, only when that profile is authorized for the route.
+   - It never runs implicitly from a grant, a default change or a classifier.
+   - It is bounded and idempotent, it never changes a job pinned to another profile, and it returns the count it moved.
+4. The client requires an authenticated session.
+5. Tests:
+   - Rust tests for each operation, including a revoked profile and a route without a grant.
+   - A real-core root test: capture with no provider, configure and grant, re-pin, and the job dispatches to the fake provider.
+   - `make check` and `make test` pass. The exact-head macOS CI run is linked.
+
+### A08
+
+Configure retention and act on unresolved sole audio
+
+Persist the user's retention period, and expose retention status, the sole-audio cases and their retry and delete actions to `app/`.
+
+Owned paths: one migration step appended to `MIGRATIONS` in `core/src/store/schema/mod.rs` (the next version after V01b's); `core/src/lifecycle/retention/` (only the persisted-setting read and the new status query); `core/src/ffi/retention_controls.rs` and `ios/OhAndCoreBridge/CoreHandle+RetentionControls.swift`; `ios/Services/AudioRetention/`; `ios/Tests/AudioRetention/`; registrations under the capability client allowance, including one `LifecycleCoordinator` accessor for `audioRetention` (`ios/Services/Assembly/LifecycleCoordinator.swift:277`).
+
+Dependencies: V01b (migration order).
+
+Acceptance:
+
+1. The retention period is a durable setting with a seven-day default after a successful transcription. Bounds are enforced. The sweep reads the stored setting instead of the init parameter, and changing it never deletes audio whose item is its sole source.
+2. A status read returns the policy, the storage pressure the service already measures, and the unresolved sole-audio cases (item, capture time, reason).
+3. "Retry transcription" re-queues the item's on-device transcription through the existing job path.
+4. "Delete audio" removes only the audio of an item that has a transcript or text, through the existing cleanup ordering. Sole-source audio is refused and pointed to item deletion (A05).
+5. Reads are gated and writes require an authenticated session. A sweep never blocks a new capture.
+6. Tests: Rust tests and real-core root tests. `make check` and `make test` pass. The exact-head macOS CI run is linked.
+
+### A09
+
+Play retained audio safely
+
+Give `app/` a way to play an item's retained audio without exposing protected storage, and fence playback against removal.
+
+Owned paths: `ios/Services/AudioRetention/` (only the playback seam), `ios/Services/Playback/` (new), `ios/Tests/Playback/` (new), registrations under the capability client allowance.
+
+Dependencies: A08 (shared retention service).
+
+Acceptance:
+
+1. For an authenticated session and an item whose audio is retained, the root returns a playable handle, such as a URL valid only for the session or an `AVAudioPlayer` built by the service. It is never a path into `ProtectedStorageLayout` (`ios/Services/ProtectedStorage/StoreProtectionPolicy.swift:103`) that outlives the session. An item without retained audio reports that honestly.
+2. While playback is open, the retention sweep and deletion cleanup do not remove that file. A deletion intent ends playback first. Relocking ends playback.
+3. Tests cover the fence against both the sweep and deletion, a relock, and audio that is missing or unreadable. Existing retention tests pass. The exact-head macOS CI run is linked.
+
+### A10
+
+Route notification taps and reminder readiness to the app
+
+Connect prompt taps to an app-visible handler, and let the app observe reminder readiness changes. Root chain.
+
+Owned paths: `ios/Services/Assembly/CompositionRoot.swift`, `ios/Services/Notifications/NotificationEventIngestor.swift` (only `promptHandler` wiring), `ios/Tests/Services/CompositionRootTests.swift`.
+
+Dependencies: T11d (root chain).
+
+Acceptance:
+
+1. The root builds its ingestor with a `promptHandler` (`CompositionRoot.swift:661`; today the default `{ _ in }`, `NotificationEventIngestor.swift:23`). A prompt tap reaches a public open-suggestion handler on the root, like `setOpenItemHandler`, and is never dropped. A tap that arrives before a handler is set is held and delivered once.
+2. The root exposes an observer for reminder-report changes (`lastReminderReport`, `:897`). In particular it reports when a reminder becomes undeliverable because permission was never requested (`NotificationReadiness.swift:95`), so the app can ask at that point.
+3. Real-core root tests cover a prompt tap reaching the handler and readiness changes notifying the observer. Existing tests pass. The exact-head macOS CI run is linked.
+
+### A11
+
+Compose export at the root
+
+Build the existing export service in production, over the root's read session and storage layout, with its launch cleanup.
+
+Owned paths: `ios/Services/Assembly/CompositionRoot.swift`, `ios/Services/Export/` (only construction and visibility), `ios/Tests/Services/CompositionRootTests.swift`, `ios/Tests/Export/`.
+
+Dependencies: A10 (root chain).
+
+Acceptance:
+
+1. The root exposes `ExportService` (`ios/Services/Export/ExportService.swift:15`, never constructed in production today) built over the authenticated read session and the protected layout. The raw `CoreExportClient` stays private.
+2. The export temp-file sweep (`sweepAtLaunch`) runs at launch in the lifecycle order without delaying capture.
+3. Real-core root tests: export is refused before authentication, a real export round-trips, and a stale temp export is removed at the next launch. The exact-head macOS CI run is linked.
+
+### A12
+
+Compose reset at the root
+
+Build the existing reset service in production: put the reset ingress gate into the capture path, and resume an interrupted reset at launch.
+
+Owned paths: `ios/Services/Assembly/CompositionRoot.swift`, `ios/Services/Assembly/LifecycleCoordinator.swift` (only the reset resume step), `ios/Services/Reset/` (only construction and visibility), `ios/Tests/Services/`, `ios/Tests/Reset/`.
+
+Dependencies: A11 (root chain).
+
+Acceptance:
+
+1. The root constructs `ResetService` and its collaborators. Today they are internal and never built. It exposes a typed reset control and progress read to `app/`, and requires an authenticated session.
+2. `ResetIngressGate` sits in the root's ingress path. During a reset, new captures behave as the reset contract says, and a capture is never silently lost.
+3. An interrupted reset resumes at launch before the job runner activates. The L05b credential fence and the reset generation hold.
+4. Real-core root tests cover a full reset, a capture during reset and a resume after an interrupted reset. Existing reset tests pass. The exact-head macOS CI run is linked.
+
+### A13
+
+Present an item or suggestion from the app host
+
+Let the management host navigate to an item's source detail or to the current suggestion when asked by a notification tap or another screen.
+
+Owned paths: `ios/AppAssembly/ManagementNavigationModel.swift`, `ios/AppAssembly/AppRootView.swift`, `ios/AppAssembly/ManagementCatalog.swift` (only a destination registry for item and suggestion views, which U02b and U08b fill in under the management context allowance), `ios/Tests/AppAssembly/`.
+
+Dependencies: none.
+
+Acceptance:
+
+1. `requestedItemID` (`ios/AppAssembly/ManagementNavigationModel.swift:84`) and a new requested-suggestion route present a destination once one is registered. If no destination is registered, the app shows an honest placeholder, not a blank screen.
+2. Presenting either requires authentication first. A capture entry still always lands on capture.
+3. The host exposes a single registration point, one line per destination, so that U02b registers source detail and U08b registers the suggestion view without editing host behaviour.
+4. UI and unit tests cover a tap before and after authentication, a relock while presented, and the placeholder. The exact-head macOS CI run is linked.
 
 ### I05b
 
