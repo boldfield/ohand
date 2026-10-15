@@ -1,6 +1,12 @@
 import Foundation
 import OhAndCoreBridge
 
+/// Why `PromptScheduleService.configure(_:)` could not finish what it promised.
+public enum PromptScheduleConfigurationError: Error, Equatable, Sendable {
+    /// The choice was persisted, but the reminder pass that installs or cancels prompts did not converge.
+    case installIncomplete(PromptScheduleOutcome, NotificationPermissionReport)
+}
+
 /// Keeps the optional daily prompt schedule current and its prompts installed.
 ///
 /// The core owns the schedule, its ledger and the decision of which prompts exist; this service supplies the device's
@@ -32,12 +38,21 @@ public final class PromptScheduleService: @unchecked Sendable {
     }
 
     /// Applies the user's choice with the device's current zone, then runs the pass that acts on it, so turning prompts
-    /// off cancels what is installed at once. The choice is persisted before the pass runs; if the pass fails, the next
-    /// launch, foreground or time-change pass converges.
+    /// off cancels what is installed at once. The choice is persisted before the pass runs.
+    ///
+    /// The reminder pass is single-flight: a caller that arrives while one runs joins it and gets its report. A pass
+    /// already running may have read the schedule before this choice was persisted, so the first call can only return
+    /// that stale pass. It always finishes before it returns, so the second call runs a pass that began after the
+    /// choice was persisted. Throws `PromptScheduleConfigurationError.installIncomplete` when that pass did not
+    /// converge; the choice stays persisted and the next launch, foreground or time-change pass converges.
     @discardableResult
     public func configure(_ setting: PromptScheduleSetting) async throws -> PromptScheduleOutcome {
         let outcome = try await core.configure(setting, timeZoneIdentifier: timeZone().identifier)
-        _ = try? await install(.explicit)
+        _ = try await install(.explicit)
+        let report = try await install(.explicit)
+        if report.reconciliationFailure != nil || !report.converged {
+            throw PromptScheduleConfigurationError.installIncomplete(outcome, report)
+        }
         return outcome
     }
 
@@ -75,6 +90,9 @@ public final class PromptScheduleService: @unchecked Sendable {
         } catch {
             return .deferred("prompts_refresh_failed")
         }
+        // The coordinator's `.reminders` step already ran a pass against the schedule as it was before the refresh above,
+        // so each lifecycle pass reads the permission and pending list twice. This pass is the one that reflects the
+        // refreshed schedule; after a zone change it may cancel a date the earlier pass briefly installed.
         do {
             let report = try await install(reconcileTrigger)
             return LifecycleCoordinator.outcome(ofPrompts: report)

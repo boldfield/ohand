@@ -116,7 +116,11 @@ final class PromptScheduleRealCoreTests: XCTestCase {
         let installed = promptIdentifiers(center.addedRequests)
         XCTAssertEqual(installed.count, 3)
 
+        let reportBeforeOff = try XCTUnwrap(root.lastReminderReport)
         let off = try await root.promptSchedule.configure(.off)
+        let reportOfOff = try XCTUnwrap(root.lastReminderReport)
+        XCTAssertNotEqual(reportOfOff, reportBeforeOff, "the root records the pass that cancelled the prompts")
+        XCTAssertEqual(reportOfOff.trigger, .explicit)
         XCTAssertFalse(off.enabled)
         XCTAssertNil(off.next)
         XCTAssertEqual(center.removedIdentifiers.sorted(), installed.sorted(), "every installed prompt was cancelled")
@@ -180,7 +184,67 @@ final class PromptScheduleRealCoreTests: XCTestCase {
         XCTAssertEqual(promptIdentifiers(center.addedRequests), installed, "the entry itself installs nothing more")
     }
 
+    func testConfiguringWhileAPassInstallsTheOldScheduleStillCancelsThePrompts() async throws {
+        let inner = FakeNotificationCenter()
+        inner.authorizationStatus = .denied
+        let center = SuspendingNotificationCenter(inner: inner)
+        let (root, _) = try makeStartedRoot(center: center)
+        defer { root.shutDown() }
+        _ = try await root.promptSchedule.configure(.daily(hour: 9, minute: 0))
+        XCTAssertEqual(promptIdentifiers(inner.addedRequests), [], "a denied permission withholds every prompt")
+
+        inner.authorizationStatus = .authorized
+        let addGate = SuspensionGate()
+        center.addGate = addGate
+        let staleReminderPass = Task { try await root.reconcileReminders(trigger: .foreground) }
+        try await waitUntil("the stale pass reaches its first install") { addGate.arrivals >= 1 }
+
+        let configuring = Task { try await root.promptSchedule.configure(.off) }
+        try await waitUntil("the choice to turn prompts off is persisted") {
+            let persisted = try await root.promptSchedule.read()
+            return !persisted.enabled
+        }
+        addGate.release()
+
+        _ = try await staleReminderPass.value
+        let off = try await configuring.value
+        XCTAssertFalse(off.enabled)
+        XCTAssertEqual(promptIdentifiers(inner.pendingIdentifiers), [], "the stale pass did not leave prompts behind")
+    }
+
+    func testConfigureReportsAPassThatDidNotConverge() async throws {
+        let inner = FakeNotificationCenter()
+        let center = SuspendingNotificationCenter(inner: inner)
+        let (root, _) = try makeStartedRoot(center: center)
+        defer { root.shutDown() }
+        inner.addError = URLError(.cannotConnectToHost)
+
+        do {
+            _ = try await root.promptSchedule.configure(.daily(hour: 9, minute: 0))
+            XCTFail("configure reported success although no prompt could be installed")
+        } catch PromptScheduleConfigurationError.installIncomplete(let outcome, let report) {
+            XCTAssertTrue(outcome.enabled, "the choice itself was persisted")
+            XCTAssertFalse(report.converged)
+        }
+        let persisted = try await root.promptSchedule.read()
+        XCTAssertTrue(persisted.enabled)
+    }
+
     // MARK: Helpers
+
+    private func waitUntil(
+        _ description: String, timeoutSeconds: TimeInterval = 20, _ condition: () async throws -> Bool
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while true {
+            if try await condition() { return }
+            if Date() > deadline {
+                XCTFail("timed out waiting for \(description)")
+                throw CancellationError()
+            }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
 
     private func promptIdentifiers(_ identifiers: [String]) -> [String] {
         identifiers.filter { $0.hasPrefix("prompt:") }
@@ -191,7 +255,7 @@ final class PromptScheduleRealCoreTests: XCTestCase {
     }
 
     private func makeStartedRoot(
-        center: FakeNotificationCenter
+        center: NotificationCenterProviding
     ) throws -> (ServiceCompositionRoot, LifecycleCoordinator) {
         let coordinator = LifecycleCoordinator(stepTimeoutSeconds: 30)
         let session = ReadAuthenticationSession(boundary: FakeReadAuthenticationBoundary())
