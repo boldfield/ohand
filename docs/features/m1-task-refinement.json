@@ -2235,7 +2235,8 @@
         "core/src/interpretation/enqueue/",
         "core/tests/provider_profiles/",
         "core/src/ffi/provider_profiles.rs",
-        "ios/OhAndCoreBridge/CoreHandle+ProviderProfiles.swift"
+        "ios/OhAndCoreBridge/CoreHandle+ProviderProfiles.swift",
+        "core/tests/migrations/main.rs"
       ],
       "intent": "Production write path for immutable provider-profile versions, a default per capability and listing, with an FFI export.",
       "acceptance": [
@@ -2609,7 +2610,8 @@
         "ios/OhAndCoreBridge/CoreHandle+RetentionControls.swift",
         "ios/Services/AudioRetention/",
         "ios/Tests/AudioRetention/",
-        "ios/Services/Assembly/LifecycleCoordinator.swift:277"
+        "ios/Services/Assembly/LifecycleCoordinator.swift:277",
+        "core/tests/migrations/main.rs"
       ],
       "intent": "Persist the user's retention period, and expose retention status, the sole-audio cases and their retry and delete actions to `app/`.",
       "acceptance": [
@@ -3550,6 +3552,10 @@
     {
       "date": "2026-10-15",
       "change": "App-facing API layer: capability client allowance and management context allowance (standing); A01-A13 added (item detail, corrections, lifecycle controls, reminder controls, item deletion, suggestion responses, job configuration controls, retention controls, playback, notification signals, export composition, reset composition, host navigation); root behaviour chain S05b -> T11d -> A10 -> A11 -> A12; U01d/U01e no longer serialized; S04 deferred behind T08; slice dependencies updated."
+    },
+    {
+      "date": "2026-10-15",
+      "change": "V01b and A08 granted core/tests/migrations/main.rs (schema-version expectations forced by their appended migration step plus its own migration test), as C05a, L05a, L05b and S05a had."
     }
   ]
 }
