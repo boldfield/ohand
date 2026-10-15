@@ -20,6 +20,7 @@ pub mod ingress_import;
 pub mod item_corrections;
 pub mod metrics;
 pub mod provider_transport;
+pub mod reminder_controls;
 pub mod transcription_attachment;
 
 pub mod job_health;
