@@ -3,6 +3,7 @@
 //! the real dispatcher with no provider profile configured, asserting on durable state.
 
 use chrono::{DateTime, Duration, Utc};
+use ohand_core::domain::status::{ItemStatus, ProcessingJobStatus, ProcessingState};
 use ohand_core::ingress::{
     apply_transcription_outcome, import_foreground_ingress, ImportDisposition,
     InterpretationQueued, InterpretationRequest, RecognizedTranscript, RecognizerResult,
@@ -105,6 +106,14 @@ impl Store {
             )
             .optional()
             .unwrap()
+    }
+
+    fn status(&self, item_id: &str) -> ItemStatus {
+        let mut database = self.open();
+        let tx = database.immediate_transaction().unwrap();
+        let status = ItemStatus::load(&tx, item_id).unwrap().unwrap();
+        tx.commit().unwrap();
+        status
     }
 
     fn search(&self, query: &str) -> usize {
@@ -218,6 +227,13 @@ fn an_unrecognized_capture_without_profiles_stays_saved_searchable_and_awaiting_
     }
     assert_eq!(store.reminder(&item_id), None);
     assert_eq!(store.search("roofer"), 1);
+    let status = store.status(&item_id);
+    assert_eq!(status.processing_state, ProcessingState::Unprocessed);
+    assert_eq!(
+        status.processing_job_status,
+        Some(ProcessingJobStatus::AwaitingConfiguration)
+    );
+    assert_eq!(store.item_row(&item_id).0, "unprocessed");
     let capture_text: String = store
         .open()
         .conn()
