@@ -22,6 +22,15 @@
 //!   `ohand_core_pin_audio_removal` immediately before the file effect; a pinned lease cannot
 //!   expire, so the fence cannot lapse during the effect. A denial holds nothing. The file effect is native: the core never opens,
 //!   reads or removes an audio file. See [`lease`] for the guarantees and the expiry rule.
+//! * `begin_user_removal` (`item_id`, `audio_reference`) -> the same answer and lease as
+//!   `begin_removal`, but for audio the user asked to remove: it ignores the retention clock and is
+//!   approved (`{"decision": "approved"}`, with no `expired_at`) whenever the item is live, the
+//!   audio reference still matches and the item keeps recoverable text without the audio (a usable
+//!   transcript, or captured or user-written text). It is denied as `sole_source` when the audio
+//!   is the item's only source, as `deletion_owns_cleanup` for a deleted item, and as
+//!   `audio_reference_mismatch` when the reference no longer matches. It is decided inside the same
+//!   fence, so a text correction that would make the audio the only source cannot commit between
+//!   the approval and the file effect. Sweeps and `begin_removal` are unchanged.
 //!
 //! `period_seconds` is the configured retention period; absent or 0 selects the default of seven
 //! days, and a value outside the policy's bounds is refused as `invalid_request`. Failures are
@@ -76,6 +85,10 @@ enum Command {
         #[serde(default)]
         period_seconds: u64,
     },
+    BeginUserRemoval {
+        item_id: String,
+        audio_reference: String,
+    },
 }
 
 impl Command {
@@ -84,6 +97,7 @@ impl Command {
             Command::Sweep { period_seconds, .. }
             | Command::AuthorizeRemoval { period_seconds, .. }
             | Command::BeginRemoval { period_seconds, .. } => *period_seconds,
+            Command::BeginUserRemoval { .. } => 0,
         };
         if period_seconds == 0 {
             return Ok(RetentionPolicy::default());
@@ -105,6 +119,10 @@ impl Command {
                 item_id,
                 audio_reference,
                 ..
+            }
+            | Command::BeginUserRemoval {
+                item_id,
+                audio_reference,
             } => validate_identifiers(item_id, audio_reference)?,
         }
         self.policy().map(|_| ())
@@ -193,6 +211,7 @@ fn decision_json(decision: &RemovalDecision) -> Value {
         RemovalDecision::Approved { expired_at } => {
             json!({ "decision": "approved", "expired_at": expired_at.to_rfc3339() })
         }
+        RemovalDecision::ApprovedByUser => json!({ "decision": "approved" }),
         RemovalDecision::Denied(denial) => match denial {
             RemovalDenial::ItemNotFound => {
                 json!({ "decision": "denied", "reason": "item_not_found" })
@@ -202,6 +221,9 @@ fn decision_json(decision: &RemovalDecision) -> Value {
             }
             RemovalDenial::DeletionOwnsCleanup => {
                 json!({ "decision": "denied", "reason": "deletion_owns_cleanup" })
+            }
+            RemovalDenial::SoleSource => {
+                json!({ "decision": "denied", "reason": "sole_source" })
             }
             RemovalDenial::NotYetExpired { expires_at } => json!({
                 "decision": "denied",
@@ -251,30 +273,54 @@ fn run(database: &Database, handle: u64, command: &Command) -> Result<Value, Abi
             item_id,
             audio_reference,
             ..
-        } => {
-            let store_path = database
-                .conn()
-                .path()
-                .map(Path::new)
-                .ok_or(AbiFailure::STORE_UNAVAILABLE)?;
-            let begun = lease::begin(
-                store_path,
-                handle,
-                &SystemClock,
-                &policy,
-                item_id,
-                audio_reference,
-                lease::LEASE_DURATION,
-            )?;
-            let mut body = decision_json(&begun.decision);
-            if let Some(lease_id) = begun.lease_id {
-                body["lease_id"] = json!(lease_id);
-                body["lease_millis"] =
-                    json!(u64::try_from(lease::LEASE_DURATION.as_millis()).unwrap_or(u64::MAX));
-            }
-            Ok(body)
-        }
+        } => begin_removal(
+            database,
+            handle,
+            lease::Authorization::Expired(&policy),
+            item_id,
+            audio_reference,
+        ),
+        Command::BeginUserRemoval {
+            item_id,
+            audio_reference,
+        } => begin_removal(
+            database,
+            handle,
+            lease::Authorization::UserInitiated,
+            item_id,
+            audio_reference,
+        ),
     }
+}
+
+fn begin_removal(
+    database: &Database,
+    handle: u64,
+    authorization: lease::Authorization<'_>,
+    item_id: &str,
+    audio_reference: &str,
+) -> Result<Value, AbiFailure> {
+    let store_path = database
+        .conn()
+        .path()
+        .map(Path::new)
+        .ok_or(AbiFailure::STORE_UNAVAILABLE)?;
+    let begun = lease::begin(
+        store_path,
+        handle,
+        &SystemClock,
+        authorization,
+        item_id,
+        audio_reference,
+        lease::LEASE_DURATION,
+    )?;
+    let mut body = decision_json(&begun.decision);
+    if let Some(lease_id) = begun.lease_id {
+        body["lease_id"] = json!(lease_id);
+        body["lease_millis"] =
+            json!(u64::try_from(lease::LEASE_DURATION.as_millis()).unwrap_or(u64::MAX));
+    }
+    Ok(body)
 }
 
 fn retention_job(handle: u64, command: Command, operation_id: u64) -> JobFn {
