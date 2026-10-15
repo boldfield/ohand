@@ -70,17 +70,13 @@ public final class PromptScheduleService: @unchecked Sendable {
             refreshTrigger = .timeOrZoneChange
             reconcileTrigger = .explicit
         }
-        NSLog("DIAG prompt step begin \(triggers)")
         do {
             _ = try await core.refresh(trigger: refreshTrigger, timeZoneIdentifier: timeZone().identifier)
-            NSLog("DIAG prompt refresh done")
         } catch {
-            NSLog("DIAG prompt refresh failed \(error)")
             return .deferred("prompts_refresh_failed")
         }
         do {
             let report = try await install(reconcileTrigger)
-            NSLog("DIAG prompt install done")
             return LifecycleCoordinator.outcome(ofPrompts: report)
         } catch is CancellationError {
             return .deferred("prompts_cancelled")
