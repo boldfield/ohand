@@ -95,7 +95,9 @@ public final class PromptScheduleService: @unchecked Sendable {
         // refreshed schedule; after a zone change it may cancel a date the earlier pass briefly installed.
         do {
             let report = try await install(reconcileTrigger)
-            return LifecycleCoordinator.outcome(ofPrompts: report)
+            let outcome = LifecycleCoordinator.outcome(ofPrompts: report)
+            if case .completed = outcome, !report.converged { return .deferred("prompts_not_converged") }
+            return outcome
         } catch is CancellationError {
             return .deferred("prompts_cancelled")
         } catch {

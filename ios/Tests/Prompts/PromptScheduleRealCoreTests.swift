@@ -286,6 +286,24 @@ final class PromptScheduleRealCoreTests: XCTestCase {
         XCTAssertTrue(persisted.enabled)
     }
 
+    func testALifecyclePassThatDidNotConvergeIsNotReportedCompleted() async throws {
+        let (core, client) = try openCore()
+        defer { client.shutDown(); core.close() }
+        let reconciliation = ScheduleMirroringReconciler(core: client)
+        let reconciler = NotificationPermissionReconciler(
+            center: FakeNotificationCenter(), reconciliation: reconciliation,
+            observations: InMemoryNotificationPermissionObservationStore())
+        let service = PromptScheduleService(
+            core: client, timeZone: { Self.timeZone }, install: { try await reconciler.refresh(trigger: $0) })
+
+        let converged = await service.runLifecyclePass([.launch])
+        XCTAssertEqual(converged, .completed, "a converged pass completes the step")
+
+        reconciliation.reportsConverged = false
+        let unconverged = await service.runLifecyclePass([.foreground])
+        XCTAssertEqual(unconverged, .deferred("prompts_not_converged"))
+    }
+
     // MARK: Helpers
 
     private func openCore() throws -> (CoreHandle, CorePromptScheduleClient) {
