@@ -569,16 +569,80 @@ fn invalid_requests_are_refused_before_anything_is_queued_and_never_echo_the_que
 }
 
 #[test]
-fn match_span_counts_unicode_scalars_and_ignores_case_and_punctuation() {
+fn match_span_counts_unicode_scalars_and_ignores_case_diacritics_and_punctuation() {
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("span.sqlite").display().to_string();
+    let database = Database::open(&path, Arc::new(SystemClock)).unwrap();
+    let connection = database.conn();
+    let span = |text: &str, query: &str| match_span(connection, text, query).unwrap();
     assert_eq!(
-        match_span("Café, ÉCLAIR time", "éclair"),
+        span("Café, ÉCLAIR time", "éclair"),
         Some(json!({"start": 6, "end": 12}))
     );
     assert_eq!(
-        match_span("one two", "tw"),
-        Some(json!({"start": 4, "end": 7}))
+        span("Café, ÉCLAIR time", "cafe"),
+        Some(json!({"start": 0, "end": 4}))
     );
-    assert_eq!(match_span("one two", "three"), None);
-    assert_eq!(match_span("one two", "?!"), None);
-    assert_eq!(match_span("", "one"), None);
+    assert_eq!(
+        span("Café, ÉCLAIR time", "ECLAIR"),
+        Some(json!({"start": 6, "end": 12}))
+    );
+    assert_eq!(span("one two", "tw"), Some(json!({"start": 4, "end": 7})));
+    assert_eq!(span("one two", "three"), None);
+    assert_eq!(span("one two", "?!"), None);
+    assert_eq!(span("", "one"), None);
+    let leftovers: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM temp.sqlite_master WHERE name LIKE 'ohand_span_fold%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(leftovers, 0, "the folding scratch tables are dropped");
+}
+
+#[test]
+fn an_unaccented_query_gets_a_span_in_accented_current_text() {
+    let _guard = serial();
+    let directory = TempDir::new().unwrap();
+    let store_path = directory.path().join("core.sqlite").display().to_string();
+    {
+        let mut database = Database::open(&store_path, Arc::new(SystemClock)).unwrap();
+        database
+            .conn()
+            .execute(
+                "INSERT INTO routes (route_id, route_name, scope, processing_destinations,
+                                     created_at)
+                 VALUES ('route-personal', 'route-personal', 'personal', '[]',
+                         '2026-10-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        import_foreground_ingress(
+            &mut database,
+            &capture(
+                "cafe-1",
+                "Meet at the Café, then ÉCLAIR time",
+                "personal",
+                "2026-10-01T09:00:00+00:00",
+                None,
+            ),
+        )
+        .unwrap();
+    }
+    let session = Session::over(&store_path);
+    for (query, expected) in [
+        ("cafe", json!({"start": 12, "end": 16})),
+        ("CAFÉ", json!({"start": 12, "end": 16})),
+        ("eclair", json!({"start": 23, "end": 29})),
+    ] {
+        let body = session.succeed(&json!({
+            "op": "search", "query": query, "read_scopes": ["personal"]
+        }));
+        assert_eq!(body["total_accessible"], 1, "{query}");
+        let hit = &body["hits"][0];
+        assert_eq!(hit["matched"], "current", "{query}");
+        assert_eq!(hit["match_span"], expected, "{query}");
+    }
+    session.close();
 }

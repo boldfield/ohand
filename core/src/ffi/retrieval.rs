@@ -26,7 +26,8 @@
 //! and quote, `text_basis` is `original`, `transcribed` or `corrected`, `original_text` is set
 //! only for a corrected item, `matched` is `current` or `superseded_original` (only the replaced
 //! original matched), and `match_span` is `{"start","end"}` in Unicode scalar offsets into `text`
-//! of the first word that begins with a query term, or `null` for a list or when the match is
+//! of the first word that begins with a query term (compared with the search tokenizer's case and
+//! diacritic folding, so `cafe` matches `Café`), or `null` for a list or when the match is
 //! not in `text`. Failures are normalized and never echo the query, filters or stored text.
 //! The query and the results stay on the device: this module sends nothing anywhere.
 
@@ -188,37 +189,111 @@ impl Command {
     }
 }
 
+const FOLD_TABLE: &str = "ohand_span_fold";
+const FOLD_VOCABULARY: &str = "ohand_span_fold_terms";
+
+/// The terms the search index's tokenizer produces for each word, so span matching agrees with
+/// the case and diacritic folding of the full-text match. SQLite is asked rather than
+/// approximated: each word goes through a throwaway temp index that uses the same default
+/// tokenizer as `search_index`.
+fn tokenizer_terms(connection: &Connection, words: &[String]) -> Result<Vec<String>, AbiFailure> {
+    let fold = || -> rusqlite::Result<Vec<String>> {
+        connection.execute_batch(&format!(
+            "DROP TABLE IF EXISTS temp.{FOLD_VOCABULARY};
+             DROP TABLE IF EXISTS temp.{FOLD_TABLE};
+             CREATE VIRTUAL TABLE temp.{FOLD_TABLE} USING fts5(word);"
+        ))?;
+        let outcome = (|| {
+            let mut insert = connection.prepare(&format!(
+                "INSERT INTO temp.{FOLD_TABLE} (rowid, word) VALUES (?, ?)"
+            ))?;
+            for (index, word) in words.iter().enumerate() {
+                insert.execute(rusqlite::params![index as i64 + 1, word])?;
+            }
+            drop(insert);
+            connection.execute_batch(&format!(
+                "CREATE VIRTUAL TABLE temp.{FOLD_VOCABULARY}
+                     USING fts5vocab({FOLD_TABLE}, instance)"
+            ))?;
+            let mut folded = vec![String::new(); words.len()];
+            let mut select = connection.prepare(&format!(
+                "SELECT doc, term FROM temp.{FOLD_VOCABULARY} ORDER BY doc, \"offset\""
+            ))?;
+            let rows = select.query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (document, term) = row?;
+                if let Some(slot) = usize::try_from(document - 1)
+                    .ok()
+                    .and_then(|index| folded.get_mut(index))
+                {
+                    slot.push_str(&term);
+                }
+            }
+            Ok(folded)
+        })();
+        connection.execute_batch(&format!(
+            "DROP TABLE IF EXISTS temp.{FOLD_VOCABULARY};
+             DROP TABLE IF EXISTS temp.{FOLD_TABLE};"
+        ))?;
+        outcome
+    };
+    fold().map_err(|error| {
+        AbiFailure::from_store(&anyhow::Error::new(error), AbiFailure::STORAGE_ERROR)
+    })
+}
+
 /// Unicode scalar offsets `[start, end)` of the first word in `text` that begins with one of the
-/// query's words, compared case-insensitively. Words are maximal alphanumeric runs.
-fn match_span(text: &str, query: &str) -> Option<Value> {
+/// query's words. Words are maximal alphanumeric runs, compared after the search tokenizer's case
+/// and diacritic folding, so any text the index matched on its current text gets a span.
+fn match_span(
+    connection: &Connection,
+    text: &str,
+    query: &str,
+) -> Result<Option<Value>, AbiFailure> {
     let query_words: Vec<String> = query
         .split(|character: char| !character.is_alphanumeric())
         .filter(|word| !word.is_empty())
-        .map(str::to_lowercase)
+        .map(str::to_string)
         .collect();
     if query_words.is_empty() {
-        return None;
+        return Ok(None);
     }
+    let mut text_words: Vec<(usize, usize, String)> = Vec::new();
     let mut word_start: Option<usize> = None;
     let mut word = String::new();
     for (position, character) in text.chars().chain(std::iter::once(' ')).enumerate() {
         if character.is_alphanumeric() {
             word_start.get_or_insert(position);
             word.push(character);
-            continue;
-        }
-        if let Some(start) = word_start.take() {
-            let lowered = word.to_lowercase();
-            if query_words
-                .iter()
-                .any(|query_word| lowered.starts_with(query_word.as_str()))
-            {
-                return Some(json!({ "start": start, "end": position }));
-            }
-            word.clear();
+        } else if let Some(start) = word_start.take() {
+            text_words.push((start, position, std::mem::take(&mut word)));
         }
     }
-    None
+    if text_words.is_empty() {
+        return Ok(None);
+    }
+    let all_words: Vec<String> = query_words
+        .iter()
+        .cloned()
+        .chain(text_words.iter().map(|(_, _, word)| word.clone()))
+        .collect();
+    let folded = tokenizer_terms(connection, &all_words)?;
+    let (folded_query, folded_text) = folded.split_at(query_words.len());
+    let folded_query: Vec<&String> = folded_query
+        .iter()
+        .filter(|term| !term.is_empty())
+        .collect();
+    Ok(text_words
+        .iter()
+        .zip(folded_text)
+        .find(|(_, folded_word)| {
+            folded_query
+                .iter()
+                .any(|query_word| folded_word.starts_with(query_word.as_str()))
+        })
+        .map(|((start, end, _), _)| json!({ "start": start, "end": end })))
 }
 
 fn capture_instant(connection: &Connection, item_id: &str) -> Result<String, AbiFailure> {
@@ -241,7 +316,7 @@ fn hit_json(
 ) -> Result<Value, AbiFailure> {
     let corrected = hit.text_basis.as_str() == "corrected";
     let span = match (search_text, hit.matched) {
-        (Some(query), MatchedText::Current) => match_span(&hit.current_text, query),
+        (Some(query), MatchedText::Current) => match_span(connection, &hit.current_text, query)?,
         _ => None,
     };
     Ok(json!({
