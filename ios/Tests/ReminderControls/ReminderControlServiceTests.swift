@@ -78,7 +78,7 @@ final class ReminderControlServiceTests: XCTestCase {
         return session
     }
 
-    private func record(version: Int = 2, instant: String = "2096-10-02T09:46:40Z") -> ReminderRecordAnswer {
+    private func record(version: Int = 2, instant: String = "2096-10-02T07:06:40Z") -> ReminderRecordAnswer {
         ReminderRecordAnswer(
             reminderID: "rem-1", sourcePhrase: "tomorrow at nine", requestState: "resolved",
             scheduleState: "scheduled", resolvedInstant: instant, timezoneID: "Europe/Dublin", scheduleGeneration: 2,
@@ -166,7 +166,7 @@ final class ReminderControlServiceTests: XCTestCase {
                     commandID: "c-1", itemID: "item-1", expectedRevision: 4, expectedReminderVersion: 1,
                     change: .correctTime(instant: instant.addingTimeInterval(0.75), timeZoneID: "Europe/Dublin"))
             ])
-        XCTAssertEqual(ReminderInstant.string(from: instant.addingTimeInterval(0.75)), "2096-10-02T09:46:40Z")
+        XCTAssertEqual(ReminderInstant.string(from: instant.addingTimeInterval(0.75)), "2096-10-02T07:06:40Z")
     }
 
     func testACancelSendsItsCommand() async throws {
