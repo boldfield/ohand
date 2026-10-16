@@ -52,15 +52,22 @@ final class PromptSettingsModel: ObservableObject {
     @Published private(set) var hasLoaded = false
 
     private let controller: PromptSettingsControlling
-    private let calendar: Calendar
+    private let currentCalendar: () -> Calendar
+    private var calendar: Calendar { currentCalendar() }
     private let nextPromptFormatter: ISO8601DateFormatter
 
-    init(controller: PromptSettingsControlling, calendar: Calendar = .current) {
+    /// `currentCalendar` is read every time a local time is converted, so a time zone change while the app is running
+    /// is followed; the default tracks the system zone, the same one the time picker renders in.
+    init(controller: PromptSettingsControlling, currentCalendar: @escaping () -> Calendar = { .autoupdatingCurrent }) {
         self.controller = controller
-        self.calendar = calendar
+        self.currentCalendar = currentCalendar
         nextPromptFormatter = ISO8601DateFormatter()
         nextPromptFormatter.formatOptions = [.withInternetDateTime]
-        time = Self.date(hour: Self.defaultTime.hour, minute: Self.defaultTime.minute, calendar: calendar)
+        time = Self.date(hour: Self.defaultTime.hour, minute: Self.defaultTime.minute, calendar: currentCalendar())
+    }
+
+    convenience init(controller: PromptSettingsControlling, calendar: Calendar) {
+        self.init(controller: controller, currentCalendar: { calendar })
     }
 
     /// Reads the stored schedule. Reading changes nothing.
@@ -103,8 +110,22 @@ final class PromptSettingsModel: ObservableObject {
             adopt(change.outcome)
             notice = Self.notice(after: setting, report: change.report)
         } catch {
-            notice = .notSaved
-            if let stored = try? await controller.read() { adopt(stored) }
+            // The service saves before it runs the reminder pass, so a thrown error may mean the pass failed after the
+            // change was saved. Only the stored setting tells the two apart.
+            if let stored = try? await controller.read() {
+                adopt(stored)
+                notice = Self.matches(stored, setting) ? .savedNotYetApplied : .notSaved
+            } else {
+                notice = .notSaved
+            }
+        }
+    }
+
+    private static func matches(_ outcome: PromptScheduleOutcome, _ setting: PromptScheduleSetting) -> Bool {
+        switch setting {
+        case .off: return !outcome.enabled
+        case .daily(let hour, let minute):
+            return outcome.enabled && outcome.time?.hour == hour && outcome.time?.minute == minute
         }
     }
 

@@ -8,6 +8,8 @@ private final class ScriptedPromptController: PromptSettingsControlling, @unchec
     private var stored: PromptScheduleOutcome
     private(set) var configured: [PromptScheduleSetting] = []
     var configureError: Error?
+    /// Throws after the change is stored, the way the service does when its reminder pass fails.
+    var failPassAfterSaving: Error?
     var passReport: NotificationPermissionReport?
     var readError: Error?
 
@@ -36,6 +38,7 @@ private final class ScriptedPromptController: PromptSettingsControlling, @unchec
         case .off: stored = Self.outcome(enabled: false)
         case .daily(let hour, let minute): stored = Self.outcome(enabled: true, hour: hour, minute: minute)
         }
+        if let failPassAfterSaving { throw failPassAfterSaving }
         let report = passReport ?? ScriptedPromptController.cleanReport
         return PromptScheduleChange(outcome: stored, report: report)
     }
@@ -135,6 +138,42 @@ final class PromptSettingsModelTests: XCTestCase {
         await model.setEnabled(true)
         XCTAssertFalse(model.isEnabled)
         XCTAssertEqual(model.notice, .notSaved)
+    }
+
+    func testAPassThatFailsAfterSavingEnablingIsReportedAsSaved() async {
+        let controller = ScriptedPromptController()
+        controller.failPassAfterSaving = CallFailed()
+        let model = PromptSettingsModel(controller: controller, calendar: calendar)
+        await model.load()
+        await model.setEnabled(true)
+        XCTAssertTrue(model.isEnabled)
+        XCTAssertEqual(model.notice, .savedNotYetApplied)
+    }
+
+    func testAPassThatFailsAfterSavingDisablingIsReportedAsSaved() async {
+        let controller = ScriptedPromptController(stored: ScriptedPromptController.outcome(enabled: true))
+        controller.failPassAfterSaving = CallFailed()
+        let model = PromptSettingsModel(controller: controller, calendar: calendar)
+        await model.load()
+        await model.setEnabled(false)
+        XCTAssertFalse(model.isEnabled)
+        XCTAssertEqual(model.notice, .savedNotYetApplied)
+    }
+
+    func testTheTimeFollowsAZoneChangeAfterTheModelWasBuilt() async {
+        var zone = TimeZone(identifier: "UTC")!
+        let current: () -> Calendar = {
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = zone
+            return calendar
+        }
+        let controller = ScriptedPromptController(stored: ScriptedPromptController.outcome(enabled: true, hour: 9))
+        let model = PromptSettingsModel(controller: controller, currentCalendar: current)
+        zone = TimeZone(identifier: "Asia/Tokyo")!
+        await model.load()
+        XCTAssertEqual(current().dateComponents([.hour, .minute], from: model.time).hour, 9)
+        await model.setTime(current().date(bySettingHour: 18, minute: 15, second: 0, of: Date())!)
+        XCTAssertEqual(controller.configured, [.daily(hour: 18, minute: 15)])
     }
 
     func testADeniedPermissionIsSavedAndExplainedWithoutRetrying() async {
