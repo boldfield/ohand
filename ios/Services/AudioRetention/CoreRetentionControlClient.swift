@@ -25,7 +25,7 @@ protocol RetentionControlCore: Sendable {
 /// identifiers start at `firstOperationID`, a range no other client uses. Call `shutDown()` before closing the core so
 /// no completion is left waiting.
 final class CoreRetentionControlClient: RetentionControlCore, @unchecked Sendable {
-    static let firstOperationID: UInt64 = 1 << 47
+    static let firstOperationID: UInt64 = 1 << 46
 
     static let shutDownFailure = CoreFailure(
         errorClass: .cancelled, code: "client_shut_down", message: "the retention control client was shut down")

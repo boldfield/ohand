@@ -530,6 +530,10 @@ private final class CoreHandleReadSource: PrivateReadSource {
     func startRetentionRead(operationID: UInt64, kind: RetentionReadKind, readScopes: [CoreExportScope]) throws {
         try core.startRetentionRead(operationID: operationID, kind: kind, readScopes: readScopes)
     }
+
+    func startJobConfigurationRead(operationID: UInt64, command: JobConfigurationCommand) throws {
+        try core.startJobConfiguration(operationID: operationID, command: command)
+    }
 }
 
 /// Reads an item's independent status facts from the core, only through the private read gate: a capture-only session
@@ -801,6 +805,7 @@ public final class ServiceCompositionRoot {
     static let suggestionResponseClientName = "suggestion responses"
     static let itemDetailClientName = "item detail"
     static let retentionControlClientName = "retention controls"
+    static let jobConfigurationClientName = "job configuration"
 
     /// One half-open interval of operation identifiers `[start, end)` that a client claims.
     public struct OperationRange: Equatable, Sendable {
@@ -840,6 +845,7 @@ public final class ServiceCompositionRoot {
         fixedWidthRange(suggestionResponseClientName, from: CoreSuggestionResponseClient.firstOperationID),
         fixedWidthRange(itemDetailClientName, from: CoreItemDetailClient.firstOperationID),
         fixedWidthRange(retentionControlClientName, from: CoreRetentionControlClient.firstOperationID),
+        fixedWidthRange(jobConfigurationClientName, from: CoreJobConfigurationClient.firstOperationID),
         OperationRange(
             name: processingHealthClientName, start: ProcessingHealthService.firstOperationID,
             end: JobRunnerService.firstOperationID),
@@ -863,6 +869,9 @@ public final class ServiceCompositionRoot {
     /// Configures audio retention and acts on unresolved sole audio; reads are gated and writes need an authenticated
     /// session.
     public let retentionControls: RetentionControlService
+    /// Re-pins waiting work, requeues a job, revokes a profile and lists the jobs pinned to one; needs an authenticated
+    /// read session.
+    public let jobConfiguration: JobConfigurationService
 
     let adapters: CompositionAdapters
     /// The session whose scope gates every private read the root performs.
@@ -886,6 +895,7 @@ public final class ServiceCompositionRoot {
     private let suggestionResponseClient: CoreSuggestionResponseClient
     private let itemDetailClient: CoreItemDetailClient
     private let retentionControlClient: CoreRetentionControlClient
+    private let jobConfigurationClient: CoreJobConfigurationClient
     private let modules: [CompositionModule]
     private let foreground: ForegroundState
     private let stateLock = NSLock()
@@ -954,6 +964,8 @@ public final class ServiceCompositionRoot {
         itemDetails = assembly.itemDetails
         retentionControlClient = assembly.retentionControlClient
         retentionControls = assembly.retentionControls
+        jobConfigurationClient = assembly.jobConfigurationClient
+        jobConfiguration = assembly.jobConfiguration
         reminderReconciler = assembly.permissionReconciler
         foreground = assembly.foreground
         jobRunner.setDrainIdleObserver { [weak self] in self?.runReminderPassAfterDrain() }
@@ -1099,6 +1111,7 @@ public final class ServiceCompositionRoot {
         suggestionResponseClient.shutDown()
         itemDetailClient.shutDown()
         retentionControlClient.shutDown()
+        jobConfigurationClient.shutDown()
         reminderCore.invalidate()
         statusReader.shutDown()
         coreHandle.close()
@@ -1368,6 +1381,8 @@ public final class ServiceCompositionRoot {
         let itemDetails: ItemDetailService
         let retentionControlClient: CoreRetentionControlClient
         let retentionControls: RetentionControlService
+        let jobConfigurationClient: CoreJobConfigurationClient
+        let jobConfiguration: JobConfigurationService
         let permissionReconciler: NotificationPermissionReconciler
         let foreground: ForegroundState
     }
@@ -1495,6 +1510,11 @@ public final class ServiceCompositionRoot {
                 core: retentionControlClient, session: adapters.readSession,
                 pressureProbe: VolumeStoragePressureProbe(volumeURL: layout.rootDirectory),
                 removerProvider: { modules.lazy.compactMap { ($0 as? LifecycleCoordinator)?.audioRetention }.first })
+            let jobConfigurationClient = CoreJobConfigurationClient(core: core, gate: readGate)
+            router.register { jobConfigurationClient.handle($0) }
+            undo.append { jobConfigurationClient.shutDown() }
+            let jobConfiguration = JobConfigurationService(
+                core: jobConfigurationClient, session: adapters.readSession)
             let permissionReconciler = NotificationPermissionReconciler(
                 center: adapters.notificationCenter, reconciliation: reminderCore,
                 observations: adapters.permissionObservations)
@@ -1548,7 +1568,8 @@ public final class ServiceCompositionRoot {
                 suggestionResponseClient: suggestionResponseClient,
                 suggestionResponses: suggestionResponses, itemDetailClient: itemDetailClient,
                 itemDetails: itemDetails, retentionControlClient: retentionControlClient,
-                retentionControls: retentionControls, permissionReconciler: permissionReconciler,
+                retentionControls: retentionControls, jobConfigurationClient: jobConfigurationClient,
+                jobConfiguration: jobConfiguration, permissionReconciler: permissionReconciler,
                 foreground: foreground)
         } catch {
             for step in undo.reversed() {

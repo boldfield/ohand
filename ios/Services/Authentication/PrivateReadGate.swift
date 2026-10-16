@@ -24,6 +24,7 @@ protocol PrivateReadSource: AnyObject {
         operationID: UInt64, itemID: String, kind: ReminderReadKind, readScopes: [CoreExportScope]) throws
     func startItemDetail(operationID: UInt64, itemID: String, readScopes: [CoreExportScope]) throws
     func startRetentionRead(operationID: UInt64, kind: RetentionReadKind, readScopes: [CoreExportScope]) throws
+    func startJobConfigurationRead(operationID: UInt64, command: JobConfigurationCommand) throws
 }
 
 /// Raised by a read source that does not implement a read added after it was written.
@@ -40,6 +41,10 @@ extension PrivateReadSource {
 
     /// Default for the same reason; the core-backed source in the composition root overrides it.
     func startRetentionRead(operationID: UInt64, kind: RetentionReadKind, readScopes: [CoreExportScope]) throws {
+        throw PrivateReadNotSupportedBySource()
+    }
+
+    func startJobConfigurationRead(operationID: UInt64, command: JobConfigurationCommand) throws {
         throw PrivateReadNotSupportedBySource()
     }
 }
@@ -210,6 +215,20 @@ final class PrivateReadGate {
     private func startRetentionRead(operationID: UInt64, kind: RetentionReadKind) throws {
         try issue(operationID: operationID) {
             try source.startRetentionRead(operationID: operationID, kind: kind, readScopes: authorizedScopes)
+        }
+    }
+
+    func startJobsPinnedToProfile(operationID: UInt64, profileVersion: String, limit: Int?) throws {
+        try issue(operationID: operationID) {
+            try source.startJobConfigurationRead(
+                operationID: operationID,
+                command: .jobsPinnedToProfile(profileVersion: profileVersion, limit: limit))
+        }
+    }
+
+    func startRequeueRecord(operationID: UInt64, jobID: String) throws {
+        try issue(operationID: operationID) {
+            try source.startJobConfigurationRead(operationID: operationID, command: .requeueRecord(jobID: jobID))
         }
     }
 
