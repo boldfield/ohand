@@ -97,6 +97,9 @@ enum VoiceHandoffResult: Equatable {
     case keptForRetry
     /// Nothing was staged; the audio remains in the in-progress store.
     case notStaged
+    /// A staging record exists but its audio is missing, empty or could not be moved into place. Nothing durable holds
+    /// the audio, so this is never kept-for-retry. Whether any bytes remain in the in-progress store is read from disk.
+    case stagedAudioUnavailable
     /// The user deleted the item for this capture.
     case itemDeleted
 }

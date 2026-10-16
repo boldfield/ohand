@@ -484,6 +484,7 @@ fn a_ready_job_is_sent_to_the_pinned_destination_off_the_worker_and_completes() 
 fn a_self_hosted_job_is_sent_only_to_its_own_endpoint_and_completes() {
     let _guard = serial();
     let session = Session::open_with_profile("self-hosted", self_hosted_profile());
+    protocols::enable_for_test(session.handle, &["anthropic", "open_ai", "self_hosted"]);
     assert_eq!(session.register_host(&[]).status, OHAND_CORE_STATUS_OK);
 
     assert_eq!(session.start(22).status, OHAND_CORE_STATUS_OK);
@@ -521,6 +522,58 @@ fn a_self_hosted_job_is_sent_only_to_its_own_endpoint_and_completes() {
 
     wait_until_idle(session.handle);
     session.assert_no_command();
+    session.close();
+}
+
+#[test]
+fn a_self_hosted_job_waits_until_the_host_enables_the_protocol_and_stops_when_it_is_disabled() {
+    let _guard = serial();
+    let session = Session::open_with_profile("self-hosted-gate", self_hosted_profile());
+    assert_eq!(session.register_host(&[]).status, OHAND_CORE_STATUS_OK);
+
+    session.start(161);
+    let summary = payload_of(&session.event(161));
+    assert_eq!(summary["stop"], "idle", "{summary}");
+    assert_eq!(only_job(&summary)["settlement"], "backed_off", "{summary}");
+    session.assert_no_command();
+    let deferred = session.job(JOB_ID);
+    assert_eq!(deferred.status, JobStatus::Queued);
+    assert_eq!(deferred.attempt_count, 1, "only the claim, no failure");
+    assert_eq!(
+        deferred.failure_reason.as_deref(),
+        Some(PROTOCOL_DEFERRED_REASON)
+    );
+    wait_for_drain_to_end(session.handle);
+
+    protocols::enable_for_test(session.handle, &["anthropic", "open_ai", "self_hosted"]);
+    session.start(162);
+    let send = session.command();
+    assert_eq!(send.command, OHAND_JOB_HOST_COMMAND_SEND);
+    session.complete(send.request_id, 200, &self_hosted_reply());
+    let summary = payload_of(&session.event(162));
+    assert_eq!(only_job(&summary)["settlement"], "completed", "{summary}");
+    assert_eq!(session.job(JOB_ID).status, JobStatus::Completed);
+    wait_until_idle(session.handle);
+    session.close();
+}
+
+#[test]
+fn disabling_a_protocol_again_stops_new_dispatches() {
+    let _guard = serial();
+    let session = Session::open_with_profile("self-hosted-disable", self_hosted_profile());
+    protocols::enable_for_test(session.handle, &["anthropic", "open_ai", "self_hosted"]);
+    session.register_host(&[]);
+    protocols::enable_for_test(session.handle, &["anthropic", "open_ai"]);
+
+    session.start(163);
+    let summary = payload_of(&session.event(163));
+    assert_eq!(only_job(&summary)["settlement"], "backed_off", "{summary}");
+    session.assert_no_command();
+    assert_eq!(session.job(JOB_ID).status, JobStatus::Queued);
+    assert_eq!(
+        session.job(JOB_ID).failure_reason.as_deref(),
+        Some(PROTOCOL_DEFERRED_REASON)
+    );
     session.close();
 }
 
@@ -1103,4 +1156,155 @@ fn a_host_that_settled_the_job_as_failed_is_reported_as_failed() {
 fn set_reachable_after_register(session: &Session) {
     session.register_host(&[NATIVE_JOB_TYPE]);
     assert_eq!(set_reachable(session, true).status, OHAND_CORE_STATUS_OK);
+}
+
+mod voice_capture_transcription {
+    use super::*;
+    use crate::ingress::transcription::{
+        apply_transcription_outcome, InterpretationRequest, RecognizedTranscript, RecognizerResult,
+        TranscriptionOutcome,
+    };
+    use crate::privacy::routing::{JOB_TYPE_INTERPRET, JOB_TYPE_TRANSCRIPTION_ATTACHMENT};
+    use crate::store::captures::Capture;
+
+    const VOICE_CAPTURE_ID: &str = "5a1c0000-0000-4000-8000-0000000000c9";
+    const VOICE_AUDIO_REFERENCE: &str = "staging/2026-10-08/clip-9.m4a";
+    const SPOKEN_TEXT: &str = "remind me to water the ferns tomorrow";
+
+    /// Imports an audio-only capture; `stored_before_queueing` removes the job import queued, as if
+    /// the capture had been stored before imports queued their own.
+    fn seed_voice_capture(path: &str, stored_before_queueing: bool) {
+        let mut database =
+            Database::open(path, std::sync::Arc::new(crate::store::schema::SystemClock)).unwrap();
+        database
+            .conn()
+            .execute(
+                "INSERT INTO routes (route_id, route_name, scope, processing_destinations, \
+                 created_at) VALUES (?, ?, 'personal', '[]', '2026-10-08T09:00:00Z')",
+                rusqlite::params![ROUTE_ID, ROUTE_ID],
+            )
+            .unwrap();
+        let capture = Capture::new(
+            VOICE_CAPTURE_ID.to_string(),
+            None,
+            Some(VOICE_AUDIO_REFERENCE.to_string()),
+            "2026-10-08T09:30:00Z".to_string(),
+            "America/New_York".to_string(),
+            -240,
+            "en_US".to_string(),
+            "gregorian".to_string(),
+            "personal".to_string(),
+            ROUTE_ID.to_string(),
+            false,
+            "2026-10-08T09:30:01Z".to_string(),
+            None,
+        )
+        .unwrap();
+        crate::ingress::import_foreground_ingress(&mut database, &capture).unwrap();
+        if stored_before_queueing {
+            database.conn().execute("DELETE FROM jobs", []).unwrap();
+        }
+    }
+
+    fn drain_transcribes_the_capture(name: &str, stored_before_queueing: bool) {
+        let _guard = serial();
+        let session = Session::open_seeded(name, |path| {
+            seed_voice_capture(path, stored_before_queueing)
+        });
+        session.register_host(&[JOB_TYPE_TRANSCRIPTION_ATTACHMENT]);
+
+        session.start(321);
+        // The fake recognizer: the host is asked to run the transcription job and answers with a
+        // transcript through the core's apply path, as the native handler does.
+        let command = session.command();
+        assert_eq!(command.command, OHAND_JOB_HOST_COMMAND_RUN_CAPABILITY);
+        let run: Value = serde_json::from_slice(&command.data).unwrap();
+        assert_eq!(run["job_type"], JOB_TYPE_TRANSCRIPTION_ATTACHMENT);
+        let job_id = run["job_id"].as_str().unwrap().to_string();
+        let acknowledgment = apply_transcription_outcome(
+            &mut session.database(),
+            &TranscriptionOutcome {
+                job_id: job_id.clone(),
+                lease_attempt: run["attempt"].as_i64().unwrap() as i32,
+                audio_reference: VOICE_AUDIO_REFERENCE.to_string(),
+                result: RecognizerResult::Transcript(RecognizedTranscript {
+                    text: SPOKEN_TEXT.to_string(),
+                    confidence: Some(0.9),
+                    detected_language: Some("en-US".to_string()),
+                    recognizer: "fake-recognizer/1".to_string(),
+                    audio_sha256:
+                        "0b5f1b0f6c2a4d0d9e8d6f6e0f7b8a1c2d3e4f5061728394a5b6c7d8e9f00112"
+                            .to_string(),
+                }),
+                interpretation: Some(InterpretationRequest {
+                    job_id: "interpret-after-transcription".to_string(),
+                    profile_version: None,
+                    request_version: "request-after-transcription".to_string(),
+                }),
+            },
+            Utc::now(),
+        )
+        .unwrap();
+        assert!(matches!(
+            acknowledgment.disposition,
+            crate::ingress::transcription::TranscriptionDisposition::Attached { .. }
+        ));
+        assert_eq!(
+            session
+                .finish(command.request_id, OHAND_JOB_CAPABILITY_SETTLED, "")
+                .status,
+            OHAND_CORE_STATUS_OK
+        );
+        let summary = payload_of(&session.event(321));
+        assert!(
+            summary["jobs"].as_array().unwrap().iter().any(|job| {
+                job["job_id"] == job_id.as_str() && job["settlement"] == "completed"
+            }),
+            "{summary}"
+        );
+
+        assert_eq!(session.job(&job_id).status, JobStatus::Completed);
+        let database = session.database();
+        let (state, text): (String, String) = database
+            .conn()
+            .query_row(
+                "SELECT i.transcription_state, t.text FROM items i \
+                 JOIN transcript_attachments t ON t.item_id = i.item_id",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "transcribed");
+        assert_eq!(text, SPOKEN_TEXT);
+        let interpretation_jobs: i64 = database
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM jobs WHERE job_type = ? AND job_id = ?",
+                rusqlite::params![JOB_TYPE_INTERPRET, "interpret-after-transcription"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(interpretation_jobs, 1);
+        let transcription_jobs: i64 = database
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM jobs WHERE job_type = ?",
+                [JOB_TYPE_TRANSCRIPTION_ATTACHMENT],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(transcription_jobs, 1, "one transcription job in total");
+        drop(database);
+        session.close();
+    }
+
+    #[test]
+    fn a_drain_transcribes_a_voice_capture_whose_import_queued_the_job() {
+        drain_transcribes_the_capture("voice-imported", false);
+    }
+
+    #[test]
+    fn a_drain_backfills_and_transcribes_a_voice_capture_stored_without_a_job() {
+        drain_transcribes_the_capture("voice-backfilled", true);
+    }
 }

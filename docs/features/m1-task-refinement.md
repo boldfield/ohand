@@ -127,7 +127,69 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
     - (b) In `ios/Tests/ProjectSmoke/ProjectSmokeTests.swift`, only the `ContentView` assertion that U01's shell replaces. Any other assertion is out.
     - (c) In `ios/project.yml`, exactly one `OhAndApp` sources entry, for the repository's `app/` directory: `optional: true`, `createIntermediateGroups: true`, placeholders excluded. Without it no target compiles the `app/<slice>/` directories the UI slices own. If `ios/scripts/check_project_config.py` rejects the entry, U01 blocks and names the check. It does not edit the check.
   - **Still owed in U01.** Retry a failed launch from `sceneWillEnterForeground` and `willConnectTo` when no services exist. `launch()` is idempotent. A test covers it (Opus round 1, finding 2).
+- B05 prerequisites: the native daily-prompt pipeline (coordinator, 2026-10-14, after PR #213 round 1). Both reviewers rejected B05's Swift `DailyPromptSchedule`. It is an in-memory copy of S02's `PromptSchedule` that diverges from it:
+  - Opus: it replays a prompt delivered while the app was not observing, after the clock is set back.
+  - Opus: it replans the same local date after a relaunch and westward travel.
+  - GPT: it spends a date that core never attempted.
+  - GPT: no production path installs a prompt at all.
+
+  B05 blocked itself, correctly. S02 and S03 built the core schedule and coordinator, but nothing exposes `PromptSchedule` through the FFI, nothing persists it (`reconcile_prompts` says "persist it after every pass"), and nothing native installs prompts (`NotificationPermissionModels.swift:163`: "Installing them belongs to the prompt scheduler"; `LifecycleCoordinator.swift:103`: "the core's daily prompt schedule is not exposed through the bridge"). No task owned this. Without it, optional daily prompts never fire in M1, whatever U08a configures.
+  - **New tasks.**
+    - **S05a (core):** the core persists the schedule and owns it end to end. Native code supplies only the time zone, the permission state and the triggers.
+    - **S05b (native):** a prompt service driven by the lifecycle, connected through the root.
+    - **B05** then depends on S05b and drops its Swift copy. Its prompt half becomes "forward clock and zone changes to the core schedule and run a pass", tested against the real core. Its reminder half (PR #213: debouncing, absolute instants, `TimeChangeRealCoreTests`) was sound and is kept.
+  - **S05a allowance.**
+    - (1) One appended migration step in `core/src/store/schema/mod.rs`, the next version after v10. It creates a single-row `prompt_schedule` table holding the serialized `PromptSchedule` and `updated_at`, and it gets a migration test in `core/tests/migrations/`.
+    - (2) In `core/src/ffi/notification_reconciliation.rs`, only what makes the reminder pass take its prompt demands from the persisted schedule through S02's `reconcile_prompts`, and persist the schedule in the same call. Native-supplied prompt candidates stop being a source of installs.
+
+    - (3) **Native effect path**, added 2026-10-14 after PR #219 round 1, where both reviewers found that the native effect handler refuses every prompt command the core now issues.
+      - The files: `NotificationIdentifier`/`NotificationModels.swift`, `NotificationBridge.swift`, `NotificationEventIngestor.swift`, `ReminderNativeEffects.swift` and `CoreReminderReconciler.swift`, with their tests under `ios/Tests/Notifications/` and `ios/Tests/NotificationPermission/`.
+      - What it covers: accepting core-issued `prompt:<local date>` identifiers as a separate prompt identifier kind. That kind must be schedulable and cancellable, and it must appear in the pending and delivered listings the core reads. Today `NotificationBridge.swift:173` drops non-reminder identifiers from the pending listing, so the core would treat an installed prompt as gone and spend its date.
+      - Reminder identifier validation stays exactly as strict.
+      - A delivered or tapped prompt is recognized as a prompt event and is neither journaled as a reminder action nor reported as invalid. Routing a prompt tap to the S03 activation belongs to U08b.
+      - The real-core test must assert that the granted prompts are in the fake centre, that the pass converges and that no scheduling failure is recorded.
+
+    Nothing else outside S05a's paths is covered.
+- T11 prerequisites, round 2 (coordinator, 2026-10-14, after PR #216 round 1). Both reviewers found that T11's self-hosted "registration" is inert. `OptionalCapabilitiesModule.selfHosted` has no consumer. Because T11a registered `SelfHosted` unconditionally in the job runner, a root without the module still dispatches a stored `supported` self-hosted profile (the PR's own test shows it). So "absent capability stays disabled" fails. T11 blocked itself, correctly: no module seam can switch a provider protocol on or off.
+  - The coordinator chose a core-enforced gate over redefining the stored profile as the registration. T05 requires a capability to be absent or disabled for the base trial until its own canaries pass. That has to be a build-level decision the core enforces, not a property of user data that U05 may later write.
+  - **New tasks.**
+    - **T11c (core):** the host declares which provider protocols may dispatch. Self-hosted is off by default. T11c also adds a typed provider-profile status read.
+    - **T11d (root):** modules declare enabled protocols, the root passes the union to the core at assembly, and modules get the status read as a typed client.
+  - **Serialization.** The root edits are chained on `CompositionRoot.swift`: U01b → U01c → S05b → T11d. U01 is the critical path, B05 comes next, and T11 is off the M1 critical path. T11 now depends on T11c and T11d.
+- C04c added (coordinator, 2026-10-14, after U01c PR #218 round 1). Opus approved U01c. GPT rejected it, correctly in substance. The root's `CompositionRecordingOutcome.audioUnavailable` (a record is staged but the audio is missing or unreadable) has no honest mapping into C04's voice contract. `VoiceHandoffResult` has only `saved`, `keptForRetry` (asserts the audio is durable), `notStaged` (asserts the audio remains) and `itemDeleted`, and `VoiceRecordingController.outcome(for:)` turns the first two into `keptForRetry`. The root seam itself is correct and meets U01c's acceptance. The gap is in the consumer contract, so C04c owns it. U01c lands as is, and U01 depends on C04c so its adapter can map honestly. `VoiceCaptureOutcome.unrecoverable(captureID:end:fileRetained:)` already exists.
+- F13 and F14 added (coordinator, 2026-10-14). These are intermittent failures that reviewers saw and that no task owns. F13: `ProviderExchangeBoundaryTests.testUntrustedCertificateIsRefusedAndDiagnosticsStayProtected` got no final event within 10 s (run 38534729949, attempt 1, job 115754735518, `:357`). F14: the `tools/bench` test `fake_run_with_an_unverified_self_hosted_arm_skips_every_case_and_sends_nothing` failed once in `make test` (seen by the Opus reviewer on L05b, 2026-10-13).
 - V06 and V07 now depend on V01 alone: they implement Rust adapters against its transport interface using fixtures. V05 is the native effect implementation and remains required by app composition/integration, not by independent protocol adapter implementation. This is an explicit dependency override for those retained tasks.
+- Tier-2 prerequisites added (coordinator, 2026-10-14, at the maintainer's direction, before U02a, U05a, U05b and U06a were claimed). Checking those four against main at 164f722 found five gaps that no task owns:
+  - **Nothing queues interpretation for a saved capture.** `import_foreground_ingress` (`core/src/ingress/import.rs:147`) stores the capture, item and index row and queues no job. The only production enqueue of an `interpret` job is the transcription attachment (`core/src/ingress/transcription/mod.rs:952`), and only when the native caller supplies an `InterpretationRequest`; the root never does (`TranscriptionCapability` defaults to `{ _ in nil }`). So no capture from the app is interpreted, and even the offline fast path (which runs only inside an interpret job) never sees it. I08 owns this.
+  - **No production code writes a provider profile, a default or a route grant.** `INSERT INTO provider_profiles` and `INSERT INTO route_authorizations` appear only in tests. No default-profile concept exists. U05a's "existing versioned profile service" does not exist. V01b owns profiles and defaults; V02b owns route grants.
+  - **No connection check exists** for U05b's "explicitly authorized connection test". V01c owns it.
+  - **Retrieval is not exported.** `scoped_query`/`scoped_list` (`core/src/retrieval/query/mod.rs:76`, `:97`) have no FFI export, and `PrivateReadGate` admits only store check, get capture and item status. R04 owns the export.
+  - **The root offers none of these to `app/` modules** (B02 rule: modules get typed clients only through `CompositionCoreClients`/`CompositionPrivateReads`). U01d adds the gated retrieval reads; U01e adds the configuration clients and the credential service. Both join the root-file chain after T11d (U01b → U01c → S05b → T11d → U01d → U01e), so S05b and T11d are not disturbed.
+  - I08 amended after round 1 (PR #225): criteria 2 and 4 as first written were coordinator errors. The request version must be a UUID, and a no-profile non-match waits for configuration (`unprocessed`, `AwaitingConfiguration`) rather than ending `uninterpreted`. Both now name the contract they follow, criterion 4 asserts more than before, and test-fixture adaptations for the auto-queued job are granted.
+  - Dependency edits: U02a also depends on U01d; U05a on U01e; U06a on U01e and U02a (its criterion 1 retrieves before provider setup, which needs U02a's search).
+- F15 and F16 added (coordinator, 2026-10-15). Two intermittent failures that no task owns. Both rejected otherwise-approved work.
+  - F15: memory-safety failures in the `notification_reconciliation` FFI tests on Linux reviewer pods. (a) F14 round 2, merged with `d3dafb3`: `answers_that_do_not_fit_the_command_are_refused_and_the_command_waits_for_a_valid_one` failed, then the `ohand_core` test process died with SIGSEGV. (b) S05b round 1, merged with `fefb034`: the lib test binary aborted with glibc `corrupted size vs. prev_size in fastbins` during `optional_prompts_use_the_slots_left_and_are_withheld_without_permission`, with no Rust change in the PR. The coordinator ran 8 consecutive full `cargo test --lib` runs on `d3dafb3` on macOS, all clean, so the failure is load- or platform-dependent. One confirmed hazard: the tests' `Session` has no `Drop`, so a panicking assertion skips `close()` and leaves the core handle open with the native-effects callback registered against a freed context. That explains (a)'s SIGSEGV after a failure, but not (b), which had no reported failure first.
+  - F16: `NotificationProbeAuthorizedUITests.testAuthorizedSchedulingBehavior`, foreground-delivery activity (`:71`): "add took 99 ms for a 15 s trigger; delivered=false pending=false" (run 38666074347, job 116198215493, PR #223 head `49f0f8f`, 2026-10-15). F10's fix for a trigger that is already in the past by the time `add()` returns does not cover this. The request was added in good time and then vanished.
+- App-facing API layer added (coordinator, 2026-10-15, at the maintainer's direction). U07a and U08a blocked themselves on main `fefb034` because the operations they configure are not reachable from `app/`. A read-only audit of the 12 unclaimed UI slices then found that the M1 plan never scheduled the layer between core and UI. Many operations exist as core functions (for example `mark_deletion_intent`, `get_reminder`, `apply_user_time_correction`, `end_item_with_event`, `record_not_now`, `requeue_job_to_new_profile`) but have no user-facing FFI export or root client. `ExportService` and `ResetService` are never constructed in production. Prompt taps are dropped because the root's ingestor has no `promptHandler`. A notification tap records the item but presents nothing. Only U09 was buildable as specified. The coordinator added A01–A13 and the two allowances below, deferred S04, and recorded each slice's new dependencies in `effective_dependencies`:
+  - **Capability client allowance (standing).** This replaces root-file serialization for typed capability clients. A task whose slice cites this allowance may, in addition to its owned paths:
+    1. Add its client and service files under the new `ios/Services/<Area>/` directory its spec names.
+    2. In `ios/Services/Assembly/CompositionRoot.swift`, add one registration for that client: a client-name constant, one entry in `reservedOperationRanges`, its construction in the root assembly with `router.register` and undo, one public property or accessor on `ServiceCompositionRoot`, and one shutdown call. Each is a single line or one contiguous block at the end of its list.
+    3. In `ios/Services/Authentication/PrivateReadGate.swift`, add one gated verb per private read the capability exports, using the existing `issue`/`admit` pattern.
+    4. In `ios/Services/Assembly/LifecycleCoordinator.swift`, add one public accessor exposing an existing internal service, where the spec names it.
+
+    Nothing else in those files changes. Every read of stored history or state derived from it goes through the read gate. Every write that changes stored history, reminders, deletion or what leaves the device requires an authenticated read session, and a capture-only session is refused. Conflicts are resolved by rebasing, and the merger bounces the PR for rework on conflict. Reviewers reject edits beyond these registrations. Root behaviour changes (the ingress path, launch order, notification handling) are not covered; they stay on the serialized root chain S05b → T11d → A10 → A11 → A12. U01d and U01e now register under this allowance, so they no longer wait on T11d or on each other.
+  - **Management context allowance (standing).** Each UI slice may add exactly one field to `ManagementContext` (`ios/AppAssembly/ManagementCatalog.swift`) and one line that builds it in `AppServices` (`ios/AppAssembly/AppServices.swift`). The field carries only seams that already exist on main or in the slice's dependencies. This supplements the shared host allowance. U07c may additionally add exactly one section entry to U02b's source-detail host, for its per-item delete control.
+  - **S04 deferred.** As scoped it cannot be built:
+    - `PayloadKind` has only `Generic` (`core/src/reminders/reconcile/effects.rs:48`), and prompts hard-code it (`core/src/suggestions/schedule/apply.rs:178`).
+    - The preview opt-in has no store, and `routes.preview_safe` is only ever written as 0 (`core/src/ffi/route_provisioning.rs:99`).
+    - Prompts choose their item at open time (S03), so a preview needs an S02/S03 design change.
+
+    S04 is an opt-in feature and no M1 task depends on it. It now depends on T08 and will be re-decomposed after the trial verdict.
+  - **Missing seams found by blocked tasks (coordinator, 2026-10-15).** Four tasks blocked with accurate reports. Each was checked against main `c33b978`.
+    - F15's fix is approved by both reviewers, but its 50-run soak cannot pass while two `tools/bench` transport tests fail under load (3-second polling window). F17 fixes those tests; F15 depends on F17.
+    - V01c's owned file was a sibling of `provider_transport` and could not reach its private transport. Its file moves under `core/src/ffi/provider_transport/`, as `shadow_review` already is.
+    - U02a must show each result's type, but no layer of the retrieval answer carries it. R05 adds it; U02a depends on R05.
+    - A08's "Delete audio" cannot pass the fence, because `authorize_audio_removal` approves only expired audio, and its "Retry transcription" has no job path to reuse. While tracing the second, the coordinator found that **no production code enqueues a `transcription_attachment` job at all**: voice captures stay `audio_pending` and are never transcribed. C07 queues the job at import, backfills stored voice captures at drain start and provides the requeue function; A14 adds the user-initiated removal decision. A08 keeps all its criteria and depends on both.
 
 ## Why some tasks stay together
 
@@ -699,6 +761,648 @@ Acceptance:
    Existing tests pass. The macOS CI run for the exact head is linked.
 
 Source pointers: `ios/Services/Ingress/ForegroundIngressService.swift`; `ios/Services/Ingress/IngressRecord.swift:20`; `ios/Services/Assembly/CompositionRoot.swift:779`, `:826`; `ios/Capture/Voice/VoiceRecordingTypes.swift:105`; `ios/Capture/Voice/VoiceRecoveryTypes.swift:32`.
+
+### S05a
+
+Persist the daily prompt schedule in the core and expose it through the FFI
+
+Make the core the only holder of the S02 prompt schedule, durable across relaunches, and run prompt installs from it inside the reminder pass.
+
+Owned paths: `core/src/ffi/prompt_schedule.rs`, `core/src/ffi/prompt_schedule/`, its single `pub mod` line in `core/src/ffi/mod.rs`, `ios/OhAndCoreBridge/CoreHandle+PromptSchedule.swift`. It also holds the allowance in "B05 prerequisites": one migration step, and the prompt-source change in `core/src/ffi/notification_reconciliation.rs`.
+
+Dependencies: none (L05b's v10 has landed).
+
+Acceptance:
+
+1. The core loads and saves `PromptSchedule` from the new table. Every exported entry point that takes `now` reads the core clock, takes the IANA zone from the caller and persists the schedule before it returns.
+2. Exports:
+   - configure (off, or a daily local time);
+   - refresh (S02's `RefreshTrigger`: launch, foreground, time or zone change, settings change);
+   - read the current settings and next planned occurrence, without content.
+3. With optional prompts allowed and the schedule enabled, the reminder pass takes its prompt demands only from the persisted schedule, through `reconcile_prompts`, and records the capacity pass in the ledger. Prompt candidates supplied by the caller no longer cause installs. Reminders keep priority over prompts.
+4. Rust tests on a migrated store cover:
+   - the schedule survives reopening the store;
+   - a prompt the OS delivered while nothing was observing is not reinstalled after the clock is set back;
+   - after a reopen and westward zone travel, no second prompt for an already-held local date;
+   - a planned occurrence that permission or capacity kept from being attempted is not spent, and a later time the same day schedules;
+   - DST gap and fold use S02's local-time rules;
+   - repeated refreshes do not duplicate an install;
+   - the migration test.
+
+   `make check` and `make test` pass. The exact-head macOS CI run is linked: the bridge must compile.
+
+Source pointers: `core/src/suggestions/schedule/plan.rs:167`, `:213`, `:222`, `:299`; `core/src/suggestions/schedule/apply.rs:119`; `core/src/ffi/notification_reconciliation.rs:21`, `:249`.
+
+### S05b
+
+Drive the daily prompt schedule from the app lifecycle
+
+Connect the core prompt schedule to launch, foreground, permission changes and settings, so a configured daily prompt is actually installed and kept current.
+
+Owned paths: `ios/Services/Prompts/`, `ios/Tests/Prompts/`, `ios/Services/Assembly/CompositionRoot.swift` (only the prompt service's construction and its typed client), `ios/Tests/Services/CompositionRootTests.swift`.
+
+Dependencies: S05a, U01c (shared file).
+
+Acceptance:
+
+1. A prompt service over a root-provided typed client exposes configure, read, and a time-change entry that refreshes with the current zone. The root installs it as the `LifecycleCoordinator` `.promptEligibility` action, so every launch, foreground and time-change pass refreshes the schedule and the same pass installs or cancels prompts through the core. U08a's settings UI calls configure; that UI is not built here.
+2. Prompts stay off until configured. Turning them off cancels any installed prompt. Permission denied or provisional follows N04b's existing rules. No prompt content appears in any payload beyond S03's rules.
+3. Real-core simulator tests with the fake notification centre:
+   - configure, then launch, installs exactly one prompt for the next eligible local date;
+   - a foreground pass does not duplicate it;
+   - turning prompts off cancels it;
+   - a relaunch keeps the ledger: no second prompt for a held date.
+
+   Existing tests pass. The exact-head macOS CI run is linked.
+
+Source pointers: `ios/Services/Assembly/LifecycleCoordinator.swift:101`-`:106`, `:592`; `ios/Services/NotificationPermission/NotificationPermissionReconciler.swift:38`; `ios/Services/Assembly/CompositionRoot.swift:1051`.
+
+### T11c
+
+Let the host decide which provider protocols the core may dispatch
+
+Gate provider-protocol dispatch in the core on an explicit host declaration, so an optional protocol is disabled unless the build registers it. Add a typed provider-profile status read.
+
+Owned paths: `core/src/ffi/provider_transport.rs`, `core/src/ffi/provider_transport/`, `core/src/ffi/job_runner.rs`, `core/src/ffi/job_runner/`, `ios/OhAndCoreBridge/CoreHandle+JobRunner.swift`, `ios/OhAndCoreBridge/CoreHandle+ProviderTransport.swift`.
+
+Dependencies: none.
+
+Acceptance:
+
+1. A core-handle call sets the enabled provider protocols. The job-runner drain, `prepare` and `run_exchange`, and shadow-review dispatch refuse a protocol that is not enabled, with a normalized `protocol_not_enabled` and nothing sent.
+2. The default is Anthropic and OpenAI enabled and self-hosted disabled. That keeps today's behaviour for the base protocols. Enabling self-hosted changes no other check (T11a rules).
+3. A status read for a provider-profile version returns only whether it exists, its protocol, whether it is revoked, and whether it serves a given model. It returns no endpoint, credential or content.
+4. Tests:
+   - a stored `supported` self-hosted profile and job, with self-hosted not enabled, sends nothing in all three paths;
+   - enabled, it dispatches;
+   - disabling it again stops new dispatches;
+   - the status read covers revoked, missing and wrong-protocol profiles;
+   - existing tests pass, with fixtures enabling self-hosted where they rely on it.
+
+   `make check` and `make test` pass. The exact-head macOS CI run is linked.
+
+Source pointers: `core/src/ffi/job_runner.rs:776`; `core/src/ffi/provider_transport.rs:692`; `core/src/ffi/provider_transport/shadow_review.rs`.
+
+### T11d
+
+Let modules enable provider protocols at the composition root
+
+Give `CompositionModule` a typed way to declare the provider protocols it enables, and give modules the provider-profile status read as a typed client.
+
+Owned paths: `ios/Services/Assembly/CompositionRoot.swift`, `ios/Tests/Services/CompositionRootTests.swift`.
+
+Dependencies: T11c, S05b (shared file).
+
+Acceptance:
+
+1. `CompositionModule` gains `enabledProviderProtocols`, which defaults to empty. During assembly, under undo-on-failure, the root passes the base protocols plus the union of the modules' declarations to T11c's call. A root with no module declaring self-hosted leaves it disabled.
+2. `CompositionCoreClients` gains a typed provider-profile status client. No `CoreHandle` becomes public.
+3. Root tests:
+   - with no declaring module, a stored self-hosted job sends nothing;
+   - a module declaring self-hosted enables dispatch;
+   - the status client reports revoked and missing profiles.
+
+   Existing tests pass. The exact-head macOS CI run is linked.
+
+Source pointers: `ios/Services/Assembly/CompositionRoot.swift:156`, `:261`.
+
+### C04c
+
+Give the voice handoff an honest result for unavailable audio
+
+Extend the voice handoff contract so a recording whose audio could not be made durable is reported as unrecoverable, never as kept.
+
+Owned paths: `ios/Capture/Voice/VoiceRecordingTypes.swift`, `ios/Capture/Voice/VoiceRecordingController.swift`, `ios/Tests/VoiceCapture/`.
+
+Dependencies: none.
+
+Acceptance:
+
+1. `VoiceHandoffResult` gains an explicit case for "staged but the audio is unavailable".
+2. `VoiceRecordingController` maps that case to `VoiceCaptureOutcome.unrecoverable`, with `fileRetained` reflecting whether the in-progress file still exists on disk. Nothing in that path claims the audio is kept, saved or retryable. Every exhaustive switch is updated. The existing outcomes are unchanged.
+3. The test handoff adapter (`VoiceTestSupport.swift`) maps an ingress `sourceUnavailable` to the new case, not to `keptForRetry`.
+4. Controller tests cover the new case with the file present and absent, and check the user-facing recovery state for each. Existing voice tests pass. The exact-head macOS CI run is linked.
+
+Source pointers: `ios/Capture/Voice/VoiceRecordingTypes.swift:93`; `ios/Capture/Voice/VoiceRecordingController.swift:398`; `ios/Capture/Voice/VoiceRecordingTypes.swift:132`; `ios/Tests/VoiceCapture/VoiceTestSupport.swift`.
+
+### F13
+
+Make the untrusted-certificate exchange test deterministic
+
+Find why `testUntrustedCertificateIsRefusedAndDiagnosticsStayProtected` sometimes gets no final event, and fix the cause.
+
+Owned paths: `ios/Tests/ProviderTransport/`. If the cause is in the transport (`ios/Services/ProviderTransport/`) and not in the test, block and name it. Do not mask it.
+
+Dependencies: none.
+
+Acceptance:
+
+1. **Diagnosis.** The PR states the cause with evidence from job 115754735518 (log lines around 08:34:45–08:35:10) or from a reproduction: the handshake failure was not delivered, delivered late, or lost by the fixture's event pump. A cause the evidence cannot confirm is labelled as a hypothesis.
+2. **The fix addresses the cause.** No retries, no skipped or weakened assertions. A wait may be raised only if the PR shows the operation legitimately takes that long on a hosted runner. If the transport can fail to report a refused handshake, that is a product defect. Block and name it.
+3. The F10 counting rule applies to this test. On the final head it passes in 5 consecutive executions of the `simulator` job's `OhAndTests` step. Executions where an earlier unrelated step failed are neutral. The run URLs are linked. `make check` and `make test` pass.
+
+Source pointers: `ios/Tests/ProviderTransport/ProviderExchangeBoundaryTests.swift:347`, `:357`; `ios/Tests/ProviderTransport/ProviderExchangeFixture.swift:213`; `ios/Tests/ProviderTransport/FixtureTLSServer.swift:86`.
+
+### F14
+
+Make the bench unverified-self-hosted CLI test deterministic
+
+Find why `fake_run_with_an_unverified_self_hosted_arm_skips_every_case_and_sends_nothing` failed intermittently in `make test`, and fix the cause.
+
+Owned paths: `tools/bench/src/cli/tests.rs`. A cause outside it (for example shared process state in `tools/bench/src/cli/`) is in scope only for that fix, and the PR names it.
+
+Dependencies: none.
+
+Acceptance:
+
+1. **Diagnosis.** The PR states the cause with evidence: a reproduction, for example `cargo test` looped or run under parallel load, plus the failing assertion. Candidates include shared environment variables or working directories across parallel tests, temp-path reuse, and time-dependent journal content. A cause the evidence cannot confirm is labelled as a hypothesis.
+2. **The fix addresses the cause.** No retries, no `#[ignore]`, no weakened assertion, and no forcing of `--test-threads=1` across the suite.
+3. The test passes 200 consecutive times under parallel `cargo test` on the final head, run with the loop command written in the PR. `make check` and `make test` pass.
+
+Source pointers: `tools/bench/src/cli/tests.rs:1849`.
+
+### I08
+
+Queue interpretation for every saved capture
+
+Make the core queue an interpretation job when a capture with text is imported and when a transcript attaches, with the profile pin chosen by the core, so the offline fast path and any authorized provider see app captures.
+
+Owned paths: `core/src/interpretation/enqueue/` (new; its `pub mod` line in `core/src/interpretation/mod.rs`), `core/src/ingress/import.rs`, the interpretation-queueing code in `core/src/ingress/transcription/mod.rs` and the request wire in `core/src/ffi/transcription_attachment.rs`, their existing tests, and `core/tests/interpretation_enqueue/` (new). Amended 2026-10-14 after round 1: existing tests elsewhere (`core/src/export/tests.rs`, `core/src/lifecycle/reset/tests.rs`, `core/src/lifecycle/retention/tests.rs`, `core/tests/interpretation_dispatch/main.rs`, `tests/resilience/capture-processing/processing.rs`, and any other existing test that counts jobs after an import) may be adapted only to account for the job every text import now queues; no assertion is removed or weakened.
+
+Dependencies: none.
+
+Acceptance:
+
+1. **One resolver decides the pin.** `core/src/interpretation/enqueue/` exposes one function that, inside the caller's transaction, returns the profile version a new `interpret` job for an item is pinned to, or none. Until V01b lands it always returns none (an unpinned job runs the fast path only and is `Local` under `authorize_job`). V01b replaces its body; no other code chooses a pin.
+2. **Text imports queue a job in the import transaction.** A foreground import whose capture has text enqueues one `interpret` job at the item's initial revision, with a request version that is a deterministic UUID derived from `M1_INSTRUCTION_VERSION`, item and revision (the provider contract requires a UUID, `core/src/providers/contracts/request.rs:135`; the instruction digest itself is bound in `build_request`), and the resolver's pin, in the same IMMEDIATE transaction, so the acknowledgment still means "saved". Job identity is deterministic over item and revision, so a retried import of the same capture (already imported, or `ItemDeleted`) never adds a second job. An audio-only capture with no text queues nothing here.
+3. **Transcripts queue a job without a native request.** When a transcript attaches and the caller supplied no interpretation request, the core queues one with the resolver's pin, through the existing authorize-then-keep savepoint. A native-supplied request whose pin differs from the resolver's is refused with a fixed failure and nothing is queued; native code cannot choose a destination. Existing attachment tests are updated only where they relied on the caller choosing the pin.
+4. **End-to-end through the existing dispatcher.** Rust tests: a text capture "remind me tomorrow at 9am"-style command imported with no profiles is applied by the fast path and produces its reminder; an unrecognized capture with no profile stays `unprocessed` with its job reporting `AwaitingConfiguration` (the landed status contract, `core/src/domain/status/mod.rs:103`: waiting for configuration never produces `uninterpreted`), the test asserts both and that the capture is found by search; import retry does not duplicate jobs; a voice capture's transcript queues exactly one job. Capture save never waits on interpretation. `make check` and `make test` pass.
+
+Out of scope: retroactively interpreting captures saved before a provider is configured (U06b's requeue controls), and any `ios/` edit.
+
+Source pointers: `core/src/ingress/import.rs:147`; `core/src/ingress/transcription/mod.rs:99`, `:944`; `core/src/interpretation/dispatch/mod.rs:221`, `:247`; `core/src/privacy/routing/mod.rs:226`; `core/src/interpretation/instructions/text.rs:12`.
+
+### V01b
+
+Store versioned provider profiles and the default per capability
+
+Give the core a production write path for provider profiles: create immutable versions, choose the default profile per processing capability, and list them, with an FFI export.
+
+Owned paths: `core/src/providers/profiles/` (new; its `pub mod` line in `core/src/providers/mod.rs`), one migration step appended to `MIGRATIONS` in `core/src/store/schema/mod.rs` (the next version after S05a's), the body of I08's pin resolver in `core/src/interpretation/enqueue/`, `core/tests/provider_profiles/` (new), `core/tests/migrations/main.rs` (only the schema-version expectations the appended step forces and its own migration test; added 2026-10-15 after PR #228 round 1), and under the native-boundary allowance `core/src/ffi/provider_profiles.rs` (with its `pub mod` line) and `ios/OhAndCoreBridge/CoreHandle+ProviderProfiles.swift`.
+
+Dependencies: S05a (shared schema file), I08 (resolver).
+
+Acceptance:
+
+1. **Versioned create.** Creating or editing a profile writes a new immutable `provider_profiles` row (same `profile_id`, new `profile_version`); existing rows are never updated except by the existing revocation. Validation rejects, with fixed failure codes that never echo input: unknown protocol; missing or malformed endpoint where the protocol needs one (self-hosted) or a caller-supplied endpoint where it does not; empty model; capabilities the protocol's adapter does not support; a cloud profile with no credential reference; timeout or retry values outside the contract's bounds. A credential reference claimed by a pending reset is refused through the existing L05b trigger as `credential_pending_removal`.
+2. **Defaults.** A durable default per processing capability points at one profile version; setting it to a revoked or missing version is refused; clearing it is allowed. Changing the default never touches existing jobs (test: a queued job keeps its pin).
+3. **The resolver uses the default only when it would dispatch.** I08's resolver returns the default version for text interpretation when one is set, unrevoked and `authorize_job` would authorize it on the item's route; otherwise none, so an unconfigured route still gets the offline fast path instead of a job that only waits.
+4. **Listing** returns each profile's versions, protocol, endpoint, model, capabilities, whether a credential reference is bound (never the reference's secret), revocation and default flags. The FFI export covers create, set/clear default and list, following the B01 conventions. Rust tests cover each validation failure, versioning, defaults and resolver cases; `make check` and `make test` pass. Native tests are U01e's.
+
+Source pointers: `core/src/store/schema/mod.rs:508`, `:879`; `core/src/jobs/configuration/mod.rs:29`, `:136`; `core/src/privacy/routing/mod.rs:183`; `core/src/providers/contracts/mod.rs:1`.
+
+### V01c
+
+Check a provider profile's connection on explicit request
+
+Add a core operation that, only when called, sends one fixed synthetic request to a stored profile's own destination and reports a redacted classification.
+
+Owned paths: `core/src/ffi/provider_transport/connection_check.rs` (new; its single `pub mod connection_check;` line in `core/src/ffi/provider_transport.rs`, mirroring `shadow_review`) and `ios/OhAndCoreBridge/CoreHandle+ProviderConnectionCheck.swift` under the native-boundary allowance, and their tests. As a child module it can use the transport's private registration, exchange and profile-loading items directly; nothing else in `provider_transport.rs` changes. (Amended 2026-10-15: the original sibling path could not reach the existing transport.)
+
+Dependencies: V01b.
+
+Acceptance:
+
+1. The request is built by the profile's own protocol adapter from a fixed synthetic payload that contains no capture, query or user text; it goes only to the destinations `contacted_destinations` derives from that profile version, through the existing provider transport, off the core worker thread, cancellable through `CancelToken`. It does not require a route grant (the user is testing before granting) and it never runs in the background or on a schedule.
+2. The outcome is one of a fixed set, at least: `ok`, `credential_missing`, `credential_rejected`, `unreachable`, `tls_failure`, `timeout`, `capability_mismatch` (for example an unknown model), `protocol_not_enabled` (T11c gate). No secret, response body, header or endpoint is echoed in the outcome, logs or failure strings.
+3. Rust tests over the fake transport cover each outcome and show the payload contains no text from a seeded capture. `make check` and `make test` pass.
+
+Source pointers: `core/src/ffi/provider_transport.rs`; `core/src/ffi/provider_transport/protocols.rs:65`; `core/src/providers/contracts/dispatch.rs:154`.
+
+### V02b
+
+Grant and revoke route processing permissions
+
+Give the core a production write path for route processing policy: a deliberate, per-capability grant whose destinations come from a stored profile, its revocation, and a readable policy listing, with an FFI export.
+
+Owned paths: `core/src/privacy/routing/grants.rs` (new; its `mod`/`pub use` lines in `core/src/privacy/routing/mod.rs`), `core/tests/route_grants/` (new), and under the native-boundary allowance `core/src/ffi/route_policy.rs` (with its `pub mod` line) and `ios/OhAndCoreBridge/CoreHandle+RoutePolicy.swift`.
+
+Dependencies: none.
+
+Acceptance:
+
+1. **Grant.** Granting capability C on route R for profile version P derives the destinations from P in the core (the caller cannot name destinations), adds them to R's `processing_destinations` ceiling and to C's `route_authorizations` row, in one transaction. A revoked or missing P, an unknown route or a transcription grant (on-device only) is refused with a fixed failure. Repeating a grant is idempotent.
+2. **Isolation.** Tests through `authorize_job` show that granting one capability does not authorize another, and granting one route does not authorize another route.
+3. **Revoke.** Revoking C on R removes C's grant; queued jobs then fail authorization at dispatch with the existing denial, never falling back to another destination. Destinations no remaining grant on R uses leave the ceiling.
+4. **Listing** returns each route's name, scope, granted capabilities and destination classes. Nothing here runs from a classifier or any inferred signal; only the explicit operation grants. Rust tests cover each case; `make check` and `make test` pass.
+
+Source pointers: `core/src/privacy/routing/mod.rs:183`, `:266`; `core/src/store/schema/mod.rs:424`, `:438`; `core/src/ffi/route_provisioning.rs:1`.
+
+### R04
+
+Export scoped retrieval over the core boundary
+
+Expose the existing scoped search and list operations to native code.
+
+Owned paths: `core/src/ffi/retrieval.rs` (with its `pub mod` line) and `ios/OhAndCoreBridge/CoreHandle+Retrieval.swift` under the native-boundary allowance, and their tests.
+
+Dependencies: none.
+
+Acceptance:
+
+1. Exports run `scoped_query` and `scoped_list` with the existing `QueryFilter` (scopes, date bounds, session topics) and bounded pagination on the core worker, returning per hit the item and capture identifiers, scope, current text, text basis, original text where corrected, matched span and capture date, plus the accessible total. Query text never leaves the device and is never echoed in failures.
+2. The caller states the read scopes it is authorized for; the export cannot widen them. Authentication itself is enforced natively by U01d's gate.
+3. Rust tests cover text search, date bounds, session-topic filtering, scope exclusion (no count or snippet from an excluded scope), pagination limits and invalid filters. `make check` and `make test` pass.
+
+Source pointers: `core/src/retrieval/query/mod.rs:22`, `:65`, `:76`, `:97`; `core/src/retrieval/index/mod.rs:112`.
+
+### R05
+
+Carry each search hit's item type through the gated retrieval answer
+
+Add the item's type to every retrieval hit so search results can show date, type and source without echoing the request filter.
+
+Owned paths: `core/src/retrieval/index/mod.rs` (only `SearchHit` and the queries that build it), `core/src/retrieval/query/` (only where hits are built), `core/src/ffi/retrieval.rs` and its tests, `ios/OhAndCoreBridge/CoreHandle+Retrieval.swift`, and in `ios/Services/Authentication/PrivateReadGate.swift` only the `PrivateRetrievalHit` field and its decoding, plus the matching tests under `ios/Tests/Authentication/`.
+
+Dependencies: none.
+
+Acceptance:
+
+1. `SearchHit` carries the item's current `item_type` from the item projection (`items.item_type`, `core/src/store/schema/mod.rs:372`), which is absent for an item that has not been classified. Absent is reported as absent, never as a guessed type.
+2. The R04 hit JSON and `PrivateRetrievalHit` carry the same value (an optional string). Scope enforcement is unchanged: an excluded scope still yields no hit, count or type.
+3. Rust tests: a typed item's hit carries its type, an unclassified item's hit carries none, and a type correction (D04) is reflected on the next search. A Swift test decodes both forms. `make check` and `make test` pass. The exact-head macOS CI run is linked.
+
+Source pointers: `core/src/retrieval/index/mod.rs:112`; `core/src/retrieval/query/mod.rs:277`; `ios/Services/Authentication/PrivateReadGate.swift:73`.
+
+### U01d
+
+Offer gated retrieval reads at the composition root
+
+Add search and list to the root's private read gate so `app/` modules can retrieve without a core handle.
+
+Owned paths: `ios/Services/Assembly/CompositionRoot.swift`, `ios/Services/Authentication/PrivateReadGate.swift`, `ios/Tests/Services/CompositionRootTests.swift`, `ios/Tests/Authentication/`.
+
+Dependencies: T11d (shared root file), R04.
+
+Acceptance:
+
+1. `PrivateReadGate` and `CompositionPrivateReads` gain search and list verbs over R04's exports, refused with `unauthorized` while capture-only, with answers admitted through the existing `admit` so a result arriving after a relock is discarded. The verbs pass the session's authorized scopes; a module cannot pass wider ones.
+2. Typed request and result models live in `OhAndServices`; no `CoreHandle` becomes public.
+3. Real-core root tests: search before authentication is refused; after authentication returns a seeded capture's text; a relock between request and answer discards the answer; scope exclusion holds. Existing tests pass. The exact-head macOS CI run is linked.
+
+Source pointers: `ios/Services/Assembly/CompositionRoot.swift:145`, `:203`; `ios/Services/Authentication/PrivateReadGate.swift:18`, `:63`.
+
+### U01e
+
+Offer provider and route configuration clients at the composition root
+
+Give `app/` modules typed clients for provider profiles, connection checks, route policy and credential entry.
+
+Owned paths: `ios/Services/Assembly/CompositionRoot.swift`, new client files under `ios/Services/ProviderConfiguration/`, `ios/Tests/Services/CompositionRootTests.swift`, `ios/Tests/ProviderConfiguration/` (new).
+
+Dependencies: U01d (shared root file), V01b, V01c, V02b.
+
+Acceptance:
+
+1. `CompositionCoreClients` (or `CompositionContext`) gains typed clients over V01b (create, default, list), V01c (connection check) and V02b (grant, revoke, list), each taken once per root with its own reserved operation range, and the root's `CredentialService` behind a narrow interface that can add, update, delete and report status of a credential but never return a secret. No `CoreHandle` becomes public.
+2. Profile writes and grants that change what leaves the device require an authenticated read session; capture-only callers are refused.
+3. Real-core root tests: create a profile with a credential, set it default, grant interpretation on the capture route, and see a newly imported capture's job pinned to it (I08 + V01b resolver); the connection check against the fixture server reports `credential_rejected` for a bad key without the key appearing in any output; revoking the grant makes the job's dispatch fail authorization. Existing tests pass. The exact-head macOS CI run is linked.
+
+Source pointers: `ios/Services/Assembly/CompositionRoot.swift:162`, `:349`; `ios/Services/Credentials/CredentialService.swift:58`.
+
+### F15
+
+Find and fix the memory corruption in the notification reconciliation FFI tests
+
+Find why the `notification_reconciliation` FFI tests intermittently crash the test process (SIGSEGV, heap corruption), and fix the cause, in the product code if it is there.
+
+Owned paths: `core/src/ffi/notification_reconciliation.rs` and `core/src/ffi/notification_reconciliation/` (including its tests). If the cause is in the shared core-handle lifecycle (`core/src/ffi/core_handle/`), block and name it with evidence instead of working around it.
+
+Dependencies: none.
+
+Acceptance:
+
+1. **Diagnosis.** The PR names the cause with evidence: a reproduction on Linux under parallel load (for example a CPU-saturating background load while looping `cargo test --locked --lib ffi::notification_reconciliation`), or a sanitizer or Miri finding where the toolchain on the worker supports it. A cause the evidence cannot confirm is labelled as a hypothesis. It must account for both recorded failures, including the heap corruption that had no failing assertion first.
+2. **The fix addresses the cause.** If the core can call the native-effects callback, or read or write native buffers, after unregistration, after `ohand_core_close`, or after a command is abandoned, that is a product defect. Fix it here with a regression test. The test `Session` also tears down safely when a test panics: close the handle and unregister before the context is freed. That second fix alone does not satisfy this criterion. No retries, no `#[ignore]`, no weakened assertion, and no forcing of `--test-threads=1`.
+3. 50 consecutive full `cargo test --locked --lib` runs under the same parallel load pass on the final head, using the loop command written in the PR. `make check` and `make test` pass.
+
+Source pointers: `core/src/ffi/notification_reconciliation.rs:83`, `:92`, `:127`, `:173`, `:699`, `:792`; `core/src/ffi/notification_reconciliation/tests.rs:365`, `:401`, `:840`.
+
+### F16
+
+Make the notification probe's foreground delivery deterministic
+
+Find why the foreground-delivery request in `testAuthorizedSchedulingBehavior` is sometimes neither delivered nor pending after a timely `add()`, and fix the cause.
+
+Owned paths: `ios/NotificationProbe/Tests/`; in `ios/NotificationProbe/Sources/ProbeScenarios.swift`, the foreground-delivery scenario and any cleanup between the capacity scenario and it; the matching rows of `docs/validation/notification-probe.md`.
+
+Dependencies: none.
+
+Acceptance:
+
+1. **Diagnosis.** The PR states the cause with evidence from run 38666074347 or a reproduction. One hypothesis to check: the capacity scenario adds 100 requests against the 64-request OS limit, and an add that completes late evicts the foreground request. A cause the evidence cannot confirm is labelled as a hypothesis.
+2. **The fix addresses the cause.** No retries, no skipped or weakened assertions. Recorded OS behaviour in `docs/validation/notification-probe.md` stays accurate. If the fix changes a step, the matching row is updated.
+3. The F10 counting rule applies. On the final head the test passes in 5 consecutive executions of its step. Executions where an earlier unrelated step failed are neutral. The run URLs are linked. `make check` and `make test` pass.
+
+Source pointers: `ios/NotificationProbe/Tests/NotificationProbeAuthorizedUITests.swift:56`, `:66`, `:71`; `ios/NotificationProbe/Sources/ProbeScenarios.swift`.
+
+### F17
+
+Make the bench transport teardown tests deterministic under load
+
+Make `tools/bench` transport tests that wait for an exchange to be torn down pass under CPU load, without weakening what they assert.
+
+Owned paths: `tools/bench/src/transport/tests.rs`; in the other files under `tools/bench/src/transport/` (for example `fixture.rs`), only a test-observable teardown signal if the tests need one.
+
+Dependencies: none.
+
+Acceptance:
+
+1. **Diagnosis.** The PR shows the failure under parallel load: `transport::tests::cancellation_returns_promptly_while_the_request_is_in_flight` and `transport::tests::the_dispatch_clock_deadline_ends_a_call_even_with_a_long_relative_budget` fail in `assert_exchange_torn_down`, which polls `closed_connections()` against a 3-second wall-clock window (`tools/bench/src/transport/tests.rs:679`). It states why that window is exceeded under load.
+2. **The fix addresses the cause.** The tests wait for the teardown event itself, for example a channel or condition signalled when the fixture closes the connection, with a generous upper bound that only catches a hang. Both tests still assert that the call returned promptly and that the connection was closed. No retries, no `#[ignore]`, no removed assertion, no forcing of `--test-threads=1`.
+3. 50 consecutive `cargo test --locked -p bench --lib` runs pass under a CPU-saturating background load on the final head, using the loop command written in the PR. `make check` and `make test` pass.
+
+Source pointers: `tools/bench/src/transport/tests.rs:679`.
+
+### A01
+
+Read one item's detail through a gated root client
+
+Export a read of one item by opaque identifier, and give `app/` a typed, read-gated client for it.
+
+Owned paths: `core/src/ffi/item_detail.rs` and `ios/OhAndCoreBridge/CoreHandle+ItemDetail.swift` (native-boundary allowance); `ios/Services/Items/Detail/` (new); `ios/Tests/ItemDetail/` (new); registrations under the capability client allowance (root and read gate).
+
+Dependencies: none.
+
+Acceptance:
+
+1. The export returns, for one item ID:
+   - current text with its basis, the original capture text, and the corrected text where one exists;
+   - item revision, type, scope, session topic, lifecycle state and capture time;
+   - the original audio reference, and transcript provenance where present;
+   - the item's event and correction history, newest first and bounded.
+
+   It reuses `load_item_state` (`core/src/domain/items/mod.rs:233`), `get_events_for_item` (`core/src/store/events/mod.rs:916`) and the transcript provenance read (`core/src/ingress/transcription/mod.rs:639`). An unknown or deleted item returns a fixed `not_found`. The caller's read scopes are enforced, and an item outside them is indistinguishable from not found.
+2. The client is a public typed service on the root. It is refused while the session is capture-only and admitted through the read gate, so an answer that arrives after a relock is discarded. The item ID is validated as opaque, and nothing parses meaning out of it.
+3. Tests:
+   - Rust tests for each field, including a corrected item, a transcribed voice item, an excluded scope and a deleted item.
+   - Real-core root tests for refusal before authentication, a relock discard, and a seeded item read end to end.
+   - `make check` and `make test` pass. The exact-head macOS CI run is linked.
+
+### A02
+
+Correct an item's text, type and session topic
+
+Export the user's corrections as compare-and-set commands, and give `app/` a typed client for them.
+
+Owned paths: `core/src/ffi/item_corrections.rs` and `ios/OhAndCoreBridge/CoreHandle+ItemCorrections.swift`; `core/tests/item_corrections/` (new); `ios/Services/Items/Corrections/` (new); `ios/Tests/ItemCorrections/` (new); registrations under the capability client allowance.
+
+Dependencies: none.
+
+Acceptance:
+
+1. Text, type and session-topic corrections each take the item ID, the expected revision and an idempotent command ID.
+   - Each is stored through the existing event path (`save_event`, `core/src/store/events/mod.rs:440`, which re-syncs the search index), never as a direct row edit.
+   - A stale revision is refused with a fixed `stale_revision` failure that reports the current revision.
+   - A repeated command ID reports the first outcome and writes nothing new.
+   - The original capture is never altered.
+2. Correcting the type away from an actionable type is decided in the core, with a test. If the item has a live reminder, it is cancelled through the existing reminder state path, or the correction is refused with a fixed reason. The choice and its contract basis are written in the PR.
+3. A user correction always beats later model output and transcripts. The existing regressions still hold, and one new test covers a correction made while an interpretation job is in flight.
+4. The client requires an authenticated session.
+5. Tests: Rust and real-core root tests. `make check` and `make test` pass. The exact-head macOS CI run is linked.
+
+### A03
+
+Complete, cancel and quiet an item
+
+Export item completion, cancellation, not-now and stop-suggesting as user commands keyed by item, and give `app/` a typed client for them.
+
+Owned paths: `core/src/ffi/item_lifecycle_controls.rs` and `ios/OhAndCoreBridge/CoreHandle+ItemLifecycleControls.swift`; `core/tests/item_lifecycle_controls/` (new); `ios/Services/Items/LifecycleControls/` (new); `ios/Tests/ItemLifecycleControls/` (new); registrations under the capability client allowance.
+
+Dependencies: none.
+
+Acceptance:
+
+1. Complete and cancel reuse `end_item_with_event` (`core/src/reminders/state/mod.rs:817`) with the same outcome as the notification action path (`core/src/ffi/notification_actions.rs:314`), but keyed by item ID and expected revision, not by a notification identifier.
+2. Not-now reuses `record_not_now` (`core/src/suggestions/eligibility/mod.rs:381`), and stop-suggesting reuses the control event and `set_pull_only` (`:414`).
+3. Every command is idempotent by command ID and refuses stale revisions. The resulting reminder and notification changes go through the next reminder pass (`root.reconcileReminders`), never through a direct native effect.
+4. The client requires an authenticated session.
+5. Tests: Rust tests for each command, including on a deleted item. Real-core root tests showing that completing an item with a live reminder leaves no pending notification after the pass. `make check` and `make test` pass. The exact-head macOS CI run is linked.
+
+### A04
+
+Read, edit, cancel and review an item's reminder
+
+Export the reminder read, user time correction, cancellation and history, and give `app/` typed clients for them. Reads are gated.
+
+Owned paths: `core/src/ffi/reminder_controls.rs` and `ios/OhAndCoreBridge/CoreHandle+ReminderControls.swift`; `core/tests/reminder_controls/` (new); `ios/Services/Reminders/Controls/` (new); `ios/Tests/ReminderControls/` (new); registrations under the capability client allowance.
+
+Dependencies: none.
+
+Acceptance:
+
+1. **Read.** Returns the item's reminder: requested and resolved instant, time zone, the states the item status already reports, and any unsupported or ambiguity reason with its state version. It reuses `get_reminder` (`core/src/reminders/state/mod.rs:859`).
+2. **Edit.** Applies `apply_user_time_correction` (`:595`) with the item revision and reminder version (`:384`). A stale version is refused. An edit can never backdate a reminder or silently substitute a different deadline.
+3. **Cancel.** Applies `cancel_reminder` (`:686`).
+4. **History.** Returns the bounded reminder history (`core/src/reminders/history/view.rs:149`).
+5. Reads go through the read gate. Writes require an authenticated session, and their native effects go through the next reminder pass.
+6. Tests: Rust tests, plus real-core root tests for edit and cancel reaching the notification centre after a pass. `make check` and `make test` pass. The exact-head macOS CI run is linked.
+
+### A05
+
+Delete an item and report deletion progress
+
+Export per-item deletion intent and progress, and run the cleanup promptly through the lifecycle coordinator's existing deletion service.
+
+Owned paths: `core/src/ffi/item_deletion.rs` and `ios/OhAndCoreBridge/CoreHandle+ItemDeletion.swift`; `core/tests/item_deletion/` (new); `ios/Services/Deletion/ItemDeletion/` (new); `ios/Tests/ItemDeletion/` (new); registrations under the capability client allowance, including one `LifecycleCoordinator` accessor for `deletionCleanup` (`ios/Services/Assembly/LifecycleCoordinator.swift:270`).
+
+Dependencies: none.
+
+Acceptance:
+
+1. Marking an item deleted reuses `mark_deletion_intent` (`core/src/lifecycle/delete_intent/mod.rs:211`). It tombstones the item, cancels its jobs and reminders, and enqueues cleanup in one transaction, idempotently. Progress reuses `deletion_progress` (`:370`).
+2. After the intent commits, the client triggers the existing deletion cleanup service immediately. It does not wait for the next launch, it never deletes native files itself, and a failure leaves the intent to be resumed by the normal lifecycle pass.
+3. Requires an authenticated session. A deleted item disappears from search and detail reads, and a late job result for it is refused, per the existing tests.
+4. Tests: Rust tests, plus a real-core root test in which deletion removes the item's pending notification and retained audio and reports progress through to completion. `make check` and `make test` pass. The exact-head macOS CI run is linked.
+
+### A06
+
+Activate and answer a suggestion
+
+Export prompt activation and response as user commands, and give `app/` a typed client for them.
+
+Owned paths: `core/src/ffi/suggestion_responses.rs` and `ios/OhAndCoreBridge/CoreHandle+SuggestionResponses.swift`; `core/tests/suggestion_responses/` (new); `ios/Services/Suggestions/Responses/` (new); `ios/Tests/SuggestionResponses/` (new); registrations under the capability client allowance.
+
+Dependencies: none.
+
+Acceptance:
+
+1. Activation reuses `PromptCoordinator::activate` (`core/src/suggestions/coordinator/mod.rs:157`) for a delivered or opened prompt, and returns the chosen item's identifier and the text that may be displayed. It discloses nothing before authentication. A prompt that no longer has an eligible item reports that honestly.
+2. Responses (not now, stop, done) reuse `respond` (`:201`) and are idempotent by command ID.
+3. The client requires an authenticated session.
+4. Tests: Rust tests for each response and for a stale or replaced prompt, plus a real-core root test. `make check` and `make test` pass. The exact-head macOS CI run is linked.
+
+### A07
+
+Control job configuration after policy changes
+
+Export the existing requeue and revocation controls, and add the missing core path that moves waiting unpinned work onto a newly authorized profile.
+
+Owned paths: `core/src/jobs/configuration/` (only for the new re-pin operation and its tests); `core/src/ffi/job_configuration.rs` and `ios/OhAndCoreBridge/CoreHandle+JobConfiguration.swift`; `core/tests/job_configuration_controls/` (new); `ios/Services/JobConfiguration/` (new); `ios/Tests/JobConfiguration/` (new); registrations under the capability client allowance.
+
+Dependencies: V01b, V02b.
+
+Acceptance:
+
+1. Export `requeue_job_to_new_profile` (`core/src/jobs/configuration/mod.rs:239`), `get_requeue_record` (`:201`), and a bounded listing of jobs pinned to a profile (`get_jobs_pinned_to_profile`, `:59`, with item and status only).
+2. Profile revocation is available outside reset. It reuses `revoke_profile` and the job retirement path (`:136`, `:148`) and respects the L05b credential claim fence.
+3. **New: re-pin waiting work.**
+   - An explicit, user-invoked operation re-pins unpinned `interpret` jobs that are waiting for configuration on a route, plus the uninterpreted or unprocessed items of that route that have no live job. They move to the profile the I08/V01b resolver now selects, only when that profile is authorized for the route.
+   - It never runs implicitly from a grant, a default change or a classifier.
+   - It is bounded and idempotent, it never changes a job pinned to another profile, and it returns the count it moved.
+4. The client requires an authenticated session.
+5. Tests:
+   - Rust tests for each operation, including a revoked profile and a route without a grant.
+   - A real-core root test: capture with no provider, configure and grant, re-pin, and the job dispatches to the fake provider.
+   - `make check` and `make test` pass. The exact-head macOS CI run is linked.
+
+### A08
+
+Configure retention and act on unresolved sole audio
+
+Persist the user's retention period, and expose retention status, the sole-audio cases and their retry and delete actions to `app/`.
+
+Owned paths: one migration step appended to `MIGRATIONS` in `core/src/store/schema/mod.rs` (the next version after V01b's) and, in `core/tests/migrations/main.rs`, only the schema-version expectations it forces and its own migration test; `core/src/lifecycle/retention/` (only the persisted-setting read and the new status query); `core/src/ffi/retention_controls.rs` and `ios/OhAndCoreBridge/CoreHandle+RetentionControls.swift`; `ios/Services/AudioRetention/`; `ios/Tests/AudioRetention/`; registrations under the capability client allowance, including one `LifecycleCoordinator` accessor for `audioRetention` (`ios/Services/Assembly/LifecycleCoordinator.swift:277`); in `core/src/ffi/audio_retention.rs`, only `Command::policy` reading the stored setting (after A14).
+
+Dependencies: V01b (migration order), A14 (user-initiated removal decision; shared `ffi/audio_retention.rs`), C07 (transcription requeue).
+
+Acceptance:
+
+1. The retention period is a durable setting with a seven-day default after a successful transcription. Bounds are enforced. The sweep reads the stored setting instead of the init parameter, and changing it never deletes audio whose item is its sole source.
+2. A status read returns the policy, the storage pressure the service already measures, and the unresolved sole-audio cases (item, capture time, reason).
+3. "Retry transcription" re-queues the item's on-device transcription through the existing job path (C07's requeue function).
+4. "Delete audio" removes only the audio of an item that has a transcript or text, through the existing cleanup ordering and A14's user-initiated decision inside the removal fence. Sole-source audio is refused and pointed to item deletion (A05).
+5. Reads are gated and writes require an authenticated session. A sweep never blocks a new capture.
+6. Tests: Rust tests and real-core root tests. `make check` and `make test` pass. The exact-head macOS CI run is linked.
+
+### A09
+
+Play retained audio safely
+
+Give `app/` a way to play an item's retained audio without exposing protected storage, and fence playback against removal.
+
+Owned paths: `ios/Services/AudioRetention/` (only the playback seam), `ios/Services/Playback/` (new), `ios/Tests/Playback/` (new), registrations under the capability client allowance.
+
+Dependencies: A08 (shared retention service).
+
+Acceptance:
+
+1. For an authenticated session and an item whose audio is retained, the root returns a playable handle, such as a URL valid only for the session or an `AVAudioPlayer` built by the service. It is never a path into `ProtectedStorageLayout` (`ios/Services/ProtectedStorage/StoreProtectionPolicy.swift:103`) that outlives the session. An item without retained audio reports that honestly.
+2. While playback is open, the retention sweep and deletion cleanup do not remove that file. A deletion intent ends playback first. Relocking ends playback.
+3. Tests cover the fence against both the sweep and deletion, a relock, and audio that is missing or unreadable. Existing retention tests pass. The exact-head macOS CI run is linked.
+
+### A10
+
+Route notification taps and reminder readiness to the app
+
+Connect prompt taps to an app-visible handler, and let the app observe reminder readiness changes. Root chain.
+
+Owned paths: `ios/Services/Assembly/CompositionRoot.swift`, `ios/Services/Notifications/NotificationEventIngestor.swift` (only `promptHandler` wiring), `ios/Tests/Services/CompositionRootTests.swift`.
+
+Dependencies: T11d (root chain).
+
+Acceptance:
+
+1. The root builds its ingestor with a `promptHandler` (`CompositionRoot.swift:661`; today the default `{ _ in }`, `NotificationEventIngestor.swift:23`). A prompt tap reaches a public open-suggestion handler on the root, like `setOpenItemHandler`, and is never dropped. A tap that arrives before a handler is set is held and delivered once.
+2. The root exposes an observer for reminder-report changes (`lastReminderReport`, `:897`). In particular it reports when a reminder becomes undeliverable because permission was never requested (`NotificationReadiness.swift:95`), so the app can ask at that point.
+3. Real-core root tests cover a prompt tap reaching the handler and readiness changes notifying the observer. Existing tests pass. The exact-head macOS CI run is linked.
+
+### A11
+
+Compose export at the root
+
+Build the existing export service in production, over the root's read session and storage layout, with its launch cleanup.
+
+Owned paths: `ios/Services/Assembly/CompositionRoot.swift`, `ios/Services/Export/` (only construction and visibility), `ios/Tests/Services/CompositionRootTests.swift`, `ios/Tests/Export/`.
+
+Dependencies: A10 (root chain).
+
+Acceptance:
+
+1. The root exposes `ExportService` (`ios/Services/Export/ExportService.swift:15`, never constructed in production today) built over the authenticated read session and the protected layout. The raw `CoreExportClient` stays private.
+2. The export temp-file sweep (`sweepAtLaunch`) runs at launch in the lifecycle order without delaying capture.
+3. Real-core root tests: export is refused before authentication, a real export round-trips, and a stale temp export is removed at the next launch. The exact-head macOS CI run is linked.
+
+### A12
+
+Compose reset at the root
+
+Build the existing reset service in production: put the reset ingress gate into the capture path, and resume an interrupted reset at launch.
+
+Owned paths: `ios/Services/Assembly/CompositionRoot.swift`, `ios/Services/Assembly/LifecycleCoordinator.swift` (only the reset resume step), `ios/Services/Reset/` (only construction and visibility), `ios/Tests/Services/`, `ios/Tests/Reset/`.
+
+Dependencies: A11 (root chain).
+
+Acceptance:
+
+1. The root constructs `ResetService` and its collaborators. Today they are internal and never built. It exposes a typed reset control and progress read to `app/`, and requires an authenticated session.
+2. `ResetIngressGate` sits in the root's ingress path. During a reset, new captures behave as the reset contract says, and a capture is never silently lost.
+3. An interrupted reset resumes at launch before the job runner activates. The L05b credential fence and the reset generation hold.
+4. Real-core root tests cover a full reset, a capture during reset and a resume after an interrupted reset. Existing reset tests pass. The exact-head macOS CI run is linked.
+
+### A13
+
+Present an item or suggestion from the app host
+
+Let the management host navigate to an item's source detail or to the current suggestion when asked by a notification tap or another screen.
+
+Owned paths: `ios/AppAssembly/ManagementNavigationModel.swift`, `ios/AppAssembly/AppRootView.swift`, `ios/AppAssembly/ManagementCatalog.swift` (only a destination registry for item and suggestion views, which U02b and U08b fill in under the management context allowance), `ios/Tests/AppAssembly/`.
+
+Dependencies: none.
+
+Acceptance:
+
+1. `requestedItemID` (`ios/AppAssembly/ManagementNavigationModel.swift:84`) and a new requested-suggestion route present a destination once one is registered. If no destination is registered, the app shows an honest placeholder, not a blank screen.
+2. Presenting either requires authentication first. A capture entry still always lands on capture.
+3. The host exposes a single registration point, one line per destination, so that U02b registers source detail and U08b registers the suggestion view without editing host behaviour.
+4. UI and unit tests cover a tap before and after authentication, a relock while presented, and the placeholder. The exact-head macOS CI run is linked.
+
+### A14
+
+Let the user remove an item's audio through the removal fence
+
+Add a user-initiated removal decision to the L03b fence, so the audio of an item that has text can be removed on request and never the audio that is an item's only source.
+
+Owned paths: `core/src/lifecycle/retention/mod.rs` (only the new user-initiated authorization) and its tests; `core/src/ffi/audio_retention.rs` and `core/src/ffi/audio_retention/lease.rs` (only selecting the new authorization for a user-initiated removal); `ios/OhAndCoreBridge/CoreHandle+AudioRetention.swift` if the command shape changes; and their tests.
+
+Dependencies: none.
+
+Acceptance:
+
+1. A user-initiated removal is approved when the item is live, the audio reference still matches, and recoverable text exists: a usable transcript, or captured or user-written text (including `TextWithoutTranscript`). It is denied, with a fixed reason, when the audio is the item's only source, when the item is deleted (deletion owns cleanup), or when the reference no longer matches.
+2. The decision is made inside the existing fence (`begin` in `lease.rs`) under the same store write lock, so a concurrent text correction that makes the audio sole-source cannot race the removal. Automatic sweeps still use `authorize_audio_removal` unchanged.
+3. Rust tests cover approval with transcript, approval with typed text and no transcript, denial for sole-source audio, denial after deletion, denial after an audio-reference change, and a correction racing a begun removal. `make check` and `make test` pass. If the Swift extension changes, the exact-head macOS CI run is linked.
+
+Source pointers: `core/src/lifecycle/retention/mod.rs:320`; `core/src/ffi/audio_retention/lease.rs:115`, `:136`.
+
+### C07
+
+Queue on-device transcription for imported voice captures
+
+Create the `transcription_attachment` job that the native transcription handler (C05b) waits for. Today nothing in production creates one: import stores an audio-only capture as `audio_pending` (`core/src/ingress/import.rs:366`) and queues nothing, so voice captures are never transcribed.
+
+Owned paths: `core/src/ingress/transcription/queue.rs` (new; its `mod` line in `core/src/ingress/transcription/mod.rs`), `core/src/ingress/import.rs` (only the call in the import transaction), one call at the start of each drain in `core/src/ffi/job_runner.rs`, and their tests.
+
+Dependencies: none.
+
+Acceptance:
+
+1. **On import.** The import transaction that creates an audio-only item (`audio_pending`) also enqueues one `transcription_attachment` job for it at the item's revision, with no profile pin (transcription is on-device only and `authorize_job` treats it as local). An import retry that finds the existing item queues nothing new. A capture with text queues no transcription job.
+2. **Backfill.** At the start of each job drain, every non-deleted `audio_pending` item with no queued, running or completed `transcription_attachment` job gets one, idempotently and in bounded batches. This covers voice captures already stored before this fix.
+3. **Explicit retry.** A core function requeues transcription for one item: it moves `transcription_failed` or `transcription_unsupported` back to `audio_pending` and enqueues a new job in one transaction. It refuses a deleted item, an item whose audio was removed, an item already `transcribed` or `not_applicable`, and an item with a queued or running transcription job. It is a plain core function; A08 exports it.
+4. **End to end.** A Rust test imports an audio-only capture, drains with a fake recognizer through the existing transcription apply path, and sees the transcript attached and the interpretation job queued. Further tests cover retry idempotency, backfill idempotency and each refusal. `make check` and `make test` pass.
+
+Source pointers: `core/src/ingress/import.rs:366`; `core/src/privacy/routing/mod.rs:30`, `:226`; `core/src/jobs/queue/mod.rs:162`; `ios/Services/Transcription/TranscriptionJobHandler.swift:23`.
 
 ### I05b
 

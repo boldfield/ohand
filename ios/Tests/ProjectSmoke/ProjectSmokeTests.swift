@@ -6,7 +6,6 @@ import OhAndServices
 final class ProjectSmokeTests: XCTestCase {
     func testHostApplicationIsProductionApp() {
         XCTAssertEqual(Bundle.main.bundleIdentifier, "com.boldfield.ohand.app")
-        XCTAssertEqual(ContentView().bundleIdentifier, "com.boldfield.ohand.app")
     }
 
     func testServicesAndBridgeFrameworksLink() {

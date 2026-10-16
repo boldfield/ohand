@@ -144,7 +144,7 @@ struct RecordEvent {
     record: RecordJson,
 }
 
-fn parse_request<T: serde::de::DeserializeOwned>(
+pub(super) fn parse_request<T: serde::de::DeserializeOwned>(
     request: *const u8,
     request_len: usize,
 ) -> Result<T, AbiFailure> {
@@ -162,7 +162,7 @@ fn parse_request<T: serde::de::DeserializeOwned>(
     serde_json::from_slice(bytes).map_err(|_| AbiFailure::INVALID_REQUEST)
 }
 
-fn encode<T: Serialize>(event: &T) -> Result<Vec<u8>, AbiFailure> {
+pub(super) fn encode<T: Serialize>(event: &T) -> Result<Vec<u8>, AbiFailure> {
     serde_json::to_vec(event).map_err(|_| AbiFailure::INTERNAL)
 }
 
@@ -521,7 +521,11 @@ fn lease_shadow_job(
 /// Builds the review request from stored state: the reviewer sees the text the interpretation
 /// saw (the item's latest user correction, otherwise the capture text) under the case's pinned
 /// review profile, to destinations the route's `review` grant covers.
-fn prepare_review(connection: &Connection, job_id: &str) -> Result<Prepared, AbiFailure> {
+fn prepare_review(
+    connection: &Connection,
+    handle: u64,
+    job_id: &str,
+) -> Result<Prepared, AbiFailure> {
     let target = match resolve_execution_target(connection, job_id).map_err(storage_failure)? {
         ExecutionResolution::Denied(reason) => return Err(denial_failure(reason)),
         ExecutionResolution::Local => return Err(failures::NOT_REMOTE),
@@ -532,6 +536,7 @@ fn prepare_review(connection: &Connection, job_id: &str) -> Result<Prepared, Abi
         return Err(shadow_failures::NOT_SHADOW_JOB);
     }
     let profile = load_profile(connection, &target.profile_version)?;
+    protocols::ensure_enabled(handle, profile.protocol())?;
     if target.credential_ref.as_deref() != Some(profile.credential_ref().as_str()) {
         return Err(failures::MALFORMED_PROFILE);
     }
@@ -591,6 +596,7 @@ enum Begun {
 /// A refusal ends the case as unreviewed with no request sent.
 fn begin_review(
     database: &mut Database,
+    handle: u64,
     job_id: &str,
     policy: &ShadowPolicy,
     now: DateTime<Utc>,
@@ -636,7 +642,7 @@ fn begin_review(
         ShadowDispatchDecision::Denied(denial) => return refuse(database, denial_code(denial)),
         ShadowDispatchDecision::Allowed(_) => {}
     }
-    match prepare_review(database.conn(), job_id) {
+    match prepare_review(database.conn(), handle, job_id) {
         Ok(prepared) => Ok(Begun::Dispatch(Box::new(Dispatch {
             prepared,
             primary,
@@ -818,7 +824,7 @@ fn start_review_job(
         let policy = request.policy.policy();
         let begun = {
             let mut database = lock(database);
-            begin_review(&mut database, &request.job_id, &policy, Utc::now())?
+            begin_review(&mut database, handle, &request.job_id, &policy, Utc::now())?
         };
         let dispatch = match begun {
             Begun::Finished { denial, record } => {

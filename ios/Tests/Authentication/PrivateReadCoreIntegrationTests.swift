@@ -1,3 +1,4 @@
+import SQLite3
 import XCTest
 @testable import OhAndCoreBridge
 @testable import OhAndServices
@@ -31,7 +32,9 @@ final class PrivateReadCoreIntegrationTests: XCTestCase {
         super.tearDown()
     }
 
-    private func makeCapture(id: String, text: String) -> CaptureRecord {
+    private func makeCapture(
+        id: String, text: String, itemScope: String = "personal", routeID: String = "route-default"
+    ) -> CaptureRecord {
         CaptureRecord(
             captureID: id,
             text: text,
@@ -40,8 +43,8 @@ final class PrivateReadCoreIntegrationTests: XCTestCase {
             utcOffsetMinutes: 0,
             locale: "en_US",
             calendar: "gregorian",
-            itemScope: "personal",
-            routeID: "route-default",
+            itemScope: itemScope,
+            routeID: routeID,
             entryLocked: false,
             createdAt: "2026-10-08T09:30:01Z"
         )
@@ -63,6 +66,14 @@ final class PrivateReadCoreIntegrationTests: XCTestCase {
         func startItemStatus(operationID: UInt64, itemID: String) throws {
             try core.startItemStatus(operationID: operationID, itemID: itemID)
         }
+
+        func startRetrieval(operationID: UInt64, request: CoreRetrievalRequest) throws {
+            try core.startRetrieval(operationID: operationID, request: request)
+        }
+
+        func startItemDetail(operationID: UInt64, itemID: String, readScopes: [CoreExportScope]) throws {
+            try core.startItemDetail(operationID: operationID, itemID: itemID, readScopes: readScopes)
+        }
     }
 
     /// One app launch: a real core, a fresh (capture-only) session and the gate in front of the core's read verbs.
@@ -74,10 +85,11 @@ final class PrivateReadCoreIntegrationTests: XCTestCase {
         private(set) var events: [CoreEvent] = []
         private var nextOperationID: UInt64 = 1
 
-        init(path: String) throws {
+        init(path: String, authorizedScopes: [CoreExportScope] = [.personal, .work]) throws {
             core = try CoreHandle(path: path)
             session = ReadAuthenticationSession(boundary: boundary)
-            gate = PrivateReadGate(session: session, source: CoreHandleReadSource(core: core))
+            gate = PrivateReadGate(
+                session: session, source: CoreHandleReadSource(core: core), authorizedScopes: authorizedScopes)
             try core.setEventHandler { [unowned self] event in
                 self.events.append(event)
             }
@@ -108,11 +120,39 @@ final class PrivateReadCoreIntegrationTests: XCTestCase {
             return try waitForEvent(operationID).decode(SaveCaptureAcknowledgment.self)
         }
 
+        /// Imports the capture as an item, which is what retrieval searches. Routes must already exist.
+        func importCapture(_ capture: CaptureRecord) throws {
+            let operationID = allocateOperationID()
+            try core.startImportForegroundIngress(operationID: operationID, record: capture)
+            _ = try waitForEvent(operationID).decode(IngressImportAcknowledgment.self)
+        }
+
         /// Starts a gated capture read and returns once the core has answered, without admitting the answer.
         func startGatedCaptureRead(_ captureID: String) throws -> CoreEvent {
             let operationID = allocateOperationID()
             try gate.startGetCapture(operationID: operationID, captureID: captureID)
             return try waitForEvent(operationID)
+        }
+
+        /// Starts a gated search or list and returns once the core has answered, without admitting the answer.
+        func startGatedRetrieval(
+            query: String?, filters: PrivateRetrievalFilters = PrivateRetrievalFilters()
+        ) throws -> CoreEvent {
+            let operationID = allocateOperationID()
+            if let query {
+                try gate.startSearch(operationID: operationID, query: query, filters: filters)
+            } else {
+                try gate.startList(operationID: operationID, filters: filters)
+            }
+            return try waitForEvent(operationID)
+        }
+
+        func retrieve(
+            query: String?, filters: PrivateRetrievalFilters = PrivateRetrievalFilters()
+        ) throws -> PrivateRetrievalAnswer {
+            let event = try startGatedRetrieval(query: query, filters: filters)
+            try gate.admit(operationID: event.operationID)
+            return try event.decode(PrivateRetrievalAnswer.self)
         }
 
         func readStoreCheck() throws -> StoreCheckReport {
@@ -197,6 +237,113 @@ final class PrivateReadCoreIntegrationTests: XCTestCase {
         let lateEvent = try launch.waitForEvent(operationID)
         XCTAssertThrowsError(try launch.gate.admit(operationID: lateEvent.operationID)) { error in
             XCTAssertEqual(error as? PrivateReadDenied, .relockedBeforeDelivery)
+        }
+    }
+
+    private func seedRoutes() {
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(layout.databaseURL.path, &database), SQLITE_OK)
+        sqlite3_busy_timeout(database, 5_000)
+        defer { sqlite3_close(database) }
+        for scope in ["personal", "work"] {
+            let statement = "INSERT INTO routes (route_id, route_name, scope, processing_destinations, created_at) "
+                + "VALUES ('route-\(scope)', 'route-\(scope)', '\(scope)', '[]', '2026-10-08T09:00:00Z')"
+            XCTAssertEqual(sqlite3_exec(database, statement, nil, nil, nil), SQLITE_OK)
+        }
+    }
+
+    func testRetrievalIsDeniedBeforeAuthenticationAndAfterRelockWithoutReachingTheCore() throws {
+        let launch = try Launch(path: layout.databaseURL.path)
+        defer { launch.close() }
+        seedRoutes()
+        try launch.importCapture(
+            makeCapture(
+                id: "capture-retrieval-denied", text: "synthetic note behind retrieval", routeID: "route-personal"))
+        let eventsBefore = launch.events.count
+
+        func assertRetrievalDenied(file: StaticString = #filePath, line: UInt = #line) {
+            XCTAssertThrowsError(
+                try launch.gate.startSearch(
+                    operationID: launch.allocateOperationID(), query: "synthetic", filters: PrivateRetrievalFilters()),
+                file: file, line: line
+            ) { XCTAssertEqual($0 as? PrivateReadDenied, .sessionNotAuthenticated, file: file, line: line) }
+            XCTAssertThrowsError(
+                try launch.gate.startList(operationID: launch.allocateOperationID(), filters: PrivateRetrievalFilters()),
+                file: file, line: line
+            ) { XCTAssertEqual($0 as? PrivateReadDenied, .sessionNotAuthenticated, file: file, line: line) }
+        }
+        assertRetrievalDenied()
+        XCTAssertEqual(authenticateAndWait(launch.session), .authenticated)
+        let answer = try launch.retrieve(query: "synthetic")
+        XCTAssertEqual(answer.hits.map(\.text), ["synthetic note behind retrieval"])
+        XCTAssertNil(answer.hits.first?.itemType, "an unclassified item reports no type")
+        let eventsAfterRead = launch.events.count
+        launch.session.relock(.enteredBackground)
+        assertRetrievalDenied()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        XCTAssertGreaterThan(eventsAfterRead, eventsBefore)
+        XCTAssertEqual(launch.events.count, eventsAfterRead, "denied retrievals never reached the core")
+    }
+
+    func testRetrievalHitDecodesATypedAndAnUnclassifiedItemType() throws {
+        func hitJSON(itemType: String) -> String {
+            """
+            {"item_id": "item-1", "capture_id": "capture-1", "scope": "personal", "item_type": \(itemType),
+             "text": "synthetic text", "text_basis": "original", "original_text": null, "matched": "current",
+             "match_span": null, "captured_at": "2026-10-08T09:30:00Z"}
+            """
+        }
+        let decoder = JSONDecoder()
+        let typed = try decoder.decode(PrivateRetrievalHit.self, from: Data(hitJSON(itemType: "\"action\"").utf8))
+        XCTAssertEqual(typed.itemType, "action")
+        let unclassified = try decoder.decode(PrivateRetrievalHit.self, from: Data(hitJSON(itemType: "null").utf8))
+        XCTAssertNil(unclassified.itemType)
+    }
+
+    func testRetrievalInFlightWhenTheSessionRelocksIsNotDelivered() throws {
+        let launch = try Launch(path: layout.databaseURL.path)
+        defer { launch.close() }
+        seedRoutes()
+        try launch.importCapture(
+            makeCapture(id: "capture-retrieval-late", text: "synthetic note read during a relock", routeID: "route-personal"))
+        XCTAssertEqual(authenticateAndWait(launch.session), .authenticated)
+
+        let operationID = launch.allocateOperationID()
+        try launch.gate.startSearch(operationID: operationID, query: "synthetic", filters: PrivateRetrievalFilters())
+        launch.session.relock(.enteredBackground)
+        let lateEvent = try launch.waitForEvent(operationID)
+        XCTAssertThrowsError(try launch.gate.admit(operationID: lateEvent.operationID)) { error in
+            XCTAssertEqual(error as? PrivateReadDenied, .relockedBeforeDelivery)
+        }
+    }
+
+    func testRetrievalNeverAsksForMoreThanTheSessionsAuthorizedScopes() throws {
+        let launch = try Launch(path: layout.databaseURL.path, authorizedScopes: [.personal])
+        defer { launch.close() }
+        seedRoutes()
+        try launch.importCapture(
+            makeCapture(id: "capture-scope-personal", text: "synthetic zebrafinch personal", routeID: "route-personal"))
+        try launch.importCapture(
+            makeCapture(
+                id: "capture-scope-work", text: "synthetic zebrafinch work", itemScope: "work", routeID: "route-work"))
+        XCTAssertEqual(authenticateAndWait(launch.session), .authenticated)
+
+        let everything = PrivateRetrievalFilters(scopes: [.personal, .work])
+        for answer in [
+            try launch.retrieve(query: "zebrafinch", filters: everything),
+            try launch.retrieve(query: nil, filters: everything),
+            try launch.retrieve(query: "zebrafinch"),
+        ] {
+            XCTAssertEqual(answer.totalAccessible, 1, "the work item is outside the session's scopes")
+            XCTAssertEqual(answer.hits.map(\.text), ["synthetic zebrafinch personal"])
+        }
+
+        XCTAssertThrowsError(
+            try launch.gate.startSearch(
+                operationID: launch.allocateOperationID(), query: "zebrafinch",
+                filters: PrivateRetrievalFilters(scopes: [.work]))
+        ) { error in
+            XCTAssertEqual((error as? CoreFailure)?.code, "invalid_request", "no authorized scope is left to read")
         }
     }
 

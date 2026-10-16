@@ -354,7 +354,10 @@ final class VoiceRecordingController {
             answered = true
             guard let self = self else { return }
             self.pendingHandoffCount -= 1
-            self.deliver(Self.outcome(for: result, summary: summary))
+            self.deliver(Self.outcome(for: result, summary: summary, inProgressFileExists: {
+                FileManager.default.fileExists(
+                    atPath: self.inProgressDirectory.appendingPathComponent(summary.inProgressFileName).path)
+            }))
         }
     }
 
@@ -395,7 +398,10 @@ final class VoiceRecordingController {
             protectionApplied: protectionApplied)
     }
 
-    static func outcome(for result: VoiceHandoffResult, summary: VoiceRecordingSummary) -> VoiceCaptureOutcome {
+    /// `inProgressFileExists` is read only for `stagedAudioUnavailable`, after the handoff has answered.
+    static func outcome(
+        for result: VoiceHandoffResult, summary: VoiceRecordingSummary, inProgressFileExists: () -> Bool
+    ) -> VoiceCaptureOutcome {
         switch result {
         case .saved(let itemID, let savedAt, let alreadyImported):
             return .saved(summary, VoiceSaveAcknowledgment(itemID: itemID, savedAt: savedAt, alreadyImported: alreadyImported))
@@ -403,6 +409,8 @@ final class VoiceRecordingController {
             return .keptForRetry(summary, .importUnconfirmed)
         case .notStaged:
             return .keptForRetry(summary, .notStaged)
+        case .stagedAudioUnavailable:
+            return .unrecoverable(captureID: summary.captureID, end: summary.end, fileRetained: inProgressFileExists())
         case .itemDeleted:
             return .itemDeleted(summary)
         }

@@ -672,13 +672,18 @@ fn close_delimited_bodies_need_close_notify_and_short_length_framed_bodies_fail(
 
 // --- Deadline and cancellation ----------------------------------------------------------------
 
+/// Upper bound that only catches a hang; the tests wait for the event, not for this long.
+const EXCHANGE_EVENT_LIMIT: Duration = Duration::from_secs(60);
+
 /// The request reached the server, and the client then closed the connection well inside the
 /// 60 s relative budget the caller gave: the exchange itself was aborted, not just abandoned.
 fn assert_exchange_torn_down(fixture: &Fixture) {
-    let waiting_since = Instant::now();
-    while fixture.closed_connections() == 0 && waiting_since.elapsed() < Duration::from_secs(3) {
-        thread::sleep(Duration::from_millis(10));
-    }
+    assert!(
+        fixture
+            .events()
+            .wait_for_closed_connection(EXCHANGE_EVENT_LIMIT),
+        "the fixture never saw the client close the connection"
+    );
     assert_eq!(fixture.requests().len(), 1);
     assert_eq!(fixture.closed_connections(), 1);
 }
@@ -709,18 +714,27 @@ fn cancellation_returns_promptly_while_the_request_is_in_flight() {
 
     let cancel = CancelToken::new();
     let canceller = cancel.clone();
+    let events = fixture.events();
+    let cancelled_at = Arc::new(Mutex::new(None));
+    let cancel_recorder = Arc::clone(&cancelled_at);
     thread::spawn(move || {
-        thread::sleep(Duration::from_millis(150));
-        canceller.cancel();
+        if events.wait_for_request(EXCHANGE_EVENT_LIMIT) {
+            *cancel_recorder.lock().unwrap() = Some(Instant::now());
+            canceller.cancel();
+        }
     });
     let mut request = request_to(fixture.url("/"), Some(credential_use()));
     request.timeout = Duration::from_secs(60);
-    let started = Instant::now();
     let error = transport.send(&request, &cancel, None).unwrap_err();
+    let returned_at = Instant::now();
 
     assert_eq!(error, HostTransportError::Cancelled);
     assert_eq!(TransportError::from(error), TransportError::Cancelled);
-    assert!(started.elapsed() < Duration::from_secs(5));
+    let cancelled_at = cancelled_at
+        .lock()
+        .unwrap()
+        .expect("the request never reached the server, so nothing was cancelled");
+    assert!(returned_at.duration_since(cancelled_at) < Duration::from_secs(5));
     assert_no_open_sockets(&transport);
     assert_exchange_torn_down(&fixture);
 }
@@ -772,13 +786,17 @@ fn the_dispatch_clock_deadline_ends_a_call_even_with_a_long_relative_budget() {
 
     let clock = Arc::new(ManualClock::new());
     let advancing = Arc::clone(&clock);
+    let events = fixture.events();
+    let advanced_at = Arc::new(Mutex::new(None));
+    let advance_recorder = Arc::clone(&advanced_at);
     thread::spawn(move || {
-        thread::sleep(Duration::from_millis(150));
-        advancing.advance_ms(10_000);
+        if events.wait_for_request(EXCHANGE_EVENT_LIMIT) {
+            *advance_recorder.lock().unwrap() = Some(Instant::now());
+            advancing.advance_ms(10_000);
+        }
     });
     let mut request = request_to(fixture.url("/"), Some(credential_use()));
     request.timeout = Duration::from_secs(60);
-    let started = Instant::now();
     let error = transport
         .send(
             &request,
@@ -789,9 +807,14 @@ fn the_dispatch_clock_deadline_ends_a_call_even_with_a_long_relative_budget() {
             }),
         )
         .unwrap_err();
+    let returned_at = Instant::now();
 
     assert_eq!(error, HostTransportError::Timeout);
-    assert!(started.elapsed() < Duration::from_secs(5));
+    let advanced_at = advanced_at
+        .lock()
+        .unwrap()
+        .expect("the request never reached the server, so the clock never advanced");
+    assert!(returned_at.duration_since(advanced_at) < Duration::from_secs(5));
     assert_no_open_sockets(&transport);
     assert_exchange_torn_down(&fixture);
 }

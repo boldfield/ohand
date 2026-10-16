@@ -1,7 +1,13 @@
 //! Transactional foreground ingress import (C02a).
 //!
 //! One IMMEDIATE transaction stores the capture (reusing `store::captures`), creates the item
-//! with its initial independent states, and writes the search-index row (`retrieval::index`).
+//! with its initial independent states, writes the search-index row (`retrieval::index`) and,
+//! for a capture with text, queues its `interpret` job (`interpretation::enqueue`) and for a
+//! voice capture without text queues its on-device `transcription_attachment` job
+//! (`ingress::transcription::queue`). Queueing only writes the job row, so the acknowledgment
+//! still means "saved" and never waits on interpretation or transcription. A retry finds the
+//! existing item and queues nothing. A voice capture's interpretation job is queued when its
+//! transcript attaches.
 //! The acknowledgment is returned only after that transaction has committed; every error
 //! reports whether the commit happened, so the native side removes its staging record only on
 //! `Ok` and keeps it (and retries with the same capture ID) otherwise. The one exception is
@@ -12,6 +18,8 @@
 //! the `ohand_core_start_save_capture` export performs. Nothing in this module deletes a
 //! capture, so a failed or interrupted import can never remove the sole copy of a source.
 
+use crate::ingress::transcription::queue::enqueue_for_new_item as enqueue_transcription;
+use crate::interpretation::enqueue::enqueue_default_interpretation;
 use crate::retrieval::index::sync_item_in_tx;
 use crate::store::captures::{get_capture, save_capture_in_tx, Capture};
 use crate::store::events::ItemScope;
@@ -23,6 +31,8 @@ use std::fmt;
 
 /// Largest absolute UTC offset (+/-18 hours) a time context may carry.
 const MAX_UTC_OFFSET_MINUTES: i32 = 18 * 60;
+/// The revision `insert_item` creates every item at.
+const INITIAL_REVISION: i32 = 0;
 
 /// Whether the import transaction is known to have committed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -135,6 +145,8 @@ pub(crate) enum ImportStage {
     CaptureWritten,
     ItemWritten,
     IndexWritten,
+    InterpretationQueued,
+    TranscriptionQueued,
     Committed,
 }
 
@@ -180,6 +192,19 @@ pub(crate) fn import_with_fault_points(
 
             sync_item_in_tx(&transaction, &item_id).map_err(before_commit)?;
             fault_point(ImportStage::IndexWritten).map_err(before_commit)?;
+
+            let saved_at = DateTime::parse_from_rfc3339(&capture.created_at)
+                .map_err(|error| before_commit(error.into()))?
+                .with_timezone(&Utc);
+            if capture.text.as_deref().is_some_and(|text| !text.is_empty()) {
+                enqueue_default_interpretation(&transaction, &item_id, INITIAL_REVISION, saved_at)
+                    .map_err(before_commit)?;
+                fault_point(ImportStage::InterpretationQueued).map_err(before_commit)?;
+            } else {
+                enqueue_transcription(&transaction, &item_id, INITIAL_REVISION, saved_at)
+                    .map_err(before_commit)?;
+                fault_point(ImportStage::TranscriptionQueued).map_err(before_commit)?;
+            }
 
             IngressImportAcknowledgment {
                 capture_id: capture.capture_id.clone(),
@@ -356,10 +381,11 @@ fn insert_item(
         "INSERT INTO items (item_id, capture_id, revision, lifecycle_state, save_state,
                             sync_state, processing_state, transcription_state,
                             created_at, updated_at)
-         VALUES (?, ?, 0, 'active', 'saved_local', 'not_configured', 'unprocessed', ?, ?, ?)",
+         VALUES (?, ?, ?, 'active', 'saved_local', 'not_configured', 'unprocessed', ?, ?, ?)",
         rusqlite::params![
             item_id,
             capture.capture_id,
+            INITIAL_REVISION,
             transcription_state,
             capture.created_at,
             capture.created_at,

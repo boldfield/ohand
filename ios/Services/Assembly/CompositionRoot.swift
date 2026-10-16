@@ -1,6 +1,7 @@
 import Foundation
 import OhAndCoreBridge
 import UIKit
+import UserNotifications
 
 // MARK: - Errors
 
@@ -17,6 +18,9 @@ public enum CompositionError: Error, Equatable {
     case jobTypeConflict(String)
     /// A core client with a fixed operation range was asked for a second time; two instances would share identifiers.
     case coreClientAlreadyTaken(String)
+    /// The configured capture route could not be provisioned, so no save would be accepted. The label is the core's
+    /// normalized failure code (for example `route_scope_mismatch`) or `route_provisioning_timeout`; never content.
+    case captureRouteUnavailable(String)
 }
 
 // MARK: - Configuration
@@ -181,6 +185,115 @@ public struct CompositionCoreClients {
         try taken.take(ServiceCompositionRoot.shadowReviewClientName)
         return ShadowReviewService(core: core, configuration: configuration)
     }
+
+    /// Reads whether a stored provider profile exists, is revoked, and serves a model. The answer carries no endpoint,
+    /// credential or content, so it is not a gated read.
+    public func providerProfileStatus() throws -> CoreProviderProfileStatusClient {
+        try taken.take(ServiceCompositionRoot.providerProfileStatusClientName)
+        return CoreProviderProfileStatusClient(core: core)
+    }
+}
+
+/// The result of one provider-profile status read.
+public typealias CoreProviderProfileStatusResult = Result<ProviderProfileStatus, CoreFailure>
+
+/// Asks the core about stored provider profiles without handing a module the core handle. A module forwards each
+/// event to `handle(_:)`, which returns `true` when the event answered one of this client's reads. Operation
+/// identifiers start at `firstOperationID`. Call `shutDown()` to fail the reads still waiting.
+public final class CoreProviderProfileStatusClient: @unchecked Sendable {
+    public static let firstOperationID: UInt64 = 1 << 41
+
+    static let shutDownFailure = CoreFailure(
+        errorClass: .cancelled, code: "client_shut_down", message: "the provider profile status client was shut down")
+    private static let unreadableAnswer = CoreFailure(
+        errorClass: .permanent, code: "unreadable_event", message: "the core answer could not be read")
+
+    private let core: CoreHandle
+    private let lock = NSLock()
+    private var nextOperationID = CoreProviderProfileStatusClient.firstOperationID
+    private var pending: [UInt64: @Sendable (CoreProviderProfileStatusResult) -> Void] = [:]
+    private var isShutDown = false
+
+    init(core: CoreHandle) {
+        self.core = core
+    }
+
+    /// Reads the stored profile `profileVersion` and calls `completion` once. A missing profile is a successful
+    /// answer with `exists == false`.
+    public func status(
+        profileVersion: String, model: String,
+        completion: @escaping @Sendable (CoreProviderProfileStatusResult) -> Void
+    ) {
+        lock.lock()
+        if isShutDown {
+            lock.unlock()
+            completion(.failure(Self.shutDownFailure))
+            return
+        }
+        let operationID = nextOperationID
+        nextOperationID += 1
+        pending[operationID] = completion
+        lock.unlock()
+        do {
+            try core.startProviderProfileStatus(operationID: operationID, profileVersion: profileVersion, model: model)
+        } catch {
+            lock.lock()
+            let removed = pending.removeValue(forKey: operationID)
+            lock.unlock()
+            removed?(.failure((error as? CoreFailure) ?? Self.unreadableAnswer))
+        }
+    }
+
+    /// Consumes the event if it answers one of this client's reads.
+    @discardableResult
+    public func handle(_ event: CoreEvent) -> Bool {
+        lock.lock()
+        let completion = pending.removeValue(forKey: event.operationID)
+        lock.unlock()
+        guard let completion else { return false }
+        switch event.outcome {
+        case .failure(let failure):
+            completion(.failure(failure))
+        case .success:
+            if let answer = try? event.decode(ProviderProfileStatus.self) {
+                completion(.success(answer))
+            } else {
+                completion(.failure(Self.unreadableAnswer))
+            }
+        }
+        return true
+    }
+
+    /// Fails every read still waiting and refuses later ones. Idempotent.
+    public func shutDown() {
+        lock.lock()
+        isShutDown = true
+        let waiting = pending
+        pending = [:]
+        lock.unlock()
+        for completion in waiting.values {
+            completion(.failure(Self.shutDownFailure))
+        }
+    }
+}
+
+/// Lets a service built during assembly reach the root that does not exist yet. The root sets itself once, at the end of
+/// its initializer, before anything can call the service.
+private final class WeakRootReference: @unchecked Sendable {
+    private let lock = NSLock()
+    private weak var storedRoot: ServiceCompositionRoot?
+
+    var root: ServiceCompositionRoot? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedRoot
+    }
+
+    func set(_ root: ServiceCompositionRoot) {
+        lock.lock()
+        storedRoot = root
+        lock.unlock()
+    }
 }
 
 /// The fixed-range core clients already handed out by one root's factory.
@@ -215,6 +328,20 @@ public final class CompositionPrivateReads {
 
     public func startItemStatus(operationID: UInt64, itemID: String) throws {
         try gated { try gate.startItemStatus(operationID: operationID, itemID: itemID) }
+    }
+
+    /// Full-text search over the items the session may read. The answer decodes as `PrivateRetrievalAnswer`, after
+    /// `admit`.
+    public func startSearch(
+        operationID: UInt64, query: String, filters: PrivateRetrievalFilters = PrivateRetrievalFilters()
+    ) throws {
+        try gated { try gate.startSearch(operationID: operationID, query: query, filters: filters) }
+    }
+
+    /// Every item the session may read that satisfies the filters. The answer
+    /// decodes as `PrivateRetrievalAnswer`, after `admit`.
+    public func startList(operationID: UInt64, filters: PrivateRetrievalFilters = PrivateRetrievalFilters()) throws {
+        try gated { try gate.startList(operationID: operationID, filters: filters) }
     }
 
     /// Returns normally only while the read this event answers is still authorized. On a throw the caller discards the
@@ -265,6 +392,10 @@ public protocol CompositionModule: AnyObject {
     var firstOperationID: UInt64 { get }
     /// Native job types this module runs; they are registered with the job host when it attaches.
     var jobCapabilities: [JobCapabilityHandler] { get }
+    /// Provider protocols this module needs the core to dispatch, beyond the base ones (Anthropic and OpenAI). The
+    /// root enables the union of every module's declaration; a protocol no module declares stays disabled (self-hosted
+    /// is disabled unless a module names it).
+    var enabledProviderProtocols: Set<CoreProviderProtocol> { get }
     func attach(to context: CompositionContext) throws
     /// Takes the event if it answers one of this module's operations.
     func handle(_ event: CoreEvent) -> Bool
@@ -274,6 +405,7 @@ public protocol CompositionModule: AnyObject {
 
 public extension CompositionModule {
     var jobCapabilities: [JobCapabilityHandler] { [] }
+    var enabledProviderProtocols: Set<CoreProviderProtocol> { [] }
 }
 
 /// A module that owns the ordered launch and foreground reconciliation (staged-capture recovery, job activation and
@@ -395,6 +527,62 @@ public enum CompositionSaveOutcome: Equatable, Sendable {
     case itemDeleted(captureID: String)
 }
 
+/// A finished recording offered to the root: the recorder's in-progress file and the finalized name bound to the
+/// capture ID (it must start with `<captureID>.`).
+public struct CompositionRecordingHandoff: Equatable, Sendable {
+    public var captureID: String
+    public var inProgressFileName: String
+    public var finalizedFileName: String
+    public var startedAt: Date
+
+    public init(captureID: String, inProgressFileName: String, finalizedFileName: String, startedAt: Date) {
+        self.captureID = captureID
+        self.inProgressFileName = inProgressFileName
+        self.finalizedFileName = finalizedFileName
+        self.startedAt = startedAt
+    }
+}
+
+/// What handing off a recording came to, with the same honesty rules as `CompositionSaveOutcome`.
+public enum CompositionRecordingOutcome: Equatable, Sendable {
+    /// The core confirmed the import. The only outcome that may be shown as saved.
+    case saved(captureID: String, itemID: String, savedAt: String, alreadySaved: Bool)
+    /// Durable on this device and waiting for the core to confirm.
+    case keptOnDevice(captureID: String)
+    /// Nothing was staged; the recording remains in the in-progress store.
+    case notStaged(captureID: String)
+    /// A record is staged, but the audio could not be moved into the finalized store (for example the in-progress file is
+    /// missing or unreadable). Not saved, and nothing proves the audio is durable.
+    case audioUnavailable(captureID: String)
+    case itemDeleted(captureID: String)
+}
+
+/// Why a staged capture is not confirmed saved. The capture itself is durable on the device in every case.
+public enum CompositionPendingReason: Equatable, Sendable {
+    case importUnconfirmed
+    case coreRejected(code: String)
+    case audioUnavailable
+    case stagingRecordUnreadable
+}
+
+public struct CompositionPendingCapture: Equatable, Sendable {
+    public var captureID: String
+    public var reason: CompositionPendingReason
+}
+
+/// What a restart recovery pass found.
+public struct CompositionRecoveryReport: Equatable, Sendable {
+    /// Staged captures whose import is still unconfirmed. They are retained, never reported as saved.
+    public var pending: [CompositionPendingCapture] = []
+    /// Staged captures the core confirmed during this pass.
+    public var confirmedCaptureIDs: [String] = []
+    /// Staged captures whose item the user had deleted; nothing was re-imported.
+    public var deletedItemCaptureIDs: [String] = []
+    /// Files in the in-progress audio store that no staged capture owns, left in place and never imported. nil means
+    /// ownership could not be fully determined and must never be read as "none".
+    public var unclaimedInProgressFileNames: [String]?
+}
+
 // MARK: - Event routing
 
 /// Hands each core event to the clients in turn until one claims it. The core has one event handler, and every client
@@ -437,6 +625,28 @@ private final class CoreHandleReadSource: PrivateReadSource {
 
     func startItemStatus(operationID: UInt64, itemID: String) throws {
         try core.startItemStatus(operationID: operationID, itemID: itemID)
+    }
+
+    func startRetrieval(operationID: UInt64, request: CoreRetrievalRequest) throws {
+        try core.startRetrieval(operationID: operationID, request: request)
+    }
+
+    func startReminderRead(
+        operationID: UInt64, itemID: String, kind: ReminderReadKind, readScopes: [CoreExportScope]
+    ) throws {
+        try core.startReminderRead(operationID: operationID, itemID: itemID, kind: kind, readScopes: readScopes)
+    }
+
+    func startItemDetail(operationID: UInt64, itemID: String, readScopes: [CoreExportScope]) throws {
+        try core.startItemDetail(operationID: operationID, itemID: itemID, readScopes: readScopes)
+    }
+
+    func startRetentionRead(operationID: UInt64, kind: RetentionReadKind, readScopes: [CoreExportScope]) throws {
+        try core.startRetentionRead(operationID: operationID, kind: kind, readScopes: readScopes)
+    }
+
+    func startJobConfigurationRead(operationID: UInt64, command: JobConfigurationCommand) throws {
+        try core.startJobConfiguration(operationID: operationID, command: command)
     }
 }
 
@@ -553,6 +763,120 @@ private final class ForegroundState: @unchecked Sendable {
     }
 }
 
+/// Holds the callback a resolved tap runs, so the app can set it after the root is built.
+private final class OpenItemRelay: @unchecked Sendable {
+    private let lock = NSLock()
+    private var handler: (@Sendable (String) -> Void)?
+
+    func set(_ handler: (@Sendable (String) -> Void)?) {
+        lock.lock()
+        self.handler = handler
+        lock.unlock()
+    }
+
+    func open(_ itemID: String) {
+        lock.lock()
+        let current = handler
+        lock.unlock()
+        current?(itemID)
+    }
+}
+
+/// The notification-action pieces the root owns: the core client, the durable journal's handler and the delegate.
+/// Nothing here is public; the root exposes the delegate, a reconcile and the open-item setter.
+final class NotificationActionClients: @unchecked Sendable {
+    static let journalDirectoryName = "NotificationActions"
+
+    let client: CoreNotificationActionClient
+    let handler: ActionHandler
+    let ingestor: NotificationEventIngestor
+    let receiver: NotificationEventReceiver
+    fileprivate let openItem: OpenItemRelay
+    private let scopeToken: SessionScopeObserverToken
+
+    init(
+        core: CoreHandle,
+        layout: ProtectedStorageLayout,
+        session: ReadAuthenticationSession,
+        now: @escaping @Sendable () -> Date,
+        forwardTo environmentHandler: @escaping NotificationEventHandler
+    ) {
+        let client = CoreNotificationActionClient(core: core)
+        let journal = FileNotificationActionJournal(
+            directory: layout.directory(for: .temporaryFiles)
+                .appendingPathComponent(Self.journalDirectoryName, isDirectory: true))
+        let relay = OpenItemRelay()
+        let handler = ActionHandler(
+            core: client, journal: journal, authorization: session, openItem: { relay.open($0) })
+        let ingestor = NotificationEventIngestor(
+            now: now,
+            handler: { event in
+                handler.eventHandler(event)
+                environmentHandler(event)
+            })
+        self.client = client
+        self.handler = handler
+        self.ingestor = ingestor
+        openItem = relay
+        receiver = NotificationEventReceiver(ingestor: ingestor)
+        scopeToken = handler.attach(to: session)
+    }
+
+    func shutDown(session: ReadAuthenticationSession) {
+        session.removeScopeObserver(scopeToken)
+        client.shutDown()
+    }
+}
+
+/// Waits for the answer to the route-provisioning request. The core delivers events on the main queue, so a caller on
+/// the main thread has to keep the run loop turning while it waits.
+private final class RouteProvisioningWait: @unchecked Sendable {
+    private let lock = NSLock()
+    private let signal = DispatchSemaphore(value: 0)
+    private var outcome: Result<Void, CoreFailure>?
+
+    func handle(_ event: CoreEvent) -> Bool {
+        guard event.operationID == ServiceCompositionRoot.routeProvisioningOperationID else { return false }
+        let result: Result<Void, CoreFailure>
+        switch event.outcome {
+        case .failure(let failure):
+            result = .failure(failure)
+        case .success:
+            if (try? event.decode(RouteProvisioningOutcome.self)) != nil {
+                result = .success(())
+            } else {
+                result = .failure(
+                    CoreFailure(
+                        errorClass: .permanent, code: "unreadable_event", message: "the core answer could not be read"))
+            }
+        }
+        lock.lock()
+        outcome = outcome ?? result
+        lock.unlock()
+        signal.signal()
+        return true
+    }
+
+    func wait(timeout: TimeInterval) -> Result<Void, CoreFailure>? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let answered = current { return answered }
+            if Thread.isMainThread {
+                RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+            } else {
+                _ = signal.wait(timeout: .now() + 0.05)
+            }
+        }
+        return current
+    }
+
+    private var current: Result<Void, CoreFailure>? {
+        lock.lock()
+        defer { lock.unlock() }
+        return outcome
+    }
+}
+
 // MARK: - Root
 
 /// The one place the production services are connected: the Rust core, the foreground ingress that saves into it, the
@@ -578,12 +902,29 @@ public final class ServiceCompositionRoot {
     /// The width of a module's own operation range and of each fixed-range client's reserved range.
     public static let operationRangeWidth: UInt64 = 1 << 40
 
+    /// The route-provisioning request's identifier: the top of the importer's interval, which the importer never issues.
+    static let routeProvisioningOperationID: UInt64 = minimumModuleOperationID - 1
+    static let routeProvisioningTimeoutSeconds: TimeInterval = 30
+    static let captureRouteName = "Local capture"
+
     static let audioRetentionClientName = "audio retention"
     static let deletionCleanupClientName = "deletion cleanup"
     static let processingHealthClientName = "processing health"
     static let shadowReviewClientName = "shadow review"
+    static let providerProfileStatusClientName = "provider profile status"
+    /// The provider protocols enabled for every root: today's behaviour, before any module declares more.
+    static let baseProviderProtocols: Set<CoreProviderProtocol> = [.anthropic, .openAI]
+    static let promptScheduleClientName = "prompt schedule"
     /// `ShadowReviewService` keeps its first operation identifier private; this is its value.
     static let shadowReviewFirstOperationID: UInt64 = 1 << 48
+    static let itemCorrectionClientName = "item corrections"
+    static let itemDeletionClientName = "item deletion"
+    static let reminderControlClientName = "reminder controls"
+    static let itemLifecycleControlClientName = "item lifecycle controls"
+    static let suggestionResponseClientName = "suggestion responses"
+    static let itemDetailClientName = "item detail"
+    static let retentionControlClientName = "retention controls"
+    static let jobConfigurationClientName = "job configuration"
 
     /// One half-open interval of operation identifiers `[start, end)` that a client claims.
     public struct OperationRange: Equatable, Sendable {
@@ -608,14 +949,25 @@ public final class ServiceCompositionRoot {
     public static let reservedOperationRanges: [OperationRange] = [
         OperationRange(name: "importer", start: 0, end: minimumModuleOperationID),
         fixedWidthRange(shadowReviewClientName, from: shadowReviewFirstOperationID),
+        fixedWidthRange(providerProfileStatusClientName, from: CoreProviderProfileStatusClient.firstOperationID),
         fixedWidthRange("transcription", from: TranscriptionCoreClient.firstOperationID),
         fixedWidthRange(deletionCleanupClientName, from: CoreDeletionCleanupClient.firstOperationID),
         fixedWidthRange("export", from: CoreExportClient.firstOperationID),
+        fixedWidthRange(promptScheduleClientName, from: CorePromptScheduleClient.firstOperationID),
         fixedWidthRange("reminders", from: CoreReminderReconciler.firstOperationID),
         fixedWidthRange("item status", from: CoreItemStatusReader.firstOperationID),
         fixedWidthRange(audioRetentionClientName, from: CoreAudioRetentionClient.firstOperationID),
         fixedWidthRange("metrics", from: CoreMetricsClient.firstOperationID),
         fixedWidthRange("notification actions", from: CoreNotificationActionClient.firstOperationID),
+        fixedWidthRange(itemCorrectionClientName, from: CoreItemCorrectionClient.firstOperationID),
+        fixedWidthRange(itemDeletionClientName, from: CoreItemDeletionClient.firstOperationID),
+        fixedWidthRange(reminderControlClientName, from: CoreReminderControlClient.firstOperationID),
+        fixedWidthRange(
+            itemLifecycleControlClientName, from: CoreItemLifecycleControlClient.firstOperationID),
+        fixedWidthRange(suggestionResponseClientName, from: CoreSuggestionResponseClient.firstOperationID),
+        fixedWidthRange(itemDetailClientName, from: CoreItemDetailClient.firstOperationID),
+        fixedWidthRange(retentionControlClientName, from: CoreRetentionControlClient.firstOperationID),
+        fixedWidthRange(jobConfigurationClientName, from: CoreJobConfigurationClient.firstOperationID),
         OperationRange(
             name: processingHealthClientName, start: ProcessingHealthService.firstOperationID,
             end: JobRunnerService.firstOperationID),
@@ -626,19 +978,53 @@ public final class ServiceCompositionRoot {
     public var adapterSet: CompositionAdapterSet { adapters.kind }
     public let jobRunner: JobRunnerService
     public let reminderReconciler: NotificationPermissionReconciler
+    /// The optional daily prompt schedule. Settings calls `configure`; the lifecycle pass keeps it current once the
+    /// root is started with a `LifecycleCoordinator`.
+    public let promptSchedule: PromptScheduleService
+    /// Corrects an item's text, type or session topic; needs an authenticated read session.
+    public let itemCorrections: ItemCorrectionService
+    /// Deletes one item and runs its native cleanup at once; needs an authenticated read session.
+    public let itemDeletion: ItemDeletionService
+    /// Reads, edits, cancels and reviews an item's reminder; reads are gated and writes need an authenticated session.
+    public let reminderControls: ReminderControlService
+    /// Completes, cancels or quiets an item; needs an authenticated read session.
+    public let itemLifecycleControls: ItemLifecycleControlService
+    /// Opens a daily prompt and records the user's answer; needs an authenticated read session.
+    public let suggestionResponses: SuggestionResponseService
+    /// Reads one item's full detail; needs an authenticated read session.
+    public let itemDetails: ItemDetailService
+    /// Configures audio retention and acts on unresolved sole audio; reads are gated and writes need an authenticated
+    /// session.
+    public let retentionControls: RetentionControlService
+    /// Re-pins waiting work, requeues a job, revokes a profile and lists the jobs pinned to one; needs an authenticated
+    /// read session.
+    public let jobConfiguration: JobConfigurationService
 
     let adapters: CompositionAdapters
     /// The session whose scope gates every private read the root performs.
     var readSession: ReadAuthenticationSession { adapters.readSession }
     let coreHandle: CoreHandle
     let transcription: TranscriptionCapability
+    /// The ingestor the delegate hands OS callbacks to; tests feed callbacks through it, since a
+    /// `UNNotificationResponse` cannot be built outside the OS.
+    var notificationIngestor: NotificationEventIngestor { notificationActions.ingestor }
 
     private let environment: CompositionEnvironment
     private let layout: ProtectedStorageLayout
     private let protectionFailureTotal: Int
     private let statusReader: CoreItemStatusReader
     private let reminderCore: CoreReminderReconciler
+    private let promptScheduleClient: CorePromptScheduleClient
     private let providerTransport: ProviderExchangeCoordinator
+    private let notificationActions: NotificationActionClients
+    private let itemCorrectionClient: CoreItemCorrectionClient
+    private let itemDeletionClient: CoreItemDeletionClient
+    private let reminderControlClient: CoreReminderControlClient
+    private let itemLifecycleControlClient: CoreItemLifecycleControlClient
+    private let suggestionResponseClient: CoreSuggestionResponseClient
+    private let itemDetailClient: CoreItemDetailClient
+    private let retentionControlClient: CoreRetentionControlClient
+    private let jobConfigurationClient: CoreJobConfigurationClient
     private let modules: [CompositionModule]
     private let foreground: ForegroundState
     private let stateLock = NSLock()
@@ -693,10 +1079,35 @@ public final class ServiceCompositionRoot {
         jobRunner = assembly.jobRunner
         transcription = assembly.transcription
         reminderCore = assembly.reminderCore
+        promptScheduleClient = assembly.promptScheduleClient
+        promptSchedule = assembly.promptSchedule
         providerTransport = assembly.providerTransport
+        notificationActions = assembly.notificationActions
+        itemCorrectionClient = assembly.itemCorrectionClient
+        itemCorrections = assembly.itemCorrections
+        itemDeletionClient = assembly.itemDeletionClient
+        itemDeletion = assembly.itemDeletion
+        reminderControlClient = assembly.reminderControlClient
+        reminderControls = assembly.reminderControls
+        itemLifecycleControlClient = assembly.itemLifecycleControlClient
+        itemLifecycleControls = assembly.itemLifecycleControls
+        suggestionResponseClient = assembly.suggestionResponseClient
+        suggestionResponses = assembly.suggestionResponses
+        itemDetailClient = assembly.itemDetailClient
+        itemDetails = assembly.itemDetails
+        retentionControlClient = assembly.retentionControlClient
+        retentionControls = assembly.retentionControls
+        jobConfigurationClient = assembly.jobConfigurationClient
+        jobConfiguration = assembly.jobConfiguration
         reminderReconciler = assembly.permissionReconciler
         foreground = assembly.foreground
+        assembly.rootReference.set(self)
         jobRunner.setDrainIdleObserver { [weak self] in self?.runReminderPassAfterDrain() }
+        itemDeletion.setCleanupProvider { [weak self] in
+            let coordinator = self?.modules.lazy.compactMap { $0 as? LifecycleCoordinator }.first
+            let cleanup: ItemDeletionCleanup? = coordinator?.deletionCleanup
+            return cleanup
+        }
     }
 
     deinit {
@@ -736,6 +1147,9 @@ public final class ServiceCompositionRoot {
         hasStarted = true
         let lifecycleOwner = modules.lazy.compactMap { $0 as? CompositionLifecycleOwner }.first
         let ownsLifecycle = lifecycleOwner?.connectLifecycle(to: self) ?? false
+        if ownsLifecycle, let coordinator = lifecycleOwner as? LifecycleCoordinator {
+            coordinator.setAction(promptSchedule.lifecycleAction, for: .promptEligibility)
+        }
         let center = adapters.lifecycleNotifications
         let foregroundState = foreground
         foregroundState.set(isActive)
@@ -832,7 +1246,18 @@ public final class ServiceCompositionRoot {
         providerTransport.shutDown()
         jobRunner.shutDown()
         transcription.shutDown()
+        notificationActions.shutDown(session: adapters.readSession)
+        itemCorrectionClient.shutDown()
+        itemDeletion.setCleanupProvider(nil)
+        itemDeletionClient.shutDown()
+        reminderControlClient.shutDown()
+        itemLifecycleControlClient.shutDown()
+        suggestionResponseClient.shutDown()
+        itemDetailClient.shutDown()
+        retentionControlClient.shutDown()
+        jobConfigurationClient.shutDown()
         reminderCore.invalidate()
+        promptScheduleClient.shutDown()
         statusReader.shutDown()
         coreHandle.close()
     }
@@ -858,6 +1283,42 @@ public final class ServiceCompositionRoot {
             captureID: captureID, text: text, audio: nil, context: captureContext(at: capturedAt))
         service.submit(record) { outcome in
             completion(Self.saveOutcome(for: outcome))
+        }
+    }
+
+    /// The directory the recorder must write in-progress audio to. Recordings handed off from here are moved, never
+    /// copied, into the finalized audio store.
+    public var inProgressAudioDirectory: URL { layout.directory(for: .ingressInProgressAudio) }
+
+    /// Saves a finished recording: staged durably first, finalized by move, then imported into the core in one
+    /// transaction. Call and completion are on the main queue. Handing off the same capture again converges on the
+    /// same item.
+    public func saveRecording(
+        _ handoff: CompositionRecordingHandoff,
+        completion: @escaping (CompositionRecordingOutcome) -> Void
+    ) {
+        stateLock.lock()
+        let service = ingress
+        stateLock.unlock()
+        guard let service else {
+            completion(.notStaged(captureID: handoff.captureID))
+            return
+        }
+        let record = IngressRecord(
+            captureID: handoff.captureID, text: nil,
+            audio: IngressAudioHandoff(
+                inProgressFileName: handoff.inProgressFileName, finalizedFileName: handoff.finalizedFileName),
+            context: captureContext(at: handoff.startedAt))
+        service.submit(record) { outcome in
+            completion(Self.recordingOutcome(for: outcome))
+        }
+    }
+
+    /// Imports every capture a previous run left staged and reports it; `nil` once the root is shut down. Safe to
+    /// repeat. Call on the main queue; the completion arrives there.
+    public func recoverRecordings(completion: @escaping (CompositionRecoveryReport?) -> Void) {
+        recoverStagedIngress { report in
+            completion(report.map(Self.recoveryReport(from:)))
         }
     }
 
@@ -903,6 +1364,27 @@ public final class ServiceCompositionRoot {
         completion: @escaping (Result<ItemStatusReport, CoreFailure>) -> Void
     ) {
         statusReader.read(itemID: itemID, completion: completion)
+    }
+
+    // MARK: Notification actions
+
+    /// The delegate to install on `UNUserNotificationCenter`. It stores each delivered, opened and action callback
+    /// durably before anything else happens, so a callback is not lost while the core, the network or a provider is
+    /// unavailable. Completing and opening wait for an authenticated session.
+    public var notificationCenterDelegate: UNUserNotificationCenterDelegate { notificationActions.receiver }
+
+    /// Delivers the callbacks stored by this or an earlier launch that the session now allows. Call it at launch; the
+    /// root repeats it by itself whenever the session authenticates.
+    public func reconcileNotificationActions() async {
+        _ = await notificationActions.handler.reconcile()
+    }
+
+    /// Sets (or clears, with `nil`) what runs when a tap resolves to an item. It receives the identifier the core
+    /// resolved for the notification, never the payload's target, and only while the session that admitted the tap is
+    /// still authenticated. It may run on any thread; set it before installing the delegate, since a tap that
+    /// resolves while none is set is spent.
+    public func setOpenItemHandler(_ handler: (@Sendable (String) -> Void)?) {
+        notificationActions.openItem.set(handler)
     }
 
     // MARK: Reminders
@@ -971,6 +1453,54 @@ public final class ServiceCompositionRoot {
         }
     }
 
+    private static func recordingOutcome(for outcome: IngressOutcome) -> CompositionRecordingOutcome {
+        switch outcome {
+        case .saved(let acknowledgment):
+            return .saved(
+                captureID: acknowledgment.captureID, itemID: acknowledgment.itemID, savedAt: acknowledgment.savedAt,
+                alreadySaved: acknowledgment.alreadyImported)
+        case .keptForRetry(let captureID, .sourceUnavailable):
+            return .audioUnavailable(captureID: captureID)
+        case .keptForRetry(let captureID, _):
+            return .keptOnDevice(captureID: captureID)
+        case .notStaged(let captureID, _):
+            return .notStaged(captureID: captureID)
+        case .itemDeleted(let captureID):
+            return .itemDeleted(captureID: captureID)
+        }
+    }
+
+    private static func recoveryReport(from ingress: IngressRecoveryReport) -> CompositionRecoveryReport {
+        var report = CompositionRecoveryReport()
+        for entry in ingress.entries {
+            switch entry.outcome {
+            case .saved:
+                report.confirmedCaptureIDs.append(entry.captureID)
+            case .itemDeleted:
+                report.deletedItemCaptureIDs.append(entry.captureID)
+            case .keptForRetry(_, let problem):
+                report.pending.append(
+                    CompositionPendingCapture(captureID: entry.captureID, reason: pendingReason(for: problem)))
+            case .notStaged:
+                report.pending.append(
+                    CompositionPendingCapture(captureID: entry.captureID, reason: .audioUnavailable))
+            }
+        }
+        let ownershipKnown = ingress.listingFailure == nil && ingress.unclaimedAudioListingFailure == nil
+            && !ingress.unclaimedAudioNotEvaluated
+        report.unclaimedInProgressFileNames = ownershipKnown ? ingress.unclaimedInProgressAudio : nil
+        return report
+    }
+
+    private static func pendingReason(for problem: IngressPendingProblem) -> CompositionPendingReason {
+        switch problem {
+        case .notCommitted, .commitUnknown, .coreUnavailable, .conflictingReuse: return .importUnconfirmed
+        case .rejected(let code): return .coreRejected(code: code)
+        case .sourceUnavailable: return .audioUnavailable
+        case .recordUnreadable: return .stagingRecordUnreadable
+        }
+    }
+
     // MARK: Assembly
 
     private struct Assembly {
@@ -982,7 +1512,27 @@ public final class ServiceCompositionRoot {
         let jobRunner: JobRunnerService
         let transcription: TranscriptionCapability
         let reminderCore: CoreReminderReconciler
+        let promptScheduleClient: CorePromptScheduleClient
+        let promptSchedule: PromptScheduleService
+        let rootReference: WeakRootReference
         let providerTransport: ProviderExchangeCoordinator
+        let notificationActions: NotificationActionClients
+        let itemCorrectionClient: CoreItemCorrectionClient
+        let itemCorrections: ItemCorrectionService
+        let itemDeletionClient: CoreItemDeletionClient
+        let itemDeletion: ItemDeletionService
+        let reminderControlClient: CoreReminderControlClient
+        let reminderControls: ReminderControlService
+        let itemLifecycleControlClient: CoreItemLifecycleControlClient
+        let itemLifecycleControls: ItemLifecycleControlService
+        let suggestionResponseClient: CoreSuggestionResponseClient
+        let suggestionResponses: SuggestionResponseService
+        let itemDetailClient: CoreItemDetailClient
+        let itemDetails: ItemDetailService
+        let retentionControlClient: CoreRetentionControlClient
+        let retentionControls: RetentionControlService
+        let jobConfigurationClient: CoreJobConfigurationClient
+        let jobConfiguration: JobConfigurationService
         let permissionReconciler: NotificationPermissionReconciler
         let foreground: ForegroundState
     }
@@ -1005,6 +1555,31 @@ public final class ServiceCompositionRoot {
                 throw CompositionError.operationRangeConflict(module.identifier)
             }
             claimed.append(range)
+        }
+    }
+
+    /// Makes sure the configured capture route exists before ingress can accept or recover a save. A new route has no
+    /// processing destinations and no authorizations, so provisioning never authorizes an upload. Blocks until the core
+    /// answers, which takes a turning main run loop when called on the main thread.
+    private static func provisionCaptureRoute(
+        core: CoreHandle, router: CoreEventRouter, configuration: CompositionConfiguration
+    ) throws {
+        let wait = RouteProvisioningWait()
+        router.register { wait.handle($0) }
+        do {
+            try core.startEnsureLocalCaptureRoute(
+                operationID: routeProvisioningOperationID, routeID: configuration.captureRouteID,
+                routeName: captureRouteName, scope: configuration.captureItemScope)
+        } catch let failure as CoreFailure {
+            throw CompositionError.captureRouteUnavailable(failure.code)
+        }
+        switch wait.wait(timeout: routeProvisioningTimeoutSeconds) {
+        case .success?:
+            return
+        case .failure(let failure)?:
+            throw CompositionError.captureRouteUnavailable(failure.code)
+        case nil:
+            throw CompositionError.captureRouteUnavailable("route_provisioning_timeout")
         }
     }
 
@@ -1031,6 +1606,8 @@ public final class ServiceCompositionRoot {
             let router = CoreEventRouter()
             try core.setEventHandler { [router] event in router.route(event) }
 
+            try provisionCaptureRoute(core: core, router: router, configuration: configuration)
+
             let importer = CoreIngressImporter(attachedTo: core)
             router.register { importer.handle($0) }
             let ingress = try ForegroundIngressService(layout: layout, importer: importer, protection: protection)
@@ -1048,6 +1625,61 @@ public final class ServiceCompositionRoot {
                 core: core, bridge: bridge, center: adapters.notificationCenter)
             undo.append { reminderCore.invalidate() }
             router.register { reminderCore.handle($0) }
+
+            let promptScheduleClient = CorePromptScheduleClient(core: core)
+            undo.append { promptScheduleClient.shutDown() }
+            router.register { promptScheduleClient.handle($0) }
+            let rootReference = WeakRootReference()
+            let promptSchedule = PromptScheduleService(
+                core: promptScheduleClient, timeZone: environment.timeZone,
+                install: { trigger in
+                    guard let root = rootReference.root else { throw CancellationError() }
+                    return try await root.reconcileReminders(trigger: trigger)
+                })
+
+            let notificationActions = NotificationActionClients(
+                core: core, layout: layout, session: adapters.readSession, now: environment.now,
+                forwardTo: environment.notificationEvents)
+            undo.append { notificationActions.shutDown(session: adapters.readSession) }
+            router.register { notificationActions.client.handle($0) }
+            let itemCorrectionClient = CoreItemCorrectionClient(core: core)
+            router.register { itemCorrectionClient.handle($0) }
+            undo.append { itemCorrectionClient.shutDown() }
+            let itemCorrections = ItemCorrectionService(core: itemCorrectionClient, session: adapters.readSession)
+            let itemDeletionClient = CoreItemDeletionClient(core: core, gate: readGate)
+            router.register { itemDeletionClient.handle($0) }
+            undo.append { itemDeletionClient.shutDown() }
+            let itemDeletion = ItemDeletionService(core: itemDeletionClient, session: adapters.readSession)
+            let reminderControlClient = CoreReminderControlClient(core: core, gate: readGate)
+            router.register { reminderControlClient.handle($0) }
+            undo.append { reminderControlClient.shutDown() }
+            let reminderControls = ReminderControlService(core: reminderControlClient, session: adapters.readSession)
+            let itemLifecycleControlClient = CoreItemLifecycleControlClient(core: core)
+            router.register { itemLifecycleControlClient.handle($0) }
+            undo.append { itemLifecycleControlClient.shutDown() }
+            let itemLifecycleControls = ItemLifecycleControlService(
+                core: itemLifecycleControlClient, session: adapters.readSession)
+            let suggestionResponseClient = CoreSuggestionResponseClient(core: core, gate: readGate)
+            router.register { suggestionResponseClient.handle($0) }
+            undo.append { suggestionResponseClient.shutDown() }
+            let suggestionResponses = SuggestionResponseService(
+                core: suggestionResponseClient, session: adapters.readSession)
+            let itemDetailClient = CoreItemDetailClient(gate: readGate)
+            router.register { itemDetailClient.handle($0) }
+            undo.append { itemDetailClient.shutDown() }
+            let itemDetails = ItemDetailService(core: itemDetailClient)
+            let retentionControlClient = CoreRetentionControlClient(core: core, gate: readGate)
+            router.register { retentionControlClient.handle($0) }
+            undo.append { retentionControlClient.shutDown() }
+            let retentionControls = RetentionControlService(
+                core: retentionControlClient, session: adapters.readSession,
+                pressureProbe: VolumeStoragePressureProbe(volumeURL: layout.rootDirectory),
+                removerProvider: { modules.lazy.compactMap { ($0 as? LifecycleCoordinator)?.audioRetention }.first })
+            let jobConfigurationClient = CoreJobConfigurationClient(core: core, gate: readGate)
+            router.register { jobConfigurationClient.handle($0) }
+            undo.append { jobConfigurationClient.shutDown() }
+            let jobConfiguration = JobConfigurationService(
+                core: jobConfigurationClient, session: adapters.readSession)
             let permissionReconciler = NotificationPermissionReconciler(
                 center: adapters.notificationCenter, reconciliation: reminderCore,
                 observations: adapters.permissionObservations)
@@ -1071,6 +1703,12 @@ public final class ServiceCompositionRoot {
             for capability in capabilities where !jobTypes.insert(capability.jobType).inserted {
                 throw CompositionError.jobTypeConflict(capability.jobType)
             }
+            var enabledProtocols = ServiceCompositionRoot.baseProviderProtocols
+            for module in modules {
+                enabledProtocols.formUnion(module.enabledProviderProtocols)
+            }
+            try core.setEnabledProviderProtocols(enabledProtocols)
+            undo.append { try? core.setEnabledProviderProtocols(ServiceCompositionRoot.baseProviderProtocols) }
             let jobRunner = try JobRunnerService.attach(
                 to: core, storePath: layout.databaseURL.path, sender: adapters.sender,
                 capabilities: capabilities, isReachable: adapters.reachability.isReachable,
@@ -1093,8 +1731,19 @@ public final class ServiceCompositionRoot {
             return Assembly(
                 layout: layout, protectionFailureTotal: report.failures.count, core: core, ingress: ingress,
                 statusReader: statusReader, jobRunner: jobRunner, transcription: transcription,
-                reminderCore: reminderCore, providerTransport: providerTransport,
-                permissionReconciler: permissionReconciler, foreground: foreground)
+                reminderCore: reminderCore, promptScheduleClient: promptScheduleClient,
+                promptSchedule: promptSchedule, rootReference: rootReference, providerTransport: providerTransport,
+                notificationActions: notificationActions, itemCorrectionClient: itemCorrectionClient,
+                itemCorrections: itemCorrections, itemDeletionClient: itemDeletionClient,
+                itemDeletion: itemDeletion, reminderControlClient: reminderControlClient,
+                reminderControls: reminderControls, itemLifecycleControlClient: itemLifecycleControlClient,
+                itemLifecycleControls: itemLifecycleControls,
+                suggestionResponseClient: suggestionResponseClient,
+                suggestionResponses: suggestionResponses, itemDetailClient: itemDetailClient,
+                itemDetails: itemDetails, retentionControlClient: retentionControlClient,
+                retentionControls: retentionControls, jobConfigurationClient: jobConfigurationClient,
+                jobConfiguration: jobConfiguration, permissionReconciler: permissionReconciler,
+                foreground: foreground)
         } catch {
             for step in undo.reversed() {
                 step()
