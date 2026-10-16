@@ -59,6 +59,7 @@ struct ProviderSettingsView: View {
     static let nameFieldIdentifier = "provider-settings.field.name"
     static let modelFieldIdentifier = "provider-settings.field.model"
     static let credentialFieldIdentifier = "provider-settings.field.credential"
+    static let endpointFieldIdentifier = "provider-settings.field.endpoint"
 
     static func versionIdentifier(_ version: String) -> String { "provider-settings.version.\(version)" }
     static func makeDefaultIdentifier(_ version: String) -> String { "provider-settings.make-default.\(version)" }
@@ -215,7 +216,8 @@ struct ProviderSettingsView: View {
         if model.draft.providerProtocol.takesEndpoint {
             TextField("https://server address", text: $model.draft.endpoint)
                 .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
-                .accessibilityIdentifier("provider-settings.field.endpoint")
+                .reportRendered(Self.endpointFieldIdentifier, text: model.draft.endpoint)
+                .accessibilityIdentifier(Self.endpointFieldIdentifier)
         }
         TextField("Model", text: $model.draft.model)
             .textInputAutocapitalization(.never).autocorrectionDisabled()

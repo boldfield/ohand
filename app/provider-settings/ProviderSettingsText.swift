@@ -42,12 +42,29 @@ enum ProviderSettingsText {
         case "supported": return "\(name): available"
         case "unverified":
             return "\(name): unavailable, not verified. It will not process notes until verification evidence exists."
-        default: return "\(name): unavailable"
+        default: return "\(name): unavailable. \(unsupportedReason(capability))"
         }
     }
 
     static func capabilityName(_ capability: String) -> String {
-        capability == "text_interpretation" ? "Text interpretation" : "Unsupported capability"
+        switch capability {
+        case "text_interpretation": return "Text interpretation"
+        case "transcription": return "Transcription"
+        case "embeddings": return "Embeddings"
+        case "speech_generation": return "Speech generation"
+        default: return "Other capability (\(capability))"
+        }
+    }
+
+    /// Why a capability the core declared unsupported cannot be used, following the M1 provider capability contract.
+    static func unsupportedReason(_ capability: String) -> String {
+        switch capability {
+        case "text_interpretation": return "This provider version does not offer it."
+        case "transcription": return "Notes are transcribed on this device only; no provider transcribes them."
+        case "embeddings": return "This version of the app does not use embeddings."
+        case "speech_generation": return "This version of the app does not use speech generation."
+        default: return "This version of the app does not use it."
+        }
     }
 
     static func issue(_ issue: ProviderSettingsIssue) -> String {

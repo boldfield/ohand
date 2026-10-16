@@ -147,6 +147,72 @@ final class ProviderSettingsViewTests: XCTestCase {
         }
     }
 
+    func testSwitchingFromAPrivateServerToAHostedProviderDropsTheHiddenAddress() async {
+        let controls = FakeProviderSettingsControls(listing: Self.mixedListing)
+        await withScreen(controls) { model in
+            model.draft = ProviderSettingsDraft(
+                profileName: "work", providerProtocol: .selfHosted, endpoint: "https://server.example/v1",
+                model: "synthetic-model", credentialReference: "cred-1", timeoutSeconds: 60)
+            await settle()
+            XCTAssertEqual(text(ProviderSettingsView.endpointFieldIdentifier), "https://server.example/v1")
+            assertTappable(ProviderSettingsView.saveIdentifier)
+
+            // What the provider type picker does through its binding.
+            model.draft.providerProtocol = .openAI
+            await settle()
+            XCTAssertNil(rendered[ProviderSettingsView.endpointFieldIdentifier], "a hosted provider takes no address")
+            XCTAssertEqual(model.draft.endpoint, "")
+            XCTAssertNil(rendered[ProviderSettingsView.issuesIdentifier], "no hidden value blocks saving")
+            assertTappable(ProviderSettingsView.saveIdentifier)
+
+            await model.save()
+            await settle()
+            XCTAssertEqual(text(ProviderSettingsView.saveStateIdentifier), ProviderSettingsActionState.saved.message)
+            XCTAssertEqual(controls.created.count, 1)
+            XCTAssertNil(controls.created.first?.endpoint)
+            XCTAssertEqual(controls.created.first?.providerProtocol, "open_ai")
+
+            model.draft.providerProtocol = .selfHosted
+            await settle()
+            XCTAssertEqual(text(ProviderSettingsView.endpointFieldIdentifier), "", "the address field returns empty")
+        }
+    }
+
+    func testEverySelfHostedCapabilityIsNamedAndUnavailableOnesGiveTheirReason() async {
+        let capabilities = [
+            ("text_interpretation", "unverified"), ("transcription", "unsupported"), ("embeddings", "unsupported"),
+            ("speech_generation", "unsupported"),
+        ]
+        let capabilityJSON = capabilities.map { #"{"capability":"\#($0.0)","support":"\#($0.1)"}"# }
+            .joined(separator: ",")
+        let json = #"{"operation_id":1,"profiles":[{"profile_id":"private","versions":[{"profile_version":"private-v1","#
+            + #""protocol":"self_hosted","endpoint":"https://server.example/v1","model":"synthetic-model","#
+            + #""capabilities":[\#(capabilityJSON)],"credential_bound":true,"revoked":false,"default_for":[],"#
+            + #""created_at":"2026-10-01T00:00:00Z"}]}],"defaults":[]}"#
+        let listing = try! JSONDecoder().decode(ProviderProfileListAnswer.self, from: Data(json.utf8))
+
+        await withScreen(FakeProviderSettingsControls(listing: listing)) { _ in
+            let expected = [
+                "text_interpretation":
+                    "Text interpretation: unavailable, not verified. It will not process notes until verification "
+                    + "evidence exists.",
+                "transcription":
+                    "Transcription: unavailable. Notes are transcribed on this device only; no provider transcribes them.",
+                "embeddings": "Embeddings: unavailable. This version of the app does not use embeddings.",
+                "speech_generation":
+                    "Speech generation: unavailable. This version of the app does not use speech generation.",
+            ]
+            for (capability, status) in expected {
+                XCTAssertEqual(
+                    text(ProviderSettingsView.capabilityIdentifier("private-v1", capability)), status, capability)
+            }
+            let shown = expected.keys.compactMap { text(ProviderSettingsView.capabilityIdentifier("private-v1", $0)) }
+            XCTAssertEqual(Set(shown).count, 4, "each capability row is distinguishable")
+            XCTAssertFalse(shown.contains { $0.contains("Unsupported capability") })
+            XCTAssertNil(rendered[ProviderSettingsView.makeDefaultIdentifier("private-v1")])
+        }
+    }
+
     func testALockedSessionShowsOnlyTheLockedNotice() async {
         scope = .captureOnly
         await withScreen(FakeProviderSettingsControls(listing: Self.mixedListing)) { _ in

@@ -139,6 +139,9 @@ final class ProviderSettingsModelTests: XCTestCase {
         draft.endpoint = "https://server.example/v1"
         XCTAssertEqual(ProviderSettingsModel.issues(for: draft), [])
         draft.providerProtocol = .anthropic
+        XCTAssertEqual(draft.endpoint, "", "switching to a hosted provider drops the hidden address")
+        XCTAssertEqual(ProviderSettingsModel.issues(for: draft), [])
+        draft.endpoint = "https://server.example/v1"
         XCTAssertEqual(ProviderSettingsModel.issues(for: draft), [.endpointNotAllowed])
         draft.endpoint = ""
         draft.timeoutSeconds = 301

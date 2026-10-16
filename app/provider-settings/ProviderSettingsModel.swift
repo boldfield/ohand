@@ -76,7 +76,11 @@ enum ProviderSettingsActionState: Equatable {
 /// The text the user is typing into the profile form.
 struct ProviderSettingsDraft: Equatable {
     var profileName = ""
-    var providerProtocol: ProviderSettingsProtocol = .openAI
+    /// Choosing a provider type that takes no address drops any address typed earlier: its field is no longer shown,
+    /// so a leftover value would block saving with nothing on screen to clear.
+    var providerProtocol: ProviderSettingsProtocol = .openAI {
+        didSet { if !providerProtocol.takesEndpoint { endpoint = "" } }
+    }
     var endpoint = ""
     var model = ""
     var credentialReference = ""
