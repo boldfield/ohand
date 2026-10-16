@@ -114,22 +114,36 @@ final class TimeChangeRealCoreTests: XCTestCase {
         XCTAssertEqual(overdueStored.resolvedInstant, Self.isoText(overdueInstant), "the overdue instant is preserved")
     }
 
-    func testZoneTravelRefreshesTheCoreDailyPromptScheduleAndRepeatedCallbacksInstallNothingMore() async throws {
+    func testZoneTravelKeepsTheCorePlannedPromptsAtTheirAbsoluteInstantsAndRepeatedCallbacksChangeNothing() async throws {
         let layout = ProtectedStorageLayout(rootDirectory: storageRoot)
         try prepareStore(
             layout, futureInstant: Self.wholeSecond(Date().addingTimeInterval(2 * 86_400)),
             overdueInstant: Self.wholeSecond(Date().addingTimeInterval(-3_600)))
 
-        let time = ManualTime(wall: Date(), zone: TimeZone(identifier: "America/New_York")!)
+        let newYork = TimeZone(identifier: "America/New_York")!
+        let time = ManualTime(wall: Date(), zone: newYork)
         let center = FakeNotificationCenter()
         let lifecycle = LifecycleCoordinator(stepTimeoutSeconds: 30)
         let root = try makeRoot(modules: [lifecycle], notificationCenter: center, time: time)
         defer { root.shutDown() }
         try lifecycle.connect(to: root)
         lifecycle.setAction(root.promptSchedule.lifecycleAction, for: .promptEligibility)
-        _ = try await root.promptSchedule.configure(.daily(hour: 9, minute: 0))
-        let installedBeforeTravel = center.pendingIdentifiers
-        XCTAssertFalse(installedBeforeTravel.isEmpty, "the core planned and the pass installed daily prompts")
+        let configured = try await root.promptSchedule.configure(.daily(hour: 9, minute: 0))
+        let plannedNext = try XCTUnwrap(configured.next)
+
+        let promptsBeforeTravel = promptRequests(center.addedRequests)
+        XCTAssertEqual(promptsBeforeTravel.count, 3, "the core planned its horizon and the pass installed it")
+        XCTAssertEqual(
+            promptsBeforeTravel.map(\.identifier).sorted().first, "prompt:\(plannedNext.localDate)",
+            "the first installed prompt is the core's next occurrence")
+        var newYorkCalendar = Calendar(identifier: .gregorian)
+        newYorkCalendar.timeZone = newYork
+        for request in promptsBeforeTravel {
+            let parts = newYorkCalendar.dateComponents([.hour, .minute], from: request.dueInstant)
+            XCTAssertEqual(parts.hour, 9, "\(request.identifier) was planned for 09:00 in the zone it was chosen in")
+            XCTAssertEqual(parts.minute, 0)
+        }
+        let removedBeforeTravel = center.removedIdentifiers
 
         let systemCallbacks = NotificationCenter()
         let coordinator = TimeChangeCoordinator(
@@ -137,23 +151,57 @@ final class TimeChangeRealCoreTests: XCTestCase {
         coordinator.start()
         defer { coordinator.stop() }
 
+        // The person flies west and the OS repeats its callbacks for the one change.
         time.travel(to: losAngeles)
         for _ in 0..<3 { systemCallbacks.post(name: .NSSystemTimeZoneDidChange, object: nil) }
         await settleTimers(time, count: 3)
         let passed = await timeChangeWaitUntil { lifecycle.finishedPassCount == 1 }
         XCTAssertTrue(passed)
+        XCTAssertEqual(lifecycle.lastReport?.triggers, [.systemTimeChange])
         XCTAssertEqual(lifecycle.lastReport?.results.map(\.step), [.reminders, .promptEligibility])
-        let afterTravel = center.pendingIdentifiers
-        XCTAssertEqual(Set(afterTravel).count, afterTravel.count, "no prompt is installed twice")
+        XCTAssertEqual(lifecycle.lastReport?.outcome(of: .promptEligibility), .completed)
 
+        // The core's contract for a time or zone change: it drops occurrences and adds none, so the prompts it
+        // already planned stay installed at their absolute instants and nothing is requested or cancelled.
+        let promptsAfterTravel = promptRequests(center.addedRequests)
+        XCTAssertEqual(promptsAfterTravel.map(\.identifier), promptsBeforeTravel.map(\.identifier), "no prompt requested again")
+        XCTAssertEqual(promptsAfterTravel.map(\.dueInstant), promptsBeforeTravel.map(\.dueInstant))
+        XCTAssertEqual(center.removedIdentifiers, removedBeforeTravel, "no prompt was cancelled and reinstalled")
+        let pendingAfterTravel = promptIdentifiers(center.pendingIdentifiers)
+        XCTAssertEqual(pendingAfterTravel, promptsBeforeTravel.map(\.identifier).sorted())
+        let afterTravel = try await root.promptSchedule.read()
+        XCTAssertTrue(afterTravel.enabled)
+        XCTAssertEqual(afterTravel.time, configured.time)
+        XCTAssertEqual(afterTravel.next, configured.next, "the next occurrence keeps its date and instant")
+
+        // The clock is then set back a day, with repeated callbacks. The native path replays no spent date.
+        time.jumpWallClock(by: -86_400)
+        for _ in 0..<2 { systemCallbacks.post(name: .NSSystemClockDidChange, object: nil) }
+        await settleTimers(time, count: 2)
+        let secondPass = await timeChangeWaitUntil { lifecycle.finishedPassCount == 2 }
+        XCTAssertTrue(secondPass)
+        XCTAssertEqual(lifecycle.lastReport?.outcome(of: .promptEligibility), .completed)
+
+        // A callback with nothing changed, repeated, runs no pass at all.
         for _ in 0..<5 { systemCallbacks.post(name: .NSSystemClockDidChange, object: nil) }
         await settleTimers(time, count: 5)
         try? await Task.sleep(nanoseconds: 300_000_000)
-        XCTAssertEqual(lifecycle.finishedPassCount, 1, "no change, no pass")
-        XCTAssertEqual(center.pendingIdentifiers, afterTravel)
+        XCTAssertEqual(lifecycle.finishedPassCount, 2, "no change, no pass")
+
+        XCTAssertEqual(promptRequests(center.addedRequests).map(\.identifier), promptsBeforeTravel.map(\.identifier))
+        XCTAssertEqual(center.removedIdentifiers, removedBeforeTravel)
+        XCTAssertEqual(promptIdentifiers(center.pendingIdentifiers), pendingAfterTravel)
     }
 
     // MARK: helpers
+
+    private func promptIdentifiers(_ identifiers: [String]) -> [String] {
+        identifiers.filter { $0.hasPrefix("prompt:") }
+    }
+
+    private func promptRequests(_ requests: [NotificationCenterRequest]) -> [NotificationCenterRequest] {
+        requests.filter { $0.identifier.hasPrefix("prompt:") }
+    }
 
     private func settleTimers(_ time: ManualTime, count: Int) async {
         let held = await timeChangeWaitUntil { time.sleeperCount == count }
