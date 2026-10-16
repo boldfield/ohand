@@ -5,12 +5,12 @@ import XCTest
 /// Both optional capabilities joined to the production root through the extension seam, over the real Rust core, with a
 /// recording sender in place of the network. Everything here is synthetic.
 final class OptionalCapabilitiesIntegrationTests: OptionalCapabilitiesTestCase {
-    private func selfHostedSender() throws -> RecordingProviderSender {
-        RecordingProviderSender(repliesByHost: ["spark.example.test": try OptionalCapabilitiesReplies.selfHosted()])
+    private func selfHostedSender() throws -> OptionalCapabilitiesRecordingSender {
+        OptionalCapabilitiesRecordingSender(repliesByHost: ["spark.example.test": try OptionalCapabilitiesReplies.selfHosted()])
     }
 
-    private func reviewSender(itemType: String) throws -> RecordingProviderSender {
-        RecordingProviderSender(repliesByHost: ["api.anthropic.com": try OptionalCapabilitiesReplies.review(itemType: itemType)])
+    private func reviewSender(itemType: String) throws -> OptionalCapabilitiesRecordingSender {
+        OptionalCapabilitiesRecordingSender(repliesByHost: ["api.anthropic.com": try OptionalCapabilitiesReplies.review(itemType: itemType)])
     }
 
     private func save(_ root: ServiceCompositionRoot, text: String = "buy stamps") -> CompositionSaveOutcome? {
@@ -36,7 +36,7 @@ final class OptionalCapabilitiesIntegrationTests: OptionalCapabilitiesTestCase {
 
     func testBaseAppConstructsAndCapturesWithNeitherFeatureConfigured() throws {
         try prepareSelfHostedStore(SelfHostedScenario(interpretationGranted: false, includesProfile: false))
-        let sender = RecordingProviderSender()
+        let sender = OptionalCapabilitiesRecordingSender()
         let module = OptionalCapabilitiesModule()
         let root = try makeRoot(sender: sender, modules: [module])
         defer { root.shutDown() }
@@ -54,7 +54,7 @@ final class OptionalCapabilitiesIntegrationTests: OptionalCapabilitiesTestCase {
     func testTheModuleDoesNotTakeTheShadowClientUnlessShadowReviewIsOn() throws {
         try prepareShadowReviewStore()
         let probe = ShadowClientProbeModule(configuration: shadowReviewConfiguration())
-        let root = try makeRoot(sender: RecordingProviderSender(), modules: [OptionalCapabilitiesModule(), probe])
+        let root = try makeRoot(sender: OptionalCapabilitiesRecordingSender(), modules: [OptionalCapabilitiesModule(), probe])
         defer { root.shutDown() }
         XCTAssertNotNil(probe.service, "an unconfigured module leaves the fixed-range client free")
     }
@@ -64,7 +64,7 @@ final class OptionalCapabilitiesIntegrationTests: OptionalCapabilitiesTestCase {
         let enabled = OptionalCapabilitiesConfiguration(shadowReview: shadowReviewConfiguration())
         let module = OptionalCapabilitiesModule(configuration: enabled)
         let probe = ShadowClientProbeModule(configuration: shadowReviewConfiguration())
-        XCTAssertThrowsError(try makeRoot(sender: RecordingProviderSender(), modules: [module, probe])) {
+        XCTAssertThrowsError(try makeRoot(sender: OptionalCapabilitiesRecordingSender(), modules: [module, probe])) {
             XCTAssertEqual($0 as? CompositionError, .coreClientAlreadyTaken(ServiceCompositionRoot.shadowReviewClientName))
         }
     }
@@ -156,7 +156,7 @@ final class OptionalCapabilitiesIntegrationTests: OptionalCapabilitiesTestCase {
             try prepareSelfHostedStore(scenario)
             let module = OptionalCapabilitiesModule(
                 configuration: OptionalCapabilitiesConfiguration(selfHosted: verifiedRegistration()))
-            let root = try makeRoot(sender: RecordingProviderSender(), modules: [module])
+            let root = try makeRoot(sender: OptionalCapabilitiesRecordingSender(), modules: [module])
             XCTAssertEqual(availability(of: module), expected)
             root.shutDown()
         }
@@ -167,7 +167,7 @@ final class OptionalCapabilitiesIntegrationTests: OptionalCapabilitiesTestCase {
         let registration = SelfHostedRegistration(
             profileVersion: ShadowReviewScenario.profileVersion, model: SelfHostedVerifiedBoundary.current.model)
         let module = OptionalCapabilitiesModule(configuration: OptionalCapabilitiesConfiguration(selfHosted: registration))
-        let root = try makeRoot(sender: RecordingProviderSender(), modules: [module])
+        let root = try makeRoot(sender: OptionalCapabilitiesRecordingSender(), modules: [module])
         defer { root.shutDown() }
         XCTAssertEqual(availability(of: module), .unavailable(.notSelfHosted))
     }
@@ -175,7 +175,7 @@ final class OptionalCapabilitiesIntegrationTests: OptionalCapabilitiesTestCase {
     func testUnconfiguredModuleNeverChecksTheStore() throws {
         try prepareSelfHostedStore()
         let module = OptionalCapabilitiesModule()
-        let root = try makeRoot(sender: RecordingProviderSender(), modules: [module])
+        let root = try makeRoot(sender: OptionalCapabilitiesRecordingSender(), modules: [module])
         defer { root.shutDown() }
         settle(0.5)
         XCTAssertEqual(module.selfHostedAvailability, .unchecked)
@@ -372,7 +372,7 @@ final class OptionalCapabilitiesIntegrationTests: OptionalCapabilitiesTestCase {
         try prepareShadowReviewStore()
         let module = OptionalCapabilitiesModule(
             configuration: OptionalCapabilitiesConfiguration(shadowReview: shadowReviewConfiguration()))
-        let root = try makeRoot(sender: RecordingProviderSender(), modules: [module])
+        let root = try makeRoot(sender: OptionalCapabilitiesRecordingSender(), modules: [module])
         XCTAssertNotNil(module.shadowReview)
         root.shutDown()
         XCTAssertNil(module.shadowReview)

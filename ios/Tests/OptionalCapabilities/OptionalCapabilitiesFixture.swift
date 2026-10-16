@@ -126,7 +126,7 @@ enum SelfHostedSeed {
 
 /// Answers each send by host and records every request the core built. A host with no scripted reply gets a native
 /// refusal, so a request to an unexpected destination is visible both in `requests` and as a failure.
-final class RecordingProviderSender: ProviderRequestSender, @unchecked Sendable {
+final class OptionalCapabilitiesRecordingSender: ProviderRequestSender, @unchecked Sendable {
     private let lock = NSLock()
     private let repliesByHost: [String: Data]
     private var recorded: [ProviderHTTPRequest] = []
