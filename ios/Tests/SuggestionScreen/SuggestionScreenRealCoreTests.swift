@@ -160,6 +160,8 @@ final class SuggestionScreenRealCoreTests: XCTestCase {
             reminderBefore, "the explicit reminder is unchanged whatever the screen resolved to")
         XCTAssertEqual(scalar("SELECT lifecycle_state FROM items WHERE item_id = '\(itemID)'"), "active")
         XCTAssertEqual(scalar("SELECT COUNT(*) FROM events WHERE event_type = 'completion'"), "0")
+        XCTAssertEqual(model.state, .responded(.notNow))
+        XCTAssertEqual(scalar("SELECT COUNT(*) FROM events WHERE event_type = 'suggestion_control' AND event_id LIKE 'prompt-response:%'"), "1")
 
         // A second item shows the stored cooldown across a relaunch.
         root.shutDown()
@@ -171,7 +173,7 @@ final class SuggestionScreenRealCoreTests: XCTestCase {
         XCTAssertEqual(secondOffer.itemID, secondID, "the reminded item is not offered")
         await second.respond(.notNow)
         XCTAssertEqual(second.state, .responded(.notNow))
-        XCTAssertEqual(scalar("SELECT COUNT(*) FROM events WHERE event_type = 'suggestion_control' AND event_id LIKE 'prompt-response:%'"), "1")
+        XCTAssertEqual(scalar("SELECT COUNT(*) FROM events WHERE event_type = 'suggestion_control' AND event_id LIKE 'prompt-response:%'"), "2")
         XCTAssertEqual(scalar("SELECT lifecycle_state FROM items WHERE item_id = '\(secondID)'"), "active")
 
         root.shutDown()

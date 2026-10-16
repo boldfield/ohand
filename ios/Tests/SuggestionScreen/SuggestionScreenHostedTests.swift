@@ -147,25 +147,25 @@ final class SuggestionScreenHostedTests: XCTestCase {
         XCTAssertEqual(model.state, .locked)
     }
 
-    @MainActor func testARespondedAnswerAndAChangedItemNoticeAreRendered() async {
+    func testARespondedAnswerAndAChangedItemNoticeAreRendered() {
         let responder = HostedResponder(activations: [.success(.offer(offer())), .success(.nothingToOffer)])
         responder.responses = [.failure(SuggestionResponseError.noLongerCurrent)]
         let model = host(responder: responder)
         tapPromptAndAuthenticate(model)
         settle { rendered[SuggestionView.textIdentifier] != nil }
 
-        await model.respond(.notNow)
+        Task { @MainActor in await model.respond(.notNow) }
         settle { rendered[SuggestionView.noticeIdentifier] != nil }
         XCTAssertEqual(rendered[SuggestionView.noticeIdentifier], SuggestionView.text(for: .changed))
         XCTAssertEqual(rendered[SuggestionView.messageIdentifier], SuggestionView.nothingToOfferLine)
     }
 
-    @MainActor func testAStoredAnswerIsConfirmedOnScreen() async {
+    func testAStoredAnswerIsConfirmedOnScreen() {
         let model = host(responder: HostedResponder(activations: [.success(.offer(offer()))]))
         tapPromptAndAuthenticate(model)
         settle { rendered[SuggestionView.textIdentifier] != nil }
 
-        await model.respond(.done)
+        Task { @MainActor in await model.respond(.done) }
         settle { rendered[SuggestionView.messageIdentifier] != nil }
         XCTAssertEqual(rendered[SuggestionView.messageIdentifier], SuggestionView.text(forResponded: .done))
         XCTAssertNil(rendered[SuggestionView.notNowIdentifier])
