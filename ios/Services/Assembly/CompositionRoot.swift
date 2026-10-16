@@ -334,6 +334,8 @@ struct CompositionAdapters {
     let recognizer: OnDeviceRecognizing?
     /// The read-authorization session every private read goes through.
     let readSession: ReadAuthenticationSession
+    /// The Keychain-backed credentials the transport resolves at dispatch and provider setup enters secrets into.
+    let credentials: CredentialService
 
     fileprivate init(
         kind: CompositionAdapterSet,
@@ -345,7 +347,8 @@ struct CompositionAdapters {
         backgroundGrant: BackgroundExecutionGrant?,
         lifecycleNotifications: NotificationCenter,
         recognizer: OnDeviceRecognizing?,
-        readSession: ReadAuthenticationSession
+        readSession: ReadAuthenticationSession,
+        credentials: CredentialService
     ) {
         self.kind = kind
         self.sender = sender
@@ -357,6 +360,7 @@ struct CompositionAdapters {
         self.lifecycleNotifications = lifecycleNotifications
         self.recognizer = recognizer
         self.readSession = readSession
+        self.credentials = credentials
     }
 
     fileprivate static func production(for configuration: CompositionConfiguration) -> CompositionAdapters {
@@ -371,7 +375,8 @@ struct CompositionAdapters {
             backgroundGrant: ApplicationBackgroundExecutionGrant(),
             lifecycleNotifications: .default,
             recognizer: nil,
-            readSession: ReadAuthenticationSession(boundary: LocalAuthenticationBoundary()))
+            readSession: ReadAuthenticationSession(boundary: LocalAuthenticationBoundary()),
+            credentials: credentials)
     }
 
     #if DEBUG
@@ -388,14 +393,16 @@ struct CompositionAdapters {
         reachability: NetworkReachability,
         backgroundGrant: BackgroundExecutionGrant? = nil,
         lifecycleNotifications: NotificationCenter = NotificationCenter(),
-        recognizer: OnDeviceRecognizing? = nil
+        recognizer: OnDeviceRecognizing? = nil,
+        credentials: CredentialService = CredentialService(
+            serviceName: "com.boldfield.ohand.tests.composition.\(UUID().uuidString)")
     ) -> CompositionAdapters {
         CompositionAdapters(
             kind: .injectedForTests, sender: sender, attachProviderTransport: attachProviderTransport,
             notificationCenter: notificationCenter,
             permissionObservations: permissionObservations, reachability: reachability,
             backgroundGrant: backgroundGrant, lifecycleNotifications: lifecycleNotifications,
-            recognizer: recognizer, readSession: readSession)
+            recognizer: recognizer, readSession: readSession, credentials: credentials)
     }
     #endif
 }
@@ -801,6 +808,9 @@ public final class ServiceCompositionRoot {
     static let suggestionResponseClientName = "suggestion responses"
     static let itemDetailClientName = "item detail"
     static let jobConfigurationClientName = "job configuration"
+    static let providerProfileClientName = "provider profiles"
+    static let providerConnectionCheckClientName = "provider connection check"
+    static let routePolicyClientName = "route policy"
 
     /// One half-open interval of operation identifiers `[start, end)` that a client claims.
     public struct OperationRange: Equatable, Sendable {
@@ -840,6 +850,9 @@ public final class ServiceCompositionRoot {
         fixedWidthRange(suggestionResponseClientName, from: CoreSuggestionResponseClient.firstOperationID),
         fixedWidthRange(itemDetailClientName, from: CoreItemDetailClient.firstOperationID),
         fixedWidthRange(jobConfigurationClientName, from: CoreJobConfigurationClient.firstOperationID),
+        fixedWidthRange(providerProfileClientName, from: CoreProviderProfileClient.firstOperationID),
+        fixedWidthRange(providerConnectionCheckClientName, from: CoreProviderConnectionCheckClient.firstOperationID),
+        fixedWidthRange(routePolicyClientName, from: CoreRoutePolicyClient.firstOperationID),
         OperationRange(
             name: processingHealthClientName, start: ProcessingHealthService.firstOperationID,
             end: JobRunnerService.firstOperationID),
@@ -863,6 +876,12 @@ public final class ServiceCompositionRoot {
     /// Re-pins waiting work, requeues a job, revokes a profile and lists the jobs pinned to one; needs an authenticated
     /// read session.
     public let jobConfiguration: JobConfigurationService
+    /// Creates provider profiles, sets defaults, checks a connection on request and grants or revokes route processing;
+    /// every call needs an authenticated read session.
+    public let providerConfiguration: ProviderConfigurationService
+    /// Stores, replaces, deletes and reports the status of a provider secret, never returning one; every call needs an
+    /// authenticated read session.
+    public let providerCredentials: ProviderCredentialEntry
 
     let adapters: CompositionAdapters
     /// The session whose scope gates every private read the root performs.
@@ -886,6 +905,9 @@ public final class ServiceCompositionRoot {
     private let suggestionResponseClient: CoreSuggestionResponseClient
     private let itemDetailClient: CoreItemDetailClient
     private let jobConfigurationClient: CoreJobConfigurationClient
+    private let providerProfileClient: CoreProviderProfileClient
+    private let providerConnectionCheckClient: CoreProviderConnectionCheckClient
+    private let routePolicyClient: CoreRoutePolicyClient
     private let modules: [CompositionModule]
     private let foreground: ForegroundState
     private let stateLock = NSLock()
@@ -954,6 +976,11 @@ public final class ServiceCompositionRoot {
         itemDetails = assembly.itemDetails
         jobConfigurationClient = assembly.jobConfigurationClient
         jobConfiguration = assembly.jobConfiguration
+        providerProfileClient = assembly.providerProfileClient
+        providerConnectionCheckClient = assembly.providerConnectionCheckClient
+        routePolicyClient = assembly.routePolicyClient
+        providerConfiguration = assembly.providerConfiguration
+        providerCredentials = assembly.providerCredentials
         reminderReconciler = assembly.permissionReconciler
         foreground = assembly.foreground
         jobRunner.setDrainIdleObserver { [weak self] in self?.runReminderPassAfterDrain() }
@@ -1099,6 +1126,9 @@ public final class ServiceCompositionRoot {
         suggestionResponseClient.shutDown()
         itemDetailClient.shutDown()
         jobConfigurationClient.shutDown()
+        providerProfileClient.shutDown()
+        providerConnectionCheckClient.shutDown()
+        routePolicyClient.shutDown()
         reminderCore.invalidate()
         statusReader.shutDown()
         coreHandle.close()
@@ -1368,6 +1398,11 @@ public final class ServiceCompositionRoot {
         let itemDetails: ItemDetailService
         let jobConfigurationClient: CoreJobConfigurationClient
         let jobConfiguration: JobConfigurationService
+        let providerProfileClient: CoreProviderProfileClient
+        let providerConnectionCheckClient: CoreProviderConnectionCheckClient
+        let routePolicyClient: CoreRoutePolicyClient
+        let providerConfiguration: ProviderConfigurationService
+        let providerCredentials: ProviderCredentialEntry
         let permissionReconciler: NotificationPermissionReconciler
         let foreground: ForegroundState
     }
@@ -1493,6 +1528,20 @@ public final class ServiceCompositionRoot {
             undo.append { jobConfigurationClient.shutDown() }
             let jobConfiguration = JobConfigurationService(
                 core: jobConfigurationClient, session: adapters.readSession)
+            let providerProfileClient = CoreProviderProfileClient(core: core)
+            router.register { providerProfileClient.handle($0) }
+            undo.append { providerProfileClient.shutDown() }
+            let providerConnectionCheckClient = CoreProviderConnectionCheckClient(core: core)
+            router.register { providerConnectionCheckClient.handle($0) }
+            undo.append { providerConnectionCheckClient.shutDown() }
+            let routePolicyClient = CoreRoutePolicyClient(core: core)
+            router.register { routePolicyClient.handle($0) }
+            undo.append { routePolicyClient.shutDown() }
+            let providerConfiguration = ProviderConfigurationService(
+                profiles: providerProfileClient, connectionChecks: providerConnectionCheckClient,
+                routePolicy: routePolicyClient, session: adapters.readSession)
+            let providerCredentials = ProviderCredentialEntry(
+                store: adapters.credentials, session: adapters.readSession)
             let permissionReconciler = NotificationPermissionReconciler(
                 center: adapters.notificationCenter, reconciliation: reminderCore,
                 observations: adapters.permissionObservations)
@@ -1546,8 +1595,10 @@ public final class ServiceCompositionRoot {
                 suggestionResponseClient: suggestionResponseClient,
                 suggestionResponses: suggestionResponses, itemDetailClient: itemDetailClient,
                 itemDetails: itemDetails, jobConfigurationClient: jobConfigurationClient,
-                jobConfiguration: jobConfiguration, permissionReconciler: permissionReconciler,
-                foreground: foreground)
+                jobConfiguration: jobConfiguration, providerProfileClient: providerProfileClient,
+                providerConnectionCheckClient: providerConnectionCheckClient, routePolicyClient: routePolicyClient,
+                providerConfiguration: providerConfiguration, providerCredentials: providerCredentials,
+                permissionReconciler: permissionReconciler, foreground: foreground)
         } catch {
             for step in undo.reversed() {
                 step()
