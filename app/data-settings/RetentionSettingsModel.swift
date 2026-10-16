@@ -69,6 +69,7 @@ final class RetentionSettingsModel: ObservableObject {
     private let controls: RetentionControlling
     private let readScope: () -> CompositionReadScope
     private var generation = 0
+    private var lastStoredDays = 7
 
     nonisolated init(controls: RetentionControlling, readScope: @escaping () -> CompositionReadScope) {
         self.controls = controls
@@ -91,7 +92,10 @@ final class RetentionSettingsModel: ObservableObject {
             guard thisGeneration == generation else { return }
             guard readScope() == .authenticated else { lock(); return }
             status = fresh
-            chosenDays = max(Self.minimumDays, min(Self.maximumDays, Int(fresh.policy.periodSeconds / 86_400)))
+            let storedDays = max(Self.minimumDays, min(Self.maximumDays, Int(fresh.policy.periodSeconds / 86_400)))
+            // An unsaved stepper value survives a refresh; only an untouched one follows the stored period.
+            if status == nil || chosenDays == lastStoredDays { chosenDays = storedDays }
+            lastStoredDays = storedDays
             actions = actions.filter { entry in fresh.unresolved.contains { $0.itemID == entry.key } }
             phase = .loaded
         } catch {

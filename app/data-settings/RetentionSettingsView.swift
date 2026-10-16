@@ -18,6 +18,7 @@ struct RetentionSettingsView: View {
     static func caseIdentifier(_ itemID: String) -> String { "data-settings.retention.case.\(itemID)" }
     static func retryIdentifier(_ itemID: String) -> String { "data-settings.retention.retry.\(itemID)" }
     static func deleteIdentifier(_ itemID: String) -> String { "data-settings.retention.delete.\(itemID)" }
+    static func deleteNoteIdentifier(_ itemID: String) -> String { "data-settings.retention.delete-note.\(itemID)" }
     static func actionStateIdentifier(_ itemID: String) -> String { "data-settings.retention.action-state.\(itemID)" }
 
     @ObservedObject var model: RetentionSettingsModel
@@ -64,7 +65,7 @@ struct RetentionSettingsView: View {
             Text("Keep recordings for").font(.headline)
             Text(RetentionSettingsText.periodSummary(status.policy))
                 .accessibilityIdentifier(Self.policyIdentifier)
-            Text(RetentionSettingsText.defaultPolicyExplanation)
+            Text(RetentionSettingsText.policyExplanation(status.policy))
                 .font(.footnote).foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier(Self.explanationIdentifier)
@@ -122,7 +123,7 @@ struct RetentionSettingsView: View {
                 .disabled(busy)
                 .accessibilityIdentifier(Self.retryIdentifier(entry.itemID))
             }
-            if entry.options.contains(.deleteAudio) {
+            if RetentionSettingsText.offersDeleteAudio(entry) {
                 Button(role: .destructive) {
                     Task { await model.deleteAudio(itemID: entry.itemID) }
                 } label: {
@@ -131,6 +132,9 @@ struct RetentionSettingsView: View {
                 .buttonStyle(.bordered)
                 .disabled(busy)
                 .accessibilityIdentifier(Self.deleteIdentifier(entry.itemID))
+            }
+            if entry.options.contains(.deleteAudio) {
+                note(RetentionSettingsText.deleteItemNote, identifier: Self.deleteNoteIdentifier(entry.itemID))
             }
             if let message = model.actions[entry.itemID]?.message {
                 note(message, identifier: Self.actionStateIdentifier(entry.itemID))

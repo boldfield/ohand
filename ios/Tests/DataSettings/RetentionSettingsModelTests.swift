@@ -68,8 +68,33 @@ final class RetentionSettingsModelTests: XCTestCase {
         XCTAssertEqual(model.status?.unresolved.map(\.itemID), ["item-sole"])
         XCTAssertEqual(model.chosenDays, 7)
         XCTAssertEqual(model.status.map { RetentionSettingsText.periodSummary($0.policy) }, "7 days (default)")
-        XCTAssertTrue(RetentionSettingsText.defaultPolicyExplanation.contains("7 days"))
+        XCTAssertTrue(RetentionSettingsText.policyExplanation(model.status!.policy).contains("kept for 7 days"))
+        XCTAssertFalse(RetentionSettingsText.policyExplanation(model.status!.policy).contains("default is"))
         XCTAssertTrue(RetentionSettingsText.soleSourceExplanation.contains("never removed automatically"))
+    }
+
+    func testPolicyExplanationFollowsTheStoredPeriodAndNamesSevenDaysOnlyAsDefault() {
+        let custom = RetentionPolicySetting(periodSeconds: 30 * 86_400, isDefault: false)
+        let text = RetentionSettingsText.policyExplanation(custom)
+        XCTAssertTrue(text.contains("kept for 30 days"))
+        XCTAssertFalse(text.contains("kept for 7 days"))
+        XCTAssertTrue(text.contains("default is 7 days"))
+    }
+
+    func testNoAudioOnlyDeleteIsOfferedForSoleSourceCases() async {
+        let model = makeModel(FakeRetentionControls(status: Self.status()))
+        await model.refresh()
+        let entry = model.status!.unresolved[0]
+        XCTAssertTrue(entry.options.contains(.deleteAudio), "the core still lists it")
+        XCTAssertFalse(RetentionSettingsText.offersDeleteAudio(entry))
+    }
+
+    func testAnUnsavedPeriodChoiceSurvivesARefresh() async {
+        let model = makeModel(FakeRetentionControls(status: Self.status()))
+        await model.refresh()
+        model.chosenDays = 21
+        await model.refresh()
+        XCTAssertEqual(model.chosenDays, 21)
     }
 
     func testLowStoragePressureIsReportedWithoutOfferingToDeleteSoleSourceAudio() async {
