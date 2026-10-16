@@ -11,7 +11,14 @@
 //! Moving queued work to a different profile is an explicit act ([`requeue_job_to_new_profile`])
 //! that retires the old job and records the old-to-new link in `job_requeues`. Revocation
 //! ([`revoke_profile`]) stamps `revoked_at` on the profile and retires every queued or running
-//! job pinned to it.
+//! job pinned to it. Waiting unpinned work moves onto a newly authorized profile only through
+//! the explicit [`repin_waiting_interpretations`].
+
+mod repin;
+
+pub use repin::{
+    repin_waiting_interpretations, repin_waiting_interpretations_in_tx, MAX_REPIN_BATCH,
+};
 
 use crate::jobs::queue::{
     enqueue_job_in_tx, get_job_internal, Job, JobStatus, PROFILE_MISSING_REASON,
