@@ -63,6 +63,19 @@ final class AppServicesTests: XCTestCase {
             services.lifecycle.processingHealth, "the root attached the lifecycle module that owns launch work")
     }
 
+    func testTheProductionSearchScreenStaysLockedUntilTheSessionIsAuthenticated() throws {
+        let services = try AppServices.production(
+            handoff: CaptureEntryHandoff(notificationCenter: NotificationCenter()), storageRoot: storageRoot)
+        created.append(services)
+
+        let search = services.managementContext.retrieval
+        search.query = "roofer"
+        search.search()
+
+        XCTAssertEqual(search.phase, .locked, "a capture-only session never reaches the core or shows a result")
+        XCTAssertTrue(search.rows.isEmpty)
+    }
+
     func testEveryLaunchStartsLockedSoNothingStoredIsReadable() throws {
         let services = try makeServices()
         XCTAssertEqual(services.root.readScope, .captureOnly)

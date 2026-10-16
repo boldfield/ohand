@@ -230,6 +230,12 @@ final class PrivateReadGate {
         try issue(operationID: operationID, start)
     }
 
+    /// Starts an item's deletion progress read, which reports state derived from the item's stored history. `start`
+    /// queues the core command.
+    func startDeletionProgress(operationID: UInt64, start: () throws -> Void) throws {
+        try issue(operationID: operationID, start)
+    }
+
     /// Returns normally only if the read that `operationID` answers is still authorized; otherwise throws, and the
     /// caller must discard the answer, success or failure, without decoding or logging it. Each answer is admitted at
     /// most once.
