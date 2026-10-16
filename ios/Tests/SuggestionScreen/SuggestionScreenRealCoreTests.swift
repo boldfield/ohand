@@ -60,9 +60,9 @@ final class SuggestionScreenRealCoreTests: XCTestCase {
         return (root, session)
     }
 
-    private func seedAction(_ root: ServiceCompositionRoot) async throws -> String {
+    private func seedCapture(_ root: ServiceCompositionRoot, text: String = SuggestionScreenRealCoreTests.captureText) async throws -> String {
         let outcome: CompositionSaveOutcome = await withCheckedContinuation { continuation in
-            root.saveText(captureID: UUID().uuidString.lowercased(), text: Self.captureText, capturedAt: Date()) {
+            root.saveText(captureID: UUID().uuidString.lowercased(), text: text, capturedAt: Date()) {
                 continuation.resume(returning: $0)
             }
         }
@@ -70,6 +70,11 @@ final class SuggestionScreenRealCoreTests: XCTestCase {
             XCTFail("expected a confirmed save, got \(outcome)")
             throw CoreFailure.handleClosed
         }
+        return itemID
+    }
+
+    private func seedAction(_ root: ServiceCompositionRoot) async throws -> String {
+        let itemID = try await seedCapture(root)
         let start = try XCTUnwrap(Int(scalar("SELECT revision FROM items WHERE item_id = '\(itemID)'")))
         _ = try await root.itemCorrections.correctType(
             commandID: "seed-type-\(itemID)", itemID: itemID, expectedRevision: start, itemType: .action)
@@ -110,7 +115,9 @@ final class SuggestionScreenRealCoreTests: XCTestCase {
     func testStopSuggestingIsStoredPersistsAcrossRelaunchAndLeavesTheReminderAlone() async throws {
         var (root, _) = try makeRoot()
         let itemID = try await seedAction(root)
-        let reminderID = seedReminder(itemID: itemID)
+        // The reminder sits on a different item: an item with its own reminder is not suggested.
+        let reminderItemID = try await seedCapture(root, text: "synthetic reminder item")
+        let reminderID = seedReminder(itemID: reminderItemID)
         let reminderBefore = scalar("SELECT schedule_state || delivery_state FROM reminders WHERE reminder_id = '\(reminderID)'")
 
         let model = SuggestionScreenModel(responder: root.suggestionResponses)
