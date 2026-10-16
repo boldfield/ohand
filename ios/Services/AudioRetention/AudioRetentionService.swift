@@ -62,19 +62,20 @@ actor AudioRetentionService {
     private let fileSystem: AudioRetentionFileSystem
     private let ledger: AudioRetentionLedger
     private let pressureProbe: AudioStoragePressureProbing
-    private let retentionPeriodSeconds: UInt64
     private let maximumAttempts: Int
     private let maximumRemovalsPerSweep: Int
     private var isRunning = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
-    /// `retentionPeriodSeconds` 0 selects the core's default of seven days after successful transcription.
+    /// The period sent with every request. 0 asks the core to apply the retention period the user stored, or its
+    /// default of seven days after successful transcription; native code holds no period of its own.
+    private static let storedPeriodSeconds: UInt64 = 0
+
     init(
         core: AudioRetentionCore,
         layout: ProtectedStorageLayout,
         fileSystem: AudioRetentionFileSystem = FileManagerAudioRetentionFileSystem(),
         pressureProbe: AudioStoragePressureProbing? = nil,
-        retentionPeriodSeconds: UInt64 = 0,
         maximumAttempts: Int = AudioRetentionService.defaultMaximumAttempts,
         maximumRemovalsPerSweep: Int = AudioRetentionService.defaultMaximumRemovalsPerSweep
     ) {
@@ -83,7 +84,6 @@ actor AudioRetentionService {
         staging = IngressStagingStore(layout: layout, fileSystem: fileSystem)
         ledger = AudioRetentionLedger(layout: layout, fileSystem: fileSystem)
         self.pressureProbe = pressureProbe ?? VolumeStoragePressureProbe(volumeURL: layout.rootDirectory)
-        self.retentionPeriodSeconds = retentionPeriodSeconds
         self.maximumAttempts = max(1, maximumAttempts)
         self.maximumRemovalsPerSweep = max(1, maximumRemovalsPerSweep)
     }
@@ -97,7 +97,7 @@ actor AudioRetentionService {
         let pressure = pressureProbe.currentPressure()
         let items: [AudioRetentionItem]
         do {
-            items = try await core.sweep(pressure: pressure, periodSeconds: retentionPeriodSeconds)
+            items = try await core.sweep(pressure: pressure, periodSeconds: Self.storedPeriodSeconds)
         } catch {
             return AudioRetentionSweepReport(
                 listingFailure: Self.coreReason(error), pressure: pressure, items: [])
@@ -144,7 +144,7 @@ actor AudioRetentionService {
                 continue
             }
             attempted += 1
-            let outcome = await remove(itemID: item.itemID, audioReference: audioReference)
+            let outcome = await remove(itemID: item.itemID, audioReference: audioReference, mode: .retention)
             reports.append(AudioRetentionItemReport(item: item, removal: outcome))
         }
         if ledgerReadable {
@@ -164,7 +164,29 @@ actor AudioRetentionService {
         try ledger.resetFailure(itemID: itemID, audioReference: audioReference)
     }
 
+    /// Removes the audio of one item at the user's request, through the core's user-removal fence: the core ignores the
+    /// retention clock and approves only when the item keeps text without the audio, and denies audio that is the item's
+    /// only source as `soleSource` without running the file effect. Serialized with sweeps, with the same ledger
+    /// ordering: nothing is removed without a readable ledger, and the removal is reported only when the file is
+    /// verified absent and the completion is recorded. A failed attempt is `retryLater`; it is not counted toward the
+    /// permanent-failure bound, which belongs to automatic sweeps.
+    func removeAudioForUser(itemID: String, audioReference: String) async -> AudioRemovalOutcome {
+        await acquire()
+        defer { release() }
+        do {
+            try ledger.refresh()
+        } catch {
+            return .retryLater(.ledgerUnavailable)
+        }
+        return await remove(itemID: itemID, audioReference: audioReference, mode: .user)
+    }
+
     // MARK: Removal
+
+    private enum RemovalMode {
+        case retention
+        case user
+    }
 
     /// True only when the ledger holds the completion and the file is verified absent. Throws when the ledger cannot be
     /// read, which is "unknown", not "not removed". A file whose presence cannot be determined is not verified absent,
@@ -181,14 +203,14 @@ actor AudioRetentionService {
         (try? fileSystem.isPresent(at: url)) == false
     }
 
-    private func remove(itemID: String, audioReference: String) async -> AudioRemovalOutcome {
+    private func remove(itemID: String, audioReference: String, mode: RemovalMode) async -> AudioRemovalOutcome {
         let recorded: AudioRetentionLedger.Entry?
         do {
             recorded = try ledger.entry(itemID: itemID, audioReference: audioReference)
         } catch {
             return .retryLater(.ledgerUnavailable)
         }
-        if let recorded, recorded.state == .failed {
+        if mode == .retention, let recorded, recorded.state == .failed {
             // The failure stays visible only while the core still offers this audio for removal.
             if let outcome = await outcomeUnlessStillApproved(itemID: itemID, audioReference: audioReference) {
                 return outcome
@@ -197,6 +219,7 @@ actor AudioRetentionService {
         }
 
         guard let url = staging.finalizedAudioURL(forReference: audioReference) else {
+            if mode == .user { return .failedPermanently(.audioReferenceUnresolvable) }
             if let outcome = await outcomeUnlessStillApproved(itemID: itemID, audioReference: audioReference) {
                 return outcome
             }
@@ -220,9 +243,15 @@ actor AudioRetentionService {
         }
         let result: AudioRemovalResult
         do {
-            result = try await core.removeAudio(
-                itemID: itemID, audioReference: audioReference, periodSeconds: retentionPeriodSeconds,
-                effect: removeFile)
+            switch mode {
+            case .retention:
+                result = try await core.removeAudio(
+                    itemID: itemID, audioReference: audioReference, periodSeconds: Self.storedPeriodSeconds,
+                    effect: removeFile)
+            case .user:
+                result = try await core.removeAudioForUser(
+                    itemID: itemID, audioReference: audioReference, effect: removeFile)
+            }
         } catch {
             return .retryLater(Self.coreReason(error))
         }
@@ -235,6 +264,7 @@ actor AudioRetentionService {
         }
         // The result is checked: a file that is still there, or that cannot be looked up, is never reported gone.
         guard effect != .failed, isVerifiedAbsent(url) else {
+            if mode == .user { return .retryLater(.storageUnavailable) }
             return recordFailure(
                 itemID: itemID, audioReference: audioReference,
                 code: AudioRetentionRetryReason.storageUnavailable.rawValue, permanent: false)
@@ -254,7 +284,7 @@ actor AudioRetentionService {
     private func outcomeUnlessStillApproved(itemID: String, audioReference: String) async -> AudioRemovalOutcome? {
         do {
             let decision = try await core.authorizeRemoval(
-                itemID: itemID, audioReference: audioReference, periodSeconds: retentionPeriodSeconds)
+                itemID: itemID, audioReference: audioReference, periodSeconds: Self.storedPeriodSeconds)
             if case .denied(let denial) = decision { return .denied(denial) }
             return nil
         } catch {

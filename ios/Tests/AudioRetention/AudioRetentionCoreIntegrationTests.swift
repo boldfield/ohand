@@ -72,7 +72,8 @@ final class AudioRetentionCoreIntegrationTests: XCTestCase {
         XCTAssertNil(outcome(defaultReport, recent.itemID))
         XCTAssertTrue(world.audioExists(recent.fileName))
 
-        let shortened = await world.makeService(on: session, retentionPeriodSeconds: 2 * 86_400).sweep()
+        try await session.storeRetentionPeriod(seconds: 2 * 86_400)
+        let shortened = await world.makeService(on: session).sweep()
         XCTAssertEqual(outcome(shortened, recent.itemID), .removed)
         XCTAssertFalse(world.audioExists(recent.fileName))
         session.close()
@@ -345,7 +346,7 @@ final class AudioRetentionCoreIntegrationTests: XCTestCase {
             observations: InMemoryNotificationPermissionObservationStore(), promptCandidates: { [] })
         let service = AudioRetentionService(
             core: retention, layout: world.layout, fileSystem: FileManagerAudioRetentionFileSystem(),
-            pressureProbe: FixedPressureProbe(pressure: .normal), retentionPeriodSeconds: 0)
+            pressureProbe: FixedPressureProbe(pressure: .normal))
 
         // The reminder pass is inside the core, waiting on the OS pending list, when the sweep is submitted. The sweep
         // queues behind it on the core's single worker, so both first operations are outstanding at once.

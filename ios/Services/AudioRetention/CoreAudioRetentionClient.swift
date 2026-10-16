@@ -50,9 +50,22 @@ public final class CoreAudioRetentionClient: AudioRetentionCore, @unchecked Send
     public func removeAudio(
         itemID: String, audioReference: String, periodSeconds: UInt64, effect: () -> AudioRemovalEffect
     ) async throws -> AudioRemovalResult {
-        let answer = try await ask(
+        try await removeUnderFence(
             .beginRemoval(itemID: itemID, audioReference: audioReference, periodSeconds: periodSeconds),
-            as: CoreRetentionDecisionAnswer.self)
+            effect: effect)
+    }
+
+    public func removeAudioForUser(itemID: String, audioReference: String, effect: () -> AudioRemovalEffect)
+        async throws -> AudioRemovalResult
+    {
+        try await removeUnderFence(
+            .beginUserRemoval(itemID: itemID, audioReference: audioReference), effect: effect)
+    }
+
+    private func removeUnderFence(_ begin: AudioRetentionCommand, effect: () -> AudioRemovalEffect) async throws
+        -> AudioRemovalResult
+    {
+        let answer = try await ask(begin, as: CoreRetentionDecisionAnswer.self)
         if case .denied(let denial) = try Self.decision(from: answer) { return .denied(denial) }
         guard let leaseID = answer.leaseID else { throw Self.unreadableAnswer }
 
@@ -131,6 +144,7 @@ public final class CoreAudioRetentionClient: AudioRetentionCore, @unchecked Send
             case "audio_reference_mismatch": return .denied(.audioReferenceMismatch)
             case "deletion_owns_cleanup": return .denied(.deletionOwnsCleanup)
             case "not_yet_expired": return .denied(.notYetExpired)
+            case "sole_source": return .denied(.soleSource)
             case "unresolved":
                 guard let raw = answer.unresolvedReason, let reason = AudioUnresolvedReason(rawValue: raw) else {
                     throw unreadableAnswer

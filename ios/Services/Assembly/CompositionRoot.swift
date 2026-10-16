@@ -187,6 +187,25 @@ public struct CompositionCoreClients {
     }
 }
 
+/// Lets a service built during assembly reach the root that does not exist yet. The root sets itself once, at the end of
+/// its initializer, before anything can call the service.
+private final class WeakRootReference: @unchecked Sendable {
+    private let lock = NSLock()
+    private weak var storedRoot: ServiceCompositionRoot?
+
+    var root: ServiceCompositionRoot? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedRoot
+    }
+
+    func set(_ root: ServiceCompositionRoot) {
+        lock.lock()
+        storedRoot = root
+        lock.unlock()
+    }
+}
+
 /// The fixed-range core clients already handed out by one root's factory.
 private final class TakenCoreClients {
     private let lock = NSLock()
@@ -527,6 +546,10 @@ private final class CoreHandleReadSource: PrivateReadSource {
         try core.startItemDetail(operationID: operationID, itemID: itemID, readScopes: readScopes)
     }
 
+    func startRetentionRead(operationID: UInt64, kind: RetentionReadKind, readScopes: [CoreExportScope]) throws {
+        try core.startRetentionRead(operationID: operationID, kind: kind, readScopes: readScopes)
+    }
+
     func startJobConfigurationRead(operationID: UInt64, command: JobConfigurationCommand) throws {
         try core.startJobConfiguration(operationID: operationID, command: command)
     }
@@ -793,6 +816,7 @@ public final class ServiceCompositionRoot {
     static let deletionCleanupClientName = "deletion cleanup"
     static let processingHealthClientName = "processing health"
     static let shadowReviewClientName = "shadow review"
+    static let promptScheduleClientName = "prompt schedule"
     /// `ShadowReviewService` keeps its first operation identifier private; this is its value.
     static let shadowReviewFirstOperationID: UInt64 = 1 << 48
     static let itemCorrectionClientName = "item corrections"
@@ -801,6 +825,7 @@ public final class ServiceCompositionRoot {
     static let itemLifecycleControlClientName = "item lifecycle controls"
     static let suggestionResponseClientName = "suggestion responses"
     static let itemDetailClientName = "item detail"
+    static let retentionControlClientName = "retention controls"
     static let jobConfigurationClientName = "job configuration"
 
     /// One half-open interval of operation identifiers `[start, end)` that a client claims.
@@ -829,6 +854,7 @@ public final class ServiceCompositionRoot {
         fixedWidthRange("transcription", from: TranscriptionCoreClient.firstOperationID),
         fixedWidthRange(deletionCleanupClientName, from: CoreDeletionCleanupClient.firstOperationID),
         fixedWidthRange("export", from: CoreExportClient.firstOperationID),
+        fixedWidthRange(promptScheduleClientName, from: CorePromptScheduleClient.firstOperationID),
         fixedWidthRange("reminders", from: CoreReminderReconciler.firstOperationID),
         fixedWidthRange("item status", from: CoreItemStatusReader.firstOperationID),
         fixedWidthRange(audioRetentionClientName, from: CoreAudioRetentionClient.firstOperationID),
@@ -841,6 +867,7 @@ public final class ServiceCompositionRoot {
             itemLifecycleControlClientName, from: CoreItemLifecycleControlClient.firstOperationID),
         fixedWidthRange(suggestionResponseClientName, from: CoreSuggestionResponseClient.firstOperationID),
         fixedWidthRange(itemDetailClientName, from: CoreItemDetailClient.firstOperationID),
+        fixedWidthRange(retentionControlClientName, from: CoreRetentionControlClient.firstOperationID),
         fixedWidthRange(jobConfigurationClientName, from: CoreJobConfigurationClient.firstOperationID),
         OperationRange(
             name: processingHealthClientName, start: ProcessingHealthService.firstOperationID,
@@ -852,6 +879,9 @@ public final class ServiceCompositionRoot {
     public var adapterSet: CompositionAdapterSet { adapters.kind }
     public let jobRunner: JobRunnerService
     public let reminderReconciler: NotificationPermissionReconciler
+    /// The optional daily prompt schedule. Settings calls `configure`; the lifecycle pass keeps it current once the
+    /// root is started with a `LifecycleCoordinator`.
+    public let promptSchedule: PromptScheduleService
     /// Corrects an item's text, type or session topic; needs an authenticated read session.
     public let itemCorrections: ItemCorrectionService
     /// Deletes one item and runs its native cleanup at once; needs an authenticated read session.
@@ -864,6 +894,9 @@ public final class ServiceCompositionRoot {
     public let suggestionResponses: SuggestionResponseService
     /// Reads one item's full detail; needs an authenticated read session.
     public let itemDetails: ItemDetailService
+    /// Configures audio retention and acts on unresolved sole audio; reads are gated and writes need an authenticated
+    /// session.
+    public let retentionControls: RetentionControlService
     /// Re-pins waiting work, requeues a job, revokes a profile and lists the jobs pinned to one; needs an authenticated
     /// read session.
     public let jobConfiguration: JobConfigurationService
@@ -882,6 +915,7 @@ public final class ServiceCompositionRoot {
     private let protectionFailureTotal: Int
     private let statusReader: CoreItemStatusReader
     private let reminderCore: CoreReminderReconciler
+    private let promptScheduleClient: CorePromptScheduleClient
     private let providerTransport: ProviderExchangeCoordinator
     private let notificationActions: NotificationActionClients
     private let itemCorrectionClient: CoreItemCorrectionClient
@@ -890,6 +924,7 @@ public final class ServiceCompositionRoot {
     private let itemLifecycleControlClient: CoreItemLifecycleControlClient
     private let suggestionResponseClient: CoreSuggestionResponseClient
     private let itemDetailClient: CoreItemDetailClient
+    private let retentionControlClient: CoreRetentionControlClient
     private let jobConfigurationClient: CoreJobConfigurationClient
     private let modules: [CompositionModule]
     private let foreground: ForegroundState
@@ -945,6 +980,8 @@ public final class ServiceCompositionRoot {
         jobRunner = assembly.jobRunner
         transcription = assembly.transcription
         reminderCore = assembly.reminderCore
+        promptScheduleClient = assembly.promptScheduleClient
+        promptSchedule = assembly.promptSchedule
         providerTransport = assembly.providerTransport
         notificationActions = assembly.notificationActions
         itemCorrectionClient = assembly.itemCorrectionClient
@@ -959,10 +996,13 @@ public final class ServiceCompositionRoot {
         suggestionResponses = assembly.suggestionResponses
         itemDetailClient = assembly.itemDetailClient
         itemDetails = assembly.itemDetails
+        retentionControlClient = assembly.retentionControlClient
+        retentionControls = assembly.retentionControls
         jobConfigurationClient = assembly.jobConfigurationClient
         jobConfiguration = assembly.jobConfiguration
         reminderReconciler = assembly.permissionReconciler
         foreground = assembly.foreground
+        assembly.rootReference.set(self)
         jobRunner.setDrainIdleObserver { [weak self] in self?.runReminderPassAfterDrain() }
         itemDeletion.setCleanupProvider { [weak self] in
             let coordinator = self?.modules.lazy.compactMap { $0 as? LifecycleCoordinator }.first
@@ -1008,6 +1048,9 @@ public final class ServiceCompositionRoot {
         hasStarted = true
         let lifecycleOwner = modules.lazy.compactMap { $0 as? CompositionLifecycleOwner }.first
         let ownsLifecycle = lifecycleOwner?.connectLifecycle(to: self) ?? false
+        if ownsLifecycle, let coordinator = lifecycleOwner as? LifecycleCoordinator {
+            coordinator.setAction(promptSchedule.lifecycleAction, for: .promptEligibility)
+        }
         let center = adapters.lifecycleNotifications
         let foregroundState = foreground
         foregroundState.set(isActive)
@@ -1112,8 +1155,10 @@ public final class ServiceCompositionRoot {
         itemLifecycleControlClient.shutDown()
         suggestionResponseClient.shutDown()
         itemDetailClient.shutDown()
+        retentionControlClient.shutDown()
         jobConfigurationClient.shutDown()
         reminderCore.invalidate()
+        promptScheduleClient.shutDown()
         statusReader.shutDown()
         coreHandle.close()
     }
@@ -1368,6 +1413,9 @@ public final class ServiceCompositionRoot {
         let jobRunner: JobRunnerService
         let transcription: TranscriptionCapability
         let reminderCore: CoreReminderReconciler
+        let promptScheduleClient: CorePromptScheduleClient
+        let promptSchedule: PromptScheduleService
+        let rootReference: WeakRootReference
         let providerTransport: ProviderExchangeCoordinator
         let notificationActions: NotificationActionClients
         let itemCorrectionClient: CoreItemCorrectionClient
@@ -1382,6 +1430,8 @@ public final class ServiceCompositionRoot {
         let suggestionResponses: SuggestionResponseService
         let itemDetailClient: CoreItemDetailClient
         let itemDetails: ItemDetailService
+        let retentionControlClient: CoreRetentionControlClient
+        let retentionControls: RetentionControlService
         let jobConfigurationClient: CoreJobConfigurationClient
         let jobConfiguration: JobConfigurationService
         let permissionReconciler: NotificationPermissionReconciler
@@ -1477,6 +1527,17 @@ public final class ServiceCompositionRoot {
             undo.append { reminderCore.invalidate() }
             router.register { reminderCore.handle($0) }
 
+            let promptScheduleClient = CorePromptScheduleClient(core: core)
+            undo.append { promptScheduleClient.shutDown() }
+            router.register { promptScheduleClient.handle($0) }
+            let rootReference = WeakRootReference()
+            let promptSchedule = PromptScheduleService(
+                core: promptScheduleClient, timeZone: environment.timeZone,
+                install: { trigger in
+                    guard let root = rootReference.root else { throw CancellationError() }
+                    return try await root.reconcileReminders(trigger: trigger)
+                })
+
             let notificationActions = NotificationActionClients(
                 core: core, layout: layout, session: adapters.readSession, now: environment.now,
                 forwardTo: environment.notificationEvents)
@@ -1508,6 +1569,13 @@ public final class ServiceCompositionRoot {
             router.register { itemDetailClient.handle($0) }
             undo.append { itemDetailClient.shutDown() }
             let itemDetails = ItemDetailService(core: itemDetailClient)
+            let retentionControlClient = CoreRetentionControlClient(core: core, gate: readGate)
+            router.register { retentionControlClient.handle($0) }
+            undo.append { retentionControlClient.shutDown() }
+            let retentionControls = RetentionControlService(
+                core: retentionControlClient, session: adapters.readSession,
+                pressureProbe: VolumeStoragePressureProbe(volumeURL: layout.rootDirectory),
+                removerProvider: { modules.lazy.compactMap { ($0 as? LifecycleCoordinator)?.audioRetention }.first })
             let jobConfigurationClient = CoreJobConfigurationClient(core: core, gate: readGate)
             router.register { jobConfigurationClient.handle($0) }
             undo.append { jobConfigurationClient.shutDown() }
@@ -1558,7 +1626,8 @@ public final class ServiceCompositionRoot {
             return Assembly(
                 layout: layout, protectionFailureTotal: report.failures.count, core: core, ingress: ingress,
                 statusReader: statusReader, jobRunner: jobRunner, transcription: transcription,
-                reminderCore: reminderCore, providerTransport: providerTransport,
+                reminderCore: reminderCore, promptScheduleClient: promptScheduleClient,
+                promptSchedule: promptSchedule, rootReference: rootReference, providerTransport: providerTransport,
                 notificationActions: notificationActions, itemCorrectionClient: itemCorrectionClient,
                 itemCorrections: itemCorrections, itemDeletionClient: itemDeletionClient,
                 itemDeletion: itemDeletion, reminderControlClient: reminderControlClient,
@@ -1566,7 +1635,8 @@ public final class ServiceCompositionRoot {
                 itemLifecycleControls: itemLifecycleControls,
                 suggestionResponseClient: suggestionResponseClient,
                 suggestionResponses: suggestionResponses, itemDetailClient: itemDetailClient,
-                itemDetails: itemDetails, jobConfigurationClient: jobConfigurationClient,
+                itemDetails: itemDetails, retentionControlClient: retentionControlClient,
+                retentionControls: retentionControls, jobConfigurationClient: jobConfigurationClient,
                 jobConfiguration: jobConfiguration, permissionReconciler: permissionReconciler,
                 foreground: foreground)
         } catch {
