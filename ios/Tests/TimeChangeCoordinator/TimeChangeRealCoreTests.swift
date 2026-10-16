@@ -114,6 +114,45 @@ final class TimeChangeRealCoreTests: XCTestCase {
         XCTAssertEqual(overdueStored.resolvedInstant, Self.isoText(overdueInstant), "the overdue instant is preserved")
     }
 
+    func testZoneTravelRefreshesTheCoreDailyPromptScheduleAndRepeatedCallbacksInstallNothingMore() async throws {
+        let layout = ProtectedStorageLayout(rootDirectory: storageRoot)
+        try prepareStore(
+            layout, futureInstant: Self.wholeSecond(Date().addingTimeInterval(2 * 86_400)),
+            overdueInstant: Self.wholeSecond(Date().addingTimeInterval(-3_600)))
+
+        let time = ManualTime(wall: Date(), zone: TimeZone(identifier: "America/New_York")!)
+        let center = FakeNotificationCenter()
+        let lifecycle = LifecycleCoordinator(stepTimeoutSeconds: 30)
+        let root = try makeRoot(modules: [lifecycle], notificationCenter: center, time: time)
+        defer { root.shutDown() }
+        try lifecycle.connect(to: root)
+        lifecycle.setAction(root.promptSchedule.lifecycleAction, for: .promptEligibility)
+        _ = try await root.promptSchedule.configure(.daily(hour: 9, minute: 0))
+        let installedBeforeTravel = center.pendingIdentifiers
+        XCTAssertFalse(installedBeforeTravel.isEmpty, "the core planned and the pass installed daily prompts")
+
+        let systemCallbacks = NotificationCenter()
+        let coordinator = TimeChangeCoordinator(
+            lifecycle: lifecycle, notificationCenter: systemCallbacks, sources: time.sources)
+        coordinator.start()
+        defer { coordinator.stop() }
+
+        time.travel(to: losAngeles)
+        for _ in 0..<3 { systemCallbacks.post(name: .NSSystemTimeZoneDidChange, object: nil) }
+        await settleTimers(time, count: 3)
+        let passed = await timeChangeWaitUntil { lifecycle.finishedPassCount == 1 }
+        XCTAssertTrue(passed)
+        XCTAssertEqual(lifecycle.lastReport?.results.map(\.step), [.reminders, .promptEligibility])
+        let afterTravel = center.pendingIdentifiers
+        XCTAssertEqual(Set(afterTravel).count, afterTravel.count, "no prompt is installed twice")
+
+        for _ in 0..<5 { systemCallbacks.post(name: .NSSystemClockDidChange, object: nil) }
+        await settleTimers(time, count: 5)
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(lifecycle.finishedPassCount, 1, "no change, no pass")
+        XCTAssertEqual(center.pendingIdentifiers, afterTravel)
+    }
+
     // MARK: helpers
 
     private func settleTimers(_ time: ManualTime, count: Int) async {

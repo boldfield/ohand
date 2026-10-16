@@ -134,11 +134,10 @@ public final class TimeChangeCoordinator: @unchecked Sendable {
         self.onChange = onChange
     }
 
-    /// Forwards each real change to `lifecycle`, after telling `promptSchedule` (when there is one) so it drops
-    /// occurrences that have passed before the reminder pass reads its candidates.
+    /// Forwards each real change to `lifecycle`. The lifecycle's reminder and prompt steps then act: the prompt step
+    /// refreshes the core's durable prompt schedule for the device's current zone, so this type keeps no prompt state.
     public convenience init(
         lifecycle: LifecycleCoordinator,
-        promptSchedule: DailyPromptSchedule? = nil,
         notificationCenter: NotificationCenter = .default,
         sources: TimeSources = .system,
         configuration: TimeChangeConfiguration = TimeChangeConfiguration()
@@ -147,7 +146,6 @@ public final class TimeChangeCoordinator: @unchecked Sendable {
         self.init(
             notificationCenter: notificationCenter, sources: sources, configuration: configuration,
             onChange: { _ in
-                promptSchedule?.timeChanged(now: sources.wallClock(), zone: sources.timeZone())
                 requestReconciliation()
             })
     }

@@ -357,7 +357,6 @@ final class TimeChangeLifecycleTests: XCTestCase {
     private final class PassLog: @unchecked Sendable {
         private let lock = NSLock()
         private var steps: [String] = []
-        private var plannedCountsSeenByPromptStep: [Int] = []
 
         var order: [String] {
             lock.lock()
@@ -365,16 +364,9 @@ final class TimeChangeLifecycleTests: XCTestCase {
             return steps
         }
 
-        var promptStepCounts: [Int] {
-            lock.lock()
-            defer { lock.unlock() }
-            return plannedCountsSeenByPromptStep
-        }
-
-        func record(_ step: String, plannedCount: Int? = nil) {
+        func record(_ step: String) {
             lock.lock()
             steps.append(step)
-            if let plannedCount { plannedCountsSeenByPromptStep.append(plannedCount) }
             lock.unlock()
         }
     }
@@ -410,34 +402,5 @@ final class TimeChangeLifecycleTests: XCTestCase {
 
         XCTAssertEqual(lifecycle.finishedPassCount, 1, "repeat callbacks with nothing changed ran no pass")
         XCTAssertEqual(log.order.count, 2)
-    }
-
-    func testThePromptScheduleDropsPassedOccurrencesBeforeThePromptStepAndAddsNone() async {
-        let time = ManualTime(wall: instant("2026-10-14T12:00:00Z"), zone: newYork)
-        let schedule = DailyPromptSchedule()
-        schedule.configure(DailyPromptTime(hour: 9, minute: 0), now: time.now, zone: newYork)
-        XCTAssertEqual(schedule.planned.count, 3)
-
-        let log = PassLog()
-        let lifecycle = LifecycleCoordinator(stepTimeoutSeconds: 10)
-        lifecycle.setAction({ _ in .completed }, for: .reminders)
-        lifecycle.setAction(
-            { _ in log.record("promptEligibility", plannedCount: schedule.planned.count); return .completed },
-            for: .promptEligibility)
-        let coordinator = TimeChangeCoordinator(
-            lifecycle: lifecycle, promptSchedule: schedule, notificationCenter: center, sources: time.sources)
-        coordinator.start()
-        defer { coordinator.stop() }
-
-        time.jumpWallClock(by: 2 * 86_400)  // the clock was set forward two days
-        center.post(name: .NSSystemClockDidChange, object: nil)
-        let held = await timeChangeWaitUntil { time.sleeperCount == 1 }
-        XCTAssertTrue(held)
-        time.releaseTimers()
-
-        let passed = await timeChangeWaitUntil { lifecycle.finishedPassCount == 1 }
-        XCTAssertTrue(passed)
-        XCTAssertEqual(log.promptStepCounts, [1], "14 and 15 October passed and were dropped, not replayed; none was added")
-        XCTAssertEqual(schedule.planned.map(\.localDate.text), ["2026-10-16"])
     }
 }
