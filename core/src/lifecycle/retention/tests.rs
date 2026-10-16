@@ -303,6 +303,71 @@ fn the_retention_period_is_configurable_and_bounded() {
 }
 
 #[test]
+fn the_stored_period_replaces_the_default() {
+    let store = Store::new();
+    let database = store.open();
+    assert_eq!(
+        stored_retention_policy(database.conn()).unwrap(),
+        RetentionPolicy::default()
+    );
+
+    database
+        .conn()
+        .execute(
+            "INSERT INTO retention_settings (singleton, period_seconds, updated_at)
+             VALUES (1, 3600, '2026-10-01T08:00:00Z')",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        stored_retention_policy(database.conn()).unwrap().period(),
+        Duration::hours(1)
+    );
+}
+
+#[test]
+fn unresolved_sole_audio_lists_only_live_items_whose_audio_is_the_only_source() {
+    let store = Store::new();
+    let sole = store.voice_item();
+    let transcribed = store.import(SECOND_CAPTURE_ID, Some(SECOND_AUDIO), None);
+    store.transcribe(&transcribed, SECOND_AUDIO, transcribed_at());
+    let typed = store.import(
+        "3f9c1e52-0000-4000-8000-0000000000d3",
+        Some("audio/2026-10-01/typed.m4a"),
+        Some("buy ferns"),
+    );
+    let deleted = store.import(
+        "3f9c1e52-0000-4000-8000-0000000000d4",
+        Some("audio/2026-10-01/deleted.m4a"),
+        None,
+    );
+    store
+        .open()
+        .conn()
+        .execute(
+            "UPDATE items SET lifecycle_state = 'deleted' WHERE item_id = ?",
+            [&deleted],
+        )
+        .unwrap();
+
+    let cases = unresolved_sole_audio(store.open().conn()).unwrap();
+    assert_eq!(cases.len(), 1, "{cases:?}");
+    assert_eq!(cases[0].item_id, sole);
+    assert_eq!(cases[0].captured_at, "2026-10-01T08:00:00Z");
+    assert_eq!(cases[0].reason, UnresolvedReason::TranscriptionPending);
+    assert_eq!(
+        cases[0].options,
+        vec![
+            RetentionOption::RetryTranscription,
+            RetentionOption::DeleteAudio
+        ]
+    );
+    assert!(cases
+        .iter()
+        .all(|case| case.item_id != transcribed && case.item_id != typed));
+}
+
+#[test]
 fn a_transcription_time_in_the_future_never_expires_audio_early() {
     let store = Store::new();
     let item_id = store.voice_item();

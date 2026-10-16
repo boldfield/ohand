@@ -32,8 +32,9 @@
 //!   fence, so a text correction that would make the audio the only source cannot commit between
 //!   the approval and the file effect. Sweeps and `begin_removal` are unchanged.
 //!
-//! `period_seconds` is the configured retention period; absent or 0 selects the default of seven
-//! days, and a value outside the policy's bounds is refused as `invalid_request`. Failures are
+//! `period_seconds` overrides the retention period for one command; absent or 0 selects the
+//! user's stored setting (`retention_controls`), which is seven days until one is stored, and a
+//! value outside the policy's bounds is refused as `invalid_request`. Failures are
 //! normalized and never echo identifiers or content.
 
 use super::capture::OHAND_CORE_MAX_CAPTURE_REQUEST_BYTES;
@@ -42,9 +43,9 @@ use super::core_handle::exports::{OhandCoreHandle, OhandCoreResult};
 use super::core_handle::failure::AbiFailure;
 use super::core_handle::instance::{self, lock, JobFn};
 use crate::lifecycle::retention::{
-    authorize_audio_removal, sweep_audio_retention, AudioRetentionAssessment, CleanupIntent,
-    RemovalDecision, RemovalDenial, RetentionOption, RetentionPolicy, RetentionState,
-    StoragePressure, StoragePressureNotice, UnresolvedReason,
+    authorize_audio_removal, stored_retention_policy, sweep_audio_retention,
+    AudioRetentionAssessment, CleanupIntent, RemovalDecision, RemovalDenial, RetentionOption,
+    RetentionPolicy, RetentionState, StoragePressure, StoragePressureNotice, UnresolvedReason,
 };
 use crate::store::schema::{Database, SystemClock};
 use chrono::Duration;
@@ -92,7 +93,7 @@ enum Command {
 }
 
 impl Command {
-    fn policy(&self) -> Result<RetentionPolicy, AbiFailure> {
+    fn explicit_period(&self) -> Result<Option<RetentionPolicy>, AbiFailure> {
         let period_seconds = match self {
             Command::Sweep { period_seconds, .. }
             | Command::AuthorizeRemoval { period_seconds, .. }
@@ -100,11 +101,22 @@ impl Command {
             Command::BeginUserRemoval { .. } => 0,
         };
         if period_seconds == 0 {
-            return Ok(RetentionPolicy::default());
+            return Ok(None);
         }
         let seconds = i64::try_from(period_seconds).map_err(|_| AbiFailure::INVALID_REQUEST)?;
         let period = Duration::try_seconds(seconds).ok_or(AbiFailure::INVALID_REQUEST)?;
-        RetentionPolicy::new(period).map_err(|_| AbiFailure::INVALID_REQUEST)
+        RetentionPolicy::new(period)
+            .map(Some)
+            .map_err(|_| AbiFailure::INVALID_REQUEST)
+    }
+
+    /// The period the command names, else the user's stored setting (the built-in default when
+    /// none was stored).
+    fn policy(&self, connection: &rusqlite::Connection) -> Result<RetentionPolicy, AbiFailure> {
+        match self.explicit_period()? {
+            Some(policy) => Ok(policy),
+            None => stored_retention_policy(connection).map_err(|error| store_failure(&error)),
+        }
     }
 
     fn validate(&self) -> Result<(), AbiFailure> {
@@ -125,7 +137,7 @@ impl Command {
                 audio_reference,
             } => validate_identifiers(item_id, audio_reference)?,
         }
-        self.policy().map(|_| ())
+        self.explicit_period().map(|_| ())
     }
 }
 
@@ -240,7 +252,7 @@ fn decision_json(decision: &RemovalDecision) -> Value {
 }
 
 fn run(database: &Database, handle: u64, command: &Command) -> Result<Value, AbiFailure> {
-    let policy = command.policy()?;
+    let policy = command.policy(database.conn())?;
     match command {
         Command::Sweep { pressure, .. } => {
             let pressure = match pressure {

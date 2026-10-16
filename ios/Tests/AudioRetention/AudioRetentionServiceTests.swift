@@ -559,4 +559,68 @@ final class AudioRetentionServiceTests: XCTestCase {
         XCTAssertEqual(outcomes.filter { $0 == .removed }.count, 10)
         XCTAssertEqual(outcomes.filter { $0 == .alreadyRemoved }.count, 10)
     }
+
+    // MARK: User removal
+
+    func testAUserRemovalIgnoresTheClockRemovesTheFileAndRecordsIt() async throws {
+        try storage.writeAudio("a.m4a")
+        let reference = RetentionFixtures.audioReference("a.m4a")
+
+        let outcome = await makeService().removeAudioForUser(itemID: "item-1", audioReference: reference)
+
+        XCTAssertEqual(outcome, .removed)
+        XCTAssertFalse(storage.audioExists("a.m4a"))
+        XCTAssertEqual(core.userRemovalRequests, ["item-1"])
+        XCTAssertEqual(core.removalRequests, [], "the retention path is not used")
+        XCTAssertEqual(try storage.ledgerEntries().map(\.state), [.removed])
+    }
+
+    func testAUserRemovalOfSoleSourceAudioIsDeniedAndLeavesTheFileAndTheLedger() async throws {
+        try storage.writeAudio("a.m4a")
+        core.setDecision(.denied(.soleSource), itemID: "item-1")
+
+        let outcome = await makeService().removeAudioForUser(
+            itemID: "item-1", audioReference: RetentionFixtures.audioReference("a.m4a"))
+
+        XCTAssertEqual(outcome, .denied(.soleSource))
+        XCTAssertTrue(storage.audioExists("a.m4a"))
+        XCTAssertEqual(try storage.ledgerEntries(), [])
+    }
+
+    func testAUserRemovalNeverRunsWithoutAReadableLedger() async throws {
+        try storage.writeAudio("a.m4a")
+        try Data("{}".utf8).write(to: storage.ledgerURL)
+        faults.arm("fs.read:\(AudioRetentionLedger.fileName)")
+
+        let outcome = await makeService().removeAudioForUser(
+            itemID: "item-1", audioReference: RetentionFixtures.audioReference("a.m4a"))
+
+        XCTAssertEqual(outcome, .retryLater(.ledgerUnavailable))
+        XCTAssertTrue(storage.audioExists("a.m4a"))
+        XCTAssertEqual(core.userRemovalRequests, [])
+    }
+
+    func testAUserRemovalThatFailedInTheCoreIsRetriedAndNotCountedAsAPermanentFailure() async throws {
+        try storage.writeAudio("a.m4a")
+        let reference = RetentionFixtures.audioReference("a.m4a")
+        core.failEffect(of: "a.m4a")
+        let service = makeService(maximumAttempts: 1)
+
+        let failed = await service.removeAudioForUser(itemID: "item-1", audioReference: reference)
+        XCTAssertEqual(failed, .retryLater(.storageUnavailable))
+        XCTAssertTrue(storage.audioExists("a.m4a"))
+        XCTAssertEqual(try storage.ledgerEntries(), [], "a user attempt records no failure")
+
+        let retried = await service.removeAudioForUser(itemID: "item-1", audioReference: reference)
+        XCTAssertEqual(retried, .removed)
+        XCTAssertFalse(storage.audioExists("a.m4a"))
+    }
+
+    func testAUserRemovalOfAReferenceOutsideTheAudioStoreIsRefusedWithoutAskingTheCore() async throws {
+        let outcome = await makeService().removeAudioForUser(itemID: "item-1", audioReference: "../escape.m4a")
+
+        XCTAssertEqual(outcome, .failedPermanently(.audioReferenceUnresolvable))
+        XCTAssertEqual(core.userRemovalRequests, [])
+        XCTAssertEqual(try storage.ledgerEntries(), [])
+    }
 }
