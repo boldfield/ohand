@@ -24,7 +24,7 @@ final class ExportSettingsModelTests: XCTestCase {
 
     private func makeModel(_ world: ExportWorld) -> ExportSettingsModel {
         let session = world.session
-        return ExportSettingsModel(controls: world.makeService(), readScope: { session.scope })
+        return ExportSettingsModel(controls: world.makeService(), readScope: { session.scope == .authenticated ? .authenticated : .captureOnly })
     }
 
     func testNoScopeAndNoAudioByDefaultAndExportCannotStart() async throws {
