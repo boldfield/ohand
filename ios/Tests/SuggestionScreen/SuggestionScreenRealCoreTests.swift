@@ -46,6 +46,7 @@ final class SuggestionScreenRealCoreTests: XCTestCase {
             session.authenticate(reason: "test") { _ in }
             XCTAssertEqual(session.scope, .authenticated)
         }
+        let coordinator = LifecycleCoordinator(stepTimeoutSeconds: 30)
         let root = try ServiceCompositionRoot(
             testing: CompositionConfiguration(
                 storageRootPath: storageRoot.path, captureRouteID: "route-suggestion-screen", jobRetryDelaySeconds: 3600),
@@ -53,7 +54,9 @@ final class SuggestionScreenRealCoreTests: XCTestCase {
                 timeZone: { TimeZone(identifier: "UTC")! }, locale: { Locale(identifier: "en_US") }),
             adapters: .injectedForTests(
                 sender: ScreenTestProviderSender(), readSession: session, notificationCenter: FakeNotificationCenter(),
-                reachability: FakeReachability(reachable: true)))
+                reachability: FakeReachability(reachable: true), lifecycleNotifications: NotificationCenter()),
+            modules: [coordinator])
+        root.start(isActive: false)
         return (root, session)
     }
 
@@ -104,7 +107,7 @@ final class SuggestionScreenRealCoreTests: XCTestCase {
         return reminderID
     }
 
-    @MainActor func testStopSuggestingIsStoredPersistsAcrossRelaunchAndLeavesTheReminderAlone() async throws {
+    func testStopSuggestingIsStoredPersistsAcrossRelaunchAndLeavesTheReminderAlone() async throws {
         var (root, _) = try makeRoot()
         let itemID = try await seedAction(root)
         let reminderID = seedReminder(itemID: itemID)
@@ -132,7 +135,7 @@ final class SuggestionScreenRealCoreTests: XCTestCase {
         XCTAssertEqual(relaunched.state, .nothingToOffer, "the stop persists and nothing else is offered")
     }
 
-    @MainActor func testDoneCompletesTheItemAndAStaleScreenResolvesToNothing() async throws {
+    func testDoneCompletesTheItemAndAStaleScreenResolvesToNothing() async throws {
         let (root, _) = try makeRoot()
         defer { root.shutDown() }
         let itemID = try await seedAction(root)
@@ -152,7 +155,7 @@ final class SuggestionScreenRealCoreTests: XCTestCase {
         XCTAssertEqual(scalar("SELECT lifecycle_state FROM items WHERE item_id = '\(itemID)'"), "completed")
     }
 
-    @MainActor func testACaptureOnlySessionShowsNothingAndStoresNothing() async throws {
+    func testACaptureOnlySessionShowsNothingAndStoresNothing() async throws {
         let (root, session) = try makeRoot()
         defer { root.shutDown() }
         let itemID = try await seedAction(root)
