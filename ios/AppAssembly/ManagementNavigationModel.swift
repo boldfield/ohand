@@ -93,16 +93,23 @@ final class ManagementNavigationModel: ObservableObject {
         present(.item(itemID))
     }
 
+    /// Opens an item's screen on top of the screens already open, so Back returns to the screen the user chose it from
+    /// (the search results, for one). Under the same authentication rule as `openItem`; when reads are not authenticated
+    /// nothing stays open to return to, so it behaves like `openItem` and asks the device owner first.
+    func pushItem(itemID: String) {
+        present(.item(itemID), keepingOpenScreens: true)
+    }
+
     /// Presents the current suggestion, under the same authentication rule as an item.
     func openSuggestion() {
         present(.suggestion)
     }
 
-    private func present(_ route: ManagementRoute) {
+    private func present(_ route: ManagementRoute, keepingOpenScreens: Bool = false) {
         notice = nil
         if readScope() == .authenticated {
             pendingRoute = nil
-            path = [route.pathComponent]
+            path = keepingOpenScreens ? path + [route.pathComponent] : [route.pathComponent]
             return
         }
         pendingRoute = route

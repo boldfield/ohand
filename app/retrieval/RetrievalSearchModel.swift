@@ -183,13 +183,13 @@ final class RetrievalSearchModel: ObservableObject {
 
 extension RetrievalSearchModel {
     /// The model as the app assembles it: reads follow the root's session, and a selected result is handed to the
-    /// management navigation, which holds it for the detail screen.
+    /// management navigation, which pushes the detail screen above the search so Back returns to it.
     static func assembled(
         searcher: RetrievalSearching, root: ServiceCompositionRoot, navigation: ManagementNavigationModel
     ) -> RetrievalSearchModel {
         RetrievalSearchModel(
             searcher: searcher,
             readScope: { [weak root] in root?.readScope ?? .captureOnly },
-            onSelect: { [weak navigation] reference in navigation?.openItem(itemID: reference.value) })
+            onSelect: { [weak navigation] reference in navigation?.pushItem(itemID: reference.value) })
     }
 }

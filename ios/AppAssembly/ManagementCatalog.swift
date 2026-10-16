@@ -4,6 +4,8 @@ import SwiftUI
 struct ManagementContext {
     let voiceRecovery: VoiceRecoveryModel
     let retrieval: RetrievalSearchModel
+    /// Lets a hosted test see what the search screen shows; production leaves it unset.
+    var retrievalRenderReporter: (([String: RetrievalRenderedElement]) -> Void)?
 }
 
 /// Frames of the placeholder screens, keyed by accessibility identifier, so a hosted test can see that they render.
@@ -77,7 +79,7 @@ enum ManagementCatalog {
 
     /// Screens the capture surface links to. They are secondary: capture is always the first screen.
     static let secondaryEntries: [ManagementEntry] = [
-        ManagementEntry(id: searchEntryID, title: "Search", systemImage: "magnifyingglass") { context in AnyView(RetrievalSearchView(model: context.retrieval)) },
+        ManagementEntry(id: searchEntryID, title: "Search", systemImage: "magnifyingglass") { context in AnyView(RetrievalSearchView(model: context.retrieval, renderReporter: context.retrievalRenderReporter)) },
         ManagementEntry(id: settingsEntryID, title: "Settings", systemImage: "gearshape") { context in AnyView(SettingsRootView(sections: ManagementCatalog.settingsSections, context: context)) },
     ]
 
