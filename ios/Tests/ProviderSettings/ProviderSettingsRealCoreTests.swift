@@ -15,6 +15,23 @@ private struct ProviderSettingsBuiltRoot: @unchecked Sendable {
     let coordinator: LifecycleCoordinator
 }
 
+private final class SaveOutcomeBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: CompositionSaveOutcome?
+
+    var value: CompositionSaveOutcome? {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+
+    func set(_ outcome: CompositionSaveOutcome) {
+        lock.lock()
+        stored = outcome
+        lock.unlock()
+    }
+}
+
 /// Drives `ProviderSettingsModel` over the real composition root and Rust core on an on-disk store: the core's own
 /// validation, versioning and default pointer.
 @MainActor
@@ -113,15 +130,17 @@ final class ProviderSettingsRealCoreTests: XCTestCase {
         return String(cString: text)
     }
 
-    private func saveCapture() throws -> String {
-        var outcome: CompositionSaveOutcome?
-        root.saveText(captureID: UUID().uuidString.lowercased(), text: "Synthetic capture text", capturedAt: Date()) {
-            outcome = $0
+    private func saveCapture() async throws -> String {
+        let box = SaveOutcomeBox()
+        let savedRoot = root!
+        savedRoot.saveText(captureID: UUID().uuidString.lowercased(), text: "Synthetic capture text", capturedAt: Date()) {
+            box.set($0)
         }
         let deadline = Date().addingTimeInterval(30)
-        while outcome == nil && Date() < deadline {
-            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        while box.value == nil && Date() < deadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
         }
+        let outcome = box.value
         guard case .saved(_, let itemID, _)? = outcome else {
             XCTFail("expected a confirmed save, got \(String(describing: outcome))")
             throw CoreFailure.handleClosed
@@ -215,7 +234,7 @@ final class ProviderSettingsRealCoreTests: XCTestCase {
         await model.makeDefault(first)
         XCTAssertEqual(model.defaultVersion?.profileVersion, first.profileVersion)
 
-        let itemID = try saveCapture()
+        let itemID = try await saveCapture()
         let textBefore = scalar("SELECT COUNT(*) FROM items WHERE item_id = '\(itemID)'")
         XCTAssertEqual(textBefore, "1")
         execute(
