@@ -239,7 +239,7 @@ final class CoreProviderConnectionCheckClient: ProviderConnectionCheckCore, @unc
 /// Runs route-policy requests over a `CoreHandle`. Forward every core event to `handle(_:)`, and call `shutDown()`
 /// before closing the core.
 final class CoreRoutePolicyClient: RoutePolicyCore, @unchecked Sendable {
-    static let firstOperationID: UInt64 = 1 << 45
+    static let firstOperationID: UInt64 = 1 << 40
 
     private struct Waiting {
         let command: RoutePolicyCommand
