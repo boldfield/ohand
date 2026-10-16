@@ -178,10 +178,11 @@ final class ProviderSettingsModel: ObservableObject {
             protocolName: ProviderSettingsText.protocolName(version.providerProtocol), model: version.model)
     }
 
-    /// Whether `version` may be chosen as the default: unrevoked, and able to serve text interpretation.
+    /// Whether `version` may be chosen as the default: unrevoked, and not declared unable to serve text interpretation (an unverified
+    /// private server may still be chosen).
     func canMakeDefault(_ version: ProviderProfileListAnswer.Version) -> Bool {
         !version.revoked && !isChangingDefault && version.capabilities.contains {
-            $0.capability == Self.capability && $0.support == "supported"
+            $0.capability == Self.capability && $0.support != "unsupported"
         } && defaultVersion?.profileVersion != version.profileVersion
     }
 
