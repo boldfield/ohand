@@ -489,6 +489,8 @@ final class CompositionRootTests: XCTestCase {
             ("above the job runner start", [RecordingModule(identifier: "a", firstOperationID: 1 << 63)]),
             ("the highest identifier", [RecordingModule(identifier: "a", firstOperationID: UInt64.max)]),
             ("the reminder range", [RecordingModule(identifier: "a", firstOperationID: 1 << 56)]),
+            ("the prompt schedule client range", [RecordingModule(identifier: "a", firstOperationID: 1 << 43)]),
+            ("the retention control client range", [RecordingModule(identifier: "a", firstOperationID: 1 << 46)]),
             ("the audio retention client range", [RecordingModule(identifier: "a", firstOperationID: 1 << 58)]),
             ("the deletion cleanup client range", [RecordingModule(identifier: "a", firstOperationID: 1 << 52)]),
             ("the shadow review client range", [RecordingModule(identifier: "a", firstOperationID: 1 << 48)]),

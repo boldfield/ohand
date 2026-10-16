@@ -648,7 +648,9 @@ final class LifecycleCoordinatorRealCoreTests: XCTestCase {
         }
         XCTAssertEqual(try staging.listRecords().recordCaptureIDs, [captureID], "the root did not recover ingress itself")
         XCTAssertEqual(root.jobRunner.startedDrainCount, 0, "the root did not activate the job runner itself")
-        XCTAssertNil(root.lastReminderReport, "the root did not run a reminder pass itself")
+        XCTAssertEqual(
+            root.lastReminderReport?.trigger, .foreground,
+            "the root ran no reminder pass itself; the only recorded pass is the prompt step's, for the last foreground")
     }
 
     func testStartingTheRootRunsTheRealOrderedPassOnLaunchAndForeground() async throws {
