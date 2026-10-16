@@ -128,6 +128,31 @@ final class ManagementNavigationModelTests: XCTestCase {
         XCTAssertTrue(reasons.isEmpty)
     }
 
+    func testPushingAnItemKeepsTheScreenItWasChosenFromUnderneath() {
+        scope = .authenticated
+        model.open(entryID: ManagementCatalog.searchEntryID)
+
+        model.pushItem(itemID: "item-1")
+
+        XCTAssertEqual(model.path.map { ManagementRoute(pathComponent: $0) }, [.entry(ManagementCatalog.searchEntryID), .item("item-1")])
+        XCTAssertEqual(model.requestedItemID, "item-1")
+        XCTAssertTrue(reasons.isEmpty)
+
+        model.path.removeLast()
+        XCTAssertEqual(model.path, [ManagementCatalog.searchEntryID], "Back lands on the screen the item was chosen from")
+    }
+
+    func testPushingAnItemBeforeAuthenticationAsksFirstAndOpensOnlyThatItem() {
+        model.pushItem(itemID: "item-1")
+
+        XCTAssertEqual(reasons, [ManagementNavigationModel.authenticationReason])
+        XCTAssertEqual(model.path, [])
+
+        finishAuthentication(.authenticated, grantingScope: true)
+
+        XCTAssertEqual(model.path.map { ManagementRoute(pathComponent: $0) }, [.item("item-1")])
+    }
+
     func testATapBeforeAuthenticationAsksFirstAndPresentsOnlyAfterSuccess() {
         model.openItem(itemID: "item-1")
 
