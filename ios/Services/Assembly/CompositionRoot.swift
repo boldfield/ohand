@@ -1052,7 +1052,7 @@ public final class ServiceCompositionRoot {
     public let providerCredentials: ProviderCredentialEntry
     /// Prepares an export for the share sheet; needs an authenticated read session. Leftover export files are swept at
     /// launch, after capture recovery has been started.
-    let exportService: ExportService
+    public let exportService: ExportService
 
     let adapters: CompositionAdapters
     /// The session whose scope gates every private read the root performs.
