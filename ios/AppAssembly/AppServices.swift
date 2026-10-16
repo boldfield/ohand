@@ -96,7 +96,8 @@ final class AppServices {
             voiceRecovery: voice.recoveryModel,
             retrieval: .assembled(searcher: retrieval, root: root, navigation: navigation),
             retention: .assembled(root: root),
-            providerSettings: .assembled(root: root))
+            providerSettings: .assembled(root: root),
+            promptSettings: PromptSettingsModel(controller: root.promptSchedule))
         entrySession = CaptureEntrySession(
             handoff: handoff, defaultMode: defaultMode, access: access, notificationCenter: notificationCenter)
         entrySession.observeHandoffs { [weak self] presentation in self?.present(presentation) }
