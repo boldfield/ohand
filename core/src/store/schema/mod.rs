@@ -79,6 +79,22 @@ pub const MIGRATIONS: &[MigrationStep] = &[
         target_version: 9,
         apply: add_reset_generations_v9,
     },
+    MigrationStep {
+        target_version: 10,
+        apply: add_reset_credential_claims_v10,
+    },
+    MigrationStep {
+        target_version: 11,
+        apply: add_prompt_schedule_v11,
+    },
+    MigrationStep {
+        target_version: 12,
+        apply: add_default_provider_profiles_v12,
+    },
+    MigrationStep {
+        target_version: 13,
+        apply: add_retention_settings_v13,
+    },
 ];
 
 /// Database handle with schema validation.
@@ -851,6 +867,92 @@ fn add_reset_generations_v9(tx: &Transaction<'_>) -> Result<()> {
     tx.execute(
         "CREATE UNIQUE INDEX idx_reset_generations_one_pending
          ON reset_generations(phase) WHERE phase = 'pending'",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Step 10 (L05b): the credential-claim fence behind an explicit "remove credentials" reset choice.
+/// A claim names a credential reference whose Keychain secret the native reset is about to remove
+/// for `generation`. While the claim exists, storage refuses any provider profile that would start
+/// holding that reference (a new profile, or an edit that moves a profile onto it) with
+/// `credential_pending_removal`, so a profile configured after the choice can never lose a secret
+/// the reset then deletes. Revoking a profile updates `revoked_at`, not `credential_ref`, and stays
+/// allowed. The table holds references only, never secrets.
+fn add_reset_credential_claims_v10(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute(
+        "CREATE TABLE reset_credential_claims (
+            credential_ref TEXT PRIMARY KEY,
+            generation INTEGER NOT NULL REFERENCES reset_generations(generation)
+        )",
+        [],
+    )?;
+    tx.execute(
+        "CREATE TRIGGER trg_provider_profiles_refuse_claimed_insert
+         BEFORE INSERT ON provider_profiles
+         WHEN NEW.credential_ref IS NOT NULL
+              AND EXISTS (SELECT 1 FROM reset_credential_claims
+                          WHERE credential_ref = NEW.credential_ref)
+         BEGIN
+             SELECT RAISE(ABORT, 'credential_pending_removal');
+         END",
+        [],
+    )?;
+    tx.execute(
+        "CREATE TRIGGER trg_provider_profiles_refuse_claimed_update
+         BEFORE UPDATE OF credential_ref ON provider_profiles
+         WHEN NEW.credential_ref IS NOT NULL
+              AND EXISTS (SELECT 1 FROM reset_credential_claims
+                          WHERE credential_ref = NEW.credential_ref)
+         BEGIN
+             SELECT RAISE(ABORT, 'credential_pending_removal');
+         END",
+        [],
+    )?;
+    Ok(())
+}
+
+/// The optional daily prompt schedule (S05a): one row holding the serialized `PromptSchedule`,
+/// ledger included, so the core is its only holder and it survives relaunches. The CHECK keeps
+/// the table to a single row.
+fn add_prompt_schedule_v11(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute(
+        "CREATE TABLE prompt_schedule (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            schedule TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )",
+        [],
+    )?;
+    Ok(())
+}
+
+/// The default provider profile version per processing capability (V01b). One row per capability
+/// names the version a new job of that capability is pinned to. There is deliberately no foreign
+/// key: a profile can be removed independently, and the resolver then treats the default as
+/// unavailable instead of blocking the removal. Existing jobs keep the pin they were created with.
+fn add_default_provider_profiles_v12(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute(
+        "CREATE TABLE default_provider_profiles (
+            capability TEXT PRIMARY KEY CHECK (capability IN ('text_interpretation', 'review')),
+            profile_version TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )",
+        [],
+    )?;
+    Ok(())
+}
+
+/// The user's audio retention period (A08). A single row; no row means the built-in default
+/// (7 days after successful transcription). The period is stored in seconds and bounded to at
+/// most ten years; sole-source audio never expires whatever the period is.
+fn add_retention_settings_v13(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute(
+        "CREATE TABLE retention_settings (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            period_seconds INTEGER NOT NULL CHECK (period_seconds BETWEEN 1 AND 315360000),
+            updated_at TEXT NOT NULL
+        )",
         [],
     )?;
     Ok(())

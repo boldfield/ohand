@@ -67,6 +67,11 @@ fn claimed_store(name: &str) -> (std::path::PathBuf, String, i32) {
     let item_id = crate::ingress::import_foreground_ingress(&mut database, &capture)
         .unwrap()
         .item_id;
+    // The test queues and claims its own job instead of the one import queued.
+    database
+        .conn()
+        .execute("DELETE FROM jobs WHERE item_id = ?", [&item_id])
+        .unwrap();
     let revision: i32 = database
         .conn()
         .query_row(
@@ -265,7 +270,7 @@ fn a_transcript_is_attached_once_and_a_redelivery_converges() {
     let first = success_json(&session.apply(1, &request));
     assert_eq!(first["operation_id"], 1);
     assert_eq!(first["disposition"], "attached");
-    assert_eq!(first["interpretation"]["status"], "not_requested");
+    assert_eq!(first["interpretation"]["status"], "queued");
     let revision = first["revision"].clone();
     assert_eq!(item_state(&path).0, "transcribed");
     assert_eq!(job_row(&path).0, "completed");

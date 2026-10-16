@@ -296,6 +296,9 @@ impl Session {
         assert_eq!(outcome.status, OHAND_CORE_STATUS_OK);
         let (recorder, events) = recorder();
         register(handle, &recorder);
+        if scenario.profile.protocol() == ProviderProtocol::SelfHosted {
+            protocols::enable_for_test(handle, &["anthropic", "open_ai", "self_hosted"]);
+        }
         let (sender, commands) = std::sync::mpsc::channel();
         Session {
             handle,
@@ -720,6 +723,39 @@ fn a_self_hosted_review_without_its_own_endpoint_is_refused_with_nothing_sent() 
     assert_eq!(payload["denial"], "malformed_profile", "{payload}");
     session.assert_no_command();
     wait_until_idle(session.handle);
+    session.close();
+}
+
+#[test]
+fn a_self_hosted_review_is_refused_unless_the_host_enabled_the_protocol() {
+    let _guard = serial();
+    let session = Session::open("self-hosted-gate", &Scenario::self_hosted());
+    session.register_native();
+    let job_id = session.select(1);
+
+    protocols::enable_for_test(session.handle, &["anthropic", "open_ai"]);
+    assert_eq!(
+        session.start_review(2, &job_id).status,
+        OHAND_CORE_STATUS_OK
+    );
+    let payload = payload_of(&session.event(2));
+    assert_eq!(payload["phase"], "completed");
+    assert_eq!(payload["denial"], "protocol_not_enabled", "{payload}");
+    assert_eq!(payload["record"]["outcome"], "unreviewed");
+    session.assert_no_command();
+    wait_until_idle(session.handle);
+    session.close();
+
+    let session = Session::open("self-hosted-gate-enabled", &Scenario::self_hosted());
+    session.register_native();
+    let job_id = session.select(1);
+    let send = session.dispatch(2, &job_id);
+    assert_eq!(
+        send["url"],
+        "https://spark.example.test/v1/chat/completions"
+    );
+    session.complete(2, &self_hosted_reply("action"));
+    assert_eq!(session.final_record(2)["outcome"], "reviewed");
     session.close();
 }
 

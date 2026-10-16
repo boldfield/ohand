@@ -74,6 +74,8 @@ public enum AudioRemovalDenial: Equatable, Sendable {
     case deletionOwnsCleanup
     case notYetExpired
     case unresolved(AudioUnresolvedReason)
+    /// The user asked to remove audio that is the item's only source. Only deleting the item may remove it.
+    case soleSource
 }
 
 public enum AudioRemovalDecision: Equatable, Sendable {
@@ -119,6 +121,12 @@ public protocol AudioRetentionCore: Sendable {
     func removeAudio(
         itemID: String, audioReference: String, periodSeconds: UInt64, effect: () -> AudioRemovalEffect
     ) async throws -> AudioRemovalResult
+
+    /// Like `removeAudio`, for audio the user asked to remove: the core ignores the retention clock and approves
+    /// whenever the item keeps text without the audio. Audio that is the item's only source is denied as
+    /// `soleSource`, and `effect` is never run. The same fence, pin and release apply.
+    func removeAudioForUser(itemID: String, audioReference: String, effect: () -> AudioRemovalEffect) async throws
+        -> AudioRemovalResult
 }
 
 /// Why a removal was left for the next sweep. Fixed codes only: a result never reports identifiers, paths or error text.

@@ -963,9 +963,11 @@
         4
       ],
       "depends_on": [
-        "U01",
+        "C01b",
         "R03",
-        "C01b"
+        "R05",
+        "U01",
+        "U01d"
       ],
       "source_pointers": [
         "docs/architecture/m1-contracts.md:127",
@@ -990,7 +992,9 @@
         4
       ],
       "depends_on": [
-        "U02a"
+        "U02a",
+        "A01",
+        "A09"
       ],
       "source_pointers": [
         "docs/architecture/m1-contracts.md:127",
@@ -1016,7 +1020,8 @@
       ],
       "depends_on": [
         "U02b",
-        "D04"
+        "D04",
+        "A02"
       ],
       "source_pointers": [
         "docs/architecture/m1-contracts.md:53",
@@ -1040,7 +1045,8 @@
         2
       ],
       "depends_on": [
-        "U03a"
+        "U03a",
+        "A03"
       ],
       "source_pointers": [
         "docs/architecture/m1-contracts.md:53",
@@ -1065,7 +1071,8 @@
       ],
       "depends_on": [
         "U02b",
-        "N06"
+        "N06",
+        "A04"
       ],
       "source_pointers": [
         "docs/architecture/m1-contracts.md:188",
@@ -1089,7 +1096,8 @@
         2
       ],
       "depends_on": [
-        "U04a"
+        "U04a",
+        "A13"
       ],
       "source_pointers": [
         "docs/architecture/m1-contracts.md:188",
@@ -1116,7 +1124,8 @@
         "U01",
         "V06",
         "V07",
-        "V04"
+        "V04",
+        "U01e"
       ],
       "source_pointers": [
         "docs/architecture/m1-contracts.md:566",
@@ -1172,7 +1181,9 @@
       "depends_on": [
         "U05b",
         "V02",
-        "V03"
+        "V03",
+        "U01e",
+        "U02a"
       ],
       "source_pointers": [
         "docs/architecture/m1-contracts.md:139",
@@ -1199,7 +1210,8 @@
         2
       ],
       "depends_on": [
-        "U06a"
+        "U06a",
+        "A07"
       ],
       "source_pointers": [
         "docs/architecture/m1-contracts.md:139",
@@ -1284,7 +1296,8 @@
         "U01",
         "L03b",
         "L04b",
-        "L05b"
+        "L05b",
+        "A08"
       ],
       "source_pointers": [
         "docs/architecture/m1-contracts.md:548",
@@ -1308,7 +1321,8 @@
         2
       ],
       "depends_on": [
-        "U07a"
+        "U07a",
+        "A11"
       ],
       "source_pointers": [
         "docs/architecture/m1-contracts.md:548",
@@ -1332,7 +1346,10 @@
         2
       ],
       "depends_on": [
-        "U07b"
+        "U07b",
+        "A05",
+        "A12",
+        "U02b"
       ],
       "source_pointers": [
         "docs/architecture/m1-contracts.md:548",
@@ -1357,7 +1374,8 @@
       ],
       "depends_on": [
         "U01",
-        "S03"
+        "S03",
+        "S05b"
       ],
       "source_pointers": [
         "docs/architecture/m1-contracts.md:198",
@@ -1381,7 +1399,10 @@
         2
       ],
       "depends_on": [
-        "U08a"
+        "U08a",
+        "A06",
+        "A10",
+        "A13"
       ],
       "source_pointers": [
         "docs/architecture/m1-contracts.md:198",
@@ -1933,6 +1954,895 @@
         "ios/Services/ProviderTransport/ProviderExchangeCoordinator.swift:33",
         "ios/Services/Assembly/CompositionRoot.swift"
       ]
+    },
+    {
+      "key": "U01a",
+      "parent": "U01",
+      "title": "Provision the fresh-install local-only capture route",
+      "file_scope": [
+        "core/src/ffi/route_provisioning.rs",
+        "core/src/ffi/route_provisioning/",
+        "ios/OhAndCoreBridge/CoreHandle+RouteProvisioning.swift"
+      ],
+      "intent": "Idempotent core operation ensuring the configured capture route exists with no processing destinations, so a fresh install saves locally without authorizing upload.",
+      "acceptance": [
+        "Absent route inserted with empty destinations, preview_safe 0, no grants; same-scope existing route untouched; scope mismatch refused; idempotent and concurrency-safe.",
+        "Rust tests: fresh store import succeeds after provisioning; remote authorization denied; configured route untouched; mismatch refused; repeat is no-op.",
+        "Swift bridge exposes it with normalized failure; make check/test pass; exact-head macOS CI linked."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/ingress/import.rs:320",
+        "core/src/privacy/routing/mod.rs:11",
+        "core/src/store/schema/mod.rs:420"
+      ]
+    },
+    {
+      "key": "U01b",
+      "parent": "U01",
+      "title": "Provision the route at open and compose notification actions at the root",
+      "file_scope": [
+        "ios/Services/Assembly/CompositionRoot.swift",
+        "ios/Tests/Services/CompositionRootTests.swift"
+      ],
+      "intent": "Root provisions the configured capture route during assembly and builds ActionHandler, journal and NotificationEventReceiver over its own core, exposing only the delegate, reconcile and open-item callback.",
+      "acceptance": [
+        "Route provisioned under undo-on-failure before ingress saves or recovers; failure fails assembly with a distinct error.",
+        "Root builds ActionHandler (core client, durable journal, read session), receiver feeding its eventHandler and any caller handler; attached to the read session.",
+        "Public surface: delegate, async reconcile, authenticated open-item callback; no CoreHandle/journal/handler made public.",
+        "Real-core tests: fresh-store saveText saved; Complete reaches core once; unauthenticated response deferred then reconciled; tap opens core-resolved item; macOS CI linked."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "T11b",
+        "U01a"
+      ],
+      "source_pointers": [
+        "ios/Services/NotificationActions/ActionHandler.swift:72",
+        "ios/Services/Notifications/NotificationEventIngestor.swift:76",
+        "ios/Services/Assembly/CompositionRoot.swift:111"
+      ]
+    },
+    {
+      "key": "U01c",
+      "parent": "U01",
+      "title": "Expose the voice ingress handoff and recovery at the root",
+      "file_scope": [
+        "ios/Services/Assembly/CompositionRoot.swift",
+        "ios/Tests/Services/CompositionRootTests.swift"
+      ],
+      "intent": "Public root seam for durable recording handoff, restart recovery and the in-progress audio location, so U01 can replace VoiceRecorderUnavailable.",
+      "acceptance": [
+        "Public recording save via ForegroundIngressService audio path with saveText honesty rules; public recovery reporting re-imports and unclaimed in-progress names (nil when unknown); in-progress location exposed; no ingress/core types made public beyond value types.",
+        "Real-core tests: recording saved with item; interrupted handoff recovered next assembly; unclaimed file reported not imported; nothing uploaded; macOS CI linked."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "U01b"
+      ],
+      "source_pointers": [
+        "ios/Services/Ingress/ForegroundIngressService.swift",
+        "ios/Services/Ingress/IngressRecord.swift:20",
+        "ios/Services/Assembly/CompositionRoot.swift:779"
+      ]
+    },
+    {
+      "key": "S05a",
+      "parent": "B05",
+      "title": "Persist the daily prompt schedule in the core and expose it through the FFI",
+      "file_scope": [
+        "core/src/ffi/prompt_schedule.rs",
+        "core/src/ffi/prompt_schedule/",
+        "ios/OhAndCoreBridge/CoreHandle+PromptSchedule.swift",
+        "ios/Services/Notifications/NotificationModels.swift",
+        "ios/Services/Notifications/NotificationBridge.swift",
+        "ios/Services/Notifications/NotificationEventIngestor.swift",
+        "ios/Services/NotificationPermission/ReminderNativeEffects.swift",
+        "ios/Services/NotificationPermission/CoreReminderReconciler.swift",
+        "ios/Tests/Notifications/",
+        "ios/Tests/NotificationPermission/"
+      ],
+      "intent": "Core is the sole durable holder of the S02 PromptSchedule; reminder pass sources prompt demands only from it via reconcile_prompts.",
+      "acceptance": [
+        "Schedule loaded/saved from new table; entry points use core clock, caller zone, persist before return.",
+        "Exports configure/refresh/read (no content).",
+        "Reminder pass takes prompt demands only from persisted schedule; caller candidates no longer install; reminders keep priority.",
+        "Rust tests: reopen survival, no replay after backward clock, no second prompt after reopen+west travel, unattempted not spent, DST, idempotent refresh, migration; make check/test; macOS CI.",
+        "Native effect path accepts prompt:<date> as a distinct identifier kind (schedule, cancel, pending/delivered listing); reminder validation unchanged; prompt delivery/tap recognized, not journaled as reminder action; real-core test asserts granted prompts installed, converged, no scheduling failure."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/suggestions/schedule/plan.rs:167",
+        "core/src/suggestions/schedule/apply.rs:119",
+        "core/src/ffi/notification_reconciliation.rs:249"
+      ]
+    },
+    {
+      "key": "S05b",
+      "parent": "B05",
+      "title": "Drive the daily prompt schedule from the app lifecycle",
+      "file_scope": [
+        "ios/Services/Prompts/",
+        "ios/Tests/Prompts/",
+        "ios/Services/Assembly/CompositionRoot.swift",
+        "ios/Tests/Services/CompositionRootTests.swift"
+      ],
+      "intent": "Native prompt service over a typed root client, installed as LifecycleCoordinator's promptEligibility action, so configured prompts are installed and kept current.",
+      "acceptance": [
+        "Service exposes configure/read/time-change; root installs it as the .promptEligibility action.",
+        "Off until configured; off cancels; permission per N04b; no extra content.",
+        "Real-core sim tests: one install, no duplicate on foreground, off cancels, relaunch keeps ledger; macOS CI."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "S05a",
+        "U01c"
+      ],
+      "source_pointers": [
+        "ios/Services/Assembly/LifecycleCoordinator.swift:101",
+        "ios/Services/Assembly/CompositionRoot.swift:1051"
+      ]
+    },
+    {
+      "key": "T11c",
+      "parent": "T11",
+      "title": "Let the host decide which provider protocols the core may dispatch",
+      "file_scope": [
+        "core/src/ffi/provider_transport.rs",
+        "core/src/ffi/provider_transport/",
+        "core/src/ffi/job_runner.rs",
+        "core/src/ffi/job_runner/",
+        "ios/OhAndCoreBridge/CoreHandle+JobRunner.swift",
+        "ios/OhAndCoreBridge/CoreHandle+ProviderTransport.swift"
+      ],
+      "intent": "Core-enforced enabled-protocol set (self-hosted off by default) across job runner, exchange and shadow review, plus a content-free provider-profile status read.",
+      "acceptance": [
+        "Host call sets enabled protocols; disabled protocol refused with protocol_not_enabled, nothing sent, in all three paths.",
+        "Default Anthropic+OpenAI on, self-hosted off; enabling changes no other check.",
+        "Status read: exists, protocol, revoked, serves model; nothing else.",
+        "Tests for disabled/enabled/re-disabled and status cases; existing pass; make check/test; macOS CI."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/ffi/job_runner.rs:776",
+        "core/src/ffi/provider_transport.rs:692"
+      ]
+    },
+    {
+      "key": "T11d",
+      "parent": "T11",
+      "title": "Let modules enable provider protocols at the composition root",
+      "file_scope": [
+        "ios/Services/Assembly/CompositionRoot.swift",
+        "ios/Tests/Services/CompositionRootTests.swift"
+      ],
+      "intent": "CompositionModule.enabledProviderProtocols collected by the root and passed to the core at assembly; typed provider-profile status client.",
+      "acceptance": [
+        "Modules declare protocols (default empty); root passes base+union under undo-on-failure.",
+        "Typed status client; no public CoreHandle.",
+        "Root tests: no declaring module sends nothing; declaring module enables; status reports revoked/missing; macOS CI."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "T11c",
+        "S05b"
+      ],
+      "source_pointers": [
+        "ios/Services/Assembly/CompositionRoot.swift:156",
+        "ios/Services/Assembly/CompositionRoot.swift:261"
+      ]
+    },
+    {
+      "key": "C04c",
+      "parent": "C04",
+      "title": "Give the voice handoff an honest result for unavailable audio",
+      "file_scope": [
+        "ios/Capture/Voice/VoiceRecordingTypes.swift",
+        "ios/Capture/Voice/VoiceRecordingController.swift",
+        "ios/Tests/VoiceCapture/"
+      ],
+      "intent": "VoiceHandoffResult gains an unavailable-audio case mapped to VoiceCaptureOutcome.unrecoverable(fileRetained:), so the root's audioUnavailable outcome has an honest consumer.",
+      "acceptance": [
+        "New VoiceHandoffResult case.",
+        "Controller maps it to unrecoverable with fileRetained from disk; no kept/saved claim; switches updated.",
+        "Test adapter maps sourceUnavailable to it.",
+        "Controller tests for file present/absent; existing pass; macOS CI."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/Capture/Voice/VoiceRecordingController.swift:398"
+      ]
+    },
+    {
+      "key": "F13",
+      "parent": null,
+      "title": "Make the untrusted-certificate exchange test deterministic",
+      "file_scope": [
+        "ios/Tests/ProviderTransport/"
+      ],
+      "intent": "Diagnose and fix the intermittent missing final event in ProviderExchangeBoundaryTests untrusted-certificate test; product defects block, not masked.",
+      "acceptance": [
+        "Cause stated with evidence or labelled hypothesis.",
+        "Fix the cause; no retries/skips/weakening; transport defect blocks.",
+        "5 consecutive counting OhAndTests executions on final head (F10 rule); make check/test."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/Tests/ProviderTransport/ProviderExchangeBoundaryTests.swift:357"
+      ]
+    },
+    {
+      "key": "F14",
+      "parent": null,
+      "title": "Make the bench unverified-self-hosted CLI test deterministic",
+      "file_scope": [
+        "tools/bench/src/cli/tests.rs"
+      ],
+      "intent": "Diagnose and fix the intermittent tools/bench CLI test failure under parallel cargo test.",
+      "acceptance": [
+        "Cause stated with reproduction evidence or labelled hypothesis.",
+        "Fix the cause; no retries/ignore/weakening/single-threading.",
+        "200 consecutive parallel passes with the stated loop; make check/test."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "tools/bench/src/cli/tests.rs:1849"
+      ]
+    },
+    {
+      "key": "I08",
+      "parent": "I06",
+      "title": "Queue interpretation for every saved capture",
+      "file_scope": [
+        "core/src/interpretation/enqueue/",
+        "core/src/ingress/import.rs",
+        "core/src/ingress/transcription/mod.rs",
+        "core/src/ffi/transcription_attachment.rs",
+        "core/tests/interpretation_enqueue/",
+        "core/src/export/tests.rs",
+        "core/src/lifecycle/reset/tests.rs",
+        "core/src/lifecycle/retention/tests.rs",
+        "core/tests/interpretation_dispatch/main.rs",
+        "tests/resilience/capture-processing/processing.rs"
+      ],
+      "intent": "The core queues an interpret job when a capture with text is imported and when a transcript attaches, with the pin chosen by one core resolver.",
+      "acceptance": [
+        "One resolver decides the pin; returns none until V01b.",
+        "Text imports enqueue one deterministic job in the import transaction with a UUID request version derived from M1_INSTRUCTION_VERSION; retries never duplicate.",
+        "Transcripts queue a job without a native request; a differing native pin is refused.",
+        "Rust end-to-end: fast-path reminder offline; unrecognized with no profile stays unprocessed/AwaitingConfiguration and is searchable; voice queues one job."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/ingress/import.rs:147",
+        "core/src/ingress/transcription/mod.rs:944",
+        "core/src/interpretation/dispatch/mod.rs:221"
+      ]
+    },
+    {
+      "key": "V01b",
+      "parent": "V01",
+      "title": "Store versioned provider profiles and the default per capability",
+      "file_scope": [
+        "core/src/providers/profiles/",
+        "core/src/store/schema/mod.rs",
+        "core/src/interpretation/enqueue/",
+        "core/tests/provider_profiles/",
+        "core/src/ffi/provider_profiles.rs",
+        "ios/OhAndCoreBridge/CoreHandle+ProviderProfiles.swift",
+        "core/tests/migrations/main.rs"
+      ],
+      "intent": "Production write path for immutable provider-profile versions, a default per capability and listing, with an FFI export.",
+      "acceptance": [
+        "Versioned create with fixed-code validation; L05b claim refusal surfaces.",
+        "Durable default per capability; changing it never touches queued jobs.",
+        "Resolver pins the default only when authorize_job would authorize it.",
+        "Listing without secrets; FFI export; Rust tests."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "S05a",
+        "I08"
+      ],
+      "source_pointers": [
+        "core/src/store/schema/mod.rs:508",
+        "core/src/privacy/routing/mod.rs:183"
+      ]
+    },
+    {
+      "key": "V01c",
+      "parent": "V01",
+      "title": "Check a provider profile's connection on explicit request",
+      "file_scope": [
+        "core/src/ffi/provider_transport/connection_check.rs",
+        "core/src/ffi/provider_transport.rs",
+        "ios/OhAndCoreBridge/CoreHandle+ProviderConnectionCheck.swift"
+      ],
+      "intent": "Explicitly invoked connection check sending a fixed synthetic request to a profile's own destination, with a redacted outcome.",
+      "acceptance": [
+        "Synthetic payload only, profile's own destinations, off the worker thread, cancellable, never background.",
+        "Fixed outcome set with no secret, body, header or endpoint echoed.",
+        "Fake-transport tests per outcome."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "V01b"
+      ],
+      "source_pointers": [
+        "core/src/ffi/provider_transport.rs",
+        "core/src/providers/contracts/dispatch.rs:154"
+      ]
+    },
+    {
+      "key": "V02b",
+      "parent": "V02",
+      "title": "Grant and revoke route processing permissions",
+      "file_scope": [
+        "core/src/privacy/routing/grants.rs",
+        "core/tests/route_grants/",
+        "core/src/ffi/route_policy.rs",
+        "ios/OhAndCoreBridge/CoreHandle+RoutePolicy.swift"
+      ],
+      "intent": "Production write path for per-capability route grants whose destinations come from a stored profile, revocation and listing, with an FFI export.",
+      "acceptance": [
+        "Grant derives destinations from the profile and updates ceiling and authorization in one transaction.",
+        "Granting one capability or route does not authorize another.",
+        "Revoke makes queued jobs fail authorization without fallback.",
+        "Listing; explicit operation only; Rust tests."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/privacy/routing/mod.rs:183",
+        "core/src/store/schema/mod.rs:438"
+      ]
+    },
+    {
+      "key": "R04",
+      "parent": "R03",
+      "title": "Export scoped retrieval over the core boundary",
+      "file_scope": [
+        "core/src/ffi/retrieval.rs",
+        "ios/OhAndCoreBridge/CoreHandle+Retrieval.swift"
+      ],
+      "intent": "Expose scoped_query and scoped_list to native code.",
+      "acceptance": [
+        "Exports with filters, bounded pagination and hit fields; query text never leaves the device.",
+        "Caller-stated scopes cannot be widened.",
+        "Rust tests for search, dates, topics, scope exclusion, pagination."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/retrieval/query/mod.rs:76",
+        "core/src/retrieval/query/mod.rs:97"
+      ]
+    },
+    {
+      "key": "U01d",
+      "parent": "U01",
+      "title": "Offer gated retrieval reads at the composition root",
+      "file_scope": [
+        "ios/Services/Assembly/CompositionRoot.swift",
+        "ios/Services/Authentication/PrivateReadGate.swift",
+        "ios/Tests/Services/CompositionRootTests.swift",
+        "ios/Tests/Authentication/"
+      ],
+      "intent": "Search and list verbs on the root's private read gate.",
+      "acceptance": [
+        "Gate verbs over R04, refused while capture-only, admitted after relock checks.",
+        "Typed models; no public CoreHandle.",
+        "Real-core root tests; macOS CI."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "R04"
+      ],
+      "source_pointers": [
+        "ios/Services/Assembly/CompositionRoot.swift:203",
+        "ios/Services/Authentication/PrivateReadGate.swift:18"
+      ]
+    },
+    {
+      "key": "U01e",
+      "parent": "U01",
+      "title": "Offer provider and route configuration clients at the composition root",
+      "file_scope": [
+        "ios/Services/Assembly/CompositionRoot.swift",
+        "ios/Services/ProviderConfiguration/",
+        "ios/Tests/Services/CompositionRootTests.swift",
+        "ios/Tests/ProviderConfiguration/"
+      ],
+      "intent": "Typed root clients for provider profiles, connection checks, route policy and write-only credential entry.",
+      "acceptance": [
+        "Typed clients over V01b, V01c, V02b and a secret-never-returned credential interface.",
+        "Writes require an authenticated session.",
+        "Real-core root tests: configured profile pins a new job; bad key redacted; revoke denies; macOS CI."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "V01b",
+        "V01c",
+        "V02b"
+      ],
+      "source_pointers": [
+        "ios/Services/Assembly/CompositionRoot.swift:162",
+        "ios/Services/Credentials/CredentialService.swift:58"
+      ]
+    },
+    {
+      "key": "F15",
+      "title": "Find and fix the memory corruption in the notification reconciliation FFI tests",
+      "file_scope": [
+        "core/src/ffi/notification_reconciliation.rs",
+        "core/src/ffi/notification_reconciliation/"
+      ],
+      "intent": "Diagnose and fix intermittent SIGSEGV/heap corruption in notification_reconciliation FFI tests.",
+      "acceptance": [
+        "Diagnosis under Linux parallel load covering both failures.",
+        "Fix the cause (product defect if callback/buffer use after unregister/close/abandon); panic-safe Session teardown; no retries/ignore/single-threading.",
+        "50 consecutive loaded full lib runs."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "F17"
+      ],
+      "source_pointers": [
+        "core/src/ffi/notification_reconciliation.rs:173",
+        "core/src/ffi/notification_reconciliation/tests.rs:401"
+      ],
+      "parent": null
+    },
+    {
+      "key": "F16",
+      "title": "Make the notification probe's foreground delivery deterministic",
+      "file_scope": [
+        "ios/NotificationProbe/Tests/",
+        "ios/NotificationProbe/Sources/ProbeScenarios.swift",
+        "docs/validation/notification-probe.md"
+      ],
+      "intent": "Diagnose and fix the foreground-delivery request vanishing after a timely add.",
+      "acceptance": [
+        "Diagnosis with evidence.",
+        "Fix the cause; no retries or weakened assertions; validation doc accurate.",
+        "F10 counting rule, 5 consecutive executions."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/NotificationProbe/Tests/NotificationProbeAuthorizedUITests.swift:71"
+      ],
+      "parent": null
+    },
+    {
+      "key": "A01",
+      "parent": null,
+      "title": "Read one item's detail through a gated root client",
+      "file_scope": [
+        "core/src/ffi/item_detail.rs",
+        "ios/OhAndCoreBridge/CoreHandle+ItemDetail.swift",
+        "ios/Services/Items/Detail/",
+        "ios/Tests/ItemDetail/"
+      ],
+      "intent": "Export a read of one item by opaque identifier, and give `app/` a typed, read-gated client for it.",
+      "acceptance": [
+        "The export returns, for one item ID:",
+        "The client is a public typed service on the root. It is refused while the session is capture-only and admitted through the read gate, so an answer that arrives after a relock is discarded. The item ID is validated as opaque, and nothing parses meaning out of it.",
+        "Tests:"
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/domain/items/mod.rs:233",
+        "core/src/ingress/transcription/mod.rs:639",
+        "core/src/store/events/mod.rs:916"
+      ]
+    },
+    {
+      "key": "A02",
+      "parent": null,
+      "title": "Correct an item's text, type and session topic",
+      "file_scope": [
+        "core/src/ffi/item_corrections.rs",
+        "ios/OhAndCoreBridge/CoreHandle+ItemCorrections.swift",
+        "core/tests/item_corrections/",
+        "ios/Services/Items/Corrections/",
+        "ios/Tests/ItemCorrections/"
+      ],
+      "intent": "Export the user's corrections as compare-and-set commands, and give `app/` a typed client for them.",
+      "acceptance": [
+        "Text, type and session-topic corrections each take the item ID, the expected revision and an idempotent command ID.",
+        "Correcting the type away from an actionable type is decided in the core, with a test. If the item has a live reminder, it is cancelled through the existing reminder state path, or the correction is refused with a fixed reason. The choice and its contract basis are written in the PR.",
+        "A user correction always beats later model output and transcripts. The existing regressions still hold, and one new test covers a correction made while an interpretation job is in flight.",
+        "The client requires an authenticated session.",
+        "Tests: Rust and real-core root tests. `make check` and `make test` pass. The exact-head macOS CI run is linked."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/store/events/mod.rs:440"
+      ]
+    },
+    {
+      "key": "A03",
+      "parent": null,
+      "title": "Complete, cancel and quiet an item",
+      "file_scope": [
+        "core/src/ffi/item_lifecycle_controls.rs",
+        "ios/OhAndCoreBridge/CoreHandle+ItemLifecycleControls.swift",
+        "core/tests/item_lifecycle_controls/",
+        "ios/Services/Items/LifecycleControls/",
+        "ios/Tests/ItemLifecycleControls/"
+      ],
+      "intent": "Export item completion, cancellation, not-now and stop-suggesting as user commands keyed by item, and give `app/` a typed client for them.",
+      "acceptance": [
+        "Complete and cancel reuse `end_item_with_event` (`core/src/reminders/state/mod.rs:817`) with the same outcome as the notification action path (`core/src/ffi/notification_actions.rs:314`), but keyed by item ID and expected revision, not by a notification identifier.",
+        "Not-now reuses `record_not_now` (`core/src/suggestions/eligibility/mod.rs:381`), and stop-suggesting reuses the control event and `set_pull_only` (`:414`).",
+        "Every command is idempotent by command ID and refuses stale revisions. The resulting reminder and notification changes go through the next reminder pass (`root.reconcileReminders`), never through a direct native effect.",
+        "The client requires an authenticated session.",
+        "Tests: Rust tests for each command, including on a deleted item. Real-core root tests showing that completing an item with a live reminder leaves no pending notification after the pass. `make check` and `make test` pass. The exact-head macOS CI run is linked."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/ffi/notification_actions.rs:314",
+        "core/src/reminders/state/mod.rs:817",
+        "core/src/suggestions/eligibility/mod.rs:381"
+      ]
+    },
+    {
+      "key": "A04",
+      "parent": null,
+      "title": "Read, edit, cancel and review an item's reminder",
+      "file_scope": [
+        "core/src/ffi/reminder_controls.rs",
+        "ios/OhAndCoreBridge/CoreHandle+ReminderControls.swift",
+        "core/tests/reminder_controls/",
+        "ios/Services/Reminders/Controls/",
+        "ios/Tests/ReminderControls/"
+      ],
+      "intent": "Export the reminder read, user time correction, cancellation and history, and give `app/` typed clients for them. Reads are gated.",
+      "acceptance": [
+        "**Read.** Returns the item's reminder: requested and resolved instant, time zone, the states the item status already reports, and any unsupported or ambiguity reason with its state version. It reuses `get_reminder` (`core/src/reminders/state/mod.rs:859`).",
+        "**Edit.** Applies `apply_user_time_correction` (`:595`) with the item revision and reminder version (`:384`). A stale version is refused. An edit can never backdate a reminder or silently substitute a different deadline.",
+        "**Cancel.** Applies `cancel_reminder` (`:686`).",
+        "**History.** Returns the bounded reminder history (`core/src/reminders/history/view.rs:149`).",
+        "Reads go through the read gate. Writes require an authenticated session, and their native effects go through the next reminder pass.",
+        "Tests: Rust tests, plus real-core root tests for edit and cancel reaching the notification centre after a pass. `make check` and `make test` pass. The exact-head macOS CI run is linked."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/reminders/history/view.rs:149",
+        "core/src/reminders/state/mod.rs:859"
+      ]
+    },
+    {
+      "key": "A05",
+      "parent": null,
+      "title": "Delete an item and report deletion progress",
+      "file_scope": [
+        "core/src/ffi/item_deletion.rs",
+        "ios/OhAndCoreBridge/CoreHandle+ItemDeletion.swift",
+        "core/tests/item_deletion/",
+        "ios/Services/Deletion/ItemDeletion/",
+        "ios/Tests/ItemDeletion/",
+        "ios/Services/Assembly/LifecycleCoordinator.swift:270"
+      ],
+      "intent": "Export per-item deletion intent and progress, and run the cleanup promptly through the lifecycle coordinator's existing deletion service.",
+      "acceptance": [
+        "Marking an item deleted reuses `mark_deletion_intent` (`core/src/lifecycle/delete_intent/mod.rs:211`). It tombstones the item, cancels its jobs and reminders, and enqueues cleanup in one transaction, idempotently. Progress reuses `deletion_progress` (`:370`).",
+        "After the intent commits, the client triggers the existing deletion cleanup service immediately. It does not wait for the next launch, it never deletes native files itself, and a failure leaves the intent to be resumed by the normal lifecycle pass.",
+        "Requires an authenticated session. A deleted item disappears from search and detail reads, and a late job result for it is refused, per the existing tests.",
+        "Tests: Rust tests, plus a real-core root test in which deletion removes the item's pending notification and retained audio and reports progress through to completion. `make check` and `make test` pass. The exact-head macOS CI run is linked."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/lifecycle/delete_intent/mod.rs:211",
+        "ios/Services/Assembly/LifecycleCoordinator.swift:270"
+      ]
+    },
+    {
+      "key": "A06",
+      "parent": null,
+      "title": "Activate and answer a suggestion",
+      "file_scope": [
+        "core/src/ffi/suggestion_responses.rs",
+        "ios/OhAndCoreBridge/CoreHandle+SuggestionResponses.swift",
+        "core/tests/suggestion_responses/",
+        "ios/Services/Suggestions/Responses/",
+        "ios/Tests/SuggestionResponses/"
+      ],
+      "intent": "Export prompt activation and response as user commands, and give `app/` a typed client for them.",
+      "acceptance": [
+        "Activation reuses `PromptCoordinator::activate` (`core/src/suggestions/coordinator/mod.rs:157`) for a delivered or opened prompt, and returns the chosen item's identifier and the text that may be displayed. It discloses nothing before authentication. A prompt that no longer has an eligible item reports that honestly.",
+        "Responses (not now, stop, done) reuse `respond` (`:201`) and are idempotent by command ID.",
+        "The client requires an authenticated session.",
+        "Tests: Rust tests for each response and for a stale or replaced prompt, plus a real-core root test. `make check` and `make test` pass. The exact-head macOS CI run is linked."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/suggestions/coordinator/mod.rs:157"
+      ]
+    },
+    {
+      "key": "A07",
+      "parent": null,
+      "title": "Control job configuration after policy changes",
+      "file_scope": [
+        "core/src/jobs/configuration/",
+        "core/src/ffi/job_configuration.rs",
+        "ios/OhAndCoreBridge/CoreHandle+JobConfiguration.swift",
+        "core/tests/job_configuration_controls/",
+        "ios/Services/JobConfiguration/",
+        "ios/Tests/JobConfiguration/"
+      ],
+      "intent": "Export the existing requeue and revocation controls, and add the missing core path that moves waiting unpinned work onto a newly authorized profile.",
+      "acceptance": [
+        "Export `requeue_job_to_new_profile` (`core/src/jobs/configuration/mod.rs:239`), `get_requeue_record` (`:201`), and a bounded listing of jobs pinned to a profile (`get_jobs_pinned_to_profile`, `:59`, with item and status only).",
+        "Profile revocation is available outside reset. It reuses `revoke_profile` and the job retirement path (`:136`, `:148`) and respects the L05b credential claim fence.",
+        "**New: re-pin waiting work.**",
+        "The client requires an authenticated session.",
+        "Tests:"
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "V01b",
+        "V02b"
+      ],
+      "source_pointers": [
+        "core/src/jobs/configuration/mod.rs:239"
+      ]
+    },
+    {
+      "key": "A08",
+      "parent": null,
+      "title": "Configure retention and act on unresolved sole audio",
+      "file_scope": [
+        "core/src/store/schema/mod.rs",
+        "core/src/lifecycle/retention/",
+        "core/src/ffi/retention_controls.rs",
+        "ios/OhAndCoreBridge/CoreHandle+RetentionControls.swift",
+        "ios/Services/AudioRetention/",
+        "ios/Tests/AudioRetention/",
+        "ios/Services/Assembly/LifecycleCoordinator.swift:277",
+        "core/tests/migrations/main.rs",
+        "core/src/ffi/audio_retention.rs"
+      ],
+      "intent": "Persist the user's retention period, and expose retention status, the sole-audio cases and their retry and delete actions to `app/`.",
+      "acceptance": [
+        "The retention period is a durable setting with a seven-day default after a successful transcription. Bounds are enforced. The sweep reads the stored setting instead of the init parameter, and changing it never deletes audio whose item is its sole source.",
+        "A status read returns the policy, the storage pressure the service already measures, and the unresolved sole-audio cases (item, capture time, reason).",
+        "\"Retry transcription\" re-queues the item's on-device transcription through the existing job path.",
+        "\"Delete audio\" removes only the audio of an item that has a transcript or text, through the existing cleanup ordering. Sole-source audio is refused and pointed to item deletion (A05).",
+        "Reads are gated and writes require an authenticated session. A sweep never blocks a new capture.",
+        "Tests: Rust tests and real-core root tests. `make check` and `make test` pass. The exact-head macOS CI run is linked."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "V01b",
+        "A14",
+        "C07"
+      ],
+      "source_pointers": [
+        "ios/Services/Assembly/LifecycleCoordinator.swift:277"
+      ]
+    },
+    {
+      "key": "A09",
+      "parent": null,
+      "title": "Play retained audio safely",
+      "file_scope": [
+        "ios/Services/AudioRetention/",
+        "ios/Services/Playback/",
+        "ios/Tests/Playback/"
+      ],
+      "intent": "Give `app/` a way to play an item's retained audio without exposing protected storage, and fence playback against removal.",
+      "acceptance": [
+        "For an authenticated session and an item whose audio is retained, the root returns a playable handle, such as a URL valid only for the session or an `AVAudioPlayer` built by the service. It is never a path into `ProtectedStorageLayout` (`ios/Services/ProtectedStorage/StoreProtectionPolicy.swift:103`) that outlives the session. An item without retained audio reports that honestly.",
+        "While playback is open, the retention sweep and deletion cleanup do not remove that file. A deletion intent ends playback first. Relocking ends playback.",
+        "Tests cover the fence against both the sweep and deletion, a relock, and audio that is missing or unreadable. Existing retention tests pass. The exact-head macOS CI run is linked."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "A08"
+      ],
+      "source_pointers": [
+        "ios/Services/ProtectedStorage/StoreProtectionPolicy.swift:103"
+      ]
+    },
+    {
+      "key": "A10",
+      "parent": null,
+      "title": "Route notification taps and reminder readiness to the app",
+      "file_scope": [
+        "ios/Services/Assembly/CompositionRoot.swift",
+        "ios/Services/Notifications/NotificationEventIngestor.swift",
+        "ios/Tests/Services/CompositionRootTests.swift"
+      ],
+      "intent": "Connect prompt taps to an app-visible handler, and let the app observe reminder readiness changes. Root chain.",
+      "acceptance": [
+        "The root builds its ingestor with a `promptHandler` (`CompositionRoot.swift:661`; today the default `{ _ in }`, `NotificationEventIngestor.swift:23`). A prompt tap reaches a public open-suggestion handler on the root, like `setOpenItemHandler`, and is never dropped. A tap that arrives before a handler is set is held and delivered once.",
+        "The root exposes an observer for reminder-report changes (`lastReminderReport`, `:897`). In particular it reports when a reminder becomes undeliverable because permission was never requested (`NotificationReadiness.swift:95`), so the app can ask at that point.",
+        "Real-core root tests cover a prompt tap reaching the handler and readiness changes notifying the observer. Existing tests pass. The exact-head macOS CI run is linked."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "T11d"
+      ],
+      "source_pointers": []
+    },
+    {
+      "key": "A11",
+      "parent": null,
+      "title": "Compose export at the root",
+      "file_scope": [
+        "ios/Services/Assembly/CompositionRoot.swift",
+        "ios/Services/Export/",
+        "ios/Tests/Services/CompositionRootTests.swift",
+        "ios/Tests/Export/"
+      ],
+      "intent": "Build the existing export service in production, over the root's read session and storage layout, with its launch cleanup.",
+      "acceptance": [
+        "The root exposes `ExportService` (`ios/Services/Export/ExportService.swift:15`, never constructed in production today) built over the authenticated read session and the protected layout. The raw `CoreExportClient` stays private.",
+        "The export temp-file sweep (`sweepAtLaunch`) runs at launch in the lifecycle order without delaying capture.",
+        "Real-core root tests: export is refused before authentication, a real export round-trips, and a stale temp export is removed at the next launch. The exact-head macOS CI run is linked."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "A10"
+      ],
+      "source_pointers": [
+        "ios/Services/Export/ExportService.swift:15"
+      ]
+    },
+    {
+      "key": "A12",
+      "parent": null,
+      "title": "Compose reset at the root",
+      "file_scope": [
+        "ios/Services/Assembly/CompositionRoot.swift",
+        "ios/Services/Assembly/LifecycleCoordinator.swift",
+        "ios/Services/Reset/",
+        "ios/Tests/Services/",
+        "ios/Tests/Reset/"
+      ],
+      "intent": "Build the existing reset service in production: put the reset ingress gate into the capture path, and resume an interrupted reset at launch.",
+      "acceptance": [
+        "The root constructs `ResetService` and its collaborators. Today they are internal and never built. It exposes a typed reset control and progress read to `app/`, and requires an authenticated session.",
+        "`ResetIngressGate` sits in the root's ingress path. During a reset, new captures behave as the reset contract says, and a capture is never silently lost.",
+        "An interrupted reset resumes at launch before the job runner activates. The L05b credential fence and the reset generation hold.",
+        "Real-core root tests cover a full reset, a capture during reset and a resume after an interrupted reset. Existing reset tests pass. The exact-head macOS CI run is linked."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "A11"
+      ],
+      "source_pointers": []
+    },
+    {
+      "key": "A13",
+      "parent": null,
+      "title": "Present an item or suggestion from the app host",
+      "file_scope": [
+        "ios/AppAssembly/ManagementNavigationModel.swift",
+        "ios/AppAssembly/AppRootView.swift",
+        "ios/AppAssembly/ManagementCatalog.swift",
+        "ios/Tests/AppAssembly/"
+      ],
+      "intent": "Let the management host navigate to an item's source detail or to the current suggestion when asked by a notification tap or another screen.",
+      "acceptance": [
+        "`requestedItemID` (`ios/AppAssembly/ManagementNavigationModel.swift:84`) and a new requested-suggestion route present a destination once one is registered. If no destination is registered, the app shows an honest placeholder, not a blank screen.",
+        "Presenting either requires authentication first. A capture entry still always lands on capture.",
+        "The host exposes a single registration point, one line per destination, so that U02b registers source detail and U08b registers the suggestion view without editing host behaviour.",
+        "UI and unit tests cover a tap before and after authentication, a relock while presented, and the placeholder. The exact-head macOS CI run is linked."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/AppAssembly/ManagementNavigationModel.swift:84"
+      ]
+    },
+    {
+      "key": "F17",
+      "parent": null,
+      "title": "Make the bench transport teardown tests deterministic under load",
+      "file_scope": [
+        "tools/bench/src/transport/tests.rs",
+        "tools/bench/src/transport/"
+      ],
+      "intent": "Wait for the teardown event instead of a 3-second wall-clock window so the bench transport tests pass under load.",
+      "acceptance": [
+        "Diagnosis of the load failure.",
+        "Fix the cause; same assertions, no retries or ignores.",
+        "50 consecutive loaded bench lib runs on the final head."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "tools/bench/src/transport/tests.rs:679"
+      ]
+    },
+    {
+      "key": "R05",
+      "parent": null,
+      "title": "Carry each search hit's item type through the gated retrieval answer",
+      "file_scope": [
+        "core/src/retrieval/index/mod.rs",
+        "core/src/retrieval/query/",
+        "core/src/ffi/retrieval.rs",
+        "ios/OhAndCoreBridge/CoreHandle+Retrieval.swift",
+        "ios/Services/Authentication/PrivateReadGate.swift",
+        "ios/Tests/Authentication/"
+      ],
+      "intent": "Add the item's current type, absent when unclassified, to SearchHit, the retrieval FFI hit and PrivateRetrievalHit.",
+      "acceptance": [
+        "SearchHit carries items.item_type; absent stays absent.",
+        "FFI JSON and PrivateRetrievalHit carry it; scope enforcement unchanged.",
+        "Rust and Swift tests; macOS CI linked."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/retrieval/index/mod.rs:112",
+        "ios/Services/Authentication/PrivateReadGate.swift:73"
+      ]
+    },
+    {
+      "key": "A14",
+      "parent": null,
+      "title": "Let the user remove an item's audio through the removal fence",
+      "file_scope": [
+        "core/src/lifecycle/retention/mod.rs",
+        "core/src/ffi/audio_retention.rs",
+        "core/src/ffi/audio_retention/lease.rs",
+        "ios/OhAndCoreBridge/CoreHandle+AudioRetention.swift"
+      ],
+      "intent": "A user-initiated removal decision inside the L03b fence: approve when recoverable text exists, deny sole-source audio.",
+      "acceptance": [
+        "Approve with transcript or typed text; deny sole-source, deleted or mismatched.",
+        "Decided under the fence's write lock; sweeps unchanged.",
+        "Rust tests including a racing correction."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/lifecycle/retention/mod.rs:320",
+        "core/src/ffi/audio_retention/lease.rs:115"
+      ]
+    },
+    {
+      "key": "C07",
+      "parent": null,
+      "title": "Queue on-device transcription for imported voice captures",
+      "file_scope": [
+        "core/src/ingress/transcription/queue.rs",
+        "core/src/ingress/transcription/mod.rs",
+        "core/src/ingress/import.rs",
+        "core/src/ffi/job_runner.rs"
+      ],
+      "intent": "Enqueue the transcription_attachment job at import, backfill stored audio_pending items at drain start, and provide an explicit requeue.",
+      "acceptance": [
+        "Import enqueues one local transcription job for an audio-only item.",
+        "Idempotent backfill at drain start.",
+        "Explicit requeue with refusals.",
+        "End-to-end Rust test through the apply path."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/ingress/import.rs:366",
+        "core/src/privacy/routing/mod.rs:226"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -2285,45 +3195,61 @@
       "E03b",
       "T11a",
       "T11b",
+      "T11c",
+      "T11d",
       "V09"
     ],
     "U01": [
-      "P10",
       "B03",
-      "N07"
+      "C04c",
+      "N07",
+      "P10",
+      "U01a",
+      "U01b",
+      "U01c"
     ],
     "B05": [
       "B03",
       "N06",
-      "S03"
+      "S03",
+      "S05b"
     ],
     "U02a": [
-      "U01",
+      "C01b",
       "R03",
-      "C01b"
+      "R05",
+      "U01",
+      "U01d"
     ],
     "U02b": [
-      "U02a"
+      "U02a",
+      "A01",
+      "A09"
     ],
     "U03a": [
       "U02b",
-      "D04"
+      "D04",
+      "A02"
     ],
     "U03b": [
-      "U03a"
+      "U03a",
+      "A03"
     ],
     "U04a": [
       "U02b",
-      "N06"
+      "N06",
+      "A04"
     ],
     "U04b": [
-      "U04a"
+      "U04a",
+      "A13"
     ],
     "U05a": [
       "U01",
       "V06",
       "V07",
-      "V04"
+      "V04",
+      "U01e"
     ],
     "U05b": [
       "U05a"
@@ -2331,14 +3257,18 @@
     "U06a": [
       "U05b",
       "V02",
-      "V03"
+      "V03",
+      "U01e",
+      "U02a"
     ],
     "U06b": [
-      "U06a"
+      "U06a",
+      "A07"
     ],
     "U11": [
       "U06b",
-      "C06"
+      "C06",
+      "A10"
     ],
     "L05a": [
       "L02",
@@ -2352,20 +3282,29 @@
       "U01",
       "L03b",
       "L04b",
-      "L05b"
+      "L05b",
+      "A08"
     ],
     "U07b": [
-      "U07a"
+      "U07a",
+      "A11"
     ],
     "U07c": [
-      "U07b"
+      "U07b",
+      "A05",
+      "A12",
+      "U02b"
     ],
     "U08a": [
       "U01",
-      "S03"
+      "S03",
+      "S05b"
     ],
     "U08b": [
-      "U08a"
+      "U08a",
+      "A06",
+      "A10",
+      "A13"
     ],
     "U09": [
       "U01",
@@ -2376,7 +3315,8 @@
     ],
     "S04": [
       "S03",
-      "U08b"
+      "U08b",
+      "T08"
     ],
     "U10": [
       "U03b",
@@ -2495,7 +3435,82 @@
     ],
     "T11b": [
       "B03"
-    ]
+    ],
+    "U01a": [],
+    "U01b": [
+      "T11b",
+      "U01a"
+    ],
+    "U01c": [
+      "U01b"
+    ],
+    "S05a": [],
+    "S05b": [
+      "S05a",
+      "U01c"
+    ],
+    "T11c": [],
+    "T11d": [
+      "T11c",
+      "S05b"
+    ],
+    "F13": [],
+    "F14": [],
+    "C04c": [],
+    "I08": [],
+    "V01b": [
+      "S05a",
+      "I08"
+    ],
+    "V01c": [
+      "V01b"
+    ],
+    "V02b": [],
+    "R04": [],
+    "U01d": [
+      "R04"
+    ],
+    "U01e": [
+      "V01b",
+      "V01c",
+      "V02b"
+    ],
+    "F15": [
+      "F17"
+    ],
+    "F16": [],
+    "A01": [],
+    "A02": [],
+    "A03": [],
+    "A04": [],
+    "A05": [],
+    "A06": [],
+    "A07": [
+      "V01b",
+      "V02b"
+    ],
+    "A08": [
+      "A14",
+      "C07",
+      "V01b"
+    ],
+    "A09": [
+      "A08"
+    ],
+    "A10": [
+      "T11d"
+    ],
+    "A11": [
+      "A10"
+    ],
+    "A12": [
+      "A11"
+    ],
+    "A13": [],
+    "F17": [],
+    "R05": [],
+    "A14": [],
+    "C07": []
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -2617,6 +3632,42 @@
     {
       "date": "2026-10-13",
       "change": "L05b credential-claim fence: schema v10 allowance (reset_credential_claims + BEFORE INSERT/UPDATE triggers on provider_profiles raising credential_pending_removal); claim-revoke-delete-release protocol with the persisted claim set as resume authority. Added T11a (core FFI dispatches SelfHosted) and T11b (root attaches provider exchange transport); T11 depends on both."
+    },
+    {
+      "date": "2026-10-14",
+      "change": "U01 blocked after PR #212 round 1 on three cross-ownership gaps: no production composition of notification actions, no route provisioning (nothing writes routes; fresh-install saves rejected as UnknownRoute), and no public voice ingress seam. Added U01a (core idempotent local-only capture route), U01b (root: provision route at open + compose ActionHandler/receiver), U01c (root: voice handoff/recovery seam); U01 depends on all three. U01 allowance: ios/Tests/AppAssembly/, the replaced ContentView assertion in ProjectSmokeTests, and one OhAndApp sources entry for app/ in ios/project.yml. F10 granted ProbeScenarios.swift foreground-delivery scenario. L05b item (4): bind removal before the tap boundary."
+    },
+    {
+      "date": "2026-10-14",
+      "change": "B05 blocked: no native daily-prompt pipeline exists (S02 PromptSchedule unexposed, unpersisted, nothing installs prompts). Added S05a (core persists schedule, migration after v10, reminder pass sources prompts from it) and S05b (native prompt service as LifecycleCoordinator promptEligibility action); B05 depends on S05b and drops its Swift schedule copy. T11 blocked: self-hosted registration inert because the core dispatches SelfHosted unconditionally. Added T11c (core enabled-protocol gate, self-hosted off by default, profile status read) and T11d (root collects module-declared protocols). Root chain: U01b, U01c, S05b, T11d."
+    },
+    {
+      "date": "2026-10-14",
+      "change": "S05a allowance (3): native effect path accepts core-issued prompt identifiers (NotificationModels, NotificationBridge incl. pending listing, NotificationEventIngestor, ReminderNativeEffects, CoreReminderReconciler + tests). Added C04c (VoiceHandoffResult unavailable-audio case mapped to unrecoverable); U01c lands as is, U01 depends on C04c. Added F13 (untrusted-certificate exchange test missing final event) and F14 (tools/bench unverified self-hosted CLI test)."
+    },
+    {
+      "date": "2026-10-14",
+      "change": "Tier-2 prerequisites: I08 (queue interpretation for saved captures, core-chosen pin), V01b (versioned provider profiles and defaults), V01c (explicit connection check), V02b (route grants), R04 (retrieval export), U01d (gated retrieval reads at the root, after T11d), U01e (configuration clients at the root). U02a depends on U01d; U05a on U01e; U06a on U01e and U02a."
+    },
+    {
+      "date": "2026-10-14",
+      "change": "I08 amended after PR #225 round 1: UUID request version derived from M1_INSTRUCTION_VERSION; no-profile non-match stays unprocessed/AwaitingConfiguration and searchable; existing-test fixture adaptations for the auto-queued job granted."
+    },
+    {
+      "date": "2026-10-15",
+      "change": "Added F15 (notification_reconciliation FFI test SIGSEGV/heap corruption) and F16 (NotificationProbe foreground delivery vanishing after a timely add)."
+    },
+    {
+      "date": "2026-10-15",
+      "change": "App-facing API layer: capability client allowance and management context allowance (standing); A01-A13 added (item detail, corrections, lifecycle controls, reminder controls, item deletion, suggestion responses, job configuration controls, retention controls, playback, notification signals, export composition, reset composition, host navigation); root behaviour chain S05b -> T11d -> A10 -> A11 -> A12; U01d/U01e no longer serialized; S04 deferred behind T08; slice dependencies updated."
+    },
+    {
+      "date": "2026-10-15",
+      "change": "V01b and A08 granted core/tests/migrations/main.rs (schema-version expectations forced by their appended migration step plus its own migration test), as C05a, L05a, L05b and S05a had."
+    },
+    {
+      "date": "2026-10-15",
+      "change": "Missing seams from blocked tasks: F17 (bench transport teardown flake; F15 depends on it), R05 (item type on retrieval hits; U02a depends on it), A14 (user-initiated audio removal in the fence) and C07 (queue transcription jobs at import, backfill, requeue; no production path created them) added; A08 depends on A14 and C07 and may make Command::policy read the stored setting; V01c's file moved under core/src/ffi/provider_transport/."
     }
   ]
 }

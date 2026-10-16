@@ -113,6 +113,65 @@ public struct NotificationIdentifier: Hashable, Sendable, CustomStringConvertibl
     public var description: String { rawValue }
 }
 
+/// The core-derived identifier of one optional daily prompt, `prompt:<local date>` with the date as
+/// `YYYY-MM-DD`. It is a kind of its own, never a reminder identifier: `NotificationIdentifier` stays exactly as
+/// strict, and a reminder identifier is never accepted here. A prompt carries no item, so the identifier holds
+/// nothing but the date.
+public struct PromptIdentifier: Hashable, Sendable, CustomStringConvertible {
+    public static let prefix = "prompt:"
+
+    public let localDate: String
+
+    public init?(rawValue: String) {
+        guard rawValue.hasPrefix(Self.prefix) else { return nil }
+        let date = String(rawValue.dropFirst(Self.prefix.count))
+        let bytes = Array(date.utf8)
+        guard bytes.count == 10, bytes[4] == UInt8(ascii: "-"), bytes[7] == UInt8(ascii: "-") else { return nil }
+        let digitPositions = [0, 1, 2, 3, 5, 6, 8, 9]
+        guard digitPositions.allSatisfy({ (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(bytes[$0]) }) else {
+            return nil
+        }
+        guard let month = Int(date.dropFirst(5).prefix(2)), (1...12).contains(month),
+              let day = Int(date.dropFirst(8)), (1...31).contains(day)
+        else { return nil }
+        localDate = date
+    }
+
+    public var rawValue: String { Self.prefix + localDate }
+
+    public var description: String { rawValue }
+}
+
+/// One prompt install from the core: the identifier and the instant it is due. The wording is fixed and carries
+/// no item text, count or route.
+public struct PromptScheduleRequest: Equatable, Sendable {
+    public let identifier: PromptIdentifier
+    public let dueInstant: Date
+
+    public init(identifier: PromptIdentifier, dueInstant: Date) {
+        self.identifier = identifier
+        self.dueInstant = dueInstant
+    }
+}
+
+/// What the OS holds for a prompt after the bridge scheduled it.
+public struct InstalledPrompt: Equatable, Sendable {
+    public let identifier: PromptIdentifier
+    public let dueInstant: Date
+}
+
+/// One pending request that carries a prompt identifier.
+public struct PendingPrompt: Equatable, Sendable {
+    public let identifier: PromptIdentifier
+    public let dueInstant: Date?
+}
+
+/// The fixed wording of every optional daily prompt.
+public enum PromptNotificationWording {
+    public static let title = "Oh And"
+    public static let body = "Anything to jot down? Open Oh And."
+}
+
 public enum NotificationPayloadKind: String, Equatable, Sendable {
     case generic
     case previewApproved = "preview_approved"
@@ -214,6 +273,21 @@ public struct NotificationContent: Equatable, Sendable {
     }
 }
 
+extension NotificationContent {
+    /// The prompt's payload: fixed wording, no actions, no target. The kind value is the only thing the app
+    /// reads back from it.
+    static func prompt() -> NotificationContent {
+        NotificationContent(
+            title: PromptNotificationWording.title,
+            body: PromptNotificationWording.body,
+            userInfo: [kindKey: promptKindValue],
+            categoryIdentifier: nil
+        )
+    }
+
+    public static let promptKindValue = "prompt"
+}
+
 public enum NotificationEventKind: Equatable, Sendable {
     case delivered
     case opened
@@ -226,5 +300,18 @@ public struct NotificationEvent: Equatable, Sendable {
     public let identifier: NotificationIdentifier
     public let kind: NotificationEventKind
     public let opaqueTargetID: OpaqueIdentifier?
+    public let occurredAt: Date
+}
+
+public enum PromptNotificationEventKind: Equatable, Sendable {
+    case delivered
+    case opened
+}
+
+/// OS evidence that a prompt was delivered or tapped. It is never a reminder event: it is not journaled as a
+/// reminder action. Routing a tap to the prompt activation belongs to the prompt service.
+public struct PromptNotificationEvent: Equatable, Sendable {
+    public let identifier: PromptIdentifier
+    public let kind: PromptNotificationEventKind
     public let occurredAt: Date
 }

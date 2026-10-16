@@ -199,6 +199,11 @@ mod failures {
         "protocol_unsupported",
         "the pinned profile's protocol has no native transport",
     );
+    pub(super) const PROTOCOL_NOT_ENABLED: AbiFailure = fixed(
+        ErrorClass::Unsupported,
+        super::protocols::PROTOCOL_NOT_ENABLED,
+        "the host has not enabled the pinned profile's provider protocol",
+    );
     pub(super) const STALE_SOURCE: AbiFailure = fixed(
         ErrorClass::Permanent,
         "stale_source",
@@ -678,8 +683,9 @@ fn effective_text(
 }
 
 /// Authorizes the job and builds the request, all from stored state. Nothing is sent and no
-/// credential is touched; the first denial wins.
-fn prepare(connection: &Connection, job_id: &str) -> Result<Prepared, AbiFailure> {
+/// credential is touched; the first denial wins. The pinned profile's protocol must be one the
+/// host enabled for `handle`.
+fn prepare(connection: &Connection, handle: u64, job_id: &str) -> Result<Prepared, AbiFailure> {
     let target = match resolve_execution_target(connection, job_id).map_err(storage_failure)? {
         ExecutionResolution::Denied(reason) => return Err(denial_failure(reason)),
         ExecutionResolution::Local => return Err(failures::NOT_REMOTE),
@@ -690,6 +696,7 @@ fn prepare(connection: &Connection, job_id: &str) -> Result<Prepared, AbiFailure
         return Err(failures::UNSUPPORTED_JOB);
     }
     let profile = load_profile(connection, &target.profile_version)?;
+    protocols::ensure_enabled(handle, profile.protocol())?;
     if target.credential_ref.as_deref() != Some(profile.credential_ref().as_str()) {
         return Err(failures::MALFORMED_PROFILE);
     }
@@ -749,6 +756,7 @@ fn run_exchange(
     cancel: &CancelToken,
 ) -> Result<Vec<u8>, AbiFailure> {
     let operation_id = end.operation_id;
+    protocols::ensure_enabled(end.handle, prepared.profile.protocol())?;
     let transport = NativeTransport { end };
     let adapter: Box<dyn ProviderAdapter> = match prepared.profile.protocol() {
         ProviderProtocol::Anthropic => Box::new(AnthropicAdapter::new(
@@ -806,7 +814,7 @@ fn start_exchange_job(
     Box::new(move |database| {
         let prepared = {
             let database = lock(database);
-            prepare(database.conn(), &job_id)?
+            prepare(database.conn(), handle, &job_id)?
         };
         let end = Arc::new(ExchangeEnd {
             handle,
@@ -1046,6 +1054,8 @@ pub unsafe extern "C" fn ohand_core_fail_provider_exchange(
     })
 }
 
+pub mod connection_check;
+pub mod protocols;
 pub mod shadow_review;
 
 #[cfg(test)]

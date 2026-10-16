@@ -89,9 +89,15 @@ impl Store {
             None,
         )
         .unwrap();
-        import_foreground_ingress(&mut self.open(), &capture)
+        let item_id = import_foreground_ingress(&mut self.open(), &capture)
             .unwrap()
-            .item_id
+            .item_id;
+        // These tests queue and settle their own transcription jobs.
+        self.open()
+            .conn()
+            .execute("DELETE FROM jobs WHERE item_id = ?", [&item_id])
+            .unwrap();
+        item_id
     }
 
     fn voice_item(&self) -> String {
@@ -119,10 +125,15 @@ impl Store {
             when,
         )
         .unwrap();
-        let job = claim_job_with_lease(&mut database, Duration::seconds(300), when)
-            .unwrap()
-            .expect("the job is eligible");
-        assert_eq!(job.job_id, job_id);
+        // A text capture already holds its own interpretation job; claim past it.
+        let job = loop {
+            let claimed = claim_job_with_lease(&mut database, Duration::seconds(300), when)
+                .unwrap()
+                .expect("the job is eligible");
+            if claimed.job_id == job_id {
+                break claimed;
+            }
+        };
         apply_transcription_outcome(
             &mut database,
             &TranscriptionOutcome {
@@ -289,6 +300,71 @@ fn the_retention_period_is_configurable_and_bounded() {
     assert!(RetentionPolicy::new(Duration::days(-1)).is_err());
     assert!(RetentionPolicy::new(Duration::days(MAX_RETENTION_DAYS + 1)).is_err());
     assert!(RetentionPolicy::new(Duration::days(MAX_RETENTION_DAYS)).is_ok());
+}
+
+#[test]
+fn the_stored_period_replaces_the_default() {
+    let store = Store::new();
+    let database = store.open();
+    assert_eq!(
+        stored_retention_policy(database.conn()).unwrap(),
+        RetentionPolicy::default()
+    );
+
+    database
+        .conn()
+        .execute(
+            "INSERT INTO retention_settings (singleton, period_seconds, updated_at)
+             VALUES (1, 3600, '2026-10-01T08:00:00Z')",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        stored_retention_policy(database.conn()).unwrap().period(),
+        Duration::hours(1)
+    );
+}
+
+#[test]
+fn unresolved_sole_audio_lists_only_live_items_whose_audio_is_the_only_source() {
+    let store = Store::new();
+    let sole = store.voice_item();
+    let transcribed = store.import(SECOND_CAPTURE_ID, Some(SECOND_AUDIO), None);
+    store.transcribe(&transcribed, SECOND_AUDIO, transcribed_at());
+    let typed = store.import(
+        "3f9c1e52-0000-4000-8000-0000000000d3",
+        Some("audio/2026-10-01/typed.m4a"),
+        Some("buy ferns"),
+    );
+    let deleted = store.import(
+        "3f9c1e52-0000-4000-8000-0000000000d4",
+        Some("audio/2026-10-01/deleted.m4a"),
+        None,
+    );
+    store
+        .open()
+        .conn()
+        .execute(
+            "UPDATE items SET lifecycle_state = 'deleted' WHERE item_id = ?",
+            [&deleted],
+        )
+        .unwrap();
+
+    let cases = unresolved_sole_audio(store.open().conn()).unwrap();
+    assert_eq!(cases.len(), 1, "{cases:?}");
+    assert_eq!(cases[0].item_id, sole);
+    assert_eq!(cases[0].captured_at, "2026-10-01T08:00:00Z");
+    assert_eq!(cases[0].reason, UnresolvedReason::TranscriptionPending);
+    assert_eq!(
+        cases[0].options,
+        vec![
+            RetentionOption::RetryTranscription,
+            RetentionOption::DeleteAudio
+        ]
+    );
+    assert!(cases
+        .iter()
+        .all(|case| case.item_id != transcribed && case.item_id != typed));
 }
 
 #[test]
@@ -1099,5 +1175,163 @@ fn removal_is_denied_for_sole_source_audio() {
         RemovalDecision::Denied(RemovalDenial::Unresolved {
             reason: UnresolvedReason::TranscriptionFailed
         })
+    );
+}
+
+impl Store {
+    fn user_removal(&self, item_id: &str, reference: &str) -> RemovalDecision {
+        authorize_user_audio_removal(self.open().conn(), item_id, reference).unwrap()
+    }
+}
+
+#[test]
+fn a_user_may_remove_audio_whose_transcript_is_usable_before_it_expires() {
+    let store = Store::new();
+    let item_id = store.voice_item();
+    store.transcribe(&item_id, FIRST_AUDIO, transcribed_at());
+
+    // The automatic path still refuses it until the period has passed.
+    assert!(matches!(
+        store.state(&item_id, transcribed_at() + Duration::days(1)),
+        RetentionState::Retained { .. }
+    ));
+    assert_eq!(
+        store.user_removal(&item_id, FIRST_AUDIO),
+        RemovalDecision::ApprovedByUser
+    );
+    assert!(RemovalDecision::ApprovedByUser.is_approved());
+}
+
+#[test]
+fn a_user_may_remove_audio_kept_beside_typed_text_without_a_transcript() {
+    let typed_after_failure = Store::new();
+    let item_id = typed_after_failure.voice_item();
+    typed_after_failure.transcription_result(
+        &item_id,
+        FIRST_AUDIO,
+        RecognizerResult::Failed,
+        transcribed_at(),
+    );
+    typed_after_failure.correct_text(&item_id, 0, None, "water the ferns");
+    assert_eq!(
+        typed_after_failure.state(&item_id, transcribed_at() + Duration::days(400)),
+        unresolved(UnresolvedReason::TextWithoutTranscript)
+    );
+    assert_eq!(
+        typed_after_failure.user_removal(&item_id, FIRST_AUDIO),
+        RemovalDecision::ApprovedByUser
+    );
+
+    let captured_text = Store::new();
+    let item_id = captured_text.import(FIRST_CAPTURE_ID, Some(FIRST_AUDIO), Some("buy milk"));
+    assert_eq!(
+        captured_text.user_removal(&item_id, FIRST_AUDIO),
+        RemovalDecision::ApprovedByUser
+    );
+}
+
+#[test]
+fn a_user_removal_is_denied_when_the_audio_is_the_only_source() {
+    let pending = Store::new();
+    let pending_item = pending.voice_item();
+    assert_eq!(
+        pending.user_removal(&pending_item, FIRST_AUDIO),
+        RemovalDecision::Denied(RemovalDenial::SoleSource)
+    );
+
+    let failed = Store::new();
+    let failed_item = failed.voice_item();
+    failed.transcription_result(
+        &failed_item,
+        FIRST_AUDIO,
+        RecognizerResult::Failed,
+        transcribed_at(),
+    );
+    assert_eq!(
+        failed.user_removal(&failed_item, FIRST_AUDIO),
+        RemovalDecision::Denied(RemovalDenial::SoleSource)
+    );
+
+    // Text cleared by a correction makes the audio the only source again.
+    let cleared = Store::new();
+    let cleared_item = cleared.voice_item();
+    cleared.transcription_result(
+        &cleared_item,
+        FIRST_AUDIO,
+        RecognizerResult::Failed,
+        transcribed_at(),
+    );
+    cleared.correct_text(&cleared_item, 0, None, "water the ferns");
+    assert_eq!(
+        cleared.user_removal(&cleared_item, FIRST_AUDIO),
+        RemovalDecision::ApprovedByUser
+    );
+    cleared.correct_text(&cleared_item, 1, Some("water the ferns"), "\u{00A0}");
+    assert_eq!(
+        cleared.user_removal(&cleared_item, FIRST_AUDIO),
+        RemovalDecision::Denied(RemovalDenial::SoleSource)
+    );
+
+    // A blank transcript recovers nothing.
+    let blank = Store::new();
+    let blank_item = blank.voice_item();
+    blank.transcription_result(
+        &blank_item,
+        FIRST_AUDIO,
+        RecognizerResult::Transcript(RecognizedTranscript {
+            text: "   ".to_string(),
+            confidence: Some(0.9),
+            detected_language: Some("en-US".to_string()),
+            recognizer: "on-device-recognizer/1".to_string(),
+            audio_sha256: AUDIO_SHA256.to_string(),
+        }),
+        transcribed_at(),
+    );
+    assert_eq!(
+        blank.user_removal(&blank_item, FIRST_AUDIO),
+        RemovalDecision::Denied(RemovalDenial::SoleSource)
+    );
+}
+
+#[test]
+fn a_user_removal_is_denied_after_deletion_a_reference_change_or_for_a_missing_item() {
+    let store = Store::new();
+    let item_id = store.voice_item();
+    store.transcribe(&item_id, FIRST_AUDIO, transcribed_at());
+
+    assert_eq!(
+        store.user_removal(&item_id, "audio/other.m4a"),
+        RemovalDecision::Denied(RemovalDenial::AudioReferenceMismatch)
+    );
+    assert_eq!(
+        store.user_removal("missing-item", FIRST_AUDIO),
+        RemovalDecision::Denied(RemovalDenial::ItemNotFound)
+    );
+
+    let revision: i32 = store
+        .open()
+        .conn()
+        .query_row(
+            "SELECT revision FROM items WHERE item_id = ?",
+            [&item_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    mark_deletion_intent(&mut store.open(), &item_id, revision, transcribed_at()).unwrap();
+    assert_eq!(
+        store.user_removal(&item_id, FIRST_AUDIO),
+        RemovalDecision::Denied(RemovalDenial::DeletionOwnsCleanup)
+    );
+}
+
+#[test]
+fn a_transcript_made_from_other_audio_does_not_make_the_audio_removable_by_the_user() {
+    let store = Store::new();
+    let item_id = store.voice_item();
+    store.transcribe(&item_id, FIRST_AUDIO, transcribed_at());
+    store.execute("UPDATE transcript_attachments SET audio_reference = 'audio/other.m4a'");
+    assert_eq!(
+        store.user_removal(&item_id, FIRST_AUDIO),
+        RemovalDecision::Denied(RemovalDenial::SoleSource)
     );
 }

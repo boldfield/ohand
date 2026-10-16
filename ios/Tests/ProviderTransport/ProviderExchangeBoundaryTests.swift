@@ -352,7 +352,11 @@ final class ProviderExchangeBoundaryTests: ProviderTransportTestCase {
             base: systemTrustTransport())
 
         let operationID = try session.startExchange()
-        let rejection = failure(of: session.finalEvent(for: operationID))
+        // The first system-trust evaluation in the test process is a cold start that took 17.8 s on a hosted runner
+        // (job 115754735518) and 10.2 s on another. The transport owns the deadline, so wait for it: the profile's
+        // request timeout, plus margin for the core to report the outcome.
+        let transportDeadline = TimeInterval(ProviderExchangeScenario.profileTimeoutSeconds)
+        let rejection = failure(of: session.finalEvent(for: operationID, timeout: transportDeadline + 15))
 
         XCTAssertEqual(rejection?.errorClass, .permanent)
         XCTAssertTrue(server.requests.isEmpty, "no request was sent over an unvalidated connection")

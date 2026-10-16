@@ -22,7 +22,9 @@
 //! expires; one that is pinned is released by native code after the effect whatever happens to it.
 
 use super::{store_failure, AbiFailure};
-use crate::lifecycle::retention::{authorize_audio_removal, RemovalDecision, RetentionPolicy};
+use crate::lifecycle::retention::{
+    authorize_audio_removal, authorize_user_audio_removal, RemovalDecision, RetentionPolicy,
+};
 use crate::providers::contracts::ErrorClass;
 use crate::store::schema::Clock;
 use rusqlite::Connection;
@@ -104,6 +106,13 @@ fn free(fence: &mut Fence) -> bool {
     true
 }
 
+/// Which decision the fence makes: automatic cleanup of expired audio, or a user's own request.
+#[derive(Clone, Copy)]
+pub(super) enum Authorization<'a> {
+    Expired(&'a RetentionPolicy),
+    UserInitiated,
+}
+
 /// The decision made inside the fence, and the lease that keeps the fence up when it approved.
 pub(super) struct Begun {
     pub(super) decision: RemovalDecision,
@@ -116,7 +125,7 @@ pub(super) fn begin(
     store_path: &Path,
     handle: u64,
     clock: &dyn Clock,
-    policy: &RetentionPolicy,
+    authorization: Authorization<'_>,
     item_id: &str,
     audio_reference: &str,
     duration: Duration,
@@ -132,15 +141,22 @@ pub(super) fn begin(
     connection
         .execute_batch("BEGIN IMMEDIATE")
         .map_err(|error| store_failure(&error.into()))?;
-    let decision =
-        match authorize_audio_removal(&connection, clock, policy, item_id, audio_reference) {
-            Ok(decision) => decision,
-            Err(error) => {
-                let _ = connection.execute_batch("ROLLBACK");
-                return Err(store_failure(&error));
-            }
-        };
-    if !matches!(decision, RemovalDecision::Approved { .. }) {
+    let decided = match authorization {
+        Authorization::Expired(policy) => {
+            authorize_audio_removal(&connection, clock, policy, item_id, audio_reference)
+        }
+        Authorization::UserInitiated => {
+            authorize_user_audio_removal(&connection, item_id, audio_reference)
+        }
+    };
+    let decision = match decided {
+        Ok(decision) => decision,
+        Err(error) => {
+            let _ = connection.execute_batch("ROLLBACK");
+            return Err(store_failure(&error));
+        }
+    };
+    if !decision.is_approved() {
         let _ = connection.execute_batch("ROLLBACK");
         return Ok(Begun {
             decision,

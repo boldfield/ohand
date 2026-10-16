@@ -26,6 +26,9 @@
 //! * `transcription_lease_not_held`: the job is unknown or no longer running under this lease (a
 //!   stale or duplicate delivery); nothing was written.
 //! * `transcription_not_authorized`: processing of the job is not authorized; nothing was written.
+//! * `transcription_interpretation_pin_refused`: the request named an interpretation profile
+//!   pin other than the one the core chooses; nothing was written. Omit the request: the core
+//!   queues the interpretation job itself.
 //! * `transcription_conflicting_result`: the job already attached a different transcript.
 //! * `transcription_not_committed`: a storage fault; nothing was written, retry is safe.
 //! * `transcription_commit_unknown`: the commit outcome cannot be asserted; retry with the same
@@ -324,6 +327,11 @@ fn apply_failure(error: &TranscriptionError) -> AbiFailure {
             "transcription_not_authorized",
             "processing of the transcription job is not authorized",
         ),
+        TranscriptionErrorKind::InterpretationPinRefused => failure(
+            ErrorClass::Permanent,
+            "transcription_interpretation_pin_refused",
+            "the interpretation profile pin is chosen by the core",
+        ),
         TranscriptionErrorKind::ConflictingResult => failure(
             ErrorClass::Permanent,
             "transcription_conflicting_result",
@@ -420,7 +428,8 @@ pub unsafe extern "C" fn ohand_core_start_read_transcription_job(
 /// "interpretation"}` where `result` is `transcript`, `unsupported` or `failed`, `transcript`
 /// (`text`, `confidence`, `detected_language`, `recognizer`, `audio_sha256`) is present exactly
 /// for `transcript`, and `interpretation` (`job_id`, `profile_version`, `request_version`) is
-/// optional. Unknown fields are rejected. The outcome event for `operation_id` is success only
+/// optional: when omitted the core queues the interpretation job itself with the profile pin it
+/// chooses, and a request whose `profile_version` is not that pin is refused. Unknown fields are rejected. The outcome event for `operation_id` is success only
 /// after the transaction committed (or an earlier identical delivery had), with JSON
 /// `{"operation_id","item_id","job_id","disposition","revision","transcription_state",
 /// "discard_reason","interpretation"}`, or a normalized failure (see the module documentation).

@@ -137,6 +137,14 @@ impl Store {
         let now = DateTime::parse_from_rfc3339("2026-10-08T10:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
+        // The test queues its own transcription job in place of the one import queued.
+        database
+            .conn()
+            .execute(
+                "DELETE FROM jobs WHERE item_id = ? AND job_type = ?",
+                rusqlite::params![item_id, JOB_TYPE_TRANSCRIPTION_ATTACHMENT],
+            )
+            .unwrap();
         enqueue_job(
             &mut database,
             "transcription-1".to_string(),
@@ -149,9 +157,15 @@ impl Store {
             now,
         )
         .unwrap();
-        let job = claim_job_with_lease(&mut database, Duration::seconds(300), now)
-            .unwrap()
-            .expect("job is claimable");
+        // A text capture already holds its own interpretation job; claim past it.
+        let job = loop {
+            let claimed = claim_job_with_lease(&mut database, Duration::seconds(300), now)
+                .unwrap()
+                .expect("job is claimable");
+            if claimed.job_id == "transcription-1" {
+                break claimed;
+            }
+        };
         apply_transcription_outcome(
             &mut database,
             &TranscriptionOutcome {

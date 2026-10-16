@@ -1,6 +1,7 @@
 use super::*;
 use crate::domain::items::{load_item_state, verify_state_integrity, ItemState, TextState};
 use crate::ingress::import::import_foreground_ingress;
+use crate::interpretation::enqueue::{interpretation_job_id, interpretation_request_version};
 use crate::jobs::queue::{claim_job_with_lease, enqueue_job, get_job, get_jobs_for_item};
 use crate::lifecycle::delete_intent::mark_deletion_intent;
 use crate::retrieval::index::{search_index, TextBasis as SearchBasis};
@@ -89,6 +90,14 @@ impl Store {
                 |row| row.get(0),
             )
             .unwrap();
+        // Replace the job import queued with this one, as a test that scripts its own job.
+        database
+            .conn()
+            .execute(
+                "DELETE FROM jobs WHERE item_id = ? AND job_type = ? AND status = 'queued'",
+                rusqlite::params![self.item_id, JOB_TYPE_TRANSCRIPTION_ATTACHMENT],
+            )
+            .unwrap();
         enqueue_job(
             &mut database,
             job_id.to_string(),
@@ -101,11 +110,15 @@ impl Store {
             now(),
         )
         .unwrap();
-        let claimed = claim_job_with_lease(&mut database, Duration::seconds(300), now())
-            .unwrap()
-            .expect("the job is eligible");
-        assert_eq!(claimed.job_id, job_id);
-        claimed
+        // A text capture already holds its own interpretation job; claim past it.
+        loop {
+            let claimed = claim_job_with_lease(&mut database, Duration::seconds(300), now())
+                .unwrap()
+                .expect("the job is eligible");
+            if claimed.job_id == job_id {
+                return claimed;
+            }
+        }
     }
 
     fn scalar_text(&self, sql: &str) -> String {
@@ -367,7 +380,7 @@ fn a_transcript_becomes_the_item_text_with_provenance_in_one_transaction() {
 }
 
 #[test]
-fn attaching_without_an_interpretation_request_queues_no_interpretation() {
+fn attaching_without_an_interpretation_request_queues_the_core_chosen_job() {
     let store = Store::with_voice_capture();
     let job = store.claim_transcription_job("transcription-1");
 
@@ -377,35 +390,77 @@ fn attaching_without_an_interpretation_request_queues_no_interpretation() {
         later(),
     )
     .unwrap();
+    let queued_id = interpretation_job_id(&store.item_id, 1);
     assert_eq!(
         acknowledgment.disposition,
         TranscriptionDisposition::Attached {
             revision: 1,
-            interpretation: InterpretationQueued::NotRequested,
+            interpretation: InterpretationQueued::Queued {
+                job_id: queued_id.clone(),
+            },
         }
     );
-    assert!(store.interpretation_jobs().is_empty());
+    let jobs = store.interpretation_jobs();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].job_id, queued_id);
+    assert_eq!(jobs[0].source_revision, 1);
+    assert_eq!(jobs[0].profile_version, None);
+    assert_eq!(
+        jobs[0].request_version,
+        Some(interpretation_request_version(&store.item_id, 1))
+    );
+
+    let retry = apply_transcription_outcome(
+        &mut store.open(),
+        &outcome(&job, recognized(TRANSCRIPT)),
+        later() + Duration::hours(1),
+    )
+    .unwrap();
+    assert_eq!(
+        retry.disposition,
+        TranscriptionDisposition::AlreadyAttached {
+            revision: 1,
+            interpretation: InterpretationQueued::Queued { job_id: queued_id },
+        }
+    );
+    assert_eq!(store.interpretation_jobs().len(), 1);
 }
 
 #[test]
-fn an_unauthorized_interpretation_is_not_queued_but_the_transcript_is_kept() {
+fn a_native_request_naming_a_pin_the_core_did_not_choose_is_refused_and_nothing_is_written() {
     let store = Store::with_voice_capture();
     let job = store.claim_transcription_job("transcription-1");
     let mut request = with_interpretation(outcome(&job, recognized(TRANSCRIPT)), "interpret-1");
     request.interpretation.as_mut().unwrap().profile_version =
         Some("profile-that-does-not-exist".to_string());
 
-    let acknowledgment = apply_transcription_outcome(&mut store.open(), &request, later()).unwrap();
-    assert_eq!(
-        acknowledgment.disposition,
-        TranscriptionDisposition::Attached {
-            revision: 1,
-            interpretation: InterpretationQueued::NotAuthorized(DenialReason::ProfileUnavailable),
-        }
+    let error = apply_transcription_outcome(&mut store.open(), &request, later()).unwrap_err();
+    assert!(
+        matches!(
+            kind_of(&error),
+            TranscriptionErrorKind::InterpretationPinRefused
+        ),
+        "{error}"
     );
+    assert_eq!(error.commit_status, CommitStatus::NotCommitted);
     assert!(store.interpretation_jobs().is_empty());
-    assert_eq!(store.item_row().2, "transcribed");
-    assert_eq!(store.search("ferns").len(), 1);
+    assert_eq!(store.attachments(), 0);
+    assert_eq!(store.item_row().2, "audio_pending");
+    assert_eq!(store.job(&job.job_id).status, JobStatus::Running);
+
+    let accepted = apply_transcription_outcome(
+        &mut store.open(),
+        &outcome(&job, recognized(TRANSCRIPT)),
+        later(),
+    )
+    .unwrap();
+    assert!(matches!(
+        accepted.disposition,
+        TranscriptionDisposition::Attached {
+            interpretation: InterpretationQueued::Queued { .. },
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -1614,4 +1669,439 @@ fn a_rebuilt_index_and_the_direct_source_search_report_the_transcript_as_transcr
     assert_eq!(indexed.len(), 1);
     assert_eq!(indexed[0].text_basis, SearchBasis::Transcribed);
     assert_eq!(indexed[0].current_text, TRANSCRIPT);
+}
+
+mod queueing {
+    use super::*;
+    use crate::ingress::transcription::queue::{
+        backfill_missing_jobs, requeue_transcription, RequeueError, RequeueRefusal,
+        BACKFILL_BATCH_SIZE,
+    };
+
+    fn transcription_jobs(store: &Store) -> Vec<Job> {
+        get_jobs_for_item(&store.open(), &store.item_id)
+            .unwrap()
+            .into_iter()
+            .filter(|job| job.job_type == JOB_TYPE_TRANSCRIPTION_ATTACHMENT)
+            .collect()
+    }
+
+    fn set_transcription_state(store: &Store, state: &str) {
+        store
+            .open()
+            .conn()
+            .execute(
+                "UPDATE items SET transcription_state = ? WHERE item_id = ?",
+                rusqlite::params![state, store.item_id],
+            )
+            .unwrap();
+    }
+
+    fn drop_jobs(store: &Store) {
+        store
+            .open()
+            .conn()
+            .execute("DELETE FROM jobs WHERE item_id = ?", [&store.item_id])
+            .unwrap();
+    }
+
+    fn set_job_status(store: &Store, job: &Job, status: &str) {
+        store
+            .open()
+            .conn()
+            .execute(
+                "UPDATE jobs SET status = ? WHERE job_id = ?",
+                rusqlite::params![status, job.job_id],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn importing_a_voice_capture_queues_one_unpinned_job_at_the_item_revision() {
+        let store = Store::with_voice_capture();
+
+        let jobs = transcription_jobs(&store);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].status, JobStatus::Queued);
+        assert_eq!(jobs[0].source_revision, 0);
+        assert_eq!(jobs[0].profile_version, None);
+        assert_eq!(jobs[0].request_version, None);
+        assert_eq!(store.interpretation_jobs().len(), 0);
+
+        // An import retry finds the item and queues nothing.
+        let retry = import_foreground_ingress(&mut store.open(), &voice_capture()).unwrap();
+        assert_eq!(retry.item_id, store.item_id);
+        assert_eq!(transcription_jobs(&store).len(), 1);
+        assert_eq!(store.count("jobs"), 1);
+    }
+
+    #[test]
+    fn a_capture_with_text_queues_no_transcription_job() {
+        let store = Store::with_capture(typed_capture());
+
+        assert!(transcription_jobs(&store).is_empty());
+        assert_eq!(store.interpretation_jobs().len(), 1);
+    }
+
+    #[test]
+    fn an_imported_voice_capture_is_transcribed_and_interpreted_end_to_end() {
+        let store = Store::with_voice_capture();
+
+        // The drain claims the job import queued; a fake recognizer supplies the outcome.
+        let mut database = store.open();
+        let job = claim_job_with_lease(&mut database, Duration::seconds(300), now())
+            .unwrap()
+            .expect("import queued a job");
+        assert_eq!(job.job_type, JOB_TYPE_TRANSCRIPTION_ATTACHMENT);
+        assert_eq!(job.item_id, store.item_id);
+
+        let acknowledgment = apply_transcription_outcome(
+            &mut database,
+            &outcome(&job, recognized(TRANSCRIPT)),
+            later(),
+        )
+        .unwrap();
+        assert!(matches!(
+            acknowledgment.disposition,
+            TranscriptionDisposition::Attached {
+                revision: 1,
+                interpretation: InterpretationQueued::Queued { .. }
+            }
+        ));
+
+        assert_eq!(store.item_row().2, "transcribed");
+        assert_eq!(store.job(&job.job_id).status, JobStatus::Completed);
+        assert_eq!(store.attachments(), 1);
+        let interpretation = store.interpretation_jobs();
+        assert_eq!(interpretation.len(), 1);
+        assert_eq!(interpretation[0].source_revision, 1);
+
+        // Nothing is left for a backfill to queue.
+        assert_eq!(
+            backfill_missing_jobs(&mut store.open(), later()).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_failure_while_queueing_at_import_rolls_the_item_back() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("ohand.db").display().to_string();
+        let mut database = Database::open(&path, Arc::new(SystemClock)).unwrap();
+        database
+            .conn()
+            .execute(
+                "INSERT INTO routes (route_id, route_name, scope, processing_destinations, created_at)
+                 VALUES (?, ?, 'personal', '[]', '2026-10-08T09:00:00Z')",
+                rusqlite::params![ROUTE_ID, ROUTE_ID],
+            )
+            .unwrap();
+
+        let error = crate::ingress::import::import_with_fault_points(
+            &mut database,
+            &voice_capture(),
+            &mut |stage| {
+                if stage == crate::ingress::import::ImportStage::TranscriptionQueued {
+                    Err(anyhow!("injected failure"))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.commit_status, CommitStatus::NotCommitted);
+        for table in ["captures", "items", "jobs"] {
+            let rows: i64 = database
+                .conn()
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(rows, 0, "{table}");
+        }
+
+        import_foreground_ingress(&mut database, &voice_capture()).unwrap();
+        let jobs: i64 = database
+            .conn()
+            .query_row("SELECT COUNT(*) FROM jobs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(jobs, 1);
+    }
+
+    #[test]
+    fn backfill_queues_a_job_for_a_stored_voice_capture_once() {
+        let store = Store::with_voice_capture();
+        drop_jobs(&store); // a capture stored before imports queued their own job
+
+        assert_eq!(
+            backfill_missing_jobs(&mut store.open(), later()).unwrap(),
+            1
+        );
+        let jobs = transcription_jobs(&store);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].status, JobStatus::Queued);
+        assert_eq!(jobs[0].profile_version, None);
+        assert_eq!(jobs[0].request_version, None);
+        assert_eq!(jobs[0].source_revision, 0);
+
+        assert_eq!(
+            backfill_missing_jobs(&mut store.open(), later()).unwrap(),
+            0
+        );
+        assert_eq!(transcription_jobs(&store).len(), 1);
+    }
+
+    #[test]
+    fn backfill_leaves_items_with_a_queued_running_or_completed_job_alone() {
+        for status in ["queued", "running", "completed"] {
+            let store = Store::with_voice_capture();
+            set_job_status(&store, &transcription_jobs(&store)[0], status);
+
+            assert_eq!(
+                backfill_missing_jobs(&mut store.open(), later()).unwrap(),
+                0,
+                "{status}"
+            );
+            assert_eq!(transcription_jobs(&store).len(), 1, "{status}");
+        }
+    }
+
+    #[test]
+    fn backfill_requeues_work_whose_job_ended_without_a_result() {
+        for status in ["failed", "cancelled"] {
+            let store = Store::with_voice_capture();
+            set_job_status(&store, &transcription_jobs(&store)[0], status);
+
+            assert_eq!(
+                backfill_missing_jobs(&mut store.open(), later()).unwrap(),
+                1,
+                "{status}"
+            );
+            assert_eq!(
+                backfill_missing_jobs(&mut store.open(), later()).unwrap(),
+                0,
+                "{status}"
+            );
+        }
+    }
+
+    #[test]
+    fn backfill_skips_items_that_cannot_use_a_transcript() {
+        // Deleted item.
+        let store = Store::with_voice_capture();
+        drop_jobs(&store);
+        mark_deletion_intent(&mut store.open(), &store.item_id, 0, now()).unwrap();
+        assert_eq!(
+            backfill_missing_jobs(&mut store.open(), later()).unwrap(),
+            0
+        );
+
+        // Audio removed.
+        let store = Store::with_voice_capture();
+        drop_jobs(&store);
+        store
+            .open()
+            .conn()
+            .execute("UPDATE captures SET audio_reference = NULL, text = ''", [])
+            .unwrap();
+        assert_eq!(
+            backfill_missing_jobs(&mut store.open(), later()).unwrap(),
+            0
+        );
+
+        // Not waiting for transcription any more, or never audio.
+        for state in [
+            "transcribed",
+            "transcription_failed",
+            "transcription_unsupported",
+            "not_applicable",
+        ] {
+            let store = Store::with_voice_capture();
+            drop_jobs(&store);
+            set_transcription_state(&store, state);
+            assert_eq!(
+                backfill_missing_jobs(&mut store.open(), later()).unwrap(),
+                0,
+                "{state}"
+            );
+        }
+        let store = Store::with_capture(typed_capture());
+        assert_eq!(
+            backfill_missing_jobs(&mut store.open(), later()).unwrap(),
+            0
+        );
+
+        // The user already supplied the text.
+        let store = Store::with_voice_capture();
+        drop_jobs(&store);
+        save_event(
+            &mut store.open(),
+            &user_text_correction(&store.item_id, 0, "typed over the audio"),
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            backfill_missing_jobs(&mut store.open(), later()).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn backfill_works_through_more_items_than_one_batch_holds() {
+        let store = Store::with_voice_capture();
+        let mut database = store.open();
+        let total = BACKFILL_BATCH_SIZE * 2 + 7;
+        for index in 0..total - 1 {
+            let capture = Capture {
+                capture_id: format!("3f9c1e52-0000-4000-8000-{index:012}"),
+                audio_reference: Some(format!("staging/2026-10-08/bulk-{index}.m4a")),
+                ..voice_capture()
+            };
+            import_foreground_ingress(&mut database, &capture).unwrap();
+        }
+        database.conn().execute("DELETE FROM jobs", []).unwrap();
+
+        assert_eq!(
+            backfill_missing_jobs(&mut database, later()).unwrap(),
+            total
+        );
+        assert_eq!(
+            store.count("jobs"),
+            total as i64,
+            "one job per voice capture"
+        );
+        assert_eq!(backfill_missing_jobs(&mut database, later()).unwrap(), 0);
+    }
+
+    #[test]
+    fn retry_moves_a_failed_or_unsupported_item_back_to_pending_with_a_new_job() {
+        for state in ["transcription_failed", "transcription_unsupported"] {
+            let store = Store::with_voice_capture();
+            let first = transcription_jobs(&store).remove(0);
+            set_job_status(&store, &first, "failed");
+            set_transcription_state(&store, state);
+
+            let job = requeue_transcription(&mut store.open(), &store.item_id, later()).unwrap();
+
+            assert_ne!(job.job_id, first.job_id);
+            assert_eq!(job.status, JobStatus::Queued);
+            assert_eq!(job.source_revision, 0);
+            assert_eq!(job.profile_version, None);
+            assert_eq!(job.request_version, None);
+            assert_eq!(store.item_row().2, "audio_pending", "{state}");
+            assert_eq!(transcription_jobs(&store).len(), 2, "{state}");
+        }
+    }
+
+    #[test]
+    fn a_second_retry_while_the_job_is_queued_or_running_is_refused() {
+        let store = Store::with_voice_capture();
+        set_job_status(&store, &transcription_jobs(&store)[0], "failed");
+        set_transcription_state(&store, "transcription_failed");
+        requeue_transcription(&mut store.open(), &store.item_id, later()).unwrap();
+
+        let refusal = requeue_transcription(&mut store.open(), &store.item_id, later());
+        assert!(matches!(
+            refusal,
+            Err(RequeueError::Refused(RequeueRefusal::JobInFlight))
+        ));
+        assert_eq!(transcription_jobs(&store).len(), 2);
+
+        // A claimed (running) job also blocks it.
+        let mut database = store.open();
+        claim_job_with_lease(&mut database, Duration::seconds(300), later())
+            .unwrap()
+            .expect("the retry job is eligible");
+        let refusal = requeue_transcription(&mut database, &store.item_id, later());
+        assert!(matches!(
+            refusal,
+            Err(RequeueError::Refused(RequeueRefusal::JobInFlight))
+        ));
+        assert_eq!(transcription_jobs(&store).len(), 2);
+    }
+
+    #[test]
+    fn retry_refuses_deleted_audio_less_transcribed_and_text_items_and_changes_nothing() {
+        let refused = |store: &Store| {
+            let before = (store.item_row(), store.count("jobs"));
+            let result = requeue_transcription(&mut store.open(), &store.item_id, later());
+            assert_eq!((store.item_row(), store.count("jobs")), before);
+            result.unwrap_err()
+        };
+
+        let store = Store::with_voice_capture();
+        drop_jobs(&store);
+        set_transcription_state(&store, "transcription_failed");
+        mark_deletion_intent(&mut store.open(), &store.item_id, 0, now()).unwrap();
+        assert!(matches!(
+            refused(&store),
+            RequeueError::Refused(RequeueRefusal::ItemDeleted)
+        ));
+
+        let store = Store::with_voice_capture();
+        drop_jobs(&store);
+        set_transcription_state(&store, "transcription_failed");
+        store
+            .open()
+            .conn()
+            .execute("UPDATE captures SET audio_reference = NULL, text = ''", [])
+            .unwrap();
+        assert!(matches!(
+            refused(&store),
+            RequeueError::Refused(RequeueRefusal::AudioRemoved)
+        ));
+
+        let store = Store::with_voice_capture();
+        drop_jobs(&store);
+        set_transcription_state(&store, "transcribed");
+        assert!(matches!(
+            refused(&store),
+            RequeueError::Refused(RequeueRefusal::NotRetryable(
+                TranscriptionState::Transcribed
+            ))
+        ));
+
+        let store = Store::with_capture(typed_capture());
+        assert!(matches!(
+            refused(&store),
+            RequeueError::Refused(RequeueRefusal::NotRetryable(
+                TranscriptionState::NotApplicable
+            ))
+        ));
+
+        let store = Store::with_voice_capture();
+        let result = requeue_transcription(&mut store.open(), "no-such-item", later());
+        assert!(matches!(result, Err(RequeueError::ItemNotFound)));
+    }
+
+    #[test]
+    fn a_retried_job_attaches_the_transcript() {
+        let store = Store::with_voice_capture();
+        let mut database = store.open();
+        let first = claim_job_with_lease(&mut database, Duration::seconds(300), now())
+            .unwrap()
+            .unwrap();
+        apply_transcription_outcome(
+            &mut database,
+            &outcome(&first, RecognizerResult::Unsupported),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(store.item_row().2, "transcription_unsupported");
+
+        requeue_transcription(&mut database, &store.item_id, later()).unwrap();
+        let retried = claim_job_with_lease(&mut database, Duration::seconds(300), later())
+            .unwrap()
+            .expect("the retry job is eligible");
+        assert_ne!(retried.job_id, first.job_id);
+        apply_transcription_outcome(
+            &mut database,
+            &outcome(&retried, recognized(TRANSCRIPT)),
+            later(),
+        )
+        .unwrap();
+
+        assert_eq!(store.item_row().2, "transcribed");
+        assert_eq!(store.attachments(), 1);
+    }
 }
