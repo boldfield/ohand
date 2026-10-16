@@ -1158,6 +1158,93 @@ final class CompositionRootTests: XCTestCase {
         XCTAssertEqual(itemLifecycle(itemID), "active", "opening changes nothing")
     }
 
+    func testPromptTapReachesTheOpenSuggestionHandler() throws {
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))
+        defer { root.shutDown() }
+        let opened = PromptEventsBox()
+        root.setOpenSuggestionHandler { opened.add($0) }
+
+        tapPrompt("prompt:2026-10-15", on: root)
+        XCTAssertEqual(opened.all.map(\.identifier.rawValue), ["prompt:2026-10-15"])
+        XCTAssertEqual(opened.all.map(\.kind), [.opened])
+    }
+
+    func testPromptTapBeforeAHandlerIsSetIsHeldAndDeliveredOnce() throws {
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))
+        defer { root.shutDown() }
+        tapPrompt("prompt:2026-10-15", on: root)
+
+        let first = PromptEventsBox()
+        root.setOpenSuggestionHandler { first.add($0) }
+        XCTAssertEqual(first.all.map(\.identifier.rawValue), ["prompt:2026-10-15"])
+
+        let second = PromptEventsBox()
+        root.setOpenSuggestionHandler { second.add($0) }
+        XCTAssertTrue(second.all.isEmpty, "a held tap is delivered once")
+    }
+
+    func testReminderReportChangesNotifyTheObserverIncludingPermissionNeverRequested() throws {
+        let center = FakeNotificationCenter()
+        center.authorizationStatus = .notDetermined
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), notifications: center)
+        defer { root.shutDown() }
+        let itemID = try saveSyntheticCapture(root)
+        try seedReminder(itemID: itemID)
+        let reports = ReportsBox()
+        root.setReminderReportObserver { reports.add($0) }
+
+        let finished = FinishedFlag()
+        Task {
+            _ = try? await root.reconcileReminders()
+            finished.finish()
+        }
+        XCTAssertTrue(pump(until: { finished.isFinished }), "the reminder pass finished")
+        let report = try XCTUnwrap(reports.all.last)
+        XCTAssertEqual(report.permission, .notRequested)
+        XCTAssertTrue(
+            report.readiness.reminders.contains { $0.outlook == .undeliverable(.permissionNotRequested) })
+        XCTAssertEqual(root.lastReminderReport, report)
+    }
+
+    private final class PromptEventsBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var events: [PromptNotificationEvent] = []
+
+        func add(_ event: PromptNotificationEvent) {
+            lock.lock()
+            events.append(event)
+            lock.unlock()
+        }
+
+        var all: [PromptNotificationEvent] {
+            lock.lock()
+            defer { lock.unlock() }
+            return events
+        }
+    }
+
+    private final class ReportsBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var reports: [NotificationPermissionReport] = []
+
+        func add(_ report: NotificationPermissionReport) {
+            lock.lock()
+            reports.append(report)
+            lock.unlock()
+        }
+
+        var all: [NotificationPermissionReport] {
+            lock.lock()
+            defer { lock.unlock() }
+            return reports
+        }
+    }
+
+    private func tapPrompt(_ identifier: String, on root: ServiceCompositionRoot) {
+        root.notificationIngestor.ingestResponse(
+            requestIdentifier: identifier, actionIdentifier: UNNotificationDefaultActionIdentifier, userInfo: [:])
+    }
+
     func testEventsAlsoReachTheEnvironmentHandlerTheCallerSupplied() throws {
         let received = ReceivedEventsBox()
         let session = makeSession(authenticated: true).0
