@@ -92,6 +92,7 @@ final class RetrievalSearchNavigationTests: XCTestCase {
         let context = ManagementContext(
             voiceRecovery: services.managementContext.voiceRecovery, retrieval: searchModel,
             retention: services.managementContext.retention,
+            providerSettings: services.managementContext.providerSettings,
             retrievalRenderReporter: { [unowned self] in rendered = $0 })
         let rootView = AppRootView(
             navigation: navigation, captureEntry: services.captureEntry, context: context,

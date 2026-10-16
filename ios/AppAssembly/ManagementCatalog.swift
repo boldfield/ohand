@@ -5,6 +5,7 @@ struct ManagementContext {
     let voiceRecovery: VoiceRecoveryModel
     let retrieval: RetrievalSearchModel
     let retention: RetentionSettingsModel
+    let providerSettings: ProviderSettingsModel
     /// Lets a hosted test see what the search screen shows; production leaves it unset.
     var retrievalRenderReporter: (([String: RetrievalRenderedElement]) -> Void)?
 }
@@ -88,6 +89,7 @@ enum ManagementCatalog {
     static let settingsSections: [ManagementEntry] = [
         ManagementEntry(id: "voice-recovery", title: "Unfinished recordings", systemImage: "waveform") { context in AnyView(VoiceRecoveryView(model: context.voiceRecovery).navigationTitle("Unfinished recordings").navigationBarTitleDisplayMode(.inline)) },
         ManagementEntry(id: "audio-retention", title: "Audio retention", systemImage: "externaldrive") { context in AnyView(RetentionSettingsView(model: context.retention)) },
+        ManagementEntry(id: "provider-settings", title: "Providers", systemImage: "server.rack") { context in AnyView(ProviderSettingsView(model: context.providerSettings)) },
     ]
 
     /// Where a slice registers the screen for an item or the current suggestion. Set the slice's own line, nothing else.
