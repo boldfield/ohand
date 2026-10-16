@@ -79,6 +79,7 @@ public final class ItemDeletionService: @unchecked Sendable {
     private let session: ReadAuthenticationSession
     private let lock = NSLock()
     private var cleanupProvider: (@Sendable () -> ItemDeletionCleanup?)?
+    private var intentObserver: (@Sendable (String) -> Void)?
 
     init(core: ItemDeletionCore, session: ReadAuthenticationSession) {
         self.core = core
@@ -93,6 +94,14 @@ public final class ItemDeletionService: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Sets what is told, before the deletion is requested from the core, that `itemID` is about to be deleted (it ends
+    /// the item's open audio playback).
+    func setIntentObserver(_ observer: (@Sendable (String) -> Void)?) {
+        lock.lock()
+        intentObserver = observer
+        lock.unlock()
+    }
+
     private var cleanup: ItemDeletionCleanup? {
         lock.lock()
         let provider = cleanupProvider
@@ -104,6 +113,10 @@ public final class ItemDeletionService: @unchecked Sendable {
     public func delete(itemID: String, expectedRevision: Int) async throws -> ItemDeletionReceipt {
         guard session.currentAuthorization() != nil else { throw ItemDeletionError.notAuthenticated }
         guard !itemID.isEmpty, expectedRevision >= 0 else { throw ItemDeletionError.invalidRequest }
+        lock.lock()
+        let observer = intentObserver
+        lock.unlock()
+        observer?(itemID)
         let answer = try await ask(.markDeleted(itemID: itemID, expectedRevision: expectedRevision))
         let recorded = try Self.recorded(from: answer)
 
