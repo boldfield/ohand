@@ -54,9 +54,15 @@ fn import_voice(database: &mut Database, capture_id: &str, audio: &str) -> Strin
         None,
     )
     .unwrap();
-    import_foreground_ingress(database, &capture)
+    let item_id = import_foreground_ingress(database, &capture)
         .unwrap()
-        .item_id
+        .item_id;
+    // These tests queue and settle their own transcription jobs.
+    database
+        .conn()
+        .execute("DELETE FROM jobs WHERE item_id = ?", [&item_id])
+        .unwrap();
+    item_id
 }
 
 fn transcribe(database: &Database, item_id: &str, audio: &str, transcribed_at: DateTime<Utc>) {
