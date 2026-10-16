@@ -90,6 +90,7 @@ final class AppServices {
         managementContext = ManagementContext(
             voiceRecovery: voice.recoveryModel,
             retrieval: .assembled(searcher: retrieval, root: root, navigation: navigation),
+            retention: .assembled(root: root),
             promptSettings: PromptSettingsModel(controller: root.promptSchedule))
         entrySession = CaptureEntrySession(
             handoff: handoff, defaultMode: defaultMode, access: access, notificationCenter: notificationCenter)

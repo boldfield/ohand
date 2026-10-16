@@ -185,6 +185,96 @@ public struct CompositionCoreClients {
         try taken.take(ServiceCompositionRoot.shadowReviewClientName)
         return ShadowReviewService(core: core, configuration: configuration)
     }
+
+    /// Reads whether a stored provider profile exists, is revoked, and serves a model. The answer carries no endpoint,
+    /// credential or content, so it is not a gated read.
+    public func providerProfileStatus() throws -> CoreProviderProfileStatusClient {
+        try taken.take(ServiceCompositionRoot.providerProfileStatusClientName)
+        return CoreProviderProfileStatusClient(core: core)
+    }
+}
+
+/// The result of one provider-profile status read.
+public typealias CoreProviderProfileStatusResult = Result<ProviderProfileStatus, CoreFailure>
+
+/// Asks the core about stored provider profiles without handing a module the core handle. A module forwards each
+/// event to `handle(_:)`, which returns `true` when the event answered one of this client's reads. Operation
+/// identifiers start at `firstOperationID`. Call `shutDown()` to fail the reads still waiting.
+public final class CoreProviderProfileStatusClient: @unchecked Sendable {
+    public static let firstOperationID: UInt64 = 1 << 41
+
+    static let shutDownFailure = CoreFailure(
+        errorClass: .cancelled, code: "client_shut_down", message: "the provider profile status client was shut down")
+    private static let unreadableAnswer = CoreFailure(
+        errorClass: .permanent, code: "unreadable_event", message: "the core answer could not be read")
+
+    private let core: CoreHandle
+    private let lock = NSLock()
+    private var nextOperationID = CoreProviderProfileStatusClient.firstOperationID
+    private var pending: [UInt64: @Sendable (CoreProviderProfileStatusResult) -> Void] = [:]
+    private var isShutDown = false
+
+    init(core: CoreHandle) {
+        self.core = core
+    }
+
+    /// Reads the stored profile `profileVersion` and calls `completion` once. A missing profile is a successful
+    /// answer with `exists == false`.
+    public func status(
+        profileVersion: String, model: String,
+        completion: @escaping @Sendable (CoreProviderProfileStatusResult) -> Void
+    ) {
+        lock.lock()
+        if isShutDown {
+            lock.unlock()
+            completion(.failure(Self.shutDownFailure))
+            return
+        }
+        let operationID = nextOperationID
+        nextOperationID += 1
+        pending[operationID] = completion
+        lock.unlock()
+        do {
+            try core.startProviderProfileStatus(operationID: operationID, profileVersion: profileVersion, model: model)
+        } catch {
+            lock.lock()
+            let removed = pending.removeValue(forKey: operationID)
+            lock.unlock()
+            removed?(.failure((error as? CoreFailure) ?? Self.unreadableAnswer))
+        }
+    }
+
+    /// Consumes the event if it answers one of this client's reads.
+    @discardableResult
+    public func handle(_ event: CoreEvent) -> Bool {
+        lock.lock()
+        let completion = pending.removeValue(forKey: event.operationID)
+        lock.unlock()
+        guard let completion else { return false }
+        switch event.outcome {
+        case .failure(let failure):
+            completion(.failure(failure))
+        case .success:
+            if let answer = try? event.decode(ProviderProfileStatus.self) {
+                completion(.success(answer))
+            } else {
+                completion(.failure(Self.unreadableAnswer))
+            }
+        }
+        return true
+    }
+
+    /// Fails every read still waiting and refuses later ones. Idempotent.
+    public func shutDown() {
+        lock.lock()
+        isShutDown = true
+        let waiting = pending
+        pending = [:]
+        lock.unlock()
+        for completion in waiting.values {
+            completion(.failure(Self.shutDownFailure))
+        }
+    }
 }
 
 /// Lets a service built during assembly reach the root that does not exist yet. The root sets itself once, at the end of
@@ -302,6 +392,10 @@ public protocol CompositionModule: AnyObject {
     var firstOperationID: UInt64 { get }
     /// Native job types this module runs; they are registered with the job host when it attaches.
     var jobCapabilities: [JobCapabilityHandler] { get }
+    /// Provider protocols this module needs the core to dispatch, beyond the base ones (Anthropic and OpenAI). The
+    /// root enables the union of every module's declaration; a protocol no module declares stays disabled (self-hosted
+    /// is disabled unless a module names it).
+    var enabledProviderProtocols: Set<CoreProviderProtocol> { get }
     func attach(to context: CompositionContext) throws
     /// Takes the event if it answers one of this module's operations.
     func handle(_ event: CoreEvent) -> Bool
@@ -311,6 +405,7 @@ public protocol CompositionModule: AnyObject {
 
 public extension CompositionModule {
     var jobCapabilities: [JobCapabilityHandler] { [] }
+    var enabledProviderProtocols: Set<CoreProviderProtocol> { [] }
 }
 
 /// A module that owns the ordered launch and foreground reconciliation (staged-capture recovery, job activation and
@@ -816,6 +911,9 @@ public final class ServiceCompositionRoot {
     static let deletionCleanupClientName = "deletion cleanup"
     static let processingHealthClientName = "processing health"
     static let shadowReviewClientName = "shadow review"
+    static let providerProfileStatusClientName = "provider profile status"
+    /// The provider protocols enabled for every root: today's behaviour, before any module declares more.
+    static let baseProviderProtocols: Set<CoreProviderProtocol> = [.anthropic, .openAI]
     static let promptScheduleClientName = "prompt schedule"
     /// `ShadowReviewService` keeps its first operation identifier private; this is its value.
     static let shadowReviewFirstOperationID: UInt64 = 1 << 48
@@ -851,6 +949,7 @@ public final class ServiceCompositionRoot {
     public static let reservedOperationRanges: [OperationRange] = [
         OperationRange(name: "importer", start: 0, end: minimumModuleOperationID),
         fixedWidthRange(shadowReviewClientName, from: shadowReviewFirstOperationID),
+        fixedWidthRange(providerProfileStatusClientName, from: CoreProviderProfileStatusClient.firstOperationID),
         fixedWidthRange("transcription", from: TranscriptionCoreClient.firstOperationID),
         fixedWidthRange(deletionCleanupClientName, from: CoreDeletionCleanupClient.firstOperationID),
         fixedWidthRange("export", from: CoreExportClient.firstOperationID),
@@ -1604,6 +1703,12 @@ public final class ServiceCompositionRoot {
             for capability in capabilities where !jobTypes.insert(capability.jobType).inserted {
                 throw CompositionError.jobTypeConflict(capability.jobType)
             }
+            var enabledProtocols = ServiceCompositionRoot.baseProviderProtocols
+            for module in modules {
+                enabledProtocols.formUnion(module.enabledProviderProtocols)
+            }
+            try core.setEnabledProviderProtocols(enabledProtocols)
+            undo.append { try? core.setEnabledProviderProtocols(ServiceCompositionRoot.baseProviderProtocols) }
             let jobRunner = try JobRunnerService.attach(
                 to: core, storePath: layout.databaseURL.path, sender: adapters.sender,
                 capabilities: capabilities, isReachable: adapters.reachability.isReachable,
