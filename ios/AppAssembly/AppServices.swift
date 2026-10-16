@@ -26,6 +26,8 @@ struct NotificationHooks {
 final class AppServices {
     let root: ServiceCompositionRoot
     let lifecycle: LifecycleCoordinator
+    /// Turns the system's clock and time-zone callbacks into one `.systemTimeChange` lifecycle request per real change.
+    let timeChange: TimeChangeCoordinator
     let captureEntry: CaptureEntryModel
     let navigation: ManagementNavigationModel
     let entrySession: CaptureEntrySession
@@ -55,11 +57,14 @@ final class AppServices {
         retrieval: RetrievalSearching = RetrievalSearchModule(),
         notificationHooks: NotificationHooks = .live,
         notificationCenter: NotificationCenter = .default,
+        timeSources: TimeSources = .system,
         isProtectedDataAvailable: @escaping () -> Bool = { UIApplication.shared.isProtectedDataAvailable }
     ) {
         self.root = root
         self.lifecycle = lifecycle
         self.notificationHooks = notificationHooks
+        timeChange = TimeChangeCoordinator(
+            lifecycle: lifecycle, notificationCenter: notificationCenter, sources: timeSources)
         let voice = voice ?? VoiceCaptureServices(root: root)
         self.voice = voice
 
@@ -104,16 +109,20 @@ final class AppServices {
         }
         notificationHooks.installDelegate(root.notificationCenterDelegate)
         root.start(isActive: isActive)
+        timeChange.start()
         notificationHooks.reconcile(root)
     }
 
     func shutDown() {
+        timeChange.stop()
         root.shutDown()
     }
 
     // MARK: Scene events
 
     func sceneWillEnterForeground() {
+        // Callbacks do not arrive while the app is suspended, so compare the clocks on return.
+        timeChange.checkNow()
         if let presentation = entrySession.willEnterForeground() {
             present(presentation)
         }
