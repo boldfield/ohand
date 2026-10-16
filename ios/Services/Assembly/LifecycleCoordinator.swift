@@ -23,10 +23,12 @@ public enum LifecycleTrigger: Hashable, Sendable {
 }
 
 /// One unit of recovery or foreground work. The declaration order is the order a pass runs them in: captures first,
-/// so everything after them sees every durable capture; then queued work, deletion that must finish, the reminder
+/// so everything after them sees every durable capture; then an interrupted reset, finished before any queued work
+/// can run against content it erases; then queued work, deletion that must finish, the reminder
 /// desired state, space-freeing retention, optional prompting, and finally the read-only health snapshot.
 public enum LifecycleStep: String, CaseIterable, Sendable {
     case ingress
+    case reset
     case jobs
     case deletion
     case reminders
@@ -552,6 +554,11 @@ extension LifecycleCoordinator {
             }, for: .ingress)
         setAction(
             { [weak root] _ in
+                guard let root else { return .deferred("root_unavailable") }
+                return Self.outcome(ofReset: await root.resumeInterruptedReset())
+            }, for: .reset)
+        setAction(
+            { [weak root] _ in
                 // The check and the activation run together on the main queue, where the background notification
                 // suspends the runner, so a pass delayed by slow earlier steps never wakes a runner the app has
                 // already suspended. The next foreground activation's pass activates it.
@@ -671,6 +678,13 @@ extension LifecycleCoordinator {
             return false
         }
         return keptForRetry ? .deferred("ingress_kept_for_retry") : .completed
+    }
+
+    static func outcome(ofReset outcome: ResetOutcome) -> LifecycleStepOutcome {
+        switch outcome.state {
+        case .notStarted, .completed: return .completed
+        case .pending: return .deferred("reset_pending")
+        }
     }
 
     static func outcome(ofDeletion report: DeletionReconcileReport) -> LifecycleStepOutcome {

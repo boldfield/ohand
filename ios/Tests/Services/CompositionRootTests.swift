@@ -1469,6 +1469,131 @@ final class CompositionRootTests: XCTestCase {
             "the launch sweep removes the leftover export")
     }
 
+    // MARK: reset
+
+    private final class ResetResultBox<Value: Sendable>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: Result<Value, Error>?
+
+        var value: Result<Value, Error>? {
+            lock.lock()
+            defer { lock.unlock() }
+            return stored
+        }
+
+        func set(_ result: Result<Value, Error>) {
+            lock.lock()
+            stored = result
+            lock.unlock()
+        }
+    }
+
+    private func awaitReset<Value: Sendable>(
+        timeout: TimeInterval = 30, _ operation: @escaping @Sendable () async throws -> Value
+    ) -> Result<Value, Error>? {
+        let box = ResetResultBox<Value>()
+        Task.detached {
+            do {
+                box.set(.success(try await operation()))
+            } catch {
+                box.set(.failure(error))
+            }
+        }
+        _ = pump(until: { box.value != nil }, timeout: timeout)
+        return box.value
+    }
+
+    private func recordInterruptedTap() throws {
+        let markers = FileResetMarkerStore(layout: ProtectedStorageLayout(rootDirectory: storageRoot))
+        try markers.recordRequest(
+            ResetRequest(credentialChoice: .keep, stagedBeforeTheTap: ResetStagingSnapshot(captureIDs: [])))
+    }
+
+    func testResetIsRefusedBeforeAuthentication() throws {
+        let (session, _) = makeSession(authenticated: false)
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), readSession: session)
+        defer { root.shutDown() }
+        let control = root.resetControl
+
+        guard case .failure(let error)? = awaitReset({ try await control.reset(credentialChoice: .keep) }) else {
+            return XCTFail("a reset before authentication must be refused")
+        }
+        XCTAssertEqual(error as? ResetControlError, .notAuthenticated)
+        guard case .failure(let progressError)? = awaitReset({ try await control.progress() }) else {
+            return XCTFail("a progress read before authentication must be refused")
+        }
+        XCTAssertEqual(progressError as? ResetControlError, .notAuthenticated)
+    }
+
+    func testFullResetCompletesThroughTheRoot() throws {
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), modules: [LifecycleCoordinator()])
+        defer { root.shutDown() }
+        root.start(isActive: false)
+        _ = try saveSyntheticCapture(root)
+        let control = root.resetControl
+
+        guard case .success(let outcome)? = awaitReset({ try await control.reset(credentialChoice: .keep) }) else {
+            return XCTFail("an authenticated reset is answered")
+        }
+        XCTAssertEqual(outcome.state, .completed, "blockers: \(outcome.blockers)")
+        XCTAssertEqual(outcome.progress?.phase, .completed)
+        guard case .success(let progress)? = awaitReset({ try await control.progress() }) else {
+            return XCTFail("progress is readable")
+        }
+        XCTAssertEqual(progress?.generation, 1)
+        XCTAssertEqual(progress?.itemsAwaitingTombstone, 0)
+    }
+
+    func testCaptureDuringAResetWaitsAndIsImportedAfterTheBoundaryIsReleased() throws {
+        // A first run saves a capture, then dies after recording a reset tap and before the core started it.
+        let first = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))
+        let earlierItemID = try saveSyntheticCapture(first)
+        first.shutDown()
+        try recordInterruptedTap()
+
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), modules: [LifecycleCoordinator()])
+        defer { root.shutDown() }
+        var held: CompositionSaveOutcome?
+        root.saveText(captureID: UUID().uuidString.lowercased(), text: "made during reset", capturedAt: Date()) {
+            held = $0
+        }
+        XCTAssertFalse(pump(until: { held != nil }, timeout: 1), "the capture waits at the reset boundary")
+
+        root.start(isActive: false)
+        XCTAssertTrue(pump(until: { held != nil }, timeout: 30), "the capture is imported once the reset released the boundary")
+        guard case .saved(_, let freshItemID, _)? = held else {
+            return XCTFail("the held capture must be saved, got \(String(describing: held))")
+        }
+        XCTAssertNotEqual(freshItemID, earlierItemID)
+        XCTAssertNotNil(readStatus(root, itemID: freshItemID), "the fresh capture is readable, not erased by the reset")
+    }
+
+    func testInterruptedResetIsResumedAtLaunchAndHoldsTheGeneration() throws {
+        let first = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))
+        _ = try saveSyntheticCapture(first)
+        first.shutDown()
+        try recordInterruptedTap()
+
+        let coordinator = LifecycleCoordinator()
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), modules: [coordinator])
+        defer { root.shutDown() }
+        let control = root.resetControl
+        root.start(isActive: false)
+
+        var settled: ResetProgress?
+        XCTAssertTrue(
+            pump(until: {
+                if case .success(let progress)? = self.awaitReset(timeout: 5, { try await control.progress() }) {
+                    settled = progress
+                }
+                return settled?.phase == .completed
+            }, timeout: 60),
+            "the launch pass finished the interrupted reset")
+        XCTAssertEqual(settled?.generation, 1, "one reset generation, not a second one")
+        let markers = FileResetMarkerStore(layout: ProtectedStorageLayout(rootDirectory: storageRoot))
+        XCTAssertNil(try markers.request(), "the recorded tap was consumed")
+    }
+
     // MARK: helpers
 
     private func authenticateReadsAndWait(_ root: ServiceCompositionRoot) -> CompositionAuthenticationOutcome? {
