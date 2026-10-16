@@ -1089,6 +1089,7 @@ public final class ServiceCompositionRoot {
     private let routePolicyClient: CoreRoutePolicyClient
     private let exportClient: CoreExportClient
     private let resetClient: CoreResetClient
+    private let resetStaging: NativeResetIngress
     private let resetItemCleanup: ResetItemCleanupBridge
     private let modules: [CompositionModule]
     private let foreground: ForegroundState
@@ -1173,6 +1174,7 @@ public final class ServiceCompositionRoot {
         exportClient = assembly.exportClient
         exportService = assembly.exportService
         resetClient = assembly.resetClient
+        resetStaging = assembly.resetStaging
         resetControl = assembly.resetControl
         resetItemCleanup = assembly.resetItemCleanup
         reminderReconciler = assembly.permissionReconciler
@@ -1351,6 +1353,7 @@ public final class ServiceCompositionRoot {
         providerConnectionCheckClient.shutDown()
         routePolicyClient.shutDown()
         exportClient.shutDown()
+        resetStaging.retire()
         resetClient.shutDown()
         reminderCore.invalidate()
         promptScheduleClient.shutDown()
@@ -1656,6 +1659,7 @@ public final class ServiceCompositionRoot {
         let exportClient: CoreExportClient
         let exportService: ExportService
         let resetClient: CoreResetClient
+        let resetStaging: NativeResetIngress
         let resetControl: ResetControl
         let resetItemCleanup: ResetItemCleanupBridge
         let permissionReconciler: NotificationPermissionReconciler
@@ -1830,9 +1834,11 @@ public final class ServiceCompositionRoot {
             router.register { resetClient.handle($0) }
             undo.append { resetClient.shutDown() }
             let resetItemCleanup = ResetItemCleanupBridge()
+            let resetStaging = NativeResetIngress(service: ingress, gate: resetGate, layout: layout)
+            undo.append { resetStaging.retire() }
             let resetService = ResetService(
                 core: resetClient,
-                staging: NativeResetIngress(service: ingress, gate: resetGate, layout: layout),
+                staging: resetStaging,
                 itemCleanup: resetItemCleanup,
                 exportTemporaries: ExportTemporaryCleaner(layout: layout),
                 credentials: KeychainResetCredentialRemover(serviceName: configuration.credentialServiceName),
@@ -1904,7 +1910,7 @@ public final class ServiceCompositionRoot {
                 providerConnectionCheckClient: providerConnectionCheckClient, routePolicyClient: routePolicyClient,
                 providerConfiguration: providerConfiguration, providerCredentials: providerCredentials,
                 exportClient: exportClient, exportService: exportService,
-                resetClient: resetClient, resetControl: resetControl, resetItemCleanup: resetItemCleanup,
+                resetClient: resetClient, resetStaging: resetStaging, resetControl: resetControl, resetItemCleanup: resetItemCleanup,
                 permissionReconciler: permissionReconciler, foreground: foreground)
         } catch {
             for step in undo.reversed() {
