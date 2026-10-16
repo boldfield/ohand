@@ -50,9 +50,19 @@ func providerListing(
     versions: [(profile: String, version: String, providerProtocol: String, revoked: Bool, supported: Bool)],
     defaultVersion: String?
 ) -> ProviderProfileListAnswer {
+    providerListing(
+        supportLevels: versions.map { ($0.profile, $0.version, $0.providerProtocol, $0.revoked, $0.supported ? "supported" : "unsupported") },
+        defaultVersion: defaultVersion)
+}
+
+/// Like `providerListing`, with the support level the core declared: "supported", "unverified" or "unsupported".
+func providerListing(
+    supportLevels versions: [(profile: String, version: String, providerProtocol: String, revoked: Bool, support: String)],
+    defaultVersion: String?
+) -> ProviderProfileListAnswer {
     var profiles: [String: [String]] = [:]
     for entry in versions {
-        let support = entry.supported ? "supported" : "unsupported"
+        let support = entry.support
         let json = #"{"profile_version":"\#(entry.version)","protocol":"\#(entry.providerProtocol)","#
             + #""endpoint":null,"model":"synthetic-model","capabilities":[{"capability":"text_interpretation","support":"\#(support)"}],"#
             + #""credential_bound":true,"revoked":\#(entry.revoked),"default_for":[],"created_at":"2026-10-01T00:00:00Z"}"#
@@ -175,6 +185,41 @@ final class ProviderSettingsModelTests: XCTestCase {
         let versions = model.listing!.profiles.flatMap(\.versions)
         let offered = versions.filter { model.canMakeDefault($0) }.map(\.profileVersion)
         XCTAssertEqual(Set(offered), ["hosted-v1", "private-v1"])
+    }
+
+    func testAnUnverifiedPrivateServerIsUnavailableAndCannotBeMadeDefault() async {
+        let listing = providerListing(
+            supportLevels: [
+                ("private", "private-v1", "self_hosted", false, "unverified"),
+                ("hosted", "hosted-v1", "open_ai", false, "supported"),
+            ], defaultVersion: nil)
+        let controls = FakeProviderSettingsControls(listing: listing)
+        let model = makeModel(controls)
+        await model.refresh()
+        let versions = model.listing!.profiles.flatMap(\.versions)
+        let unverified = versions.first { $0.profileVersion == "private-v1" }!
+        let supported = versions.first { $0.profileVersion == "hosted-v1" }!
+
+        XCTAssertEqual(model.availability(of: unverified), .unverified)
+        XCTAssertEqual(model.availability(of: supported), .ready)
+        XCTAssertFalse(model.canMakeDefault(unverified))
+        XCTAssertTrue(model.canMakeDefault(supported))
+
+        await model.makeDefault(unverified)
+
+        XCTAssertEqual(controls.defaultsSet, [], "an unverified version is never sent to the core as a default")
+        XCTAssertNotNil(model.defaultState?.message)
+        XCTAssertTrue(ProviderSettingsText.capabilityStatus("text_interpretation", support: "unverified").contains("not verified"))
+        XCTAssertTrue(ProviderSettingsText.capabilityStatus("text_interpretation", support: "unverified").contains("will not process notes"))
+    }
+
+    func testAnUnverifiedDefaultAlreadyStoredIsReportedAsUnableToProcess() async {
+        let listing = providerListing(
+            supportLevels: [("private", "private-v1", "self_hosted", false, "unverified")], defaultVersion: "private-v1")
+        let model = makeModel(FakeProviderSettingsControls(listing: listing))
+        await model.refresh()
+        XCTAssertEqual(model.defaultAvailability, .unverified)
+        XCTAssertTrue(ProviderSettingsText.unavailableDefaultNotice.contains("cannot process notes"))
     }
 
     func testChangingTheDefaultCallsOnlyTheProfileServiceAndWarnsThatWaitingWorkIsPinned() async {

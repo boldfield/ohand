@@ -31,6 +31,21 @@ enum ProviderSettingsText {
         }
     }
 
+    static let unavailableDefaultNotice =
+        "This default cannot process notes yet: it has no verification evidence. Captures are saved and wait on this "
+        + "device; they are not sent to another provider."
+
+    /// One capability of a stored version, with whether it can be used.
+    static func capabilityStatus(_ capability: String, support: String) -> String {
+        let name = capabilityName(capability)
+        switch support {
+        case "supported": return "\(name): available"
+        case "unverified":
+            return "\(name): unavailable, not verified. It will not process notes until verification evidence exists."
+        default: return "\(name): unavailable"
+        }
+    }
+
     static func capabilityName(_ capability: String) -> String {
         capability == "text_interpretation" ? "Text interpretation" : "Unsupported capability"
     }

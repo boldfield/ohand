@@ -38,6 +38,14 @@ enum ProviderSettingsProtocol: String, CaseIterable, Equatable {
     var takesEndpoint: Bool { self == .selfHosted }
 }
 
+/// Whether a stored version can serve text interpretation, from the support the core declared.
+enum ProviderSettingsAvailability: Equatable {
+    case ready
+    /// Declared but without verification evidence: the core will not send work to it.
+    case unverified
+    case unavailable
+}
+
 /// What the screen is showing.
 enum ProviderSettingsPhase: Equatable {
     case idle
@@ -178,12 +186,23 @@ final class ProviderSettingsModel: ObservableObject {
             protocolName: ProviderSettingsText.protocolName(version.providerProtocol), model: version.model)
     }
 
-    /// Whether `version` may be chosen as the default: unrevoked, and not declared unable to serve text interpretation (an unverified
-    /// private server may still be chosen).
+    /// Whether `version` can serve text interpretation: the core's dispatcher uses only capabilities declared supported.
+    func availability(of version: ProviderProfileListAnswer.Version) -> ProviderSettingsAvailability {
+        switch version.capabilities.first(where: { $0.capability == Self.capability })?.support {
+        case "supported": return .ready
+        case "unverified": return .unverified
+        default: return .unavailable
+        }
+    }
+
+    /// Whether the current default can actually process notes. Nil when no default is chosen.
+    var defaultAvailability: ProviderSettingsAvailability? { defaultVersion.map(availability(of:)) }
+
+    /// Whether `version` may be chosen as the default: unrevoked and declared supported. An unverified or unsupported
+    /// version is shown as unavailable, because the core refuses to dispatch to it.
     func canMakeDefault(_ version: ProviderProfileListAnswer.Version) -> Bool {
-        !version.revoked && !isChangingDefault && version.capabilities.contains {
-            $0.capability == Self.capability && $0.support != "unsupported"
-        } && defaultVersion?.profileVersion != version.profileVersion
+        !version.revoked && !isChangingDefault && availability(of: version) == .ready
+            && defaultVersion?.profileVersion != version.profileVersion
     }
 
     /// Reads the stored profiles and defaults again.
