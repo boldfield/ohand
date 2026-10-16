@@ -138,14 +138,21 @@ final class RetrievalSearchNavigationTests: XCTestCase {
             [.entry(ManagementCatalog.searchEntryID), .item(Self.itemID)], "detail is pushed above the search")
         XCTAssertEqual(navigation.requestedItemID, Self.itemID)
 
-        rendered = [:]
+        let searchRoute = ManagementRoute.entry(ManagementCatalog.searchEntryID)
+        func lastIndex(of event: ManagementPresentationEvent) -> Int? { events.lastIndex(of: event) }
+        let itemAppeared = try XCTUnwrap(lastIndex(of: .appeared(.item(Self.itemID), isPlaceholder: false)))
         navigation.path.removeLast()
-        settle { rendered[rowTextIdentifier] != nil }
+        settle {
+            guard let searchAppeared = lastIndex(of: .appeared(searchRoute, isPlaceholder: false)) else { return false }
+            return searchAppeared > itemAppeared
+        }
 
         XCTAssertEqual(navigation.path, [ManagementCatalog.searchEntryID], "Back returns to the search, not to capture")
-        XCTAssertTrue(events.contains(.disappeared(.item(Self.itemID))))
+        XCTAssertTrue(events.contains(.disappeared(.item(Self.itemID))), "the detail left the screen")
+        let searchReappeared = try XCTUnwrap(lastIndex(of: .appeared(searchRoute, isPlaceholder: false)))
+        XCTAssertGreaterThan(searchReappeared, itemAppeared, "the search screen is shown again after the detail")
         XCTAssertEqual(searchModel.query, "roofer", "the typed words were kept across detail")
-        XCTAssertEqual(rendered[rowTextIdentifier]?.text, "synthetic roofer words", "the prior results are visible again")
-        XCTAssertNotEqual(rendered[RetrievalSearchView.countIdentifier]?.text ?? "", "")
+        XCTAssertEqual(searchModel.rows, [shown], "the prior results were kept across detail")
+        XCTAssertEqual(searchModel.phase, .results)
     }
 }
