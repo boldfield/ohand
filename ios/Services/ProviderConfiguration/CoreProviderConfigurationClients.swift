@@ -121,7 +121,7 @@ protocol RoutePolicyCore: Sendable {
 /// that handler must forward every event to `handle(_:)`; it returns `true` when the event answered one of this
 /// client's operations. Call `shutDown()` before closing the core so no completion is left waiting.
 final class CoreProviderProfileClient: ProviderProfileCore, @unchecked Sendable {
-    static let firstOperationID: UInt64 = 1 << 41
+    static let firstOperationID: UInt64 = (1 << 43) | (1 << 40)
 
     private struct Waiting {
         let command: ProviderProfileCommand
