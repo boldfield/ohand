@@ -1361,7 +1361,38 @@ fn a_self_hosted_exchange_needs_its_profile_and_model_registered() {
         session.assert_no_command();
     }
 
+    // A second stored supported self-hosted profile sends nothing while the registered pair dispatches.
+    let connection = rusqlite::Connection::open(session.directory.join("core.sqlite")).unwrap();
+    connection
+        .execute(
+            "INSERT INTO provider_profiles (profile_version, profile_id, provider_type, endpoint, \
+             model, credential_ref, timeout_seconds, retry_policy, authorized_destinations, \
+             capabilities, created_at, revoked_at) SELECT '4b7a1bfe-88ff-4ba7-848e-a45069cf9083', \
+             'other-self-hosted', provider_type, endpoint, model, credential_ref, timeout_seconds, \
+             retry_policy, authorized_destinations, capabilities, created_at, NULL \
+             FROM provider_profiles",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO jobs (job_id, job_schema_version, item_id, job_type, source_revision, \
+             profile_version, request_version, status, attempt_count, created_at) SELECT \
+             'job-other-profile', job_schema_version, item_id, job_type, source_revision, \
+             '4b7a1bfe-88ff-4ba7-848e-a45069cf9083', request_version, status, attempt_count, \
+             created_at FROM jobs WHERE job_id = ?",
+            [JOB_ID],
+        )
+        .unwrap();
+    drop(connection);
     protocols::register_for_test(session.handle, &[(&profile_version, &model)]);
+    assert_eq!(
+        session.start(87, "job-other-profile").status,
+        OHAND_CORE_STATUS_OK
+    );
+    let (_, _, code) = failure_of(&session.event(87));
+    assert_eq!(code, "self_hosted_not_registered");
+    session.assert_no_command();
     assert_eq!(session.start(84, JOB_ID).status, OHAND_CORE_STATUS_OK);
     assert_eq!(session.event(84).status, OHAND_CORE_STATUS_OK);
     send_description(&session.command(84));

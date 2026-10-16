@@ -813,7 +813,73 @@ fn a_self_hosted_check_needs_its_profile_and_model_registered() {
         wait_until_idle(session.handle);
     }
 
+    // A second stored supported self-hosted profile sends nothing while the registered pair dispatches.
     protocols::register_for_test(session.handle, &[(&profile_version, model)]);
+    let other_version = "4b7a1bfe-88ff-4ba7-848e-a45069cf9083";
+    rusqlite::Connection::open(&session.path)
+        .unwrap()
+        .execute(
+            "INSERT INTO provider_profiles (profile_version, profile_id, provider_type, endpoint, \
+             model, credential_ref, timeout_seconds, retry_policy, authorized_destinations, \
+             capabilities, created_at, revoked_at) SELECT ?, 'other-self-hosted', provider_type, \
+             endpoint, model, credential_ref, timeout_seconds, retry_policy, \
+             authorized_destinations, capabilities, created_at, NULL FROM provider_profiles \
+             WHERE profile_version = ?",
+            rusqlite::params![other_version, profile_version],
+        )
+        .unwrap();
+    assert_eq!(
+        session
+            .start_with(65, &json!({ "profile_version": other_version }))
+            .status,
+        OHAND_CORE_STATUS_OK
+    );
+    assert_eq!(
+        payload_of(&session.event(65))["outcome"],
+        "self_hosted_not_registered"
+    );
+    session.assert_no_command();
+    wait_until_idle(session.handle);
     let (_, _) = session.dispatch(64);
+    session.close();
+}
+
+#[test]
+fn replacing_the_registrations_with_none_stops_new_checks() {
+    let _guard = serial();
+    let session = Session::open("registration-replaced", Kind::SelfHosted);
+    session.register_native();
+    let (_, _) = session.dispatch(71);
+    session.respond(71, 200, &Kind::SelfHosted.reply());
+    assert_eq!(session.outcome_of(71), "ok");
+    wait_until_idle(session.handle);
+    protocols::register_for_test(session.handle, &[]);
+    assert_eq!(session.start(72).status, OHAND_CORE_STATUS_OK);
+    assert_eq!(
+        payload_of(&session.event(72))["outcome"],
+        "self_hosted_not_registered"
+    );
+    session.assert_no_command();
+    wait_until_idle(session.handle);
+    session.close();
+}
+
+#[test]
+fn a_registered_but_revoked_self_hosted_profile_is_still_refused() {
+    let _guard = serial();
+    let session = Session::open("registration-revoked", Kind::SelfHosted);
+    session.register_native();
+    rusqlite::Connection::open(&session.path)
+        .unwrap()
+        .execute(
+            "UPDATE provider_profiles SET revoked_at = '2026-10-09T00:00:00Z'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(session.start(73).status, OHAND_CORE_STATUS_OK);
+    let revoked = session.event(73);
+    assert_ne!(revoked.status, OHAND_CORE_STATUS_OK);
+    assert_eq!(failure_event_code(&revoked), "profile_revoked");
+    session.assert_no_command();
     session.close();
 }

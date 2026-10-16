@@ -1326,18 +1326,69 @@ mod voice_capture_transcription {
     }
 }
 
+const OTHER_PROFILE_VERSION: &str = "4b7a1bfe-88ff-4ba7-848e-a45069cf9083";
+
+impl Session {
+    /// Stores a second `supported` self-hosted profile, a copy of the first under its own version.
+    fn store_second_self_hosted_profile(&self) {
+        rusqlite::Connection::open(&self.path)
+            .unwrap()
+            .execute(
+                "INSERT INTO provider_profiles (profile_version, profile_id, provider_type, \
+                 endpoint, model, credential_ref, timeout_seconds, retry_policy, \
+                 authorized_destinations, capabilities, created_at, revoked_at) SELECT ?, \
+                 'other-self-hosted', provider_type, endpoint, model, credential_ref, \
+                 timeout_seconds, retry_policy, authorized_destinations, capabilities, \
+                 created_at, NULL FROM provider_profiles WHERE profile_version != ?",
+                rusqlite::params![OTHER_PROFILE_VERSION, OTHER_PROFILE_VERSION],
+            )
+            .unwrap();
+    }
+
+    fn queue_job(&self, job_id: &str, profile_version: &str, created_at: &str) {
+        rusqlite::Connection::open(&self.path)
+            .unwrap()
+            .execute(
+                "INSERT INTO jobs (job_id, job_schema_version, item_id, job_type, \
+                 source_revision, profile_version, request_version, status, attempt_count, \
+                 created_at) VALUES (?, 1, ?, 'interpret', 0, ?, ?, 'queued', 0, ?)",
+                rusqlite::params![
+                    job_id,
+                    ITEM_ID,
+                    profile_version,
+                    REQUEST_VERSION,
+                    created_at
+                ],
+            )
+            .unwrap();
+    }
+
+    fn assert_deferred_unregistered(&self, job_id: &str, claims: i32) {
+        let deferred = self.job(job_id);
+        assert_eq!(deferred.status, JobStatus::Queued);
+        assert_eq!(deferred.attempt_count, claims, "only claims, no failure");
+        assert_eq!(
+            deferred.failure_reason.as_deref(),
+            Some("self_hosted_not_registered")
+        );
+    }
+}
+
+fn settlement_of(summary: &Value, job_id: &str) -> String {
+    let jobs = summary["jobs"].as_array().unwrap();
+    let job = jobs
+        .iter()
+        .find(|job| job["job_id"] == job_id)
+        .unwrap_or_else(|| panic!("{job_id} in {summary}"));
+    job["settlement"].as_str().unwrap().to_string()
+}
+
 fn assert_deferred_unregistered(session: &Session, operation_id: u64, claims: i32) {
     session.start(operation_id);
     let summary = payload_of(&session.event(operation_id));
     assert_eq!(only_job(&summary)["settlement"], "backed_off", "{summary}");
     session.assert_no_command();
-    let deferred = session.job(JOB_ID);
-    assert_eq!(deferred.status, JobStatus::Queued);
-    assert_eq!(deferred.attempt_count, claims, "only claims, no failure");
-    assert_eq!(
-        deferred.failure_reason.as_deref(),
-        Some("self_hosted_not_registered")
-    );
+    session.assert_deferred_unregistered(JOB_ID, claims);
     wait_for_drain_to_end(session.handle);
 }
 
@@ -1351,25 +1402,34 @@ fn a_self_hosted_job_needs_its_profile_and_model_registered() {
     // Enabled with no registrations sends nothing.
     assert_deferred_unregistered(&session, 171, 1);
 
-    // Another profile version, or the right profile under another model, sends nothing.
+    // The right profile under another model sends nothing.
     let (profile_version, model) = session.register_stored_self_hosted();
-    protocols::register_for_test(
-        session.handle,
-        &[("00000000-0000-4000-8000-00000000aaaa", &model)],
-    );
-    assert_deferred_unregistered(&session, 172, 2);
     protocols::register_for_test(session.handle, &[(&profile_version, "another-model")]);
-    assert_deferred_unregistered(&session, 173, 3);
+    assert_deferred_unregistered(&session, 172, 2);
 
-    // The registered pair dispatches.
+    // A second stored supported self-hosted profile sends nothing while the registered one dispatches.
+    session.store_second_self_hosted_profile();
+    session.queue_job(
+        "job-other-profile",
+        OTHER_PROFILE_VERSION,
+        "2026-10-08T09:30:04Z",
+    );
     protocols::register_for_test(session.handle, &[(&profile_version, &model)]);
-    session.start(174);
+    session.start(173);
     let send = session.command();
     assert_eq!(send.command, OHAND_JOB_HOST_COMMAND_SEND);
     session.complete(send.request_id, 200, &self_hosted_reply());
-    let summary = payload_of(&session.event(174));
-    assert_eq!(only_job(&summary)["settlement"], "completed", "{summary}");
+    let summary = payload_of(&session.event(173));
+    assert_eq!(settlement_of(&summary, JOB_ID), "completed", "{summary}");
+    assert_eq!(
+        settlement_of(&summary, "job-other-profile"),
+        "backed_off",
+        "{summary}"
+    );
+    session.assert_no_command();
+    session.assert_deferred_unregistered("job-other-profile", 1);
     wait_until_idle(session.handle);
+    wait_for_drain_to_end(session.handle);
     session.close();
 }
 
@@ -1378,10 +1438,34 @@ fn replacing_the_registrations_with_none_stops_new_dispatches() {
     let _guard = serial();
     let session = Session::open_with_profile("self-hosted-unregister", self_hosted_profile());
     protocols::enable_for_test(session.handle, &["anthropic", "open_ai", "self_hosted"]);
-    session.register_stored_self_hosted();
-    protocols::register_for_test(session.handle, &[]);
+    let (profile_version, _) = session.register_stored_self_hosted();
     assert_eq!(session.register_host(&[]).status, OHAND_CORE_STATUS_OK);
-    assert_deferred_unregistered(&session, 181, 1);
+
+    session.start(181);
+    let send = session.command();
+    assert_eq!(send.command, OHAND_JOB_HOST_COMMAND_SEND);
+    session.complete(send.request_id, 200, &self_hosted_reply());
+    let summary = payload_of(&session.event(181));
+    assert_eq!(only_job(&summary)["settlement"], "completed", "{summary}");
+    wait_until_idle(session.handle);
+    wait_for_drain_to_end(session.handle);
+
+    protocols::register_for_test(session.handle, &[]);
+    session.queue_job(
+        "job-after-unregister",
+        &profile_version,
+        "2026-10-08T09:30:05Z",
+    );
+    session.start(182);
+    let summary = payload_of(&session.event(182));
+    assert_eq!(
+        settlement_of(&summary, "job-after-unregister"),
+        "backed_off",
+        "{summary}"
+    );
+    session.assert_no_command();
+    session.assert_deferred_unregistered("job-after-unregister", 1);
+    wait_for_drain_to_end(session.handle);
     session.close();
 }
 

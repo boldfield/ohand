@@ -1818,6 +1818,7 @@ public final class ServiceCompositionRoot {
             try core.setEnabledProviderProtocols(enabledProtocols)
             undo.append { try? core.setEnabledProviderProtocols(ServiceCompositionRoot.baseProviderProtocols) }
             try core.setSelfHostedRegistrations(selfHostedRegistrations)
+            undo.append { try? core.setSelfHostedRegistrations([]) }
             let jobRunner = try JobRunnerService.attach(
                 to: core, storePath: layout.databaseURL.path, sender: adapters.sender,
                 capabilities: capabilities, isReachable: adapters.reachability.isReachable,

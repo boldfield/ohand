@@ -101,7 +101,6 @@ public struct ProviderExchangeEvent: Decodable, Equatable, Sendable {
     }
 }
 
-/// A provider wire protocol the host may enable for dispatch. The names are the core's.
 /// A stored profile version and the model it serves that the host allows the core to send to a self-hosted
 /// endpoint.
 public struct CoreSelfHostedRegistration: Codable, Hashable, Sendable {
@@ -119,6 +118,7 @@ public struct CoreSelfHostedRegistration: Codable, Hashable, Sendable {
     }
 }
 
+/// A provider wire protocol the host may enable for dispatch. The names are the core's.
 public enum CoreProviderProtocol: String, Codable, Equatable, Sendable {
     case anthropic
     case openAI = "open_ai"

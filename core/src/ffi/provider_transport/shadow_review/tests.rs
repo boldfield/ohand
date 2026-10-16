@@ -1042,6 +1042,51 @@ fn a_self_hosted_review_needs_its_profile_and_model_registered() {
 }
 
 #[test]
+fn a_second_stored_self_hosted_review_profile_sends_nothing_under_the_registrations() {
+    let _guard = serial();
+    let scenario = Scenario::self_hosted();
+    let profile_version = scenario.profile.profile_version().to_string();
+    let model = scenario.profile.model().to_string();
+    let session = Session::open("sh-reg-second", &scenario);
+    session.register_native();
+    protocols::register_for_test(session.handle, &[(&profile_version, &model)]);
+    let job_id = session.select(1);
+
+    // A second stored supported self-hosted profile sends nothing under the same registrations.
+    let other_version = "4b7a1bfe-88ff-4ba7-848e-a45069cf9083";
+    let connection = open_connection(&session.path);
+    connection
+        .execute(
+            "INSERT INTO provider_profiles (profile_version, profile_id, provider_type, endpoint, \
+             model, credential_ref, timeout_seconds, retry_policy, authorized_destinations, \
+             capabilities, created_at, revoked_at) SELECT ?, 'other-self-hosted', provider_type, \
+             endpoint, model, credential_ref, timeout_seconds, retry_policy, \
+             authorized_destinations, capabilities, created_at, NULL FROM provider_profiles \
+             WHERE profile_version = ?",
+            rusqlite::params![other_version, profile_version],
+        )
+        .unwrap();
+    let repin = |version: &str| {
+        connection
+            .execute(
+                "UPDATE jobs SET profile_version = ? WHERE job_id = ?",
+                rusqlite::params![version, job_id],
+            )
+            .unwrap();
+    };
+    repin(other_version);
+    assert_eq!(
+        session.start_review(2, &job_id).status,
+        OHAND_CORE_STATUS_OK
+    );
+    let payload = payload_of(&session.event(2));
+    assert_eq!(payload["denial"], "self_hosted_not_registered", "{payload}");
+    session.assert_no_command();
+    wait_until_idle(session.handle);
+    session.close();
+}
+
+#[test]
 fn replacing_the_registrations_with_none_stops_new_reviews() {
     let _guard = serial();
     let scenario = Scenario::self_hosted();
