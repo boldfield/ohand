@@ -13,7 +13,6 @@ private final class SettingsTestProviderSender: ProviderRequestSender, @unchecke
 
 /// Drives the settings model over the real prompt service, the real core and the production-shaped root, faking only
 /// the notification centre and the provider transport.
-@MainActor
 final class PromptSettingsRealCoreTests: XCTestCase {
     private var storageRoot: URL!
     private var baselineHandles = 0
