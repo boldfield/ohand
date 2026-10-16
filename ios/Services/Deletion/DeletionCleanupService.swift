@@ -169,6 +169,8 @@ actor DeletionCleanupService {
                 return await recordFailure(work, .unsafeCaptureIdentifier)
             } catch DeletionLocalCleanupError.ingressOwnershipUnresolved {
                 return .retryLater(.ingressOwnershipUnresolved)
+            } catch PlaybackFenceError.audioInUse {
+                return .retryLater(.audioInPlayback)
             } catch {
                 return .retryLater(.storageUnavailable)
             }

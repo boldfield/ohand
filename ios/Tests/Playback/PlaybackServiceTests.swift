@@ -185,6 +185,21 @@ final class PlaybackServiceTests: XCTestCase {
         await assertOpenFails(.notAuthenticated, makeService())
     }
 
+    func testARelockAndReauthenticationWhileThePlayerIsBuiltRefusesTheOpen() async throws {
+        try retain(audio: "cap1.m4a")
+        let service = PlaybackService(
+            core: core, session: session, layout: storage.layout, fence: fence,
+            playerFactory: { [session, player] _ in
+                // After admission, before the session exists to be ended: relock, then authenticate again.
+                session?.relock(.explicit)
+                session?.authenticate(reason: "test") { _ in }
+                return player
+            })
+        XCTAssertEqual(session.scope, .authenticated)
+        await assertOpenFails(.notAuthenticated, service)
+        XCTAssertEqual(player.stopCalls, 1, "the player built under the revoked epoch is stopped")
+    }
+
     // MARK: Fence against the sweep
 
     private func makeRetention(core retentionCore: ScriptedRetentionCore) -> AudioRetentionService {

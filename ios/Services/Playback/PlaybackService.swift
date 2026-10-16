@@ -62,7 +62,8 @@ public final class PlaybackService: @unchecked Sendable {
 
     /// Opens the item's retained audio. The returned session must be closed when playback is done.
     public func open(itemID: String) async throws -> PlaybackSession {
-        guard session.currentAuthorization() != nil else { throw PlaybackError.notAuthenticated }
+        // The epoch this open was admitted in: a relock ends it even if the user authenticates again before it returns.
+        guard let authorization = session.currentAuthorization() else { throw PlaybackError.notAuthenticated }
         guard !itemID.isEmpty else { throw PlaybackError.invalidRequest }
         let generation = fence.generation(of: itemID)
         let answer = try await readAudio(itemID: itemID)
@@ -78,7 +79,7 @@ public final class PlaybackService: @unchecked Sendable {
                 itemID: itemID, url: url, generation: generation,
                 verify: {
                     // The read may have taken a while; a session that relocked since must not start playback.
-                    guard session.currentAuthorization() != nil else { throw PlaybackError.notAuthenticated }
+                    guard session.isCurrent(authorization) else { throw PlaybackError.notAuthenticated }
                     let present: Bool
                     do { present = try fileSystem.isPresent(at: url) } catch { throw PlaybackError.audioUnreadable }
                     guard present else { throw PlaybackError.audioMissing }
@@ -98,7 +99,7 @@ public final class PlaybackService: @unchecked Sendable {
         let opened = PlaybackSession(itemID: itemID, player: player, release: { [fence] in fence.release(leaseID) })
         box.session = opened
         // A relock or deletion between the lease and here found no session to end; end it now.
-        if session.currentAuthorization() == nil {
+        if !session.isCurrent(authorization) {
             opened.end(.relocked)
             throw PlaybackError.notAuthenticated
         }
