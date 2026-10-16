@@ -796,6 +796,7 @@ public final class ServiceCompositionRoot {
     /// `ShadowReviewService` keeps its first operation identifier private; this is its value.
     static let shadowReviewFirstOperationID: UInt64 = 1 << 48
     static let itemCorrectionClientName = "item corrections"
+    static let itemDeletionClientName = "item deletion"
     static let reminderControlClientName = "reminder controls"
     static let itemLifecycleControlClientName = "item lifecycle controls"
     static let suggestionResponseClientName = "suggestion responses"
@@ -834,6 +835,7 @@ public final class ServiceCompositionRoot {
         fixedWidthRange("metrics", from: CoreMetricsClient.firstOperationID),
         fixedWidthRange("notification actions", from: CoreNotificationActionClient.firstOperationID),
         fixedWidthRange(itemCorrectionClientName, from: CoreItemCorrectionClient.firstOperationID),
+        fixedWidthRange(itemDeletionClientName, from: CoreItemDeletionClient.firstOperationID),
         fixedWidthRange(reminderControlClientName, from: CoreReminderControlClient.firstOperationID),
         fixedWidthRange(
             itemLifecycleControlClientName, from: CoreItemLifecycleControlClient.firstOperationID),
@@ -852,6 +854,8 @@ public final class ServiceCompositionRoot {
     public let reminderReconciler: NotificationPermissionReconciler
     /// Corrects an item's text, type or session topic; needs an authenticated read session.
     public let itemCorrections: ItemCorrectionService
+    /// Deletes one item and runs its native cleanup at once; needs an authenticated read session.
+    public let itemDeletion: ItemDeletionService
     /// Reads, edits, cancels and reviews an item's reminder; reads are gated and writes need an authenticated session.
     public let reminderControls: ReminderControlService
     /// Completes, cancels or quiets an item; needs an authenticated read session.
@@ -881,6 +885,7 @@ public final class ServiceCompositionRoot {
     private let providerTransport: ProviderExchangeCoordinator
     private let notificationActions: NotificationActionClients
     private let itemCorrectionClient: CoreItemCorrectionClient
+    private let itemDeletionClient: CoreItemDeletionClient
     private let reminderControlClient: CoreReminderControlClient
     private let itemLifecycleControlClient: CoreItemLifecycleControlClient
     private let suggestionResponseClient: CoreSuggestionResponseClient
@@ -944,6 +949,8 @@ public final class ServiceCompositionRoot {
         notificationActions = assembly.notificationActions
         itemCorrectionClient = assembly.itemCorrectionClient
         itemCorrections = assembly.itemCorrections
+        itemDeletionClient = assembly.itemDeletionClient
+        itemDeletion = assembly.itemDeletion
         reminderControlClient = assembly.reminderControlClient
         reminderControls = assembly.reminderControls
         itemLifecycleControlClient = assembly.itemLifecycleControlClient
@@ -957,6 +964,11 @@ public final class ServiceCompositionRoot {
         reminderReconciler = assembly.permissionReconciler
         foreground = assembly.foreground
         jobRunner.setDrainIdleObserver { [weak self] in self?.runReminderPassAfterDrain() }
+        itemDeletion.setCleanupProvider { [weak self] in
+            let coordinator = self?.modules.lazy.compactMap { $0 as? LifecycleCoordinator }.first
+            let cleanup: ItemDeletionCleanup? = coordinator?.deletionCleanup
+            return cleanup
+        }
     }
 
     deinit {
@@ -1094,6 +1106,8 @@ public final class ServiceCompositionRoot {
         transcription.shutDown()
         notificationActions.shutDown(session: adapters.readSession)
         itemCorrectionClient.shutDown()
+        itemDeletion.setCleanupProvider(nil)
+        itemDeletionClient.shutDown()
         reminderControlClient.shutDown()
         itemLifecycleControlClient.shutDown()
         suggestionResponseClient.shutDown()
@@ -1358,6 +1372,8 @@ public final class ServiceCompositionRoot {
         let notificationActions: NotificationActionClients
         let itemCorrectionClient: CoreItemCorrectionClient
         let itemCorrections: ItemCorrectionService
+        let itemDeletionClient: CoreItemDeletionClient
+        let itemDeletion: ItemDeletionService
         let reminderControlClient: CoreReminderControlClient
         let reminderControls: ReminderControlService
         let itemLifecycleControlClient: CoreItemLifecycleControlClient
@@ -1470,6 +1486,10 @@ public final class ServiceCompositionRoot {
             router.register { itemCorrectionClient.handle($0) }
             undo.append { itemCorrectionClient.shutDown() }
             let itemCorrections = ItemCorrectionService(core: itemCorrectionClient, session: adapters.readSession)
+            let itemDeletionClient = CoreItemDeletionClient(core: core, gate: readGate)
+            router.register { itemDeletionClient.handle($0) }
+            undo.append { itemDeletionClient.shutDown() }
+            let itemDeletion = ItemDeletionService(core: itemDeletionClient, session: adapters.readSession)
             let reminderControlClient = CoreReminderControlClient(core: core, gate: readGate)
             router.register { reminderControlClient.handle($0) }
             undo.append { reminderControlClient.shutDown() }
@@ -1540,7 +1560,8 @@ public final class ServiceCompositionRoot {
                 statusReader: statusReader, jobRunner: jobRunner, transcription: transcription,
                 reminderCore: reminderCore, providerTransport: providerTransport,
                 notificationActions: notificationActions, itemCorrectionClient: itemCorrectionClient,
-                itemCorrections: itemCorrections, reminderControlClient: reminderControlClient,
+                itemCorrections: itemCorrections, itemDeletionClient: itemDeletionClient,
+                itemDeletion: itemDeletion, reminderControlClient: reminderControlClient,
                 reminderControls: reminderControls, itemLifecycleControlClient: itemLifecycleControlClient,
                 itemLifecycleControls: itemLifecycleControls,
                 suggestionResponseClient: suggestionResponseClient,
