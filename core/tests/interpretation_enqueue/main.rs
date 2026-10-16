@@ -285,6 +285,14 @@ fn an_audio_only_capture_queues_no_interpretation_at_import() {
 
 fn claim_transcription_job(store: &Store, item_id: &str) -> Job {
     let mut database = store.open();
+    // Replace the job import queued with this one, as a test that scripts its own job.
+    database
+        .conn()
+        .execute(
+            "DELETE FROM jobs WHERE item_id = ? AND job_type = ? AND status = 'queued'",
+            rusqlite::params![item_id, JOB_TYPE_TRANSCRIPTION_ATTACHMENT],
+        )
+        .unwrap();
     enqueue_job(
         &mut database,
         "transcription-1".to_string(),

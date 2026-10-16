@@ -108,6 +108,14 @@ impl Fixture {
         let now = DateTime::parse_from_rfc3339("2026-10-08T10:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
+        // The test queues its own transcription job in place of the one import queued.
+        database
+            .conn()
+            .execute(
+                "DELETE FROM jobs WHERE item_id = ? AND job_type = ?",
+                rusqlite::params![item_id, JOB_TYPE_TRANSCRIPTION_ATTACHMENT],
+            )
+            .unwrap();
         enqueue_job(
             database,
             "transcription-1".to_string(),
