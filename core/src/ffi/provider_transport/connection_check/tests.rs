@@ -245,6 +245,7 @@ impl Session {
         register(handle, &recorder);
         if kind == Kind::SelfHosted {
             protocols::enable_for_test(handle, &["anthropic", "open_ai", "self_hosted"]);
+            protocols::register_for_test(handle, &[(&profile_version, model)]);
         }
         let (sender, commands) = std::sync::mpsc::channel();
         Session {
@@ -782,4 +783,37 @@ fn the_classification_never_depends_on_text_of_the_provider_response() {
         assert!(ALL_OUTCOMES.contains(&serde_json::to_value(outcome).unwrap().as_str().unwrap()));
     }
     assert_eq!(outcome_for_status(301), ConnectionOutcome::ProviderError);
+}
+
+#[test]
+fn a_self_hosted_check_needs_its_profile_and_model_registered() {
+    let _guard = serial();
+    let session = Session::open("not-registered", Kind::SelfHosted);
+    session.register_native();
+    let model = Kind::SelfHosted.serving_model();
+    let profile_version = session.profile_version.clone();
+
+    let refusals: [(u64, &[(&str, &str)]); 3] = [
+        (61, &[]),
+        (62, &[("00000000-0000-4000-8000-00000000aaaa", model)]),
+        (63, &[(profile_version.as_str(), "another-model")]),
+    ];
+    for (operation_id, pairs) in refusals {
+        protocols::register_for_test(session.handle, pairs);
+        assert_eq!(session.start(operation_id).status, OHAND_CORE_STATUS_OK);
+        assert_eq!(
+            payload_of(&session.event(operation_id)),
+            json!({
+                "operation_id": operation_id,
+                "phase": "completed",
+                "outcome": "self_hosted_not_registered",
+            })
+        );
+        session.assert_no_command();
+        wait_until_idle(session.handle);
+    }
+
+    protocols::register_for_test(session.handle, &[(&profile_version, model)]);
+    let (_, _) = session.dispatch(64);
+    session.close();
 }

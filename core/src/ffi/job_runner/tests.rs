@@ -342,6 +342,20 @@ impl Session {
         .unwrap()
     }
 
+    /// Registers the stored profile's own version and model, as the composition root does.
+    fn register_stored_self_hosted(&self) -> (String, String) {
+        let (profile_version, model): (String, String) = rusqlite::Connection::open(&self.path)
+            .unwrap()
+            .query_row(
+                "SELECT profile_version, model FROM provider_profiles",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        protocols::register_for_test(self.handle, &[(&profile_version, &model)]);
+        (profile_version, model)
+    }
+
     fn job(&self, job_id: &str) -> Job {
         get_job(&self.database(), job_id).unwrap().unwrap()
     }
@@ -485,6 +499,7 @@ fn a_self_hosted_job_is_sent_only_to_its_own_endpoint_and_completes() {
     let _guard = serial();
     let session = Session::open_with_profile("self-hosted", self_hosted_profile());
     protocols::enable_for_test(session.handle, &["anthropic", "open_ai", "self_hosted"]);
+    session.register_stored_self_hosted();
     assert_eq!(session.register_host(&[]).status, OHAND_CORE_STATUS_OK);
 
     assert_eq!(session.start(22).status, OHAND_CORE_STATUS_OK);
@@ -546,6 +561,7 @@ fn a_self_hosted_job_waits_until_the_host_enables_the_protocol_and_stops_when_it
     wait_for_drain_to_end(session.handle);
 
     protocols::enable_for_test(session.handle, &["anthropic", "open_ai", "self_hosted"]);
+    session.register_stored_self_hosted();
     session.start(162);
     let send = session.command();
     assert_eq!(send.command, OHAND_JOB_HOST_COMMAND_SEND);
@@ -562,6 +578,7 @@ fn disabling_a_protocol_again_stops_new_dispatches() {
     let _guard = serial();
     let session = Session::open_with_profile("self-hosted-disable", self_hosted_profile());
     protocols::enable_for_test(session.handle, &["anthropic", "open_ai", "self_hosted"]);
+    session.register_stored_self_hosted();
     session.register_host(&[]);
     protocols::enable_for_test(session.handle, &["anthropic", "open_ai"]);
 
@@ -1307,4 +1324,105 @@ mod voice_capture_transcription {
     fn a_drain_backfills_and_transcribes_a_voice_capture_stored_without_a_job() {
         drain_transcribes_the_capture("voice-backfilled", true);
     }
+}
+
+fn assert_deferred_unregistered(session: &Session, operation_id: u64, claims: i32) {
+    session.start(operation_id);
+    let summary = payload_of(&session.event(operation_id));
+    assert_eq!(only_job(&summary)["settlement"], "backed_off", "{summary}");
+    session.assert_no_command();
+    let deferred = session.job(JOB_ID);
+    assert_eq!(deferred.status, JobStatus::Queued);
+    assert_eq!(deferred.attempt_count, claims, "only claims, no failure");
+    assert_eq!(
+        deferred.failure_reason.as_deref(),
+        Some("self_hosted_not_registered")
+    );
+    wait_for_drain_to_end(session.handle);
+}
+
+#[test]
+fn a_self_hosted_job_needs_its_profile_and_model_registered() {
+    let _guard = serial();
+    let session = Session::open_with_profile("self-hosted-register", self_hosted_profile());
+    protocols::enable_for_test(session.handle, &["anthropic", "open_ai", "self_hosted"]);
+    assert_eq!(session.register_host(&[]).status, OHAND_CORE_STATUS_OK);
+
+    // Enabled with no registrations sends nothing.
+    assert_deferred_unregistered(&session, 171, 1);
+
+    // Another profile version, or the right profile under another model, sends nothing.
+    let (profile_version, model) = session.register_stored_self_hosted();
+    protocols::register_for_test(
+        session.handle,
+        &[("00000000-0000-4000-8000-00000000aaaa", &model)],
+    );
+    assert_deferred_unregistered(&session, 172, 2);
+    protocols::register_for_test(session.handle, &[(&profile_version, "another-model")]);
+    assert_deferred_unregistered(&session, 173, 3);
+
+    // The registered pair dispatches.
+    protocols::register_for_test(session.handle, &[(&profile_version, &model)]);
+    session.start(174);
+    let send = session.command();
+    assert_eq!(send.command, OHAND_JOB_HOST_COMMAND_SEND);
+    session.complete(send.request_id, 200, &self_hosted_reply());
+    let summary = payload_of(&session.event(174));
+    assert_eq!(only_job(&summary)["settlement"], "completed", "{summary}");
+    wait_until_idle(session.handle);
+    session.close();
+}
+
+#[test]
+fn replacing_the_registrations_with_none_stops_new_dispatches() {
+    let _guard = serial();
+    let session = Session::open_with_profile("self-hosted-unregister", self_hosted_profile());
+    protocols::enable_for_test(session.handle, &["anthropic", "open_ai", "self_hosted"]);
+    session.register_stored_self_hosted();
+    protocols::register_for_test(session.handle, &[]);
+    assert_eq!(session.register_host(&[]).status, OHAND_CORE_STATUS_OK);
+    assert_deferred_unregistered(&session, 181, 1);
+    session.close();
+}
+
+#[test]
+fn a_registered_but_revoked_profile_is_still_refused() {
+    let _guard = serial();
+    let session = Session::open_with_profile("self-hosted-revoked", self_hosted_profile());
+    protocols::enable_for_test(session.handle, &["anthropic", "open_ai", "self_hosted"]);
+    session.register_stored_self_hosted();
+    rusqlite::Connection::open(&session.path)
+        .unwrap()
+        .execute(
+            "UPDATE provider_profiles SET revoked_at = '2026-10-09T00:00:00Z'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(session.register_host(&[]).status, OHAND_CORE_STATUS_OK);
+    session.start(191);
+    let _ = session.event(191);
+    session.assert_no_command();
+    wait_for_drain_to_end(session.handle);
+    session.close();
+}
+
+#[test]
+fn registrations_with_an_empty_profile_version_or_model_are_invalid() {
+    let _guard = serial();
+    let session = Session::open("self-hosted-invalid", false);
+    for body in [
+        json!([{"profile_version": "", "model": "m"}]),
+        json!([{"profile_version": "p", "model": ""}]),
+    ] {
+        let request = serde_json::to_vec(&body).unwrap();
+        let outcome = consume(unsafe {
+            protocols::ohand_core_set_self_hosted_registrations(
+                session.handle,
+                request.as_ptr(),
+                request.len(),
+            )
+        });
+        assert_eq!(outcome.code(), "invalid_request");
+    }
+    session.close();
 }

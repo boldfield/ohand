@@ -204,6 +204,11 @@ mod failures {
         super::protocols::PROTOCOL_NOT_ENABLED,
         "the host has not enabled the pinned profile's provider protocol",
     );
+    pub(super) const SELF_HOSTED_NOT_REGISTERED: AbiFailure = fixed(
+        ErrorClass::Unsupported,
+        super::protocols::SELF_HOSTED_NOT_REGISTERED,
+        "the pinned self-hosted profile and model are not registered by the host",
+    );
     pub(super) const STALE_SOURCE: AbiFailure = fixed(
         ErrorClass::Permanent,
         "stale_source",
@@ -696,7 +701,7 @@ fn prepare(connection: &Connection, handle: u64, job_id: &str) -> Result<Prepare
         return Err(failures::UNSUPPORTED_JOB);
     }
     let profile = load_profile(connection, &target.profile_version)?;
-    protocols::ensure_enabled(handle, profile.protocol())?;
+    protocols::ensure_permitted(handle, &profile)?;
     if target.credential_ref.as_deref() != Some(profile.credential_ref().as_str()) {
         return Err(failures::MALFORMED_PROFILE);
     }
@@ -756,7 +761,7 @@ fn run_exchange(
     cancel: &CancelToken,
 ) -> Result<Vec<u8>, AbiFailure> {
     let operation_id = end.operation_id;
-    protocols::ensure_enabled(end.handle, prepared.profile.protocol())?;
+    protocols::ensure_permitted(end.handle, &prepared.profile)?;
     let transport = NativeTransport { end };
     let adapter: Box<dyn ProviderAdapter> = match prepared.profile.protocol() {
         ProviderProtocol::Anthropic => Box::new(AnthropicAdapter::new(

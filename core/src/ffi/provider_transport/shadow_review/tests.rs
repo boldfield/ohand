@@ -298,6 +298,7 @@ impl Session {
         register(handle, &recorder);
         if scenario.profile.protocol() == ProviderProtocol::SelfHosted {
             protocols::enable_for_test(handle, &["anthropic", "open_ai", "self_hosted"]);
+            protocols::register_profile_for_test(handle, &scenario.profile);
         }
         let (sender, commands) = std::sync::mpsc::channel();
         Session {
@@ -983,5 +984,104 @@ fn malformed_requests_are_rejected_without_events() {
         .events
         .recv_timeout(Duration::from_millis(200))
         .is_err());
+    session.close();
+}
+
+fn review_denial_with(name: &str, scenario: &Scenario, pairs: &[(&str, &str)]) -> Value {
+    let session = Session::open(name, scenario);
+    session.register_native();
+    protocols::register_for_test(session.handle, pairs);
+    let job_id = session.select(1);
+    assert_eq!(
+        session.start_review(2, &job_id).status,
+        OHAND_CORE_STATUS_OK
+    );
+    let payload = payload_of(&session.event(2));
+    session.assert_no_command();
+    wait_until_idle(session.handle);
+    session.close();
+    payload
+}
+
+#[test]
+fn a_self_hosted_review_needs_its_profile_and_model_registered() {
+    let _guard = serial();
+    let scenario = Scenario::self_hosted();
+    let profile_version = scenario.profile.profile_version().to_string();
+    let model = scenario.profile.model().to_string();
+
+    let refusals: [(&str, &[(&str, &str)]); 3] = [
+        ("sh-reg-none", &[]),
+        (
+            "sh-reg-other-profile",
+            &[("00000000-0000-4000-8000-00000000aaaa", model.as_str())],
+        ),
+        (
+            "sh-reg-other-model",
+            &[(profile_version.as_str(), "another-model")],
+        ),
+    ];
+    for (name, pairs) in refusals {
+        let payload = review_denial_with(name, &scenario, pairs);
+        assert_eq!(payload["denial"], "self_hosted_not_registered", "{payload}");
+        assert_eq!(payload["record"]["outcome"], "unreviewed");
+    }
+
+    let session = Session::open("sh-reg-pair", &scenario);
+    session.register_native();
+    protocols::register_for_test(session.handle, &[(&profile_version, &model)]);
+    let job_id = session.select(1);
+    let send = session.dispatch(2, &job_id);
+    assert_eq!(
+        send["url"],
+        "https://spark.example.test/v1/chat/completions"
+    );
+    session.complete(2, &self_hosted_reply("action"));
+    assert_eq!(session.final_record(2)["outcome"], "reviewed");
+    session.close();
+}
+
+#[test]
+fn replacing_the_registrations_with_none_stops_new_reviews() {
+    let _guard = serial();
+    let scenario = Scenario::self_hosted();
+    let session = Session::open("sh-reg-replaced", &scenario);
+    session.register_native();
+    protocols::register_for_test(session.handle, &[]);
+    let job_id = session.select(1);
+    assert_eq!(
+        session.start_review(2, &job_id).status,
+        OHAND_CORE_STATUS_OK
+    );
+    let payload = payload_of(&session.event(2));
+    assert_eq!(payload["denial"], "self_hosted_not_registered", "{payload}");
+    session.assert_no_command();
+    wait_until_idle(session.handle);
+    session.close();
+}
+
+#[test]
+fn a_registered_but_revoked_self_hosted_review_profile_is_still_refused() {
+    let _guard = serial();
+    let scenario = Scenario::self_hosted();
+    let session = Session::open("sh-reg-revoked", &scenario);
+    session.register_native();
+    let job_id = session.select(1);
+    rusqlite::Connection::open(&session.path)
+        .unwrap()
+        .execute(
+            "UPDATE provider_profiles SET revoked_at = '2026-10-09T00:00:00Z'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        session.start_review(2, &job_id).status,
+        OHAND_CORE_STATUS_OK
+    );
+    let payload = payload_of(&session.event(2));
+    assert_ne!(payload["denial"], Value::Null, "{payload}");
+    assert_ne!(payload["denial"], "self_hosted_not_registered", "{payload}");
+    session.assert_no_command();
+    wait_until_idle(session.handle);
     session.close();
 }

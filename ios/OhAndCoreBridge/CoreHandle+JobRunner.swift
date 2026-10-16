@@ -180,7 +180,7 @@ extension CoreHandle {
         _ = try consumeCoreResult(rawResult)
     }
 
-    /// A job whose provider protocol the host has not enabled (`setEnabledProviderProtocols`) is kept queued
+    /// A job whose provider protocol the host has not enabled (`setEnabledProviderProtocols`, and for self-hosted `setSelfHostedRegistrations`) is kept queued
     /// as `protocol_not_enabled` without a send or a spent retry, and a later drain releases it once enabled.
     ///
     /// Tells the core whether provider requests can reach the network. While they cannot, the core defers jobs

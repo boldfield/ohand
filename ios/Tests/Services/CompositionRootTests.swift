@@ -140,11 +140,17 @@ private final class ProtocolDeclaringModule: CompositionModule {
     let identifier = "protocol.declarer"
     let firstOperationID: UInt64 = 1 << 44
     let enabledProviderProtocols: Set<CoreProviderProtocol>
+    let selfHostedRegistrations: Set<CoreSelfHostedRegistration>
     private let takesStatusClient: Bool
     private(set) var statusClient: CoreProviderProfileStatusClient?
 
-    init(enabledProviderProtocols: Set<CoreProviderProtocol>, takesStatusClient: Bool = false) {
+    init(
+        enabledProviderProtocols: Set<CoreProviderProtocol>,
+        selfHostedRegistrations: Set<CoreSelfHostedRegistration> = [],
+        takesStatusClient: Bool = false
+    ) {
         self.enabledProviderProtocols = enabledProviderProtocols
+        self.selfHostedRegistrations = selfHostedRegistrations
         self.takesStatusClient = takesStatusClient
     }
 
@@ -710,7 +716,11 @@ final class CompositionRootTests: XCTestCase {
     func testModuleDeclaringSelfHostedEnablesDispatch() throws {
         try prepareSelfHostedStore()
         let sender = ScriptedProviderSender(reply: Data())
-        let module = ProtocolDeclaringModule(enabledProviderProtocols: [.selfHosted])
+        let module = ProtocolDeclaringModule(
+            enabledProviderProtocols: [.selfHosted],
+            selfHostedRegistrations: [
+                CoreSelfHostedRegistration(profileVersion: Self.profileVersion, model: "synthetic-model")
+            ])
         let root = try makeTestRoot(sender: sender, modules: [module])
         defer { root.shutDown() }
         let itemID = try saveCapture(root)
@@ -721,6 +731,65 @@ final class CompositionRootTests: XCTestCase {
             pump(until: { !sender.requests.isEmpty }, timeout: 20),
             "the self-hosted job reaches the transport: \(jobDiagnostics(root, sender: sender))")
         XCTAssertEqual(sender.requests.first?.url.host, "spark.example.test")
+    }
+
+    func testModuleDeclaringSelfHostedWithoutRegistrationSendsNothing() throws {
+        try prepareSelfHostedStore()
+        let sender = ScriptedProviderSender(reply: Data())
+        let module = ProtocolDeclaringModule(enabledProviderProtocols: [.selfHosted])
+        let root = try makeTestRoot(sender: sender, modules: [module])
+        defer { root.shutDown() }
+        let itemID = try saveCapture(root)
+        try insertInterpretationJob(itemID: itemID)
+        root.start(isActive: true)
+
+        XCTAssertTrue(
+            pump(until: { root.jobRunner.finishedDrainCount > 0 }, timeout: 20),
+            "a drain ran: \(jobDiagnostics(root, sender: sender))")
+        _ = pump(until: { false }, timeout: 1)
+        XCTAssertTrue(sender.requests.isEmpty, "self-hosted is enabled but nothing is registered")
+        XCTAssertEqual(JobStoreInspector.job(at: databasePath, id: "job-composition-1")?.status, "queued")
+    }
+
+    func testRegistrationDispatchesOnlyTheRegisteredProfilesJob() throws {
+        try prepareSelfHostedStore()
+        let otherVersion = "4b7a1bfe-88ff-4ba7-848e-a45069cf9083"
+        try execute([
+            """
+            INSERT INTO provider_profiles (profile_version, profile_id, provider_type, endpoint, model, \
+            credential_ref, timeout_seconds, retry_policy, authorized_destinations, capabilities, created_at, \
+            revoked_at) SELECT '\(otherVersion)', 'other-self-hosted', provider_type, endpoint, model, \
+            credential_ref, timeout_seconds, retry_policy, authorized_destinations, capabilities, created_at, \
+            NULL FROM provider_profiles WHERE profile_version = '\(Self.profileVersion)'
+            """
+        ])
+        let sender = ScriptedProviderSender(reply: Data())
+        let module = ProtocolDeclaringModule(
+            enabledProviderProtocols: [.selfHosted],
+            selfHostedRegistrations: [
+                CoreSelfHostedRegistration(profileVersion: Self.profileVersion, model: "synthetic-model")
+            ])
+        let root = try makeTestRoot(sender: sender, modules: [module])
+        defer { root.shutDown() }
+        let registeredItemID = try saveCapture(root)
+        let otherItemID = try saveCapture(root)
+        try insertInterpretationJob(itemID: registeredItemID)
+        try execute([
+            """
+            INSERT INTO jobs (job_id, job_schema_version, item_id, job_type, source_revision, profile_version, \
+            request_version, status, attempt_count, created_at) VALUES ('job-composition-2', 1, \
+            '\(otherItemID)', 'interpret', 0, '\(otherVersion)', '\(Self.requestVersion)', 'queued', 0, \
+            '2026-10-08T09:30:03Z')
+            """
+        ])
+        root.start(isActive: true)
+
+        XCTAssertTrue(
+            pump(until: { !sender.requests.isEmpty }, timeout: 20),
+            "the registered job reaches the transport: \(jobDiagnostics(root, sender: sender))")
+        _ = pump(until: { false }, timeout: 2)
+        XCTAssertEqual(sender.requests.count, 1, "only the registered profile's job is sent")
+        XCTAssertEqual(JobStoreInspector.job(at: databasePath, id: "job-composition-2")?.status, "queued")
     }
 
     func testStatusClientReportsExistingRevokedAndMissingProfiles() throws {
