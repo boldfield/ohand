@@ -155,7 +155,7 @@ struct RetentionSettingsView: View {
 
 extension RetentionSettingsModel {
     /// The model as the app assembles it: the root's retention controls, gated by the root's read scope.
-    static func assembled(root: ServiceCompositionRoot) -> RetentionSettingsModel {
+    nonisolated static func assembled(root: ServiceCompositionRoot) -> RetentionSettingsModel {
         RetentionSettingsModel(
             controls: root.retentionControls, readScope: { [weak root] in root?.readScope ?? .captureOnly })
     }

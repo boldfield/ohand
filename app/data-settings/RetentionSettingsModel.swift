@@ -70,7 +70,7 @@ final class RetentionSettingsModel: ObservableObject {
     private let readScope: () -> CompositionReadScope
     private var generation = 0
 
-    init(controls: RetentionControlling, readScope: @escaping () -> CompositionReadScope) {
+    nonisolated init(controls: RetentionControlling, readScope: @escaping () -> CompositionReadScope) {
         self.controls = controls
         self.readScope = readScope
     }
