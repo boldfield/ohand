@@ -146,6 +146,89 @@ final class ItemDeletionRootIntegrationTests: XCTestCase {
         XCTAssertEqual(scalar("SELECT COUNT(*) FROM deletion_work"), "0")
     }
 
+    func testAProgressAnswerThatArrivesAfterARelockIsDiscardedThroughTheRoot() throws {
+        let session = ReadAuthenticationSession(boundary: FakeReadAuthenticationBoundary())
+        session.authenticate(reason: "test") { _ in }
+        let root = try makeRoot(session: session, modules: [])
+        defer { root.shutDown() }
+        let (itemID, _) = try saveCapture(root)
+        let deletion = root.itemDeletion
+
+        // The root routes core events on the main run loop, so the answer cannot be delivered while this thread is
+        // not pumping it. Relock after the read has been issued but before the answer is pumped in. If the relock
+        // wins the race with issuing the read, the read is refused as not authenticated and the attempt is repeated.
+        var delay: TimeInterval = 0.05
+        for _ in 0..<6 {
+            if session.scope != .authenticated { session.authenticate(reason: "test") { _ in } }
+            let box = DeletionResultBox<ItemDeletionProgress>()
+            Task {
+                do { box.set(.success(try await deletion.progress(itemID: itemID))) } catch { box.set(.failure(error)) }
+            }
+            Thread.sleep(forTimeInterval: delay)
+            XCTAssertNil(box.value, "the answer is held until the main run loop is pumped")
+            session.relock(.explicit)
+            XCTAssertTrue(pump(until: { box.value != nil }), "the call never completed")
+            switch try XCTUnwrap(box.value) {
+            case .success:
+                return XCTFail("a progress answer that arrived after a relock must not be delivered")
+            case .failure(let error):
+                if (error as? ItemDeletionError) == .notAuthenticated {
+                    delay *= 2
+                    continue
+                }
+                return XCTAssertEqual(error as? ItemDeletionError, .relocked)
+            }
+        }
+        XCTFail("the read was never issued before the relock")
+    }
+
+    func testTheClientOverTheRealCoreDiscardsAProgressAnswerAfterARelockButReportsTheDeletion() throws {
+        let seedingSession = ReadAuthenticationSession(boundary: FakeReadAuthenticationBoundary())
+        seedingSession.authenticate(reason: "test") { _ in }
+        let seedingRoot = try makeRoot(session: seedingSession, modules: [])
+        let (itemID, _) = try saveCapture(seedingRoot)
+        seedingRoot.shutDown()
+        let start = try revision(of: itemID)
+
+        let session = ReadAuthenticationSession(boundary: FakeReadAuthenticationBoundary())
+        session.authenticate(reason: "test") { _ in }
+        let core = try CoreHandle(path: databasePath)
+        defer { core.close() }
+        let gate = PrivateReadGate(session: session, source: NoOtherReadsSource())
+        let client = CoreItemDeletionClient(core: core, gate: gate)
+        var held: [CoreEvent] = []
+        try core.setEventHandler { held.append($0) }
+
+        let progressOutcome = DeletionResultBox<ItemDeletionAnswer>()
+        let deletionOutcome = DeletionResultBox<ItemDeletionAnswer>()
+        client.submit(.progress(itemID: itemID)) { result in progressOutcome.set(result.mapError { $0 as Error }) }
+        client.submit(.markDeleted(itemID: itemID, expectedRevision: start)) { result in
+            deletionOutcome.set(result.mapError { $0 as Error })
+        }
+        session.relock(.enteredBackground)
+        XCTAssertTrue(pump(until: { held.count == 2 }), "the core answers both requests")
+        for event in held {
+            XCTAssertTrue(client.handle(event), "the client claims its own answers")
+        }
+
+        guard case .failure(let refusal)? = progressOutcome.value else {
+            return XCTFail("the progress answer must not be delivered after a relock")
+        }
+        XCTAssertEqual((refusal as? CoreFailure)?.code, "read_relocked")
+        let recorded = try XCTUnwrap(deletionOutcome.value).get()
+        XCTAssertEqual(recorded.outcome, "deletion_recorded", "a confirmed write is reported after a relock")
+        XCTAssertEqual(recorded.itemID, itemID)
+
+        let refusedBeforeAsking = DeletionResultBox<ItemDeletionAnswer>()
+        client.submit(.progress(itemID: itemID)) { result in refusedBeforeAsking.set(result.mapError { $0 as Error }) }
+        guard case .failure(let notAuthenticated)? = refusedBeforeAsking.value else {
+            return XCTFail("a capture-only session must not read progress")
+        }
+        XCTAssertEqual((notAuthenticated as? CoreFailure)?.code, "read_not_authenticated")
+        XCTAssertEqual(held.count, 2, "the refused read never reached the core")
+        client.shutDown()
+    }
+
     func testTheDeletionRangeIsReservedAndDisjointFromTheOthers() throws {
         let ranges = ServiceCompositionRoot.reservedOperationRanges
         let mine = try XCTUnwrap(ranges.first { $0.name == ServiceCompositionRoot.itemDeletionClientName })
@@ -168,7 +251,14 @@ final class ItemDeletionRootIntegrationTests: XCTestCase {
             session.authenticate(reason: "test") { _ in }
             XCTAssertEqual(session.scope, .authenticated)
         }
-        return try ServiceCompositionRoot(
+        return try makeRoot(session: session, modules: modules, center: center)
+    }
+
+    private func makeRoot(
+        session: ReadAuthenticationSession, modules: [CompositionModule],
+        center: FakeNotificationCenter = FakeNotificationCenter()
+    ) throws -> ServiceCompositionRoot {
+        try ServiceCompositionRoot(
             testing: CompositionConfiguration(
                 storageRootPath: storageRoot.path, captureRouteID: Self.routeID, jobRetryDelaySeconds: 3600),
             environment: CompositionEnvironment(
@@ -262,6 +352,19 @@ final class ItemDeletionRootIntegrationTests: XCTestCase {
         defer { sqlite3_finalize(statement) }
         guard sqlite3_step(statement) == SQLITE_ROW, let text = sqlite3_column_text(statement, 0) else { return "" }
         return String(cString: text)
+    }
+}
+
+/// A read source for a gate that only ever issues deletion progress reads, which queue their own core command.
+private final class NoOtherReadsSource: PrivateReadSource {
+    func startStoreCheck(operationID: UInt64) throws { throw PrivateReadNotSupportedBySource() }
+    func startGetCapture(operationID: UInt64, captureID: String) throws { throw PrivateReadNotSupportedBySource() }
+    func startItemStatus(operationID: UInt64, itemID: String) throws { throw PrivateReadNotSupportedBySource() }
+    func startRetrieval(operationID: UInt64, request: CoreRetrievalRequest) throws {
+        throw PrivateReadNotSupportedBySource()
+    }
+    func startItemDetail(operationID: UInt64, itemID: String, readScopes: [CoreExportScope]) throws {
+        throw PrivateReadNotSupportedBySource()
     }
 }
 

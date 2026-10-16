@@ -1471,7 +1471,7 @@ public final class ServiceCompositionRoot {
             router.register { itemCorrectionClient.handle($0) }
             undo.append { itemCorrectionClient.shutDown() }
             let itemCorrections = ItemCorrectionService(core: itemCorrectionClient, session: adapters.readSession)
-            let itemDeletionClient = CoreItemDeletionClient(core: core)
+            let itemDeletionClient = CoreItemDeletionClient(core: core, gate: readGate)
             router.register { itemDeletionClient.handle($0) }
             undo.append { itemDeletionClient.shutDown() }
             let itemDeletion = ItemDeletionService(core: itemDeletionClient, session: adapters.readSession)

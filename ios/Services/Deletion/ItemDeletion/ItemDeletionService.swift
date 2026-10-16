@@ -41,6 +41,8 @@ public struct ItemDeletionReceipt: Equatable, Sendable {
 public enum ItemDeletionError: Error, Equatable, Sendable {
     /// The read session is capture-only; nothing was requested from the core.
     case notAuthenticated
+    /// The session relocked while a progress read was in flight; its answer was discarded unread.
+    case relocked
     /// The request was refused before it reached the core (an empty ID or a negative revision).
     case invalidRequest
     /// The item has moved on, or was deleted at another revision; `currentRevision` is what to reload and ask about.
@@ -69,7 +71,9 @@ extension DeletionCleanupService: ItemDeletionCleanup {}
 ///   first applied against is a replay that retries cleanup.
 /// * **Authenticated.** The session must be authenticated when the call is made; a capture-only session gets
 ///   `notAuthenticated` and the core is not asked. A deletion the core confirmed is reported even if the session
-///   relocked while it ran.
+///   relocked while it ran, but only with the progress the deletion answer itself carried.
+/// * **Gated progress.** A progress read reports state derived from stored history, so it goes through the private
+///   read gate: an answer that arrives after a relock is discarded and the caller gets `relocked`.
 public final class ItemDeletionService: @unchecked Sendable {
     private let core: ItemDeletionCore
     private let session: ReadAuthenticationSession
@@ -107,6 +111,8 @@ public final class ItemDeletionService: @unchecked Sendable {
         if let cleanup {
             cleanupSettled = await cleanup.cleanUp(itemID: recorded.itemID).isSettled
         }
+        // A refused or failed read (the session may have relocked meanwhile) falls back to what the deletion answer
+        // itself reported; a fresh read is never delivered without the gate's admission.
         let progress = (try? await readProgress(itemID: recorded.itemID)) ?? recorded.progress
         return ItemDeletionReceipt(
             itemID: recorded.itemID, deletionRevision: recorded.deletionRevision, replayed: recorded.replayed,
@@ -136,6 +142,8 @@ public final class ItemDeletionService: @unchecked Sendable {
             return answer
         case .failure(let failure):
             switch failure.code {
+            case "read_not_authenticated": throw ItemDeletionError.notAuthenticated
+            case "read_relocked": throw ItemDeletionError.relocked
             case "not_found": throw ItemDeletionError.itemNotFound
             case "invalid_request": throw ItemDeletionError.invalidRequest
             default: throw ItemDeletionError.core(failure)

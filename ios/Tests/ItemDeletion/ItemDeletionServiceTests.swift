@@ -171,6 +171,39 @@ final class ItemDeletionServiceTests: XCTestCase {
         XCTAssertFalse(receipt.cleanupSettled)
     }
 
+    func testAProgressReadRefusedByTheGateAfterTheIntentReportsOnlyTheIntentsOwnProgress() async throws {
+        let relocked = CoreFailure(
+            errorClass: .unauthorized, code: "read_relocked", message: "the session relocked before the answer")
+        let (service, core, cleanup) = makeService(
+            [.success(recorded()), .failure(relocked)], cleanup: settled())
+
+        let receipt = try await service.delete(itemID: "item-1", expectedRevision: 1)
+
+        XCTAssertEqual(receipt.deletionRevision, 2, "the confirmed deletion is still reported")
+        XCTAssertEqual(
+            receipt.progress,
+            .inProgress(pending: [.cancelNotifications, .clearIngress, .removeAudio], failed: []),
+            "the receipt carries the deletion answer's progress, not a fresh read")
+        XCTAssertFalse(receipt.cleanupSettled)
+        XCTAssertEqual(cleanup?.items, ["item-1"])
+        XCTAssertEqual(core.commands.count, 2)
+    }
+
+    func testGateRefusalsOfAProgressReadAreReported() async {
+        let (service, _, _) = makeService([
+            .failure(CoreFailure(errorClass: .unauthorized, code: "read_relocked", message: "x")),
+            .failure(CoreFailure(errorClass: .unauthorized, code: "read_not_authenticated", message: "x")),
+        ])
+        for expected in [ItemDeletionError.relocked, .notAuthenticated] {
+            do {
+                _ = try await service.progress(itemID: "item-1")
+                XCTFail("a refused read delivers nothing")
+            } catch {
+                XCTAssertEqual(error as? ItemDeletionError, expected)
+            }
+        }
+    }
+
     func testARepeatedDeletionReportsAReplayAndRetriesCleanup() async throws {
         let (service, _, cleanup) = makeService(
             [.success(recorded(replayed: true)), .success(progress(complete))], cleanup: settled())
