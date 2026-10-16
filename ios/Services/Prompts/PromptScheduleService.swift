@@ -12,8 +12,9 @@ public enum PromptScheduleConfigurationError: Error, Equatable, Sendable {
 /// The core owns the schedule, its ledger and the decision of which prompts exist; this service supplies the device's
 /// current zone and the triggers, and asks the reminder pass (the only thing that installs or cancels a prompt) to
 /// act on what the core persisted. Prompts stay off until `configure(_:)` turns them on. Notification permission is
-/// applied by that same pass under N04b's rules: a denied or provisional permission withholds prompts and never
-/// touches reminders. A prompt carries no content beyond the generic wording the pass installs.
+/// applied by that same pass under N04b's rules: a denied or not-yet-requested permission withholds prompts (and
+/// cancels pending ones) without touching reminders, while a provisional or ephemeral grant is usable and the OS
+/// delivers prompts quietly. A prompt carries no content beyond the generic wording the pass installs.
 public final class PromptScheduleService: @unchecked Sendable {
     /// Runs the reminder pass that installs or cancels prompts from the persisted schedule.
     public typealias Installer = @Sendable (NotificationReconcileTrigger) async throws -> NotificationPermissionReport
