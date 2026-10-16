@@ -2,7 +2,7 @@ import XCTest
 @testable import OhAndCoreBridge
 @testable import OhAndServices
 
-private final class ScriptedAudioReadCore: RetentionControlCore, @unchecked Sendable {
+final class ScriptedAudioReadCore: RetentionControlCore, @unchecked Sendable {
     private let lock = NSLock()
     private var answer: Result<RetentionAudioAnswer, CoreFailure> = .success(
         RetentionAudioAnswer(itemID: "item-1", audioReference: nil, soleSource: false))

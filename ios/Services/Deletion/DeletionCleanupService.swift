@@ -190,6 +190,8 @@ actor DeletionCleanupService {
                 return await recordFailure(work, .unsafeCaptureIdentifier)
             } catch DeletionLocalCleanupError.audioReferenceUnresolvable {
                 return await recordFailure(work, .audioReferenceUnresolvable)
+            } catch PlaybackFenceError.audioInUse {
+                return .retryLater(.audioInPlayback)
             } catch {
                 return .retryLater(.storageUnavailable)
             }

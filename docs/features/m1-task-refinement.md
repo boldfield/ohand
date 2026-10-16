@@ -190,6 +190,9 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
     - V01c's owned file was a sibling of `provider_transport` and could not reach its private transport. Its file moves under `core/src/ffi/provider_transport/`, as `shadow_review` already is.
     - U02a must show each result's type, but no layer of the retrieval answer carries it. R05 adds it; U02a depends on R05.
     - A08's "Delete audio" cannot pass the fence, because `authorize_audio_removal` approves only expired audio, and its "Retry transcription" has no job path to reuse. While tracing the second, the coordinator found that **no production code enqueues a `transcription_attachment` job at all**: voice captures stay `audio_pending` and are never transcribed. C07 queues the job at import, backfills stored voice captures at drain start and provides the requeue function; A14 adds the user-initiated removal decision. A08 keeps all its criteria and depends on both.
+  - **Missing seams, round 2 (coordinator, 2026-10-16).** Two tasks blocked with accurate reports. Each was checked against main `f2594f2`.
+    - **A09** needs a deletion hook in A05's `ItemDeletionService` and a playback fence in the services that `LifecycleCoordinator` builds. Both reviewers of PR #252 rejected those edits as outside A09's paths. GPT also found a race: the PR ended playback *before* the core accepted the deletion. A stale or refused deletion then stopped playback for nothing, and an open between the callback and the commit survived the deletion. A05 has landed, so A09 gets a narrow grant instead of a predecessor task (see A09). The observer fires only after the intent is recorded.
+    - **T11**'s round-2 rejection is correct. Self-hosted enablement is decided once, synchronously, before modules attach (`CompositionRoot.swift:1755-1760`). The profile-status read answers later and has no consumer. So a registration naming a missing, revoked, wrong-protocol or wrong-model profile still enables self-hosted dispatch for *every* stored self-hosted profile. The coordinator chose a core gate over a root hook that switches the protocol on after the async read. A root hook would still enable every self-hosted profile once the registered one validated, and it opens a window between attach and the read. A core gate checks at each dispatch and needs no ordering. T11e restricts self-hosted dispatch to registered (profile version, model) pairs and lets modules declare them. T11 depends on T11e and needs no root edit.
 
 ## Why some tasks stay together
 
@@ -866,6 +869,40 @@ Acceptance:
 
 Source pointers: `ios/Services/Assembly/CompositionRoot.swift:156`, `:261`.
 
+### T11e
+
+Restrict self-hosted dispatch to the registered profile and model
+
+Make the core's self-hosted gate name a stored profile version and model, not only the protocol, so that a build's self-hosted registration decides what can be sent: only the registered profile serving the registered model dispatches. Let modules declare those pairs at the composition root.
+
+Owned paths: `core/src/ffi/provider_transport.rs`, `core/src/ffi/provider_transport/` (including `protocols.rs` and `connection_check.rs`), `core/src/ffi/job_runner.rs`, `core/src/ffi/job_runner/`, `ios/OhAndCoreBridge/CoreHandle+ProviderTransport.swift`, `ios/OhAndCoreBridge/CoreHandle+JobRunner.swift`. In `ios/Services/Assembly/CompositionRoot.swift`, only the `CompositionModule` declaration (`:390-409`) and the protocol-enable block in assembly (`:1755-1760`). Also `ios/Tests/Services/CompositionRootTests.swift`.
+
+Dependencies: A10 (root chain; shared `CompositionRoot.swift`).
+
+Acceptance:
+
+1. A core-handle call replaces the handle's self-hosted registrations, a list of (profile version, model) pairs. The default is none.
+   - Enabling the self-hosted protocol (T11c) stays necessary but is no longer sufficient.
+   - Every path that sends to a self-hosted endpoint sends only when the stored profile version and model match a registered pair. Those paths are: the job-runner drain, `prepare`/`run_exchange`, shadow-review dispatch and V01c's connection check.
+   - Otherwise the request is refused with a distinct normalized code (for example `self_hosted_not_registered`) and nothing is sent. The drain puts the job back without spending retry budget, as it does for `protocol_not_enabled`.
+   - Malformed input (an empty profile version or model) is `invalid_request`.
+2. The Anthropic and OpenAI protocols are unaffected. A registration changes no other check: execution resolution, destinations, credentials, staleness and revocation apply as before, so a registered profile that is revoked is still refused. Setting registrations reads no profile content and reports none.
+3. `CompositionModule` gains a declaration of self-hosted registrations, defaulting to empty. During assembly, under undo-on-failure, the root passes the union of the modules' declarations to the core next to the protocol set. Undo restores no registrations. No `CoreHandle` becomes public.
+4. Tests:
+   - **Rust, for each sending path:**
+     - a registered pair dispatches;
+     - a second stored `supported` self-hosted profile sends nothing, and so does the registered profile under a different model, while the registered pair still dispatches;
+     - self-hosted enabled with no registrations sends nothing;
+     - replacing the registrations with none stops new dispatches;
+     - a registered but revoked profile is refused.
+   - **Root:**
+     - a module declaring self-hosted with no registration sends nothing;
+     - a module declaring self-hosted and a registration dispatches only the registered profile's job, and a different valid supported self-hosted job stays queued.
+
+   Existing tests pass. Fixtures that rely on self-hosted dispatch register their profile, including T11d's root test. `make check` and `make test` pass. The exact-head macOS CI run is linked.
+
+Source pointers: `core/src/ffi/provider_transport/protocols.rs:41-56` (`is_enabled`/`ensure_enabled`), `:65`; `ios/Services/Assembly/CompositionRoot.swift:398`, `:1755`.
+
 ### C04c
 
 Give the voice handoff an honest result for unavailable audio
@@ -1292,6 +1329,16 @@ Play retained audio safely
 Give `app/` a way to play an item's retained audio without exposing protected storage, and fence playback against removal.
 
 Owned paths: `ios/Services/AudioRetention/` (only the playback seam), `ios/Services/Playback/` (new), `ios/Tests/Playback/` (new), registrations under the capability client allowance.
+
+Grant (coordinator, 2026-10-16, after PR #252 round 1). A05 has landed. In addition to the paths above, A09 may make these edits and no others:
+
+1. `ios/Services/Deletion/ItemDeletion/ItemDeletionService.swift`: one setter for a deletion-intent observer, following the `setCleanupProvider` pattern, and one call to it in `delete`. The call comes after `Self.recorded(from:)` returns, so the core has recorded the intent (a replay counts), and before cleanup runs. It is never made for a refused, stale, failed or unreadable deletion.
+2. `ios/Services/Deletion/DeletionCleanupService.swift`, `DeletionLocalCleanup.swift` and, if needed, one new retry reason in `DeletionCleanupModels.swift`: an optional audio-removal fence. It defaults to none, so existing construction and tests are unchanged. `removeAudio` consults it. A held file stays in place, and the step stays pending for retry without being counted toward terminal failure.
+3. In `ios/Services/AudioRetention/`, the fence covers every removal path of `AudioRetentionService`, including A14's `removeAudioForUser` as well as the sweep.
+4. `ios/Services/Assembly/LifecycleCoordinator.swift`: one setter or late-bound provider that passes the fence to the `DeletionCleanupService` and `AudioRetentionService` built in `connect` (`:529-531`).
+5. `ios/Services/Assembly/CompositionRoot.swift`: inside A09's own registration block, connect the playback service as the deletion-intent observer and as the lifecycle fence, and clear both in its shutdown line. Root behaviour otherwise does not change.
+
+Resubmission adds a deterministic regression through the production `ItemDeletionService` and root seam. It shows that a stale or refused deletion leaves playback open, and that a recorded deletion ends playback before cleanup runs. The exact-head macOS CI run is linked in the PR body and the task result.
 
 Dependencies: A08 (shared retention service).
 

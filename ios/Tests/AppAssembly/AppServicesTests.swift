@@ -30,6 +30,7 @@ final class AppServicesTests: XCTestCase {
         handoff: CaptureEntryHandoff = CaptureEntryHandoff(notificationCenter: NotificationCenter()),
         notificationCenter: NotificationCenter = NotificationCenter(),
         voice: VoiceCaptureServices? = nil,
+        timeSources: TimeSources = .system,
         protectedDataAvailable: Bool = true
     ) throws -> AppServices {
         let lifecycle = LifecycleCoordinator()
@@ -39,6 +40,7 @@ final class AppServicesTests: XCTestCase {
             root: root, lifecycle: lifecycle, handoff: handoff, voice: voice,
             notificationHooks: NotificationHooks(installDelegate: { _ in }, reconcile: { _ in }),
             notificationCenter: notificationCenter,
+            timeSources: timeSources,
             isProtectedDataAvailable: { protectedDataAvailable })
         created.append(services)
         return services
@@ -108,6 +110,35 @@ final class AppServicesTests: XCTestCase {
 
         XCTAssertEqual(services.captureEntry.textModel.text, "remind me to call the roofer")
         XCTAssertEqual(services.captureEntry.acknowledgment?.save, .notSaved)
+    }
+
+    // MARK: time changes
+
+    func testAStartedAppReconcilesOnceWhenASystemTimeZoneCallbackReportsARealChange() async throws {
+        let callbacks = NotificationCenter()
+        let time = ManualTime(wall: Date(), zone: TimeZone(identifier: "America/New_York")!)
+        let services = try makeServices(notificationCenter: callbacks, timeSources: time.sources)
+        services.start(isActive: false)
+        XCTAssertEqual(services.lifecycle.finishedPassCount, 0, "starting inactive runs no pass")
+
+        // A callback that finds nothing changed requests nothing.
+        callbacks.post(name: .NSSystemTimeZoneDidChange, object: nil)
+        let heldNoChange = await timeChangeWaitUntil { time.sleeperCount == 1 }
+        XCTAssertTrue(heldNoChange)
+        time.releaseTimers()
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(services.lifecycle.finishedPassCount, 0, "no change, no pass")
+
+        // The person lands in another zone and the system repeats the callback.
+        time.travel(to: TimeZone(identifier: "America/Los_Angeles")!)
+        for _ in 0..<3 { callbacks.post(name: .NSSystemTimeZoneDidChange, object: nil) }
+        let held = await timeChangeWaitUntil { time.sleeperCount == 3 }
+        XCTAssertTrue(held)
+        time.releaseTimers()
+        let reconciled = await timeChangeWaitUntil { services.lifecycle.finishedPassCount == 1 }
+        XCTAssertTrue(reconciled)
+        XCTAssertEqual(services.lifecycle.lastReport?.triggers, [.systemTimeChange])
+        XCTAssertEqual(services.timeChange.reportedChangeCount, 1)
     }
 
     // MARK: entries

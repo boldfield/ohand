@@ -94,8 +94,8 @@ public final class ItemDeletionService: @unchecked Sendable {
         lock.unlock()
     }
 
-    /// Sets what is told, before the deletion is requested from the core, that `itemID` is about to be deleted (it ends
-    /// the item's open audio playback).
+    /// Sets what is told, once the core has recorded the deletion of `itemID` and before cleanup runs, that it is
+    /// deleted (it ends the item's open audio playback).
     func setIntentObserver(_ observer: (@Sendable (String) -> Void)?) {
         lock.lock()
         intentObserver = observer
@@ -113,12 +113,13 @@ public final class ItemDeletionService: @unchecked Sendable {
     public func delete(itemID: String, expectedRevision: Int) async throws -> ItemDeletionReceipt {
         guard session.currentAuthorization() != nil else { throw ItemDeletionError.notAuthenticated }
         guard !itemID.isEmpty, expectedRevision >= 0 else { throw ItemDeletionError.invalidRequest }
+        let answer = try await ask(.markDeleted(itemID: itemID, expectedRevision: expectedRevision))
+        let recorded = try Self.recorded(from: answer)
+        // Only a recorded deletion (a replay counts) ends playback; a refused, stale or failed one never reaches here.
         lock.lock()
         let observer = intentObserver
         lock.unlock()
-        observer?(itemID)
-        let answer = try await ask(.markDeleted(itemID: itemID, expectedRevision: expectedRevision))
-        let recorded = try Self.recorded(from: answer)
+        observer?(recorded.itemID)
 
         var cleanupSettled = false
         if let cleanup {

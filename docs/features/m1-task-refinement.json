@@ -2136,6 +2136,38 @@
       ]
     },
     {
+      "key": "T11e",
+      "parent": "T11",
+      "title": "Restrict self-hosted dispatch to the registered profile and model",
+      "file_scope": [
+        "core/src/ffi/provider_transport.rs",
+        "core/src/ffi/provider_transport/",
+        "core/src/ffi/job_runner.rs",
+        "core/src/ffi/job_runner/",
+        "ios/OhAndCoreBridge/CoreHandle+ProviderTransport.swift",
+        "ios/OhAndCoreBridge/CoreHandle+JobRunner.swift",
+        "ios/Services/Assembly/CompositionRoot.swift:390",
+        "ios/Services/Assembly/CompositionRoot.swift:1755",
+        "ios/Tests/Services/CompositionRootTests.swift"
+      ],
+      "intent": "Self-hosted dispatch requires a registered (profile version, model) pair in every sending path; modules declare registrations at the root.",
+      "acceptance": [
+        "Core call replaces self-hosted registrations (default none); drain, prepare/run_exchange, shadow review and connection check send to self-hosted only for a registered pair; otherwise a distinct normalized refusal, nothing sent, drain requeues without retry budget.",
+        "Base protocols unaffected; revocation, staleness, destination and credential checks unchanged; no profile content read or reported.",
+        "CompositionModule declares registrations (default empty); root passes the union under undo; no public CoreHandle.",
+        "Rust and root tests incl. a second valid self-hosted profile and a wrong model sending nothing while the registered pair dispatches; make check/test; macOS CI."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "A10"
+      ],
+      "source_pointers": [
+        "core/src/ffi/provider_transport/protocols.rs:41",
+        "ios/Services/Assembly/CompositionRoot.swift:398",
+        "ios/Services/Assembly/CompositionRoot.swift:1755"
+      ]
+    },
+    {
       "key": "C04c",
       "parent": "C04",
       "title": "Give the voice handoff an honest result for unavailable audio",
@@ -2644,7 +2676,12 @@
       "file_scope": [
         "ios/Services/AudioRetention/",
         "ios/Services/Playback/",
-        "ios/Tests/Playback/"
+        "ios/Tests/Playback/",
+        "ios/Services/Deletion/ItemDeletion/ItemDeletionService.swift",
+        "ios/Services/Deletion/DeletionCleanupService.swift",
+        "ios/Services/Deletion/DeletionLocalCleanup.swift",
+        "ios/Services/Deletion/DeletionCleanupModels.swift",
+        "ios/Services/Assembly/LifecycleCoordinator.swift:529"
       ],
       "intent": "Give `app/` a way to play an item's retained audio without exposing protected storage, and fence playback against removal.",
       "acceptance": [
@@ -3197,6 +3234,7 @@
       "T11b",
       "T11c",
       "T11d",
+      "T11e",
       "V09"
     ],
     "U01": [
@@ -3510,7 +3548,10 @@
     "F17": [],
     "R05": [],
     "A14": [],
-    "C07": []
+    "C07": [],
+    "T11e": [
+      "A10"
+    ]
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -3668,6 +3709,10 @@
     {
       "date": "2026-10-15",
       "change": "Missing seams from blocked tasks: F17 (bench transport teardown flake; F15 depends on it), R05 (item type on retrieval hits; U02a depends on it), A14 (user-initiated audio removal in the fence) and C07 (queue transcription jobs at import, backfill, requeue; no production path created them) added; A08 depends on A14 and C07 and may make Command::policy read the stored setting; V01c's file moved under core/src/ffi/provider_transport/."
+    },
+    {
+      "date": "2026-10-16",
+      "change": "Missing seams round 2: A09 granted a post-commit deletion-intent observer in ItemDeletionService, an optional audio-removal fence in deletion cleanup and all AudioRetentionService removals, and their LifecycleCoordinator/root wiring; T11e added (core gate restricts self-hosted dispatch to registered profile/model pairs, modules declare them at the root); T11 depends on T11e."
     }
   ]
 }

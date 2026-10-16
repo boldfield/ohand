@@ -91,6 +91,8 @@ final class RetrievalSearchNavigationTests: XCTestCase {
         destinations.item = { _, itemID in AnyView(Text("source detail \(itemID)")) }
         let context = ManagementContext(
             voiceRecovery: services.managementContext.voiceRecovery, retrieval: searchModel,
+            retention: services.managementContext.retention,
+            promptSettings: services.managementContext.promptSettings,
             retrievalRenderReporter: { [unowned self] in rendered = $0 })
         let rootView = AppRootView(
             navigation: navigation, captureEntry: services.captureEntry, context: context,

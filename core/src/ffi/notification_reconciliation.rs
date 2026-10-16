@@ -17,6 +17,9 @@
 //!   read as omitted, so `{"pending":null}` or `{"error":null}` cannot pass for `{}`. A command that is not answered
 //!   within `EFFECT_DEADLINE` is abandoned (`OHAND_NOTIFICATION_COMMAND_ABANDON`) and counts as a
 //!   transient failure, which the next pass retries; a late answer is `not_found` and ignored.
+//!   Clearing or replacing the registration ends a command waiting on it at once as a transient
+//!   failure, without an abandon call, and closing the handle stops the pass before its next
+//!   command: the callback is never invoked for a command begun after either.
 //! * `ohand_core_start_reconcile_reminders` queues one pass. The request is
 //!   `{"rearm_rejected_schedules","allow_optional_prompts","prompts":[{"notification_id",
 //!   "fire_at"}],"facts_only"}`. `rearm_rejected_schedules` re-opens the current generation's
@@ -136,6 +139,10 @@ impl Registration {
 
     fn deactivate(&self) {
         *lock(&self.active) = false;
+    }
+
+    fn is_active(&self) -> bool {
+        *lock(&self.active)
     }
 }
 
@@ -421,6 +428,12 @@ impl NativeEffects {
         reply: Reply,
         payload: &dyn Fn(u64) -> Vec<u8>,
     ) -> AnswerResult {
+        if instance::lookup(self.handle).is_err() {
+            return Err(NotificationEffectError::new(
+                ErrorClass::Cancelled,
+                "effects_cancelled",
+            ));
+        }
         let effect_id = NEXT_EFFECT_ID.fetch_add(1, Ordering::SeqCst);
         let (sender, receiver) = channel();
         let key = (self.handle, effect_id);
@@ -445,6 +458,12 @@ impl NativeEffects {
                     ))
                 }
                 Err(RecvTimeoutError::Timeout) => {}
+            }
+            if !self.registration.is_active() {
+                return Err(NotificationEffectError::new(
+                    ErrorClass::Transient,
+                    "effects_unavailable",
+                ));
             }
             let abandoned = if instance::lookup(self.handle).is_err() {
                 Some("effects_cancelled")
