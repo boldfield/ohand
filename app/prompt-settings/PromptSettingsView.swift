@@ -18,6 +18,7 @@ struct PromptSettingsView: View {
         switch notice {
         case .saved: return "Saved."
         case .savedNotificationsOff: return "Saved, but notifications are not allowed for Oh And, so no prompt will appear. Allow them in iOS Settings; prompts are not sent later to catch up."
+        case .savedWaitingForRoom: return "Saved, but your reminders are using every notification slot the system allows, so prompts wait. They start when there is room, only for the next \(PromptSettingsModel.horizonDays) days; days that passed are skipped."
         case .savedNotYetApplied: return "Saved. Prompts could not be updated just now and will be updated the next time you open the app."
         case .notSaved: return "That change could not be saved. Your earlier choice is still in place."
         case .unreadable: return "Your prompt setting could not be read. Prompts stay as they were."

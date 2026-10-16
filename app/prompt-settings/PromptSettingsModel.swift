@@ -6,7 +6,7 @@ import OhAndServices
 /// The prompt schedule operations this screen needs. `PromptScheduleService` is the production implementation.
 protocol PromptSettingsControlling: AnyObject, Sendable {
     func read() async throws -> PromptScheduleOutcome
-    func configure(_ setting: PromptScheduleSetting) async throws -> PromptScheduleOutcome
+    func configureReportingPass(_ setting: PromptScheduleSetting) async throws -> PromptScheduleChange
 }
 
 extension PromptScheduleService: PromptSettingsControlling {}
@@ -17,6 +17,8 @@ enum PromptSettingsNotice: Equatable {
     case saved
     /// The choice is saved, but the system will not show prompts until notifications are allowed.
     case savedNotificationsOff
+    /// The choice is saved, but explicit reminders hold every notification slot the system allows, so prompts wait.
+    case savedWaitingForRoom
     /// The choice is saved; installing or cancelling the prompts did not finish and the next app open finishes it.
     case savedNotYetApplied
     /// The choice was not saved and the screen shows what is stored.
@@ -32,7 +34,7 @@ enum PromptSettingsNotice: Equatable {
 /// * Every change is one configure call. Turning prompts off is the same call, so cancellation persists and is applied
 ///   by the core's reminder pass; this type never touches reminders, so explicit reminders are unaffected.
 /// * A change that could not be saved leaves the stored choice on screen. A change that was saved but not yet applied
-///   (permission denied, capacity or an install failure) is shown as saved; nothing is retried in a burst here, because
+///   (permission denied, no room or an install failure) is shown as saved with the reason, read from the pass report; nothing is retried in a burst here, because
 ///   the core refills only the bounded horizon on launch.
 /// * Nothing shown comes from stored items.
 /// Confined to the main queue; the entry points that change state run on the main actor.
@@ -57,7 +59,7 @@ final class PromptSettingsModel: ObservableObject {
         self.controller = controller
         self.calendar = calendar
         nextPromptFormatter = ISO8601DateFormatter()
-        nextPromptFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        nextPromptFormatter.formatOptions = [.withInternetDateTime]
         time = Self.date(hour: Self.defaultTime.hour, minute: Self.defaultTime.minute, calendar: calendar)
     }
 
@@ -93,25 +95,31 @@ final class PromptSettingsModel: ObservableObject {
         return .daily(hour: components.hour ?? Self.defaultTime.hour, minute: components.minute ?? 0)
     }
 
-    private func apply(_ setting: PromptScheduleSetting) async {
+    @MainActor private func apply(_ setting: PromptScheduleSetting) async {
         isBusy = true
         defer { isBusy = false }
         do {
-            adopt(try await controller.configure(setting))
-            notice = .saved
-        } catch let PromptScheduleConfigurationError.installIncomplete(outcome, report) {
-            adopt(outcome)
-            switch report.permission {
-            case .denied, .notRequested: notice = .savedNotificationsOff
-            case .usable: notice = .savedNotYetApplied
-            }
+            let change = try await controller.configureReportingPass(setting)
+            adopt(change.outcome)
+            notice = Self.notice(after: setting, report: change.report)
         } catch {
             notice = .notSaved
             if let stored = try? await controller.read() { adopt(stored) }
         }
     }
 
-    private func adopt(_ outcome: PromptScheduleOutcome) {
+    /// Classifies the pass that followed a saved change from its report. Turning prompts off only needs the pass to
+    /// have finished; turning them on also needs permission and room.
+    private static func notice(after setting: PromptScheduleSetting, report: NotificationPermissionReport) -> PromptSettingsNotice {
+        if case .daily = setting, !report.readiness.optionalPromptsAllowed { return .savedNotificationsOff }
+        if report.reconciliationFailure != nil || !report.converged { return .savedNotYetApplied }
+        guard case .daily = setting else { return .saved }
+        if report.promptsWithheld > 0 { return .savedNotYetApplied }
+        if report.promptsDeferred > 0 { return .savedWaitingForRoom }
+        return .saved
+    }
+
+    @MainActor private func adopt(_ outcome: PromptScheduleOutcome) {
         isEnabled = outcome.enabled
         if outcome.enabled, let stored = outcome.time {
             time = Self.date(hour: stored.hour, minute: stored.minute, calendar: calendar)

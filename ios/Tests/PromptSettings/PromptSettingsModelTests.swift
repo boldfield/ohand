@@ -8,6 +8,7 @@ private final class ScriptedPromptController: PromptSettingsControlling, @unchec
     private var stored: PromptScheduleOutcome
     private(set) var configured: [PromptScheduleSetting] = []
     var configureError: Error?
+    var passReport: NotificationPermissionReport?
     var readError: Error?
 
     init(stored: PromptScheduleOutcome = ScriptedPromptController.outcome(enabled: false)) {
@@ -27,17 +28,22 @@ private final class ScriptedPromptController: PromptSettingsControlling, @unchec
         return stored
     }
 
-    func configure(_ setting: PromptScheduleSetting) async throws -> PromptScheduleOutcome {
+    func configureReportingPass(_ setting: PromptScheduleSetting) async throws -> PromptScheduleChange {
         lock.lock(); defer { lock.unlock() }
-        if let configureError, !(configureError is PromptScheduleConfigurationError) { throw configureError }
+        if let configureError { throw configureError }
         configured.append(setting)
         switch setting {
         case .off: stored = Self.outcome(enabled: false)
         case .daily(let hour, let minute): stored = Self.outcome(enabled: true, hour: hour, minute: minute)
         }
-        if let configureError { throw configureError }
-        return stored
+        let report = passReport ?? ScriptedPromptController.cleanReport
+        return PromptScheduleChange(outcome: stored, report: report)
     }
+
+    static let cleanReport = NotificationPermissionReport(
+        permission: .usable, transition: .unchanged, trigger: .explicit,
+        readiness: NotificationReadinessReport(permission: .usable, reminders: []),
+        promptsGranted: 3, promptsDeferred: 0, promptsWithheld: 0, reconciliationFailure: nil, converged: true)
 }
 
 private struct CallFailed: Error {}
@@ -50,11 +56,15 @@ final class PromptSettingsModelTests: XCTestCase {
         return calendar
     }()
 
-    private func report(permission: NotificationPermissionState) -> NotificationPermissionReport {
+    /// A pass that converged, the way the real service reports a denied permission or a full budget.
+    private func report(
+        permission: NotificationPermissionState, deferred: Int = 0, withheld: Int = 0, converged: Bool = true
+    ) -> NotificationPermissionReport {
         NotificationPermissionReport(
             permission: permission, transition: .unchanged, trigger: .explicit,
             readiness: NotificationReadinessReport(permission: permission, reminders: []),
-            promptsGranted: 0, promptsDeferred: 0, promptsWithheld: 0, reconciliationFailure: nil, converged: false)
+            promptsGranted: 0, promptsDeferred: deferred, promptsWithheld: withheld, reconciliationFailure: nil,
+            converged: converged)
     }
 
     func testPromptsAreOffByDefault() async {
@@ -104,7 +114,7 @@ final class PromptSettingsModelTests: XCTestCase {
 
     func testTurningOffPersistsAndClearsTheNextPrompt() async {
         let controller = ScriptedPromptController(
-            stored: ScriptedPromptController.outcome(enabled: true, fireAt: "2026-10-17T09:00:00.000Z"))
+            stored: ScriptedPromptController.outcome(enabled: true, fireAt: "2026-10-17T09:00:00Z"))
         let model = PromptSettingsModel(controller: controller, calendar: calendar)
         await model.load()
         XCTAssertNotNil(model.nextPrompt)
@@ -129,8 +139,7 @@ final class PromptSettingsModelTests: XCTestCase {
 
     func testADeniedPermissionIsSavedAndExplainedWithoutRetrying() async {
         let controller = ScriptedPromptController()
-        controller.configureError = PromptScheduleConfigurationError.installIncomplete(
-            ScriptedPromptController.outcome(enabled: true), report(permission: .denied))
+        controller.passReport = report(permission: .denied, withheld: 3)
         let model = PromptSettingsModel(controller: controller, calendar: calendar)
         await model.load()
         await model.setEnabled(true)
@@ -139,26 +148,53 @@ final class PromptSettingsModelTests: XCTestCase {
         XCTAssertEqual(controller.configured.count, 1, "no catch-up attempt")
     }
 
-    func testAnIncompleteInstallWithPermissionIsSavedForTheNextOpen() async {
+    func testAFullBudgetIsSavedAndExplainedAsWaiting() async {
         let controller = ScriptedPromptController()
-        controller.configureError = PromptScheduleConfigurationError.installIncomplete(
-            ScriptedPromptController.outcome(enabled: true), report(permission: .usable))
+        controller.passReport = report(permission: .usable, deferred: 3)
+        let model = PromptSettingsModel(controller: controller, calendar: calendar)
+        await model.load()
+        await model.setEnabled(true)
+        XCTAssertTrue(model.isEnabled)
+        XCTAssertEqual(model.notice, .savedWaitingForRoom)
+        XCTAssertEqual(controller.configured.count, 1, "no catch-up attempt")
+    }
+
+    func testTurningOffUnderADeniedPermissionIsJustSaved() async {
+        let controller = ScriptedPromptController(stored: ScriptedPromptController.outcome(enabled: true))
+        controller.passReport = report(permission: .denied)
+        let model = PromptSettingsModel(controller: controller, calendar: calendar)
+        await model.load()
+        await model.setEnabled(false)
+        XCTAssertEqual(model.notice, .saved)
+    }
+
+    func testAnUnconvergedPassWithPermissionIsSavedForTheNextOpen() async {
+        let controller = ScriptedPromptController()
+        controller.passReport = report(permission: .usable, converged: false)
         let model = PromptSettingsModel(controller: controller, calendar: calendar)
         await model.load()
         await model.setEnabled(true)
         XCTAssertEqual(model.notice, .savedNotYetApplied)
     }
 
-    func testTheWordsExplainHorizonRefillAndNeverNameStoredContent() {
+    func testTheNextPromptParsesTheCoresWholeSecondTimestamp() async {
+        let controller = ScriptedPromptController(
+            stored: ScriptedPromptController.outcome(enabled: true, fireAt: "2026-10-17T09:00:00Z"))
+        let model = PromptSettingsModel(controller: controller, calendar: calendar)
+        await model.load()
+        XCTAssertEqual(model.nextPrompt, Date(timeIntervalSince1970: 1_792_227_600))
+    }
+
+    func testTheWordsExplainHorizonAndRefill() {
         let words = [PromptSettingsView.introText, PromptSettingsView.horizonText, PromptSettingsView.privacyText,
                      PromptSettingsView.remindersText] + [
-            PromptSettingsNotice.saved, .savedNotificationsOff, .savedNotYetApplied, .notSaved, .unreadable,
+            PromptSettingsNotice.saved, .savedNotificationsOff, .savedWaitingForRoom, .savedNotYetApplied, .notSaved, .unreadable,
         ].map(PromptSettingsView.text(for:))
         XCTAssertTrue(PromptSettingsView.horizonText.contains("3 days"))
         XCTAssertTrue(PromptSettingsView.horizonText.contains("each time you open the app"))
         XCTAssertTrue(PromptSettingsView.horizonText.contains("never sent together"))
         XCTAssertTrue(PromptSettingsView.remindersText.contains("separate"))
         XCTAssertEqual(PromptSettingsModel.horizonDays, 3)
-        XCTAssertFalse(words.isEmpty)
+        XCTAssertTrue(words.allSatisfy { !$0.isEmpty })
     }
 }
