@@ -3,6 +3,9 @@ import SwiftUI
 /// What the host hands each management screen when it builds it: the models that screens present.
 struct ManagementContext {
     let voiceRecovery: VoiceRecoveryModel
+    let retrieval: RetrievalSearchModel
+    /// Lets a hosted test see what the search screen shows; production leaves it unset.
+    var retrievalRenderReporter: (([String: RetrievalRenderedElement]) -> Void)?
 }
 
 /// Frames of the placeholder screens, keyed by accessibility identifier, so a hosted test can see that they render.
@@ -76,7 +79,7 @@ enum ManagementCatalog {
 
     /// Screens the capture surface links to. They are secondary: capture is always the first screen.
     static let secondaryEntries: [ManagementEntry] = [
-        ManagementEntry(id: searchEntryID, title: "Search", systemImage: "magnifyingglass") { _ in AnyView(SearchPlaceholderView()) },
+        ManagementEntry(id: searchEntryID, title: "Search", systemImage: "magnifyingglass") { context in AnyView(RetrievalSearchView(model: context.retrieval, renderReporter: context.retrievalRenderReporter)) },
         ManagementEntry(id: settingsEntryID, title: "Settings", systemImage: "gearshape") { context in AnyView(SettingsRootView(sections: ManagementCatalog.settingsSections, context: context)) },
     ]
 
@@ -92,23 +95,6 @@ enum ManagementCatalog {
 
     static func entry(withID id: String) -> ManagementEntry? {
         secondaryEntries.first { $0.id == id }
-    }
-}
-
-/// Shown until the retrieval screens exist. It says so rather than showing an empty result list.
-struct SearchPlaceholderView: View {
-    static let identifier = "management.search.placeholder"
-
-    var body: some View {
-        Text("Search is not available in this version yet. Your captures are saved.")
-            .font(.body)
-            .foregroundColor(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding()
-            .accessibilityIdentifier(Self.identifier)
-            .navigationTitle("Search")
-            .navigationBarTitleDisplayMode(.inline)
     }
 }
 

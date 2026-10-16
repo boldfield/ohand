@@ -23,6 +23,7 @@ protocol PrivateReadSource: AnyObject {
     func startReminderRead(
         operationID: UInt64, itemID: String, kind: ReminderReadKind, readScopes: [CoreExportScope]) throws
     func startItemDetail(operationID: UInt64, itemID: String, readScopes: [CoreExportScope]) throws
+    func startRetentionRead(operationID: UInt64, kind: RetentionReadKind, readScopes: [CoreExportScope]) throws
     func startJobConfigurationRead(operationID: UInt64, command: JobConfigurationCommand) throws
 }
 
@@ -35,6 +36,11 @@ extension PrivateReadSource {
     func startReminderRead(
         operationID: UInt64, itemID: String, kind: ReminderReadKind, readScopes: [CoreExportScope]
     ) throws {
+        throw PrivateReadNotSupportedBySource()
+    }
+
+    /// Default for the same reason; the core-backed source in the composition root overrides it.
+    func startRetentionRead(operationID: UInt64, kind: RetentionReadKind, readScopes: [CoreExportScope]) throws {
         throw PrivateReadNotSupportedBySource()
     }
 
@@ -198,6 +204,20 @@ final class PrivateReadGate {
         }
     }
 
+    func startRetentionStatus(operationID: UInt64) throws {
+        try startRetentionRead(operationID: operationID, kind: .status)
+    }
+
+    func startRetentionAudio(operationID: UInt64, itemID: String) throws {
+        try startRetentionRead(operationID: operationID, kind: .audio(itemID: itemID))
+    }
+
+    private func startRetentionRead(operationID: UInt64, kind: RetentionReadKind) throws {
+        try issue(operationID: operationID) {
+            try source.startRetentionRead(operationID: operationID, kind: kind, readScopes: authorizedScopes)
+        }
+    }
+
     func startJobsPinnedToProfile(operationID: UInt64, profileVersion: String, limit: Int?) throws {
         try issue(operationID: operationID) {
             try source.startJobConfigurationRead(
@@ -227,6 +247,12 @@ final class PrivateReadGate {
 
     /// Starts a prompt activation, which returns the stored text of the item it offers. `start` queues the core command.
     func startSuggestionActivation(operationID: UInt64, start: () throws -> Void) throws {
+        try issue(operationID: operationID, start)
+    }
+
+    /// Starts an item's deletion progress read, which reports state derived from the item's stored history. `start`
+    /// queues the core command.
+    func startDeletionProgress(operationID: UInt64, start: () throws -> Void) throws {
         try issue(operationID: operationID, start)
     }
 

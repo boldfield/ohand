@@ -48,6 +48,7 @@ final class ScriptedRetentionCore: AudioRetentionCore, @unchecked Sendable {
     private var expiredLeases: Set<String> = []
     private(set) var authorizedRequests: [String] = []
     private(set) var removalRequests: [String] = []
+    private(set) var userRemovalRequests: [String] = []
     private(set) var removedFileNames: [String] = []
     private(set) var sweepPressures: [CoreRetentionPressure] = []
 
@@ -88,8 +89,21 @@ final class ScriptedRetentionCore: AudioRetentionCore, @unchecked Sendable {
     func removeAudio(itemID: String, audioReference: String, periodSeconds: UInt64, effect: () -> AudioRemovalEffect)
         async throws -> AudioRemovalResult
     {
+        try remove(itemID: itemID, audioReference: audioReference, byUser: false, effect: effect)
+    }
+
+    /// Behaves like `removeAudio`, except that a script can also make the user's removal be denied as sole source.
+    func removeAudioForUser(itemID: String, audioReference: String, effect: () -> AudioRemovalEffect) async throws
+        -> AudioRemovalResult
+    {
+        try remove(itemID: itemID, audioReference: audioReference, byUser: true, effect: effect)
+    }
+
+    private func remove(itemID: String, audioReference: String, byUser: Bool, effect: () -> AudioRemovalEffect) throws
+        -> AudioRemovalResult
+    {
         try locked {
-            removalRequests.append(itemID)
+            if byUser { userRemovalRequests.append(itemID) } else { removalRequests.append(itemID) }
             let fileName = (audioReference as NSString).lastPathComponent
             if removalFailures.remove(fileName) != nil { throw RetentionFixtureError() }
             if let decisionFailure { throw decisionFailure }
