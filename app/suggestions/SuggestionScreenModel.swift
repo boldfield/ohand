@@ -53,6 +53,10 @@ final class SuggestionScreenModel: ObservableObject {
     @Published private(set) var state: SuggestionScreenState = .idle
     @Published private(set) var notice: SuggestionScreenNotice?
     @Published private(set) var isBusy = false
+    /// The tapped prompt the screen presents. Holds only the date-based prompt identifier, never stored content.
+    @Published private(set) var promptID: String?
+    /// Lets a hosted test see what the screen renders; production leaves it unset.
+    var renderReporter: (([String: String]) -> Void)?
 
     private struct PendingResponse {
         let itemID: String
@@ -74,9 +78,16 @@ final class SuggestionScreenModel: ObservableObject {
         self.makeCommandID = makeCommandID
     }
 
+    /// Records the prompt a tap opened. The screen opens it once it is on display, which is after authentication.
+    func receive(promptID: String) {
+        self.promptID = promptID
+    }
+
     /// Opens the daily prompt `notificationID` and shows the item the core offers now, if any. Without a prompt there is
-    /// nothing to open, and the screen says so calmly.
+    /// nothing to open, and the screen says so calmly. A call while an answer is being stored is ignored, so a late
+    /// result cannot overwrite what the newer call shows; the screen resolves again once the answer is stored.
     @MainActor func open(notificationID: String?) async {
+        guard !isBusy else { return }
         self.notificationID = notificationID
         pendingResponse = nil
         notice = nil

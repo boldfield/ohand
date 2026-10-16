@@ -142,6 +142,46 @@ final class SuggestionScreenRealCoreTests: XCTestCase {
         XCTAssertEqual(relaunched.state, .nothingToOffer, "the stop persists and nothing else is offered")
     }
 
+    func testNotNowStoresTheCooldownPersistsAcrossRelaunchAndLeavesAReminderAddedAfterActivationAlone() async throws {
+        var (root, _) = try makeRoot()
+        let itemID = try await seedAction(root)
+        let model = SuggestionScreenModel(responder: root.suggestionResponses)
+        await model.open(notificationID: Self.promptID)
+        guard case .offer(let offer) = model.state else { return XCTFail("expected an offer, got \(model.state)") }
+        XCTAssertEqual(offer.itemID, itemID)
+
+        // The offered item gains an explicit reminder after the screen opened and before the answer.
+        let reminderID = seedReminder(itemID: itemID)
+        let reminderBefore = scalar("SELECT schedule_state || delivery_state FROM reminders WHERE reminder_id = '\(reminderID)'")
+
+        await model.respond(.notNow)
+        XCTAssertEqual(
+            scalar("SELECT schedule_state || delivery_state FROM reminders WHERE reminder_id = '\(reminderID)'"),
+            reminderBefore, "the explicit reminder is unchanged whatever the screen resolved to")
+        XCTAssertEqual(scalar("SELECT lifecycle_state FROM items WHERE item_id = '\(itemID)'"), "active")
+        XCTAssertEqual(scalar("SELECT COUNT(*) FROM events WHERE event_type = 'completion'"), "0")
+
+        // A second item shows the stored cooldown across a relaunch.
+        root.shutDown()
+        (root, _) = try makeRoot()
+        let secondID = try await seedAction(root)
+        let second = SuggestionScreenModel(responder: root.suggestionResponses)
+        await second.open(notificationID: Self.promptID)
+        guard case .offer(let secondOffer) = second.state else { return XCTFail("expected an offer, got \(second.state)") }
+        XCTAssertEqual(secondOffer.itemID, secondID, "the reminded item is not offered")
+        await second.respond(.notNow)
+        XCTAssertEqual(second.state, .responded(.notNow))
+        XCTAssertEqual(scalar("SELECT COUNT(*) FROM events WHERE event_type = 'suggestion_control' AND event_id LIKE 'prompt-response:%'"), "1")
+        XCTAssertEqual(scalar("SELECT lifecycle_state FROM items WHERE item_id = '\(secondID)'"), "active")
+
+        root.shutDown()
+        (root, _) = try makeRoot()
+        defer { root.shutDown() }
+        let relaunched = SuggestionScreenModel(responder: root.suggestionResponses)
+        await relaunched.open(notificationID: Self.promptID)
+        XCTAssertEqual(relaunched.state, .nothingToOffer, "the cooldown persists across the relaunch")
+    }
+
     func testDoneCompletesTheItemAndAStaleScreenResolvesToNothing() async throws {
         let (root, _) = try makeRoot()
         defer { root.shutDown() }

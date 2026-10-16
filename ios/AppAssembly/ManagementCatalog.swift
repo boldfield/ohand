@@ -6,6 +6,7 @@ struct ManagementContext {
     let retrieval: RetrievalSearchModel
     let retention: RetentionSettingsModel
     let promptSettings: PromptSettingsModel
+    let suggestion: SuggestionScreenModel
     /// Lets a hosted test see what the search screen shows; production leaves it unset.
     var retrievalRenderReporter: (([String: RetrievalRenderedElement]) -> Void)?
 }
@@ -95,7 +96,7 @@ enum ManagementCatalog {
     /// Where a slice registers the screen for an item or the current suggestion. Set the slice's own line, nothing else.
     static let destinations = ManagementDestinations(
         item: nil,
-        suggestion: nil)
+        suggestion: { context in AnyView(SuggestionView(model: context.suggestion)) })
 
     static func entry(withID id: String) -> ManagementEntry? {
         secondaryEntries.first { $0.id == id }

@@ -48,6 +48,15 @@ struct SuggestionView: View {
         }
     }
 
+    /// Identifier to the text shown for it, collected so a hosted test can see what is rendered.
+    struct RenderedKey: PreferenceKey {
+        static var defaultValue: [String: String] = [:]
+
+        static func reduce(value: inout [String: String], nextValue: () -> [String: String]) {
+            value.merge(nextValue()) { _, latest in latest }
+        }
+    }
+
     @ObservedObject var model: SuggestionScreenModel
 
     var body: some View {
@@ -58,10 +67,12 @@ struct SuggestionView: View {
                     .font(.title3)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier(Self.textIdentifier)
+                    .preference(key: RenderedKey.self, value: [Self.textIdentifier: offer.text ?? Self.noTextLine])
                 ForEach(offer.responses, id: \.self) { response in
                     Button(Self.text(for: response)) { Task { await model.respond(response) } }
                         .disabled(model.isBusy)
                         .accessibilityIdentifier(Self.identifier(for: response))
+                        .preference(key: RenderedKey.self, value: [Self.identifier(for: response): Self.text(for: response)])
                 }
             case .idle, .loading:
                 message(Self.loadingLine)
@@ -80,6 +91,7 @@ struct SuggestionView: View {
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier(Self.noticeIdentifier)
+                    .preference(key: RenderedKey.self, value: [Self.noticeIdentifier: Self.text(for: notice)])
             }
             Spacer()
         }
@@ -87,6 +99,9 @@ struct SuggestionView: View {
         .padding()
         .navigationTitle("Suggestion")
         .navigationBarTitleDisplayMode(.inline)
+        .onPreferenceChange(RenderedKey.self) { model.renderReporter?($0) }
+        .task(id: model.promptID) { await model.open(notificationID: model.promptID) }
+        .onDisappear { model.lock() }
     }
 
     private func message(_ line: String) -> some View {
@@ -95,5 +110,6 @@ struct SuggestionView: View {
             .foregroundColor(.secondary)
             .fixedSize(horizontal: false, vertical: true)
             .accessibilityIdentifier(Self.messageIdentifier)
+            .preference(key: RenderedKey.self, value: [Self.messageIdentifier: line])
     }
 }
