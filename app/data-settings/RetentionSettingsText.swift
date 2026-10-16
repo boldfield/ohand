@@ -15,9 +15,6 @@ enum RetentionSettingsText {
         return policy.isDefault ? base : base + " The default is \(defaultPeriodDays) days."
     }
 
-    /// Only a recording that is an item's sole source reaches this screen, and the core refuses to delete such audio on
-    /// its own, so no audio-only delete is offered here. Item deletion is the explicit destructive path.
-    static func offersDeleteAudio(_ entry: UnresolvedSoleAudioCase) -> Bool { false }
     static let soleSourceExplanation =
         "A recording that has no text yet is never removed automatically, whatever the period is. It stays until it has "
         + "text or you delete the whole item."
@@ -29,6 +26,8 @@ enum RetentionSettingsText {
     static let lockedText = "Your saved items are locked. Go back and open Settings again to unlock them."
     static let noUnresolvedText = "No recording is waiting on text. Your captures are saved."
     static let periodChangeNote = "Changing the period moves when transcribed audio expires. It never deletes audio now."
+
+    static func dayCount(_ days: Int) -> String { days == 1 ? "1 day" : "\(days) days" }
 
     static func periodSummary(_ policy: RetentionPolicySetting) -> String {
         let length = periodLength(policy)

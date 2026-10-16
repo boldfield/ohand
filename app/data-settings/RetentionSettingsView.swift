@@ -1,6 +1,44 @@
 import SwiftUI
 import OhAndServices
 
+/// Where an element of the retention screen landed and the words it shows, so a hosted test can see what is on screen.
+struct RetentionRenderedElement: Equatable {
+    let frame: CGRect
+    let text: String
+    let isEnabled: Bool
+}
+
+private struct RetentionRenderedKey: PreferenceKey {
+    static var defaultValue: [String: RetentionRenderedElement] = [:]
+
+    static func reduce(
+        value: inout [String: RetentionRenderedElement], nextValue: () -> [String: RetentionRenderedElement]
+    ) {
+        value.merge(nextValue()) { _, latest in latest }
+    }
+}
+
+private struct RetentionRenderReport: ViewModifier {
+    let identifier: String
+    let text: String
+    @Environment(\.isEnabled) private var isEnabled
+
+    func body(content: Content) -> some View {
+        content.background(GeometryReader { proxy in
+            Color.clear.preference(
+                key: RetentionRenderedKey.self,
+                value: [identifier: RetentionRenderedElement(
+                    frame: proxy.frame(in: .global), text: text, isEnabled: isEnabled)])
+        })
+    }
+}
+
+private extension View {
+    func reportRendered(_ identifier: String, text: String) -> some View {
+        modifier(RetentionRenderReport(identifier: identifier, text: text))
+    }
+}
+
 /// The retention screen: the stored period, the storage-pressure notice and the recordings that are an item's only
 /// source, each with the choices the core offers. Everything it shows comes from `RetentionSettingsModel`.
 struct RetentionSettingsView: View {
@@ -14,14 +52,21 @@ struct RetentionSettingsView: View {
     static let lockedIdentifier = "data-settings.retention.locked"
     static let failureIdentifier = "data-settings.retention.failure"
     static let noUnresolvedIdentifier = "data-settings.retention.none-unresolved"
+    static let loadingIdentifier = "data-settings.retention.loading"
+    static let tryAgainIdentifier = "data-settings.retention.try-again"
 
     static func caseIdentifier(_ itemID: String) -> String { "data-settings.retention.case.\(itemID)" }
     static func retryIdentifier(_ itemID: String) -> String { "data-settings.retention.retry.\(itemID)" }
-    static func deleteIdentifier(_ itemID: String) -> String { "data-settings.retention.delete.\(itemID)" }
     static func deleteNoteIdentifier(_ itemID: String) -> String { "data-settings.retention.delete-note.\(itemID)" }
     static func actionStateIdentifier(_ itemID: String) -> String { "data-settings.retention.action-state.\(itemID)" }
 
     @ObservedObject var model: RetentionSettingsModel
+    var renderReporter: (([String: RetentionRenderedElement]) -> Void)?
+
+    init(model: RetentionSettingsModel, renderReporter: (([String: RetentionRenderedElement]) -> Void)? = nil) {
+        self.model = model
+        self.renderReporter = renderReporter
+    }
 
     var body: some View {
         ScrollView {
@@ -32,6 +77,9 @@ struct RetentionSettingsView: View {
         }
         .navigationTitle("Audio retention")
         .navigationBarTitleDisplayMode(.inline)
+        .onPreferenceChange(RetentionRenderedKey.self) { elements in
+            renderReporter?(elements)
+        }
         .task { await model.refresh() }
         .onDisappear { model.clear() }
     }
@@ -43,12 +91,15 @@ struct RetentionSettingsView: View {
             EmptyView()
         case .loading:
             ProgressView("Loading").frame(maxWidth: .infinity)
+                .reportRendered(Self.loadingIdentifier, text: "Loading")
         case .locked:
             note(RetentionSettingsText.lockedText, identifier: Self.lockedIdentifier)
         case .failed(let message):
             note(message, identifier: Self.failureIdentifier)
             Button("Try again") { Task { await model.refresh() } }
                 .frame(minHeight: 44)
+                .accessibilityIdentifier(Self.tryAgainIdentifier)
+                .reportRendered(Self.tryAgainIdentifier, text: "Try again")
         case .loaded:
             if let status = model.status {
                 policySection(status)
@@ -65,20 +116,24 @@ struct RetentionSettingsView: View {
             Text("Keep recordings for").font(.headline)
             Text(RetentionSettingsText.periodSummary(status.policy))
                 .accessibilityIdentifier(Self.policyIdentifier)
+                .reportRendered(Self.policyIdentifier, text: RetentionSettingsText.periodSummary(status.policy))
             Text(RetentionSettingsText.policyExplanation(status.policy))
                 .font(.footnote).foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier(Self.explanationIdentifier)
+                .reportRendered(Self.explanationIdentifier, text: RetentionSettingsText.policyExplanation(status.policy))
             Text(RetentionSettingsText.soleSourceExplanation)
                 .font(.footnote).foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier(Self.soleSourceIdentifier)
+                .reportRendered(Self.soleSourceIdentifier, text: RetentionSettingsText.soleSourceExplanation)
             Stepper(
                 value: $model.chosenDays, in: RetentionSettingsModel.minimumDays...RetentionSettingsModel.maximumDays
             ) {
-                Text(model.chosenDays == 1 ? "1 day" : "\(model.chosenDays) days")
+                Text(RetentionSettingsText.dayCount(model.chosenDays))
             }
             .accessibilityIdentifier(Self.periodStepperIdentifier)
+            .reportRendered(Self.periodStepperIdentifier, text: RetentionSettingsText.dayCount(model.chosenDays))
             Text(RetentionSettingsText.periodChangeNote)
                 .font(.footnote).foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -88,6 +143,7 @@ struct RetentionSettingsView: View {
                 Text("Save period").frame(maxWidth: .infinity, minHeight: 44)
             }
             .buttonStyle(.borderedProminent)
+            .reportRendered(Self.applyIdentifier, text: "Save period")
             .disabled(model.isApplyingPeriod)
             .accessibilityIdentifier(Self.applyIdentifier)
             if let message = model.periodState?.message {
@@ -120,19 +176,12 @@ struct RetentionSettingsView: View {
                     Text("Retry turning into text").frame(maxWidth: .infinity, minHeight: 44)
                 }
                 .buttonStyle(.bordered)
+                .reportRendered(Self.retryIdentifier(entry.itemID), text: "Retry turning into text")
                 .disabled(busy)
                 .accessibilityIdentifier(Self.retryIdentifier(entry.itemID))
             }
-            if RetentionSettingsText.offersDeleteAudio(entry) {
-                Button(role: .destructive) {
-                    Task { await model.deleteAudio(itemID: entry.itemID) }
-                } label: {
-                    Text("Delete audio").frame(maxWidth: .infinity, minHeight: 44)
-                }
-                .buttonStyle(.bordered)
-                .disabled(busy)
-                .accessibilityIdentifier(Self.deleteIdentifier(entry.itemID))
-            }
+            // Only sole-source audio is listed here, and the core refuses to delete such audio on its own, so no
+            // audio-only delete is offered. Item deletion is the explicit destructive path.
             if entry.options.contains(.deleteAudio) {
                 note(RetentionSettingsText.deleteItemNote, identifier: Self.deleteNoteIdentifier(entry.itemID))
             }
@@ -145,6 +194,7 @@ struct RetentionSettingsView: View {
         .cornerRadius(8)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(Self.caseIdentifier(entry.itemID))
+        .reportRendered(Self.caseIdentifier(entry.itemID), text: RetentionSettingsText.reason(entry.reason))
     }
 
     private func note(_ text: String, identifier: String) -> some View {
@@ -154,6 +204,7 @@ struct RetentionSettingsView: View {
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
             .accessibilityIdentifier(identifier)
+            .reportRendered(identifier, text: text)
     }
 }
 

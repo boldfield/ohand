@@ -69,7 +69,10 @@ final class RetentionSettingsModel: ObservableObject {
 
     private let controls: RetentionControlling
     private let readScope: () -> CompositionReadScope
+    /// Advanced by every read and by `clear()`; a read answers only if it is still the latest.
     private var generation = 0
+    /// Advanced only by `clear()`; a period change or row action answers only into the screen that started it.
+    private var session = 0
     private var lastStoredDays = RetentionSettingsModel.defaultDays
 
     nonisolated init(controls: RetentionControlling, readScope: @escaping () -> CompositionReadScope) {
@@ -119,9 +122,11 @@ final class RetentionSettingsModel: ObservableObject {
             periodState = .failed(RetentionSettingsText.failure(RetentionControlError.invalidRequest))
             return
         }
+        let thisSession = session
         periodState = .working
         do {
             let stored = try await controls.setPeriod(seconds: Int64(days) * 86_400)
+            guard thisSession == session else { return }
             guard readScope() == .authenticated else { lock(); return }
             if let current = status {
                 status = RetentionStatus(
@@ -130,6 +135,7 @@ final class RetentionSettingsModel: ObservableObject {
             periodState = nil
             await refresh()
         } catch {
+            guard thisSession == session else { return }
             if case RetentionControlError.notAuthenticated = error { lock(); return }
             periodState = .failed(RetentionSettingsText.failure(error))
         }
@@ -150,6 +156,7 @@ final class RetentionSettingsModel: ObservableObject {
     /// Call when the screen goes away or the app locks: drops every stored detail and ignores answers still pending.
     func clear() {
         generation += 1
+        session += 1
         status = nil
         actions = [:]
         periodState = nil
@@ -164,12 +171,15 @@ final class RetentionSettingsModel: ObservableObject {
     ) async {
         guard readScope() == .authenticated else { lock(); return }
         if actions[itemID] == .working { return }
+        let thisSession = session
         actions[itemID] = .working
         do {
             try await operation()
+            guard thisSession == session else { return }
             guard readScope() == .authenticated else { lock(); return }
             actions[itemID] = success
         } catch {
+            guard thisSession == session else { return }
             if case RetentionControlError.notAuthenticated = error { lock(); return }
             actions[itemID] = .failed(RetentionSettingsText.failure(error))
         }

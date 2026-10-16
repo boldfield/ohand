@@ -3,7 +3,48 @@ import XCTest
 @testable import OhAndServices
 @testable import OhAnd
 
-private final class FakeRetentionControls: RetentionControlling, @unchecked Sendable {
+/// Holds an operation in flight until the test opens it, so a test can act while the operation is suspended.
+final class RetentionOperationGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var waiting: CheckedContinuation<Void, Never>?
+    private var isOpen = false
+    private var arrived = false
+
+    var hasArrived: Bool { lock.withLock { arrived } }
+
+    func pass() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            arrived = true
+            if isOpen {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                waiting = continuation
+                lock.unlock()
+            }
+        }
+    }
+
+    func open() {
+        lock.lock()
+        isOpen = true
+        let continuation = waiting
+        waiting = nil
+        lock.unlock()
+        continuation?.resume()
+    }
+
+    /// Waits, bounded, until the held operation has reached the gate.
+    func waitForArrival(file: StaticString = #filePath, line: UInt = #line) async {
+        for _ in 0..<2_000 where !hasArrived {
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertTrue(hasArrived, "the operation reached the gate", file: file, line: line)
+    }
+}
+
+final class FakeRetentionControls: RetentionControlling, @unchecked Sendable {
     var statusResult: Result<RetentionStatus, Error>
     var setPeriodResult: Result<RetentionPolicySetting, Error> = .failure(RetentionControlError.unreadable)
     var retryResult: Result<String, Error> = .success("job-1")
@@ -13,26 +54,33 @@ private final class FakeRetentionControls: RetentionControlling, @unchecked Send
     private(set) var deleteRequests: [String] = []
     /// Invoked in the middle of `status`, so a test can change the session while a read is in flight.
     var duringStatus: (() -> Void)?
+    /// When set, period changes, retries and deletions wait at it before answering.
+    var operationGate: RetentionOperationGate?
+    private(set) var statusReads = 0
 
     init(status: RetentionStatus) { statusResult = .success(status) }
 
     func status() async throws -> RetentionStatus {
+        statusReads += 1
         duringStatus?()
         return try statusResult.get()
     }
 
     func setPeriod(seconds: Int64) async throws -> RetentionPolicySetting {
         periodRequests.append(seconds)
+        await operationGate?.pass()
         return try setPeriodResult.get()
     }
 
     func retryTranscription(itemID: String) async throws -> String {
         retryRequests.append(itemID)
+        await operationGate?.pass()
         return try retryResult.get()
     }
 
     func deleteAudio(itemID: String) async throws -> AudioDeletionReceipt {
         deleteRequests.append(itemID)
+        await operationGate?.pass()
         return try deleteResult.get()
     }
 }
@@ -79,14 +127,6 @@ final class RetentionSettingsModelTests: XCTestCase {
         XCTAssertTrue(text.contains("kept for 30 days"))
         XCTAssertFalse(text.contains("kept for 7 days"))
         XCTAssertTrue(text.contains("default is 7 days"))
-    }
-
-    func testNoAudioOnlyDeleteIsOfferedForSoleSourceCases() async {
-        let model = makeModel(FakeRetentionControls(status: Self.status()))
-        await model.refresh()
-        let entry = model.status!.unresolved[0]
-        XCTAssertTrue(entry.options.contains(.deleteAudio), "the core still lists it")
-        XCTAssertFalse(RetentionSettingsText.offersDeleteAudio(entry))
     }
 
     func testAnUnsavedPeriodChoiceSurvivesARefresh() async {
@@ -235,6 +275,97 @@ final class RetentionSettingsModelTests: XCTestCase {
         XCTAssertEqual(model.phase, .locked)
         XCTAssertNil(model.status)
         XCTAssertTrue(model.actions.isEmpty)
+    }
+
+    private func assertCleared(_ model: RetentionSettingsModel, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(model.phase, .idle, file: file, line: line)
+        XCTAssertNil(model.status, file: file, line: line)
+        XCTAssertNil(model.periodState, file: file, line: line)
+        XCTAssertTrue(model.actions.isEmpty, file: file, line: line)
+    }
+
+    func testARetryThatFinishesAfterTheScreenIsLeftLeavesTheModelCleared() async {
+        for result in [Result<String, Error>.success("job-1"), .failure(RetentionControlError.jobInFlight)] {
+            let controls = FakeRetentionControls(status: Self.status())
+            controls.retryResult = result
+            let gate = RetentionOperationGate()
+            controls.operationGate = gate
+            let model = makeModel(controls)
+            await model.refresh()
+            let readsBefore = controls.statusReads
+
+            let retry = Task { await model.retryTranscription(itemID: "item-sole") }
+            await gate.waitForArrival()
+            XCTAssertEqual(model.actions["item-sole"], .working)
+            model.clear()
+            gate.open()
+            await retry.value
+
+            assertCleared(model)
+            XCTAssertEqual(controls.statusReads, readsBefore, "no read is made for a screen that is gone")
+        }
+    }
+
+    func testADeletionThatFinishesAfterTheScreenIsLeftLeavesTheModelCleared() async {
+        let controls = FakeRetentionControls(status: Self.status())
+        controls.deleteResult = .failure(RetentionControlError.soleSourceUseItemDeletion)
+        let gate = RetentionOperationGate()
+        controls.operationGate = gate
+        let model = makeModel(controls)
+        await model.refresh()
+
+        let deletion = Task { await model.deleteAudio(itemID: "item-sole") }
+        await gate.waitForArrival()
+        model.clear()
+        gate.open()
+        await deletion.value
+
+        assertCleared(model)
+    }
+
+    func testAPeriodSaveThatFinishesAfterTheScreenIsLeftLeavesTheModelCleared() async {
+        let outcomes: [Result<RetentionPolicySetting, Error>] = [
+            .success(RetentionPolicySetting(periodSeconds: 30 * 86_400, isDefault: false)),
+            .failure(RetentionControlError.audioRemovalUnavailable),
+        ]
+        for outcome in outcomes {
+            let controls = FakeRetentionControls(status: Self.status())
+            controls.setPeriodResult = outcome
+            let gate = RetentionOperationGate()
+            controls.operationGate = gate
+            let model = makeModel(controls)
+            await model.refresh()
+            let readsBefore = controls.statusReads
+
+            model.chosenDays = 30
+            let save = Task { await model.applyPeriod() }
+            await gate.waitForArrival()
+            XCTAssertTrue(model.isApplyingPeriod)
+            model.clear()
+            gate.open()
+            await save.value
+
+            assertCleared(model)
+            XCTAssertEqual(model.chosenDays, RetentionSettingsModel.defaultDays)
+            XCTAssertEqual(controls.statusReads, readsBefore, "no read is made for a screen that is gone")
+        }
+    }
+
+    func testARefreshDuringARetryDoesNotLoseTheRetrysAnswer() async {
+        let controls = FakeRetentionControls(status: Self.status())
+        let gate = RetentionOperationGate()
+        controls.operationGate = gate
+        let model = makeModel(controls)
+        await model.refresh()
+
+        let retry = Task { await model.retryTranscription(itemID: "item-sole") }
+        await gate.waitForArrival()
+        await model.refresh()
+        gate.open()
+        await retry.value
+
+        XCTAssertEqual(model.actions["item-sole"], .queued)
+        XCTAssertEqual(model.phase, .loaded)
     }
 
     func testClearDropsStoredDetails() async {
