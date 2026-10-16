@@ -12,8 +12,8 @@ import OhAndCoreBridge
 /// session relocks (which includes entering the background) or the task is cancelled, and by `sweepAtLaunch` for
 /// whatever an interrupted run left behind. A share completion that arrives after the export was invalidated is
 /// reported as `interrupted`, never as success.
-final class ExportService: @unchecked Sendable {
-    static let exportsDirectoryName = "Exports"
+public final class ExportService: @unchecked Sendable {
+    public static let exportsDirectoryName = "Exports"
     static let exportFileName = "ohand-export.jsonl"
     static let audioDirectoryName = "audio"
 
@@ -56,7 +56,7 @@ final class ExportService: @unchecked Sendable {
         }
     }
 
-    var exportsDirectory: URL {
+    public var exportsDirectory: URL {
         layout.directory(for: .temporaryFiles).appendingPathComponent(Self.exportsDirectoryName, isDirectory: true)
     }
 
@@ -64,7 +64,7 @@ final class ExportService: @unchecked Sendable {
 
     /// Exports `selection` to protected temporaries. Throws `ExportFailure`; on any failure nothing of this export is
     /// left on disk.
-    func prepareExport(_ selection: ExportSelection) async throws -> PreparedExport {
+    public func prepareExport(_ selection: ExportSelection) async throws -> PreparedExport {
         guard !selection.scopes.isEmpty else { throw ExportFailure.noScopeSelected }
         guard let authorization = session.currentAuthorization() else { throw ExportFailure.notAuthenticated }
 
@@ -190,7 +190,7 @@ final class ExportService: @unchecked Sendable {
     /// Records how the share sheet ended and removes the export's temporaries. `shared` is reported only when the sheet
     /// completed an activity and the export was still valid; an export that was invalidated meanwhile is `interrupted`.
     @discardableResult
-    func finishShare(exportID: String, ending: ExportShareEnding) -> ExportShareOutcome {
+    public func finishShare(exportID: String, ending: ExportShareEnding) -> ExportShareOutcome {
         lock.lock()
         let entry = active[exportID]
         lock.unlock()
@@ -214,7 +214,7 @@ final class ExportService: @unchecked Sendable {
 
     /// Removes an export that was prepared but will not be shared (for example the screen was dismissed first).
     @discardableResult
-    func cancelExport(exportID: String) -> ExportShareOutcome {
+    public func cancelExport(exportID: String) -> ExportShareOutcome {
         lock.lock()
         let entry = active[exportID]
         lock.unlock()
@@ -228,7 +228,7 @@ final class ExportService: @unchecked Sendable {
     /// Removes every export directory left by an earlier run (an interrupted share, a crash, a failed removal). Call it
     /// at launch. Exports active in this process are left alone.
     @discardableResult
-    func sweepAtLaunch() -> ExportSweepReport {
+    public func sweepAtLaunch() -> ExportSweepReport {
         let root = exportsDirectory
         guard fileSystem.fileExists(at: root), let names = try? fileSystem.entryNames(in: root) else {
             return ExportSweepReport(removedCount: 0, failedCount: 0)
@@ -290,7 +290,7 @@ final class ExportService: @unchecked Sendable {
 }
 
 /// How the share sheet ended, before the service checks that the export is still valid.
-enum ExportShareEnding: Equatable {
+public enum ExportShareEnding: Equatable {
     case completed
     case cancelled
     case failed
