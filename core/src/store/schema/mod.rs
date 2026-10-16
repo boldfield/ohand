@@ -91,6 +91,10 @@ pub const MIGRATIONS: &[MigrationStep] = &[
         target_version: 12,
         apply: add_default_provider_profiles_v12,
     },
+    MigrationStep {
+        target_version: 13,
+        apply: add_retention_settings_v13,
+    },
 ];
 
 /// Database handle with schema validation.
@@ -932,6 +936,21 @@ fn add_default_provider_profiles_v12(tx: &Transaction<'_>) -> Result<()> {
         "CREATE TABLE default_provider_profiles (
             capability TEXT PRIMARY KEY CHECK (capability IN ('text_interpretation', 'review')),
             profile_version TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )",
+        [],
+    )?;
+    Ok(())
+}
+
+/// The user's audio retention period (A08). A single row; no row means the built-in default
+/// (7 days after successful transcription). The period is stored in seconds and bounded to at
+/// most ten years; sole-source audio never expires whatever the period is.
+fn add_retention_settings_v13(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute(
+        "CREATE TABLE retention_settings (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            period_seconds INTEGER NOT NULL CHECK (period_seconds BETWEEN 1 AND 315360000),
             updated_at TEXT NOT NULL
         )",
         [],

@@ -43,13 +43,12 @@ final class RealCoreRetentionWorld {
     func makeService(
         on session: RealCoreRetentionSession,
         fileSystem: AudioRetentionFileSystem = FileManagerAudioRetentionFileSystem(),
-        retentionPeriodSeconds: UInt64 = 0,
         core: AudioRetentionCore? = nil
     ) -> AudioRetentionService {
         let core = core ?? session.client
         return AudioRetentionService(
             core: core, layout: layout, fileSystem: fileSystem,
-            pressureProbe: FixedPressureProbe(pressure: .normal), retentionPeriodSeconds: retentionPeriodSeconds)
+            pressureProbe: FixedPressureProbe(pressure: .normal))
     }
 
     // MARK: Files
@@ -124,6 +123,11 @@ final class RealCoreRetentionWorld {
             try execute("UPDATE captures SET audio_reference = '\(reference)' WHERE capture_id = '\(captureID)'"))
     }
 
+    /// Removes the transcription job import queued, as a finished or failed job leaves the queue.
+    func clearJobs(itemID: String) {
+        XCTAssertNoThrow(try execute("DELETE FROM jobs WHERE item_id = '\(itemID)'"))
+    }
+
     private func execute(_ statement: String) throws {
         var database: OpaquePointer?
         guard sqlite3_open(databasePath, &database) == SQLITE_OK else { throw StorageSetupFailed() }
@@ -158,17 +162,35 @@ final class RealCoreRetentionSession {
     }
 
     func importCapture(_ record: CaptureRecord) async throws -> IngressImportAcknowledgment {
+        let operationID = takeOperationID()
+        try core.startImportForegroundIngress(operationID: operationID, record: record)
+        return try await awaitOtherEvent(operationID).decode(IngressImportAcknowledgment.self)
+    }
+
+    /// Stores the retention period through the real core, as the user's setting would.
+    func storeRetentionPeriod(seconds: Int64) async throws {
+        let operationID = takeOperationID()
+        try core.startRetentionControl(operationID: operationID, command: .setPeriod(seconds: seconds))
+        let answer = try await awaitOtherEvent(operationID).decode(RetentionControlAnswer.self)
+        XCTAssertEqual(answer.outcome, "stored")
+        XCTAssertEqual(answer.periodSeconds, seconds)
+    }
+
+    private func takeOperationID() -> UInt64 {
         lock.lock()
+        defer { lock.unlock() }
         let operationID = nextOperationID
         nextOperationID += 1
-        lock.unlock()
-        try core.startImportForegroundIngress(operationID: operationID, record: record)
+        return operationID
+    }
+
+    private func awaitOtherEvent(_ operationID: UInt64) async throws -> CoreEvent {
         let deadline = Date().addingTimeInterval(30)
         while Date() < deadline {
             lock.lock()
             let event = otherEvents.first { $0.operationID == operationID }
             lock.unlock()
-            if let event { return try event.decode(IngressImportAcknowledgment.self) }
+            if let event { return event }
             try await Task.sleep(nanoseconds: 10_000_000)
         }
         throw RetentionFixtureError()
@@ -232,6 +254,19 @@ final class HookedRetentionCore: AudioRetentionCore, @unchecked Sendable {
         let duringRemoval = duringRemoval
         return try await wrapped.removeAudio(
             itemID: itemID, audioReference: audioReference, periodSeconds: periodSeconds,
+            effect: {
+                duringRemoval?(itemID)
+                return effect()
+            })
+    }
+
+    func removeAudioForUser(itemID: String, audioReference: String, effect: () -> AudioRemovalEffect) async throws
+        -> AudioRemovalResult
+    {
+        beforeRemoval?(itemID)
+        let duringRemoval = duringRemoval
+        return try await wrapped.removeAudioForUser(
+            itemID: itemID, audioReference: audioReference,
             effect: {
                 duringRemoval?(itemID)
                 return effect()
