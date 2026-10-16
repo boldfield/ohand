@@ -5,6 +5,7 @@ struct ManagementContext {
     let voiceRecovery: VoiceRecoveryModel
     let retrieval: RetrievalSearchModel
     let retention: RetentionSettingsModel
+    let exportSettings: ExportSettingsModel
     let promptSettings: PromptSettingsModel
     /// Lets a hosted test see what the search screen shows; production leaves it unset.
     var retrievalRenderReporter: (([String: RetrievalRenderedElement]) -> Void)?
@@ -89,6 +90,7 @@ enum ManagementCatalog {
     static let settingsSections: [ManagementEntry] = [
         ManagementEntry(id: "voice-recovery", title: "Unfinished recordings", systemImage: "waveform") { context in AnyView(VoiceRecoveryView(model: context.voiceRecovery).navigationTitle("Unfinished recordings").navigationBarTitleDisplayMode(.inline)) },
         ManagementEntry(id: "audio-retention", title: "Audio retention", systemImage: "externaldrive") { context in AnyView(RetentionSettingsView(model: context.retention)) },
+        ManagementEntry(id: "export", title: "Export", systemImage: "square.and.arrow.up") { context in AnyView(ExportSettingsView(model: context.exportSettings)) },
         ManagementEntry(id: "prompt-settings", title: "Daily prompt", systemImage: "bell.badge") { context in AnyView(PromptSettingsView(model: context.promptSettings)) },
     ]
 
