@@ -702,7 +702,7 @@ final class CompositionRootTests: XCTestCase {
         XCTAssertTrue(
             pump(until: { root.jobRunner.finishedDrainCount > 0 }, timeout: 20),
             "a drain ran: \(jobDiagnostics(root, sender: sender))")
-        XCTAssertTrue(pump(until: { false }, timeout: 1))
+        _ = pump(until: { false }, timeout: 1)
         XCTAssertTrue(sender.requests.isEmpty, "self-hosted is disabled, so nothing is sent")
         XCTAssertEqual(JobStoreInspector.job(at: databasePath, id: "job-composition-1")?.status, "queued")
     }
