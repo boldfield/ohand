@@ -178,7 +178,7 @@ final class CoreProviderProfileClient: ProviderProfileCore, @unchecked Sendable 
 /// the native transport and a `completed` event with the outcome; only the second finishes the operation. A failure
 /// event finishes it too. Forward every core event to `handle(_:)`, and call `shutDown()` before closing the core.
 final class CoreProviderConnectionCheckClient: ProviderConnectionCheckCore, @unchecked Sendable {
-    static let firstOperationID: UInt64 = 1 << 43
+    static let firstOperationID: UInt64 = (1 << 42) | (1 << 40)
 
     typealias Completion = @Sendable (Result<ProviderConnectionOutcome, CoreFailure>) -> Void
 
