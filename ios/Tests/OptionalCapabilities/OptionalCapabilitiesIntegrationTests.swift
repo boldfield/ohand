@@ -97,14 +97,88 @@ final class OptionalCapabilitiesIntegrationTests: OptionalCapabilitiesTestCase {
         XCTAssertTrue(String(decoding: request.body ?? Data(), as: UTF8.self).contains(SelfHostedScenario.captureText))
     }
 
-    func testSelfHostedRegistrationDoesNotChangeWhereTheCoreSends() throws {
+    func testAbsentRegistrationLeavesTheStoredSelfHostedProfileUnused() throws {
         try prepareSelfHostedStore()
-        let sender = try selfHostedSender()
-        let root = try makeRoot(sender: sender, modules: [OptionalCapabilitiesModule()])
+        for modules in [[], [OptionalCapabilitiesModule()]] as [[CompositionModule]] {
+            let sender = try selfHostedSender()
+            let root = try makeRoot(sender: sender, modules: modules)
+            root.start(isActive: true)
+            XCTAssertTrue(waitForDrain(root), "the drain ends")
+            XCTAssertTrue(sender.requests.isEmpty, "a supported stored profile is not enough without the module")
+            XCTAssertNotEqual(jobStatus(), "completed")
+            root.shutDown()
+        }
+    }
+
+    func testUnverifiedRegistrationLeavesTheStoredSelfHostedProfileUnused() throws {
+        // The stored profile is supported and serves the verified model: only the module's gate can stop the send.
+        try prepareSelfHostedStore()
+        var wrongModel = verifiedRegistration()
+        wrongModel.model = "unlisted-model:latest"
+        let incompleteEvidence = SelfHostedRegistration(
+            profileVersion: SelfHostedScenario.profileVersion, model: SelfHostedVerifiedBoundary.current.model,
+            evidence: [])
+        for registration in [wrongModel, incompleteEvidence] {
+            let sender = try selfHostedSender()
+            let module = OptionalCapabilitiesModule(
+                configuration: OptionalCapabilitiesConfiguration(selfHosted: registration))
+            XCTAssertTrue(module.enabledProviderProtocols.isEmpty)
+            let root = try makeRoot(sender: sender, modules: [module])
+            root.start(isActive: true)
+            XCTAssertTrue(waitForDrain(root), "the drain ends")
+            XCTAssertTrue(sender.requests.isEmpty, "an unverified registration keeps self-hosted disabled")
+            XCTAssertNotEqual(jobStatus(), "completed")
+            root.shutDown()
+        }
+    }
+
+    func testVerifiedRegistrationDeclaresOnlyTheSelfHostedProtocol() {
+        let module = OptionalCapabilitiesModule(
+            configuration: OptionalCapabilitiesConfiguration(selfHosted: verifiedRegistration()))
+        XCTAssertEqual(module.enabledProviderProtocols, [.selfHosted])
+        XCTAssertTrue(OptionalCapabilitiesModule().enabledProviderProtocols.isEmpty)
+    }
+
+    private func availability(of module: OptionalCapabilitiesModule) -> SelfHostedProfileAvailability {
+        _ = pump(until: { module.selfHostedAvailability != .unchecked }, timeout: 10)
+        return module.selfHostedAvailability
+    }
+
+    func testModuleReportsWhetherTheRegisteredProfileIsUsable() throws {
+        let scenarios: [(SelfHostedScenario, SelfHostedProfileAvailability)] = [
+            (SelfHostedScenario(), .available),
+            (SelfHostedScenario(isRevoked: true), .unavailable(.revoked)),
+            (SelfHostedScenario(includesProfile: false), .unavailable(.missing)),
+        ]
+        for (scenario, expected) in scenarios {
+            try? FileManager.default.removeItem(at: storageRoot)
+            try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
+            try prepareSelfHostedStore(scenario)
+            let module = OptionalCapabilitiesModule(
+                configuration: OptionalCapabilitiesConfiguration(selfHosted: verifiedRegistration()))
+            let root = try makeRoot(sender: RecordingProviderSender(), modules: [module])
+            XCTAssertEqual(availability(of: module), expected)
+            root.shutDown()
+        }
+    }
+
+    func testModuleReportsAProfileOfAnotherProtocolAsUnusable() throws {
+        try prepareShadowReviewStore()
+        let registration = SelfHostedRegistration(
+            profileVersion: ShadowReviewScenario.profileVersion, model: SelfHostedVerifiedBoundary.current.model)
+        let module = OptionalCapabilitiesModule(configuration: OptionalCapabilitiesConfiguration(selfHosted: registration))
+        let root = try makeRoot(sender: RecordingProviderSender(), modules: [module])
         defer { root.shutDown() }
-        root.start(isActive: true)
-        XCTAssertTrue(pump(until: { self.jobStatus() == "completed" }, timeout: 30), "an unregistered build runs it too")
-        XCTAssertEqual(sender.requests.map(\.url.host), ["spark.example.test"], "the stored profile alone decides")
+        XCTAssertEqual(availability(of: module), .unavailable(.notSelfHosted))
+    }
+
+    func testUnconfiguredModuleNeverChecksTheStore() throws {
+        try prepareSelfHostedStore()
+        let module = OptionalCapabilitiesModule()
+        let root = try makeRoot(sender: RecordingProviderSender(), modules: [module])
+        defer { root.shutDown() }
+        settle(0.5)
+        XCTAssertEqual(module.selfHostedAvailability, .unchecked)
     }
 
     func testRegistrationWithoutAStoredProfileContactsNothing() throws {
@@ -115,8 +189,9 @@ final class OptionalCapabilitiesIntegrationTests: OptionalCapabilitiesTestCase {
         let root = try makeRoot(sender: sender, modules: [module])
         defer { root.shutDown() }
         root.start(isActive: true)
-        settle()
+        XCTAssertTrue(waitForDrain(root), "the drain ends")
         XCTAssertTrue(sender.requests.isEmpty, "the registration carries no endpoint of its own")
+        XCTAssertNotEqual(jobStatus(), "completed")
     }
 
     func testDeniedRouteSendsNothing() throws {

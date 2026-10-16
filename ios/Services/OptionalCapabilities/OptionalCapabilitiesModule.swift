@@ -5,8 +5,8 @@ import OhAndCoreBridge
 /// to the root.
 ///
 /// * **Off by default.** With `.none`, or with a registration that fails verification, the module takes no core client
-///   and contributes nothing; the base app builds and captures exactly as without it, and the shadow review service does
-///   not exist.
+///   and declares no provider protocol, so the core refuses to dispatch self-hosted jobs whatever the store holds; the
+///   base app builds and captures exactly as without it, and the shadow review service does not exist.
 /// * **Same rules.** The module has no `CoreHandle`, provider transport, endpoint or credential. Self-hosted jobs run in
 ///   the core's job runner and shadow review through the core-built, core-authorized exchange, so both follow the same
 ///   route grant, revocation and credential-reference checks as every other provider. A registration never widens them.
@@ -27,6 +27,10 @@ public final class OptionalCapabilitiesModule: CompositionModule {
     /// Present only while shadow review is enabled and the module is attached to a root.
     public private(set) var shadowReview: ShadowReviewService?
 
+    private let availabilityLock = NSLock()
+    private var storedSelfHostedAvailability: SelfHostedProfileAvailability = .unchecked
+    private var profileStatusClient: CoreProviderProfileStatusClient?
+
     public init(configuration: OptionalCapabilitiesConfiguration = .none) {
         self.configuration = configuration
         selfHostedState = OptionalCapabilityVerification.selfHostedState(configuration.selfHosted)
@@ -39,16 +43,62 @@ public final class OptionalCapabilitiesModule: CompositionModule {
         selfHostedState.isEnabled ? configuration.selfHosted : nil
     }
 
+    /// The root enables the self-hosted protocol in the core only while the registration is verified.
+    public var enabledProviderProtocols: Set<CoreProviderProtocol> {
+        selfHostedState.isEnabled ? [.selfHosted] : []
+    }
+
+    /// What the core's store says about the registered profile. `.unchecked` until the read is answered, and always
+    /// while the capability is off.
+    public var selfHostedAvailability: SelfHostedProfileAvailability {
+        availabilityLock.withLock { storedSelfHostedAvailability }
+    }
+
     public func attach(to context: CompositionContext) throws {
+        if let registration = selfHosted {
+            let client = try context.clients.providerProfileStatus()
+            availabilityLock.withLock { profileStatusClient = client }
+            client.status(profileVersion: registration.profileVersion, model: registration.model) { [weak self] result in
+                self?.record(result)
+            }
+        }
         guard shadowReviewState.isEnabled, let shadowConfiguration = configuration.shadowReview else { return }
         shadowReview = try context.clients.shadowReview(configuration: shadowConfiguration)
     }
 
     public func handle(_ event: CoreEvent) -> Bool {
-        shadowReview?.handle(event) ?? false
+        let client = availabilityLock.withLock { profileStatusClient }
+        if client?.handle(event) == true { return true }
+        return shadowReview?.handle(event) ?? false
     }
 
     public func shutDown() {
+        let client = availabilityLock.withLock { () -> CoreProviderProfileStatusClient? in
+            defer { profileStatusClient = nil }
+            return profileStatusClient
+        }
+        client?.shutDown()
         shadowReview = nil
+    }
+
+    private func record(_ result: CoreProviderProfileStatusResult) {
+        let availability: SelfHostedProfileAvailability
+        switch result {
+        case .failure:
+            availability = .unavailable(.checkFailed)
+        case .success(let status):
+            if !status.exists {
+                availability = .unavailable(.missing)
+            } else if status.providerProtocol != .selfHosted {
+                availability = .unavailable(.notSelfHosted)
+            } else if status.revoked {
+                availability = .unavailable(.revoked)
+            } else if !status.servesModel {
+                availability = .unavailable(.modelNotServed)
+            } else {
+                availability = .available
+            }
+        }
+        availabilityLock.withLock { storedSelfHostedAvailability = availability }
     }
 }

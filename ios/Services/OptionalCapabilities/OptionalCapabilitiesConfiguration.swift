@@ -18,6 +18,21 @@ public enum OptionalCapabilityState: Equatable, Sendable {
     public var isEnabled: Bool { self == .enabled }
 }
 
+/// Whether the core's store holds a usable profile for a verified registration. Fixed labels only.
+public enum SelfHostedProfileAvailability: Equatable, Sendable {
+    case unchecked
+    case available
+    case unavailable(Reason)
+
+    public enum Reason: String, Equatable, Sendable {
+        case missing
+        case notSelfHosted = "not_self_hosted"
+        case revoked
+        case modelNotServed = "model_not_served"
+        case checkFailed = "check_failed"
+    }
+}
+
 /// Registers the verified self-hosted provider. It names the installed profile and the model the profile serves, and
 /// carries the evidence the claim rests on. It holds no endpoint, credential or route: the profile in the core's store
 /// is the only place those live, so there is no default endpoint to fall back to.

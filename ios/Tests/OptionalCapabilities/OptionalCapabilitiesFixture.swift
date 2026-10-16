@@ -79,14 +79,16 @@ enum SelfHostedSeed {
                 \(quote(SelfHostedScenario.credentialReference)), 30, \(quote(retryPolicy)), \(origins), \
                 \(quote(capabilities(scenario))), '2026-10-08T09:00:00Z', \(revokedAt))
                 """)
-            statements.append(
-                """
-                INSERT INTO jobs (job_id, job_schema_version, item_id, job_type, source_revision, profile_version, \
-                request_version, status, attempt_count, created_at) VALUES (\(quote(SelfHostedScenario.jobID)), 1, \
-                \(quote(SelfHostedScenario.itemID)), 'interpret', 0, \(quote(SelfHostedScenario.profileVersion)), \
-                \(quote(SelfHostedScenario.requestVersion)), 'queued', 0, '2026-10-08T09:30:02Z')
-                """)
         }
+        // The job is queued even when the profile it names was never installed, so "nothing was sent" shows that the
+        // core had no endpoint to fall back to rather than that there was nothing to dispatch.
+        statements.append(
+            """
+            INSERT INTO jobs (job_id, job_schema_version, item_id, job_type, source_revision, profile_version, \
+            request_version, status, attempt_count, created_at) VALUES (\(quote(SelfHostedScenario.jobID)), 1, \
+            \(quote(SelfHostedScenario.itemID)), 'interpret', 0, \(quote(SelfHostedScenario.profileVersion)), \
+            \(quote(SelfHostedScenario.requestVersion)), 'queued', 0, '2026-10-08T09:30:02Z')
+            """)
         if scenario.interpretationGranted {
             statements.append(
                 """
