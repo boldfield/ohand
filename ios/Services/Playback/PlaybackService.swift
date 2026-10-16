@@ -46,7 +46,7 @@ public final class PlaybackService: @unchecked Sendable {
         layout: ProtectedStorageLayout,
         fence: PlaybackFence,
         fileSystem: AudioRetentionFileSystem = FileManagerAudioRetentionFileSystem(),
-        playerFactory: PlaybackPlayerFactory
+        playerFactory: @escaping PlaybackPlayerFactory
     ) {
         self.core = core
         self.session = session
