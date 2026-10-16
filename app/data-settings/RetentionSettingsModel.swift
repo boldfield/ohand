@@ -61,15 +61,16 @@ final class RetentionSettingsModel: ObservableObject {
     @Published private(set) var actions: [String: RetentionActionState] = [:]
 
     /// The period the user is choosing, in whole days. Applied by `applyPeriod()`.
-    @Published var chosenDays: Int = 7
+    @Published var chosenDays: Int = RetentionSettingsModel.defaultDays
 
+    static let defaultDays = 7
     static let minimumDays = 1
     static let maximumDays = Int(RetentionPolicySetting.maximumPeriodSeconds / 86_400)
 
     private let controls: RetentionControlling
     private let readScope: () -> CompositionReadScope
     private var generation = 0
-    private var lastStoredDays = 7
+    private var lastStoredDays = RetentionSettingsModel.defaultDays
 
     nonisolated init(controls: RetentionControlling, readScope: @escaping () -> CompositionReadScope) {
         self.controls = controls
@@ -86,7 +87,8 @@ final class RetentionSettingsModel: ObservableObject {
         }
         generation += 1
         let thisGeneration = generation
-        if status == nil { phase = .loading }
+        let isFirstLoad = status == nil
+        if isFirstLoad { phase = .loading }
         do {
             let fresh = try await controls.status()
             guard thisGeneration == generation else { return }
@@ -94,7 +96,7 @@ final class RetentionSettingsModel: ObservableObject {
             status = fresh
             let storedDays = max(Self.minimumDays, min(Self.maximumDays, Int(fresh.policy.periodSeconds / 86_400)))
             // An unsaved stepper value survives a refresh; only an untouched one follows the stored period.
-            if status == nil || chosenDays == lastStoredDays { chosenDays = storedDays }
+            if isFirstLoad || chosenDays == lastStoredDays { chosenDays = storedDays }
             lastStoredDays = storedDays
             actions = actions.filter { entry in fresh.unresolved.contains { $0.itemID == entry.key } }
             phase = .loaded
@@ -152,6 +154,9 @@ final class RetentionSettingsModel: ObservableObject {
         actions = [:]
         periodState = nil
         phase = .idle
+        // An unsaved stepper value is abandoned with the screen; the next load follows the stored period.
+        chosenDays = Self.defaultDays
+        lastStoredDays = Self.defaultDays
     }
 
     private func act(

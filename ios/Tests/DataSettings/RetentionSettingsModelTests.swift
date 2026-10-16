@@ -97,6 +97,27 @@ final class RetentionSettingsModelTests: XCTestCase {
         XCTAssertEqual(model.chosenDays, 21)
     }
 
+    func testAnAbandonedPeriodChoiceIsDroppedWhenTheScreenIsLeft() async {
+        let model = makeModel(FakeRetentionControls(status: Self.status()))
+        await model.refresh()
+        model.chosenDays = 21
+        model.clear()
+        await model.refresh()
+        XCTAssertEqual(model.chosenDays, 7)
+    }
+
+    func testAnAbandonedPeriodChoiceIsDroppedByARelock() async {
+        let model = makeModel(FakeRetentionControls(status: Self.status(periodDays: 30, isDefault: false)))
+        await model.refresh()
+        model.chosenDays = 21
+        scope = .captureOnly
+        await model.refresh()
+        XCTAssertEqual(model.phase, .locked)
+        scope = .authenticated
+        await model.refresh()
+        XCTAssertEqual(model.chosenDays, 30)
+    }
+
     func testLowStoragePressureIsReportedWithoutOfferingToDeleteSoleSourceAudio() async {
         let model = makeModel(FakeRetentionControls(status: Self.status(pressure: .low)))
 
