@@ -1054,6 +1054,7 @@ pub unsafe extern "C" fn ohand_core_fail_provider_exchange(
     })
 }
 
+pub mod connection_check;
 pub mod protocols;
 pub mod shadow_review;
 
