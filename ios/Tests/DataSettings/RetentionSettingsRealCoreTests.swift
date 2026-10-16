@@ -9,6 +9,11 @@ private final class UnreachableSettingsProviderSender: ProviderRequestSender, @u
     }
 }
 
+private struct BuiltRoot: @unchecked Sendable {
+    let root: ServiceCompositionRoot
+    let coordinator: LifecycleCoordinator
+}
+
 /// Drives `RetentionSettingsModel` over the real composition root and Rust core on an on-disk store: the real policy,
 /// the real unresolved list, the core's refusals, and a capture saved while a sweep runs.
 @MainActor
@@ -40,26 +45,34 @@ final class RetentionSettingsRealCoreTests: XCTestCase {
         super.tearDown()
     }
 
-    private func makeModel() throws -> RetentionSettingsModel {
-        coordinator = LifecycleCoordinator(stepTimeoutSeconds: 30)
-        root = try ServiceCompositionRoot(
-            testing: CompositionConfiguration(
-                storageRootPath: world.layout.rootDirectory.path, captureRouteID: "route-personal",
-                jobRetryDelaySeconds: 3600),
-            environment: CompositionEnvironment(
-                timeZone: { TimeZone(identifier: "UTC")! }, locale: { Locale(identifier: "en_US") }),
-            adapters: .injectedForTests(
-                sender: UnreachableSettingsProviderSender(), readSession: session,
-                notificationCenter: FakeNotificationCenter(), reachability: FakeReachability(reachable: true)),
-            modules: [coordinator])
-        try coordinator.connect(to: root)
+    /// Builds the root off the main thread, as the other real-core suites do: its route provisioning blocks until the
+    /// core answers.
+    private func makeModel() async throws -> RetentionSettingsModel {
+        let layoutPath = world.layout.rootDirectory.path
+        let readSession = session!
+        let built = try await Task.detached { () -> BuiltRoot in
+            let coordinator = LifecycleCoordinator(stepTimeoutSeconds: 30)
+            let root = try ServiceCompositionRoot(
+                testing: CompositionConfiguration(
+                    storageRootPath: layoutPath, captureRouteID: "route-personal", jobRetryDelaySeconds: 3600),
+                environment: CompositionEnvironment(
+                    timeZone: { TimeZone(identifier: "UTC")! }, locale: { Locale(identifier: "en_US") }),
+                adapters: .injectedForTests(
+                    sender: UnreachableSettingsProviderSender(), readSession: readSession,
+                    notificationCenter: FakeNotificationCenter(), reachability: FakeReachability(reachable: true)),
+                modules: [coordinator])
+            try coordinator.connect(to: root)
+            return BuiltRoot(root: root, coordinator: coordinator)
+        }.value
+        root = built.root
+        coordinator = built.coordinator
         return RetentionSettingsModel.assembled(root: root)
     }
 
     func testTheModelShowsTheRealDefaultPolicyAndSoleAudioAndStoresAChangedPeriod() async throws {
         let sole = try await world.seedVoice(captureID: "cap-sole", transcribedDaysAgo: nil)
         _ = try await world.seedVoice(captureID: "cap-transcribed", transcribedDaysAgo: 1)
-        let model = try makeModel()
+        let model = try await makeModel()
 
         await model.refresh()
         XCTAssertEqual(model.phase, .loaded)
@@ -75,7 +88,7 @@ final class RetentionSettingsRealCoreTests: XCTestCase {
 
     func testRetryAndDeleteUseTheCoresOperationsAndSoleSourceAudioIsKept() async throws {
         let sole = try await world.seedVoice(captureID: "cap-sole", transcribedDaysAgo: nil)
-        let model = try makeModel()
+        let model = try await makeModel()
         await model.refresh()
 
         await model.deleteAudio(itemID: sole.itemID)
@@ -98,7 +111,7 @@ final class RetentionSettingsRealCoreTests: XCTestCase {
 
     func testARelockedSessionShowsNothingFromTheCore() async throws {
         _ = try await world.seedVoice(captureID: "cap-sole", transcribedDaysAgo: nil)
-        let model = try makeModel()
+        let model = try await makeModel()
         await model.refresh()
         XCTAssertNotNil(model.status)
 
@@ -111,7 +124,7 @@ final class RetentionSettingsRealCoreTests: XCTestCase {
 
     func testANewCaptureIsSavedWhileASweepAndAStatusReadRun() async throws {
         _ = try await world.seedVoice(captureID: "cap-transcribed", transcribedDaysAgo: 10)
-        let model = try makeModel()
+        let model = try await makeModel()
         let retention = try XCTUnwrap(coordinator.audioRetention)
 
         let saved = expectation(description: "capture saved")
