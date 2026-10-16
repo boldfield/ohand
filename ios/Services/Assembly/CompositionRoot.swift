@@ -545,6 +545,10 @@ private final class CoreHandleReadSource: PrivateReadSource {
     func startItemDetail(operationID: UInt64, itemID: String, readScopes: [CoreExportScope]) throws {
         try core.startItemDetail(operationID: operationID, itemID: itemID, readScopes: readScopes)
     }
+
+    func startJobConfigurationRead(operationID: UInt64, command: JobConfigurationCommand) throws {
+        try core.startJobConfiguration(operationID: operationID, command: command)
+    }
 }
 
 /// Reads an item's independent status facts from the core, only through the private read gate: a capture-only session
@@ -816,6 +820,7 @@ public final class ServiceCompositionRoot {
     static let itemLifecycleControlClientName = "item lifecycle controls"
     static let suggestionResponseClientName = "suggestion responses"
     static let itemDetailClientName = "item detail"
+    static let jobConfigurationClientName = "job configuration"
 
     /// One half-open interval of operation identifiers `[start, end)` that a client claims.
     public struct OperationRange: Equatable, Sendable {
@@ -855,6 +860,7 @@ public final class ServiceCompositionRoot {
             itemLifecycleControlClientName, from: CoreItemLifecycleControlClient.firstOperationID),
         fixedWidthRange(suggestionResponseClientName, from: CoreSuggestionResponseClient.firstOperationID),
         fixedWidthRange(itemDetailClientName, from: CoreItemDetailClient.firstOperationID),
+        fixedWidthRange(jobConfigurationClientName, from: CoreJobConfigurationClient.firstOperationID),
         OperationRange(
             name: processingHealthClientName, start: ProcessingHealthService.firstOperationID,
             end: JobRunnerService.firstOperationID),
@@ -878,6 +884,9 @@ public final class ServiceCompositionRoot {
     public let suggestionResponses: SuggestionResponseService
     /// Reads one item's full detail; needs an authenticated read session.
     public let itemDetails: ItemDetailService
+    /// Re-pins waiting work, requeues a job, revokes a profile and lists the jobs pinned to one; needs an authenticated
+    /// read session.
+    public let jobConfiguration: JobConfigurationService
 
     let adapters: CompositionAdapters
     /// The session whose scope gates every private read the root performs.
@@ -901,6 +910,7 @@ public final class ServiceCompositionRoot {
     private let itemLifecycleControlClient: CoreItemLifecycleControlClient
     private let suggestionResponseClient: CoreSuggestionResponseClient
     private let itemDetailClient: CoreItemDetailClient
+    private let jobConfigurationClient: CoreJobConfigurationClient
     private let modules: [CompositionModule]
     private let foreground: ForegroundState
     private let stateLock = NSLock()
@@ -969,6 +979,8 @@ public final class ServiceCompositionRoot {
         suggestionResponses = assembly.suggestionResponses
         itemDetailClient = assembly.itemDetailClient
         itemDetails = assembly.itemDetails
+        jobConfigurationClient = assembly.jobConfigurationClient
+        jobConfiguration = assembly.jobConfiguration
         reminderReconciler = assembly.permissionReconciler
         foreground = assembly.foreground
         assembly.rootReference.set(self)
@@ -1117,6 +1129,7 @@ public final class ServiceCompositionRoot {
         itemLifecycleControlClient.shutDown()
         suggestionResponseClient.shutDown()
         itemDetailClient.shutDown()
+        jobConfigurationClient.shutDown()
         reminderCore.invalidate()
         promptScheduleClient.shutDown()
         statusReader.shutDown()
@@ -1388,6 +1401,8 @@ public final class ServiceCompositionRoot {
         let suggestionResponses: SuggestionResponseService
         let itemDetailClient: CoreItemDetailClient
         let itemDetails: ItemDetailService
+        let jobConfigurationClient: CoreJobConfigurationClient
+        let jobConfiguration: JobConfigurationService
         let permissionReconciler: NotificationPermissionReconciler
         let foreground: ForegroundState
     }
@@ -1519,6 +1534,11 @@ public final class ServiceCompositionRoot {
             router.register { itemDetailClient.handle($0) }
             undo.append { itemDetailClient.shutDown() }
             let itemDetails = ItemDetailService(core: itemDetailClient)
+            let jobConfigurationClient = CoreJobConfigurationClient(core: core, gate: readGate)
+            router.register { jobConfigurationClient.handle($0) }
+            undo.append { jobConfigurationClient.shutDown() }
+            let jobConfiguration = JobConfigurationService(
+                core: jobConfigurationClient, session: adapters.readSession)
             let permissionReconciler = NotificationPermissionReconciler(
                 center: adapters.notificationCenter, reconciliation: reminderCore,
                 observations: adapters.permissionObservations)
@@ -1572,7 +1592,8 @@ public final class ServiceCompositionRoot {
                 itemLifecycleControls: itemLifecycleControls,
                 suggestionResponseClient: suggestionResponseClient,
                 suggestionResponses: suggestionResponses, itemDetailClient: itemDetailClient,
-                itemDetails: itemDetails, permissionReconciler: permissionReconciler,
+                itemDetails: itemDetails, jobConfigurationClient: jobConfigurationClient,
+                jobConfiguration: jobConfiguration, permissionReconciler: permissionReconciler,
                 foreground: foreground)
         } catch {
             for step in undo.reversed() {
