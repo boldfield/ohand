@@ -789,6 +789,35 @@ private final class OpenItemRelay: @unchecked Sendable {
     }
 }
 
+/// Holds the callback a prompt tap runs. A tap that arrives while none is set is held and handed over once, in order,
+/// when one is set, so it is never dropped.
+private final class PromptTapRelay: @unchecked Sendable {
+    private let lock = NSLock()
+    private var handler: (@Sendable (PromptNotificationEvent) -> Void)?
+    private var held: [PromptNotificationEvent] = []
+
+    func set(_ newHandler: (@Sendable (PromptNotificationEvent) -> Void)?) {
+        lock.lock()
+        handler = newHandler
+        let pending = newHandler == nil ? [] : held
+        if newHandler != nil { held = [] }
+        lock.unlock()
+        for event in pending { newHandler?(event) }
+    }
+
+    func receive(_ event: PromptNotificationEvent) {
+        guard event.kind == .opened else { return }
+        lock.lock()
+        guard let current = handler else {
+            held.append(event)
+            lock.unlock()
+            return
+        }
+        lock.unlock()
+        current(event)
+    }
+}
+
 /// The notification-action pieces the root owns: the core client, the durable journal's handler and the delegate.
 /// Nothing here is public; the root exposes the delegate, a reconcile and the open-item setter.
 final class NotificationActionClients: @unchecked Sendable {
@@ -799,6 +828,7 @@ final class NotificationActionClients: @unchecked Sendable {
     let ingestor: NotificationEventIngestor
     let receiver: NotificationEventReceiver
     fileprivate let openItem: OpenItemRelay
+    fileprivate let promptTap = PromptTapRelay()
     private let scopeToken: SessionScopeObserverToken
 
     init(
@@ -815,12 +845,14 @@ final class NotificationActionClients: @unchecked Sendable {
         let relay = OpenItemRelay()
         let handler = ActionHandler(
             core: client, journal: journal, authorization: session, openItem: { relay.open($0) })
+        let promptTap = promptTap
         let ingestor = NotificationEventIngestor(
             now: now,
             handler: { event in
                 handler.eventHandler(event)
                 environmentHandler(event)
-            })
+            },
+            promptHandler: { promptTap.receive($0) })
         self.client = client
         self.handler = handler
         self.ingestor = ingestor
@@ -1060,6 +1092,7 @@ public final class ServiceCompositionRoot {
     private var permissionObserver: NotificationPermissionLifecycleObserver?
     private var foregroundTokens: [NSObjectProtocol] = []
     private var latestReminderReport: NotificationPermissionReport?
+    private var reminderReportObserver: (@Sendable (NotificationPermissionReport) -> Void)?
 
     /// Builds the production root: real adapters chosen from `configuration`.
     public convenience init(
@@ -1423,7 +1456,23 @@ public final class ServiceCompositionRoot {
         notificationActions.openItem.set(handler)
     }
 
+    /// Sets (or clears, with `nil`) what runs when a tapped daily prompt asks to open its suggestion. It receives the
+    /// opened prompt event and may run on any thread. A tap that arrives while none is set is held and delivered once
+    /// when one is set.
+    public func setOpenSuggestionHandler(_ handler: (@Sendable (PromptNotificationEvent) -> Void)?) {
+        notificationActions.promptTap.set(handler)
+    }
+
     // MARK: Reminders
+
+    /// Sets (or clears, with `nil`) what runs when a reminder pass produces a report different from the previous one,
+    /// including when reminders become undeliverable because permission was never requested
+    /// (`ReminderUndeliverableReason.permissionNotRequested`), so the app can ask then. It may run on any thread.
+    public func setReminderReportObserver(_ observer: (@Sendable (NotificationPermissionReport) -> Void)?) {
+        stateLock.lock()
+        reminderReportObserver = observer
+        stateLock.unlock()
+    }
 
     /// Runs one reminder pass now: the core decides what to install or cancel, and the notification bridge performs it.
     @discardableResult
@@ -1450,8 +1499,11 @@ public final class ServiceCompositionRoot {
 
     private func recordReminderReport(_ report: NotificationPermissionReport) {
         stateLock.lock()
+        let changed = latestReminderReport != report
         latestReminderReport = report
+        let observer = changed ? reminderReportObserver : nil
         stateLock.unlock()
+        observer?(report)
     }
 
     // MARK: Helpers
