@@ -4,7 +4,7 @@ import XCTest
 @testable import OhAndCoreBridge
 @testable import OhAndServices
 
-private struct PlaybackRootUnreachableSender: ProviderRequestSender {
+private final class PlaybackRootUnreachableSender: ProviderRequestSender, @unchecked Sendable {
     func send(_ request: ProviderHTTPRequest) async throws -> ProviderHTTPResponse {
         throw URLError(.notConnectedToInternet)
     }
