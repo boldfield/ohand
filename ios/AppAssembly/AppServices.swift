@@ -89,7 +89,8 @@ final class AppServices {
         self.navigation = navigation
         managementContext = ManagementContext(
             voiceRecovery: voice.recoveryModel,
-            retrieval: .assembled(searcher: retrieval, root: root, navigation: navigation))
+            retrieval: .assembled(searcher: retrieval, root: root, navigation: navigation),
+            promptSettings: PromptSettingsModel(controller: root.promptSchedule))
         entrySession = CaptureEntrySession(
             handoff: handoff, defaultMode: defaultMode, access: access, notificationCenter: notificationCenter)
         entrySession.observeHandoffs { [weak self] presentation in self?.present(presentation) }

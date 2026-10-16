@@ -4,6 +4,7 @@ import SwiftUI
 struct ManagementContext {
     let voiceRecovery: VoiceRecoveryModel
     let retrieval: RetrievalSearchModel
+    let promptSettings: PromptSettingsModel
     /// Lets a hosted test see what the search screen shows; production leaves it unset.
     var retrievalRenderReporter: (([String: RetrievalRenderedElement]) -> Void)?
 }
@@ -86,6 +87,7 @@ enum ManagementCatalog {
     /// Sections of the settings root.
     static let settingsSections: [ManagementEntry] = [
         ManagementEntry(id: "voice-recovery", title: "Unfinished recordings", systemImage: "waveform") { context in AnyView(VoiceRecoveryView(model: context.voiceRecovery).navigationTitle("Unfinished recordings").navigationBarTitleDisplayMode(.inline)) },
+        ManagementEntry(id: "prompt-settings", title: "Daily prompt", systemImage: "bell.badge") { context in AnyView(PromptSettingsView(model: context.promptSettings)) },
     ]
 
     /// Where a slice registers the screen for an item or the current suggestion. Set the slice's own line, nothing else.
