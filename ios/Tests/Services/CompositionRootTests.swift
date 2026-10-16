@@ -135,6 +135,34 @@ private final class ShadowReviewTakingModule: CompositionModule {
     func shutDown() {}
 }
 
+/// Declares the provider protocols it needs and, when asked, takes the provider-profile status client.
+private final class ProtocolDeclaringModule: CompositionModule {
+    let identifier = "protocol.declarer"
+    let firstOperationID: UInt64 = 1 << 44
+    let enabledProviderProtocols: Set<CoreProviderProtocol>
+    private let takesStatusClient: Bool
+    private(set) var statusClient: CoreProviderProfileStatusClient?
+
+    init(enabledProviderProtocols: Set<CoreProviderProtocol>, takesStatusClient: Bool = false) {
+        self.enabledProviderProtocols = enabledProviderProtocols
+        self.takesStatusClient = takesStatusClient
+    }
+
+    func attach(to context: CompositionContext) throws {
+        if takesStatusClient {
+            statusClient = try context.clients.providerProfileStatus()
+        }
+    }
+
+    func handle(_ event: CoreEvent) -> Bool {
+        statusClient?.handle(event) ?? false
+    }
+
+    func shutDown() {
+        statusClient?.shutDown()
+    }
+}
+
 /// Retrieves through the gated search and list verbs only, as an `app/` module would: it holds no core handle.
 private final class RetrievalModule: CompositionModule {
     let identifier = "retrieval.reader"
@@ -454,6 +482,7 @@ final class CompositionRootTests: XCTestCase {
             _ = try clients.deletionCleanup()
             _ = try clients.processingHealth()
             _ = try clients.shadowReview()
+            _ = try clients.providerProfileStatus()
         }
         let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), modules: [module])
         root.shutDown()
@@ -467,6 +496,7 @@ final class CompositionRootTests: XCTestCase {
             (ServiceCompositionRoot.deletionCleanupClientName, { _ = try $0.deletionCleanup() }),
             (ServiceCompositionRoot.processingHealthClientName, { _ = try $0.processingHealth() }),
             (ServiceCompositionRoot.shadowReviewClientName, { _ = try $0.shadowReview() }),
+            (ServiceCompositionRoot.providerProfileStatusClientName, { _ = try $0.providerProfileStatus() }),
         ]
         for (name, take) in takers {
             let first = ClientTakingModule(identifier: "first", firstOperationID: 1 << 44, take: take)
@@ -658,6 +688,75 @@ final class CompositionRootTests: XCTestCase {
         XCTAssertEqual(sender.requests.count, 1, "the one review request reached the sender the root was given")
         XCTAssertEqual(sender.requests.first?.authorization.capability, .review)
         XCTAssertEqual(sender.requests.first?.url.host, "api.anthropic.com")
+    }
+
+    func testStoredSelfHostedJobSendsNothingWhenNoModuleDeclaresSelfHosted() throws {
+        try prepareSelfHostedStore()
+        let sender = ScriptedProviderSender(reply: Data())
+        let root = try makeTestRoot(sender: sender, modules: [ProtocolDeclaringModule(enabledProviderProtocols: [])])
+        defer { root.shutDown() }
+        let itemID = try saveCapture(root)
+        try insertInterpretationJob(itemID: itemID)
+        root.start(isActive: true)
+
+        XCTAssertTrue(
+            pump(until: { root.jobRunner.finishedDrainCount > 0 }, timeout: 20),
+            "a drain ran: \(jobDiagnostics(root, sender: sender))")
+        _ = pump(until: { false }, timeout: 1)
+        XCTAssertTrue(sender.requests.isEmpty, "self-hosted is disabled, so nothing is sent")
+        XCTAssertEqual(JobStoreInspector.job(at: databasePath, id: "job-composition-1")?.status, "queued")
+    }
+
+    func testModuleDeclaringSelfHostedEnablesDispatch() throws {
+        try prepareSelfHostedStore()
+        let sender = ScriptedProviderSender(reply: Data())
+        let module = ProtocolDeclaringModule(enabledProviderProtocols: [.selfHosted])
+        let root = try makeTestRoot(sender: sender, modules: [module])
+        defer { root.shutDown() }
+        let itemID = try saveCapture(root)
+        try insertInterpretationJob(itemID: itemID)
+        root.start(isActive: true)
+
+        XCTAssertTrue(
+            pump(until: { !sender.requests.isEmpty }, timeout: 20),
+            "the self-hosted job reaches the transport: \(jobDiagnostics(root, sender: sender))")
+        XCTAssertEqual(sender.requests.first?.url.host, "spark.example.test")
+    }
+
+    func testStatusClientReportsExistingRevokedAndMissingProfiles() throws {
+        try prepareStore()
+        let revokedVersion = "4b7a1bfe-88ff-4ba7-848e-a45069cf9082"
+        try execute([
+            """
+            INSERT INTO provider_profiles (profile_version, profile_id, provider_type, endpoint, model, \
+            credential_ref, timeout_seconds, retry_policy, authorized_destinations, capabilities, created_at, \
+            revoked_at) SELECT '\(revokedVersion)', 'revoked-profile', provider_type, endpoint, model, \
+            credential_ref, timeout_seconds, retry_policy, authorized_destinations, capabilities, created_at, \
+            '2026-10-08T10:00:00Z' FROM provider_profiles WHERE profile_version = '\(Self.profileVersion)'
+            """
+        ])
+        let module = ProtocolDeclaringModule(enabledProviderProtocols: [], takesStatusClient: true)
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), modules: [module])
+        defer { root.shutDown() }
+        let client = try XCTUnwrap(module.statusClient)
+
+        func read(_ version: String) -> ProviderProfileStatus? {
+            var result: CoreProviderProfileStatusResult?
+            client.status(profileVersion: version, model: "synthetic-model") { result = $0 }
+            _ = pump(until: { result != nil })
+            return try? result?.get()
+        }
+        let live = try XCTUnwrap(read(Self.profileVersion))
+        XCTAssertTrue(live.exists)
+        XCTAssertFalse(live.revoked)
+        XCTAssertEqual(live.providerProtocol, .anthropic)
+        XCTAssertTrue(live.servesModel)
+        let revoked = try XCTUnwrap(read(revokedVersion))
+        XCTAssertTrue(revoked.exists)
+        XCTAssertTrue(revoked.revoked)
+        let missing = try XCTUnwrap(read("4b7a1bfe-88ff-4ba7-848e-a45069cf9099"))
+        XCTAssertFalse(missing.exists)
+        XCTAssertNil(missing.providerProtocol)
     }
 
     func testRootAttachesTheTransportOnceToItsOwnCoreWithTheAdapterSender() throws {
@@ -1304,6 +1403,49 @@ final class CompositionRootTests: XCTestCase {
             '2026-10-08T09:00:00Z', NULL)
             """,
         ])
+    }
+
+    /// Like `prepareStore`, but the installed profile is a self-hosted one at its own origin.
+    private func prepareSelfHostedStore() throws {
+        let layout = ProtectedStorageLayout(rootDirectory: storageRoot)
+        _ = ProtectedStorageService(layout: layout).prepare()
+        try CoreHandle(path: layout.databaseURL.path).close()
+        let destination = #"["https://spark.example.test"]"#
+        let retryPolicy = #"{"max_attempts":3,"initial_backoff_ms":500,"max_backoff_ms":30000}"#
+        let capabilities =
+            #"{"text_interpretation":{"capability":"text_interpretation","support":"supported","# +
+            #""evidence":"composition-root-tests","reason":null,"input_size_limit":500,"# +
+            #""structured_output":"json_schema"}}"#
+        try execute([
+            """
+            INSERT INTO routes (route_id, route_name, scope, processing_destinations, created_at) VALUES \
+            ('\(Self.routeID)', 'synthetic', 'personal', '\(destination)', '2026-10-08T09:00:00Z')
+            """,
+            """
+            INSERT INTO route_authorizations (route_id, capability, authorized_destinations, created_at) VALUES \
+            ('\(Self.routeID)', 'text_interpretation', '\(destination)', '2026-10-08T09:00:00Z')
+            """,
+            """
+            INSERT INTO provider_profiles (profile_version, profile_id, provider_type, endpoint, model, \
+            credential_ref, timeout_seconds, retry_policy, authorized_destinations, capabilities, created_at, \
+            revoked_at) VALUES ('\(Self.profileVersion)', 'synthetic-self-hosted', 'self_hosted', \
+            'https://spark.example.test/v1', 'synthetic-model', 'synthetic-credential', 30, '\(retryPolicy)', \
+            '\(destination)', '\(capabilities)', '2026-10-08T09:00:00Z', NULL)
+            """,
+        ])
+    }
+
+    private func saveCapture(_ root: ServiceCompositionRoot) throws -> String {
+        var saved: CompositionSaveOutcome?
+        root.saveText(captureID: UUID().uuidString.lowercased(), text: Self.captureText, capturedAt: Date()) {
+            saved = $0
+        }
+        XCTAssertTrue(pump(until: { saved != nil }), "the save completes")
+        guard case .saved(_, let itemID, _)? = saved else {
+            XCTFail("expected a confirmed save, got \(String(describing: saved))")
+            throw XCTSkip("no saved capture")
+        }
+        return itemID
     }
 
     private func shadowReviewConfiguration() -> ShadowReviewConfiguration {
