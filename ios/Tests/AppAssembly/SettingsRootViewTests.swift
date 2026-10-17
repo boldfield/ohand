@@ -88,4 +88,14 @@ final class SettingsRootViewTests: XCTestCase {
         XCTAssertEqual(rendered["audio-retention"], "Audio: 7 days")
         XCTAssertEqual(rendered[SettingsRootView.exportEntryID], "Export")
     }
+
+    func testRowsFollowTheDesignOrderRegardlessOfCatalogOrder() {
+        let ids = { (entries: [ManagementEntry]) in entries.map(\.id) }
+        let catalog = ManagementCatalog.settingsSections
+        XCTAssertEqual(ids(SettingsRootView.ordered(SettingsRootView.firstGroupEntryIDs, from: catalog)),
+                       ["prompt-settings", "voice-recovery"])
+        XCTAssertEqual(ids(SettingsRootView.ordered(SettingsRootView.secondGroupEntryIDs, from: catalog)),
+                       ["provider-settings", "audio-retention"])
+        XCTAssertEqual(SettingsRootView.secondGroupEntryIDs.last, SettingsRootView.exportEntryID)
+    }
 }

@@ -91,7 +91,7 @@ enum ManagementCatalog {
     static let settingsSections: [ManagementEntry] = [
         ManagementEntry(id: "voice-recovery", title: "Unfinished recordings", systemImage: "waveform") { context in AnyView(VoiceRecoveryView(model: context.voiceRecovery).navigationTitle("Unfinished recordings").navigationBarTitleDisplayMode(.inline)) },
         ManagementEntry(id: "audio-retention", title: "Audio retention", systemImage: "externaldrive") { context in AnyView(RetentionSettingsView(model: context.retention)) },
-        ManagementEntry(id: "provider-settings", title: "Processing", systemImage: "server.rack") { context in AnyView(ProviderSettingsView(model: context.providerSettings)) },
+        ManagementEntry(id: "provider-settings", title: "Providers", systemImage: "server.rack") { context in AnyView(ProviderSettingsView(model: context.providerSettings)) },
         ManagementEntry(id: "prompt-settings", title: "Daily prompt", systemImage: "bell.badge") { context in AnyView(PromptSettingsView(model: context.promptSettings)) },
     ]
 
@@ -156,8 +156,9 @@ struct SettingsRootView: View {
     static let versionIdentifier = "management.settings.version"
     static let exportEntryID = "export"
 
-    /// Sections shown in the first group; the rest follow in the second.
-    static let firstGroupEntryIDs: Set<String> = ["prompt-settings", "voice-recovery"]
+    /// The design's row order for the two groups. Rows missing from `sections` are skipped.
+    static let firstGroupEntryIDs = ["prompt-settings", "voice-recovery"]
+    static let secondGroupEntryIDs = ["provider-settings", "audio-retention", exportEntryID]
 
     let sections: [ManagementEntry]
     let context: ManagementContext
@@ -167,12 +168,15 @@ struct SettingsRootView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
-    private var firstGroup: [ManagementEntry] { sections.filter { Self.firstGroupEntryIDs.contains($0.id) } }
+    private var firstGroup: [ManagementEntry] { Self.ordered(Self.firstGroupEntryIDs, from: sections) }
 
-    /// The remaining sections, then Export, which lives with the other data settings.
+    /// Processing, Audio, then Export, which lives with the other data settings.
     private var secondGroup: [ManagementEntry] {
-        sections.filter { !Self.firstGroupEntryIDs.contains($0.id) }
-            + (context.retention.exportSettings == nil ? [] : [Self.exportEntry])
+        Self.ordered(Self.secondGroupEntryIDs, from: sections + (context.retention.exportSettings == nil ? [] : [Self.exportEntry]))
+    }
+
+    static func ordered(_ ids: [String], from entries: [ManagementEntry]) -> [ManagementEntry] {
+        ids.compactMap { id in entries.first { $0.id == id } }
     }
 
     private static let exportEntry = ManagementEntry(id: exportEntryID, title: "Export", systemImage: "square.and.arrow.up") { context in
@@ -329,7 +333,7 @@ private struct ProcessingValueRow: View {
     }
 
     var body: some View {
-        reported(entry, value: value)
+        reported(entry, label: "Processing", value: value)
     }
 }
 
