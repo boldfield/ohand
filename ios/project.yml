@@ -326,6 +326,20 @@ targets:
     dependencies:
       - target: CaptureProbe
 
+  OhAndWalkthroughUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITests/Walkthrough
+        createIntermediateGroups: true
+    settings:
+      PRODUCT_NAME: OhAndWalkthroughUITests
+      PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.app.walkthrough-uitests
+      GENERATE_INFOPLIST_FILE: YES
+      TEST_TARGET_NAME: OhAndApp
+    dependencies:
+      - target: OhAndApp
+
   ManagementHandoffUITests:
     type: bundle.ui-testing
     platform: iOS
@@ -391,6 +405,13 @@ schemes:
     test:
       targets:
         - CaptureProbeUITests
+  OhAndWalkthroughUITests:
+    build:
+      targets:
+        OhAndWalkthroughUITests: all
+    test:
+      targets:
+        - OhAndWalkthroughUITests
   ManagementHandoffUITests:
     build:
       targets:

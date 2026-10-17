@@ -288,6 +288,73 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  walkthrough:
+    name: Screenshot walkthrough
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select pinned Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          # Must equal options.xcodeVersion in ios/project.yml (enforced by check_project_config.py).
+          # Next bump: Xcode 27 once the hosted image carries it.
+          xcode-version: '26.6'
+
+      - name: Install XcodeGen launcher
+        shell: bash
+        run: brew install mint
+
+      - name: Select simulators
+        id: simulators
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ios/.evidence
+          sdk_version="$(xcrun --sdk iphonesimulator --show-sdk-version)"
+          xcrun simctl list -j devices available > ios/.evidence/simctl-devices.json
+          python3 ios/scripts/select_simulator.py --input ios/.evidence/simctl-devices.json \
+            --max-runtime "${sdk_version}" | sed 's/^/phone_/' | tee ios/.evidence/simulators.txt >> "$GITHUB_OUTPUT"
+          # A regular-width run needs an iPad; without one only the compact run is made.
+          if python3 ios/scripts/select_simulator.py --input ios/.evidence/simctl-devices.json \
+              --max-runtime "${sdk_version}" --family iPad | sed 's/^/pad_/' >> ios/.evidence/simulators.txt; then
+            grep '^pad_' ios/.evidence/simulators.txt >> "$GITHUB_OUTPUT"
+          fi
+          cat ios/.evidence/simulators.txt
+
+      - name: Generate Xcode project
+        run: cd ios && ./scripts/generate.sh
+
+      - name: Walkthrough at compact width
+        shell: bash
+        env:
+          SIMULATOR_UDID: ${{ steps.simulators.outputs.phone_udid }}
+        run: |
+          set -euo pipefail
+          cd ios
+          ./scripts/walkthrough-simulator.sh "${SIMULATOR_UDID}" .evidence compact
+
+      - name: Walkthrough at regular width
+        if: steps.simulators.outputs.pad_udid != ''
+        shell: bash
+        env:
+          SIMULATOR_UDID: ${{ steps.simulators.outputs.pad_udid }}
+        run: |
+          set -euo pipefail
+          cd ios
+          ./scripts/walkthrough-simulator.sh "${SIMULATOR_UDID}" .evidence regular
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-walkthrough
+          path: ios/.evidence
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
   tauri-probe:
     name: Tauri 2 iOS probe build and round-trip test
     runs-on: macos-26
