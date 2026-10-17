@@ -272,8 +272,8 @@ final class ManagementNavigationModelTests: XCTestCase {
         XCTAssertEqual(ManagementRoute(pathComponent: ManagementCatalog.searchEntryID), .entry("search"))
     }
 
-    func testOnlyTheSuggestionDestinationIsRegisteredSoItemRequestsShowPlaceholders() {
-        XCTAssertFalse(ManagementCatalog.destinations.isRegistered(.item("item-1")))
+    func testTheSourceDetailAndSuggestionDestinationsAreRegistered() {
+        XCTAssertTrue(ManagementCatalog.destinations.isRegistered(.item("item-1")))
         XCTAssertTrue(ManagementCatalog.destinations.isRegistered(.suggestion))
         XCTAssertTrue(ManagementCatalog.destinations.isRegistered(.entry(ManagementCatalog.searchEntryID)))
     }

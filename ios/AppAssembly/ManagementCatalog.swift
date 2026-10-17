@@ -7,6 +7,7 @@ struct ManagementContext {
     let retention: RetentionSettingsModel
     let providerSettings: ProviderSettingsModel
     let promptSettings: PromptSettingsModel
+    let sourceDetail: (String) -> SourceDetailModel
     let suggestion: SuggestionScreenModel
     /// Lets a hosted test see what the search screen shows; production leaves it unset.
     var retrievalRenderReporter: (([String: RetrievalRenderedElement]) -> Void)?
@@ -97,7 +98,7 @@ enum ManagementCatalog {
 
     /// Where a slice registers the screen for an item or the current suggestion. Set the slice's own line, nothing else.
     static let destinations = ManagementDestinations(
-        item: nil,
+        item: { context, itemID in AnyView(SourceDetailScreen(itemID: itemID, makeModel: context.sourceDetail).id(itemID)) },
         suggestion: { context in AnyView(SuggestionView(model: context.suggestion)) })
 
     static func entry(withID id: String) -> ManagementEntry? {
