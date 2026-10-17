@@ -22,13 +22,13 @@ public enum LifecycleTrigger: Hashable, Sendable {
     }
 }
 
-/// One unit of recovery or foreground work. The declaration order is the order a pass runs them in: captures first,
-/// so everything after them sees every durable capture; then an interrupted reset, finished before any queued work
-/// can run against content it erases; then queued work, deletion that must finish, the reminder
+/// One unit of recovery or foreground work. The declaration order is the order a pass runs them in: an interrupted
+/// reset first, because the ingress gate holds every capture recovery would import until the reset releases its
+/// boundary; then captures, so everything after them sees every durable capture; then queued work, deletion that must finish, the reminder
 /// desired state, space-freeing retention, optional prompting, and finally the read-only health snapshot.
 public enum LifecycleStep: String, CaseIterable, Sendable {
-    case ingress
     case reset
+    case ingress
     case jobs
     case deletion
     case reminders
