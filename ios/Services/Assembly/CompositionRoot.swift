@@ -1053,6 +1053,9 @@ public final class ServiceCompositionRoot {
     /// Stores, replaces, deletes and reports the status of a provider secret, never returning one; every call needs an
     /// authenticated read session.
     public let providerCredentials: ProviderCredentialEntry
+    /// Prepares an export for the share sheet; needs an authenticated read session. Leftover export files are swept at
+    /// launch, after capture recovery has been started.
+    public let exportService: ExportService
 
     let adapters: CompositionAdapters
     /// The session whose scope gates every private read the root performs.
@@ -1082,6 +1085,7 @@ public final class ServiceCompositionRoot {
     private let providerProfileClient: CoreProviderProfileClient
     private let providerConnectionCheckClient: CoreProviderConnectionCheckClient
     private let routePolicyClient: CoreRoutePolicyClient
+    private let exportClient: CoreExportClient
     private let modules: [CompositionModule]
     private let foreground: ForegroundState
     private let stateLock = NSLock()
@@ -1163,6 +1167,8 @@ public final class ServiceCompositionRoot {
         routePolicyClient = assembly.routePolicyClient
         providerConfiguration = assembly.providerConfiguration
         providerCredentials = assembly.providerCredentials
+        exportClient = assembly.exportClient
+        exportService = assembly.exportService
         reminderReconciler = assembly.permissionReconciler
         foreground = assembly.foreground
         assembly.rootReference.set(self)
@@ -1256,6 +1262,9 @@ public final class ServiceCompositionRoot {
         if ownsLifecycle {
             lifecycleOwner?.beginLifecycle(isActive: isActive)
         }
+        // After capture recovery has been started, and off the main queue so it never delays a capture.
+        let exportService = self.exportService
+        DispatchQueue.global(qos: .utility).async { exportService.sweepAtLaunch() }
     }
 
     /// Whether the app is active right now. Read it on the main queue, where the lifecycle notifications that change it
@@ -1325,6 +1334,7 @@ public final class ServiceCompositionRoot {
         providerProfileClient.shutDown()
         providerConnectionCheckClient.shutDown()
         routePolicyClient.shutDown()
+        exportClient.shutDown()
         reminderCore.invalidate()
         promptScheduleClient.shutDown()
         statusReader.shutDown()
@@ -1627,6 +1637,8 @@ public final class ServiceCompositionRoot {
         let routePolicyClient: CoreRoutePolicyClient
         let providerConfiguration: ProviderConfigurationService
         let providerCredentials: ProviderCredentialEntry
+        let exportClient: CoreExportClient
+        let exportService: ExportService
         let permissionReconciler: NotificationPermissionReconciler
         let foreground: ForegroundState
     }
@@ -1793,6 +1805,10 @@ public final class ServiceCompositionRoot {
                 routePolicy: routePolicyClient, session: adapters.readSession)
             let providerCredentials = ProviderCredentialEntry(
                 store: adapters.credentials, session: adapters.readSession)
+            let exportClient = CoreExportClient(core: core)
+            router.register { exportClient.handle($0) }
+            undo.append { exportClient.shutDown() }
+            let exportService = ExportService(core: exportClient, session: adapters.readSession, layout: layout)
             let permissionReconciler = NotificationPermissionReconciler(
                 center: adapters.notificationCenter, reconciliation: reminderCore,
                 observations: adapters.permissionObservations)
@@ -1859,6 +1875,7 @@ public final class ServiceCompositionRoot {
                 jobConfiguration: jobConfiguration, providerProfileClient: providerProfileClient,
                 providerConnectionCheckClient: providerConnectionCheckClient, routePolicyClient: routePolicyClient,
                 providerConfiguration: providerConfiguration, providerCredentials: providerCredentials,
+                exportClient: exportClient, exportService: exportService,
                 permissionReconciler: permissionReconciler, foreground: foreground)
         } catch {
             for step in undo.reversed() {
