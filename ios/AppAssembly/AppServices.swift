@@ -34,6 +34,11 @@ final class AppServices {
     let voice: VoiceCaptureServices
     let managementContext: ManagementContext
     private let notificationHooks: NotificationHooks
+    private let lifecycleCenter: NotificationCenter
+    private var lifecycleTokens: [NSObjectProtocol] = []
+    /// Whether this foreground stay has already made its one quiet attempt, so a launch that is also a foreground, or a
+    /// repeated activation, never prompts twice even when an attempt finishes synchronously. Reset on background.
+    private var quietAttemptSpent = false
 
     /// Builds the production root over the app's own storage, with the lifecycle coordinator attached.
     static func production(
@@ -63,6 +68,7 @@ final class AppServices {
         self.root = root
         self.lifecycle = lifecycle
         self.notificationHooks = notificationHooks
+        lifecycleCenter = notificationCenter
         timeChange = TimeChangeCoordinator(
             lifecycle: lifecycle, notificationCenter: notificationCenter, sources: timeSources)
         let voice = voice ?? VoiceCaptureServices(root: root)
@@ -117,13 +123,28 @@ final class AppServices {
         root.start(isActive: isActive)
         timeChange.start()
         notificationHooks.reconcile(root)
+        observeActivation()
         requestQuietAuthentication(isActive: isActive)
     }
 
-    /// One quiet Face ID attempt whenever the app becomes active. The attempt never blocks capture; a failure shows
-    /// nothing and is not retried until the next foreground.
+    private func observeActivation() {
+        guard lifecycleTokens.isEmpty else { return }
+        lifecycleTokens = [
+            lifecycleCenter.addObserver(
+                forName: UIApplication.didBecomeActiveNotification, object: nil, queue: nil
+            ) { [weak self] _ in self?.requestQuietAuthentication(isActive: true) },
+            lifecycleCenter.addObserver(
+                forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: nil
+            ) { [weak self] _ in self?.quietAttemptSpent = false },
+        ]
+    }
+
+    /// One quiet Face ID attempt per foreground stay, at launch when active and otherwise on `didBecomeActive`. That
+    /// notification follows `willEnterForeground`, where the root relocks, so the relock cannot cancel the attempt. The
+    /// attempt never blocks capture; a failure shows nothing and is not retried until the next foreground.
     private func requestQuietAuthentication(isActive: Bool) {
-        guard isActive else { return }
+        guard isActive, !quietAttemptSpent else { return }
+        quietAttemptSpent = true
         root.requestQuietReadAuthentication(reason: Self.quietAuthenticationReason) { [weak self] _ in
             self?.captureEntry.refreshAccess()
         }
@@ -139,6 +160,8 @@ final class AppServices {
     }
 
     func shutDown() {
+        lifecycleTokens.forEach { lifecycleCenter.removeObserver($0) }
+        lifecycleTokens = []
         timeChange.stop()
         root.shutDown()
     }
@@ -148,7 +171,6 @@ final class AppServices {
     func sceneWillEnterForeground() {
         // Callbacks do not arrive while the app is suspended, so compare the clocks on return.
         timeChange.checkNow()
-        requestQuietAuthentication(isActive: true)
         if let presentation = entrySession.willEnterForeground() {
             present(presentation)
         }
