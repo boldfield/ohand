@@ -2546,7 +2546,7 @@ Rebuild the export screen's presentation per the M1 UI design. Export behaviour 
 
 Owned paths: `app/data-settings/` (the export views only: `ExportSettingsView.swift`, `ExportSettingsText.swift`) and their tests.
 
-Dependencies: DS01, U07c (shared `app/data-settings/`, which DS06 and U07c also change).
+Dependencies: DS01, U07c (shared `app/data-settings/`; DS06 and U07c also change it).
 
 Acceptance:
 
