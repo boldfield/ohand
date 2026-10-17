@@ -1,4 +1,5 @@
 import Foundation
+import OhAndCoreBridge
 
 /// What the root's `CredentialService` lets a settings flow do with a provider secret: store one, replace one, delete one
 /// and ask whether one is still there. No call returns a secret. The only values that come back are an opaque reference
@@ -28,7 +29,7 @@ extension CredentialService: ProviderCredentialStore {}
 /// become dispatchable again. **Removing is by reference, not by version:** other stored versions that name the same
 /// reference lose their secret too and report `credentialMissing`. An unknown version and a version with no credential
 /// bound throw distinct errors, and no answer or error carries a reference or a secret.
-public final class ProviderCredentialEntry {
+public final class ProviderCredentialEntry: @unchecked Sendable {
     private let store: ProviderCredentialStore
     private let session: ReadAuthenticationSession
     private let profiles: ProviderProfileCore?
