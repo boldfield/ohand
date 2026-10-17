@@ -96,6 +96,7 @@ final class AppServices {
             voiceRecovery: voice.recoveryModel,
             retrieval: .assembled(searcher: retrieval, root: root, navigation: navigation),
             retention: .assembled(root: root),
+            providerSettings: .assembled(root: root),
             promptSettings: PromptSettingsModel(controller: root.promptSchedule),
             suggestion: SuggestionScreenModel(responder: root.suggestionResponses))
         entrySession = CaptureEntrySession(
