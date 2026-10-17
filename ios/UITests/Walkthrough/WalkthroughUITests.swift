@@ -139,22 +139,19 @@ final class WalkthroughUITests: XCTestCase {
         }
     }
 
-    /// Puts the keyboard away (after the slide-to-type tip, if the system shows it) so the home screenshot shows the
+    /// Puts the keyboard away by showing the Voice capture mode (after the slide-to-type tip, if the system shows it) so the home screenshot shows the
     /// app. The walkthrough fails if the keyboard cannot be dismissed, rather than saving a covered home screen.
     private func dismissKeyboard() {
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         for button in [app.buttons["Continue"], springboard.buttons["Continue"]] where button.waitForExistence(timeout: 2) {
             button.tap()
         }
-        for _ in 1...3 where app.keyboards.count > 0 {
-            let hide = app.keyboards.buttons["Hide keyboard"]
-            if hide.exists {
-                hide.tap()
-            } else {
-                app.navigationBars.firstMatch.tap()
-                if app.keyboards.count > 0 { app.swipeDown() }
-            }
-            sleep(1)
+        // The silent capture field takes focus whenever it appears and the screen has no control that puts the keyboard
+        // away, so a person gets the whole home screen by choosing Voice capture, which has no text field.
+        if app.keyboards.count > 0 {
+            let voice = app.buttons["Voice"]
+            XCTAssertTrue(voice.waitForExistence(timeout: screenTimeout), "capture mode picker did not appear")
+            voice.tap()
         }
         let gone = NSPredicate(format: "count == 0")
         expectation(for: gone, evaluatedWith: app.keyboards)
