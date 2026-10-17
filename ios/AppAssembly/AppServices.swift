@@ -98,7 +98,8 @@ final class AppServices {
             retention: .assembled(root: root),
             providerSettings: .assembled(root: root),
             promptSettings: PromptSettingsModel(controller: root.promptSchedule),
-            sourceDetail: { [root] itemID in .assembled(itemID: itemID, root: root) })
+            sourceDetail: { [root] itemID in .assembled(itemID: itemID, root: root) },
+            suggestion: SuggestionScreenModel(responder: root.suggestionResponses))
         entrySession = CaptureEntrySession(
             handoff: handoff, defaultMode: defaultMode, access: access, notificationCenter: notificationCenter)
         entrySession.observeHandoffs { [weak self] presentation in self?.present(presentation) }
@@ -110,10 +111,20 @@ final class AppServices {
         root.setOpenItemHandler { [weak self] itemID in
             DispatchQueue.main.async { self?.navigation.openItem(itemID: itemID) }
         }
+        root.setOpenSuggestionHandler { [weak self] event in
+            DispatchQueue.main.async { self?.routePromptTap(event) }
+        }
         notificationHooks.installDelegate(root.notificationCenterDelegate)
         root.start(isActive: isActive)
         timeChange.start()
         notificationHooks.reconcile(root)
+    }
+
+    /// Presents the suggestion screen for a tapped prompt. The prompt identifier is kept first; the navigation model
+    /// shows the screen only once the session is authenticated, and the screen reads nothing before that.
+    func routePromptTap(_ event: PromptNotificationEvent) {
+        managementContext.suggestion.receive(promptID: event.identifier.rawValue)
+        navigation.openSuggestion()
     }
 
     func shutDown() {

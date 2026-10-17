@@ -1152,7 +1152,8 @@
         2
       ],
       "depends_on": [
-        "U05a"
+        "U05a",
+        "U01f"
       ],
       "source_pointers": [
         "docs/architecture/m1-contracts.md:566",
@@ -2410,6 +2411,35 @@
       ]
     },
     {
+      "key": "U01f",
+      "parent": "U01",
+      "title": "Manage a stored profile version's credential without exposing its reference",
+      "file_scope": [
+        "core/src/ffi/provider_profiles.rs",
+        "core/src/ffi/provider_profiles/",
+        "core/src/providers/profiles/mod.rs:588",
+        "ios/OhAndCoreBridge/CoreHandle+ProviderProfiles.swift",
+        "ios/Services/ProviderConfiguration/",
+        "ios/Tests/ProviderConfiguration/",
+        "ios/Tests/Credentials/",
+        "ios/Services/Assembly/CompositionRoot.swift:1811"
+      ],
+      "intent": "Replace, status and remove a stored profile version's secret by profile version; the reference is resolved inside ios/Services and never returned.",
+      "acceptance": [
+        "Core reference read per version (unknown/unbound distinct); listing still omits references; no app/ client receives one.",
+        "ProviderCredentialEntry replace/status/remove by version; authenticated; in-place under the same reference; no reference or secret in any answer or error.",
+        "Removal leaves credentialMissing; shared references documented and tested.",
+        "Rust and real-core Swift tests; make check/test; macOS CI."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/ffi/provider_profiles.rs:42",
+        "core/src/ffi/reset.rs:175",
+        "ios/Services/ProviderConfiguration/ProviderCredentialEntry.swift:23"
+      ]
+    },
+    {
       "key": "F15",
       "title": "Find and fix the memory corruption in the notification reconciliation FFI tests",
       "file_scope": [
@@ -3290,6 +3320,7 @@
       "U01e"
     ],
     "U05b": [
+      "U01f",
       "U05a"
     ],
     "U06a": [
@@ -3551,7 +3582,8 @@
     "C07": [],
     "T11e": [
       "A10"
-    ]
+    ],
+    "U01f": []
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -3713,6 +3745,10 @@
     {
       "date": "2026-10-16",
       "change": "Missing seams round 2: A09 granted a post-commit deletion-intent observer in ItemDeletionService, an optional audio-removal fence in deletion cleanup and all AudioRetentionService removals, and their LifecycleCoordinator/root wiring; T11e added (core gate restricts self-hosted dispatch to registered profile/model pairs, modules declare them at the root); T11 depends on T11e."
+    },
+    {
+      "date": "2026-10-17",
+      "change": "U01f added: credential replace/status/remove by stored profile version, reference resolved inside ios/Services; U05b depends on U01f and its rework covers orphaned draft secrets, untrimmed input and view/real-core tests."
     }
   ]
 }
