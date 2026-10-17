@@ -263,3 +263,64 @@ fn malformed_requests_are_rejected_before_anything_is_queued() {
     }
     assert!(harness.events.try_recv().is_err());
 }
+
+#[test]
+fn credential_reference_is_read_by_version_and_the_listing_still_omits_it() {
+    let _guard = serial();
+    let mut harness = Harness::new("credential-reference");
+    let (_, created) = harness.run(&json!({"command": "create_profile", "profile": profile("p")}));
+    let version = created["profile_version"].as_str().unwrap().to_string();
+
+    let (status, read) =
+        harness.run(&json!({"command": "credential_reference", "profile_version": version}));
+    assert_eq!(status, OHAND_CORE_STATUS_OK);
+    assert_eq!(read["profile_version"], version);
+    assert_eq!(read["credential_ref"], "credential-ref/synthetic-primary");
+
+    let (_, listing) = harness.run(&json!({"command": "list"}));
+    assert!(!listing.to_string().contains("credential-ref"));
+}
+
+#[test]
+fn credential_reference_distinguishes_unknown_and_unbound_versions() {
+    let _guard = serial();
+    let mut harness = Harness::new("credential-reference-refusals");
+    let (_, created) = harness.run(&json!({"command": "create_profile", "profile": profile("p")}));
+    let version = created["profile_version"].as_str().unwrap().to_string();
+    let path = harness
+        .directory
+        .join("core.sqlite")
+        .to_string_lossy()
+        .into_owned();
+    let database = Database::open(
+        &path,
+        std::sync::Arc::new(crate::store::schema::SystemClock),
+    )
+    .unwrap();
+    database
+        .conn()
+        .execute(
+            "UPDATE provider_profiles SET credential_ref = NULL WHERE profile_version = ?",
+            [&version],
+        )
+        .unwrap();
+    drop(database);
+
+    let (status, unbound) =
+        harness.run(&json!({"command": "credential_reference", "profile_version": version}));
+    assert_eq!(status, OHAND_CORE_STATUS_OK);
+    assert_eq!(unbound["credential_ref"], Value::Null);
+
+    let (status, unknown) =
+        harness.run(&json!({"command": "credential_reference", "profile_version": SENTINEL}));
+    assert_eq!(status, OHAND_CORE_STATUS_PERMANENT);
+    assert_eq!(unknown["code"], "profile_not_found");
+    assert!(!unknown.to_string().contains(SENTINEL));
+
+    let (status, code) = harness.rejected_up_front(
+        &serde_json::to_vec(&json!({"command": "credential_reference", "profile_version": ""}))
+            .unwrap(),
+    );
+    assert_eq!(status, OHAND_CORE_STATUS_PERMANENT);
+    assert_eq!(code, "invalid_request");
+}

@@ -74,6 +74,9 @@ public enum ProviderProfileCommand: Equatable, Sendable {
     /// Removes the capability's default. Allowed when none is set; queued jobs keep the version they were pinned to.
     case clearDefault(capability: String)
     case list
+    /// Reads the credential reference bound to one stored version. Not part of the listing: only native credential
+    /// management in `ios/Services` issues it, and the answer type lives there.
+    case credentialReference(profileVersion: String)
 
     fileprivate struct Wire: Encodable {
         let command: String
@@ -96,6 +99,8 @@ public enum ProviderProfileCommand: Equatable, Sendable {
             return Wire(command: "set_default", capability: capability, profileVersion: profileVersion)
         case .clearDefault(let capability): return Wire(command: "clear_default", capability: capability)
         case .list: return Wire(command: "list")
+        case .credentialReference(let profileVersion):
+            return Wire(command: "credential_reference", profileVersion: profileVersion)
         }
     }
 }

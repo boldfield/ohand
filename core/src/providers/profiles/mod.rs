@@ -506,6 +506,28 @@ pub fn default_profile_version(
     .context("reading default profile")
 }
 
+/// The credential reference bound to one stored profile version: `Ok(None)` when the version
+/// names none, [`ProfileFailure::ProfileNotFound`] when no stored version has that identifier.
+/// The listing never returns a reference; only native credential management reads this.
+pub fn credential_reference_of_version(
+    conn: &Connection,
+    profile_version: &str,
+) -> Result<Option<String>, ProfileFailure> {
+    let stored = conn
+        .query_row(
+            "SELECT credential_ref FROM provider_profiles WHERE profile_version = ?",
+            [profile_version],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .context("reading credential reference")
+        .map_err(ProfileFailure::Storage)?;
+    match stored {
+        None => Err(ProfileFailure::ProfileNotFound),
+        Some(reference) => Ok(reference.filter(|reference| !reference.is_empty())),
+    }
+}
+
 type ListedRow = (
     String,
     String,

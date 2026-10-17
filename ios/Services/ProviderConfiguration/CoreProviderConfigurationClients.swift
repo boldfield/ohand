@@ -52,6 +52,7 @@ enum ProviderProfileAnswer: Equatable, Sendable {
     case defaultSet(ProviderProfileDefaultSetAnswer)
     case defaultCleared(ProviderProfileDefaultClearedAnswer)
     case listing(ProviderProfileListAnswer)
+    case credentialReference(ProviderProfileCredentialReferenceAnswer)
 
     static func decode(_ data: Data, for command: ProviderProfileCommand) throws -> ProviderProfileAnswer {
         let decoder = JSONDecoder()
@@ -61,7 +62,23 @@ enum ProviderProfileAnswer: Equatable, Sendable {
         case .clearDefault:
             return .defaultCleared(try decoder.decode(ProviderProfileDefaultClearedAnswer.self, from: data))
         case .list: return .listing(try decoder.decode(ProviderProfileListAnswer.self, from: data))
+        case .credentialReference:
+            return .credentialReference(try decoder.decode(ProviderProfileCredentialReferenceAnswer.self, from: data))
         }
+    }
+}
+
+/// The answer to `credentialReference`: the opaque reference bound to one stored version, or `nil` when it has none.
+/// Internal to `OhAndServices` so that nothing outside the services layer can receive a reference.
+struct ProviderProfileCredentialReferenceAnswer: Decodable, Equatable, Sendable {
+    let operationID: UInt64
+    let profileVersion: String
+    let credentialReference: String?
+
+    enum CodingKeys: String, CodingKey {
+        case operationID = "operation_id"
+        case profileVersion = "profile_version"
+        case credentialReference = "credential_ref"
     }
 }
 
