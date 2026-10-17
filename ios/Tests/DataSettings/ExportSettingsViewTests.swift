@@ -187,7 +187,8 @@ final class ExportSettingsViewTests: XCTestCase {
     }
 
     /// The sheet goes off screen before its completion handler runs, and a share extension may still be sending. That
-    /// dismissal must not be taken as a cancel: the files stay, and the handler's later answer is the one shown.
+    /// dismissal must not be taken as a cancel: the files stay, and the handler's later answer is the one shown. The
+    /// handler is held back while the sheet is dismissed, as a share extension holds it back until it has finished.
     func testDismissingTheSheetBeforeItsHandlerRunsKeepsTheExportUntilTheHandlerReportsCompletion() async {
         await withScreen { model, world in
             model.setScope(.personal, selected: true)
@@ -197,6 +198,8 @@ final class ExportSettingsViewTests: XCTestCase {
             let remnants = world.exportRemnants()
             XCTAssertFalse(remnants.isEmpty)
 
+            let handler = sheet.completionWithItemsHandler
+            sheet.completionWithItemsHandler = nil
             sheet.dismiss(animated: false)
             await settle()
 
@@ -206,14 +209,14 @@ final class ExportSettingsViewTests: XCTestCase {
             XCTAssertEqual(world.exportRemnants(), remnants, "the files the activity may still read are kept")
             XCTAssertEqual(text(ExportSettingsView.stateIdentifier), ExportSettingsText.readyText)
 
-            sheet.completionWithItemsHandler?(nil, true, nil, nil)
+            handler?(nil, true, nil, nil)
             await settle()
 
             let shown = text(ExportSettingsView.stateIdentifier) ?? ""
             XCTAssertTrue(shown.hasPrefix("Shared"), shown)
             XCTAssertEqual(world.exportRemnants(), [])
 
-            sheet.completionWithItemsHandler?(nil, false, nil, nil)
+            handler?(nil, false, nil, nil)
             await settle()
             XCTAssertEqual(text(ExportSettingsView.stateIdentifier), shown, "the export ends once")
         }
