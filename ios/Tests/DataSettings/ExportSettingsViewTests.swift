@@ -14,6 +14,8 @@ final class ExportSettingsViewTests: XCTestCase {
     private var worlds: [ExportWorld] = []
     private var rendered: [String: RetentionRenderedElement] = [:]
     private var window: UIWindow?
+    /// The host app's key window before the screen took over, made key again when the screen goes.
+    private var previousKeyWindow: UIWindow?
 
     override func tearDown() {
         close()
@@ -38,6 +40,7 @@ final class ExportSettingsViewTests: XCTestCase {
             })
         // The share sheet is presented from UIKit, which needs a window in a scene; the host app provides one.
         let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        previousKeyWindow = scene?.keyWindow
         let shown = scene.map { UIWindow(windowScene: $0) } ?? UIWindow()
         shown.frame = CGRect(origin: .zero, size: Self.phone)
         shown.rootViewController = hosting
@@ -57,6 +60,8 @@ final class ExportSettingsViewTests: XCTestCase {
         window?.rootViewController?.presentedViewController?.dismiss(animated: false)
         window?.isHidden = true
         window = nil
+        previousKeyWindow?.makeKey()
+        previousKeyWindow = nil
     }
 
     private func settle() async {
