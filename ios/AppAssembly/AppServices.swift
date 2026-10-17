@@ -97,7 +97,8 @@ final class AppServices {
             retrieval: .assembled(searcher: retrieval, root: root, navigation: navigation),
             retention: .assembled(root: root),
             providerSettings: .assembled(root: root),
-            promptSettings: PromptSettingsModel(controller: root.promptSchedule))
+            promptSettings: PromptSettingsModel(controller: root.promptSchedule),
+            sourceDetail: { [root] itemID in .assembled(itemID: itemID, root: root) })
         entrySession = CaptureEntrySession(
             handoff: handoff, defaultMode: defaultMode, access: access, notificationCenter: notificationCenter)
         entrySession.observeHandoffs { [weak self] presentation in self?.present(presentation) }

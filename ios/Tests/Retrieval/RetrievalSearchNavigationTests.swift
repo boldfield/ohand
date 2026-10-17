@@ -94,6 +94,7 @@ final class RetrievalSearchNavigationTests: XCTestCase {
             retention: services.managementContext.retention,
             providerSettings: services.managementContext.providerSettings,
             promptSettings: services.managementContext.promptSettings,
+            sourceDetail: services.managementContext.sourceDetail,
             retrievalRenderReporter: { [unowned self] in rendered = $0 })
         let rootView = AppRootView(
             navigation: navigation, captureEntry: services.captureEntry, context: context,
