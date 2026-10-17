@@ -181,7 +181,9 @@ extension CoreHandle {
     }
 
     /// A job whose provider protocol the host has not enabled (`setEnabledProviderProtocols`) is kept queued
-    /// as `protocol_not_enabled` without a send or a spent retry, and a later drain releases it once enabled.
+    /// as `protocol_not_enabled`, and a self-hosted job whose profile version and model are not registered
+    /// (`setSelfHostedRegistrations`) as `self_hosted_not_registered`. Neither sends or spends a retry, and a
+    /// later drain releases the job once enabled or registered.
     ///
     /// Tells the core whether provider requests can reach the network. While they cannot, the core defers jobs
     /// that would call a provider, without spending retry budget and without ending the drain, so on-device
