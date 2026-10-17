@@ -142,6 +142,30 @@ final class ReadAuthenticationSession {
         }
     }
 
+    /// Makes one quiet, biometrics-only attempt when the session is capture-only and no attempt is in flight; otherwise
+    /// does nothing and returns false (so a foreground during an attempt never prompts twice). Failure, cancellation
+    /// and unavailability leave the session capture-only. An explicit `authenticate` supersedes it. `completion` runs
+    /// on the completion queue, only when an attempt was started.
+    @discardableResult
+    func authenticateQuietly(reason: String, completion: @escaping (ReadAuthenticationResult) -> Void = { _ in }) -> Bool {
+        lock.lock()
+        guard currentScope == .captureOnly, attemptInFlight == nil else {
+            lock.unlock()
+            return false
+        }
+        attemptSequence += 1
+        let attempt = attemptSequence
+        attemptInFlight = attempt
+        lock.unlock()
+
+        boundary.authenticateQuietly(reason: reason) { [weak self] outcome in
+            guard let self else { return }
+            let result = self.finish(attempt: attempt, outcome: outcome)
+            self.completionQueue.async { completion(result) }
+        }
+        return true
+    }
+
     /// Returns to the capture-only scope and invalidates every authorization and attempt issued so far.
     func relock(_ reason: RelockReason) {
         deliveryLock.lock()

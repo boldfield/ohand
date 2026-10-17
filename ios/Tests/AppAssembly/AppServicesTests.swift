@@ -273,6 +273,120 @@ final class AppServicesTests: XCTestCase {
         XCTAssertEqual(root.lastPathComponent, "Store")
     }
 
+    // MARK: quiet authentication
+
+    private func makeQuietServices(
+        boundary: FakeReadAuthenticationBoundary, lifecycleCenter: NotificationCenter
+    ) throws -> AppServices {
+        let lifecycle = LifecycleCoordinator()
+        let root = try ServiceCompositionRoot(
+            testing: CompositionConfiguration(
+                storageRootPath: storageRoot.path, captureRouteID: "route-personal", jobRetryDelaySeconds: 3600),
+            environment: CompositionEnvironment(
+                timeZone: { TimeZone(identifier: "UTC")! }, locale: { Locale(identifier: "en_US") }),
+            adapters: .injectedForTests(
+                sender: QuietUnreachableSender(), readSession: ReadAuthenticationSession(boundary: boundary),
+                notificationCenter: FakeNotificationCenter(), reachability: FakeReachability(reachable: false),
+                lifecycleNotifications: lifecycleCenter),
+            modules: [lifecycle])
+        let services = AppServices(
+            root: root, lifecycle: lifecycle,
+            handoff: CaptureEntryHandoff(notificationCenter: NotificationCenter()),
+            notificationHooks: NotificationHooks(installDelegate: { _ in }, reconcile: { _ in }),
+            notificationCenter: lifecycleCenter)
+        created.append(services)
+        return services
+    }
+
+    func testAnActiveLaunchMakesOneQuietAttemptAndTheLauncherForegroundAddsNone() throws {
+        let boundary = FakeReadAuthenticationBoundary()
+        boundary.nextOutcome = .unavailable
+        let center = NotificationCenter()
+        let launcher = AppLauncher(
+            makeServices: { [unowned self] in try self.makeQuietServices(boundary: boundary, lifecycleCenter: center) },
+            isApplicationActive: { true })
+
+        launcher.launch()
+
+        XCTAssertEqual(boundary.quietCallCount, 1, "a synchronous unavailable outcome is not retried by the foreground")
+        XCTAssertEqual(launcher.services?.root.readScope, .captureOnly)
+        XCTAssertEqual(boundary.authenticateCallCount, 0)
+    }
+
+    func testAnInactiveLaunchWaitsForActivationAndSuccessAuthorizesReads() async throws {
+        let boundary = FakeReadAuthenticationBoundary()
+        let center = NotificationCenter()
+        let services = try makeQuietServices(boundary: boundary, lifecycleCenter: center)
+        services.start(isActive: false)
+        XCTAssertEqual(boundary.quietCallCount, 0)
+
+        center.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+
+        XCTAssertEqual(boundary.quietCallCount, 1)
+        XCTAssertEqual(services.root.readScope, .authenticated)
+        let refreshed = await timeChangeWaitUntil { services.captureEntry.access.readAuthorized }
+        XCTAssertTrue(refreshed, "the capture surface learns of the success")
+    }
+
+    func testEachForegroundAfterABackgroundMakesOneAttemptAndTheRelockDoesNotCancelIt() throws {
+        let boundary = FakeReadAuthenticationBoundary()
+        boundary.nextOutcome = .denied
+        let center = NotificationCenter()
+        let services = try makeQuietServices(boundary: boundary, lifecycleCenter: center)
+        services.start(isActive: true)
+        XCTAssertEqual(boundary.quietCallCount, 1)
+
+        center.post(name: UIApplication.didEnterBackgroundNotification, object: nil)
+        boundary.defersCompletion = true
+        center.post(name: UIApplication.willEnterForegroundNotification, object: nil)
+        center.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        center.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+
+        XCTAssertEqual(boundary.quietCallCount, 2, "one more attempt, and no second prompt while it is showing")
+        XCTAssertEqual(boundary.invalidateCallCount, 0, "the foreground relock ran before the attempt began")
+        boundary.completeDeferredAttempt(at: 0, with: .succeeded)
+        XCTAssertEqual(services.root.readScope, .authenticated)
+    }
+
+    func testFailureAndUnavailabilityLeaveCaptureOnlyAndAreNotRetriedUntilTheNextForeground() throws {
+        for outcome: ReadAuthenticationOutcome in [.denied, .unavailable, .cancelled] {
+            let boundary = FakeReadAuthenticationBoundary()
+            boundary.nextOutcome = outcome
+            let center = NotificationCenter()
+            let services = try makeQuietServices(boundary: boundary, lifecycleCenter: center)
+            services.start(isActive: true)
+            center.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+            XCTAssertEqual(boundary.quietCallCount, 1, "\(outcome)")
+            XCTAssertEqual(services.root.readScope, .captureOnly, "\(outcome)")
+            XCTAssertNil(services.captureEntry.acknowledgment, "no error is shown for \(outcome)")
+            services.shutDown()
+            created.removeAll { $0 === services }
+        }
+    }
+
+    func testTextCaptureSavesWhileAQuietAttemptIsStillShowing() async throws {
+        let boundary = FakeReadAuthenticationBoundary()
+        boundary.defersCompletion = true
+        let services = try makeQuietServices(boundary: boundary, lifecycleCenter: NotificationCenter())
+        services.start(isActive: true)
+        XCTAssertEqual(boundary.quietCallCount, 1)
+        XCTAssertEqual(boundary.deferredCompletions.count, 1, "the attempt is held open")
+
+        services.captureEntry.textModel.updateText("remind me to call the roofer")
+        services.captureEntry.saveText()
+
+        let finished = await timeChangeWaitUntil {
+            guard let save = services.captureEntry.acknowledgment?.save else { return false }
+            return save != .saving
+        }
+        XCTAssertTrue(finished)
+        guard case .saved = services.captureEntry.acknowledgment?.save else {
+            return XCTFail("the capture is saved: \(String(describing: services.captureEntry.acknowledgment))")
+        }
+        XCTAssertEqual(services.root.readScope, .captureOnly)
+        XCTAssertEqual(boundary.invalidateCallCount, 0)
+    }
+
     // MARK: release target
 
     func testTheAppBundleEmbedsNoProbeTarget() throws {
@@ -285,5 +399,11 @@ final class AppServicesTests: XCTestCase {
                 "\(directory) must not carry a probe: \(entries)")
         }
         XCTAssertEqual(Bundle.main.bundleIdentifier, "com.boldfield.ohand.app")
+    }
+}
+
+private final class QuietUnreachableSender: ProviderRequestSender, @unchecked Sendable {
+    func send(_ request: ProviderHTTPRequest) async throws -> ProviderHTTPResponse {
+        throw URLError(.notConnectedToInternet)
     }
 }

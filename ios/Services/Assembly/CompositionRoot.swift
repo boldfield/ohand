@@ -1479,6 +1479,16 @@ public final class ServiceCompositionRoot {
         }
     }
 
+    /// Makes one quiet biometrics-only attempt (no passcode fallback, no error shown) if the session is capture-only
+    /// and no attempt is already in flight. Success authenticates the session as `authenticateReads` does; any other
+    /// outcome leaves it capture-only. Never blocks capture.
+    /// `completion` runs on the main queue only when an attempt was started, and says whether it authenticated.
+    public func requestQuietReadAuthentication(reason: String, completion: @escaping (Bool) -> Void = { _ in }) {
+        adapters.readSession.authenticateQuietly(reason: reason) { result in
+            completion(result == .authenticated)
+        }
+    }
+
     /// Returns to capture-only and invalidates every read still waiting for its answer. The root also relocks itself
     /// when the app enters the background or returns to the foreground, and when protected data becomes unavailable.
     public func relockReads() {

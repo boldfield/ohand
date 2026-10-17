@@ -16,6 +16,9 @@ enum ReadAuthenticationOutcome: Equatable {
 protocol ReadAuthenticationBoundary: AnyObject {
     /// Starts one attempt. `completion` may run on any queue, exactly once.
     func authenticate(reason: String, completion: @escaping (ReadAuthenticationOutcome) -> Void)
+    /// Starts one quiet, biometrics-only attempt: no passcode fallback, and `unavailable` without prompting when
+    /// biometrics are unavailable, not enrolled or locked out. `completion` may run on any queue, exactly once.
+    func authenticateQuietly(reason: String, completion: @escaping (ReadAuthenticationOutcome) -> Void)
     /// Dismisses an attempt that is still showing. The abandoned attempt's completion may still run; the session
     /// ignores it.
     func invalidatePendingAttempt()
@@ -28,9 +31,25 @@ final class LocalAuthenticationBoundary: ReadAuthenticationBoundary {
     private var pendingContext: LAContext?
 
     func authenticate(reason: String, completion: @escaping (ReadAuthenticationOutcome) -> Void) {
+        evaluate(policy: .deviceOwnerAuthentication, fallbackTitle: nil, reason: reason, completion: completion)
+    }
+
+    func authenticateQuietly(reason: String, completion: @escaping (ReadAuthenticationOutcome) -> Void) {
+        evaluate(
+            policy: .deviceOwnerAuthenticationWithBiometrics, fallbackTitle: "", reason: reason,
+            completion: completion)
+    }
+
+    private func evaluate(
+        policy: LAPolicy,
+        fallbackTitle: String?,
+        reason: String,
+        completion: @escaping (ReadAuthenticationOutcome) -> Void
+    ) {
         let context = LAContext()
+        if let fallbackTitle { context.localizedFallbackTitle = fallbackTitle }
         var policyError: NSError?
-        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &policyError) else {
+        guard context.canEvaluatePolicy(policy, error: &policyError) else {
             completion(.unavailable)
             return
         }
@@ -39,7 +58,7 @@ final class LocalAuthenticationBoundary: ReadAuthenticationBoundary {
         pendingContext = context
         lock.unlock()
         supersededContext?.invalidate()
-        context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { [weak self] success, error in
+        context.evaluatePolicy(policy, localizedReason: reason) { [weak self] success, error in
             self?.clear(context)
             completion(Self.outcome(success: success, error: error))
         }
@@ -66,7 +85,7 @@ final class LocalAuthenticationBoundary: ReadAuthenticationBoundary {
         switch authenticationError.code {
         case .userCancel, .systemCancel, .appCancel:
             return .cancelled
-        case .passcodeNotSet, .biometryNotAvailable, .notInteractive:
+        case .passcodeNotSet, .biometryNotAvailable, .biometryNotEnrolled, .biometryLockout, .notInteractive:
             return .unavailable
         default:
             return .denied
