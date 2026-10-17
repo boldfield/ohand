@@ -95,9 +95,9 @@ struct ExportSettingsView: View {
                 Text("Export").frame(maxWidth: .infinity, minHeight: 44)
             }
             .buttonStyle(.borderedProminent)
+            .reportDataSettingsRendered(Self.startIdentifier, text: "Export")
             .disabled(!model.canStart)
             .accessibilityIdentifier(Self.startIdentifier)
-            .reportDataSettingsRendered(Self.startIdentifier, text: "Export")
             if let message = stateMessage {
                 note(message, identifier: Self.stateIdentifier)
             }
