@@ -62,6 +62,7 @@ actor AudioRetentionService {
     private let fileSystem: AudioRetentionFileSystem
     private let ledger: AudioRetentionLedger
     private let pressureProbe: AudioStoragePressureProbing
+    private let playbackFence: PlaybackFence?
     private let maximumAttempts: Int
     private let maximumRemovalsPerSweep: Int
     private var isRunning = false
@@ -76,11 +77,13 @@ actor AudioRetentionService {
         layout: ProtectedStorageLayout,
         fileSystem: AudioRetentionFileSystem = FileManagerAudioRetentionFileSystem(),
         pressureProbe: AudioStoragePressureProbing? = nil,
+        playbackFence: PlaybackFence? = nil,
         maximumAttempts: Int = AudioRetentionService.defaultMaximumAttempts,
         maximumRemovalsPerSweep: Int = AudioRetentionService.defaultMaximumRemovalsPerSweep
     ) {
         self.core = core
         self.fileSystem = fileSystem
+        self.playbackFence = playbackFence
         staging = IngressStagingStore(layout: layout, fileSystem: fileSystem)
         ledger = AudioRetentionLedger(layout: layout, fileSystem: fileSystem)
         self.pressureProbe = pressureProbe ?? VolumeStoragePressureProbe(volumeURL: layout.rootDirectory)
@@ -228,15 +231,30 @@ actor AudioRetentionService {
                 code: AudioRetentionPermanentFailure.audioReferenceUnresolvable.rawValue, permanent: true)
         }
 
+        // Audio open for playback stays where it is; the removal is decided again on a later sweep or request.
+        if playbackFence?.isHeld(url) == true { return .retryLater(.audioInPlayback) }
+
         // The core re-decides for this exact audio and, only if it approves, holds its store-wide fence while the closure
         // removes the file here: no write can make the audio protected between the approval and the removal.
         let fileSystem = self.fileSystem
+        let playbackFence = self.playbackFence
+        var heldByPlayback = false
         // A lookup that fails is a failed effect, never an absent file.
         let removeFile: () -> AudioRemovalEffect = {
             let wasPresent: Bool
             do { wasPresent = try fileSystem.isPresent(at: url) } catch { return .failed }
             if wasPresent {
-                do { try fileSystem.remove(at: url) } catch { return .failed }
+                do {
+                    // Playback may have opened since the check above; the fence refuses the removal atomically.
+                    if let playbackFence {
+                        try playbackFence.withUnheld(url) { try fileSystem.remove(at: url) }
+                    } else {
+                        try fileSystem.remove(at: url)
+                    }
+                } catch PlaybackFenceError.audioInUse {
+                    heldByPlayback = true
+                    return .failed
+                } catch { return .failed }
             }
             guard (try? fileSystem.isPresent(at: url)) == false else { return .failed }
             return wasPresent ? .removed : .alreadyAbsent
@@ -262,6 +280,7 @@ actor AudioRetentionService {
         case .approved(let approvedEffect):
             effect = approvedEffect
         }
+        if heldByPlayback { return .retryLater(.audioInPlayback) }
         // The result is checked: a file that is still there, or that cannot be looked up, is never reported gone.
         guard effect != .failed, isVerifiedAbsent(url) else {
             if mode == .user { return .retryLater(.storageUnavailable) }

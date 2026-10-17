@@ -25,6 +25,7 @@ protocol PrivateReadSource: AnyObject {
     func startItemDetail(operationID: UInt64, itemID: String, readScopes: [CoreExportScope]) throws
     func startRetentionRead(operationID: UInt64, kind: RetentionReadKind, readScopes: [CoreExportScope]) throws
     func startJobConfigurationRead(operationID: UInt64, command: JobConfigurationCommand) throws
+    func startRecentItems(operationID: UInt64, readScopes: [CoreExportScope], limit: Int?, cursor: String?) throws
 }
 
 /// Raised by a read source that does not implement a read added after it was written.
@@ -45,6 +46,10 @@ extension PrivateReadSource {
     }
 
     func startJobConfigurationRead(operationID: UInt64, command: JobConfigurationCommand) throws {
+        throw PrivateReadNotSupportedBySource()
+    }
+
+    func startRecentItems(operationID: UInt64, readScopes: [CoreExportScope], limit: Int?, cursor: String?) throws {
         throw PrivateReadNotSupportedBySource()
     }
 }
@@ -201,6 +206,13 @@ final class PrivateReadGate {
     func startItemDetail(operationID: UInt64, itemID: String) throws {
         try issue(operationID: operationID) {
             try source.startItemDetail(operationID: operationID, itemID: itemID, readScopes: authorizedScopes)
+        }
+    }
+
+    func startRecentItems(operationID: UInt64, limit: Int?, cursor: String?) throws {
+        try issue(operationID: operationID) {
+            try source.startRecentItems(
+                operationID: operationID, readScopes: authorizedScopes, limit: limit, cursor: cursor)
         }
     }
 

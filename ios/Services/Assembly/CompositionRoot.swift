@@ -396,6 +396,10 @@ public protocol CompositionModule: AnyObject {
     /// root enables the union of every module's declaration; a protocol no module declares stays disabled (self-hosted
     /// is disabled unless a module names it).
     var enabledProviderProtocols: Set<CoreProviderProtocol> { get }
+    /// The stored self-hosted profile versions and models this module lets the core send to. Enabling self-hosted
+    /// is not enough: the root passes the union of every module's declaration to the core, which refuses any
+    /// self-hosted request whose profile version and model are not named (default none).
+    var selfHostedRegistrations: Set<CoreSelfHostedRegistration> { get }
     func attach(to context: CompositionContext) throws
     /// Takes the event if it answers one of this module's operations.
     func handle(_ event: CoreEvent) -> Bool
@@ -406,6 +410,7 @@ public protocol CompositionModule: AnyObject {
 public extension CompositionModule {
     var jobCapabilities: [JobCapabilityHandler] { [] }
     var enabledProviderProtocols: Set<CoreProviderProtocol> { [] }
+    var selfHostedRegistrations: Set<CoreSelfHostedRegistration> { [] }
 }
 
 /// A module that owns the ordered launch and foreground reconciliation (staged-capture recovery, job activation and
@@ -450,6 +455,9 @@ struct CompositionAdapters {
     let readSession: ReadAuthenticationSession
     /// The Keychain-backed credentials the transport resolves at dispatch and provider setup enters secrets into.
     let credentials: CredentialService
+    /// The reset core the reset service and control use, given the root's real client. Production uses the client
+    /// itself; a debug test may wrap it to fail a read.
+    let resetCore: (ResetCore) -> ResetCore
 
     fileprivate init(
         kind: CompositionAdapterSet,
@@ -462,7 +470,8 @@ struct CompositionAdapters {
         lifecycleNotifications: NotificationCenter,
         recognizer: OnDeviceRecognizing?,
         readSession: ReadAuthenticationSession,
-        credentials: CredentialService
+        credentials: CredentialService,
+        resetCore: @escaping (ResetCore) -> ResetCore = { $0 }
     ) {
         self.kind = kind
         self.sender = sender
@@ -475,6 +484,7 @@ struct CompositionAdapters {
         self.recognizer = recognizer
         self.readSession = readSession
         self.credentials = credentials
+        self.resetCore = resetCore
     }
 
     fileprivate static func production(for configuration: CompositionConfiguration) -> CompositionAdapters {
@@ -509,14 +519,15 @@ struct CompositionAdapters {
         lifecycleNotifications: NotificationCenter = NotificationCenter(),
         recognizer: OnDeviceRecognizing? = nil,
         credentials: CredentialService = CredentialService(
-            serviceName: "com.boldfield.ohand.tests.composition.\(UUID().uuidString)")
+            serviceName: "com.boldfield.ohand.tests.composition.\(UUID().uuidString)"),
+        resetCore: @escaping (ResetCore) -> ResetCore = { $0 }
     ) -> CompositionAdapters {
         CompositionAdapters(
             kind: .injectedForTests, sender: sender, attachProviderTransport: attachProviderTransport,
             notificationCenter: notificationCenter,
             permissionObservations: permissionObservations, reachability: reachability,
             backgroundGrant: backgroundGrant, lifecycleNotifications: lifecycleNotifications,
-            recognizer: recognizer, readSession: readSession, credentials: credentials)
+            recognizer: recognizer, readSession: readSession, credentials: credentials, resetCore: resetCore)
     }
     #endif
 }
@@ -646,6 +657,10 @@ private final class CoreHandleReadSource: PrivateReadSource {
 
     func startItemDetail(operationID: UInt64, itemID: String, readScopes: [CoreExportScope]) throws {
         try core.startItemDetail(operationID: operationID, itemID: itemID, readScopes: readScopes)
+    }
+
+    func startRecentItems(operationID: UInt64, readScopes: [CoreExportScope], limit: Int?, cursor: String?) throws {
+        try core.startRecentItems(operationID: operationID, readScopes: readScopes, limit: limit, cursor: cursor)
     }
 
     func startRetentionRead(operationID: UInt64, kind: RetentionReadKind, readScopes: [CoreExportScope]) throws {
@@ -965,6 +980,7 @@ public final class ServiceCompositionRoot {
     static let retentionControlClientName = "retention controls"
     static let jobConfigurationClientName = "job configuration"
     static let providerProfileClientName = "provider profiles"
+    static let recentItemsClientName = "recent items"
     static let providerConnectionCheckClientName = "provider connection check"
     static let routePolicyClientName = "route policy"
 
@@ -995,6 +1011,7 @@ public final class ServiceCompositionRoot {
         fixedWidthRange("transcription", from: TranscriptionCoreClient.firstOperationID),
         fixedWidthRange(deletionCleanupClientName, from: CoreDeletionCleanupClient.firstOperationID),
         fixedWidthRange("export", from: CoreExportClient.firstOperationID),
+        fixedWidthRange("reset", from: CoreResetClient.firstOperationID),
         fixedWidthRange(promptScheduleClientName, from: CorePromptScheduleClient.firstOperationID),
         fixedWidthRange("reminders", from: CoreReminderReconciler.firstOperationID),
         fixedWidthRange("item status", from: CoreItemStatusReader.firstOperationID),
@@ -1013,6 +1030,7 @@ public final class ServiceCompositionRoot {
         fixedWidthRange(providerProfileClientName, from: CoreProviderProfileClient.firstOperationID),
         fixedWidthRange(providerConnectionCheckClientName, from: CoreProviderConnectionCheckClient.firstOperationID),
         fixedWidthRange(routePolicyClientName, from: CoreRoutePolicyClient.firstOperationID),
+        fixedWidthRange(recentItemsClientName, from: CoreRecentItemsClient.firstOperationID),
         OperationRange(
             name: processingHealthClientName, start: ProcessingHealthService.firstOperationID,
             end: JobRunnerService.firstOperationID),
@@ -1038,9 +1056,14 @@ public final class ServiceCompositionRoot {
     public let suggestionResponses: SuggestionResponseService
     /// Reads one item's full detail; needs an authenticated read session.
     public let itemDetails: ItemDetailService
+    /// Lists the most recent captures; needs an authenticated read session.
+    public let recentItems: RecentItemsService
     /// Configures audio retention and acts on unresolved sole audio; reads are gated and writes need an authenticated
     /// session.
     public let retentionControls: RetentionControlService
+    /// Opens an item's retained audio for playback without exposing protected storage; needs an authenticated read
+    /// session. Open playback holds the audio in place and ends on deletion, relock and shutdown.
+    public let playback: PlaybackService
     /// Re-pins waiting work, requeues a job, revokes a profile and lists the jobs pinned to one; needs an authenticated
     /// read session.
     public let jobConfiguration: JobConfigurationService
@@ -1053,6 +1076,10 @@ public final class ServiceCompositionRoot {
     /// Prepares an export for the share sheet; needs an authenticated read session. Leftover export files are swept at
     /// launch, after capture recovery has been started.
     public let exportService: ExportService
+    /// Resets all captured content and reads the reset's progress; needs an authenticated read session. New captures
+    /// pass the reset ingress gate, so one made during a reset waits and is imported afterwards, never lost. An
+    /// interrupted reset is resumed at launch, before the job runner activates.
+    public let resetControl: ResetControl
 
     let adapters: CompositionAdapters
     /// The session whose scope gates every private read the root performs.
@@ -1077,12 +1104,16 @@ public final class ServiceCompositionRoot {
     private let itemLifecycleControlClient: CoreItemLifecycleControlClient
     private let suggestionResponseClient: CoreSuggestionResponseClient
     private let itemDetailClient: CoreItemDetailClient
+    private let recentItemsClient: CoreRecentItemsClient
     private let retentionControlClient: CoreRetentionControlClient
     private let jobConfigurationClient: CoreJobConfigurationClient
     private let providerProfileClient: CoreProviderProfileClient
     private let providerConnectionCheckClient: CoreProviderConnectionCheckClient
     private let routePolicyClient: CoreRoutePolicyClient
     private let exportClient: CoreExportClient
+    private let resetClient: CoreResetClient
+    private let resetStaging: NativeResetIngress
+    private let resetItemCleanup: ResetItemCleanupBridge
     private let modules: [CompositionModule]
     private let foreground: ForegroundState
     private let stateLock = NSLock()
@@ -1154,8 +1185,11 @@ public final class ServiceCompositionRoot {
         suggestionResponses = assembly.suggestionResponses
         itemDetailClient = assembly.itemDetailClient
         itemDetails = assembly.itemDetails
+        recentItemsClient = assembly.recentItemsClient
+        recentItems = assembly.recentItems
         retentionControlClient = assembly.retentionControlClient
         retentionControls = assembly.retentionControls
+        playback = assembly.playback
         jobConfigurationClient = assembly.jobConfigurationClient
         jobConfiguration = assembly.jobConfiguration
         providerProfileClient = assembly.providerProfileClient
@@ -1165,6 +1199,10 @@ public final class ServiceCompositionRoot {
         providerCredentials = assembly.providerCredentials
         exportClient = assembly.exportClient
         exportService = assembly.exportService
+        resetClient = assembly.resetClient
+        resetStaging = assembly.resetStaging
+        resetControl = assembly.resetControl
+        resetItemCleanup = assembly.resetItemCleanup
         reminderReconciler = assembly.permissionReconciler
         foreground = assembly.foreground
         assembly.rootReference.set(self)
@@ -1174,10 +1212,22 @@ public final class ServiceCompositionRoot {
             let cleanup: ItemDeletionCleanup? = coordinator?.deletionCleanup
             return cleanup
         }
+        resetItemCleanup.setProvider { [weak self] in
+            self?.modules.lazy.compactMap { $0 as? LifecycleCoordinator }.first?.deletionCleanup
+        }
     }
 
     deinit {
         shutDown()
+    }
+
+    // MARK: Reset
+
+    /// Finishes a reset a previous run left unfinished. The lifecycle coordinator calls it at launch, before the job
+    /// runner activates. It needs no authenticated session: it only completes what the user already confirmed, and
+    /// does nothing when no reset is recorded.
+    func resumeInterruptedReset() async -> ResetOutcome {
+        await resetControl.resumeInterrupted()
     }
 
     // MARK: Observation
@@ -1323,12 +1373,17 @@ public final class ServiceCompositionRoot {
         itemLifecycleControlClient.shutDown()
         suggestionResponseClient.shutDown()
         itemDetailClient.shutDown()
+        recentItemsClient.shutDown()
+        itemDeletion.setIntentObserver(nil)
+        playback.shutDown()
         retentionControlClient.shutDown()
         jobConfigurationClient.shutDown()
         providerProfileClient.shutDown()
         providerConnectionCheckClient.shutDown()
         routePolicyClient.shutDown()
         exportClient.shutDown()
+        resetStaging.retire()
+        resetClient.shutDown()
         reminderCore.invalidate()
         promptScheduleClient.shutDown()
         statusReader.shutDown()
@@ -1621,8 +1676,11 @@ public final class ServiceCompositionRoot {
         let suggestionResponses: SuggestionResponseService
         let itemDetailClient: CoreItemDetailClient
         let itemDetails: ItemDetailService
+        let recentItemsClient: CoreRecentItemsClient
+        let recentItems: RecentItemsService
         let retentionControlClient: CoreRetentionControlClient
         let retentionControls: RetentionControlService
+        let playback: PlaybackService
         let jobConfigurationClient: CoreJobConfigurationClient
         let jobConfiguration: JobConfigurationService
         let providerProfileClient: CoreProviderProfileClient
@@ -1632,6 +1690,10 @@ public final class ServiceCompositionRoot {
         let providerCredentials: ProviderCredentialEntry
         let exportClient: CoreExportClient
         let exportService: ExportService
+        let resetClient: CoreResetClient
+        let resetStaging: NativeResetIngress
+        let resetControl: ResetControl
+        let resetItemCleanup: ResetItemCleanupBridge
         let permissionReconciler: NotificationPermissionReconciler
         let foreground: ForegroundState
     }
@@ -1709,7 +1771,10 @@ public final class ServiceCompositionRoot {
 
             let importer = CoreIngressImporter(attachedTo: core)
             router.register { importer.handle($0) }
-            let ingress = try ForegroundIngressService(layout: layout, importer: importer, protection: protection)
+            // A recorded reset tap is read here, so captures made after a tap whose process died are held from launch.
+            let resetMarkers = FileResetMarkerStore(layout: layout)
+            let resetGate = ResetIngressGate(wrapping: importer, layout: layout, markers: resetMarkers)
+            let ingress = try ForegroundIngressService(layout: layout, importer: resetGate, protection: protection)
 
             let readGate = PrivateReadGate(session: adapters.readSession, source: CoreHandleReadSource(core: core))
             let statusReader = CoreItemStatusReader(gate: readGate)
@@ -1767,6 +1832,10 @@ public final class ServiceCompositionRoot {
             router.register { itemDetailClient.handle($0) }
             undo.append { itemDetailClient.shutDown() }
             let itemDetails = ItemDetailService(core: itemDetailClient)
+            let recentItemsClient = CoreRecentItemsClient(gate: readGate)
+            router.register { recentItemsClient.handle($0) }
+            undo.append { recentItemsClient.shutDown() }
+            let recentItems = RecentItemsService(core: recentItemsClient)
             let retentionControlClient = CoreRetentionControlClient(core: core, gate: readGate)
             router.register { retentionControlClient.handle($0) }
             undo.append { retentionControlClient.shutDown() }
@@ -1774,6 +1843,11 @@ public final class ServiceCompositionRoot {
                 core: retentionControlClient, session: adapters.readSession,
                 pressureProbe: VolumeStoragePressureProbe(volumeURL: layout.rootDirectory),
                 removerProvider: { modules.lazy.compactMap { ($0 as? LifecycleCoordinator)?.audioRetention }.first })
+            let playback = PlaybackService(
+                core: retentionControlClient, session: adapters.readSession, layout: layout, fence: PlaybackFence(),
+                playerFactory: avPlaybackPlayerFactory)
+            undo.append { playback.shutDown() }
+            itemDeletion.setIntentObserver { [playback] itemID in playback.endPlayback(itemID: itemID) }
             let jobConfigurationClient = CoreJobConfigurationClient(core: core, gate: readGate)
             router.register { jobConfigurationClient.handle($0) }
             undo.append { jobConfigurationClient.shutDown() }
@@ -1792,11 +1866,26 @@ public final class ServiceCompositionRoot {
                 profiles: providerProfileClient, connectionChecks: providerConnectionCheckClient,
                 routePolicy: routePolicyClient, session: adapters.readSession)
             let providerCredentials = ProviderCredentialEntry(
-                store: adapters.credentials, session: adapters.readSession)
+                store: adapters.credentials, session: adapters.readSession, profiles: providerProfileClient)
             let exportClient = CoreExportClient(core: core)
             router.register { exportClient.handle($0) }
             undo.append { exportClient.shutDown() }
             let exportService = ExportService(core: exportClient, session: adapters.readSession, layout: layout)
+            let resetClient = CoreResetClient(core: core)
+            router.register { resetClient.handle($0) }
+            undo.append { resetClient.shutDown() }
+            let resetItemCleanup = ResetItemCleanupBridge()
+            let resetStaging = NativeResetIngress(service: ingress, gate: resetGate, layout: layout)
+            undo.append { resetStaging.retire() }
+            let resetCore = adapters.resetCore(resetClient)
+            let resetService = ResetService(
+                core: resetCore,
+                staging: resetStaging,
+                itemCleanup: resetItemCleanup,
+                exportTemporaries: ExportTemporaryCleaner(layout: layout),
+                credentials: KeychainResetCredentialRemover(serviceName: configuration.credentialServiceName),
+                markers: resetMarkers)
+            let resetControl = ResetControl(service: resetService, core: resetCore, session: adapters.readSession)
             let permissionReconciler = NotificationPermissionReconciler(
                 center: adapters.notificationCenter, reconciliation: reminderCore,
                 observations: adapters.permissionObservations)
@@ -1821,11 +1910,15 @@ public final class ServiceCompositionRoot {
                 throw CompositionError.jobTypeConflict(capability.jobType)
             }
             var enabledProtocols = ServiceCompositionRoot.baseProviderProtocols
+            var selfHostedRegistrations = Set<CoreSelfHostedRegistration>()
             for module in modules {
                 enabledProtocols.formUnion(module.enabledProviderProtocols)
+                selfHostedRegistrations.formUnion(module.selfHostedRegistrations)
             }
             try core.setEnabledProviderProtocols(enabledProtocols)
             undo.append { try? core.setEnabledProviderProtocols(ServiceCompositionRoot.baseProviderProtocols) }
+            try core.setSelfHostedRegistrations(selfHostedRegistrations)
+            undo.append { try? core.setSelfHostedRegistrations([]) }
             let jobRunner = try JobRunnerService.attach(
                 to: core, storePath: layout.databaseURL.path, sender: adapters.sender,
                 capabilities: capabilities, isReachable: adapters.reachability.isReachable,
@@ -1857,12 +1950,15 @@ public final class ServiceCompositionRoot {
                 itemLifecycleControls: itemLifecycleControls,
                 suggestionResponseClient: suggestionResponseClient,
                 suggestionResponses: suggestionResponses, itemDetailClient: itemDetailClient,
-                itemDetails: itemDetails, retentionControlClient: retentionControlClient,
-                retentionControls: retentionControls, jobConfigurationClient: jobConfigurationClient,
+                itemDetails: itemDetails, recentItemsClient: recentItemsClient, recentItems: recentItems,
+                retentionControlClient: retentionControlClient,
+                retentionControls: retentionControls, playback: playback,
+                jobConfigurationClient: jobConfigurationClient,
                 jobConfiguration: jobConfiguration, providerProfileClient: providerProfileClient,
                 providerConnectionCheckClient: providerConnectionCheckClient, routePolicyClient: routePolicyClient,
                 providerConfiguration: providerConfiguration, providerCredentials: providerCredentials,
                 exportClient: exportClient, exportService: exportService,
+                resetClient: resetClient, resetStaging: resetStaging, resetControl: resetControl, resetItemCleanup: resetItemCleanup,
                 permissionReconciler: permissionReconciler, foreground: foreground)
         } catch {
             for step in undo.reversed() {

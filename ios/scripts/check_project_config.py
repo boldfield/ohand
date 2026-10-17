@@ -263,6 +263,8 @@ def check_plists(root=IOS_ROOT):
                 errors.append(f"{owner}/Info.plist scene delegate {delegate_name!r} is not module-qualified")
         if not configurations:
             errors.append(f"{owner}/Info.plist has no scene configuration")
+        if owner == "AppAssembly" and not isinstance(plist.get("UILaunchScreen"), dict):
+            errors.append(f"{owner}/Info.plist must declare UILaunchScreen as a dictionary or iOS runs the app letterboxed")
         if "armv7" in plist.get("UIRequiredDeviceCapabilities", []):
             errors.append(f"{owner}/Info.plist requires armv7")
         for key in ("UILaunchStoryboardName", "UIMainStoryboardFile", "NSUserNotificationUsageDescription"):

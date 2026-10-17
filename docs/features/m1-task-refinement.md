@@ -193,6 +193,25 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
   - **Missing seams, round 2 (coordinator, 2026-10-16).** Two tasks blocked with accurate reports. Each was checked against main `f2594f2`.
     - **A09** needs a deletion hook in A05's `ItemDeletionService` and a playback fence in the services that `LifecycleCoordinator` builds. Both reviewers of PR #252 rejected those edits as outside A09's paths. GPT also found a race: the PR ended playback *before* the core accepted the deletion. A stale or refused deletion then stopped playback for nothing, and an open between the callback and the commit survived the deletion. A05 has landed, so A09 gets a narrow grant instead of a predecessor task (see A09). The observer fires only after the intent is recorded.
     - **T11**'s round-2 rejection is correct. Self-hosted enablement is decided once, synchronously, before modules attach (`CompositionRoot.swift:1755-1760`). The profile-status read answers later and has no consumer. So a registration naming a missing, revoked, wrong-protocol or wrong-model profile still enables self-hosted dispatch for *every* stored self-hosted profile. The coordinator chose a core gate over a root hook that switches the protocol on after the async read. A root hook would still enable every self-hosted profile once the registered one validated, and it opens a window between attach and the read. A core gate checks at each dispatch and needs no ordering. T11e restricts self-hosted dispatch to registered (profile version, model) pairs and lets modules declare them. T11 depends on T11e and needs no root edit.
+    - **U05b** (2026-10-17, after PR #267 round 1) cannot replace, check or remove the secret of a profile that is already saved. The listing deliberately returns only `credential_bound`, never `credential_ref` (`core/src/providers/profiles/mod.rs:588`). Once a draft is saved, the settings screen has no way to name the stored version's Keychain item. So the "enter or replace the secret" guidance for `credential_missing`/`credential_rejected` cannot repair the profile that pinned jobs are waiting on. The reference must stay out of `app/`. But the native services layer already receives references: the transport at dispatch, and reset through `profile_credentials` (`core/src/ffi/reset.rs:175`). U01f adds credential operations keyed by profile version. They resolve the reference inside the services layer and never return it. U05b depends on U01f.
+  - **UI design rework (coordinator, 2026-10-17).** The coordinator ran the app in a simulator and found that it had no visual design. It ran letterboxed (F18). The keyboard covered navigation. Settings rendered acceptance criteria as paragraphs. The maintainer set an identity and a design system, and chose a composer-style home with recent captures. Both are recorded in [the M1 UI design](m1-ui-design.md).
+    - **New tasks:**
+
+      | Task | Scope | Depends on |
+      | --- | --- | --- |
+      | DS01 | Design-system foundations: tokens, fonts, components | |
+      | DS02 | Icon and launch artwork | |
+      | DS03 | Quiet Face ID at launch and on return to the foreground | |
+      | R06 | Gated "recent captures" read | |
+      | DS04a | Composer home | |
+      | DS04b | Recents and lock states on the home | DS03, R06 |
+      | DS05 | Restyle Search | |
+      | DS06 | Restyle Settings, Audio and Daily prompt | after U07b |
+      | DS07 | Restyle Processing | after U05b |
+      | DS08 | Screenshot walkthrough in CI | |
+
+    - **Standing rule:** every UI task that has not started depends on DS01. It builds on `app/design-system/` and is reviewed against the design document's checklist as well as its own criteria. Behavioural acceptance is unchanged.
+    - **Unlock behaviour:** DS03 changes when authentication is attempted, not the read gate. A failed, cancelled or unavailable attempt leaves `capture_only` and capture is never blocked.
 
 ## Why some tasks stay together
 
@@ -1107,6 +1126,42 @@ Acceptance:
 
 Source pointers: `ios/Services/Assembly/CompositionRoot.swift:162`, `:349`; `ios/Services/Credentials/CredentialService.swift:58`.
 
+### U01f
+
+Manage a stored profile version's credential without exposing its reference
+
+Let the provider-configuration services replace, check and remove the secret bound to a stored profile version, by profile version, so that settings can repair a saved profile without ever holding its credential reference.
+
+Owned paths:
+- `core/src/ffi/provider_profiles.rs`, `core/src/ffi/provider_profiles/`;
+- in `core/src/providers/profiles/mod.rs`, only one read of a version's credential reference;
+- `ios/OhAndCoreBridge/CoreHandle+ProviderProfiles.swift`;
+- `ios/Services/ProviderConfiguration/`;
+- `ios/Tests/ProviderConfiguration/`, `ios/Tests/Credentials/` (only new cases);
+- in `ios/Services/Assembly/CompositionRoot.swift`, only the `ProviderCredentialEntry(...)` construction (`:1811-1812`), to pass it the profile client.
+
+Dependencies: none.
+
+Acceptance:
+
+1. A provider-profiles command returns the credential reference of one stored profile version, or reports that the version is unknown or has no credential bound. It is not part of the listing. It is reachable only from `ios/Services/`: no `app/` client, view model or diagnostic receives a reference, and the listing still never returns one.
+2. `ProviderCredentialEntry` gains three operations keyed by profile version: replace the secret, report the credential status, and remove the secret.
+   - Each requires an authenticated read session at call time, and a capture-only session gets `notAuthenticated` without touching the core or the Keychain.
+   - Each resolves the reference internally and calls the existing `CredentialService` operation. Replacing writes in place under the same reference, so the profile, its version and jobs pinned to it are unchanged and become dispatchable again.
+   - An unknown version and a version with no credential bound give distinct errors. No answer or error carries a reference or a secret.
+3. Removing a secret leaves the version `credentialMissing`. If other stored versions name the same reference, it affects them too; the entry documents this and a test shows it.
+4. Tests:
+   - **Rust:** the reference read returns the right reference, and handles unknown and unbound versions; the listing still omits references.
+   - **Real-core Swift:**
+     - save a profile with a stored secret, replace it by version, and show that the status is `present` and the reference is unchanged;
+     - remove it by version, and show that a connection check reports `credentialMissing`;
+     - show that an unknown or unbound version is refused, and that a capture-only session is refused.
+   - No test output contains a reference or secret.
+
+   `make check` and `make test` pass. The exact-head macOS CI run is linked.
+
+Source pointers: `core/src/ffi/provider_profiles.rs:42` (`Command`), `:95`; `core/src/ffi/reset.rs:175` (existing reference read); `ios/Services/ProviderConfiguration/ProviderCredentialEntry.swift:23`; `ios/Services/Assembly/CompositionRoot.swift:1811`.
+
 ### F15
 
 Find and fix the memory corruption in the notification reconciliation FFI tests
@@ -1160,6 +1215,25 @@ Acceptance:
 3. 50 consecutive `cargo test --locked -p bench --lib` runs pass under a CPU-saturating background load on the final head, using the loop command written in the PR. `make check` and `make test` pass.
 
 Source pointers: `tools/bench/src/transport/tests.rs:679`.
+
+### F18
+
+Run the app full screen instead of in legacy compatibility mode
+
+The app's Info.plist declares neither `UILaunchScreen` nor a launch storyboard. Without one, iOS runs the app at a legacy fixed screen size, scaled up and letterboxed, on every device. `check_project_config.py` bans `UILaunchStoryboardName`, so the storyboard was removed at some point and nothing replaced it. Found by the coordinator on 2026-10-17 in a simulator walkthrough (iPhone 17, iOS 26.5).
+
+Owned paths: `ios/AppAssembly/Info.plist` (only the new key), `ios/scripts/check_project_config.py` and `ios/scripts/test_check_project_config.py` (only the new rule and its tests), one new test file under `ios/Tests/AppAssembly/`.
+
+Dependencies: none.
+
+Acceptance:
+
+1. `ios/AppAssembly/Info.plist` declares `UILaunchScreen` as a dictionary. An empty dictionary is enough; a background colour from the asset catalogue is allowed if one already exists. No storyboard is added.
+2. `check_project_config.py` fails when the app's Info.plist lacks a `UILaunchScreen` dictionary. A unit test covers both the passing and the failing case. Probe Info.plists are not required to change.
+3. A hosted test in `OhAndTests` asserts that the app runs at the device's native size, not a legacy one: the key window's scene bounds equal `UIScreen.main.bounds`, and the screen height is greater than 667 points on the CI simulator. Today, before the fix, this test must fail. Show the failing run on the parent commit, or explain why it cannot be shown.
+4. The exact-head macOS CI run is linked, and its smoke screenshot shows the app filling the screen. `make check` passes.
+
+Source pointers: `ios/AppAssembly/Info.plist`; `ios/scripts/check_project_config.py:245` (`check_plists`), `:268` (banned storyboard key).
 
 ### A01
 
@@ -1992,7 +2066,9 @@ Connect profile credential references to native secure entry/update/removal and 
 
 Owned paths: `app/provider-settings/`.
 
-Dependencies: U05a.
+Dependencies: U05a, U01f (credential operations by profile version).
+
+Rework (coordinator, 2026-10-17, after PR #267 round 1): use U01f's operations to replace, check and remove the credential of a saved profile version. A secret stored for a draft must never be orphaned. Either defer the Keychain add until the profile saves, or delete a reference this screen added but never saved when the draft is cleared, abandoned, edited or the session relocks. Test whichever is chosen. Reject a secret with leading or trailing whitespace instead of trimming it. The view tests must cover: the secret field emptied after store success and failure, on disappear and on leaving the foreground; the secret never in `renderReporter` or the accessibility value. Real-core cases must cover a stored-then-checked secret, a removed secret reporting `credentialMissing`, and an invalid reference reported redacted.
 
 Acceptance:
 
@@ -2287,6 +2363,179 @@ Acceptance:
 Source pointers (baseline above): `docs/architecture/m1-contracts.md:260`, `AGENTS.md:45`.
 
 Contributes to original T12 criteria: 1, 2.
+
+### DS01
+
+Build the design-system foundations
+
+Add the tokens, fonts and shared components from the M1 UI design, so every screen builds on one system instead of local styling.
+
+Owned paths: `app/design-system/` (new), `ios/Tests/DesignSystem/` (new), `ios/AppAssembly/Info.plist` (only `UIAppFonts`), `ios/project.yml` (only what bundling the fonts needs).
+
+Dependencies: F18 (shared `Info.plist`).
+
+Acceptance:
+
+1. Colour tokens exist as dynamic colours with the exact light and dark values in the design document's token table. Type styles, spacing, radius and elevation constants match it.
+2. Instrument Serif regular and italic TTF are bundled with `OFL.txt`, registered in `UIAppFonts`, and used through `Font.custom(_:size:relativeTo:)`.
+3. These components exist, each with a SwiftUI preview in light and dark: PillButton (primary, secondary, plain, destructive), GlassButton, GlassPill, Card, GroupedSection with ChoiceRow and ToggleRow, Chip, SavedPill, Composer (the three visual states, with no capture wiring), Mark. Each meets the 44 pt touch-target rule.
+4. Tests:
+   - a token test computes WCAG contrast for every text pair the document uses (ink, inkMuted, accent, destructive and onAccent on their grounds) in both themes and fails below 4.5:1, or 3:1 for 24 pt and larger;
+   - a test asserts that the bundled font loads.
+5. No existing screen changes in this task. The exact-head macOS CI run is linked.
+
+### DS02
+
+Produce the app icon and launch screen
+
+Ship the icon and the launch screen in the M1 UI design: the italic & mark on brand indigo.
+
+Owned paths: a new asset catalogue under `ios/AppAssembly/`, `ios/project.yml` (only the catalogue and `ASSETCATALOG_COMPILER_APPICON_NAME`), `ios/AppAssembly/Info.plist` (only `UILaunchScreen` contents), and a generator script under `ios/scripts/`.
+
+Dependencies: DS01 (bundled font), F18 (shared `Info.plist` key).
+
+Acceptance:
+
+1. A script generates the mark from the bundled font's glyph outline (no hand-drawn approximation). It writes the 1024 px app icon in three variants: default (white mark on `brand` with a soft top light), dark (`#8E9BFF` mark on `#0A0B12`) and tinted (one luminance shape). The script is deterministic and its outputs are committed.
+2. `UILaunchScreen` uses a background colour from the catalogue (`brand` in light, `#0A0B12` in dark) and the mark image, centred, with no text.
+3. `check_project_config.py` still passes; the app builds with the icon set. The exact-head macOS CI run is linked, and its smoke screenshot shows the launch screen or the app at full screen.
+
+### DS03
+
+Try Face ID quietly at launch and on return to the foreground
+
+Make an unobtrusive authentication attempt whenever the app becomes active, so the owner usually sees their recent captures without asking, while capture never waits on authentication.
+
+Owned paths: `ios/Services/Authentication/` (the boundary and session only), `ios/Tests/Authentication/`, `ios/AppAssembly/AppServices.swift` (the launch and foreground trigger), and in `ios/Services/Assembly/CompositionRoot.swift` one public method beside `authenticateReads` that requests the quiet attempt.
+
+Dependencies: A12 (root chain).
+
+Acceptance:
+
+1. The boundary gains a quiet mode. It uses `.deviceOwnerAuthenticationWithBiometrics` with `localizedFallbackTitle` set to empty. It returns `unavailable` without prompting when biometrics are unavailable, not enrolled or locked out. The existing explicit `authenticate` (biometrics with passcode fallback) is unchanged.
+2. On launch and on each `willEnterForeground`, when the session is `capture_only`, the app makes one quiet attempt. A success authenticates the session exactly as today. A failure, cancellation or unavailability leaves `capture_only`, shows no error, and doesn't retry until the next foreground.
+3. A quiet attempt in flight never blocks text entry, recording or saving. An explicit unlock tap supersedes it.
+4. Relock on background is unchanged.
+5. Tests use the fake boundary to cover success, each failure, unavailable, a foreground while an attempt is in flight (no second prompt), and an explicit unlock superseding a quiet one. The capture path stays usable throughout. The exact-head macOS CI run is linked.
+
+### R06
+
+Read recent captures for the home screen
+
+Add a gated read that lists the most recent items, so the home can show recent captures without a search query.
+
+Owned paths: a new `core/src/ffi/recent_items.rs` (and its tests), the minimal query it needs in `core/src/retrieval/` or `core/src/items/`, a new `ios/OhAndCoreBridge/CoreHandle+RecentItems.swift`, and a client and service under a new `ios/Services/RecentItems/` with a registration under the capability client allowance and one gated verb in `PrivateReadGate.swift`.
+
+Dependencies: none.
+
+Acceptance:
+
+1. The read returns up to `limit` items (default 30, maximum 100), newest capture first, with a cursor for the next page. Each item has its id, current revision, item type (absent when not yet classified), the display text (the interpreted title when there is one, otherwise the source text), the capture time and the source kind (text or voice).
+2. It applies the same read scopes and exclusions as retrieval: deleted and tombstoned items never appear, and a work-only read never returns personal items.
+3. It goes through the private read gate. A `capture_only` session gets `read_not_authenticated`, and an answer that arrives after a relock is discarded.
+4. Rust tests cover ordering, paging, scopes, deletion and unclassified items. Swift tests cover the gate. `make check` and `make test` pass. The exact-head macOS CI run is linked.
+
+### DS04a
+
+Rebuild the capture surface as the composer home
+
+Replace the capture screen's layout with the composer home from the M1 UI design: a glass header, the composer at the bottom and an empty body. Text and voice capture behaviour is unchanged.
+
+Owned paths: `ios/Capture/Entry/CaptureEntryView.swift`, `ios/Capture/Text/TextCaptureView.swift`, the voice capture view code under `ios/Capture/Voice/` (views only), `ios/AppAssembly/AppRootView.swift`, new files under `app/home/`, and their tests under `ios/Tests/CaptureEntry/`, `ios/Tests/TextCapture/` and `ios/Tests/VoiceCapture/`.
+
+Dependencies: DS01.
+
+Acceptance:
+
+1. The header floats on glass: Search, the wordmark, and Settings, which becomes Done while the keyboard is up. The keyboard never covers the header or the composer, and Done dismisses it.
+2. The composer follows the design.
+   - At rest it shows the italic placeholder and the mic.
+   - While typing it grows with the text and shows the record and Save buttons.
+   - While recording it becomes the recording panel, with Discard and Stop.
+   - After a save it clears, keeps the keyboard up, and shows the SavedPill for about 2 s.
+   - Every existing outcome is still reported, including the honest unrecoverable and kept-for-retry outcomes; the status paragraph is replaced with short messages.
+3. Text and voice ingress, handoff, recovery and durability are unchanged. Every existing test passes, updated only where it asserted layout or text.
+4. At regular width, the composer is centred with a maximum width of about 500 pt. The layout passes the design checklist. The exact-head macOS CI run is linked.
+
+### DS04b
+
+Show recent captures and the lock states on the home
+
+Fill the home body with recent captures when reads are authenticated, and show the unlocking and locked states otherwise.
+
+Owned paths: `app/home/` and its tests.
+
+Dependencies: DS04a, DS03, R06.
+
+Acceptance:
+
+1. When the session is `authenticated`, the body lists recent captures from R06. They are grouped under Today and Earlier, use Cards with a type dot, type and relative date, and load more pages on scroll. At regular width they form two columns under a large "Today".
+2. While a quiet attempt is in flight, the body shows placeholder cards. When the session is `capture_only`, it shows the locked card, whose Unlock button runs the explicit authentication. In neither state does anything derived from stored history appear: no text, counts or badges.
+3. A new save shows at the top as "Just now · sorting…" until the item is interpreted. A relock clears the list immediately.
+4. Tests cover the three states, the relock clearing the list, and the fact that a read in `capture_only` is never attempted. The exact-head macOS CI run is linked.
+
+### DS05
+
+Restyle Search
+
+Rebuild the Search screen's presentation per the M1 UI design: a glass header with a search pill, filter chips and result cards. Search behaviour and filters are unchanged.
+
+Owned paths: `app/retrieval/` (views only) and `ios/Tests/Retrieval/` (layout assertions only).
+
+Dependencies: DS01.
+
+Acceptance:
+
+1. The search field is a GlassPill and is focused on entry. The type, time and topic filters are Chips that open menus, and the active filters show as selected chips. Results are Cards, with the matched words highlighted and an "N results" line. The empty and no-match states use the empty-state pattern.
+2. Every existing retrieval behaviour test passes. The read gate, locked state and scope filtering are unchanged.
+3. At regular width, the results sit in a left column with room for an item pane, which U02b fills. The layout passes the design checklist. The exact-head macOS CI run is linked.
+
+### DS06
+
+Restyle Settings, Audio and Daily prompt
+
+Rebuild the Settings root, Audio retention and Daily prompt presentation per the M1 UI design. Settings behaviour is unchanged.
+
+Owned paths: `ios/AppAssembly/ManagementCatalog.swift` (`SettingsRootView` only), `app/data-settings/` (the retention views only), `app/prompt-settings/`, and their tests.
+
+Dependencies: DS01, U07b (shared `app/data-settings/`).
+
+Acceptance:
+
+1. The Settings root has a large serif title and grouped sections with current values. "Erase everything" is a separate destructive card (wired by U07c), and the version line is at the bottom.
+2. Audio and Daily prompt each have a serif title, one grouped section per decision, one footer line and an info sheet carrying the full explanation the screens show today.
+3. Every behaviour and authentication test passes. The layout passes the design checklist. The exact-head macOS CI run is linked.
+
+### DS07
+
+Restyle Processing
+
+Rebuild the provider settings presentation per the M1 UI design: the "Sort my captures" choice first, with providers and the advanced controls one level down.
+
+Owned paths: `app/provider-settings/` (views only) and its tests.
+
+Dependencies: DS01, U05b (shared path).
+
+Acceptance:
+
+1. The screen shows a "Sort my captures" choice with one-line details, one footer line, "Add provider", and an Advanced screen. The Advanced screen holds the profile, model, timeout, credential and connection-check controls built by U05a and U05b. No control is removed and no capability is lost.
+2. Every behaviour test passes, including credential redaction. The layout passes the design checklist. The exact-head macOS CI run is linked.
+
+### DS08
+
+Capture a screenshot walkthrough in CI
+
+Add a UI-test walkthrough that captures every main screen in both appearances, so reviewers can see what a change looks like.
+
+Owned paths: a new UI-test target under `ios/UITests/Walkthrough/`, `ios/project.yml` (that target and its scheme only), `.github/workflows/ios.yml` (one job), and `ios/scripts/` for any helper.
+
+Dependencies: F18.
+
+Acceptance:
+
+1. On every pull request, the walkthrough launches the app on a simulator with synthetic captures. It visits the home, Search with a query, Settings and each settings screen, in light and dark, at compact width and, when a regular-width simulator is available, at regular width. It writes one PNG per screen. Simulated Face ID enrolment and matching are scripted, and authentication is never bypassed in app code.
+2. The job uploads the screenshots as an artifact with `retention-days: 7`. A screen the walkthrough cannot reach fails the job, not just the screenshot.
+3. The exact-head CI run is linked, along with a list of the screenshots it produced.
 
 ## Original acceptance coverage
 

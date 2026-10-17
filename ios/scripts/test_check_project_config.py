@@ -1,4 +1,5 @@
 import copy
+import plistlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -185,6 +186,30 @@ class ProjectConfigChecks(unittest.TestCase):
             self.assertTrue(any("exactly one" in e for e in checks.check_workflow_xcode_pin(project, missing)))
             doubled = self.write_workflow(directory, ["26.6", "26.6"])
             self.assertTrue(any("exactly one" in e for e in checks.check_workflow_xcode_pin(project, doubled)))
+
+    def copy_plists(self, directory):
+        for plist_path in checks.IOS_ROOT.glob("*/Info.plist"):
+            target = Path(directory) / plist_path.parent.name
+            target.mkdir()
+            (target / "Info.plist").write_bytes(plist_path.read_bytes())
+        return Path(directory)
+
+    def test_app_plist_with_launch_screen_passes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            errors = checks.check_plists(self.copy_plists(directory))
+        self.assertEqual([e for e in errors if "UILaunchScreen" in e], [])
+
+    def test_app_plist_without_launch_screen_is_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_plists(directory)
+            plist_path = root / "AppAssembly/Info.plist"
+            with plist_path.open("rb") as handle:
+                plist = plistlib.load(handle)
+            del plist["UILaunchScreen"]
+            with plist_path.open("wb") as handle:
+                plistlib.dump(plist, handle)
+            errors = checks.check_plists(root)
+        self.assertTrue(any("UILaunchScreen" in e for e in errors), errors)
 
 
 if __name__ == "__main__":

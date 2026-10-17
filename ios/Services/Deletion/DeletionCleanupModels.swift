@@ -80,6 +80,8 @@ public enum DeletionRetryReason: String, Equatable, Sendable {
     /// Another staging record that cannot be trusted names audio the deleted capture's record also names, so who owns
     /// it is unknown. The audio and the deleted capture's record stay until the other record is resolved.
     case ingressOwnershipUnresolved = "ingress_ownership_unresolved"
+    /// The audio is open for playback; it stays in place and the step is retried once playback ends.
+    case audioInPlayback = "audio_in_playback"
     case cancelled = "cancelled"
 }
 

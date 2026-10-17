@@ -15,7 +15,9 @@
 //! * Its events carry the same `operation_id`: a failure (nothing was sent: a missing or revoked
 //!   profile, a malformed one, or no registered transport), or `{"phase":"dispatched"}` followed
 //!   by `{"phase":"completed","outcome":code}`. A protocol the host has not enabled (T11c) is
-//!   not sent: its only event is `completed` with the outcome `protocol_not_enabled`.
+//!   not sent: its only event is `completed` with the outcome `protocol_not_enabled`; a self-hosted profile
+//!   whose version and model the host has not registered is likewise not sent and completes with
+//!   `self_hosted_not_registered`.
 //! * The exchange runs off the core worker thread, is answered with the ordinary provider
 //!   exchange answers and is cancelled with `ohand_core_cancel_provider_exchange` (the outcome is
 //!   then `cancelled`).
@@ -48,6 +50,7 @@ enum ConnectionOutcome {
     Timeout,
     CapabilityMismatch,
     ProtocolNotEnabled,
+    SelfHostedNotRegistered,
     RateLimited,
     ProviderError,
     UnexpectedResponse,
@@ -282,6 +285,17 @@ fn before_send_hook(handle: u64) {
     }
 }
 
+/// The outcome of a check the host's protocol and self-hosted registration settings refuse.
+fn refusal_outcome(handle: u64, profile: &ProviderProfile) -> Option<ConnectionOutcome> {
+    match protocols::permission(handle, profile) {
+        protocols::Permission::Allowed => None,
+        protocols::Permission::ProtocolNotEnabled => Some(ConnectionOutcome::ProtocolNotEnabled),
+        protocols::Permission::SelfHostedNotRegistered => {
+            Some(ConnectionOutcome::SelfHostedNotRegistered)
+        }
+    }
+}
+
 fn run_check(
     plan: &CheckPlan,
     end: Arc<ExchangeEnd>,
@@ -291,8 +305,8 @@ fn run_check(
     #[cfg(test)]
     before_send_hook(end.handle);
     // The host may disable the protocol between preparation on the worker and this send.
-    if !protocols::is_enabled(end.handle, plan.profile.protocol()) {
-        return completed_event(operation_id, ConnectionOutcome::ProtocolNotEnabled);
+    if let Some(outcome) = refusal_outcome(end.handle, &plan.profile) {
+        return completed_event(operation_id, outcome);
     }
     let observed: ObservedSlot = Arc::new(Mutex::new(None));
     let transport = RecordingTransport {
@@ -334,8 +348,8 @@ fn start_check_job(
             let database = lock(database);
             prepare_check(database.conn(), &profile_version)?
         };
-        if !protocols::is_enabled(handle, prepared.profile.protocol()) {
-            return completed_event(operation_id, ConnectionOutcome::ProtocolNotEnabled);
+        if let Some(outcome) = refusal_outcome(handle, &prepared.profile) {
+            return completed_event(operation_id, outcome);
         }
         let end = Arc::new(ExchangeEnd {
             handle,

@@ -31,10 +31,12 @@ final class RetentionSettingsViewTests: XCTestCase {
 
     /// Shows the screen over `controls`, lets its first read land, runs `body`, then takes the screen away.
     private func withScreen(
-        _ controls: FakeRetentionControls, _ body: (RetentionSettingsModel) async throws -> Void
+        _ controls: FakeRetentionControls, exportSettings: ExportSettingsModel? = nil,
+        _ body: (RetentionSettingsModel) async throws -> Void
     ) async rethrows {
         rendered = [:]
-        let model = RetentionSettingsModel(controls: controls, readScope: { [unowned self] in scope })
+        let model = RetentionSettingsModel(
+            controls: controls, readScope: { [unowned self] in scope }, exportSettings: exportSettings)
         let hosting = UIHostingController(
             rootView: NavigationStack {
                 RetentionSettingsView(model: model, renderReporter: { [unowned self] in rendered = $0 })
@@ -247,6 +249,21 @@ final class RetentionSettingsViewTests: XCTestCase {
             await settle()
             XCTAssertEqual(text(RetentionSettingsView.policyIdentifier), "7 days (default)")
             XCTAssertNil(rendered[RetentionSettingsView.failureIdentifier])
+        }
+    }
+
+    func testTheExportLinkIsShownOnlyWhenTheAppAssemblesAnExportSection() async throws {
+        await withScreen(FakeRetentionControls(status: Self.status())) { _ in
+            XCTAssertNil(rendered[RetentionSettingsView.exportLinkIdentifier])
+        }
+
+        let world = try ExportWorld()
+        addTeardownBlock { world.tearDown() }
+        let exportSettings = ExportSettingsModel(controls: world.makeService(), readScope: { .authenticated })
+        await withScreen(FakeRetentionControls(status: Self.status()), exportSettings: exportSettings) { _ in
+            XCTAssertEqual(text(RetentionSettingsView.exportLinkIdentifier), "Export a copy of your notes")
+            assertTappable(RetentionSettingsView.exportLinkIdentifier)
+            XCTAssertEqual(world.core.requests, [], "showing the link reads nothing")
         }
     }
 }

@@ -136,6 +136,8 @@ public enum AudioRetentionRetryReason: String, Equatable, Sendable {
     /// The file is gone but its completion could not be recorded durably, so it is not reported as cleaned up yet.
     case ledgerUnavailable = "ledger_unavailable"
     case cancelled = "cancelled"
+    /// The audio is open for playback; it is left in place and the removal is decided again once playback ends.
+    case audioInPlayback = "audio_in_playback"
 }
 
 /// Why a removal will not be retried automatically. The audio stays in place and the failure stays visible on every
