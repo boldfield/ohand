@@ -257,7 +257,7 @@ final class ProviderSettingsViewTests: XCTestCase {
     func testTheSecretIsNeverRenderedAndFeedbackIsFixedTextAtTheDraftAndTheStoredVersion() async throws {
         let credentials = FakeProviderSettingsCredentials()
         let secret = "synthetic-secret-value"
-        await withScreen(FakeProviderSettingsControls(listing: Self.mixedListing), credentials: credentials) { model in
+        try await withScreen(FakeProviderSettingsControls(listing: Self.mixedListing), credentials: credentials) { model in
             assertTappable(ProviderSettingsView.storeSecretIdentifier)
             assertTappable(ProviderSettingsView.checkSecretIdentifier)
             assertTappable(ProviderSettingsView.removeSecretIdentifier)
