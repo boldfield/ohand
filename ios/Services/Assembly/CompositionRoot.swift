@@ -1827,7 +1827,7 @@ public final class ServiceCompositionRoot {
                 profiles: providerProfileClient, connectionChecks: providerConnectionCheckClient,
                 routePolicy: routePolicyClient, session: adapters.readSession)
             let providerCredentials = ProviderCredentialEntry(
-                store: adapters.credentials, session: adapters.readSession)
+                store: adapters.credentials, session: adapters.readSession, profiles: providerProfileClient)
             let exportClient = CoreExportClient(core: core)
             router.register { exportClient.handle($0) }
             undo.append { exportClient.shutDown() }
