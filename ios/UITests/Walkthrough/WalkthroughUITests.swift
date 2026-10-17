@@ -117,12 +117,21 @@ final class WalkthroughUITests: XCTestCase {
             // The field is disabled while the previous capture is being saved; typing then would be lost.
             expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: field)
             waitForExpectations(timeout: 30)
-            field.tap()
-            field.typeText(text)
             let save = app.buttons["capture-entry.save"]
             XCTAssertTrue(save.waitForExistence(timeout: screenTimeout), "Save button did not appear")
-            expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: save)
-            waitForExpectations(timeout: 20)
+            // The system can take focus (the launch Face ID check, keyboard tips) and drop typed text; a person types again.
+            var typed = false
+            for attempt in 1...3 where !typed {
+                field.tap()
+                field.typeText(text)
+                let enabled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isEnabled == true"), object: save)
+                typed = XCTWaiter().wait(for: [enabled], timeout: 8) == .completed
+                if !typed {
+                    try? XCUIScreen.main.screenshot().pngRepresentation.write(
+                        to: outputDirectory.appendingPathComponent("failure-capture-attempt\(attempt).png"))
+                }
+            }
+            XCTAssertTrue(typed, "Save stayed disabled after typing a capture")
             save.tap()
             // A saved capture empties the field, which disables Save again.
             expectation(for: NSPredicate(format: "isEnabled == false"), evaluatedWith: save)
