@@ -148,9 +148,9 @@ struct RetentionSettingsView: View {
             .reportDataSettingsRendered(Self.policyIdentifier, text: RetentionSettingsText.periodSummary(status.policy))
             DSPillButton(title: "Save period") { Task { await model.applyPeriod() } }
                 .frame(maxWidth: .infinity)
-                .disabled(model.isApplyingPeriod)
                 .accessibilityIdentifier(Self.applyIdentifier)
                 .reportDataSettingsRendered(Self.applyIdentifier, text: "Save period")
+                .disabled(model.isApplyingPeriod)
             if let message = model.periodState?.message {
                 note(message, identifier: Self.periodStateIdentifier)
             }
@@ -192,9 +192,9 @@ struct RetentionSettingsView: View {
                 DSPillButton(title: "Retry turning into text", style: .secondary) {
                     Task { await model.retryTranscription(itemID: entry.itemID) }
                 }
-                .disabled(busy)
                 .accessibilityIdentifier(Self.retryIdentifier(entry.itemID))
                 .reportDataSettingsRendered(Self.retryIdentifier(entry.itemID), text: "Retry turning into text")
+                .disabled(busy)
             }
             // Only sole-source audio is listed here, and the core refuses to delete such audio on its own, so no
             // audio-only delete is offered. Item deletion is the explicit destructive path.
