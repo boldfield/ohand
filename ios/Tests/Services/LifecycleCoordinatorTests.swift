@@ -111,6 +111,19 @@ private func lifecycleWaitUntil(timeout: TimeInterval = 10, _ condition: () -> B
     return condition()
 }
 
+private final class ResetOutcomeScript: @unchecked Sendable {
+    private let lock = NSLock()
+    private var remaining: [LifecycleStepOutcome]
+
+    init(_ outcomes: [LifecycleStepOutcome]) { remaining = outcomes }
+
+    func next() -> LifecycleStepOutcome {
+        lock.lock()
+        defer { lock.unlock() }
+        return remaining.count > 1 ? remaining.removeFirst() : (remaining.first ?? .completed)
+    }
+}
+
 // MARK: - Ordering, serialization and interruption
 
 final class LifecycleCoordinatorTests: XCTestCase {
@@ -164,6 +177,29 @@ final class LifecycleCoordinatorTests: XCTestCase {
         XCTAssertEqual(report.outcome(of: .deletion), .deferred("synthetic"))
         XCTAssertEqual(log.order.count, LifecycleStep.allCases.count)
         XCTAssertEqual(report.outcome(of: .health), .completed)
+    }
+
+    func testAnUnsettledResetHoldsEffectfulStepsUntilALaterPassSettlesIt() async {
+        let log = StepLog()
+        let resetOutcomes = ResetOutcomeScript([.deferred("reset_pending"), .completed])
+        let coordinator = makeCoordinator(log: log)
+        coordinator.setAction({ _ in resetOutcomes.next() }, for: .reset)
+
+        let held = await coordinator.reconcile(.launch)
+        XCTAssertEqual(held.outcome(of: .reset), .deferred("reset_pending"))
+        XCTAssertEqual(held.outcome(of: .ingress), .completed, "captures are still recovered")
+        for step in [LifecycleStep.jobs, .deletion, .reminders, .retention, .promptEligibility] {
+            XCTAssertEqual(held.outcome(of: step), .deferred("reset_unsettled"), "\(step) must wait for the reset")
+        }
+        XCTAssertEqual(held.outcome(of: .health), .completed)
+        XCTAssertEqual(log.order, ["ingress", "health"])
+
+        let timeChange = await coordinator.reconcile(.systemTimeChange)
+        XCTAssertEqual(timeChange.outcome(of: .reminders), .deferred("reset_unsettled"))
+
+        let settled = await coordinator.reconcile(.foreground)
+        XCTAssertEqual(settled.outcome(of: .jobs), .completed)
+        XCTAssertEqual(settled.outcome(of: .reminders), .completed)
     }
 
     func testAHungStepTimesOutAndLaterStepsStillRun() async {

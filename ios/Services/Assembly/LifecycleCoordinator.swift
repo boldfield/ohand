@@ -127,6 +127,8 @@ public final class LifecycleCoordinator: CompositionLifecycleOwner, @unchecked S
     private var queuedWaiters: [CheckedContinuation<LifecyclePassReport, Never>] = []
     private var activeRace: StepRace?
     private var isStopped = false
+    /// Whether the latest reset step ended without settling; later effectful steps wait for a pass that settles it.
+    private var resetUnsettled = false
     private var foregroundObserver: NSObjectProtocol?
     private var foregroundObserverCenter: NotificationCenter?
     private weak var connectedRoot: ServiceCompositionRoot?
@@ -418,10 +420,40 @@ public final class LifecycleCoordinator: CompositionLifecycleOwner, @unchecked S
                 results.append(LifecycleStepResult(step: step, outcome: .notConfigured))
                 continue
             }
+            if Self.isHeldByUnsettledReset(step), isResetUnsettled() {
+                // Fail closed: an interrupted reset that has not settled may not yet have a core reset fence, so no
+                // queued interpretation may dispatch and no old reminder may be installed until a pass sees it settle.
+                results.append(LifecycleStepResult(step: step, outcome: .deferred("reset_unsettled")))
+                continue
+            }
             let outcome = await runBounded(action, triggers: triggers)
+            if step == .reset {
+                setResetUnsettled(outcome != .completed)
+            }
             results.append(LifecycleStepResult(step: step, outcome: outcome))
         }
         return LifecyclePassReport(triggers: triggers, results: results)
+    }
+
+    /// The steps that issue effects over durable state a reset deletes. Ingress stays open (the ingress gate holds
+    /// captures itself), and the read-only health snapshot is harmless.
+    private static func isHeldByUnsettledReset(_ step: LifecycleStep) -> Bool {
+        switch step {
+        case .jobs, .deletion, .reminders, .retention, .promptEligibility: return true
+        case .reset, .ingress, .health: return false
+        }
+    }
+
+    private func isResetUnsettled() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return resetUnsettled
+    }
+
+    private func setResetUnsettled(_ unsettled: Bool) {
+        lock.lock()
+        resetUnsettled = unsettled
+        lock.unlock()
     }
 
     /// Runs `action` and gives up on it after the step bound or on shutdown, whichever comes first. An action that
