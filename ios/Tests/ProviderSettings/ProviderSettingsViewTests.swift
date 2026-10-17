@@ -16,6 +16,8 @@ final class ProviderSettingsViewTests: XCTestCase {
     private var scope: CompositionReadScope = .authenticated
     private var rendered: [String: ProviderSettingsRenderedElement] = [:]
     private var window: UIWindow?
+    private var buffers: [String: ProviderSecretBuffer] = [:]
+    private let journal = FakeProviderSettingsJournal()
 
     private static let mixedListing = providerListing(
         supportLevels: [
@@ -30,11 +32,14 @@ final class ProviderSettingsViewTests: XCTestCase {
         _ body: (ProviderSettingsModel) async throws -> Void
     ) async rethrows {
         rendered = [:]
+        buffers = [:]
         let model = ProviderSettingsModel(
-            controls: controls, credentials: credentials, readScope: { [unowned self] in scope })
+            controls: controls, credentials: credentials, journal: journal, readScope: { [unowned self] in scope })
         let hosting = UIHostingController(
             rootView: NavigationStack {
-                ProviderSettingsView(model: model, renderReporter: { [unowned self] in rendered = $0 })
+                ProviderSettingsView(
+                    model: model, renderReporter: { [unowned self] in rendered = $0 },
+                    secretBufferProbe: { [unowned self] in buffers[$0] = $1 })
             })
         let shown = UIWindow(frame: CGRect(origin: .zero, size: Self.phone))
         shown.rootViewController = hosting
@@ -213,6 +218,112 @@ final class ProviderSettingsViewTests: XCTestCase {
             XCTAssertEqual(Set(shown).count, 4, "each capability row is distinguishable")
             XCTAssertFalse(shown.contains { $0.contains("Unsupported capability") })
             XCTAssertNil(rendered[ProviderSettingsView.makeDefaultIdentifier("private-v1")])
+        }
+    }
+
+    // MARK: the hosted secure field
+
+    private func secureFields(in view: UIView?) -> [UITextField] {
+        guard let view else { return [] }
+        let own = (view as? UITextField).flatMap { $0.isSecureTextEntry ? [$0] : [] } ?? []
+        return own + view.subviews.flatMap { secureFields(in: $0) }
+    }
+
+    private func secureField(_ identifier: String, file: StaticString = #filePath, line: UInt = #line) -> UITextField? {
+        let fields = secureFields(in: window?.rootViewController?.view)
+        let field = fields.first { $0.accessibilityIdentifier == identifier }
+        if field == nil { XCTFail("secure field \(identifier) is hosted", file: file, line: line) }
+        return field
+    }
+
+    /// Types into the real secure field the way the keyboard does, then presses its return key.
+    private func typeAndSubmit(_ secret: String, into identifier: String) async {
+        guard let field = secureField(identifier) else { return }
+        field.text = secret
+        field.sendActions(for: .editingChanged)
+        await settle()
+        _ = field.delegate?.textFieldShouldReturn?(field)
+        await settle()
+    }
+
+    func testTheHostedSecretFieldIsEmptyAfterStoreSucceedsAndAfterItFails() async {
+        let credentials = FakeProviderSettingsCredentials()
+        let secret = "synthetic-secret-value"
+        await withScreen(FakeProviderSettingsControls(listing: Self.mixedListing), credentials: credentials) { _ in
+            await typeAndSubmit(secret, into: ProviderSettingsView.secretFieldIdentifier)
+            XCTAssertEqual(credentials.added, [Data(secret.utf8)], "the secret went to the credential service")
+            XCTAssertEqual(secureField(ProviderSettingsView.secretFieldIdentifier)?.text ?? "", "")
+            XCTAssertEqual(buffers[ProviderSettingsView.secretFieldIdentifier]?.text, "")
+            XCTAssertEqual(
+                text(ProviderSettingsView.credentialStateIdentifier), ProviderSettingsCredentialState.stored.message)
+
+            credentials.updateResult = .failure(CredentialError.invalidated)
+            await typeAndSubmit(secret, into: ProviderSettingsView.secretFieldIdentifier)
+            XCTAssertEqual(credentials.updated.count, 1)
+            XCTAssertEqual(secureField(ProviderSettingsView.secretFieldIdentifier)?.text ?? "", "", "empty after a failure")
+            XCTAssertEqual(buffers[ProviderSettingsView.secretFieldIdentifier]?.text, "")
+            XCTAssertEqual(
+                text(ProviderSettingsView.credentialStateIdentifier),
+                ProviderSettingsText.credentialFailure(CredentialError.invalidated))
+            XCTAssertFalse(rendered.values.contains { $0.text.contains(secret) })
+        }
+    }
+
+    func testTheHostedSecretFieldNeverExposesTheSecretThroughAccessibilityOrTheRenderReport() async {
+        let secret = "synthetic-secret-value"
+        await withScreen(FakeProviderSettingsControls(listing: Self.mixedListing)) { _ in
+            guard let field = secureField(ProviderSettingsView.secretFieldIdentifier) else { return }
+            field.text = secret
+            field.sendActions(for: .editingChanged)
+            await settle()
+            XCTAssertEqual(buffers[ProviderSettingsView.secretFieldIdentifier]?.text, secret, "the field is live")
+            XCTAssertFalse((field.accessibilityValue ?? "").contains(secret), "accessibility value")
+            XCTAssertFalse((field.accessibilityLabel ?? "").contains(secret), "accessibility label")
+            XCTAssertFalse(rendered.values.contains { $0.text.contains(secret) }, "render report")
+        }
+    }
+
+    func testTheHostedSecretFieldsEmptyWhenTheAppResignsActiveAndWhenTheyLeaveTheScreen() async {
+        let secret = "synthetic-secret-value"
+        await withScreen(FakeProviderSettingsControls(listing: Self.mixedListing)) { model in
+            let fieldIdentifier = ProviderSettingsView.secretFieldIdentifier
+            secureField(fieldIdentifier).map { $0.text = secret; $0.sendActions(for: .editingChanged) }
+            await settle()
+            XCTAssertEqual(buffers[fieldIdentifier]?.text, secret)
+            NotificationCenter.default.post(name: UIApplication.willResignActiveNotification, object: nil)
+            await settle()
+            XCTAssertEqual(buffers[fieldIdentifier]?.text, "", "emptied when the app leaves the foreground")
+            XCTAssertEqual(secureField(fieldIdentifier)?.text ?? "", "")
+
+            secureField(fieldIdentifier).map { $0.text = secret; $0.sendActions(for: .editingChanged) }
+            await settle()
+            XCTAssertEqual(buffers[fieldIdentifier]?.text, secret)
+            // A relock takes the form, and with it the field, off the screen.
+            scope = .captureOnly
+            await model.refresh()
+            await settle()
+            XCTAssertNil(rendered[ProviderSettingsView.storeSecretIdentifier])
+            XCTAssertEqual(buffers[fieldIdentifier]?.text, "", "emptied when the field leaves the screen")
+        }
+    }
+
+    func testTheReplaceSecretEntryIsDisabledWhileItsOperationRuns() async throws {
+        let credentials = FakeProviderSettingsCredentials()
+        var release: CheckedContinuation<Void, Never>?
+        credentials.suspendReplaceByVersion = { await withCheckedContinuation { release = $0 } }
+        try await withScreen(FakeProviderSettingsControls(listing: Self.mixedListing), credentials: credentials) { model in
+            assertTappable(ProviderSettingsView.replaceSavedSecretIdentifier("hosted-v1"))
+            let hosted = try XCTUnwrap(
+                model.listing?.profiles.flatMap(\.versions).first { $0.profileVersion == "hosted-v1" })
+            let running = Task { await model.replaceSavedCredential(Data("synthetic-secret-value".utf8), for: hosted) }
+            await settle()
+            assertTappable(ProviderSettingsView.replaceSavedSecretIdentifier("hosted-v1"), enabled: false)
+            XCTAssertTrue(secureField(ProviderSettingsView.savedSecretFieldIdentifier("hosted-v1"))?.isEnabled == false)
+
+            release?.resume()
+            await running.value
+            await settle()
+            assertTappable(ProviderSettingsView.replaceSavedSecretIdentifier("hosted-v1"))
         }
     }
 

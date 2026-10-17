@@ -79,23 +79,32 @@ private struct ProviderSecretEntry: View {
     let buttonIdentifier: String
     let onSecret: (Data) -> Void
     let onRejected: (ProviderSecretRejection) -> Void
+    let bufferProbe: ((String, ProviderSecretBuffer) -> Void)?
     @StateObject private var buffer = ProviderSecretBuffer()
     @Environment(\.scenePhase) private var scenePhase
+
+    private func submit() {
+        switch buffer.take() {
+        case .secret(let secret): onSecret(secret)
+        case .rejected(let rejection): onRejected(rejection)
+        }
+    }
 
     var body: some View {
         SecureField("Secret (API key)", text: $buffer.text)
             .textInputAutocapitalization(.never).autocorrectionDisabled().textContentType(.none)
+            .submitLabel(.done)
+            .onSubmit(submit)
             .accessibilityIdentifier(fieldIdentifier)
+            .onAppear { bufferProbe?(fieldIdentifier, buffer) }
             .onDisappear { buffer.clear() }
             .onChange(of: scenePhase) { phase in
                 if phase != .active { buffer.clear() }
             }
-        Button(buttonTitle) {
-            switch buffer.take() {
-            case .secret(let secret): onSecret(secret)
-            case .rejected(let rejection): onRejected(rejection)
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+                buffer.clear()
             }
-        }
+        Button(buttonTitle, action: submit)
         .frame(minHeight: 44)
         .buttonStyle(.bordered)
         .reportRendered(buttonIdentifier, text: buttonTitle)
@@ -142,13 +151,17 @@ struct ProviderSettingsView: View {
 
     @ObservedObject var model: ProviderSettingsModel
     var renderReporter: (([String: ProviderSettingsRenderedElement]) -> Void)?
+    /// Lets a hosted test see each secret field's buffer. It is called with the field identifier and the buffer.
+    var secretBufferProbe: ((String, ProviderSecretBuffer) -> Void)?
 
     init(
         model: ProviderSettingsModel,
-        renderReporter: (([String: ProviderSettingsRenderedElement]) -> Void)? = nil
+        renderReporter: (([String: ProviderSettingsRenderedElement]) -> Void)? = nil,
+        secretBufferProbe: ((String, ProviderSecretBuffer) -> Void)? = nil
     ) {
         self.model = model
         self.renderReporter = renderReporter
+        self.secretBufferProbe = secretBufferProbe
     }
 
     var body: some View {
@@ -296,7 +309,10 @@ struct ProviderSettingsView: View {
             fieldIdentifier: Self.savedSecretFieldIdentifier(profileVersion), buttonTitle: "Replace secret",
             buttonIdentifier: Self.replaceSavedSecretIdentifier(profileVersion),
             onSecret: { secret in Task { await model.replaceSavedCredential(secret, for: version) } },
-            onRejected: { model.noteRejectedSecret($0, for: version) })
+            onRejected: { model.noteRejectedSecret($0, for: version) }, bufferProbe: secretBufferProbe
+        )
+        // A second tap while the operation runs would empty the new buffer and have the model drop the secret.
+        .disabled(model.isChangingSavedCredential(version))
         HStack {
             Button("Check secret") { Task { await model.checkSavedCredential(version) } }
                 .frame(minHeight: 44)
@@ -345,7 +361,8 @@ struct ProviderSettingsView: View {
         ProviderSecretEntry(
             fieldIdentifier: Self.secretFieldIdentifier, buttonTitle: "Store secret",
             buttonIdentifier: Self.storeSecretIdentifier,
-            onSecret: { model.storeCredential($0) }, onRejected: { model.noteRejectedSecret($0) })
+            onSecret: { model.storeCredential($0) }, onRejected: { model.noteRejectedSecret($0) },
+            bufferProbe: secretBufferProbe)
         HStack {
             Button("Check saved") { model.checkCredential() }
                 .frame(minHeight: 44)
