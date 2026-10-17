@@ -6,10 +6,10 @@ import OhAndCoreBridge
 ///
 /// The core answers on its single event handler, so the owner of that handler must forward every event to `handle(_:)`;
 /// it returns `true` when the event answered one of this client's operations. Operation IDs start at
-/// `firstOperationID`, a range no other client uses. Call `shutDown()` before closing the core so no
+/// `firstOperationID`, a range of its own (disjoint from every `ServiceCompositionRoot.reservedOperationRanges` entry). Call `shutDown()` before closing the core so no
 /// caller is left waiting.
 final class CoreResetClient: ResetCore, @unchecked Sendable {
-    static let firstOperationID: UInt64 = 1 << 56
+    static let firstOperationID: UInt64 = 1 << 44
 
     static let shutDownFailure = CoreFailure(
         errorClass: .cancelled, code: "client_shut_down", message: "the reset client was shut down")
