@@ -225,7 +225,8 @@ final class ProviderSettingsViewTests: XCTestCase {
 
     private func secureFields(in view: UIView?) -> [UITextField] {
         guard let view else { return [] }
-        let own = (view as? UITextField).flatMap { $0.isSecureTextEntry ? [$0] : [] } ?? []
+        var own: [UITextField] = []
+        if let field = view as? UITextField, field.isSecureTextEntry { own = [field] }
         return own + view.subviews.flatMap { secureFields(in: $0) }
     }
 
