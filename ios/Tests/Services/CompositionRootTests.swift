@@ -1538,6 +1538,257 @@ final class CompositionRootTests: XCTestCase {
             "the launch sweep removes the leftover export")
     }
 
+    // MARK: reset
+
+    private final class ResetResultBox<Value: Sendable>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: Result<Value, Error>?
+
+        var value: Result<Value, Error>? {
+            lock.lock()
+            defer { lock.unlock() }
+            return stored
+        }
+
+        func set(_ result: Result<Value, Error>) {
+            lock.lock()
+            stored = result
+            lock.unlock()
+        }
+    }
+
+    private func awaitReset<Value: Sendable>(
+        timeout: TimeInterval = 30, _ operation: @escaping @Sendable () async throws -> Value
+    ) -> Result<Value, Error>? {
+        let box = ResetResultBox<Value>()
+        Task.detached {
+            do {
+                box.set(.success(try await operation()))
+            } catch {
+                box.set(.failure(error))
+            }
+        }
+        _ = pump(until: { box.value != nil }, timeout: timeout)
+        return box.value
+    }
+
+    /// The root's real reset client, with its status read failing while `failsStatus` is set.
+    private final class StatusFailingResetCore: ResetCore, @unchecked Sendable {
+        private let base: ResetCore
+        private let lock = NSLock()
+        private var failing = true
+        private var failures = 0
+
+        init(base: ResetCore) { self.base = base }
+
+        var failsStatus: Bool {
+            get { lock.lock(); defer { lock.unlock() }; return failing }
+            set { lock.lock(); failing = newValue; lock.unlock() }
+        }
+
+        var failedStatusReads: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return failures
+        }
+
+        func start() async throws -> ResetProgress { try await base.start() }
+        func advance() async throws -> ResetProgress? { try await base.advance() }
+        func status() async throws -> ResetProgress? {
+            lock.lock()
+            let fail = failing
+            if fail { failures += 1 }
+            lock.unlock()
+            if fail { throw CoreFailure(errorClass: .transient, code: "synthetic_status_failure", message: "synthetic") }
+            return try await base.status()
+        }
+        func profileCredentials() async throws -> [ResetProfileCredential] { try await base.profileCredentials() }
+        func revokeProfile(profileVersion: String) async throws {
+            try await base.revokeProfile(profileVersion: profileVersion)
+        }
+        func claimCredentials(credentialReferences: [String], boundProfileVersions: [String]) async throws -> [String] {
+            try await base.claimCredentials(
+                credentialReferences: credentialReferences, boundProfileVersions: boundProfileVersions)
+        }
+        func credentialClaims() async throws -> [String] { try await base.credentialClaims() }
+        func releaseCredentialClaims() async throws { try await base.releaseCredentialClaims() }
+    }
+
+    private func recordInterruptedTap() throws {
+        let markers = FileResetMarkerStore(layout: ProtectedStorageLayout(rootDirectory: storageRoot))
+        try markers.recordRequest(
+            ResetRequest(credentialChoice: .keep, stagedBeforeTheTap: ResetStagingSnapshot(captureIDs: [])))
+    }
+
+    func testResetIsRefusedBeforeAuthentication() throws {
+        let (session, _) = makeSession(authenticated: false)
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), readSession: session)
+        defer { root.shutDown() }
+        let control = root.resetControl
+
+        guard case .failure(let error)? = awaitReset({ try await control.reset(credentialChoice: .keep) }) else {
+            return XCTFail("a reset before authentication must be refused")
+        }
+        XCTAssertEqual(error as? ResetControlError, .notAuthenticated)
+        guard case .failure(let progressError)? = awaitReset({ try await control.progress() }) else {
+            return XCTFail("a progress read before authentication must be refused")
+        }
+        XCTAssertEqual(progressError as? ResetControlError, .notAuthenticated)
+    }
+
+    func testFullResetCompletesThroughTheRoot() throws {
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), modules: [LifecycleCoordinator()])
+        defer { root.shutDown() }
+        root.start(isActive: false)
+        _ = try saveSyntheticCapture(root)
+        let control = root.resetControl
+
+        guard case .success(let outcome)? = awaitReset({ try await control.reset(credentialChoice: .keep) }) else {
+            return XCTFail("an authenticated reset is answered")
+        }
+        XCTAssertEqual(outcome.state, .completed, "blockers: \(outcome.blockers)")
+        XCTAssertEqual(outcome.progress?.phase, .completed)
+        guard case .success(let progress)? = awaitReset({ try await control.progress() }) else {
+            return XCTFail("progress is readable")
+        }
+        XCTAssertEqual(progress?.generation, 1)
+        XCTAssertEqual(progress?.itemsAwaitingTombstone, 0)
+    }
+
+    func testCaptureDuringAResetWaitsAndIsImportedAfterTheBoundaryIsReleased() throws {
+        // A first run saves a capture, then dies after recording a reset tap and before the core started it.
+        let first = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))
+        let earlierItemID = try saveSyntheticCapture(first)
+        first.shutDown()
+        try recordInterruptedTap()
+
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), modules: [LifecycleCoordinator()])
+        defer { root.shutDown() }
+        var held: CompositionSaveOutcome?
+        root.saveText(captureID: UUID().uuidString.lowercased(), text: "made during reset", capturedAt: Date()) {
+            held = $0
+        }
+        XCTAssertFalse(pump(until: { held != nil }, timeout: 1), "the capture waits at the reset boundary")
+
+        root.start(isActive: true)
+        XCTAssertTrue(pump(until: { held != nil }, timeout: 30), "the capture is imported once the reset released the boundary")
+        guard case .saved(_, let freshItemID, _)? = held else {
+            return XCTFail("the held capture must be saved, got \(String(describing: held))")
+        }
+        XCTAssertNotEqual(freshItemID, earlierItemID)
+        XCTAssertNotNil(readStatus(root, itemID: freshItemID), "the fresh capture is readable, not erased by the reset")
+    }
+
+    func testInterruptedResetIsResumedAtLaunchAndHoldsTheGeneration() throws {
+        let first = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))
+        _ = try saveSyntheticCapture(first)
+        first.shutDown()
+        try recordInterruptedTap()
+
+        let coordinator = LifecycleCoordinator()
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), modules: [coordinator])
+        defer { root.shutDown() }
+        let control = root.resetControl
+        root.start(isActive: true)
+
+        var settled: ResetProgress?
+        XCTAssertTrue(
+            pump(until: {
+                if case .success(let progress)? = self.awaitReset(timeout: 5, { try await control.progress() }) {
+                    settled = progress
+                }
+                return settled?.phase == .completed
+            }, timeout: 60),
+            "the launch pass finished the interrupted reset")
+        XCTAssertEqual(settled?.generation, 1, "one reset generation, not a second one")
+        let markers = FileResetMarkerStore(layout: ProtectedStorageLayout(rootDirectory: storageRoot))
+        XCTAssertNil(try markers.request(), "the recorded tap was consumed")
+        XCTAssertTrue(
+            pump(until: { coordinator.lastReport != nil }, timeout: 30), "the launch pass finished")
+        let report = try XCTUnwrap(coordinator.lastReport)
+        XCTAssertEqual(report.outcome(of: .reset), .completed)
+        let order = report.results.map(\.step)
+        XCTAssertLessThan(
+            try XCTUnwrap(order.firstIndex(of: .reset)), try XCTUnwrap(order.firstIndex(of: .jobs)),
+            "the reset is resumed before the job runner activates")
+    }
+
+    func testAFailedLaunchResetStatusReadHoldsEffectfulStepsUntilALaterPassReadsIt() throws {
+        let first = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))
+        _ = try saveSyntheticCapture(first)
+        first.shutDown()
+
+        var wrapped: StatusFailingResetCore?
+        let coordinator = LifecycleCoordinator()
+        let root = try makeTestRoot(
+            sender: ScriptedProviderSender(reply: Data()), modules: [coordinator],
+            resetCore: { base in
+                let failing = StatusFailingResetCore(base: base)
+                wrapped = failing
+                return failing
+            })
+        defer { root.shutDown() }
+        let resetCore = try XCTUnwrap(wrapped)
+        root.start(isActive: true)
+
+        XCTAssertTrue(pump(until: { coordinator.lastReport != nil }, timeout: 30), "the launch pass finished")
+        let held = try XCTUnwrap(coordinator.lastReport)
+        XCTAssertGreaterThan(resetCore.failedStatusReads, 0, "the launch resume read the reset status")
+        XCTAssertEqual(
+            held.outcome(of: .reset), .deferred("reset_status_unknown"),
+            "a failed status read does not prove that no reset is outstanding")
+        XCTAssertEqual(held.outcome(of: .ingress), .completed, "captures are still recovered")
+        for step in [LifecycleStep.jobs, .deletion, .reminders, .retention, .promptEligibility] {
+            XCTAssertEqual(
+                held.outcome(of: step), .deferred("reset_unsettled"), "\(step) must wait for a readable reset status")
+        }
+
+        resetCore.failsStatus = false
+        guard case .success(let settled)? = awaitReset({ await coordinator.reconcile(.foreground) }) else {
+            return XCTFail("the later pass finishes")
+        }
+        XCTAssertEqual(settled.outcome(of: .reset), .completed, "no reset is outstanding once the status is read")
+        XCTAssertEqual(settled.outcome(of: .jobs), .requested, "the job runner is activated after the reset settles")
+        XCTAssertNotEqual(settled.outcome(of: .reminders), .deferred("reset_unsettled"))
+    }
+
+    func testAFirstTimeChangePassAfterAnInactiveRelaunchStaysHeldUntilTheResetStatusIsRead() throws {
+        let first = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))
+        _ = try saveSyntheticCapture(first)
+        first.shutDown()
+
+        var wrapped: StatusFailingResetCore?
+        let coordinator = LifecycleCoordinator()
+        let root = try makeTestRoot(
+            sender: ScriptedProviderSender(reply: Data()), modules: [coordinator],
+            resetCore: { base in
+                let failing = StatusFailingResetCore(base: base)
+                wrapped = failing
+                return failing
+            })
+        defer { root.shutDown() }
+        let resetCore = try XCTUnwrap(wrapped)
+        // A background relaunch: no launch pass runs, so no reset step has proved anything yet.
+        root.start(isActive: false)
+        XCTAssertEqual(coordinator.finishedPassCount, 0, "starting inactive runs no pass")
+
+        guard case .success(let held)? = awaitReset({ await coordinator.reconcile(.systemTimeChange) }) else {
+            return XCTFail("the time-change pass finishes")
+        }
+        XCTAssertGreaterThan(resetCore.failedStatusReads, 0, "the time-change pass tried the reset resume first")
+        XCTAssertEqual(held.results.map(\.step), [.reminders, .promptEligibility])
+        XCTAssertEqual(held.outcome(of: .reminders), .deferred("reset_unsettled"))
+        XCTAssertEqual(held.outcome(of: .promptEligibility), .deferred("reset_unsettled"))
+        XCTAssertNil(root.lastReminderReport, "no reminder pass ran while the reset status was unknown")
+
+        resetCore.failsStatus = false
+        guard case .success(let settled)? = awaitReset({ await coordinator.reconcile(.systemTimeChange) }) else {
+            return XCTFail("the later time-change pass finishes")
+        }
+        XCTAssertNotEqual(settled.outcome(of: .reminders), .deferred("reset_unsettled"))
+        XCTAssertNotEqual(settled.outcome(of: .promptEligibility), .deferred("reset_unsettled"))
+    }
+
     // MARK: helpers
 
     private func authenticateReadsAndWait(_ root: ServiceCompositionRoot) -> CompositionAuthenticationOutcome? {
@@ -1570,7 +1821,8 @@ final class CompositionRootTests: XCTestCase {
         attachProviderTransport: @escaping (CoreHandle, ProviderRequestSender) throws -> ProviderExchangeCoordinator = {
             try ProviderExchangeCoordinator.attach(to: $0, sender: $1)
         },
-        modules: [CompositionModule] = []
+        modules: [CompositionModule] = [],
+        resetCore: @escaping (ResetCore) -> ResetCore = { $0 }
     ) throws -> ServiceCompositionRoot {
         let session = readSession ?? makeSession(authenticated: true).0
         return try ServiceCompositionRoot(
@@ -1579,7 +1831,8 @@ final class CompositionRootTests: XCTestCase {
                 timeZone: { Self.captureTimeZone }, locale: { Locale(identifier: "en_US") }),
             adapters: .injectedForTests(
                 sender: sender, attachProviderTransport: attachProviderTransport, readSession: session, notificationCenter: notifications,
-                reachability: FakeReachability(reachable: true), lifecycleNotifications: lifecycleNotifications),
+                reachability: FakeReachability(reachable: true), lifecycleNotifications: lifecycleNotifications,
+                resetCore: resetCore),
             modules: modules)
     }
 

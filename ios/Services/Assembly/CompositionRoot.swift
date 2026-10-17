@@ -455,6 +455,9 @@ struct CompositionAdapters {
     let readSession: ReadAuthenticationSession
     /// The Keychain-backed credentials the transport resolves at dispatch and provider setup enters secrets into.
     let credentials: CredentialService
+    /// The reset core the reset service and control use, given the root's real client. Production uses the client
+    /// itself; a debug test may wrap it to fail a read.
+    let resetCore: (ResetCore) -> ResetCore
 
     fileprivate init(
         kind: CompositionAdapterSet,
@@ -467,7 +470,8 @@ struct CompositionAdapters {
         lifecycleNotifications: NotificationCenter,
         recognizer: OnDeviceRecognizing?,
         readSession: ReadAuthenticationSession,
-        credentials: CredentialService
+        credentials: CredentialService,
+        resetCore: @escaping (ResetCore) -> ResetCore = { $0 }
     ) {
         self.kind = kind
         self.sender = sender
@@ -480,6 +484,7 @@ struct CompositionAdapters {
         self.recognizer = recognizer
         self.readSession = readSession
         self.credentials = credentials
+        self.resetCore = resetCore
     }
 
     fileprivate static func production(for configuration: CompositionConfiguration) -> CompositionAdapters {
@@ -514,14 +519,15 @@ struct CompositionAdapters {
         lifecycleNotifications: NotificationCenter = NotificationCenter(),
         recognizer: OnDeviceRecognizing? = nil,
         credentials: CredentialService = CredentialService(
-            serviceName: "com.boldfield.ohand.tests.composition.\(UUID().uuidString)")
+            serviceName: "com.boldfield.ohand.tests.composition.\(UUID().uuidString)"),
+        resetCore: @escaping (ResetCore) -> ResetCore = { $0 }
     ) -> CompositionAdapters {
         CompositionAdapters(
             kind: .injectedForTests, sender: sender, attachProviderTransport: attachProviderTransport,
             notificationCenter: notificationCenter,
             permissionObservations: permissionObservations, reachability: reachability,
             backgroundGrant: backgroundGrant, lifecycleNotifications: lifecycleNotifications,
-            recognizer: recognizer, readSession: readSession, credentials: credentials)
+            recognizer: recognizer, readSession: readSession, credentials: credentials, resetCore: resetCore)
     }
     #endif
 }
@@ -1000,6 +1006,7 @@ public final class ServiceCompositionRoot {
         fixedWidthRange("transcription", from: TranscriptionCoreClient.firstOperationID),
         fixedWidthRange(deletionCleanupClientName, from: CoreDeletionCleanupClient.firstOperationID),
         fixedWidthRange("export", from: CoreExportClient.firstOperationID),
+        fixedWidthRange("reset", from: CoreResetClient.firstOperationID),
         fixedWidthRange(promptScheduleClientName, from: CorePromptScheduleClient.firstOperationID),
         fixedWidthRange("reminders", from: CoreReminderReconciler.firstOperationID),
         fixedWidthRange("item status", from: CoreItemStatusReader.firstOperationID),
@@ -1061,6 +1068,10 @@ public final class ServiceCompositionRoot {
     /// Prepares an export for the share sheet; needs an authenticated read session. Leftover export files are swept at
     /// launch, after capture recovery has been started.
     public let exportService: ExportService
+    /// Resets all captured content and reads the reset's progress; needs an authenticated read session. New captures
+    /// pass the reset ingress gate, so one made during a reset waits and is imported afterwards, never lost. An
+    /// interrupted reset is resumed at launch, before the job runner activates.
+    public let resetControl: ResetControl
 
     let adapters: CompositionAdapters
     /// The session whose scope gates every private read the root performs.
@@ -1091,6 +1102,9 @@ public final class ServiceCompositionRoot {
     private let providerConnectionCheckClient: CoreProviderConnectionCheckClient
     private let routePolicyClient: CoreRoutePolicyClient
     private let exportClient: CoreExportClient
+    private let resetClient: CoreResetClient
+    private let resetStaging: NativeResetIngress
+    private let resetItemCleanup: ResetItemCleanupBridge
     private let modules: [CompositionModule]
     private let foreground: ForegroundState
     private let stateLock = NSLock()
@@ -1174,6 +1188,10 @@ public final class ServiceCompositionRoot {
         providerCredentials = assembly.providerCredentials
         exportClient = assembly.exportClient
         exportService = assembly.exportService
+        resetClient = assembly.resetClient
+        resetStaging = assembly.resetStaging
+        resetControl = assembly.resetControl
+        resetItemCleanup = assembly.resetItemCleanup
         reminderReconciler = assembly.permissionReconciler
         foreground = assembly.foreground
         assembly.rootReference.set(self)
@@ -1183,10 +1201,22 @@ public final class ServiceCompositionRoot {
             let cleanup: ItemDeletionCleanup? = coordinator?.deletionCleanup
             return cleanup
         }
+        resetItemCleanup.setProvider { [weak self] in
+            self?.modules.lazy.compactMap { $0 as? LifecycleCoordinator }.first?.deletionCleanup
+        }
     }
 
     deinit {
         shutDown()
+    }
+
+    // MARK: Reset
+
+    /// Finishes a reset a previous run left unfinished. The lifecycle coordinator calls it at launch, before the job
+    /// runner activates. It needs no authenticated session: it only completes what the user already confirmed, and
+    /// does nothing when no reset is recorded.
+    func resumeInterruptedReset() async -> ResetOutcome {
+        await resetControl.resumeInterrupted()
     }
 
     // MARK: Observation
@@ -1340,6 +1370,8 @@ public final class ServiceCompositionRoot {
         providerConnectionCheckClient.shutDown()
         routePolicyClient.shutDown()
         exportClient.shutDown()
+        resetStaging.retire()
+        resetClient.shutDown()
         reminderCore.invalidate()
         promptScheduleClient.shutDown()
         statusReader.shutDown()
@@ -1644,6 +1676,10 @@ public final class ServiceCompositionRoot {
         let providerCredentials: ProviderCredentialEntry
         let exportClient: CoreExportClient
         let exportService: ExportService
+        let resetClient: CoreResetClient
+        let resetStaging: NativeResetIngress
+        let resetControl: ResetControl
+        let resetItemCleanup: ResetItemCleanupBridge
         let permissionReconciler: NotificationPermissionReconciler
         let foreground: ForegroundState
     }
@@ -1721,7 +1757,10 @@ public final class ServiceCompositionRoot {
 
             let importer = CoreIngressImporter(attachedTo: core)
             router.register { importer.handle($0) }
-            let ingress = try ForegroundIngressService(layout: layout, importer: importer, protection: protection)
+            // A recorded reset tap is read here, so captures made after a tap whose process died are held from launch.
+            let resetMarkers = FileResetMarkerStore(layout: layout)
+            let resetGate = ResetIngressGate(wrapping: importer, layout: layout, markers: resetMarkers)
+            let ingress = try ForegroundIngressService(layout: layout, importer: resetGate, protection: protection)
 
             let readGate = PrivateReadGate(session: adapters.readSession, source: CoreHandleReadSource(core: core))
             let statusReader = CoreItemStatusReader(gate: readGate)
@@ -1814,6 +1853,21 @@ public final class ServiceCompositionRoot {
             router.register { exportClient.handle($0) }
             undo.append { exportClient.shutDown() }
             let exportService = ExportService(core: exportClient, session: adapters.readSession, layout: layout)
+            let resetClient = CoreResetClient(core: core)
+            router.register { resetClient.handle($0) }
+            undo.append { resetClient.shutDown() }
+            let resetItemCleanup = ResetItemCleanupBridge()
+            let resetStaging = NativeResetIngress(service: ingress, gate: resetGate, layout: layout)
+            undo.append { resetStaging.retire() }
+            let resetCore = adapters.resetCore(resetClient)
+            let resetService = ResetService(
+                core: resetCore,
+                staging: resetStaging,
+                itemCleanup: resetItemCleanup,
+                exportTemporaries: ExportTemporaryCleaner(layout: layout),
+                credentials: KeychainResetCredentialRemover(serviceName: configuration.credentialServiceName),
+                markers: resetMarkers)
+            let resetControl = ResetControl(service: resetService, core: resetCore, session: adapters.readSession)
             let permissionReconciler = NotificationPermissionReconciler(
                 center: adapters.notificationCenter, reconciliation: reminderCore,
                 observations: adapters.permissionObservations)
@@ -1885,6 +1939,7 @@ public final class ServiceCompositionRoot {
                 providerConnectionCheckClient: providerConnectionCheckClient, routePolicyClient: routePolicyClient,
                 providerConfiguration: providerConfiguration, providerCredentials: providerCredentials,
                 exportClient: exportClient, exportService: exportService,
+                resetClient: resetClient, resetStaging: resetStaging, resetControl: resetControl, resetItemCleanup: resetItemCleanup,
                 permissionReconciler: permissionReconciler, foreground: foreground)
         } catch {
             for step in undo.reversed() {

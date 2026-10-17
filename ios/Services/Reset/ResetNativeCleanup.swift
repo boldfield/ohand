@@ -10,7 +10,8 @@ import Foundation
 final class NativeResetIngress: ResetIngressStaging {
     private static let incompleteRecordSuffix = "." + IngressRecord.fileExtension + IngressFileSystemNaming.incompleteWriteSuffix
 
-    private let service: ForegroundIngressService
+    private let lock = NSLock()
+    private var service: ForegroundIngressService?
     private let gate: ResetIngressGate
     private let staging: IngressStagingStore
     private let localCleanup: DeletionLocalCleanup
@@ -25,6 +26,20 @@ final class NativeResetIngress: ResetIngressStaging {
         self.gate = gate
         staging = IngressStagingStore(layout: layout, fileSystem: fileSystem)
         localCleanup = DeletionLocalCleanup(layout: layout, fileSystem: fileSystem)
+    }
+
+    /// Lets go of the ingress service, which holds the single-writer lock while it lives. Afterwards nothing is imported
+    /// and the purge refuses to remove anything, so a staged capture is never dropped without having been imported.
+    func retire() {
+        lock.lock()
+        service = nil
+        lock.unlock()
+    }
+
+    private var currentService: ForegroundIngressService? {
+        lock.lock()
+        defer { lock.unlock() }
+        return service
     }
 
     func snapshot() async throws -> ResetStagingSnapshot {
@@ -56,6 +71,7 @@ final class NativeResetIngress: ResetIngressStaging {
 
     func importSnapshot(_ snapshot: ResetStagingSnapshot) async {
         for captureID in snapshot.captureIDs.sorted() {
+            guard let service = currentService else { return }
             // Unreadable or interrupted writes are not records; the purge that follows removes them.
             guard let record = try? staging.load(captureID: captureID) else { continue }
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
@@ -71,6 +87,7 @@ final class NativeResetIngress: ResetIngressStaging {
     /// before the record itself. An input whose record is gone has no audio left, whether it was imported (the core then
     /// owns its audio) or purged by an earlier pass, so only inputs that are still staged are visited.
     func purgeUnimported(from snapshot: ResetStagingSnapshot) async -> ResetStagingPurge {
+        guard currentService != nil else { return .unknown }
         let stillStaged: Set<String>
         do {
             stillStaged = Self.captureIDs(in: try staging.listRecords())
