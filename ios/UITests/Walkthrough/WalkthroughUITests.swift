@@ -39,6 +39,7 @@ final class WalkthroughUITests: XCTestCase {
             XCUIDevice.shared.appearance = appearance
             screenshotIndex = 0
             app.terminate()
+            app.launchArguments = ["-AppleInterfaceStyle", appearanceName == "dark" ? "Dark" : "Light"]
             app.launch()
             try walk(prefix: "\(widthName)-\(appearanceName)")
         }
@@ -58,6 +59,10 @@ final class WalkthroughUITests: XCTestCase {
         queryField.typeText(searchQuery)
         let submit = app.buttons["retrieval.search.submit"]
         if submit.exists { submit.tap() }
+        // Put the keyboard away so the results are visible.
+        let searchKey = app.keyboards.buttons["Search"]
+        if searchKey.exists { searchKey.tap() }
+        _ = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Showing'")).firstMatch.waitForExistence(timeout: 10)
         capture(prefix, "search")
         goBack()
 
