@@ -49,10 +49,20 @@ struct SettingsScreenChrome<Content: View>: View {
     }
 }
 
+/// The paragraphs an info sheet shows, so a hosted test can read what the sheet carries.
+struct SettingsInfoRenderedKey: PreferenceKey {
+    static var defaultValue: [String] = []
+
+    static func reduce(value: inout [String], nextValue: () -> [String]) {
+        value.append(contentsOf: nextValue())
+    }
+}
+
 /// The sheet behind an info button: the full explanation the screen used to show inline.
 struct SettingsInfoSheet: View {
     let title: String
     let paragraphs: [String]
+    var renderReporter: (([String]) -> Void)?
 
     @Environment(\.dismiss) private var dismiss
 
@@ -68,6 +78,7 @@ struct SettingsInfoSheet: View {
                         .font(DSFont.body)
                         .foregroundColor(DSColor.ink.color)
                         .fixedSize(horizontal: false, vertical: true)
+                        .preference(key: SettingsInfoRenderedKey.self, value: [paragraph])
                 }
                 DSPillButton(title: "Done", style: .secondary) { dismiss() }
             }
@@ -75,6 +86,7 @@ struct SettingsInfoSheet: View {
             .padding(DSSpacing.lg)
         }
         .background(DSColor.surface0.color.ignoresSafeArea())
+        .onPreferenceChange(SettingsInfoRenderedKey.self) { renderReporter?($0) }
         .presentationDetents([.medium, .large])
         .modifier(SheetCornerRadius())
     }

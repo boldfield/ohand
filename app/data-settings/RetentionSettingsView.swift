@@ -46,6 +46,7 @@ struct RetentionSettingsView: View {
     static let footerIdentifier = "data-settings.retention.footer"
     static let pressureIdentifier = "data-settings.retention.pressure"
     static let periodStepperIdentifier = "data-settings.retention.period-stepper"
+    static let stepperIdentifier = "data-settings.retention.stepper"
     static let applyIdentifier = "data-settings.retention.apply"
     static let periodStateIdentifier = "data-settings.retention.period-state"
     static let lockedIdentifier = "data-settings.retention.locked"
@@ -71,16 +72,17 @@ struct RetentionSettingsView: View {
     static let periodChoiceDays = [1, 3, 7, 14, 30, 90]
     static let footerText = "The text is always kept. A recording with no text yet is never removed."
 
-    private var infoParagraphs: [String] {
+    /// The full explanation behind the info button: the policy, the sole-source rule and what a period change does.
+    static func infoParagraphs(for status: RetentionStatus?) -> [String] {
         var paragraphs = [RetentionSettingsText.soleSourceExplanation, RetentionSettingsText.periodChangeNote]
-        if let status = model.status {
+        if let status {
             paragraphs.insert(RetentionSettingsText.policyExplanation(status.policy), at: 0)
         }
         return paragraphs
     }
 
     var body: some View {
-        SettingsScreenChrome(title: "Audio", infoTitle: "Audio retention", infoParagraphs: infoParagraphs) {
+        SettingsScreenChrome(title: "Audio", infoTitle: "Audio retention", infoParagraphs: Self.infoParagraphs(for: model.status)) {
             content
             if let exportSettings = model.exportSettings {
                 NavigationLink {
@@ -128,24 +130,44 @@ struct RetentionSettingsView: View {
         }
     }
 
-    /// The preset periods, plus the chosen one when it is not a preset (a stored 45 days, say).
-    private var periodChoices: [Int] {
-        Set(Self.periodChoiceDays + [model.chosenDays]).sorted()
+    /// The preset periods, plus the stored and chosen ones when they are not presets (a stored 45 days, say).
+    private func periodChoices(_ status: RetentionStatus) -> [Int] {
+        Set(Self.periodChoiceDays + [model.chosenDays, storedDays(status)]).sorted()
+    }
+
+    private func storedDays(_ status: RetentionStatus) -> Int {
+        Int(status.policy.periodSeconds / 86_400)
+    }
+
+    /// The stored period is named with the core's summary, which marks the default; the other rows give the length.
+    private func choiceLabel(days: Int, status: RetentionStatus) -> String {
+        days == storedDays(status) ? RetentionSettingsText.periodSummary(status.policy) : RetentionSettingsText.dayCount(days)
     }
 
     private func policySection(_ status: RetentionStatus) -> some View {
         VStack(alignment: .leading, spacing: DSSpacing.sm) {
             DSGroupedSection(title: "Keep recordings after they become text", footer: Self.footerText) {
-                ForEach(periodChoices, id: \.self) { days in
-                    DSChoiceRow(label: RetentionSettingsText.dayCount(days), isSelected: model.chosenDays == days) {
+                ForEach(periodChoices(status), id: \.self) { days in
+                    DSChoiceRow(label: choiceLabel(days: days, status: status), isSelected: model.chosenDays == days) {
                         model.chosenDays = days
                     }
                 }
+                // Any whole number of days the core supports can be chosen, not only the presets above.
+                Stepper(
+                    value: $model.chosenDays, in: RetentionSettingsModel.minimumDays...RetentionSettingsModel.maximumDays
+                ) {
+                    Text("Another length: \(RetentionSettingsText.dayCount(model.chosenDays))")
+                        .font(DSFont.rowLabel)
+                        .foregroundColor(DSColor.ink.color)
+                }
+                .padding(.horizontal, DSSpacing.md)
+                .frame(minHeight: DSLayout.rowMinimumHeight)
+                .accessibilityIdentifier(Self.stepperIdentifier)
             }
             .accessibilityIdentifier(Self.periodStepperIdentifier)
             .reportDataSettingsRendered(Self.periodStepperIdentifier, text: RetentionSettingsText.dayCount(model.chosenDays))
             .reportDataSettingsRendered(Self.footerIdentifier, text: Self.footerText)
-            .reportDataSettingsRendered(Self.policyIdentifier, text: RetentionSettingsText.periodSummary(status.policy))
+            .reportDataSettingsRendered(Self.policyIdentifier, text: choiceLabel(days: storedDays(status), status: status))
             DSPillButton(title: "Save period") { Task { await model.applyPeriod() } }
                 .frame(maxWidth: .infinity)
                 .accessibilityIdentifier(Self.applyIdentifier)

@@ -91,7 +91,7 @@ enum ManagementCatalog {
     static let settingsSections: [ManagementEntry] = [
         ManagementEntry(id: "voice-recovery", title: "Unfinished recordings", systemImage: "waveform") { context in AnyView(VoiceRecoveryView(model: context.voiceRecovery).navigationTitle("Unfinished recordings").navigationBarTitleDisplayMode(.inline)) },
         ManagementEntry(id: "audio-retention", title: "Audio retention", systemImage: "externaldrive") { context in AnyView(RetentionSettingsView(model: context.retention)) },
-        ManagementEntry(id: "provider-settings", title: "Providers", systemImage: "server.rack") { context in AnyView(ProviderSettingsView(model: context.providerSettings)) },
+        ManagementEntry(id: "provider-settings", title: "Processing", systemImage: "server.rack") { context in AnyView(ProviderSettingsView(model: context.providerSettings)) },
         ManagementEntry(id: "prompt-settings", title: "Daily prompt", systemImage: "bell.badge") { context in AnyView(PromptSettingsView(model: context.promptSettings)) },
     ]
 
@@ -141,22 +141,43 @@ struct SuggestionPlaceholderView: View {
     }
 }
 
+/// What the settings root shows on each row, keyed by the row's entry id, so a hosted test can read it.
+struct SettingsRootRenderedKey: PreferenceKey {
+    static var defaultValue: [String: String] = [:]
+
+    static func reduce(value: inout [String: String], nextValue: () -> [String: String]) {
+        value.merge(nextValue()) { _, latest in latest }
+    }
+}
+
 struct SettingsRootView: View {
     static let emptyIdentifier = "management.settings.empty"
     static let eraseIdentifier = "management.settings.erase"
     static let versionIdentifier = "management.settings.version"
+    static let exportEntryID = "export"
 
     /// Sections shown in the first group; the rest follow in the second.
     static let firstGroupEntryIDs: Set<String> = ["prompt-settings", "voice-recovery"]
 
     let sections: [ManagementEntry]
     let context: ManagementContext
+    /// Lets a hosted test see each row's label and value; production leaves it unset.
+    var renderReporter: (([String: String]) -> Void)?
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     private var firstGroup: [ManagementEntry] { sections.filter { Self.firstGroupEntryIDs.contains($0.id) } }
-    private var secondGroup: [ManagementEntry] { sections.filter { !Self.firstGroupEntryIDs.contains($0.id) } }
+
+    /// The remaining sections, then Export, which lives with the other data settings.
+    private var secondGroup: [ManagementEntry] {
+        sections.filter { !Self.firstGroupEntryIDs.contains($0.id) }
+            + (context.retention.exportSettings == nil ? [] : [Self.exportEntry])
+    }
+
+    private static let exportEntry = ManagementEntry(id: exportEntryID, title: "Export", systemImage: "square.and.arrow.up") { context in
+        context.retention.exportSettings.map { AnyView(ExportSettingsView(model: $0)) } ?? AnyView(EmptyView())
+    }
 
     private var versionText: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
@@ -185,6 +206,8 @@ struct SettingsRootView: View {
                     group(firstGroup)
                     group(secondGroup)
                 }
+                // Presentation only: the erase action is wired by the reset task (U07c), so this card is not yet
+                // interactive.
                 DSCard {
                     Text("Erase everything")
                         .font(DSFont.button)
@@ -204,6 +227,17 @@ struct SettingsRootView: View {
         .background(DSColor.surface0.color.ignoresSafeArea())
         .navigationBarBackButtonHidden(true)
         .toolbar(.hidden, for: .navigationBar)
+        .onPreferenceChange(SettingsRootRenderedKey.self) { renderReporter?($0) }
+        .task { await loadValues() }
+    }
+
+    /// Reads the current values the rows show. The models keep their own read-scope rules: a locked session leaves
+    /// the stored values (processing, audio) empty rather than showing them.
+    private func loadValues() async {
+        async let prompt: Void = context.promptSettings.load()
+        async let retention: Void = context.retention.refresh()
+        async let providers: Void = context.providerSettings.refresh()
+        _ = await (prompt, retention, providers)
     }
 
     @ViewBuilder
@@ -224,8 +258,8 @@ struct SettingsRootView: View {
     }
 }
 
-/// One settings row with its current value. Only values that are settings are shown: nothing here is read from the
-/// stored history, so the root is the same whether or not the session is unlocked.
+/// One settings row with its current value. A value that is not known yet (not loaded, or the session is locked and
+/// the setting is stored state) is left out rather than guessed.
 private struct SettingsEntryRow: View {
     let entry: ManagementEntry
     let context: ManagementContext
@@ -234,12 +268,21 @@ private struct SettingsEntryRow: View {
         switch entry.id {
         case "prompt-settings":
             PromptValueRow(entry: entry, model: context.promptSettings)
+        case "voice-recovery":
+            RecoveryValueRow(entry: entry, model: context.voiceRecovery)
+        case "provider-settings":
+            ProcessingValueRow(entry: entry, model: context.providerSettings)
         case "audio-retention":
             RetentionValueRow(entry: entry, model: context.retention)
         default:
-            DSRow(label: entry.title, iconSystemName: entry.systemImage)
+            reported(entry, value: nil)
         }
     }
+}
+
+private func reported(_ entry: ManagementEntry, label: String? = nil, value: String?) -> some View {
+    DSRow(label: label ?? entry.title, iconSystemName: entry.systemImage, value: value)
+        .preference(key: SettingsRootRenderedKey.self, value: [entry.id: [label ?? entry.title, value].compactMap { $0 }.joined(separator: ": ")])
 }
 
 private struct PromptValueRow: View {
@@ -247,7 +290,46 @@ private struct PromptValueRow: View {
     @ObservedObject var model: PromptSettingsModel
 
     var body: some View {
-        DSRow(label: entry.title, iconSystemName: entry.systemImage, value: model.hasLoaded ? (model.isEnabled ? "On" : "Off") : nil)
+        reported(entry, value: model.hasLoaded ? (model.isEnabled ? "On" : "Off") : nil)
+    }
+}
+
+/// The count comes from the recordings left on this device, not from the stored history, so it is the same whether or
+/// not the session is unlocked. It is empty until the first check finishes.
+private struct RecoveryValueRow: View {
+    let entry: ManagementEntry
+    @ObservedObject var model: VoiceRecoveryModel
+    @State private var hasRequestedCheck = false
+
+    private var value: String? {
+        guard hasRequestedCheck, !model.isChecking else { return nil }
+        return model.rows.isEmpty ? "None" : "\(model.rows.count)"
+    }
+
+    var body: some View {
+        reported(entry, value: value)
+            .onAppear {
+                hasRequestedCheck = true
+                model.refresh()
+            }
+    }
+}
+
+private struct ProcessingValueRow: View {
+    let entry: ManagementEntry
+    @ObservedObject var model: ProviderSettingsModel
+
+    private var value: String? {
+        guard model.phase == .loaded else { return nil }
+        switch model.operatingMode {
+        case .localOnly: return "On this phone"
+        case .privateServer: return "Private server"
+        case .hosted(let protocolName, _): return protocolName
+        }
+    }
+
+    var body: some View {
+        reported(entry, value: value)
     }
 }
 
@@ -256,6 +338,8 @@ private struct RetentionValueRow: View {
     @ObservedObject var model: RetentionSettingsModel
 
     var body: some View {
-        DSRow(label: "Audio", iconSystemName: entry.systemImage, value: model.status.map { RetentionSettingsText.periodSummary($0.policy) })
+        reported(
+            entry, label: "Audio",
+            value: model.status.map { RetentionSettingsText.dayCount(Int($0.policy.periodSeconds / 86_400)) })
     }
 }

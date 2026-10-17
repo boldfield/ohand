@@ -122,6 +122,36 @@ final class RetentionSettingsViewTests: XCTestCase {
         }
     }
 
+    func testAnyPeriodTheCoreSupportsCanBeChosenNotOnlyThePresets() async {
+        await withScreen(FakeRetentionControls(status: Self.status())) { model in
+            XCTAssertFalse(RetentionSettingsView.periodChoiceDays.contains(21))
+            model.chosenDays = 21
+            await settle()
+            XCTAssertEqual(text(RetentionSettingsView.periodStepperIdentifier), "21 days")
+            assertTappable(RetentionSettingsView.stepperIdentifier)
+            XCTAssertEqual(RetentionSettingsModel.minimumDays, 1)
+            XCTAssertEqual(RetentionSettingsModel.maximumDays, Int(RetentionPolicySetting.maximumPeriodSeconds / 86_400))
+        }
+    }
+
+    func testTheInfoSheetCarriesTheFullExplanationTheScreenShowedBefore() async {
+        var paragraphs: [String] = []
+        let status = Self.status()
+        let sheet = SettingsInfoSheet(
+            title: "Audio retention", paragraphs: RetentionSettingsView.infoParagraphs(for: status),
+            renderReporter: { paragraphs = $0 })
+        let shown = UIWindow(frame: CGRect(origin: .zero, size: Self.phone))
+        shown.rootViewController = UIHostingController(rootView: sheet)
+        shown.makeKeyAndVisible()
+        window = shown
+        await settle()
+        close()
+        XCTAssertEqual(paragraphs.count, 3)
+        XCTAssertTrue(paragraphs.first?.contains("kept for 7 days after they are successfully turned into text") == true)
+        XCTAssertTrue(paragraphs.contains(RetentionSettingsText.soleSourceExplanation))
+        XCTAssertTrue(paragraphs.contains(RetentionSettingsText.periodChangeNote))
+    }
+
     func testLowStorageShowsThePressureNoticeAndKeepsTheSoleSourceCase() async {
         await withScreen(FakeRetentionControls(status: Self.status(pressure: .low))) { _ in
             XCTAssertEqual(text(RetentionSettingsView.pressureIdentifier), RetentionSettingsText.pressureLowNotice)

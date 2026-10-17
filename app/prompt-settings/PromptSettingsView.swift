@@ -28,12 +28,17 @@ struct PromptSettingsView: View {
     static let previewText = "Something you saved is ready."
     static let previewIdentifier = "prompt-settings.preview"
 
+    /// The full explanation behind the info button.
+    static let infoParagraphs = [introText, horizonText, privacyText, remindersText]
+    /// The mark in the notification preview is drawn at the size of a notification's app icon.
+    private static let previewMarkSize: CGFloat = 28
+
     @ObservedObject var model: PromptSettingsModel
 
     var body: some View {
         SettingsScreenChrome(
             title: "Daily prompt", infoTitle: "Daily prompt",
-            infoParagraphs: [Self.introText, Self.horizonText, Self.privacyText, Self.remindersText]
+            infoParagraphs: Self.infoParagraphs
         ) {
             DSGroupedSection(footer: Self.footerText) {
                 DSToggleRow(label: "Daily prompt", iconSystemName: "bell.badge", isOn: Binding(
@@ -89,7 +94,7 @@ struct PromptSettingsView: View {
     private var notificationPreview: some View {
         DSCard {
             HStack(spacing: DSSpacing.sm) {
-                DSMark(size: 28)
+                DSMark(size: Self.previewMarkSize)
                     .frame(width: DSLayout.iconTileSide, height: DSLayout.iconTileSide)
                 VStack(alignment: .leading, spacing: DSSpacing.xxs) {
                     Text("Oh And")
