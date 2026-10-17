@@ -69,6 +69,11 @@ private final class RecordingPlayer: PlaybackPlayer, @unchecked Sendable {
 
 private struct UnplayableAudio: Error {}
 
+/// Lets a player factory reach the service that calls it.
+private final class ServiceHolder: @unchecked Sendable {
+    var service: PlaybackService?
+}
+
 /// Playback of retained audio against real files in a temporary protected-storage tree: what `open` returns, and that an
 /// open session holds the file against the retention sweep and deletion cleanup and is ended by deletion and relock.
 final class PlaybackServiceTests: XCTestCase {
@@ -320,5 +325,37 @@ final class PlaybackServiceTests: XCTestCase {
         let opened = try await service.open(itemID: "item-1")
         service.shutDown()
         XCTAssertEqual(opened.endReason, .relocked)
+    }
+
+    func testAShutdownWhileThePlayerIsBuiltRefusesTheOpenAndReleasesTheHold() async throws {
+        try retain(audio: "cap1.m4a")
+        let holder = ServiceHolder()
+        let service = PlaybackService(
+            core: core, session: session, layout: storage.layout, fence: fence,
+            playerFactory: { [player] _ in
+                // After admission, before the session exists to be ended: shutdown changes neither the read epoch
+                // nor the item's generation, so only the service's own closed state can refuse this open.
+                holder.service?.shutDown()
+                return player
+            })
+        holder.service = service
+        await assertOpenFails(.shutDown, service)
+        XCTAssertEqual(player.stopCalls, 1, "the player built after shutdown is stopped")
+    }
+
+    func testAnOpenAfterShutdownIsRefusedWithoutReadingTheCore() async throws {
+        try retain(audio: "cap1.m4a")
+        let service = makeService()
+        service.shutDown()
+        await assertOpenFails(.shutDown, service)
+        XCTAssertEqual(core.reads, 0)
+    }
+
+    func testAShutdownWhileTheAudioIsBeingReadRefusesTheOpen() async throws {
+        try retain(audio: "cap1.m4a")
+        let service = makeService()
+        core.script(onRead: { service.shutDown() })
+        await assertOpenFails(.shutDown, service)
+        XCTAssertEqual(player.stopCalls, 0, "no player is built once admission refuses the open")
     }
 }

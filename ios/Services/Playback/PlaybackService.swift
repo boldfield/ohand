@@ -6,6 +6,8 @@ public enum PlaybackError: Error, Equatable, Sendable {
     /// The read session is capture-only, or relocked before the open finished.
     case notAuthenticated
     case invalidRequest
+    /// The service shut down before the open finished.
+    case shutDown
     /// No readable item has that ID (the core does not say whether it is unknown, deleted or out of scope).
     case itemNotFound
     /// A deletion of the item was requested while the open was under way.
@@ -29,7 +31,8 @@ public enum PlaybackError: Error, Equatable, Sendable {
 /// * **Fenced.** While a session is open the file is in the `PlaybackFence`: the retention sweep and deletion cleanup
 ///   leave it in place (retention reports `audioInPlayback` and retries later; cleanup fails and is retried).
 /// * **Ended by the stronger decision.** A deletion request (`ItemDeletionService` tells the fence first), a relock
-///   and shutdown end open sessions and stop their players; they do not wait for the listener.
+///   and shutdown end open sessions and stop their players; they do not wait for the listener. An open still under way
+///   when one of them happens is refused, and the player it built is stopped.
 public final class PlaybackService: @unchecked Sendable {
     private let core: RetentionControlCore
     private let session: ReadAuthenticationSession
@@ -39,6 +42,7 @@ public final class PlaybackService: @unchecked Sendable {
     private let playerFactory: PlaybackPlayerFactory
     private let lock = NSLock()
     private var observerToken: SessionScopeObserverToken?
+    private var isShutDown = false
 
     init(
         core: RetentionControlCore,
@@ -65,6 +69,7 @@ public final class PlaybackService: @unchecked Sendable {
         // The epoch this open was admitted in: a relock ends it even if the user authenticates again before it returns.
         guard let authorization = session.currentAuthorization() else { throw PlaybackError.notAuthenticated }
         guard !itemID.isEmpty else { throw PlaybackError.invalidRequest }
+        guard !hasShutDown else { throw PlaybackError.shutDown }
         let generation = fence.generation(of: itemID)
         let answer = try await readAudio(itemID: itemID)
         guard let reference = answer.audioReference else { throw PlaybackError.noAudio }
@@ -80,6 +85,8 @@ public final class PlaybackService: @unchecked Sendable {
                 verify: {
                     // The read may have taken a while; a session that relocked since must not start playback.
                     guard session.isCurrent(authorization) else { throw PlaybackError.notAuthenticated }
+                    // Shutdown marks the service before ending sessions, so an open admitted after that is refused here.
+                    guard !hasShutDown else { throw PlaybackError.shutDown }
                     let present: Bool
                     do { present = try fileSystem.isPresent(at: url) } catch { throw PlaybackError.audioUnreadable }
                     guard present else { throw PlaybackError.audioMissing }
@@ -98,7 +105,11 @@ public final class PlaybackService: @unchecked Sendable {
         }
         let opened = PlaybackSession(itemID: itemID, player: player, release: { [fence] in fence.release(leaseID) })
         box.session = opened
-        // A relock or deletion between the lease and here found no session to end; end it now.
+        // A relock, deletion or shutdown between the lease and here found no session to end; end it now.
+        if hasShutDown {
+            opened.end(.relocked)
+            throw PlaybackError.shutDown
+        }
         if !session.isCurrent(authorization) {
             opened.end(.relocked)
             throw PlaybackError.notAuthenticated
@@ -115,14 +126,22 @@ public final class PlaybackService: @unchecked Sendable {
         fence.endPlayback(itemID: itemID)
     }
 
-    /// Ends every open playback and stops watching the session. Called before the core closes.
+    /// Ends every open playback, refuses opens from now on (including those under way) and stops watching the session.
+    /// Called before the core closes.
     func shutDown() {
         lock.lock()
+        isShutDown = true
         let token = observerToken
         observerToken = nil
         lock.unlock()
         if let token { session.removeScopeObserver(token) }
         fence.endAll(reason: .relocked)
+    }
+
+    private var hasShutDown: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return isShutDown
     }
 
     private final class SessionBox: @unchecked Sendable {
