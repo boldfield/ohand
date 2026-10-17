@@ -30,6 +30,12 @@ struct ExportSettingsView: View {
     static func scopeIdentifier(_ scope: CoreExportScope) -> String { "data-settings.export.scope.\(scope.rawValue)" }
 
     @ObservedObject var model: ExportSettingsModel
+    var renderReporter: (([String: RetentionRenderedElement]) -> Void)?
+
+    init(model: ExportSettingsModel, renderReporter: (([String: RetentionRenderedElement]) -> Void)? = nil) {
+        self.model = model
+        self.renderReporter = renderReporter
+    }
 
     var body: some View {
         ScrollView {
@@ -40,6 +46,9 @@ struct ExportSettingsView: View {
         }
         .navigationTitle("Export")
         .navigationBarTitleDisplayMode(.inline)
+        .onPreferenceChange(RetentionRenderedKey.self) { elements in
+            renderReporter?(elements)
+        }
         .onDisappear { model.clear() }
         .sheet(
             isPresented: Binding(
@@ -69,11 +78,13 @@ struct ExportSettingsView: View {
                 .frame(minHeight: 44)
                 .disabled(isBusy)
                 .accessibilityIdentifier(Self.scopeIdentifier(scope))
+                .reportRendered(Self.scopeIdentifier(scope), text: ExportSettingsText.scopeTitle(scope))
             }
             Toggle("Include audio recordings", isOn: $model.includeAudio)
                 .frame(minHeight: 44)
                 .disabled(isBusy)
                 .accessibilityIdentifier(Self.audioToggleIdentifier)
+                .reportRendered(Self.audioToggleIdentifier, text: "Include audio recordings")
             note(ExportSettingsText.audioNote, identifier: Self.audioNoteIdentifier)
             if model.selectedScopes.isEmpty {
                 note(ExportSettingsText.noScopeNote, identifier: Self.noScopeIdentifier)
@@ -86,6 +97,7 @@ struct ExportSettingsView: View {
             .buttonStyle(.borderedProminent)
             .disabled(!model.canStart)
             .accessibilityIdentifier(Self.startIdentifier)
+            .reportRendered(Self.startIdentifier, text: "Export")
             if let message = stateMessage {
                 note(message, identifier: Self.stateIdentifier)
             }
@@ -113,6 +125,7 @@ struct ExportSettingsView: View {
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
             .accessibilityIdentifier(identifier)
+            .reportRendered(identifier, text: text)
     }
 }
 

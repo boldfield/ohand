@@ -8,7 +8,7 @@ struct RetentionRenderedElement: Equatable {
     let isEnabled: Bool
 }
 
-private struct RetentionRenderedKey: PreferenceKey {
+struct RetentionRenderedKey: PreferenceKey {
     static var defaultValue: [String: RetentionRenderedElement] = [:]
 
     static func reduce(
@@ -18,7 +18,7 @@ private struct RetentionRenderedKey: PreferenceKey {
     }
 }
 
-private struct RetentionRenderReport: ViewModifier {
+struct RetentionRenderReport: ViewModifier {
     let identifier: String
     let text: String
     @Environment(\.isEnabled) private var isEnabled
@@ -33,7 +33,7 @@ private struct RetentionRenderReport: ViewModifier {
     }
 }
 
-private extension View {
+extension View {
     func reportRendered(_ identifier: String, text: String) -> some View {
         modifier(RetentionRenderReport(identifier: identifier, text: text))
     }
@@ -54,6 +54,7 @@ struct RetentionSettingsView: View {
     static let noUnresolvedIdentifier = "data-settings.retention.none-unresolved"
     static let loadingIdentifier = "data-settings.retention.loading"
     static let tryAgainIdentifier = "data-settings.retention.try-again"
+    static let exportLinkIdentifier = "data-settings.retention.export-link"
 
     static func caseIdentifier(_ itemID: String) -> String { "data-settings.retention.case.\(itemID)" }
     static func retryIdentifier(_ itemID: String) -> String { "data-settings.retention.retry.\(itemID)" }
@@ -72,6 +73,11 @@ struct RetentionSettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 content
+                if let exportSettings = model.exportSettings {
+                    NavigationLink("Export a copy of your notes") { ExportSettingsView(model: exportSettings, renderReporter: renderReporter) }
+                        .frame(minHeight: 44)
+                        .accessibilityIdentifier(Self.exportLinkIdentifier)
+                }
             }
             .padding()
         }
@@ -212,6 +218,7 @@ extension RetentionSettingsModel {
     /// The model as the app assembles it: the root's retention controls, gated by the root's read scope.
     nonisolated static func assembled(root: ServiceCompositionRoot) -> RetentionSettingsModel {
         RetentionSettingsModel(
-            controls: root.retentionControls, readScope: { [weak root] in root?.readScope ?? .captureOnly })
+            controls: root.retentionControls, readScope: { [weak root] in root?.readScope ?? .captureOnly },
+            exportSettings: .assembled(root: root))
     }
 }

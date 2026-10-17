@@ -92,7 +92,6 @@ final class RetrievalSearchNavigationTests: XCTestCase {
         let context = ManagementContext(
             voiceRecovery: services.managementContext.voiceRecovery, retrieval: searchModel,
             retention: services.managementContext.retention,
-            exportSettings: services.managementContext.exportSettings,
             providerSettings: services.managementContext.providerSettings,
             promptSettings: services.managementContext.promptSettings,
             retrievalRenderReporter: { [unowned self] in rendered = $0 })

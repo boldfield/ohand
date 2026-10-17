@@ -67,6 +67,9 @@ final class RetentionSettingsModel: ObservableObject {
     static let minimumDays = 1
     static let maximumDays = Int(RetentionPolicySetting.maximumPeriodSeconds / 86_400)
 
+    /// The export section reached from this screen, when the app assembles one.
+    let exportSettings: ExportSettingsModel?
+
     private let controls: RetentionControlling
     private let readScope: () -> CompositionReadScope
     /// Advanced by every read and by `clear()`; a read answers only if it is still the latest.
@@ -75,7 +78,11 @@ final class RetentionSettingsModel: ObservableObject {
     private var session = 0
     private var lastStoredDays = RetentionSettingsModel.defaultDays
 
-    nonisolated init(controls: RetentionControlling, readScope: @escaping () -> CompositionReadScope) {
+    nonisolated init(
+        controls: RetentionControlling, readScope: @escaping () -> CompositionReadScope,
+        exportSettings: ExportSettingsModel? = nil
+    ) {
+        self.exportSettings = exportSettings
         self.controls = controls
         self.readScope = readScope
     }
