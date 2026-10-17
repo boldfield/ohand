@@ -12,6 +12,8 @@ final class FakeProviderSettingsControls: ProviderSettingsControlling, @unchecke
     private(set) var created: [ProviderProfileDraft] = []
     private(set) var defaultsSet: [String] = []
     private(set) var defaultsCleared = 0
+    /// Awaited in the middle of a profile creation, so a test can act while the save is still pending.
+    var suspendCreate: (() async -> Void)?
     var checkResult: Result<ProviderConnectionOutcome, Error> = .success(.ok)
     private(set) var checked: [String] = []
     /// Invoked in the middle of every call, so a test can change the session while it is in flight.
@@ -22,6 +24,7 @@ final class FakeProviderSettingsControls: ProviderSettingsControlling, @unchecke
     func createProfile(_ draft: ProviderProfileDraft) async throws -> ProviderProfileCreatedAnswer {
         created.append(draft)
         during?()
+        await suspendCreate?()
         return try createResult.get()
     }
 
@@ -110,11 +113,15 @@ final class FakeProviderSettingsCredentials: ProviderSettingsCredentialControlli
 
 /// An in-memory journal. Sharing one between two models stands in for the journal surviving a restart.
 final class FakeProviderSettingsJournal: ProviderSettingsReferenceJournal {
-    private(set) var references: [String] = []
+    private(set) var stored: [ProviderSettingsJournalEntry] = []
+    var references: [String] { stored.map(\.reference) }
 
-    func unsavedReferences() -> [String] { references }
-    func record(_ reference: String) { if !references.contains(reference) { references.append(reference) } }
-    func forget(_ reference: String) { references.removeAll { $0 == reference } }
+    func entries() -> [ProviderSettingsJournalEntry] { stored }
+    func record(_ entry: ProviderSettingsJournalEntry) {
+        stored.removeAll { $0.reference == entry.reference }
+        stored.append(entry)
+    }
+    func forget(_ reference: String) { stored.removeAll { $0.reference == reference } }
 }
 
 private func decodeCreated(profileID: String, version: String) -> ProviderProfileCreatedAnswer {
@@ -651,6 +658,90 @@ final class ProviderSettingsModelTests: XCTestCase {
 
         XCTAssertEqual(credentials.deleted.last, "11111111-1111-1111-1111-111111111111")
         XCTAssertEqual(journal.references, [])
+    }
+
+    /// The listing a later run reads: the profiles of `twoVersions` plus the version of "work" the save would make.
+    private static let twoVersionsAndWork = providerListing(
+        versions: [
+            ("hosted", "hosted-v1", "open_ai", false, true), ("private", "private-v1", "self_hosted", false, true),
+            ("old", "old-v1", "anthropic", true, true), ("weak", "weak-v1", "anthropic", false, false),
+            ("work", "work-v1", "open_ai", false, true),
+        ], defaultVersion: nil)
+
+    /// Starts a save of a freshly stored secret and, while the core has not answered, ends the process: a second model
+    /// sharing only the journal and the credential store reads `nextListing`. `afterRestart` runs once it has read.
+    private func interruptSave(nextListing: ProviderProfileListAnswer, afterRestart: @escaping () -> Void) async {
+        let controls = FakeProviderSettingsControls(listing: Self.twoVersions)
+        let firstRun = makeModel(controls)
+        await firstRun.refresh()
+        storeAndNameSecret(firstRun)
+        controls.suspendCreate = { [unowned self] in
+            XCTAssertEqual(
+                journal.references, ["11111111-1111-1111-1111-111111111111"], "held while the save is pending")
+            XCTAssertNotNil(journal.stored.first?.pendingSave)
+            XCTAssertFalse(
+                journal.stored.description.contains("work"), "the journal keeps no profile name, only a digest")
+            await firstRun.refresh()
+            XCTAssertEqual(credentials.deleted, [], "the first run never deletes a reference its pending save names")
+
+            // The process ends here.
+            let secondRun = makeModel(FakeProviderSettingsControls(listing: nextListing))
+            await secondRun.refresh()
+            afterRestart()
+        }
+        await firstRun.save()
+    }
+
+    func testASaveInterruptedBeforeItCommittedLeavesItsSecretToBeDeletedAfterARestart() async {
+        var deletedAfterRestart: [String] = []
+        var journalAfterRestart: [String] = ["unset"]
+        await interruptSave(nextListing: Self.twoVersions) { [unowned self] in
+            deletedAfterRestart = credentials.deleted
+            journalAfterRestart = journal.references
+        }
+        XCTAssertEqual(deletedAfterRestart, ["11111111-1111-1111-1111-111111111111"], "no version names it")
+        XCTAssertEqual(journalAfterRestart, [])
+    }
+
+    func testASaveInterruptedAfterItCommittedKeepsItsSecretAfterARestart() async {
+        var deletedAfterRestart: [String] = ["unset"]
+        var journalAfterRestart: [String] = ["unset"]
+        await interruptSave(nextListing: Self.twoVersionsAndWork) { [unowned self] in
+            deletedAfterRestart = credentials.deleted
+            journalAfterRestart = journal.references
+        }
+        XCTAssertEqual(deletedAfterRestart, [], "the new version of the profile names it")
+        XCTAssertEqual(journalAfterRestart, [], "settled, so nothing is swept later")
+    }
+
+    func testAnInterruptedSaveIsNotSettledByAVersionThatExistedBeforeIt() {
+        let pending = ProviderSettingsPendingSave(profileID: "work", knownVersions: ["work-v1"])
+        XCTAssertFalse(pending.committed(in: Self.twoVersionsAndWork), "work-v1 was already there")
+        XCTAssertTrue(
+            ProviderSettingsPendingSave(profileID: "work", knownVersions: []).committed(in: Self.twoVersionsAndWork))
+        XCTAssertFalse(
+            ProviderSettingsPendingSave(profileID: "other", knownVersions: []).committed(in: Self.twoVersionsAndWork))
+    }
+
+    func testTheDefaultsJournalKeepsEntriesAcrossInstances() throws {
+        let suite = "provider-settings-journal-test-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let pending = ProviderSettingsPendingSave(profileID: "work", knownVersions: ["work-v1"])
+        let writer = UserDefaultsReferenceJournal(defaults: defaults)
+        writer.record(ProviderSettingsJournalEntry(reference: "ref-a"))
+        writer.record(ProviderSettingsJournalEntry(reference: "ref-b", pendingSave: pending))
+
+        let reader = UserDefaultsReferenceJournal(defaults: defaults)
+        XCTAssertEqual(
+            reader.entries(),
+            [
+                ProviderSettingsJournalEntry(reference: "ref-a"),
+                ProviderSettingsJournalEntry(reference: "ref-b", pendingSave: pending),
+            ])
+        reader.record(ProviderSettingsJournalEntry(reference: "ref-b"))
+        reader.forget("ref-a")
+        XCTAssertEqual(writer.entries(), [ProviderSettingsJournalEntry(reference: "ref-b")])
     }
 
     func testASweepNeverDeletesTheSecretOfTheDraftBeingEdited() async {
