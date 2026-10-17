@@ -66,6 +66,7 @@ final class WalkthroughUITests: XCTestCase {
     private func walk(prefix: String) throws {
         XCTAssertTrue(app.buttons["management.open.search"].waitForExistence(timeout: screenTimeout), "home screen did not appear")
         saveCaptures()
+        dismissKeyboard()
         capture(prefix, "home")
 
         // Search, with a query.
@@ -120,6 +121,28 @@ final class WalkthroughUITests: XCTestCase {
             XCTAssertTrue(save.isEnabled, "Save button is disabled after typing a capture")
             save.tap()
         }
+    }
+
+    /// Puts the keyboard away (after the slide-to-type tip, if the system shows it) so the home screenshot shows the
+    /// app. The walkthrough fails if the keyboard cannot be dismissed, rather than saving a covered home screen.
+    private func dismissKeyboard() {
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        for button in [app.buttons["Continue"], springboard.buttons["Continue"]] where button.waitForExistence(timeout: 2) {
+            button.tap()
+        }
+        for _ in 1...3 where app.keyboards.count > 0 {
+            let hide = app.keyboards.buttons["Hide keyboard"]
+            if hide.exists {
+                hide.tap()
+            } else {
+                app.navigationBars.firstMatch.tap()
+                if app.keyboards.count > 0 { app.swipeDown() }
+            }
+            sleep(1)
+        }
+        let gone = NSPredicate(format: "count == 0")
+        expectation(for: gone, evaluatedWith: app.keyboards)
+        waitForExpectations(timeout: 10)
     }
 
     /// Taps a home link and waits for the destination. The first open per launch shows the system Face ID prompt,

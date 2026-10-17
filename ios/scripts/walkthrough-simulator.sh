@@ -19,6 +19,10 @@ mkdir -p "${output_dir}"
 
 "${script_dir}/prepare-simulator.sh" "${udid}" --erase
 
+# Mark the keyboard's slide-to-type introduction as seen, as a person who has used the keyboard before would have.
+xcrun simctl spawn "${udid}" defaults write com.apple.keyboard.preferences DidShowGestureKeyboardIntroduction -bool true || true
+xcrun simctl spawn "${udid}" defaults write com.apple.keyboard.preferences KeyboardDidShowContinuousPathIntroduction -bool true || true
+
 # Enrol Face ID, then keep presenting a matching face until the test finishes. A match with no prompt on screen is ignored.
 xcrun simctl spawn "${udid}" notifyutil -s com.apple.BiometricKit.enrollmentChanged 1
 xcrun simctl spawn "${udid}" notifyutil -p com.apple.BiometricKit.enrollmentChanged
