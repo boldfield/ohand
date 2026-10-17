@@ -396,6 +396,10 @@ public protocol CompositionModule: AnyObject {
     /// root enables the union of every module's declaration; a protocol no module declares stays disabled (self-hosted
     /// is disabled unless a module names it).
     var enabledProviderProtocols: Set<CoreProviderProtocol> { get }
+    /// The stored self-hosted profile versions and models this module lets the core send to. Enabling self-hosted
+    /// is not enough: the root passes the union of every module's declaration to the core, which refuses any
+    /// self-hosted request whose profile version and model are not named (default none).
+    var selfHostedRegistrations: Set<CoreSelfHostedRegistration> { get }
     func attach(to context: CompositionContext) throws
     /// Takes the event if it answers one of this module's operations.
     func handle(_ event: CoreEvent) -> Bool
@@ -406,6 +410,7 @@ public protocol CompositionModule: AnyObject {
 public extension CompositionModule {
     var jobCapabilities: [JobCapabilityHandler] { [] }
     var enabledProviderProtocols: Set<CoreProviderProtocol> { [] }
+    var selfHostedRegistrations: Set<CoreSelfHostedRegistration> { [] }
 }
 
 /// A module that owns the ordered launch and foreground reconciliation (staged-capture recovery, job activation and
@@ -1042,6 +1047,9 @@ public final class ServiceCompositionRoot {
     /// Configures audio retention and acts on unresolved sole audio; reads are gated and writes need an authenticated
     /// session.
     public let retentionControls: RetentionControlService
+    /// Opens an item's retained audio for playback without exposing protected storage; needs an authenticated read
+    /// session. Open playback holds the audio in place and ends on deletion, relock and shutdown.
+    public let playback: PlaybackService
     /// Re-pins waiting work, requeues a job, revokes a profile and lists the jobs pinned to one; needs an authenticated
     /// read session.
     public let jobConfiguration: JobConfigurationService
@@ -1164,6 +1172,7 @@ public final class ServiceCompositionRoot {
         itemDetails = assembly.itemDetails
         retentionControlClient = assembly.retentionControlClient
         retentionControls = assembly.retentionControls
+        playback = assembly.playback
         jobConfigurationClient = assembly.jobConfigurationClient
         jobConfiguration = assembly.jobConfiguration
         providerProfileClient = assembly.providerProfileClient
@@ -1347,6 +1356,8 @@ public final class ServiceCompositionRoot {
         itemLifecycleControlClient.shutDown()
         suggestionResponseClient.shutDown()
         itemDetailClient.shutDown()
+        itemDeletion.setIntentObserver(nil)
+        playback.shutDown()
         retentionControlClient.shutDown()
         jobConfigurationClient.shutDown()
         providerProfileClient.shutDown()
@@ -1649,6 +1660,7 @@ public final class ServiceCompositionRoot {
         let itemDetails: ItemDetailService
         let retentionControlClient: CoreRetentionControlClient
         let retentionControls: RetentionControlService
+        let playback: PlaybackService
         let jobConfigurationClient: CoreJobConfigurationClient
         let jobConfiguration: JobConfigurationService
         let providerProfileClient: CoreProviderProfileClient
@@ -1807,6 +1819,11 @@ public final class ServiceCompositionRoot {
                 core: retentionControlClient, session: adapters.readSession,
                 pressureProbe: VolumeStoragePressureProbe(volumeURL: layout.rootDirectory),
                 removerProvider: { modules.lazy.compactMap { ($0 as? LifecycleCoordinator)?.audioRetention }.first })
+            let playback = PlaybackService(
+                core: retentionControlClient, session: adapters.readSession, layout: layout, fence: PlaybackFence(),
+                playerFactory: avPlaybackPlayerFactory)
+            undo.append { playback.shutDown() }
+            itemDeletion.setIntentObserver { [playback] itemID in playback.endPlayback(itemID: itemID) }
             let jobConfigurationClient = CoreJobConfigurationClient(core: core, gate: readGate)
             router.register { jobConfigurationClient.handle($0) }
             undo.append { jobConfigurationClient.shutDown() }
@@ -1868,11 +1885,15 @@ public final class ServiceCompositionRoot {
                 throw CompositionError.jobTypeConflict(capability.jobType)
             }
             var enabledProtocols = ServiceCompositionRoot.baseProviderProtocols
+            var selfHostedRegistrations = Set<CoreSelfHostedRegistration>()
             for module in modules {
                 enabledProtocols.formUnion(module.enabledProviderProtocols)
+                selfHostedRegistrations.formUnion(module.selfHostedRegistrations)
             }
             try core.setEnabledProviderProtocols(enabledProtocols)
             undo.append { try? core.setEnabledProviderProtocols(ServiceCompositionRoot.baseProviderProtocols) }
+            try core.setSelfHostedRegistrations(selfHostedRegistrations)
+            undo.append { try? core.setSelfHostedRegistrations([]) }
             let jobRunner = try JobRunnerService.attach(
                 to: core, storePath: layout.databaseURL.path, sender: adapters.sender,
                 capabilities: capabilities, isReachable: adapters.reachability.isReachable,
@@ -1905,7 +1926,8 @@ public final class ServiceCompositionRoot {
                 suggestionResponseClient: suggestionResponseClient,
                 suggestionResponses: suggestionResponses, itemDetailClient: itemDetailClient,
                 itemDetails: itemDetails, retentionControlClient: retentionControlClient,
-                retentionControls: retentionControls, jobConfigurationClient: jobConfigurationClient,
+                retentionControls: retentionControls, playback: playback,
+                jobConfigurationClient: jobConfigurationClient,
                 jobConfiguration: jobConfiguration, providerProfileClient: providerProfileClient,
                 providerConnectionCheckClient: providerConnectionCheckClient, routePolicyClient: routePolicyClient,
                 providerConfiguration: providerConfiguration, providerCredentials: providerCredentials,

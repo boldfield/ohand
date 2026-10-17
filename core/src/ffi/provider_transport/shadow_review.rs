@@ -536,7 +536,7 @@ fn prepare_review(
         return Err(shadow_failures::NOT_SHADOW_JOB);
     }
     let profile = load_profile(connection, &target.profile_version)?;
-    protocols::ensure_enabled(handle, profile.protocol())?;
+    protocols::ensure_permitted(handle, &profile)?;
     if target.credential_ref.as_deref() != Some(profile.credential_ref().as_str()) {
         return Err(failures::MALFORMED_PROFILE);
     }
