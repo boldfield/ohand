@@ -466,3 +466,45 @@ fn malformed_requests_are_refused_before_anything_is_queued() {
     session.refuse(&json!({"read_scopes": ["personal"], "query": "milk"}));
     session.close();
 }
+
+#[test]
+fn sub_millisecond_captures_order_and_page_at_full_precision() {
+    let _guard = serial();
+    let fixture = Fixture::new();
+    let (older, newer) = {
+        let mut database = Database::open(&fixture.store_path, Arc::new(SystemClock)).unwrap();
+        let older = import_foreground_ingress(
+            &mut database,
+            &capture(
+                "c-micro-1",
+                Some("Older microsecond"),
+                None,
+                "personal",
+                "2026-11-01T09:00:00.000001Z",
+            ),
+        )
+        .unwrap()
+        .item_id;
+        let newer = import_foreground_ingress(
+            &mut database,
+            &capture(
+                "c-micro-2",
+                Some("Newer microsecond"),
+                None,
+                "personal",
+                "2026-11-01T09:00:00.000002Z",
+            ),
+        )
+        .unwrap()
+        .item_id;
+        (older, newer)
+    };
+    let session = Session::over(&fixture.store_path);
+    let first = session.succeed(&json!({"read_scopes": ["personal", "work"], "limit": 1}));
+    assert_eq!(item_ids(&first), vec![newer.clone()]);
+    let second = session.succeed(&json!({
+        "read_scopes": ["personal", "work"], "limit": 1, "cursor": first["next_cursor"]
+    }));
+    assert_eq!(item_ids(&second), vec![older]);
+    session.close();
+}
