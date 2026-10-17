@@ -115,6 +115,11 @@ struct CaptureEntryView: View {
                 composerView(state: model.textModel.text.isEmpty ? .rest : .typing, elapsedText: "0:00")
             }
         }
+        .disabled(model.textModel.isSaving)
+        .onChange(of: model.textModel.isSaving) { isSaving in
+            // Disabling the composer for the in-flight save drops focus; a save keeps the keyboard up.
+            if !isSaving, keyboardIsVisible { DispatchQueue.main.async { composerIsFocused = true } }
+        }
         .accessibilityIdentifier(Self.composerIdentifier)
         .reportHomeFrame(Self.composerIdentifier)
     }
@@ -131,10 +136,11 @@ struct CaptureEntryView: View {
             .focused($composerIsFocused)
     }
 
-    /// A notice that stays beside the outcome: it never hides what happened to the last capture.
+    /// Notices that stay beside the outcome: they never hide what happened to the last capture, or each other.
     private var standingNotice: String? {
-        if let notice = model.voiceNotice { return notice }
-        return model.protectedDataNotice != nil ? CaptureMessages.protectedDataNotice : nil
+        let notices = [model.voiceNotice, model.protectedDataNotice != nil ? CaptureMessages.protectedDataNotice : nil]
+        let present = notices.compactMap { $0 }
+        return present.isEmpty ? nil : present.joined(separator: " ")
     }
 
     /// One short line about the last capture or the recorder, if there is anything to say.

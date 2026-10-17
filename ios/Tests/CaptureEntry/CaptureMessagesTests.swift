@@ -24,8 +24,8 @@ final class CaptureMessagesTests: XCTestCase {
         CaptureProgress(transcription: transcription, interpretation: interpretation, reminder: reminder)
     }
 
-    func testASavingStateHasNoMessage() {
-        XCTAssertNil(message(.text, .saving))
+    func testASavingStateIsReported() {
+        XCTAssertEqual(message(.text, .saving), "Saving\u{2026}")
     }
 
     func testASavedCaptureWithoutAReadSaysNotProcessedAndNoReminderConfirmed() {

@@ -12,7 +12,7 @@ enum CaptureMessages {
         let outcome: String?
         switch acknowledgment.save {
         case .saving:
-            return nil
+            return "Saving\u{2026}"
         case .saved:
             outcome = savedSentences(for: acknowledgment, locale: locale, timeZone: timeZone)
         case .keptOnDevice:
