@@ -214,6 +214,11 @@ final class RetrievalSearchViewTests: XCTestCase {
         let shown = row(Self.firstID, text: "synthetic idea words", itemType: .idea)
         runSearch(answering: .success(RetrievalPage(totalAccessible: 1, rows: [shown], offset: 0)))
 
+        var waited = 0
+        while rendered[RetrievalSearchView.rowIdentifier(shown)] == nil, waited < 20 {
+            settle()
+            waited += 1
+        }
         let frame = try XCTUnwrap(rendered[RetrievalSearchView.rowIdentifier(shown)]?.frame)
         XCTAssertLessThanOrEqual(frame.width, RetrievalSearchView.regularResultsColumnWidth)
         XCTAssertLessThan(frame.maxX, regular.width / 2, "the results sit on the left, leaving the right for the item pane")
