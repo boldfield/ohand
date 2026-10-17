@@ -1458,6 +1458,86 @@ final class CompositionRootTests: XCTestCase {
         return String(cString: text)
     }
 
+    // MARK: export
+
+    private final class ExportResultBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: Result<PreparedExport, Error>?
+
+        var value: Result<PreparedExport, Error>? {
+            lock.lock()
+            defer { lock.unlock() }
+            return stored
+        }
+
+        func set(_ result: Result<PreparedExport, Error>) {
+            lock.lock()
+            stored = result
+            lock.unlock()
+        }
+    }
+
+    private func prepareExport(_ root: ServiceCompositionRoot) -> Result<PreparedExport, Error>? {
+        let box = ExportResultBox()
+        let service = root.exportService
+        Task.detached {
+            do {
+                box.set(.success(try await service.prepareExport(ExportSelection(scopes: [.personal, .work]))))
+            } catch {
+                box.set(.failure(error))
+            }
+        }
+        _ = pump(until: { box.value != nil }, timeout: 30)
+        return box.value
+    }
+
+    private var exportsDirectory: URL {
+        ProtectedStorageLayout(rootDirectory: storageRoot).directory(for: .temporaryFiles)
+            .appendingPathComponent(ExportService.exportsDirectoryName, isDirectory: true)
+    }
+
+    func testExportIsRefusedBeforeAuthentication() throws {
+        let (session, _) = makeSession(authenticated: false)
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), readSession: session)
+        defer { root.shutDown() }
+        _ = try saveSyntheticCapture(root)
+
+        guard case .failure(let error)? = prepareExport(root) else {
+            return XCTFail("an export before authentication must be refused")
+        }
+        XCTAssertEqual(error as? ExportFailure, .notAuthenticated)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: exportsDirectory.path), "nothing was written")
+    }
+
+    func testRealExportRoundTripsThroughTheRoot() throws {
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))
+        defer { root.shutDown() }
+        _ = try saveSyntheticCapture(root)
+
+        guard case .success(let prepared)? = prepareExport(root) else {
+            return XCTFail("an authenticated export succeeds")
+        }
+        XCTAssertEqual(prepared.itemCount, 1)
+        let text = try String(contentsOf: prepared.exportFile, encoding: .utf8)
+        XCTAssertTrue(text.contains("synthetic capture"))
+
+        root.exportService.cancelExport(exportID: prepared.id)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.exportFile.path))
+    }
+
+    func testStaleTemporaryExportIsRemovedAtNextLaunch() throws {
+        let stale = exportsDirectory.appendingPathComponent("stale-export", isDirectory: true)
+        try FileManager.default.createDirectory(at: stale, withIntermediateDirectories: true)
+        try Data("stale".utf8).write(to: stale.appendingPathComponent(ExportService.exportFileName))
+
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))
+        defer { root.shutDown() }
+        root.start(isActive: false)
+        XCTAssertTrue(
+            pump(until: { !FileManager.default.fileExists(atPath: stale.path) }, timeout: 15),
+            "the launch sweep removes the leftover export")
+    }
+
     // MARK: helpers
 
     private func authenticateReadsAndWait(_ root: ServiceCompositionRoot) -> CompositionAuthenticationOutcome? {
