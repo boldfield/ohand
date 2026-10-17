@@ -118,7 +118,8 @@ final class WalkthroughUITests: XCTestCase {
             field.typeText(text)
             let save = app.buttons["capture-entry.save"]
             XCTAssertTrue(save.waitForExistence(timeout: screenTimeout), "Save button did not appear")
-            XCTAssertTrue(save.isEnabled, "Save button is disabled after typing a capture")
+            expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: save)
+            waitForExpectations(timeout: 20)
             save.tap()
         }
     }
