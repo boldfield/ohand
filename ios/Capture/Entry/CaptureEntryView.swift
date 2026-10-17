@@ -9,6 +9,7 @@ struct CaptureEntryView: View {
     static let messageIdentifier = "capture-entry.message"
     static let composerIdentifier = "capture-entry.composer"
     static let savedPillIdentifier = "capture-entry.saved"
+    static let headerIdentifier = "capture-entry.header"
     /// How long the Saved pill stays before it fades.
     static let savedPillDuration: TimeInterval = 2
     /// The widest the composer grows at regular width.
@@ -18,6 +19,8 @@ struct CaptureEntryView: View {
     var actionsAreDisabled = false
     var open: (String) -> Void = { _ in }
     var notice: String?
+    /// Test seam: receives where the header, composer and Saved pill (and Settings or Done) land on screen.
+    var layoutReporter: (([String: CGRect]) -> Void)?
 
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -37,6 +40,7 @@ struct CaptureEntryView: View {
                 focusComposerIfSilent()
                 reportReady()
             }
+            .onPreferenceChange(HomeLayoutKey.self) { frames in layoutReporter?(frames) }
             .onChange(of: model.presentation) { _ in reportReady() }
             .onChange(of: scenePhase) { phase in
                 if phase == .active { model.refreshProgress() }
@@ -44,7 +48,8 @@ struct CaptureEntryView: View {
             .onChange(of: model.mode) { _ in focusComposerIfSilent() }
             .onReceive(model.$acknowledgment) { acknowledgment in
                 guard let acknowledgment = acknowledgment, !acknowledgment.isSaving else { return }
-                UIAccessibility.post(notification: .announcement, argument: model.message(for: acknowledgment))
+                let spoken = CaptureMessages.message(for: acknowledgment) ?? model.message(for: acknowledgment)
+                UIAccessibility.post(notification: .announcement, argument: spoken)
                 if acknowledgment.savedItemID != nil { showSavedPill() }
             }
             .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
@@ -72,6 +77,7 @@ struct CaptureEntryView: View {
                 messageText(notice, identifier: AppRootView.noticeIdentifier)
             }
         }
+        .reportHomeFrame(Self.headerIdentifier)
         .padding(.horizontal, sideMargin)
         .padding(.top, DSSpacing.xs)
         .padding(.bottom, DSSpacing.xs)
@@ -82,7 +88,11 @@ struct CaptureEntryView: View {
             if savedPillIsVisible {
                 DSSavedPill()
                     .accessibilityIdentifier(Self.savedPillIdentifier)
+                    .reportHomeFrame(Self.savedPillIdentifier)
                     .transition(.opacity)
+            }
+            if let notice = standingNotice {
+                messageText(notice, identifier: Self.noticeIdentifier)
             }
             if let message = shortMessage {
                 messageText(message, identifier: Self.messageIdentifier)
@@ -106,6 +116,7 @@ struct CaptureEntryView: View {
             }
         }
         .accessibilityIdentifier(Self.composerIdentifier)
+        .reportHomeFrame(Self.composerIdentifier)
     }
 
     private func composerView(state: DSComposerState, elapsedText: String) -> some View {
@@ -120,16 +131,20 @@ struct CaptureEntryView: View {
             .focused($composerIsFocused)
     }
 
+    /// A notice that stays beside the outcome: it never hides what happened to the last capture.
+    private var standingNotice: String? {
+        if let notice = model.voiceNotice { return notice }
+        return model.protectedDataNotice != nil ? CaptureMessages.protectedDataNotice : nil
+    }
+
     /// One short line about the last capture or the recorder, if there is anything to say.
     private var shortMessage: String? {
-        if let notice = model.voiceNotice { return notice }
-        if model.protectedDataNotice != nil { return CaptureMessages.protectedDataNotice }
         switch model.recorderState {
         case .requestingPermission: return CaptureMessages.waitingForMicrophone
         case .finishing: return CaptureMessages.finishingRecording
         case .idle, .recording: break
         }
-        return model.acknowledgment.flatMap(CaptureMessages.message(for:))
+        return model.acknowledgment.flatMap { CaptureMessages.message(for: $0) }
     }
 
     private func messageText(_ message: String, identifier: String) -> some View {
@@ -140,6 +155,7 @@ struct CaptureEntryView: View {
             .frame(maxWidth: .infinity)
             .fixedSize(horizontal: false, vertical: true)
             .accessibilityIdentifier(identifier)
+            .reportHomeFrame(identifier)
     }
 
     private func showSavedPill() {

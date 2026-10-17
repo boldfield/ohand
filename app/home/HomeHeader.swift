@@ -1,5 +1,22 @@
 import SwiftUI
 
+struct HomeLayoutKey: PreferenceKey {
+    static var defaultValue: [String: CGRect] = [:]
+
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue()) { _, new in new }
+    }
+}
+
+extension View {
+    /// Reports where this view lands on screen, so a hosted test can check what is visible and unclipped.
+    func reportHomeFrame(_ identifier: String) -> some View {
+        background(GeometryReader { proxy in
+            Color.clear.preference(key: HomeLayoutKey.self, value: [identifier: proxy.frame(in: .global)])
+        })
+    }
+}
+
 /// The floating glass header: Search, the wordmark and Settings, which becomes Done while the keyboard is up.
 struct HomeHeader: View {
     static let searchIdentifier = "home.search"
@@ -52,10 +69,12 @@ struct HomeHeader: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier(Self.doneIdentifier)
+                .reportHomeFrame(Self.doneIdentifier)
             } else {
                 DSGlassButton(systemName: "gearshape", accessibilityLabel: "Settings", action: onSettings)
                     .disabled(actionsAreDisabled)
                     .accessibilityIdentifier(Self.settingsIdentifier)
+                    .reportHomeFrame(Self.settingsIdentifier)
             }
         }
     }
