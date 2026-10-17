@@ -71,6 +71,8 @@
         <string>UIInterfaceOrientationLandscapeLeft</string>
         <string>UIInterfaceOrientationLandscapeRight</string>
     </array>
+    <key>UILaunchScreen</key>
+    <dict/>
     <key>UIViewControllerBasedStatusBarAppearance</key>
     <false/>
 </dict>
