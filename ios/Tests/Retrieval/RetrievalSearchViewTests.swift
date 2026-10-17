@@ -205,6 +205,8 @@ final class RetrievalSearchViewTests: XCTestCase {
             rootView: RetrievalSearchView(model: model, renderReporter: { [unowned self] in rendered = $0 })
                 .environment(\.horizontalSizeClass, .regular))
         retainedWindow?.isHidden = true
+        retainedWindow?.rootViewController = nil
+        rendered = [:]
         let window = UIWindow(frame: CGRect(origin: .zero, size: regular))
         window.rootViewController = hosting
         window.makeKeyAndVisible()
