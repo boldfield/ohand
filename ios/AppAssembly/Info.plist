@@ -77,7 +77,12 @@
         <string>InstrumentSerif-Italic.ttf</string>
     </array>
     <key>UILaunchScreen</key>
-    <dict/>
+    <dict>
+        <key>UIColorName</key>
+        <string>LaunchBackground</string>
+        <key>UIImageName</key>
+        <string>LaunchMark</string>
+    </dict>
     <key>UIViewControllerBasedStatusBarAppearance</key>
     <false/>
 </dict>

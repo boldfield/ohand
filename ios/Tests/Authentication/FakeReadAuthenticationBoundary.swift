@@ -19,6 +19,17 @@ final class FakeReadAuthenticationBoundary: ReadAuthenticationBoundary {
         }
     }
 
+    private(set) var quietCallCount = 0
+
+    func authenticateQuietly(reason: String, completion: @escaping (ReadAuthenticationOutcome) -> Void) {
+        quietCallCount += 1
+        if defersCompletion {
+            deferredCompletions.append(completion)
+        } else {
+            completion(nextOutcome)
+        }
+    }
+
     func invalidatePendingAttempt() {
         invalidateCallCount += 1
     }
