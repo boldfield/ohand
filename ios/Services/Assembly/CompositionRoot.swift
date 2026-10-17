@@ -659,6 +659,10 @@ private final class CoreHandleReadSource: PrivateReadSource {
         try core.startItemDetail(operationID: operationID, itemID: itemID, readScopes: readScopes)
     }
 
+    func startRecentItems(operationID: UInt64, readScopes: [CoreExportScope], limit: Int?, cursor: String?) throws {
+        try core.startRecentItems(operationID: operationID, readScopes: readScopes, limit: limit, cursor: cursor)
+    }
+
     func startRetentionRead(operationID: UInt64, kind: RetentionReadKind, readScopes: [CoreExportScope]) throws {
         try core.startRetentionRead(operationID: operationID, kind: kind, readScopes: readScopes)
     }
@@ -976,6 +980,7 @@ public final class ServiceCompositionRoot {
     static let retentionControlClientName = "retention controls"
     static let jobConfigurationClientName = "job configuration"
     static let providerProfileClientName = "provider profiles"
+    static let recentItemsClientName = "recent items"
     static let providerConnectionCheckClientName = "provider connection check"
     static let routePolicyClientName = "route policy"
 
@@ -1025,6 +1030,7 @@ public final class ServiceCompositionRoot {
         fixedWidthRange(providerProfileClientName, from: CoreProviderProfileClient.firstOperationID),
         fixedWidthRange(providerConnectionCheckClientName, from: CoreProviderConnectionCheckClient.firstOperationID),
         fixedWidthRange(routePolicyClientName, from: CoreRoutePolicyClient.firstOperationID),
+        fixedWidthRange(recentItemsClientName, from: CoreRecentItemsClient.firstOperationID),
         OperationRange(
             name: processingHealthClientName, start: ProcessingHealthService.firstOperationID,
             end: JobRunnerService.firstOperationID),
@@ -1050,6 +1056,8 @@ public final class ServiceCompositionRoot {
     public let suggestionResponses: SuggestionResponseService
     /// Reads one item's full detail; needs an authenticated read session.
     public let itemDetails: ItemDetailService
+    /// Lists the most recent captures; needs an authenticated read session.
+    public let recentItems: RecentItemsService
     /// Configures audio retention and acts on unresolved sole audio; reads are gated and writes need an authenticated
     /// session.
     public let retentionControls: RetentionControlService
@@ -1096,6 +1104,7 @@ public final class ServiceCompositionRoot {
     private let itemLifecycleControlClient: CoreItemLifecycleControlClient
     private let suggestionResponseClient: CoreSuggestionResponseClient
     private let itemDetailClient: CoreItemDetailClient
+    private let recentItemsClient: CoreRecentItemsClient
     private let retentionControlClient: CoreRetentionControlClient
     private let jobConfigurationClient: CoreJobConfigurationClient
     private let providerProfileClient: CoreProviderProfileClient
@@ -1176,6 +1185,8 @@ public final class ServiceCompositionRoot {
         suggestionResponses = assembly.suggestionResponses
         itemDetailClient = assembly.itemDetailClient
         itemDetails = assembly.itemDetails
+        recentItemsClient = assembly.recentItemsClient
+        recentItems = assembly.recentItems
         retentionControlClient = assembly.retentionControlClient
         retentionControls = assembly.retentionControls
         playback = assembly.playback
@@ -1362,6 +1373,7 @@ public final class ServiceCompositionRoot {
         itemLifecycleControlClient.shutDown()
         suggestionResponseClient.shutDown()
         itemDetailClient.shutDown()
+        recentItemsClient.shutDown()
         itemDeletion.setIntentObserver(nil)
         playback.shutDown()
         retentionControlClient.shutDown()
@@ -1674,6 +1686,8 @@ public final class ServiceCompositionRoot {
         let suggestionResponses: SuggestionResponseService
         let itemDetailClient: CoreItemDetailClient
         let itemDetails: ItemDetailService
+        let recentItemsClient: CoreRecentItemsClient
+        let recentItems: RecentItemsService
         let retentionControlClient: CoreRetentionControlClient
         let retentionControls: RetentionControlService
         let playback: PlaybackService
@@ -1828,6 +1842,10 @@ public final class ServiceCompositionRoot {
             router.register { itemDetailClient.handle($0) }
             undo.append { itemDetailClient.shutDown() }
             let itemDetails = ItemDetailService(core: itemDetailClient)
+            let recentItemsClient = CoreRecentItemsClient(gate: readGate)
+            router.register { recentItemsClient.handle($0) }
+            undo.append { recentItemsClient.shutDown() }
+            let recentItems = RecentItemsService(core: recentItemsClient)
             let retentionControlClient = CoreRetentionControlClient(core: core, gate: readGate)
             router.register { retentionControlClient.handle($0) }
             undo.append { retentionControlClient.shutDown() }
@@ -1942,7 +1960,8 @@ public final class ServiceCompositionRoot {
                 itemLifecycleControls: itemLifecycleControls,
                 suggestionResponseClient: suggestionResponseClient,
                 suggestionResponses: suggestionResponses, itemDetailClient: itemDetailClient,
-                itemDetails: itemDetails, retentionControlClient: retentionControlClient,
+                itemDetails: itemDetails, recentItemsClient: recentItemsClient, recentItems: recentItems,
+                retentionControlClient: retentionControlClient,
                 retentionControls: retentionControls, playback: playback,
                 jobConfigurationClient: jobConfigurationClient,
                 jobConfiguration: jobConfiguration, providerProfileClient: providerProfileClient,
