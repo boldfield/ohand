@@ -123,21 +123,30 @@ final class ProviderCredentialByVersionTests: XCTestCase {
         let created = try run { try await root.providerConfiguration.createProfile(self.draft(reference: reference)) }
         execute("UPDATE provider_profiles SET credential_ref = NULL WHERE profile_version = '\(created.profileVersion)'")
 
-        func assertRefused(_ expected: ProviderConfigurationError, _ version: String) {
+        func assertRefused(_ expectedCode: String, _ version: String) {
             XCTAssertThrowsError(try run { try await entry.credentialStatus(profileVersion: version) }) {
-                XCTAssertEqual($0 as? ProviderConfigurationError, expected)
+                guard case .core(let failure)? = $0 as? ProviderConfigurationError else {
+                    return XCTFail("expected a core refusal")
+                }
+                XCTAssertEqual(failure.code, expectedCode)
             }
             XCTAssertThrowsError(try run { try await entry.removeCredential(profileVersion: version) }) {
-                XCTAssertEqual($0 as? ProviderConfigurationError, expected)
+                guard case .core(let failure)? = $0 as? ProviderConfigurationError else {
+                    return XCTFail("expected a core refusal")
+                }
+                XCTAssertEqual(failure.code, expectedCode)
             }
             XCTAssertThrowsError(
                 try run { try await entry.replaceCredential(Data(Self.secondSecret.utf8), profileVersion: version) }
             ) {
-                XCTAssertEqual($0 as? ProviderConfigurationError, expected)
+                guard case .core(let failure)? = $0 as? ProviderConfigurationError else {
+                    return XCTFail("expected a core refusal")
+                }
+                XCTAssertEqual(failure.code, expectedCode)
             }
         }
-        assertRefused(.unknownProfileVersion, "no-such-version")
-        assertRefused(.noCredentialBound, created.profileVersion)
+        assertRefused("profile_not_found", "no-such-version")
+        assertRefused(ProviderCredentialEntry.noCredentialBoundCode, created.profileVersion)
         XCTAssertEqual(keychain.items.values.map(\.secret), [Data(Self.firstSecret.utf8)], "the secret is untouched")
     }
 

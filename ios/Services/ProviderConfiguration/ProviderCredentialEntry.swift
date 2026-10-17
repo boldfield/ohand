@@ -27,12 +27,17 @@ extension CredentialService: ProviderCredentialStore {}
 /// layer (one core read that the listing never offers) and call the same `CredentialService` operations. Replacing
 /// writes in place under the same reference, so the profile, its version and the jobs pinned to it are unchanged and
 /// become dispatchable again. **Removing is by reference, not by version:** other stored versions that name the same
-/// reference lose their secret too and report `credentialMissing`. An unknown version and a version with no credential
-/// bound throw distinct errors, and no answer or error carries a reference or a secret.
+/// reference lose their secret too and report `credentialMissing`. An unknown version (`core` with `profile_not_found`)
+/// and a version with no credential bound (`core` with `credential_not_bound`) throw distinct errors, and no answer or
+/// error carries a reference or a secret.
 public final class ProviderCredentialEntry: @unchecked Sendable {
     private let store: ProviderCredentialStore
     private let session: ReadAuthenticationSession
     private let profiles: ProviderProfileCore?
+
+    /// The `ProviderConfigurationError.core` code for a version that has no credential bound. An unknown version is the
+    /// core's own `profile_not_found`.
+    static let noCredentialBoundCode = "credential_not_bound"
 
     /// `profiles` serves the by-version operations; without it they throw `ProviderConfigurationError.unreadable`.
     init(store: ProviderCredentialStore, session: ReadAuthenticationSession, profiles: ProviderProfileCore? = nil) {
@@ -102,14 +107,16 @@ public final class ProviderCredentialEntry: @unchecked Sendable {
         switch result {
         case .success(.credentialReference(let answer)):
             guard let reference = answer.credentialReference, !reference.isEmpty else {
-                throw ProviderConfigurationError.noCredentialBound
+                throw ProviderConfigurationError.core(
+                    CoreFailure(
+                        errorClass: .permanent, code: Self.noCredentialBoundCode,
+                        message: "the stored profile version has no credential bound"))
             }
             return reference
         case .success:
             throw ProviderConfigurationError.unreadable
         case .failure(let failure):
             switch failure.code {
-            case "profile_not_found": throw ProviderConfigurationError.unknownProfileVersion
             case "invalid_request": throw ProviderConfigurationError.invalidRequest
             case "read_not_authenticated", "read_relocked": throw ProviderConfigurationError.notAuthenticated
             default: throw ProviderConfigurationError.core(failure)

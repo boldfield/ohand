@@ -12,10 +12,6 @@ public enum ProviderConfigurationError: Error, Equatable, Sendable {
     /// request.
     case core(CoreFailure)
     case unreadable
-    /// No stored profile has the version a credential operation named.
-    case unknownProfileVersion
-    /// The stored version has no credential bound, so there is no secret to manage.
-    case noCredentialBound
 }
 
 /// Provider profiles, connection checks and route policy, as the settings flows use them. Every rule belongs to the core:
