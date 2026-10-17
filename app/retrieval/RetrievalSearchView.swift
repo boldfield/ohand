@@ -53,6 +53,10 @@ struct RetrievalSearchView: View {
         "retrieval.search.row-text.\(row.id)"
     }
 
+    static func rowOriginalIdentifier(_ row: RetrievalResultRow) -> String {
+        "retrieval.search.row-original.\(row.id)"
+    }
+
     static func rowDetailsIdentifier(_ row: RetrievalResultRow) -> String {
         "retrieval.search.row-details.\(row.id)"
     }
@@ -106,7 +110,8 @@ struct RetrievalSearchView: View {
         }
         .onDisappear { model.screenDidDisappear() }
         .onReceive(model.$phase) { phase in
-            if phase == .searching { searchedQuery = model.query }
+            // A fresh search clears the rows; loading another page keeps them and runs the earlier words, not the draft.
+            if phase == .searching, model.rows.isEmpty { searchedQuery = model.query }
         }
     }
 
@@ -172,7 +177,7 @@ struct RetrievalSearchView: View {
                 }
             }
         } label: {
-            RetrievalFilterChipLabel(title: model.itemType?.title ?? "Type", isSelected: model.itemType != nil)
+            menuChipFace(title: model.itemType?.title ?? "Type", isSelected: model.itemType != nil)
         }
         .accessibilityLabel("Type filter")
         .accessibilityValue(model.itemType != nil ? model.itemType?.title ?? "Type" : "Any")
@@ -194,7 +199,7 @@ struct RetrievalSearchView: View {
             Button("Past 30 days") { setSinceDaysAgo(29) }
             Button("Choose dates…") { presentedFilterSheet = .dates }
         } label: {
-            RetrievalFilterChipLabel(title: timeTitle, isSelected: model.since != nil || model.until != nil)
+            menuChipFace(title: timeTitle, isSelected: model.since != nil || model.until != nil)
         }
         .accessibilityLabel("Time filter")
         .accessibilityValue(model.since != nil || model.until != nil ? timeTitle : "Any")
@@ -214,12 +219,18 @@ struct RetrievalSearchView: View {
             }
             Button("Choose topic…") { presentedFilterSheet = .topic }
         } label: {
-            RetrievalFilterChipLabel(title: topicTitle, isSelected: topicIsActive)
+            menuChipFace(title: topicTitle, isSelected: topicIsActive)
         }
         .accessibilityLabel("Topic filter")
         .accessibilityValue(topicIsActive ? topicTitle : "Any")
         .accessibilityAddTraits(topicIsActive ? .isSelected : [])
         .reportRendered(Self.topicChipIdentifier, text: topicTitle)
+    }
+
+    /// The design-system Chip as a menu's label: the menu takes the tap, so the chip's own button is not hit-tested.
+    private func menuChipFace(title: String, isSelected: Bool) -> some View {
+        DSChip(title: title, isSelected: isSelected)
+            .allowsHitTesting(false)
     }
 
     private func setSinceDaysAgo(_ days: Int) {
@@ -348,30 +359,6 @@ private enum RetrievalFilterSheet: String, Identifiable {
     var id: String { rawValue }
 }
 
-/// A filter chip's face, as a 34 pt capsule. Wrapped in a `Menu`, so it is not a `Button` itself.
-private struct RetrievalFilterChipLabel: View {
-    let title: String
-    let isSelected: Bool
-
-    var body: some View {
-        HStack(spacing: DSSpacing.xxs) {
-            Text(title).lineLimit(1)
-            Image(systemName: "chevron.down")
-                .font(DSFont.chip)
-                .imageScale(.small)
-                .accessibilityHidden(true)
-        }
-        .font(DSFont.chip)
-        .foregroundColor((isSelected ? DSColor.onAccent : DSColor.ink).color)
-        .padding(.horizontal, DSSpacing.md)
-        .frame(height: DSLayout.chipHeight)
-        .background(Capsule().fill((isSelected ? DSColor.accent : DSColor.surface2).color))
-        .frame(minWidth: DSLayout.minimumTouchTarget, minHeight: DSLayout.minimumTouchTarget)
-        .contentShape(Rectangle())
-        .accessibilityAddTraits(isSelected ? .isSelected : [])
-    }
-}
-
 /// The date range and the session topic, which need more than a menu item.
 private struct RetrievalFilterSheetView: View {
     let sheet: RetrievalFilterSheet
@@ -455,7 +442,7 @@ struct RetrievalResultRowView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .reportRendered(RetrievalSearchView.rowTextIdentifier(row), text: row.text)
                 if let original = row.originalText {
-                    Self.originalText(original, highlighting: row.matched == .supersededOriginal ? highlightedQuery : "")
+                    originalLine(original)
                         .font(DSFont.footer)
                         .foregroundColor(DSColor.inkMuted.color)
                         .lineLimit(3)
@@ -473,6 +460,14 @@ struct RetrievalResultRowView: View {
         .contentShape(Rectangle())
     }
 
+    private func originalLine(_ original: String) -> some View {
+        let attributed = Self.originalAttributed(
+            original, highlighting: row.matched == .supersededOriginal ? highlightedQuery : "")
+        return Text(attributed)
+            .reportRendered(
+                RetrievalSearchView.rowOriginalIdentifier(row), text: Self.highlightedWords(in: attributed).joined(separator: "|"))
+    }
+
     /// The text with the matched words bold on a `tint` highlight.
     private var snippetText: Text {
         let snippet = row.snippet
@@ -483,25 +478,39 @@ struct RetrievalResultRowView: View {
         return Text(AttributedString(snippet.before) + matched + AttributedString(snippet.after))
     }
 
-    /// Where each searched word occurs in a replaced original, ignoring case and diacritics; the core reports no span.
+    /// Where the searched words occur in a replaced original; the core reports no span. Like the core, each searched
+    /// piece is split into letter-and-digit tokens that match, ignoring case and diacritics, as prefixes of the
+    /// original's tokens.
     static func highlightRanges(in original: String, query: String) -> [Range<String.Index>] {
-        let words = query.split(whereSeparator: { $0.isWhitespace || $0.isPunctuation }).map(String.init)
+        let queryTokens = query.split(whereSeparator: \.isWhitespace).flatMap { piece in
+            piece.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
+        }
+        guard !queryTokens.isEmpty else { return [] }
+        let options: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive, .anchored]
         var ranges: [Range<String.Index>] = []
-        for word in words {
-            var searchStart = original.startIndex
-            while searchStart < original.endIndex,
-                let found = original.range(
-                    of: word, options: [.caseInsensitive, .diacriticInsensitive], range: searchStart..<original.endIndex)
-            {
-                ranges.append(found)
-                searchStart = found.upperBound
+        var index = original.startIndex
+        while index < original.endIndex {
+            guard original[index].isLetter || original[index].isNumber else {
+                index = original.index(after: index)
+                continue
             }
+            var tokenEnd = index
+            while tokenEnd < original.endIndex, original[tokenEnd].isLetter || original[tokenEnd].isNumber {
+                tokenEnd = original.index(after: tokenEnd)
+            }
+            for queryToken in queryTokens {
+                if let found = original.range(of: queryToken, options: options, range: index..<tokenEnd) {
+                    ranges.append(found)
+                    break
+                }
+            }
+            index = tokenEnd
         }
         return ranges
     }
 
-    /// "Original: …" with each searched word tinted and bold.
-    static func originalText(_ original: String, highlighting query: String) -> Text {
+    /// "Original: …" with each matched word tinted and bold.
+    static func originalAttributed(_ original: String, highlighting query: String) -> AttributedString {
         let prefix = "Original: "
         var attributed = AttributedString(prefix + original)
         for found in highlightRanges(in: original, query: query) {
@@ -511,7 +520,12 @@ struct RetrievalResultRowView: View {
             attributed[lower..<upper].backgroundColor = DSColor.tint.color
             attributed[lower..<upper].inlinePresentationIntent = .stronglyEmphasized
         }
-        return Text(attributed)
+        return attributed
+    }
+
+    /// The words of the attributed original that carry the highlight.
+    static func highlightedWords(in attributed: AttributedString) -> [String] {
+        attributed.runs.filter { $0.backgroundColor != nil }.map { String(attributed[$0.range].characters) }
     }
 
     /// The line under a result: when it was captured, its type, whether the words are original or corrected, and scope.

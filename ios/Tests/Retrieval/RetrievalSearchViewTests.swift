@@ -217,11 +217,49 @@ final class RetrievalSearchViewTests: XCTestCase {
         XCTAssertLessThan(frame.maxX, regular.width / 2, "the results sit on the left, leaving the right for the item pane")
     }
 
-    func testAReplacedOriginalHighlightsTheWordsThatMatched() {
-        let original = "Call the Rooter, then RÖOTER again"
+    func testAReplacedOriginalHighlightsOnlyTokensTheQueryIsAPrefixOf() {
+        let original = "Call the Rooter, then RÖOTER again, proof roof, Rooter-x"
         let ranges = RetrievalResultRowView.highlightRanges(in: original, query: "rooter")
-        XCTAssertEqual(ranges.map { String(original[$0]) }, ["Rooter", "RÖOTER"])
+        XCTAssertEqual(ranges.map { String(original[$0]) }, ["Rooter", "RÖOTER", "Rooter"])
         XCTAssertTrue(RetrievalResultRowView.highlightRanges(in: original, query: "plumber").isEmpty)
+        let proof = "proof roof"
+        XCTAssertEqual(RetrievalResultRowView.highlightRanges(in: proof, query: "roof").map { String(proof[$0]) }, ["roof"])
+        XCTAssertTrue(RetrievalResultRowView.highlightRanges(in: "Rooter", query: "oot").isEmpty, "no mid-word match")
+    }
+
+    func testTheAttributedOriginalTintsExactlyTheMatchedWords() {
+        let attributed = RetrievalResultRowView.originalAttributed("proof roof", highlighting: "roof")
+        XCTAssertEqual(String(attributed.characters), "Original: proof roof")
+        XCTAssertEqual(RetrievalResultRowView.highlightedWords(in: attributed), ["roof"])
+    }
+
+    private func supersededRow() -> RetrievalResultRow {
+        RetrievalResultRow(
+            reference: RetrievalItemReference(candidate: Self.firstID)!, text: "synthetic roofer words",
+            originalText: "synthetic proof roof", basis: .corrected, matched: .supersededOriginal,
+            snippet: RetrievalSnippet(text: "synthetic roofer words", span: nil), scopeName: "Personal",
+            capturedAt: Date(timeIntervalSince1970: 1_791_462_600), itemType: .idea)
+    }
+
+    func testAReplacedOriginalCardRendersTheHighlightedMatch() {
+        let shown = supersededRow()
+        model.query = "roof"
+        model.search()
+        searcher.answerLatest(.success(RetrievalPage(totalAccessible: 1, rows: [shown], offset: 0)))
+        settle()
+        XCTAssertEqual(renderedText(RetrievalSearchView.rowOriginalIdentifier(shown)), "roof")
+    }
+
+    func testEditingTheFieldThenLoadingMoreKeepsHighlightingTheSearchedWords() {
+        let shown = supersededRow()
+        model.query = "roof"
+        model.search()
+        searcher.answerLatest(.success(RetrievalPage(totalAccessible: 2, rows: [shown], offset: 0)))
+        settle()
+        model.query = "proof"
+        model.loadMore()
+        settle()
+        XCTAssertEqual(renderedText(RetrievalSearchView.rowOriginalIdentifier(shown)), "roof")
     }
 
     func testFilterChipsReportTheActiveFilterAsTheirTitle() {
