@@ -1559,7 +1559,7 @@ final class CompositionRootTests: XCTestCase {
         }
         XCTAssertFalse(pump(until: { held != nil }, timeout: 1), "the capture waits at the reset boundary")
 
-        root.start(isActive: false)
+        root.start(isActive: true)
         XCTAssertTrue(pump(until: { held != nil }, timeout: 30), "the capture is imported once the reset released the boundary")
         guard case .saved(_, let freshItemID, _)? = held else {
             return XCTFail("the held capture must be saved, got \(String(describing: held))")
@@ -1578,7 +1578,7 @@ final class CompositionRootTests: XCTestCase {
         let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), modules: [coordinator])
         defer { root.shutDown() }
         let control = root.resetControl
-        root.start(isActive: false)
+        root.start(isActive: true)
 
         var settled: ResetProgress?
         XCTAssertTrue(
@@ -1592,6 +1592,14 @@ final class CompositionRootTests: XCTestCase {
         XCTAssertEqual(settled?.generation, 1, "one reset generation, not a second one")
         let markers = FileResetMarkerStore(layout: ProtectedStorageLayout(rootDirectory: storageRoot))
         XCTAssertNil(try markers.request(), "the recorded tap was consumed")
+        XCTAssertTrue(
+            pump(until: { coordinator.lastReport != nil }, timeout: 30), "the launch pass finished")
+        let report = try XCTUnwrap(coordinator.lastReport)
+        XCTAssertEqual(report.outcome(of: .reset), .completed)
+        let order = report.results.map(\.step)
+        XCTAssertLessThan(
+            try XCTUnwrap(order.firstIndex(of: .reset)), try XCTUnwrap(order.firstIndex(of: .jobs)),
+            "the reset is resumed before the job runner activates")
     }
 
     // MARK: helpers

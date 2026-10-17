@@ -139,7 +139,7 @@ final class LifecycleCoordinatorTests: XCTestCase {
         let coordinator = makeCoordinator(log: log)
         let report = await coordinator.reconcile(.launch)
         XCTAssertEqual(
-            log.order, ["ingress", "jobs", "deletion", "reminders", "retention", "promptEligibility", "health"])
+            log.order, ["ingress", "reset", "jobs", "deletion", "reminders", "retention", "promptEligibility", "health"])
         XCTAssertEqual(report.results.map(\.step), LifecycleStep.allCases)
         XCTAssertTrue(report.results.allSatisfy { $0.outcome == .completed })
         XCTAssertEqual(report.triggers, [.launch])
