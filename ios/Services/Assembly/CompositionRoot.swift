@@ -1041,6 +1041,9 @@ public final class ServiceCompositionRoot {
     /// Configures audio retention and acts on unresolved sole audio; reads are gated and writes need an authenticated
     /// session.
     public let retentionControls: RetentionControlService
+    /// Opens an item's retained audio for playback without exposing protected storage; needs an authenticated read
+    /// session. Open playback holds the audio in place and ends on deletion, relock and shutdown.
+    public let playback: PlaybackService
     /// Re-pins waiting work, requeues a job, revokes a profile and lists the jobs pinned to one; needs an authenticated
     /// read session.
     public let jobConfiguration: JobConfigurationService
@@ -1156,6 +1159,7 @@ public final class ServiceCompositionRoot {
         itemDetails = assembly.itemDetails
         retentionControlClient = assembly.retentionControlClient
         retentionControls = assembly.retentionControls
+        playback = assembly.playback
         jobConfigurationClient = assembly.jobConfigurationClient
         jobConfiguration = assembly.jobConfiguration
         providerProfileClient = assembly.providerProfileClient
@@ -1323,6 +1327,8 @@ public final class ServiceCompositionRoot {
         itemLifecycleControlClient.shutDown()
         suggestionResponseClient.shutDown()
         itemDetailClient.shutDown()
+        itemDeletion.setIntentObserver(nil)
+        playback.shutDown()
         retentionControlClient.shutDown()
         jobConfigurationClient.shutDown()
         providerProfileClient.shutDown()
@@ -1623,6 +1629,7 @@ public final class ServiceCompositionRoot {
         let itemDetails: ItemDetailService
         let retentionControlClient: CoreRetentionControlClient
         let retentionControls: RetentionControlService
+        let playback: PlaybackService
         let jobConfigurationClient: CoreJobConfigurationClient
         let jobConfiguration: JobConfigurationService
         let providerProfileClient: CoreProviderProfileClient
@@ -1774,6 +1781,11 @@ public final class ServiceCompositionRoot {
                 core: retentionControlClient, session: adapters.readSession,
                 pressureProbe: VolumeStoragePressureProbe(volumeURL: layout.rootDirectory),
                 removerProvider: { modules.lazy.compactMap { ($0 as? LifecycleCoordinator)?.audioRetention }.first })
+            let playback = PlaybackService(
+                core: retentionControlClient, session: adapters.readSession, layout: layout, fence: PlaybackFence(),
+                playerFactory: avPlaybackPlayerFactory)
+            undo.append { playback.shutDown() }
+            itemDeletion.setIntentObserver { [playback] itemID in playback.endPlayback(itemID: itemID) }
             let jobConfigurationClient = CoreJobConfigurationClient(core: core, gate: readGate)
             router.register { jobConfigurationClient.handle($0) }
             undo.append { jobConfigurationClient.shutDown() }
@@ -1858,7 +1870,8 @@ public final class ServiceCompositionRoot {
                 suggestionResponseClient: suggestionResponseClient,
                 suggestionResponses: suggestionResponses, itemDetailClient: itemDetailClient,
                 itemDetails: itemDetails, retentionControlClient: retentionControlClient,
-                retentionControls: retentionControls, jobConfigurationClient: jobConfigurationClient,
+                retentionControls: retentionControls, playback: playback,
+                jobConfigurationClient: jobConfigurationClient,
                 jobConfiguration: jobConfiguration, providerProfileClient: providerProfileClient,
                 providerConnectionCheckClient: providerConnectionCheckClient, routePolicyClient: routePolicyClient,
                 providerConfiguration: providerConfiguration, providerCredentials: providerCredentials,
