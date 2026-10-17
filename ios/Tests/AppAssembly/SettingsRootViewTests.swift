@@ -1,0 +1,101 @@
+import SwiftUI
+import UIKit
+import XCTest
+import OhAndCoreBridge
+@testable import OhAndServices
+@testable import OhAnd
+
+/// Hosts the real settings root over fresh models and reads what each row shows without any other screen having been
+/// opened first.
+@MainActor
+final class SettingsRootViewTests: XCTestCase {
+    private var storageRoot: URL!
+    private var baselineHandles = 0
+    private var baselineBuffers = 0
+    private var services: AppServices!
+    private var window: UIWindow?
+    private var rendered: [String: String] = [:]
+
+    override func setUpWithError() throws {
+        storageRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("settings-root-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: storageRoot, withIntermediateDirectories: true)
+        baselineHandles = CoreHandle.liveHandleCount
+        baselineBuffers = CoreHandle.liveResultBufferCount
+        let lifecycle = LifecycleCoordinator()
+        let root = try ServiceCompositionRoot(
+            configuration: AppConfiguration.production(storageRoot: storageRoot), modules: [lifecycle])
+        services = AppServices(
+            root: root, lifecycle: lifecycle, handoff: CaptureEntryHandoff(notificationCenter: NotificationCenter()),
+            notificationHooks: NotificationHooks(installDelegate: { _ in }, reconcile: { _ in }),
+            notificationCenter: NotificationCenter(),
+            isProtectedDataAvailable: { true })
+        rendered = [:]
+    }
+
+    override func tearDownWithError() throws {
+        window?.isHidden = true
+        window = nil
+        services.shutDown()
+        services = nil
+        XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
+        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
+        try? FileManager.default.removeItem(at: storageRoot)
+    }
+
+    private func host() {
+        let current = services.managementContext
+        let status = RetentionStatus(
+            policy: RetentionPolicySetting(periodSeconds: 7 * 86_400, isDefault: true),
+            storagePressure: .normal, unresolved: [])
+        let retention = RetentionSettingsModel(
+            controls: FakeRetentionControls(status: status), readScope: { .authenticated },
+            exportSettings: current.retention.exportSettings)
+        let providers = ProviderSettingsModel(
+            controls: FakeProviderSettingsControls(listing: providerListing(versions: [], defaultVersion: nil)),
+            readScope: { .authenticated })
+        let context = ManagementContext(
+            voiceRecovery: current.voiceRecovery, retrieval: current.retrieval, retention: retention,
+            providerSettings: providers, promptSettings: current.promptSettings, suggestion: current.suggestion)
+        let root = NavigationStack {
+            SettingsRootView(
+                sections: ManagementCatalog.settingsSections, context: context,
+                renderReporter: { [unowned self] in rendered = $0 })
+        }
+        let shown = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        shown.rootViewController = UIHostingController(rootView: root)
+        shown.makeKeyAndVisible()
+        window = shown
+    }
+
+    private func settle(until condition: () -> Bool) {
+        let deadline = Date(timeIntervalSinceNow: 10)
+        repeat {
+            window?.rootViewController?.view.layoutIfNeeded()
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.1))
+        } while !condition() && Date() < deadline
+    }
+
+    func testAFreshRootShowsEveryCurrentValueWithoutOpeningAnotherScreen() {
+        host()
+        settle { rendered["prompt-settings"] == "Daily prompt: Off" && rendered["audio-retention"] != nil
+            && rendered["provider-settings"]?.hasSuffix(": On this phone") == true
+            && rendered["voice-recovery"]?.hasSuffix(": None") == true }
+
+        XCTAssertEqual(rendered["prompt-settings"], "Daily prompt: Off")
+        XCTAssertEqual(rendered["voice-recovery"], "Unfinished recordings: None")
+        XCTAssertEqual(rendered["provider-settings"], "Processing: On this phone")
+        XCTAssertEqual(rendered["audio-retention"], "Audio: 7 days")
+        XCTAssertEqual(rendered[SettingsRootView.exportEntryID], "Export")
+    }
+
+    func testRowsFollowTheDesignOrderRegardlessOfCatalogOrder() {
+        let ids = { (entries: [ManagementEntry]) in entries.map(\.id) }
+        let catalog = ManagementCatalog.settingsSections
+        XCTAssertEqual(ids(SettingsRootView.ordered(SettingsRootView.firstGroupEntryIDs, from: catalog)),
+                       ["prompt-settings", "voice-recovery"])
+        XCTAssertEqual(ids(SettingsRootView.ordered(SettingsRootView.secondGroupEntryIDs, from: catalog)),
+                       ["provider-settings", "audio-retention"])
+        XCTAssertEqual(SettingsRootView.secondGroupEntryIDs.last, SettingsRootView.exportEntryID)
+    }
+}
