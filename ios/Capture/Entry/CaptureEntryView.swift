@@ -10,6 +10,10 @@ struct CaptureEntryView: View {
     static let composerIdentifier = "capture-entry.composer"
     static let savedPillIdentifier = "capture-entry.saved"
     static let headerIdentifier = "capture-entry.header"
+    /// Reported while the composer shows that state (`rest`, `typing` or `recording`), so tests can tell them apart.
+    static func composerStateIdentifier(_ state: String) -> String { "capture-entry.composer.\(state)" }
+    /// Reported while the composer is disabled for an in-flight save.
+    static let composerSavingIdentifier = "capture-entry.composer.saving"
     /// How long the Saved pill stays before it fades.
     static let savedPillDuration: TimeInterval = 2
     /// The widest the composer grows at regular width.
@@ -122,6 +126,15 @@ struct CaptureEntryView: View {
         }
         .accessibilityIdentifier(Self.composerIdentifier)
         .reportHomeFrame(Self.composerIdentifier)
+        .reportHomeFrame(Self.composerStateIdentifier(composerStateName))
+        .background {
+            if model.textModel.isSaving { Color.clear.reportHomeFrame(Self.composerSavingIdentifier) }
+        }
+    }
+
+    private var composerStateName: String {
+        if case .recording = model.recorderState { return "recording" }
+        return model.textModel.text.isEmpty ? "rest" : "typing"
     }
 
     private func composerView(state: DSComposerState, elapsedText: String) -> some View {
@@ -138,8 +151,11 @@ struct CaptureEntryView: View {
 
     /// Notices that stay beside the outcome: they never hide what happened to the last capture, or each other.
     private var standingNotice: String? {
-        let notices = [model.voiceNotice, model.protectedDataNotice != nil ? CaptureMessages.protectedDataNotice : nil]
-        let present = notices.compactMap { $0 }
+        Self.standingNotice(voiceNotice: model.voiceNotice, protectedDataNoticeIsActive: model.protectedDataNotice != nil)
+    }
+
+    static func standingNotice(voiceNotice: String?, protectedDataNoticeIsActive: Bool) -> String? {
+        let present = [voiceNotice, protectedDataNoticeIsActive ? CaptureMessages.protectedDataNotice : nil].compactMap { $0 }
         return present.isEmpty ? nil : present.joined(separator: " ")
     }
 

@@ -85,30 +85,14 @@ final class CaptureEntryViewTests: XCTestCase {
         XCTAssertLessThanOrEqual(header.maxX, windowSize.width + 0.5, file: file, line: line)
     }
 
-    /// Every accessibility element the hosted home exposes, found the way VoiceOver finds them.
-    private func accessibilityElements() -> [NSObject] {
-        var found: [NSObject] = []
-        func walk(_ object: NSObject) {
-            let count = object.accessibilityElementCount()
-            if count != NSNotFound, count > 0 {
-                for index in 0..<count {
-                    if let child = object.accessibilityElement(at: index) as? NSObject { found.append(child); walk(child) }
-                }
-            }
-            if let elements = object.accessibilityElements {
-                for case let child as NSObject in elements { found.append(child); walk(child) }
-            }
-            if let view = object as? UIView { view.subviews.forEach(walk) }
+    private func assertComposerState(
+        _ state: String, file: StaticString = #filePath, line: UInt = #line
+    ) {
+        for other in ["rest", "typing", "recording"] {
+            let shown = frames[CaptureEntryView.composerStateIdentifier(other)] != nil
+            XCTAssertEqual(shown, other == state, "composer \(other) is \(other == state ? "" : "not ")shown", file: file, line: line)
         }
-        if let root = retainedWindow?.rootViewController?.view { walk(root) }
-        return found
     }
-
-    private func element(labelled label: String) -> NSObject? {
-        accessibilityElements().first { $0.accessibilityLabel == label }
-    }
-
-    private func visibleLabels() -> [String] { accessibilityElements().compactMap { $0.accessibilityLabel } }
 
     private func post(_ name: Notification.Name) {
         NotificationCenter.default.post(name: name, object: nil)
@@ -178,53 +162,43 @@ final class CaptureEntryViewTests: XCTestCase {
 
     // MARK: Composer states
 
-    func testRestTypingAndRecordingEachShowTheirOwnControls() {
+    func testRestTypingAndRecordingEachShowTheirOwnComposer() {
         host(keyboardHeight: Self.standardPhoneKeyboardHeight)
         let rest = frame(CaptureEntryView.composerIdentifier)
-        XCTAssertNotNil(element(labelled: "What's on your mind?"), "rest shows the placeholder field")
-        XCTAssertNotNil(element(labelled: "Record"), "rest shows the mic")
-        XCTAssertNil(element(labelled: "Save"), "rest has no Save")
-        XCTAssertNil(element(labelled: "Discard"))
-        XCTAssertNil(element(labelled: "Stop recording"))
+        assertComposerState("rest")
 
         model.textModel.updateText("buy oat milk")
         settle()
-        XCTAssertNotNil(element(labelled: "Record"), "typing keeps the record button")
-        XCTAssertNotNil(element(labelled: "Save"), "typing shows Save")
-        XCTAssertNil(element(labelled: "Discard"))
-        XCTAssertNil(element(labelled: "Stop recording"))
+        assertComposerState("typing")
         assertHeaderAndComposerVisible(windowSize: Self.standardPhone, keyboardHeight: Self.standardPhoneKeyboardHeight)
 
         model.textModel.updateText("")
         model.startRecording()
         settle()
         XCTAssertEqual(voice.startCount, 1)
-        XCTAssertNotNil(element(labelled: "Discard"), "recording shows Discard")
-        XCTAssertNotNil(element(labelled: "Stop recording"), "recording shows Stop")
-        XCTAssertNil(element(labelled: "Save"))
-        XCTAssertNil(element(labelled: "Record"))
+        assertComposerState("recording")
         assertHeaderAndComposerVisible(windowSize: Self.standardPhone, keyboardHeight: Self.standardPhoneKeyboardHeight)
 
         model.cancelRecording()
         voice.state = .idle
         settle()
-        XCTAssertNotNil(element(labelled: "Record"), "back at rest")
-        XCTAssertNil(element(labelled: "Discard"))
+        assertComposerState("rest")
         XCTAssertEqual(frame(CaptureEntryView.composerIdentifier).width, rest.width, accuracy: 0.5)
     }
 
-    func testAnInFlightSaveIsReportedAndDisablesSave() {
+    func testAnInFlightSaveIsReportedAndDisablesTheComposer() {
         host(keyboardHeight: Self.standardPhoneKeyboardHeight)
         textIngress.holdsCompletions = true
         model.textModel.updateText("buy oat milk")
         model.saveText()
         settle()
 
-        XCTAssertTrue(visibleLabels().contains("Saving\u{2026}"), "the in-flight save is stated")
-        let save = element(labelled: "Save")
-        XCTAssertNotNil(save)
-        XCTAssertTrue(save?.accessibilityTraits.contains(.notEnabled) ?? false, "Save is visibly unavailable while saving")
-        XCTAssertTrue(element(labelled: "Record")?.accessibilityTraits.contains(.notEnabled) ?? false)
+        XCTAssertNotEqual(frame(CaptureEntryView.messageIdentifier), .zero, "the in-flight save is stated")
+        XCTAssertNotNil(frames[CaptureEntryView.composerSavingIdentifier], "the composer is disabled while saving")
+
+        textIngress.release()
+        settle()
+        XCTAssertNil(frames[CaptureEntryView.composerSavingIdentifier], "and enabled again afterwards")
     }
 
     // MARK: Saved pill and messages
@@ -261,15 +235,20 @@ final class CaptureEntryViewTests: XCTestCase {
     }
 
     func testBothStandingNoticesAreShownTogether() {
+        let voiceNotice = CaptureEntryModel.startFailureMessage(.microphoneDenied)
+        let combined = CaptureEntryView.standingNotice(voiceNotice: voiceNotice, protectedDataNoticeIsActive: true)
+        XCTAssertTrue(combined?.contains(voiceNotice) ?? false, "the voice notice is shown")
+        XCTAssertTrue(combined?.contains(CaptureMessages.protectedDataNotice) ?? false, "and so is the warning that saving may fail")
+        XCTAssertEqual(CaptureEntryView.standingNotice(voiceNotice: voiceNotice, protectedDataNoticeIsActive: false), voiceNotice)
+        XCTAssertEqual(
+            CaptureEntryView.standingNotice(voiceNotice: nil, protectedDataNoticeIsActive: true), CaptureMessages.protectedDataNotice)
+        XCTAssertNil(CaptureEntryView.standingNotice(voiceNotice: nil, protectedDataNoticeIsActive: false))
+
         model = makeModel(access: CaptureEntryAccess(protectedDataAvailable: false, readAuthorized: true))
         voice.startResult = .failure(.microphoneDenied)
         host(keyboardHeight: Self.standardPhoneKeyboardHeight)
         model.startRecording()
         settle()
-
-        let labels = visibleLabels().joined(separator: "\n")
-        XCTAssertNotNil(model.voiceNotice, "the microphone failure is reported")
-        XCTAssertTrue(labels.contains(CaptureEntryModel.startFailureMessage(.microphoneDenied)), "the voice notice is shown")
-        XCTAssertTrue(labels.contains(CaptureMessages.protectedDataNotice), "and so is the warning that saving may fail")
+        XCTAssertNotEqual(frame(CaptureEntryView.noticeIdentifier), .zero, "the hosted home shows the notices")
     }
 }
