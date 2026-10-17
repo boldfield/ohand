@@ -76,6 +76,17 @@ struct SettingsInfoSheet: View {
         }
         .background(DSColor.surface0.color.ignoresSafeArea())
         .presentationDetents([.medium, .large])
-        .presentationCornerRadius(DSRadius.sheet)
+        .modifier(SheetCornerRadius())
+    }
+}
+
+/// The sheet radius from the design, on the systems that let a sheet set it.
+private struct SheetCornerRadius: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 16.4, *) {
+            content.presentationCornerRadius(DSRadius.sheet)
+        } else {
+            content
+        }
     }
 }
