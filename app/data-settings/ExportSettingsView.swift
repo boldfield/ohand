@@ -78,13 +78,13 @@ struct ExportSettingsView: View {
                 .frame(minHeight: 44)
                 .disabled(isBusy)
                 .accessibilityIdentifier(Self.scopeIdentifier(scope))
-                .reportRendered(Self.scopeIdentifier(scope), text: ExportSettingsText.scopeTitle(scope))
+                .reportDataSettingsRendered(Self.scopeIdentifier(scope), text: ExportSettingsText.scopeTitle(scope))
             }
             Toggle("Include audio recordings", isOn: $model.includeAudio)
                 .frame(minHeight: 44)
                 .disabled(isBusy)
                 .accessibilityIdentifier(Self.audioToggleIdentifier)
-                .reportRendered(Self.audioToggleIdentifier, text: "Include audio recordings")
+                .reportDataSettingsRendered(Self.audioToggleIdentifier, text: "Include audio recordings")
             note(ExportSettingsText.audioNote, identifier: Self.audioNoteIdentifier)
             if model.selectedScopes.isEmpty {
                 note(ExportSettingsText.noScopeNote, identifier: Self.noScopeIdentifier)
@@ -97,7 +97,7 @@ struct ExportSettingsView: View {
             .buttonStyle(.borderedProminent)
             .disabled(!model.canStart)
             .accessibilityIdentifier(Self.startIdentifier)
-            .reportRendered(Self.startIdentifier, text: "Export")
+            .reportDataSettingsRendered(Self.startIdentifier, text: "Export")
             if let message = stateMessage {
                 note(message, identifier: Self.stateIdentifier)
             }
@@ -125,7 +125,7 @@ struct ExportSettingsView: View {
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
             .accessibilityIdentifier(identifier)
-            .reportRendered(identifier, text: text)
+            .reportDataSettingsRendered(identifier, text: text)
     }
 }
 
