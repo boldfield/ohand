@@ -123,6 +123,8 @@ final class WalkthroughUITests: XCTestCase {
             var typed = false
             for attempt in 1...3 where !typed {
                 field.tap()
+                // Typing before the keyboard is up makes the UI-test runner fail while it looks for interrupting alerts.
+                XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: screenTimeout), "keyboard did not appear")
                 field.typeText(text)
                 let enabled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isEnabled == true"), object: save)
                 typed = XCTWaiter().wait(for: [enabled], timeout: 8) == .completed
