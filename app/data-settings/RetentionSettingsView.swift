@@ -8,7 +8,7 @@ struct RetentionRenderedElement: Equatable {
     let isEnabled: Bool
 }
 
-private struct RetentionRenderedKey: PreferenceKey {
+struct RetentionRenderedKey: PreferenceKey {
     static var defaultValue: [String: RetentionRenderedElement] = [:]
 
     static func reduce(
@@ -18,7 +18,7 @@ private struct RetentionRenderedKey: PreferenceKey {
     }
 }
 
-private struct RetentionRenderReport: ViewModifier {
+struct RetentionRenderReport: ViewModifier {
     let identifier: String
     let text: String
     @Environment(\.isEnabled) private var isEnabled
@@ -33,8 +33,8 @@ private struct RetentionRenderReport: ViewModifier {
     }
 }
 
-private extension View {
-    func reportRendered(_ identifier: String, text: String) -> some View {
+extension View {
+    func reportDataSettingsRendered(_ identifier: String, text: String) -> some View {
         modifier(RetentionRenderReport(identifier: identifier, text: text))
     }
 }
@@ -54,6 +54,7 @@ struct RetentionSettingsView: View {
     static let noUnresolvedIdentifier = "data-settings.retention.none-unresolved"
     static let loadingIdentifier = "data-settings.retention.loading"
     static let tryAgainIdentifier = "data-settings.retention.try-again"
+    static let exportLinkIdentifier = "data-settings.retention.export-link"
 
     static func caseIdentifier(_ itemID: String) -> String { "data-settings.retention.case.\(itemID)" }
     static func retryIdentifier(_ itemID: String) -> String { "data-settings.retention.retry.\(itemID)" }
@@ -72,6 +73,12 @@ struct RetentionSettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 content
+                if let exportSettings = model.exportSettings {
+                    NavigationLink("Export a copy of your notes") { ExportSettingsView(model: exportSettings, renderReporter: renderReporter) }
+                        .frame(minHeight: 44)
+                        .accessibilityIdentifier(Self.exportLinkIdentifier)
+                        .reportDataSettingsRendered(Self.exportLinkIdentifier, text: "Export a copy of your notes")
+                }
             }
             .padding()
         }
@@ -91,7 +98,7 @@ struct RetentionSettingsView: View {
             EmptyView()
         case .loading:
             ProgressView("Loading").frame(maxWidth: .infinity)
-                .reportRendered(Self.loadingIdentifier, text: "Loading")
+                .reportDataSettingsRendered(Self.loadingIdentifier, text: "Loading")
         case .locked:
             note(RetentionSettingsText.lockedText, identifier: Self.lockedIdentifier)
         case .failed(let message):
@@ -99,7 +106,7 @@ struct RetentionSettingsView: View {
             Button("Try again") { Task { await model.refresh() } }
                 .frame(minHeight: 44)
                 .accessibilityIdentifier(Self.tryAgainIdentifier)
-                .reportRendered(Self.tryAgainIdentifier, text: "Try again")
+                .reportDataSettingsRendered(Self.tryAgainIdentifier, text: "Try again")
         case .loaded:
             if let status = model.status {
                 policySection(status)
@@ -116,24 +123,24 @@ struct RetentionSettingsView: View {
             Text("Keep recordings for").font(.headline)
             Text(RetentionSettingsText.periodSummary(status.policy))
                 .accessibilityIdentifier(Self.policyIdentifier)
-                .reportRendered(Self.policyIdentifier, text: RetentionSettingsText.periodSummary(status.policy))
+                .reportDataSettingsRendered(Self.policyIdentifier, text: RetentionSettingsText.periodSummary(status.policy))
             Text(RetentionSettingsText.policyExplanation(status.policy))
                 .font(.footnote).foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier(Self.explanationIdentifier)
-                .reportRendered(Self.explanationIdentifier, text: RetentionSettingsText.policyExplanation(status.policy))
+                .reportDataSettingsRendered(Self.explanationIdentifier, text: RetentionSettingsText.policyExplanation(status.policy))
             Text(RetentionSettingsText.soleSourceExplanation)
                 .font(.footnote).foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier(Self.soleSourceIdentifier)
-                .reportRendered(Self.soleSourceIdentifier, text: RetentionSettingsText.soleSourceExplanation)
+                .reportDataSettingsRendered(Self.soleSourceIdentifier, text: RetentionSettingsText.soleSourceExplanation)
             Stepper(
                 value: $model.chosenDays, in: RetentionSettingsModel.minimumDays...RetentionSettingsModel.maximumDays
             ) {
                 Text(RetentionSettingsText.dayCount(model.chosenDays))
             }
             .accessibilityIdentifier(Self.periodStepperIdentifier)
-            .reportRendered(Self.periodStepperIdentifier, text: RetentionSettingsText.dayCount(model.chosenDays))
+            .reportDataSettingsRendered(Self.periodStepperIdentifier, text: RetentionSettingsText.dayCount(model.chosenDays))
             Text(RetentionSettingsText.periodChangeNote)
                 .font(.footnote).foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -143,7 +150,7 @@ struct RetentionSettingsView: View {
                 Text("Save period").frame(maxWidth: .infinity, minHeight: 44)
             }
             .buttonStyle(.borderedProminent)
-            .reportRendered(Self.applyIdentifier, text: "Save period")
+            .reportDataSettingsRendered(Self.applyIdentifier, text: "Save period")
             .disabled(model.isApplyingPeriod)
             .accessibilityIdentifier(Self.applyIdentifier)
             if let message = model.periodState?.message {
@@ -176,7 +183,7 @@ struct RetentionSettingsView: View {
                     Text("Retry turning into text").frame(maxWidth: .infinity, minHeight: 44)
                 }
                 .buttonStyle(.bordered)
-                .reportRendered(Self.retryIdentifier(entry.itemID), text: "Retry turning into text")
+                .reportDataSettingsRendered(Self.retryIdentifier(entry.itemID), text: "Retry turning into text")
                 .disabled(busy)
                 .accessibilityIdentifier(Self.retryIdentifier(entry.itemID))
             }
@@ -194,7 +201,7 @@ struct RetentionSettingsView: View {
         .cornerRadius(8)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(Self.caseIdentifier(entry.itemID))
-        .reportRendered(Self.caseIdentifier(entry.itemID), text: RetentionSettingsText.reason(entry.reason))
+        .reportDataSettingsRendered(Self.caseIdentifier(entry.itemID), text: RetentionSettingsText.reason(entry.reason))
     }
 
     private func note(_ text: String, identifier: String) -> some View {
@@ -204,7 +211,7 @@ struct RetentionSettingsView: View {
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
             .accessibilityIdentifier(identifier)
-            .reportRendered(identifier, text: text)
+            .reportDataSettingsRendered(identifier, text: text)
     }
 }
 
@@ -212,6 +219,7 @@ extension RetentionSettingsModel {
     /// The model as the app assembles it: the root's retention controls, gated by the root's read scope.
     nonisolated static func assembled(root: ServiceCompositionRoot) -> RetentionSettingsModel {
         RetentionSettingsModel(
-            controls: root.retentionControls, readScope: { [weak root] in root?.readScope ?? .captureOnly })
+            controls: root.retentionControls, readScope: { [weak root] in root?.readScope ?? .captureOnly },
+            exportSettings: .assembled(root: root))
     }
 }
