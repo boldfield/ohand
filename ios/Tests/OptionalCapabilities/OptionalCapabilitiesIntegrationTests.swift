@@ -194,6 +194,34 @@ final class OptionalCapabilitiesIntegrationTests: OptionalCapabilitiesTestCase {
         XCTAssertNotEqual(jobStatus(), "completed")
     }
 
+    func testRegistrationNamingAnUnusableProfileDoesNotEnableADifferentStoredProfile() throws {
+        // The queued job's stored profile is supported, unrevoked and serves the verified model, but it is not the
+        // registered one, and the registered profile is missing, so nothing may be sent.
+        try prepareSelfHostedStore()
+        let unresolved = SelfHostedRegistration(
+            profileVersion: "9d3f6b20-1c7e-4a58-8e2b-6a0c4d9e7f99", model: SelfHostedVerifiedBoundary.current.model)
+        let module = OptionalCapabilitiesModule(configuration: OptionalCapabilitiesConfiguration(selfHosted: unresolved))
+        let sender = try selfHostedSender()
+        let root = try makeRoot(sender: sender, modules: [module])
+        defer { root.shutDown() }
+        XCTAssertEqual(
+            module.selfHostedRegistrations,
+            [CoreSelfHostedRegistration(profileVersion: unresolved.profileVersion, model: unresolved.model)])
+        root.start(isActive: true)
+        XCTAssertTrue(waitForDrain(root), "the drain ends")
+        XCTAssertEqual(availability(of: module), .unavailable(.missing))
+        XCTAssertTrue(sender.requests.isEmpty, "only the registered pair may be sent to")
+        XCTAssertNotEqual(jobStatus(), "completed")
+    }
+
+    func testUnconfiguredOrUnverifiedModuleDeclaresNoRegistrations() {
+        XCTAssertTrue(OptionalCapabilitiesModule().selfHostedRegistrations.isEmpty)
+        var unverified = verifiedRegistration()
+        unverified.model = "unlisted-model:latest"
+        let module = OptionalCapabilitiesModule(configuration: OptionalCapabilitiesConfiguration(selfHosted: unverified))
+        XCTAssertTrue(module.selfHostedRegistrations.isEmpty)
+    }
+
     func testDeniedRouteSendsNothing() throws {
         try prepareSelfHostedStore(SelfHostedScenario(interpretationGranted: false))
         let sender = try selfHostedSender()
