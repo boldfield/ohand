@@ -76,6 +76,33 @@ final class FakeProviderSettingsCredentials: ProviderSettingsCredentialControlli
     }
 
     func credentialStatus(reference: String) throws -> CredentialStatus { try statusResult.get() }
+
+    var replaceByVersionResult: Result<Void, Error> = .success(())
+    var removeByVersionResult: Result<Void, Error> = .success(())
+    var statusByVersionResult: Result<CredentialStatus, Error> = .success(.present)
+    private(set) var replacedByVersion: [(Data, String)] = []
+    private(set) var removedByVersion: [String] = []
+    private(set) var checkedByVersion: [String] = []
+    /// Invoked in the middle of every by-version call, so a test can change the session while it is in flight.
+    var duringByVersion: (() -> Void)?
+
+    func replaceCredential(_ secret: Data, profileVersion: String) async throws {
+        replacedByVersion.append((secret, profileVersion))
+        duringByVersion?()
+        try replaceByVersionResult.get()
+    }
+
+    func credentialStatus(profileVersion: String) async throws -> CredentialStatus {
+        checkedByVersion.append(profileVersion)
+        duringByVersion?()
+        return try statusByVersionResult.get()
+    }
+
+    func removeCredential(profileVersion: String) async throws {
+        removedByVersion.append(profileVersion)
+        duringByVersion?()
+        try removeByVersionResult.get()
+    }
 }
 
 private func decodeCreated(profileID: String, version: String) -> ProviderProfileCreatedAnswer {
@@ -465,6 +492,183 @@ final class ProviderSettingsModelTests: XCTestCase {
         await model.checkConnection(version)
         XCTAssertEqual(model.phase, .locked)
         XCTAssertTrue(model.connectionStates.isEmpty)
+    }
+
+    // MARK: unsaved secrets are not orphaned
+
+    private func storedModel() async -> ProviderSettingsModel {
+        let model = makeModel(FakeProviderSettingsControls(listing: Self.twoVersions))
+        await model.refresh()
+        return model
+    }
+
+    func testASecretStoredForADraftThatIsAbandonedIsDeleted() async {
+        let model = await storedModel()
+        model.storeCredential(Self.syntheticSecret)
+        XCTAssertEqual(credentials.deleted, [], "while the draft is open the secret is kept")
+        model.clear()
+        XCTAssertEqual(credentials.deleted, ["11111111-1111-1111-1111-111111111111"])
+    }
+
+    func testEditingTheReferenceAwayFromTheStoredSecretDeletesIt() async {
+        let model = await storedModel()
+        model.storeCredential(Self.syntheticSecret)
+        model.draft.credentialReference = "another-name"
+        XCTAssertEqual(credentials.deleted, ["11111111-1111-1111-1111-111111111111"])
+        model.clear()
+        XCTAssertEqual(credentials.deleted.count, 1, "nothing is deleted twice or for a name this screen did not add")
+    }
+
+    func testASavedProfileKeepsItsSecretWhenTheScreenIsLeft() async {
+        let model = await storedModel()
+        model.storeCredential(Self.syntheticSecret)
+        model.draft.profileName = "work"
+        model.draft.model = "synthetic-model"
+        await model.save()
+        XCTAssertEqual(model.saveState, .saved)
+        model.clear()
+        XCTAssertEqual(credentials.deleted, [], "a secret a saved version names is not deleted")
+    }
+
+    func testARefusedSaveStillLeavesTheSecretToBeDeletedWhenTheDraftIsAbandoned() async {
+        let controls = FakeProviderSettingsControls(listing: Self.twoVersions)
+        controls.createResult = .failure(
+            ProviderConfigurationError.core(CoreFailure(errorClass: .permanent, code: "model_invalid", message: "")))
+        let model = makeModel(controls)
+        await model.refresh()
+        model.storeCredential(Self.syntheticSecret)
+        model.draft.profileName = "work"
+        model.draft.model = "synthetic-model"
+        await model.save()
+        XCTAssertNotEqual(model.saveState, .saved)
+        XCTAssertEqual(credentials.deleted, [])
+        model.clear()
+        XCTAssertEqual(credentials.deleted, ["11111111-1111-1111-1111-111111111111"])
+    }
+
+    func testRemovingTheDraftSecretDoesNotDeleteItAgainOnLeaving() async {
+        let model = await storedModel()
+        model.storeCredential(Self.syntheticSecret)
+        model.removeCredential()
+        model.clear()
+        XCTAssertEqual(credentials.deleted, ["11111111-1111-1111-1111-111111111111"])
+    }
+
+    func testALockThatBlocksDeletionRetriesItOnTheNextAuthenticatedRead() async {
+        let model = await storedModel()
+        model.storeCredential(Self.syntheticSecret)
+        credentials.deleteResult = .failure(ProviderConfigurationError.notAuthenticated)
+        scope = .captureOnly
+        await model.refresh()
+        XCTAssertEqual(model.phase, .locked)
+        XCTAssertEqual(credentials.deleted.count, 1, "the lock-time attempt")
+
+        credentials.deleteResult = .success(())
+        scope = .authenticated
+        await model.refresh()
+        XCTAssertEqual(credentials.deleted.count, 2, "retried once authenticated again")
+        await model.refresh()
+        XCTAssertEqual(credentials.deleted.count, 2, "and only until it succeeds")
+    }
+
+    // MARK: secrets of stored versions
+
+    private func hostedVersion(_ model: ProviderSettingsModel) throws -> ProviderProfileListAnswer.Version {
+        try XCTUnwrap(model.listing?.profiles.flatMap(\.versions).first { $0.profileVersion == "hosted-v1" })
+    }
+
+    func testAStoredVersionsSecretIsReplacedCheckedAndRemovedByVersionWithoutAReference() async throws {
+        let model = await storedModel()
+        let hosted = try hostedVersion(model)
+
+        await model.replaceSavedCredential(Self.syntheticSecret, for: hosted)
+        XCTAssertEqual(credentials.replacedByVersion.map(\.1), ["hosted-v1"])
+        XCTAssertEqual(credentials.replacedByVersion.map(\.0), [Self.syntheticSecret])
+        XCTAssertEqual(model.savedCredentialStates["hosted-v1"], .updated)
+        XCTAssertEqual(credentials.updated.count + credentials.added.count, 0, "no new credential is created")
+
+        for status in [CredentialStatus.present, .absent, .invalidated] {
+            credentials.statusByVersionResult = .success(status)
+            await model.checkSavedCredential(hosted)
+            XCTAssertEqual(model.savedCredentialStates["hosted-v1"], .status(status))
+        }
+
+        await model.removeSavedCredential(hosted)
+        XCTAssertEqual(credentials.removedByVersion, ["hosted-v1"])
+        XCTAssertEqual(model.savedCredentialStates["hosted-v1"], .removed)
+        XCTAssertNil(model.savedCredentialStates["private-v1"], "another version is untouched")
+        XCTAssertEqual(credentials.deleted, [], "removal goes through the version, not a typed name")
+    }
+
+    func testAStoredVersionsSecretWorksAfterTheDraftWasSavedAndReset() async throws {
+        let model = await storedModel()
+        model.storeCredential(Self.syntheticSecret)
+        model.draft.profileName = "work"
+        model.draft.model = "synthetic-model"
+        await model.save()
+        XCTAssertEqual(model.draft.credentialReference, "", "the draft no longer names the saved secret")
+
+        let hosted = try hostedVersion(model)
+        await model.replaceSavedCredential(Self.syntheticSecret, for: hosted)
+        await model.removeSavedCredential(hosted)
+        XCTAssertEqual(credentials.replacedByVersion.count, 1)
+        XCTAssertEqual(credentials.removedByVersion, ["hosted-v1"])
+        XCTAssertEqual(credentials.added.count, 1, "replacing did not add another credential")
+    }
+
+    func testStoredVersionCredentialFailuresAreRedacted() async throws {
+        let model = await storedModel()
+        let hosted = try hostedVersion(model)
+        let failures: [Error] = [
+            CredentialError.invalidated, CredentialError.deviceLocked(.update), CredentialError.storage(.update, -25299),
+            ProviderConfigurationError.core(
+                CoreFailure(errorClass: .permanent, code: "credential_not_bound", message: "secret-looking-detail")),
+            ProviderConfigurationError.core(
+                CoreFailure(errorClass: .permanent, code: "profile_not_found", message: "secret-looking-detail")),
+        ]
+        for failure in failures {
+            credentials.replaceByVersionResult = .failure(failure)
+            await model.replaceSavedCredential(Self.syntheticSecret, for: hosted)
+            guard case .failed(let message)? = model.savedCredentialStates["hosted-v1"] else {
+                return XCTFail("\(failure) is reported")
+            }
+            XCTAssertFalse(message.isEmpty)
+            XCTAssertFalse(message.contains("25299"))
+            XCTAssertFalse(message.contains("secret-looking-detail"))
+            XCTAssertFalse(message.contains("synthetic-secret-value"))
+        }
+    }
+
+    func testALockDuringAStoredVersionActionEmptiesTheScreen() async throws {
+        let model = await storedModel()
+        let hosted = try hostedVersion(model)
+        credentials.duringByVersion = { [unowned self] in scope = .captureOnly }
+        await model.replaceSavedCredential(Self.syntheticSecret, for: hosted)
+        XCTAssertEqual(model.phase, .locked)
+        XCTAssertTrue(model.savedCredentialStates.isEmpty)
+        XCTAssertNil(model.listing)
+    }
+
+    func testACapturelessSessionNeverReachesTheStoredVersionOperations() async throws {
+        let model = await storedModel()
+        let hosted = try hostedVersion(model)
+        scope = .captureOnly
+        await model.replaceSavedCredential(Self.syntheticSecret, for: hosted)
+        await model.checkSavedCredential(hosted)
+        await model.removeSavedCredential(hosted)
+        XCTAssertTrue(credentials.replacedByVersion.isEmpty)
+        XCTAssertTrue(credentials.checkedByVersion.isEmpty)
+        XCTAssertTrue(credentials.removedByVersion.isEmpty)
+    }
+
+    func testARejectedSecretIsReportedForTheDraftOrTheVersionWithoutCallingTheService() async throws {
+        let model = await storedModel()
+        let hosted = try hostedVersion(model)
+        model.noteRejectedSecret(.surroundingWhitespace)
+        XCTAssertEqual(model.credentialState, .failed(ProviderSettingsText.rejectedSecret(.surroundingWhitespace)))
+        model.noteRejectedSecret(.empty, for: hosted)
+        XCTAssertEqual(model.savedCredentialStates["hosted-v1"], .failed(ProviderSettingsText.credentialEmptySecret))
+        XCTAssertEqual(credentials.added.count + credentials.replacedByVersion.count, 0)
     }
 
     func testClearingTheScreenDropsCredentialAndCheckFeedback() async {

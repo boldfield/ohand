@@ -4,10 +4,47 @@ import XCTest
 @testable import OhAndServices
 @testable import OhAnd
 
-private final class UnreachableProviderSettingsSender: ProviderRequestSender, @unchecked Sendable {
-    func send(_ request: ProviderHTTPRequest) async throws -> ProviderHTTPResponse {
-        throw URLError(.notConnectedToInternet)
+/// Stands in for the network the way the production transport does for credentials: a request naming a secret that is
+/// absent from the Keychain fails as an unavailable credential; otherwise it answers with a canned status, or fails as
+/// an unreachable destination when no status is set. No request ever leaves the test.
+private final class CheckingProviderSettingsSender: ProviderRequestSender, @unchecked Sendable {
+    private let credentials: CredentialService
+    private let lock = NSLock()
+    private var cannedStatus: Int?
+    private var sent = 0
+
+    init(credentials: CredentialService) { self.credentials = credentials }
+
+    var sentCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return sent
     }
+
+    func respond(withStatus status: Int?) {
+        lock.lock()
+        cannedStatus = status
+        lock.unlock()
+    }
+
+    func send(_ request: ProviderHTTPRequest) async throws -> ProviderHTTPResponse {
+        lock.lock()
+        sent += 1
+        let status = cannedStatus
+        lock.unlock()
+        if let reference = request.credential?.reference,
+            (try? credentials.credentialStatus(reference: reference)) != .present
+        {
+            throw ProviderTransportError.credentialUnavailable
+        }
+        if let status { return ProviderHTTPResponse(status: status, headers: [:], body: Data()) }
+        throw ProviderTransportError.connectionFailed
+    }
+}
+
+private struct ProviderSettingsInjected: @unchecked Sendable {
+    let sender: CheckingProviderSettingsSender
+    let credentials: CredentialService
 }
 
 private struct ProviderSettingsBuiltRoot: @unchecked Sendable {
@@ -42,9 +79,16 @@ final class ProviderSettingsRealCoreTests: XCTestCase {
     private var session: ReadAuthenticationSession!
     private var root: ServiceCompositionRoot!
     private var coordinator: LifecycleCoordinator!
+    private var keychain: FakeKeychain!
+    private var sender: CheckingProviderSettingsSender!
+    private var credentialService: CredentialService!
 
     override func setUpWithError() throws {
         try super.setUpWithError()
+        keychain = FakeKeychain()
+        credentialService = CredentialService(
+            serviceName: "com.boldfield.ohand.tests.provider-settings.\(UUID().uuidString)", keychain: keychain)
+        sender = CheckingProviderSettingsSender(credentials: credentialService)
         baselineHandles = CoreHandle.liveHandleCount
         baselineBuffers = CoreHandle.liveResultBufferCount
         world = try RealCoreRetentionWorld()
@@ -68,6 +112,7 @@ final class ProviderSettingsRealCoreTests: XCTestCase {
     private func makeModel() async throws -> ProviderSettingsModel {
         let layoutPath = world.layout.rootDirectory.path
         let readSession = session!
+        let injected = ProviderSettingsInjected(sender: sender, credentials: credentialService)
         let built = try await Task.detached { () -> ProviderSettingsBuiltRoot in
             let coordinator = LifecycleCoordinator(stepTimeoutSeconds: 30)
             let root = try ServiceCompositionRoot(
@@ -76,8 +121,9 @@ final class ProviderSettingsRealCoreTests: XCTestCase {
                 environment: CompositionEnvironment(
                     timeZone: { TimeZone(identifier: "UTC")! }, locale: { Locale(identifier: "en_US") }),
                 adapters: .injectedForTests(
-                    sender: UnreachableProviderSettingsSender(), readSession: readSession,
-                    notificationCenter: FakeNotificationCenter(), reachability: FakeReachability(reachable: true)),
+                    sender: injected.sender, readSession: readSession,
+                    notificationCenter: FakeNotificationCenter(), reachability: FakeReachability(reachable: true),
+                    credentials: injected.credentials),
                 modules: [coordinator])
             try coordinator.connect(to: root)
             return ProviderSettingsBuiltRoot(root: root, coordinator: coordinator)
@@ -193,14 +239,108 @@ final class ProviderSettingsRealCoreTests: XCTestCase {
 
         let hosted = try version(model, profile: "hosted")
         XCTAssertNil(model.connectionStates[hosted.profileVersion], "saving a profile checks nothing")
+        XCTAssertEqual(sender.sentCount, 0, "nothing was sent before the user asked")
         await model.checkConnection(hosted)
 
         guard case .finished(let outcome)? = model.connectionStates[hosted.profileVersion] else {
             return XCTFail("the check finished with a core outcome: \(String(describing: model.connectionStates))")
         }
-        XCTAssertNotEqual(outcome, .ok)
+        XCTAssertEqual(outcome, .credentialMissing, "the profile names a secret that was never stored")
         XCTAssertEqual(model.connectionStates[hosted.profileVersion]?.message, ProviderSettingsText.connectionOutcome(outcome))
         XCTAssertFalse(model.connectionStates[hosted.profileVersion]!.message.contains("example"))
+    }
+
+    private static let syntheticSecret = Data("synthetic-secret-value".utf8)
+
+    /// Stores a secret through the model, saves a hosted profile that names it and returns the stored version.
+    private func savedProfileWithSecret(_ model: ProviderSettingsModel) async throws -> ProviderProfileListAnswer.Version {
+        await model.refresh()
+        model.storeCredential(Self.syntheticSecret)
+        XCTAssertEqual(model.credentialState, .stored)
+        model.draft.profileName = "hosted"
+        model.draft.model = "synthetic-model"
+        await model.save()
+        XCTAssertEqual(model.saveState, .saved)
+        XCTAssertEqual(keychain.items.count, 1)
+        return try version(model, profile: "hosted")
+    }
+
+    func testAStoredSecretIsCheckedThroughTheRealCoreAndReachesOnlyTheUnreachableNetworkPath() async throws {
+        let model = try await makeModel()
+        let hosted = try await savedProfileWithSecret(model)
+
+        await model.checkConnection(hosted)
+        XCTAssertEqual(model.connectionStates[hosted.profileVersion], .finished(.unreachable))
+        XCTAssertEqual(sender.sentCount, 1, "exactly the one requested check was sent")
+
+        sender.respond(withStatus: 401)
+        await model.checkConnection(hosted)
+        XCTAssertEqual(model.connectionStates[hosted.profileVersion], .finished(.credentialRejected))
+
+        sender.respond(withStatus: 404)
+        await model.checkConnection(hosted)
+        XCTAssertEqual(model.connectionStates[hosted.profileVersion], .finished(.capabilityMismatch))
+        for state in model.connectionStates.values {
+            XCTAssertFalse(state.message.contains("synthetic-secret-value"))
+        }
+    }
+
+    func testASavedProfilesSecretIsRemovedReportedMissingAndReplacedAfterTheDraftWasReset() async throws {
+        let model = try await makeModel()
+        let hosted = try await savedProfileWithSecret(model)
+        XCTAssertEqual(model.draft.credentialReference, "", "the draft was reset by the save")
+
+        await model.checkSavedCredential(hosted)
+        XCTAssertEqual(model.savedCredentialStates[hosted.profileVersion], .status(.present))
+
+        await model.removeSavedCredential(hosted)
+        XCTAssertEqual(model.savedCredentialStates[hosted.profileVersion], .removed)
+        XCTAssertTrue(keychain.items.isEmpty, "the saved profile's own secret was removed")
+        await model.checkSavedCredential(hosted)
+        XCTAssertEqual(model.savedCredentialStates[hosted.profileVersion], .status(.absent))
+
+        await model.checkConnection(hosted)
+        XCTAssertEqual(model.connectionStates[hosted.profileVersion], .finished(.credentialMissing))
+
+        await model.replaceSavedCredential(Data("synthetic-replacement-value".utf8), for: hosted)
+        XCTAssertEqual(model.savedCredentialStates[hosted.profileVersion], .updated)
+        XCTAssertEqual(keychain.items.count, 1, "the same reference was re-bound; no second credential exists")
+        await model.checkConnection(hosted)
+        XCTAssertEqual(model.connectionStates[hosted.profileVersion], .finished(.unreachable))
+
+        await model.refresh()
+        XCTAssertEqual(model.savedCredentialStates[hosted.profileVersion], .updated)
+    }
+
+    func testAnInvalidReferenceAndAnUnknownVersionAreReportedRedactedByTheRealServices() async throws {
+        let model = try await makeModel()
+        await model.refresh()
+
+        model.draft.credentialReference = "not-a-valid-reference"
+        model.storeCredential(Self.syntheticSecret)
+        XCTAssertEqual(model.credentialState, .failed(ProviderSettingsText.credentialFailure(CredentialError.invalidReference)))
+        XCTAssertTrue(keychain.items.isEmpty)
+        XCTAssertFalse(model.credentialState!.message.contains("not-a-valid-reference"))
+
+        let unknown = providerListing(
+            versions: [("ghost", "ghost-v1", "open_ai", false, true)], defaultVersion: nil
+        ).profiles[0].versions[0]
+        await model.replaceSavedCredential(Self.syntheticSecret, for: unknown)
+        guard case .failed(let message)? = model.savedCredentialStates["ghost-v1"] else {
+            return XCTFail("the core refuses a version it does not store")
+        }
+        XCTAssertFalse(message.contains("ghost-v1"))
+        XCTAssertTrue(keychain.items.isEmpty, "nothing was written for an unknown version")
+    }
+
+    func testLeavingTheScreenDeletesASecretNoSavedProfileNames() async throws {
+        let model = try await makeModel()
+        await model.refresh()
+        model.storeCredential(Self.syntheticSecret)
+        XCTAssertEqual(keychain.items.count, 1)
+
+        model.clear()
+        XCTAssertTrue(keychain.items.isEmpty, "the unsaved secret was removed from the Keychain")
     }
 
     func testAnUnverifiedPrivateServerIsDeclaredUnavailableByTheCoreAndRefusedAsDefault() async throws {

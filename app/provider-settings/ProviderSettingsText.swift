@@ -22,14 +22,24 @@ enum ProviderSettingsText {
     static let credentialNote =
         "The secret is stored in this device's secure storage and is never shown again. The profile holds only an "
         + "opaque name for it."
+    static let noCredentialBoundCode = "credential_not_bound"
     static let credentialMissingReference = "No saved credential is named yet."
     static let credentialEmptySecret = "Enter the secret first. Nothing was stored."
     static let connectionCheckNote =
         "A connection check sends one fixed test message to this profile's own destination. It contains none of your "
         + "notes and runs only when you ask."
 
+    static func rejectedSecret(_ rejection: ProviderSecretRejection) -> String {
+        switch rejection {
+        case .empty: return credentialEmptySecret
+        case .surroundingWhitespace:
+            return "The secret starts or ends with a space or line break. Remove it and try again. Nothing was stored."
+        }
+    }
+
     static func credentialState(_ state: ProviderSettingsCredentialState) -> String {
         switch state {
+        case .working: return "Working…"
         case .stored: return "Secret stored on this device."
         case .updated: return "Secret replaced."
         case .removed: return "Secret removed. Profile versions that used it cannot send until you enter a new one."
@@ -42,6 +52,11 @@ enum ProviderSettingsText {
 
     static func credentialFailure(_ error: Error) -> String {
         if let error = error as? ProviderConfigurationError, case .notAuthenticated = error { return lockedText }
+        if let error = error as? ProviderConfigurationError, case .core(let failure) = error,
+            failure.code == ProviderSettingsText.noCredentialBoundCode
+        {
+            return "This profile version has no secret bound to it. Nothing was changed."
+        }
         guard let error = error as? CredentialError else { return "The credential could not be changed." }
         switch error {
         case .invalidReference: return "That credential name is not valid. Nothing was changed."
