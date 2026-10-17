@@ -114,6 +114,9 @@ final class WalkthroughUITests: XCTestCase {
         let field = app.textViews["capture-entry.field"]
         XCTAssertTrue(field.waitForExistence(timeout: screenTimeout), "capture field did not appear")
         for text in syntheticCaptures {
+            // The field is disabled while the previous capture is being saved; typing then would be lost.
+            expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: field)
+            waitForExpectations(timeout: 30)
             field.tap()
             field.typeText(text)
             let save = app.buttons["capture-entry.save"]
@@ -121,6 +124,9 @@ final class WalkthroughUITests: XCTestCase {
             expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: save)
             waitForExpectations(timeout: 20)
             save.tap()
+            // A saved capture empties the field, which disables Save again.
+            expectation(for: NSPredicate(format: "isEnabled == false"), evaluatedWith: save)
+            waitForExpectations(timeout: 30)
         }
     }
 
