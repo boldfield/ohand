@@ -3145,6 +3145,27 @@
       "source_pointers": [
         "docs/features/m1-ui-design.md"
       ]
+    },
+    {
+      "key": "DS09",
+      "parent": null,
+      "title": "Restyle Export",
+      "file_scope": [
+        "app/data-settings/ExportSettingsView.swift",
+        "app/data-settings/ExportSettingsText.swift"
+      ],
+      "intent": "Restyle Export per docs/features/m1-ui-design.md.",
+      "acceptance": [
+        "See the DS09 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "DS01",
+        "U07c"
+      ],
+      "source_pointers": [
+        "docs/features/m1-ui-design.md"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -3641,6 +3662,7 @@
       "DS05",
       "DS06",
       "DS07",
+      "DS09",
       "U03b",
       "U04b",
       "U07c",
@@ -3869,6 +3891,10 @@
     ],
     "DS08": [
       "F18"
+    ],
+    "DS09": [
+      "DS01",
+      "U07c"
     ]
   },
   "retained_dependency_overrides": {
@@ -4043,6 +4069,10 @@
     {
       "date": "2026-10-17",
       "change": "UI design rework: DS01-DS08 and R06 added per docs/features/m1-ui-design.md (design system, icon and launch, quiet Face ID at launch, recent-captures read, composer home, restyles, CI screenshot walkthrough). Unstarted UI tasks depend on DS01; U02b on DS05; U07c on DS06; U10 on the restyles."
+    },
+    {
+      "date": "2026-10-17",
+      "change": "DS09 (restyle Export) added after U07b landed; U10 depends on it."
     }
   ]
 }

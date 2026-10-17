@@ -209,6 +209,7 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
       | DS06 | Restyle Settings, Audio and Daily prompt | after U07b |
       | DS07 | Restyle Processing | after U05b |
       | DS08 | Screenshot walkthrough in CI | |
+      | DS09 | Restyle Export (filed after U07b landed) | after U07c |
 
     - **Standing rule:** every UI task that has not started depends on DS01. It builds on `app/design-system/` and is reviewed against the design document's checklist as well as its own criteria. Behavioural acceptance is unchanged.
     - **Unlock behaviour:** DS03 changes when authentication is attempted, not the read gate. A failed, cancelled or unavailable attempt leaves `capture_only` and capture is never blocked.
@@ -2536,6 +2537,21 @@ Acceptance:
 1. On every pull request, the walkthrough launches the app on a simulator with synthetic captures. It visits the home, Search with a query, Settings and each settings screen, in light and dark, at compact width and, when a regular-width simulator is available, at regular width. It writes one PNG per screen. Simulated Face ID enrolment and matching are scripted, and authentication is never bypassed in app code.
 2. The job uploads the screenshots as an artifact with `retention-days: 7`. A screen the walkthrough cannot reach fails the job, not just the screenshot.
 3. The exact-head CI run is linked, along with a list of the screenshots it produced.
+
+### DS09
+
+Restyle Export
+
+Rebuild the export screen's presentation per the M1 UI design. Export behaviour is unchanged.
+
+Owned paths: `app/data-settings/` (the export views only: `ExportSettingsView.swift`, `ExportSettingsText.swift`) and their tests.
+
+Dependencies: DS01, U07c (shared `app/data-settings/`, which DS06 and U07c also change).
+
+Acceptance:
+
+1. Export has a serif title, one grouped section for what is exported and one for the action, a primary export button and one footer line. The full explanation goes in an info sheet.
+2. Every export behaviour and authentication test passes: the authenticated share lifecycle and the share sheet are unchanged. The layout passes the design checklist. The exact-head macOS CI run is linked.
 
 ## Original acceptance coverage
 
