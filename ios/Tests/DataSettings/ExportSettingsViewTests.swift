@@ -50,9 +50,23 @@ final class ExportSettingsViewTests: XCTestCase {
         do {
             try await body(model, world)
         } catch {
-            close()
+            await closeScreen(model)
             throw error
         }
+        await closeScreen(model)
+    }
+
+    /// Leaves the screen the way the app does, so any share sheet still up is taken down by the screen itself, then
+    /// waits until the sheet is really gone before the window goes: a sheet left mid-dismissal in a released window
+    /// would finish its out-of-process teardown during a later test.
+    private func closeScreen(_ model: ExportSettingsModel) async {
+        model.clear()
+        _ = await waitForScreen { window?.rootViewController?.presentedViewController == nil }
+        if let leftover = window?.rootViewController?.presentedViewController {
+            leftover.dismiss(animated: false)
+            _ = await waitForScreen { window?.rootViewController?.presentedViewController == nil }
+        }
+        await settle()
         close()
     }
 
