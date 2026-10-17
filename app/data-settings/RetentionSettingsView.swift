@@ -43,10 +43,10 @@ extension View {
 /// source, each with the choices the core offers. Everything it shows comes from `RetentionSettingsModel`.
 struct RetentionSettingsView: View {
     static let policyIdentifier = "data-settings.retention.policy"
-    static let explanationIdentifier = "data-settings.retention.explanation"
-    static let soleSourceIdentifier = "data-settings.retention.sole-source"
+    static let footerIdentifier = "data-settings.retention.footer"
     static let pressureIdentifier = "data-settings.retention.pressure"
     static let periodStepperIdentifier = "data-settings.retention.period-stepper"
+    static let stepperIdentifier = "data-settings.retention.stepper"
     static let applyIdentifier = "data-settings.retention.apply"
     static let periodStateIdentifier = "data-settings.retention.period-state"
     static let lockedIdentifier = "data-settings.retention.locked"
@@ -69,21 +69,34 @@ struct RetentionSettingsView: View {
         self.renderReporter = renderReporter
     }
 
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                content
-                if let exportSettings = model.exportSettings {
-                    NavigationLink("Export a copy of your notes") { ExportSettingsView(model: exportSettings, renderReporter: renderReporter) }
-                        .frame(minHeight: 44)
-                        .accessibilityIdentifier(Self.exportLinkIdentifier)
-                        .reportDataSettingsRendered(Self.exportLinkIdentifier, text: "Export a copy of your notes")
-                }
-            }
-            .padding()
+    static let periodChoiceDays = [1, 3, 7, 14, 30, 90]
+    static let footerText = "The text is always kept. A recording with no text yet is never removed."
+
+    /// The full explanation behind the info button: the policy, the sole-source rule and what a period change does.
+    static func infoParagraphs(for status: RetentionStatus?) -> [String] {
+        var paragraphs = [RetentionSettingsText.soleSourceExplanation, RetentionSettingsText.periodChangeNote]
+        if let status {
+            paragraphs.insert(RetentionSettingsText.policyExplanation(status.policy), at: 0)
         }
-        .navigationTitle("Audio retention")
-        .navigationBarTitleDisplayMode(.inline)
+        return paragraphs
+    }
+
+    var body: some View {
+        SettingsScreenChrome(title: "Audio", infoTitle: "Audio retention", infoParagraphs: Self.infoParagraphs(for: model.status)) {
+            content
+            if let exportSettings = model.exportSettings {
+                NavigationLink {
+                    ExportSettingsView(model: exportSettings, renderReporter: renderReporter)
+                } label: {
+                    DSRow(label: "Export a copy of your notes", iconSystemName: "square.and.arrow.up")
+                        .allowsHitTesting(false)
+                }
+                .buttonStyle(.plain)
+                .background(RoundedRectangle(cornerRadius: DSRadius.card, style: .continuous).fill(DSColor.surface1.color))
+                .accessibilityIdentifier(Self.exportLinkIdentifier)
+                .reportDataSettingsRendered(Self.exportLinkIdentifier, text: "Export a copy of your notes")
+            }
+        }
         .onPreferenceChange(RetentionRenderedKey.self) { elements in
             renderReporter?(elements)
         }
@@ -103,8 +116,7 @@ struct RetentionSettingsView: View {
             note(RetentionSettingsText.lockedText, identifier: Self.lockedIdentifier)
         case .failed(let message):
             note(message, identifier: Self.failureIdentifier)
-            Button("Try again") { Task { await model.refresh() } }
-                .frame(minHeight: 44)
+            DSPillButton(title: "Try again", style: .secondary) { Task { await model.refresh() } }
                 .accessibilityIdentifier(Self.tryAgainIdentifier)
                 .reportDataSettingsRendered(Self.tryAgainIdentifier, text: "Try again")
         case .loaded:
@@ -118,41 +130,50 @@ struct RetentionSettingsView: View {
         }
     }
 
+    /// The preset periods, plus the stored and chosen ones when they are not presets (a stored 45 days, say).
+    private func periodChoices(_ status: RetentionStatus) -> [Int] {
+        Set(Self.periodChoiceDays + [model.chosenDays, storedDays(status)]).sorted()
+    }
+
+    private func storedDays(_ status: RetentionStatus) -> Int {
+        Int(status.policy.periodSeconds / 86_400)
+    }
+
+    /// The stored period is named with the core's summary, which marks the default; the other rows give the length.
+    private func choiceLabel(days: Int, status: RetentionStatus) -> String {
+        days == storedDays(status) ? RetentionSettingsText.periodSummary(status.policy) : RetentionSettingsText.dayCount(days)
+    }
+
     private func policySection(_ status: RetentionStatus) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Keep recordings for").font(.headline)
-            Text(RetentionSettingsText.periodSummary(status.policy))
-                .accessibilityIdentifier(Self.policyIdentifier)
-                .reportDataSettingsRendered(Self.policyIdentifier, text: RetentionSettingsText.periodSummary(status.policy))
-            Text(RetentionSettingsText.policyExplanation(status.policy))
-                .font(.footnote).foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityIdentifier(Self.explanationIdentifier)
-                .reportDataSettingsRendered(Self.explanationIdentifier, text: RetentionSettingsText.policyExplanation(status.policy))
-            Text(RetentionSettingsText.soleSourceExplanation)
-                .font(.footnote).foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityIdentifier(Self.soleSourceIdentifier)
-                .reportDataSettingsRendered(Self.soleSourceIdentifier, text: RetentionSettingsText.soleSourceExplanation)
-            Stepper(
-                value: $model.chosenDays, in: RetentionSettingsModel.minimumDays...RetentionSettingsModel.maximumDays
-            ) {
-                Text(RetentionSettingsText.dayCount(model.chosenDays))
+        VStack(alignment: .leading, spacing: DSSpacing.sm) {
+            DSGroupedSection(title: "Keep recordings after they become text", footer: Self.footerText) {
+                ForEach(periodChoices(status), id: \.self) { days in
+                    DSChoiceRow(label: choiceLabel(days: days, status: status), isSelected: model.chosenDays == days) {
+                        model.chosenDays = days
+                    }
+                }
+                // Any whole number of days the core supports can be chosen, not only the presets above.
+                Stepper(
+                    value: $model.chosenDays, in: RetentionSettingsModel.minimumDays...RetentionSettingsModel.maximumDays
+                ) {
+                    Text("Another length: \(RetentionSettingsText.dayCount(model.chosenDays))")
+                        .font(DSFont.rowLabel)
+                        .foregroundColor(DSColor.ink.color)
+                }
+                .padding(.horizontal, DSSpacing.md)
+                .frame(minHeight: DSLayout.rowMinimumHeight)
+                .accessibilityIdentifier(Self.stepperIdentifier)
+                .reportDataSettingsRendered(Self.stepperIdentifier, text: RetentionSettingsText.dayCount(model.chosenDays))
             }
             .accessibilityIdentifier(Self.periodStepperIdentifier)
             .reportDataSettingsRendered(Self.periodStepperIdentifier, text: RetentionSettingsText.dayCount(model.chosenDays))
-            Text(RetentionSettingsText.periodChangeNote)
-                .font(.footnote).foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Button {
-                Task { await model.applyPeriod() }
-            } label: {
-                Text("Save period").frame(maxWidth: .infinity, minHeight: 44)
-            }
-            .buttonStyle(.borderedProminent)
-            .reportDataSettingsRendered(Self.applyIdentifier, text: "Save period")
-            .disabled(model.isApplyingPeriod)
-            .accessibilityIdentifier(Self.applyIdentifier)
+            .reportDataSettingsRendered(Self.footerIdentifier, text: Self.footerText)
+            .reportDataSettingsRendered(Self.policyIdentifier, text: choiceLabel(days: storedDays(status), status: status))
+            DSPillButton(title: "Save period") { Task { await model.applyPeriod() } }
+                .frame(maxWidth: .infinity)
+                .accessibilityIdentifier(Self.applyIdentifier)
+                .reportDataSettingsRendered(Self.applyIdentifier, text: "Save period")
+                .disabled(model.isApplyingPeriod)
             if let message = model.periodState?.message {
                 note(message, identifier: Self.periodStateIdentifier)
             }
@@ -161,31 +182,42 @@ struct RetentionSettingsView: View {
 
     @ViewBuilder
     private func unresolvedSection(_ status: RetentionStatus) -> some View {
-        Text("Recordings without text").font(.headline)
         if status.unresolved.isEmpty {
-            note(RetentionSettingsText.noUnresolvedText, identifier: Self.noUnresolvedIdentifier)
-        }
-        ForEach(status.unresolved, id: \.itemID) { entry in
-            caseRow(entry)
+            DSGroupedSection(title: "Waiting for text") {
+                Text(RetentionSettingsText.noUnresolvedText)
+                    .font(DSFont.rowLabel)
+                    .foregroundColor(DSColor.inkMuted.color)
+                    .padding(.horizontal, DSSpacing.md)
+                    .frame(maxWidth: .infinity, minHeight: DSLayout.rowMinimumHeight, alignment: .leading)
+                    .accessibilityIdentifier(Self.noUnresolvedIdentifier)
+                    .reportDataSettingsRendered(Self.noUnresolvedIdentifier, text: RetentionSettingsText.noUnresolvedText)
+            }
+        } else {
+            DSGroupedSection(title: "Waiting for text") {
+                ForEach(status.unresolved, id: \.itemID) { entry in
+                    caseRow(entry)
+                }
+            }
         }
     }
 
     private func caseRow(_ entry: UnresolvedSoleAudioCase) -> some View {
         let busy = model.actions[entry.itemID] == .working
-        return VStack(alignment: .leading, spacing: 8) {
+        return VStack(alignment: .leading, spacing: DSSpacing.xs) {
             Text(RetentionSettingsText.reason(entry.reason))
+                .font(DSFont.rowLabel)
+                .foregroundColor(DSColor.ink.color)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("Captured \(entry.capturedAt)").font(.footnote).foregroundColor(.secondary)
+            Text("Captured \(entry.capturedAt)")
+                .font(DSFont.footer)
+                .foregroundColor(DSColor.inkMuted.color)
             if entry.options.contains(.retryTranscription) {
-                Button {
+                DSPillButton(title: "Retry turning into text", style: .secondary) {
                     Task { await model.retryTranscription(itemID: entry.itemID) }
-                } label: {
-                    Text("Retry turning into text").frame(maxWidth: .infinity, minHeight: 44)
                 }
-                .buttonStyle(.bordered)
+                .accessibilityIdentifier(Self.retryIdentifier(entry.itemID))
                 .reportDataSettingsRendered(Self.retryIdentifier(entry.itemID), text: "Retry turning into text")
                 .disabled(busy)
-                .accessibilityIdentifier(Self.retryIdentifier(entry.itemID))
             }
             // Only sole-source audio is listed here, and the core refuses to delete such audio on its own, so no
             // audio-only delete is offered. Item deletion is the explicit destructive path.
@@ -196,9 +228,8 @@ struct RetentionSettingsView: View {
                 note(message, identifier: Self.actionStateIdentifier(entry.itemID))
             }
         }
-        .padding()
-        .background(Color(.secondarySystemBackground))
-        .cornerRadius(8)
+        .padding(DSSpacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(Self.caseIdentifier(entry.itemID))
         .reportDataSettingsRendered(Self.caseIdentifier(entry.itemID), text: RetentionSettingsText.reason(entry.reason))
@@ -206,10 +237,11 @@ struct RetentionSettingsView: View {
 
     private func note(_ text: String, identifier: String) -> some View {
         Text(text)
-            .font(.body)
-            .foregroundColor(.secondary)
+            .font(DSFont.footer)
+            .foregroundColor(DSColor.inkMuted.color)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, DSSpacing.md)
             .accessibilityIdentifier(identifier)
             .reportDataSettingsRendered(identifier, text: text)
     }

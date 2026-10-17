@@ -141,34 +141,209 @@ struct SuggestionPlaceholderView: View {
     }
 }
 
+/// What the settings root shows on each row, keyed by the row's entry id, so a hosted test can read it.
+struct SettingsRootRenderedKey: PreferenceKey {
+    static var defaultValue: [String: String] = [:]
+
+    static func reduce(value: inout [String: String], nextValue: () -> [String: String]) {
+        value.merge(nextValue()) { _, latest in latest }
+    }
+}
+
 struct SettingsRootView: View {
     static let emptyIdentifier = "management.settings.empty"
+    static let eraseIdentifier = "management.settings.erase"
+    static let versionIdentifier = "management.settings.version"
+    static let exportEntryID = "export"
+
+    /// The design's row order for the two groups. Rows missing from `sections` are skipped.
+    static let firstGroupEntryIDs = ["prompt-settings", "voice-recovery"]
+    static let secondGroupEntryIDs = ["provider-settings", "audio-retention", exportEntryID]
 
     let sections: [ManagementEntry]
     let context: ManagementContext
+    /// Lets a hosted test see each row's label and value; production leaves it unset.
+    var renderReporter: (([String: String]) -> Void)?
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
+    private var firstGroup: [ManagementEntry] { Self.ordered(Self.firstGroupEntryIDs, from: sections) }
+
+    /// Processing, Audio, then Export, which lives with the other data settings.
+    private var secondGroup: [ManagementEntry] {
+        Self.ordered(Self.secondGroupEntryIDs, from: sections + (context.retention.exportSettings == nil ? [] : [Self.exportEntry]))
+    }
+
+    static func ordered(_ ids: [String], from entries: [ManagementEntry]) -> [ManagementEntry] {
+        ids.compactMap { id in entries.first { $0.id == id } }
+    }
+
+    private static let exportEntry = ManagementEntry(id: exportEntryID, title: "Export", systemImage: "square.and.arrow.up") { context in
+        context.retention.exportSettings.map { AnyView(ExportSettingsView(model: $0)) } ?? AnyView(EmptyView())
+    }
+
+    private var versionText: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        return version.map { "Oh And \($0)" } ?? "Oh And"
+    }
 
     var body: some View {
-        Group {
-            if sections.isEmpty {
-                Text("There is nothing to set up yet.")
-                    .font(.body)
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding()
-                    .accessibilityIdentifier(Self.emptyIdentifier)
-            } else {
-                List(sections) { section in
+        ScrollView {
+            VStack(alignment: .leading, spacing: DSSpacing.lg) {
+                HStack {
+                    DSGlassButton(systemName: "chevron.left", accessibilityLabel: "Back") { dismiss() }
+                    Spacer()
+                }
+                Text("Settings")
+                    .font(DSFont.displayXL)
+                    .foregroundColor(DSColor.ink.color)
+                    .accessibilityAddTraits(.isHeader)
+                if sections.isEmpty {
+                    Text("There is nothing to set up yet.")
+                        .font(DSFont.body)
+                        .foregroundColor(DSColor.inkMuted.color)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityIdentifier(Self.emptyIdentifier)
+                } else {
+                    group(firstGroup)
+                    group(secondGroup)
+                }
+                // Presentation only: the erase action is wired by the reset task (U07c), so this card is not yet
+                // interactive.
+                DSCard {
+                    Text("Erase everything")
+                        .font(DSFont.button)
+                        .foregroundColor(DSColor.destructive.color)
+                        .frame(maxWidth: .infinity)
+                }
+                .accessibilityIdentifier(Self.eraseIdentifier)
+                Text(versionText)
+                    .font(DSFont.footer)
+                    .foregroundColor(DSColor.inkMuted.color)
+                    .frame(maxWidth: .infinity)
+                    .accessibilityIdentifier(Self.versionIdentifier)
+            }
+            .padding(.horizontal, DSSpacing.sideMargin(for: horizontalSizeClass))
+            .padding(.vertical, DSSpacing.md)
+        }
+        .background(DSColor.surface0.color.ignoresSafeArea())
+        .navigationBarBackButtonHidden(true)
+        .toolbar(.hidden, for: .navigationBar)
+        .onPreferenceChange(SettingsRootRenderedKey.self) { renderReporter?($0) }
+        .task { await loadValues() }
+    }
+
+    /// Reads the current values the rows show. The models keep their own read-scope rules: a locked session leaves
+    /// the stored values (processing, audio) empty rather than showing them.
+    private func loadValues() async {
+        async let prompt: Void = context.promptSettings.load()
+        async let retention: Void = context.retention.refresh()
+        async let providers: Void = context.providerSettings.refresh()
+        _ = await (prompt, retention, providers)
+    }
+
+    @ViewBuilder
+    private func group(_ entries: [ManagementEntry]) -> some View {
+        if !entries.isEmpty {
+            DSGroupedSection {
+                ForEach(entries) { entry in
                     NavigationLink {
-                        section.makeView(context)
+                        entry.makeView(context)
                     } label: {
-                        Label(section.title, systemImage: section.systemImage)
-                            .fixedSize(horizontal: false, vertical: true)
+                        SettingsEntryRow(entry: entry, context: context)
+                            .allowsHitTesting(false)
                     }
+                    .buttonStyle(.plain)
                 }
             }
         }
-        .navigationTitle("Settings")
-        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+/// One settings row with its current value. A value that is not known yet (not loaded, or the session is locked and
+/// the setting is stored state) is left out rather than guessed.
+private struct SettingsEntryRow: View {
+    let entry: ManagementEntry
+    let context: ManagementContext
+
+    var body: some View {
+        switch entry.id {
+        case "prompt-settings":
+            PromptValueRow(entry: entry, model: context.promptSettings)
+        case "voice-recovery":
+            RecoveryValueRow(entry: entry, model: context.voiceRecovery)
+        case "provider-settings":
+            ProcessingValueRow(entry: entry, model: context.providerSettings)
+        case "audio-retention":
+            RetentionValueRow(entry: entry, model: context.retention)
+        default:
+            reported(entry, value: nil)
+        }
+    }
+}
+
+private func reported(_ entry: ManagementEntry, label: String? = nil, value: String?) -> some View {
+    DSRow(label: label ?? entry.title, iconSystemName: entry.systemImage, value: value)
+        .preference(key: SettingsRootRenderedKey.self, value: [entry.id: [label ?? entry.title, value].compactMap { $0 }.joined(separator: ": ")])
+}
+
+private struct PromptValueRow: View {
+    let entry: ManagementEntry
+    @ObservedObject var model: PromptSettingsModel
+
+    var body: some View {
+        reported(entry, value: model.hasLoaded ? (model.isEnabled ? "On" : "Off") : nil)
+    }
+}
+
+/// The count comes from the recordings left on this device, not from the stored history, so it is the same whether or
+/// not the session is unlocked. It is empty until the first check finishes.
+private struct RecoveryValueRow: View {
+    let entry: ManagementEntry
+    @ObservedObject var model: VoiceRecoveryModel
+    @State private var hasRequestedCheck = false
+
+    private var value: String? {
+        guard hasRequestedCheck, !model.isChecking else { return nil }
+        return model.rows.isEmpty ? "None" : "\(model.rows.count)"
+    }
+
+    var body: some View {
+        reported(entry, value: value)
+            .onAppear {
+                hasRequestedCheck = true
+                model.refresh()
+            }
+    }
+}
+
+private struct ProcessingValueRow: View {
+    let entry: ManagementEntry
+    @ObservedObject var model: ProviderSettingsModel
+
+    private var value: String? {
+        guard model.phase == .loaded else { return nil }
+        switch model.operatingMode {
+        case .localOnly: return "On this phone"
+        case .privateServer: return "Private server"
+        case .hosted(let protocolName, _): return protocolName
+        }
+    }
+
+    var body: some View {
+        reported(entry, label: "Processing", value: value)
+    }
+}
+
+private struct RetentionValueRow: View {
+    let entry: ManagementEntry
+    @ObservedObject var model: RetentionSettingsModel
+
+    var body: some View {
+        reported(
+            entry, label: "Audio",
+            value: model.status.map { RetentionSettingsText.dayCount(Int($0.policy.periodSeconds / 86_400)) })
     }
 }
