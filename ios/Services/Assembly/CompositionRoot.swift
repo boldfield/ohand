@@ -455,6 +455,9 @@ struct CompositionAdapters {
     let readSession: ReadAuthenticationSession
     /// The Keychain-backed credentials the transport resolves at dispatch and provider setup enters secrets into.
     let credentials: CredentialService
+    /// The reset core the reset service and control use, given the root's real client. Production uses the client
+    /// itself; a debug test may wrap it to fail a read.
+    let resetCore: (ResetCore) -> ResetCore
 
     fileprivate init(
         kind: CompositionAdapterSet,
@@ -467,7 +470,8 @@ struct CompositionAdapters {
         lifecycleNotifications: NotificationCenter,
         recognizer: OnDeviceRecognizing?,
         readSession: ReadAuthenticationSession,
-        credentials: CredentialService
+        credentials: CredentialService,
+        resetCore: @escaping (ResetCore) -> ResetCore = { $0 }
     ) {
         self.kind = kind
         self.sender = sender
@@ -480,6 +484,7 @@ struct CompositionAdapters {
         self.recognizer = recognizer
         self.readSession = readSession
         self.credentials = credentials
+        self.resetCore = resetCore
     }
 
     fileprivate static func production(for configuration: CompositionConfiguration) -> CompositionAdapters {
@@ -514,14 +519,15 @@ struct CompositionAdapters {
         lifecycleNotifications: NotificationCenter = NotificationCenter(),
         recognizer: OnDeviceRecognizing? = nil,
         credentials: CredentialService = CredentialService(
-            serviceName: "com.boldfield.ohand.tests.composition.\(UUID().uuidString)")
+            serviceName: "com.boldfield.ohand.tests.composition.\(UUID().uuidString)"),
+        resetCore: @escaping (ResetCore) -> ResetCore = { $0 }
     ) -> CompositionAdapters {
         CompositionAdapters(
             kind: .injectedForTests, sender: sender, attachProviderTransport: attachProviderTransport,
             notificationCenter: notificationCenter,
             permissionObservations: permissionObservations, reachability: reachability,
             backgroundGrant: backgroundGrant, lifecycleNotifications: lifecycleNotifications,
-            recognizer: recognizer, readSession: readSession, credentials: credentials)
+            recognizer: recognizer, readSession: readSession, credentials: credentials, resetCore: resetCore)
     }
     #endif
 }
@@ -1853,14 +1859,15 @@ public final class ServiceCompositionRoot {
             let resetItemCleanup = ResetItemCleanupBridge()
             let resetStaging = NativeResetIngress(service: ingress, gate: resetGate, layout: layout)
             undo.append { resetStaging.retire() }
+            let resetCore = adapters.resetCore(resetClient)
             let resetService = ResetService(
-                core: resetClient,
+                core: resetCore,
                 staging: resetStaging,
                 itemCleanup: resetItemCleanup,
                 exportTemporaries: ExportTemporaryCleaner(layout: layout),
                 credentials: KeychainResetCredentialRemover(serviceName: configuration.credentialServiceName),
                 markers: resetMarkers)
-            let resetControl = ResetControl(service: resetService, core: resetClient, session: adapters.readSession)
+            let resetControl = ResetControl(service: resetService, core: resetCore, session: adapters.readSession)
             let permissionReconciler = NotificationPermissionReconciler(
                 center: adapters.notificationCenter, reconciliation: reminderCore,
                 observations: adapters.permissionObservations)

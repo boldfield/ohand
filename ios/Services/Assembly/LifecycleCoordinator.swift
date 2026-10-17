@@ -715,9 +715,14 @@ extension LifecycleCoordinator {
         return keptForRetry ? .deferred("ingress_kept_for_retry") : .completed
     }
 
+    /// Only a resume that proved no reset is outstanding, or finished one, settles the step. A `notStarted` that carries
+    /// a blocker means the reset state could not be read (for example the core's status read failed), so an interrupted
+    /// reset is not ruled out and the effectful steps stay held.
     static func outcome(ofReset outcome: ResetOutcome) -> LifecycleStepOutcome {
         switch outcome.state {
-        case .notStarted, .completed: return .completed
+        case .notStarted where outcome.blockers.isEmpty: return .completed
+        case .notStarted: return .deferred("reset_status_unknown")
+        case .completed: return .completed
         case .pending: return .deferred("reset_pending")
         }
     }

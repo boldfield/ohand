@@ -202,6 +202,17 @@ final class LifecycleCoordinatorTests: XCTestCase {
         XCTAssertEqual(settled.outcome(of: .reminders), .completed)
     }
 
+    func testOnlyAProvenAbsentOrFinishedResetSettlesTheResetStep() {
+        func outcome(_ state: ResetState, _ blockers: [ResetBlocker]) -> LifecycleStepOutcome {
+            LifecycleCoordinator.outcome(ofReset: ResetOutcome(state: state, progress: nil, blockers: blockers))
+        }
+        XCTAssertEqual(outcome(.notStarted, []), .completed, "no reset was ever started")
+        XCTAssertEqual(outcome(.completed, []), .completed)
+        XCTAssertEqual(outcome(.notStarted, [.coreUnavailable]), .deferred("reset_status_unknown"))
+        XCTAssertEqual(outcome(.notStarted, [.cancelled]), .deferred("reset_status_unknown"))
+        XCTAssertEqual(outcome(.pending, [.markerUnreadable]), .deferred("reset_pending"))
+    }
+
     func testAHungStepTimesOutAndLaterStepsStillRun() async {
         let log = StepLog()
         let coordinator = makeCoordinator(timeout: 0.2, log: log, steps: LifecycleStep.allCases.filter { $0 != .jobs })
