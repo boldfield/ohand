@@ -1748,7 +1748,7 @@ final class CompositionRootTests: XCTestCase {
             return XCTFail("the later pass finishes")
         }
         XCTAssertEqual(settled.outcome(of: .reset), .completed, "no reset is outstanding once the status is read")
-        XCTAssertEqual(settled.outcome(of: .jobs), .completed, "the job runner activates after the reset settles")
+        XCTAssertEqual(settled.outcome(of: .jobs), .requested, "the job runner is activated after the reset settles")
         XCTAssertNotEqual(settled.outcome(of: .reminders), .deferred("reset_unsettled"))
     }
 
