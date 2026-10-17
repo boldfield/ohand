@@ -85,6 +85,7 @@ final class CaptureEntryViewTests: XCTestCase {
         XCTAssertLessThanOrEqual(header.maxX, windowSize.width + 0.5, file: file, line: line)
     }
 
+    /// Checks the controls the composer actually drew, not only which state it was given.
     private func assertComposerState(
         _ state: String, file: StaticString = #filePath, line: UInt = #line
     ) {
@@ -92,6 +93,53 @@ final class CaptureEntryViewTests: XCTestCase {
             let shown = frames[CaptureEntryView.composerStateIdentifier(other)] != nil
             XCTAssertEqual(shown, other == state, "composer \(other) is \(other == state ? "" : "not ")shown", file: file, line: line)
         }
+        let expected: Set<String>
+        switch state {
+        case "rest": expected = [HomeComposer.placeholderIdentifier, HomeComposer.fieldIdentifier, HomeComposer.recordIdentifier]
+        case "typing": expected = [HomeComposer.fieldIdentifier, HomeComposer.recordIdentifier, HomeComposer.saveIdentifier]
+        default: expected = [HomeComposer.discardIdentifier, HomeComposer.stopIdentifier]
+        }
+        let controls = [
+            HomeComposer.placeholderIdentifier, HomeComposer.fieldIdentifier, HomeComposer.recordIdentifier,
+            HomeComposer.saveIdentifier, HomeComposer.discardIdentifier, HomeComposer.stopIdentifier,
+        ]
+        for control in controls {
+            let drawn = frames[control].map { $0 != .zero } ?? false
+            XCTAssertEqual(
+                drawn, expected.contains(control), "\(control) is \(expected.contains(control) ? "" : "not ")drawn while \(state)",
+                file: file, line: line)
+            XCTAssertNil(
+                frames[HomeComposer.disabledIdentifier(control)], "\(control) is not disabled while \(state)",
+                file: file, line: line)
+        }
+        if expected.contains(HomeComposer.recordIdentifier) || expected.contains(HomeComposer.stopIdentifier) {
+            let action = frame(expected.contains(HomeComposer.stopIdentifier) ? HomeComposer.stopIdentifier : HomeComposer.recordIdentifier)
+            XCTAssertGreaterThanOrEqual(action.height, Self.minimumTouchTarget, file: file, line: line)
+        }
+    }
+
+    private func assertComposerStateName(_ state: String, file: StaticString = #filePath, line: UInt = #line) {
+        for other in ["rest", "typing", "recording"] {
+            XCTAssertEqual(frames[CaptureEntryView.composerStateIdentifier(other)] != nil, other == state, file: file, line: line)
+        }
+    }
+
+    /// While Record and Save cannot act they are drawn disabled; the text field stays enabled.
+    private func assertEntryActionsDisabled(saveIsShown: Bool, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertNotNil(frames[HomeComposer.disabledIdentifier(HomeComposer.recordIdentifier)], "Record is disabled", file: file, line: line)
+        XCTAssertNil(frames[HomeComposer.recordIdentifier], file: file, line: line)
+        if saveIsShown {
+            XCTAssertNotNil(frames[HomeComposer.disabledIdentifier(HomeComposer.saveIdentifier)], "Save is disabled", file: file, line: line)
+            XCTAssertNil(frames[HomeComposer.saveIdentifier], file: file, line: line)
+        }
+        XCTAssertNotNil(frames[HomeComposer.fieldIdentifier], "the text field stays enabled", file: file, line: line)
+        XCTAssertNil(frames[HomeComposer.disabledIdentifier(HomeComposer.fieldIdentifier)], file: file, line: line)
+    }
+
+    private func waitUntilFocused(timeout: TimeInterval = 2) -> Bool {
+        let deadline = Date(timeIntervalSinceNow: timeout)
+        while frames[HomeComposer.focusedIdentifier] == nil, Date() < deadline { settle(for: 0.1) }
+        return frames[HomeComposer.focusedIdentifier] != nil
     }
 
     private func post(_ name: Notification.Name) {
@@ -186,19 +234,63 @@ final class CaptureEntryViewTests: XCTestCase {
         XCTAssertEqual(frame(CaptureEntryView.composerIdentifier).width, rest.width, accuracy: 0.5)
     }
 
-    func testAnInFlightSaveIsReportedAndDisablesTheComposer() {
+    func testAnInFlightSaveIsReportedAndDisablesRecordAndSaveButNotTheField() {
         host(keyboardHeight: Self.standardPhoneKeyboardHeight)
         textIngress.holdsCompletions = true
+        textIngress.outcomes = [.saved(captureID: "text-capture-1", itemID: "item-1", alreadySaved: false)]
         model.textModel.updateText("buy oat milk")
         model.saveText()
         settle()
 
         XCTAssertNotEqual(frame(CaptureEntryView.messageIdentifier), .zero, "the in-flight save is stated")
-        XCTAssertNotNil(frames[CaptureEntryView.composerSavingIdentifier], "the composer is disabled while saving")
+        assertComposerStateName("typing")
+        assertEntryActionsDisabled(saveIsShown: true)
+        model.startRecording()
+        XCTAssertEqual(voice.startCount, 0, "Record does nothing while a save is in flight")
 
         textIngress.release()
         settle()
-        XCTAssertNil(frames[CaptureEntryView.composerSavingIdentifier], "and enabled again afterwards")
+        assertComposerState("rest")
+    }
+
+    func testASaveKeepsTheComposerFocused() {
+        host(keyboardHeight: Self.standardPhoneKeyboardHeight)
+        XCTAssertTrue(waitUntilFocused(), "the silent composer takes focus when the home appears")
+        textIngress.holdsCompletions = true
+        textIngress.outcomes = [.saved(captureID: "text-capture-1", itemID: "item-1", alreadySaved: false)]
+        model.textModel.updateText("buy oat milk")
+        model.saveText()
+        settle()
+        XCTAssertNotNil(frames[HomeComposer.focusedIdentifier], "the field keeps focus while the save is in flight")
+
+        textIngress.release()
+        settle()
+        XCTAssertEqual(model.textModel.text, "", "the composer clears")
+        XCTAssertNotNil(frames[HomeComposer.focusedIdentifier], "and keeps focus, so the keyboard stays up")
+    }
+
+    func testRecordAndSaveAreDisabledWhileTheRecorderStartsOrFinishes() {
+        host(keyboardHeight: Self.standardPhoneKeyboardHeight)
+
+        voice.state = .requestingPermission
+        settle()
+        XCTAssertNotEqual(frame(CaptureEntryView.messageIdentifier), .zero, "waiting for the microphone is stated")
+        assertComposerStateName("rest")
+        assertEntryActionsDisabled(saveIsShown: false)
+
+        model.textModel.updateText("buy oat milk")
+        settle()
+        assertComposerStateName("typing")
+        assertEntryActionsDisabled(saveIsShown: true)
+
+        voice.state = .finishing(captureID: "voice-1")
+        settle()
+        XCTAssertNotEqual(frame(CaptureEntryView.messageIdentifier), .zero, "finishing the recording is stated")
+        assertEntryActionsDisabled(saveIsShown: true)
+
+        voice.state = .idle
+        settle()
+        assertComposerState("typing")
     }
 
     // MARK: Saved pill and messages

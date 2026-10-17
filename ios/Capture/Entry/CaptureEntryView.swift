@@ -12,8 +12,6 @@ struct CaptureEntryView: View {
     static let headerIdentifier = "capture-entry.header"
     /// Reported while the composer shows that state (`rest`, `typing` or `recording`), so tests can tell them apart.
     static func composerStateIdentifier(_ state: String) -> String { "capture-entry.composer.\(state)" }
-    /// Reported while the composer is disabled for an in-flight save.
-    static let composerSavingIdentifier = "capture-entry.composer.saving"
     /// How long the Saved pill stays before it fades.
     static let savedPillDuration: TimeInterval = 2
     /// The widest the composer grows at regular width.
@@ -110,43 +108,56 @@ struct CaptureEntryView: View {
     }
 
     private var composer: some View {
-        Group {
+        let state = composerState
+        return Group {
             if case .recording(_, let startedAt) = model.recorderState {
                 TimelineView(.periodic(from: startedAt, by: 1)) { context in
-                    composerView(state: .recording, elapsedText: CaptureMessages.elapsedText(since: startedAt, now: context.date))
+                    composerView(state: state, elapsedText: CaptureMessages.elapsedText(since: startedAt, now: context.date))
                 }
             } else {
-                composerView(state: model.textModel.text.isEmpty ? .rest : .typing, elapsedText: "0:00")
+                composerView(state: state, elapsedText: "0:00")
             }
-        }
-        .disabled(model.textModel.isSaving)
-        .onChange(of: model.textModel.isSaving) { isSaving in
-            // Disabling the composer for the in-flight save drops focus; a save keeps the keyboard up.
-            if !isSaving, keyboardIsVisible { DispatchQueue.main.async { composerIsFocused = true } }
         }
         .accessibilityIdentifier(Self.composerIdentifier)
         .reportHomeFrame(Self.composerIdentifier)
-        .reportHomeFrame(Self.composerStateIdentifier(composerStateName))
-        .background {
-            if model.textModel.isSaving { Color.clear.reportHomeFrame(Self.composerSavingIdentifier) }
+        .reportHomeFrame(Self.composerStateIdentifier(Self.name(of: state)))
+    }
+
+    /// The one place the composer's state is chosen; the same value is drawn and reported.
+    private var composerState: DSComposerState {
+        if case .recording = model.recorderState { return .recording }
+        return model.textModel.text.isEmpty ? .rest : .typing
+    }
+
+    static func name(of state: DSComposerState) -> String {
+        switch state {
+        case .rest: return "rest"
+        case .typing: return "typing"
+        case .recording: return "recording"
         }
     }
 
-    private var composerStateName: String {
-        if case .recording = model.recorderState { return "recording" }
-        return model.textModel.text.isEmpty ? "rest" : "typing"
+    /// Record and Save do nothing while a text save is in flight or the recorder is starting or finishing, so they are
+    /// shown disabled then. The text field stays enabled and focused, so a save keeps the keyboard up.
+    private var entryActionsAreEnabled: Bool {
+        guard !model.textModel.isSaving else { return false }
+        switch model.recorderState {
+        case .idle, .recording: return true
+        case .requestingPermission, .finishing: return false
+        }
     }
 
     private func composerView(state: DSComposerState, elapsedText: String) -> some View {
-        DSComposer(
+        HomeComposer(
             state: state,
             text: Binding(get: { model.textModel.text }, set: { model.textModel.updateText($0) }),
             elapsedText: elapsedText,
-            onMic: { model.startRecording() },
-            onSave: { if model.textModel.canSave { model.saveText() } },
+            entryActionsAreEnabled: entryActionsAreEnabled,
+            focus: $composerIsFocused,
+            onMic: { if entryActionsAreEnabled { model.startRecording() } },
+            onSave: { if entryActionsAreEnabled, model.textModel.canSave { model.saveText() } },
             onDiscard: { model.cancelRecording() },
             onStop: { model.stopRecording() })
-            .focused($composerIsFocused)
     }
 
     /// Notices that stay beside the outcome: they never hide what happened to the last capture, or each other.
