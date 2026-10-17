@@ -97,6 +97,7 @@ final class AppServices {
             retrieval: .assembled(searcher: retrieval, root: root, navigation: navigation),
             retention: .assembled(root: root),
             exportSettings: .assembled(root: root),
+            providerSettings: .assembled(root: root),
             promptSettings: PromptSettingsModel(controller: root.promptSchedule))
         entrySession = CaptureEntrySession(
             handoff: handoff, defaultMode: defaultMode, access: access, notificationCenter: notificationCenter)
