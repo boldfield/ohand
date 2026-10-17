@@ -143,7 +143,7 @@ final class SourceDetailModelTests: XCTestCase {
         await missing.load()
         XCTAssertEqual(missing.failure, .notFound)
         let broken = make(FakeDetailReader(.failure(ItemDetailError.core(
-            CoreFailure(errorClass: "internal", code: "oops", message: "fixed")))))
+            CoreFailure(errorClass: .permanent, code: "oops", message: "fixed")))))
         await broken.load()
         XCTAssertEqual(broken.failure, .unreadable)
     }
