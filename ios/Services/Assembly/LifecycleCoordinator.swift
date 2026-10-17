@@ -22,10 +22,12 @@ public enum LifecycleTrigger: Hashable, Sendable {
     }
 }
 
-/// One unit of recovery or foreground work. The declaration order is the order a pass runs them in: captures first,
-/// so everything after them sees every durable capture; then queued work, deletion that must finish, the reminder
+/// One unit of recovery or foreground work. The declaration order is the order a pass runs them in: an interrupted
+/// reset first, because the ingress gate holds every capture recovery would import until the reset releases its
+/// boundary; then captures, so everything after them sees every durable capture; then queued work, deletion that must finish, the reminder
 /// desired state, space-freeing retention, optional prompting, and finally the read-only health snapshot.
 public enum LifecycleStep: String, CaseIterable, Sendable {
+    case reset
     case ingress
     case jobs
     case deletion
@@ -125,6 +127,10 @@ public final class LifecycleCoordinator: CompositionLifecycleOwner, @unchecked S
     private var queuedWaiters: [CheckedContinuation<LifecyclePassReport, Never>] = []
     private var activeRace: StepRace?
     private var isStopped = false
+    /// Whether no reset step has settled since the hold closed; effectful steps wait for a pass that settles it. It
+    /// starts open for a coordinator driven only by injected actions, and closes when `connect(to:)` installs the real
+    /// reset resume, so after a crash nothing effectful runs until a resume proves no reset is outstanding or finishes it.
+    private var resetUnsettled = false
     private var foregroundObserver: NSObjectProtocol?
     private var foregroundObserverCenter: NotificationCenter?
     private weak var connectedRoot: ServiceCompositionRoot?
@@ -406,6 +412,7 @@ public final class LifecycleCoordinator: CompositionLifecycleOwner, @unchecked S
 
     private func runPass(triggers: Set<LifecycleTrigger>) async -> LifecyclePassReport {
         let wanted = Set(triggers.flatMap { $0.steps })
+        await settleResetBeforeHeldSteps(wanted: wanted, triggers: triggers)
         var results: [LifecycleStepResult] = []
         for step in LifecycleStep.allCases where wanted.contains(step) {
             if stopped() {
@@ -416,10 +423,57 @@ public final class LifecycleCoordinator: CompositionLifecycleOwner, @unchecked S
                 results.append(LifecycleStepResult(step: step, outcome: .notConfigured))
                 continue
             }
+            if Self.isHeldByUnsettledReset(step), isResetUnsettled() {
+                // Fail closed: an interrupted reset that has not settled may not yet have a core reset fence, so no
+                // queued interpretation may dispatch and no old reminder may be installed until a pass sees it settle.
+                results.append(LifecycleStepResult(step: step, outcome: .deferred("reset_unsettled")))
+                continue
+            }
             let outcome = await runBounded(action, triggers: triggers)
+            if step == .reset {
+                setResetUnsettled(outcome != .completed)
+            }
             results.append(LifecycleStepResult(step: step, outcome: outcome))
         }
         return LifecyclePassReport(triggers: triggers, results: results)
+    }
+
+    /// A pass whose triggers want held steps but not the reset step (a time change) cannot rely on an earlier pass
+    /// having settled the reset: an inactive relaunch runs no launch pass. While the hold is closed it runs the reset
+    /// resume first as a precondition, which proves no reset is outstanding or finishes the interrupted one. It is not a
+    /// step the trigger asked for, so it adds no result; if it does not settle, the held steps report `reset_unsettled`.
+    private func settleResetBeforeHeldSteps(wanted: Set<LifecycleStep>, triggers: Set<LifecycleTrigger>) async {
+        guard !wanted.contains(.reset), wanted.contains(where: Self.isHeldByUnsettledReset), isResetUnsettled(),
+            !stopped(), let resume = action(for: .reset)
+        else { return }
+        let outcome = await runBounded(resume, triggers: triggers)
+        setResetUnsettled(outcome != .completed)
+    }
+
+    /// The steps that issue effects over durable state a reset deletes. Ingress stays open (the ingress gate holds
+    /// captures itself), and the read-only health snapshot is harmless.
+    private static func isHeldByUnsettledReset(_ step: LifecycleStep) -> Bool {
+        switch step {
+        case .jobs, .deletion, .reminders, .retention, .promptEligibility: return true
+        case .reset, .ingress, .health: return false
+        }
+    }
+
+    private func isResetUnsettled() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return resetUnsettled
+    }
+
+    /// Closes the reset hold until a reset step or precondition settles. `connect(to:)` calls it with the real resume.
+    func holdUntilResetSettles() {
+        setResetUnsettled(true)
+    }
+
+    private func setResetUnsettled(_ unsettled: Bool) {
+        lock.lock()
+        resetUnsettled = unsettled
+        lock.unlock()
     }
 
     /// Runs `action` and gives up on it after the step bound or on shutdown, whichever comes first. An action that
@@ -555,6 +609,12 @@ extension LifecycleCoordinator {
             }, for: .ingress)
         setAction(
             { [weak root] _ in
+                guard let root else { return .deferred("root_unavailable") }
+                return Self.outcome(ofReset: await root.resumeInterruptedReset())
+            }, for: .reset)
+        holdUntilResetSettles()
+        setAction(
+            { [weak root] _ in
                 // The check and the activation run together on the main queue, where the background notification
                 // suspends the runner, so a pass delayed by slow earlier steps never wakes a runner the app has
                 // already suspended. The next foreground activation's pass activates it.
@@ -674,6 +734,18 @@ extension LifecycleCoordinator {
             return false
         }
         return keptForRetry ? .deferred("ingress_kept_for_retry") : .completed
+    }
+
+    /// Only a resume that proved no reset is outstanding, or finished one, settles the step. A `notStarted` that carries
+    /// a blocker means the reset state could not be read (for example the core's status read failed), so an interrupted
+    /// reset is not ruled out and the effectful steps stay held.
+    static func outcome(ofReset outcome: ResetOutcome) -> LifecycleStepOutcome {
+        switch outcome.state {
+        case .notStarted where outcome.blockers.isEmpty: return .completed
+        case .notStarted: return .deferred("reset_status_unknown")
+        case .completed: return .completed
+        case .pending: return .deferred("reset_pending")
+        }
     }
 
     static func outcome(ofDeletion report: DeletionReconcileReport) -> LifecycleStepOutcome {
