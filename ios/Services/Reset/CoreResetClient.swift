@@ -9,7 +9,7 @@ import OhAndCoreBridge
 /// `firstOperationID`, a range of its own (disjoint from every `ServiceCompositionRoot.reservedOperationRanges` entry). Call `shutDown()` before closing the core so no
 /// caller is left waiting.
 final class CoreResetClient: ResetCore, @unchecked Sendable {
-    static let firstOperationID: UInt64 = 1 << 44
+    static let firstOperationID: UInt64 = (1 << 44) | (1 << 40)
 
     static let shutDownFailure = CoreFailure(
         errorClass: .cancelled, code: "client_shut_down", message: "the reset client was shut down")
