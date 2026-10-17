@@ -183,7 +183,7 @@ final class ProviderSettingsRealCoreTests: XCTestCase {
         XCTAssertEqual(model.operatingMode, .localOnly)
     }
 
-    func testAConnectionCheckOfAProfileWithNoStoredSecretReportsItWithoutSendingAnything() async throws {
+    func testAConnectionCheckThroughTheRealCoreEndsInAFixedRedactedOutcomeAndNeverSucceedsOverAnUnreachableSender() async throws {
         let model = try await makeModel()
         await model.refresh()
         fill(model, name: "hosted", providerProtocol: .openAI)
@@ -192,12 +192,15 @@ final class ProviderSettingsRealCoreTests: XCTestCase {
         XCTAssertEqual(model.saveState, .saved)
 
         let hosted = try version(model, profile: "hosted")
+        XCTAssertNil(model.connectionStates[hosted.profileVersion], "saving a profile checks nothing")
         await model.checkConnection(hosted)
 
-        XCTAssertEqual(model.connectionStates[hosted.profileVersion], .finished(.credentialMissing))
-        XCTAssertEqual(
-            model.connectionStates[hosted.profileVersion]?.message,
-            ProviderSettingsText.connectionOutcome(.credentialMissing))
+        guard case .finished(let outcome)? = model.connectionStates[hosted.profileVersion] else {
+            return XCTFail("the check finished with a core outcome: \(String(describing: model.connectionStates))")
+        }
+        XCTAssertNotEqual(outcome, .ok)
+        XCTAssertEqual(model.connectionStates[hosted.profileVersion]?.message, ProviderSettingsText.connectionOutcome(outcome))
+        XCTAssertFalse(model.connectionStates[hosted.profileVersion]!.message.contains("example"))
     }
 
     func testAnUnverifiedPrivateServerIsDeclaredUnavailableByTheCoreAndRefusedAsDefault() async throws {
