@@ -322,13 +322,6 @@ final class ProviderSettingsModelTests: XCTestCase {
         await model.useLocalOnly()
         XCTAssertEqual(controls.defaultsCleared, 0)
     }
-}
-
-private extension Result {
-    var failureValue: Failure? {
-        if case .failure(let failure) = self { return failure }
-        return nil
-    }
 
     // MARK: credentials and connection checks
 
@@ -464,7 +457,7 @@ private extension Result {
         await model.checkConnection(version)
         XCTAssertEqual(
             model.connectionStates["hosted-v1"],
-            .failed(ProviderSettingsText.failure(controls.checkResult.failureValueForView!)))
+            .failed(ProviderSettingsText.failure(controls.checkResult.failureValue!)))
         XCTAssertFalse(allVisibleText(model).contains("leak.example"))
 
         controls.checkResult = .success(.ok)
@@ -482,5 +475,12 @@ private extension Result {
         XCTAssertNil(model.credentialState)
         XCTAssertEqual(model.draft.credentialReference, "")
         XCTAssertTrue(model.connectionStates.isEmpty)
+    }
+}
+
+private extension Result {
+    var failureValue: Failure? {
+        if case .failure(let failure) = self { return failure }
+        return nil
     }
 }
