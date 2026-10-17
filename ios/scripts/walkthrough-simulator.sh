@@ -30,7 +30,8 @@ sleep 2
   done
 ) &
 matcher_pid=$!
-trap 'kill "${matcher_pid}" 2>/dev/null || true' EXIT
+# Shut the simulator down at the end: a second booted simulator starves the next walkthrough on the hosted runner.
+trap 'kill "${matcher_pid}" 2>/dev/null || true; xcrun simctl shutdown "${udid}" 2>/dev/null || true' EXIT
 
 test_status=0
 (
