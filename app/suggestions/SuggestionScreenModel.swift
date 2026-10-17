@@ -69,10 +69,10 @@ final class SuggestionScreenModel: ObservableObject {
     private let makeCommandID: () -> String
     private var notificationID: String?
     private var pendingResponse: PendingResponse?
-    /// Bumped by every `open`, so a response can tell that a newer prompt arrived while it was being stored.
+    /// Bumped by every `open`, so running work can tell that a newer prompt arrived while it was waiting.
     private var openGeneration = 0
-    /// Bumped by every resolve and by `lock`, so only the newest activation result is applied.
-    private var resolveSequence = 0
+    /// The `openGeneration` at the last relock. While no prompt has been opened since, nothing is requested.
+    private var lockedGeneration = -1
 
     init(
         responder: SuggestionResponding,
@@ -88,27 +88,31 @@ final class SuggestionScreenModel: ObservableObject {
     }
 
     /// Opens the daily prompt `notificationID` and shows the item the core offers now, if any. Without a prompt there is
-    /// nothing to open, and the screen says so calmly. The latest prompt is always kept: a call while an answer is being
-    /// stored records the prompt and the response resolves it once the answer is stored, and an older activation that
-    /// finishes late is ignored.
+    /// nothing to open, and the screen says so calmly. Only one call to the core runs at a time, and the latest prompt is
+    /// always kept: a call while another is running records the prompt, and the running work resolves it before it
+    /// finishes, however many prompts arrive meanwhile.
     @MainActor func open(notificationID: String?) async {
         openGeneration += 1
         self.notificationID = notificationID
         guard !isBusy else { return }
+        isBusy = true
+        defer { isBusy = false }
         pendingResponse = nil
         notice = nil
-        await resolve()
+        await resolveLatest()
     }
 
     /// Asks again for what is eligible now.
     @MainActor func refresh() async {
         guard !isBusy else { return }
-        await resolve()
+        isBusy = true
+        defer { isBusy = false }
+        await resolveLatest()
     }
 
     /// Drops everything private from the screen. The host calls it when the session relocks.
     @MainActor func lock() {
-        resolveSequence += 1
+        lockedGeneration = openGeneration
         pendingResponse = nil
         notice = nil
         state = .locked
@@ -126,8 +130,8 @@ final class SuggestionScreenModel: ObservableObject {
             pendingResponse = nil
             notice = nil
             if openGeneration != startedGeneration {
-                await resolve()
-            } else {
+                await resolveLatest()
+            } else if lockedGeneration != openGeneration {
                 state = .responded(response)
             }
         } catch SuggestionResponseError.notAuthenticated, SuggestionResponseError.relockedBeforeDelivery {
@@ -136,13 +140,13 @@ final class SuggestionScreenModel: ObservableObject {
             SuggestionResponseError.commandConflict
         {
             pendingResponse = nil
-            await resolve()
+            await resolveLatest()
             if state != .locked { notice = .changed }
         } catch {
             if openGeneration != startedGeneration {
                 pendingResponse = nil
-                await resolve()
-            } else {
+                await resolveLatest()
+            } else if lockedGeneration != openGeneration {
                 notice = .notSaved
             }
         }
@@ -163,27 +167,34 @@ final class SuggestionScreenModel: ObservableObject {
         return fresh.commandID
     }
 
-    @MainActor private func resolve() async {
-        guard let notificationID else {
-            state = .nothingToOffer
-            return
-        }
-        resolveSequence += 1
-        let sequence = resolveSequence
-        state = .loading
-        do {
-            let activation = try await responder.activate(notificationID: notificationID, scope: nil)
-            guard sequence == resolveSequence else { return }
-            switch activation {
-            case .offer(let offer): state = .offer(offer)
-            case .nothingToOffer: state = .nothingToOffer
+    /// Resolves the newest prompt. If another prompt arrives while an activation runs, that result is dropped and the
+    /// newer prompt is resolved, until the result belongs to the newest prompt. A relock with no prompt opened since
+    /// stops it, so nothing private is shown on a locked screen.
+    @MainActor private func resolveLatest() async {
+        while lockedGeneration != openGeneration {
+            let generation = openGeneration
+            guard let notificationID else {
+                state = .nothingToOffer
+                return
             }
-        } catch SuggestionResponseError.notAuthenticated, SuggestionResponseError.relockedBeforeDelivery {
-            guard sequence == resolveSequence else { return }
-            lock()
-        } catch {
-            guard sequence == resolveSequence else { return }
-            state = .unavailable
+            state = .loading
+            let outcome: Result<SuggestionActivation, Error>
+            do {
+                outcome = .success(try await responder.activate(notificationID: notificationID, scope: nil))
+            } catch {
+                outcome = .failure(error)
+            }
+            guard openGeneration == generation else { continue }
+            guard lockedGeneration != generation else { return }
+            switch outcome {
+            case .success(.offer(let offer)): state = .offer(offer)
+            case .success(.nothingToOffer): state = .nothingToOffer
+            case .failure(SuggestionResponseError.notAuthenticated),
+                .failure(SuggestionResponseError.relockedBeforeDelivery):
+                lock()
+            case .failure: state = .unavailable
+            }
+            return
         }
     }
 }

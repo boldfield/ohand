@@ -8,12 +8,32 @@ import OhAndCoreBridge
 private final class HostedResponder: SuggestionResponding, @unchecked Sendable {
     var activations: [Result<SuggestionActivation, Error>]
     var responses: [Result<SuggestionResponseReceipt, Error>] = []
+    /// When set, each activation waits for `releaseActivation()`, so a test can see the screen while it loads.
+    var holdsActivations = false
+    private let lock = NSLock()
+    private var heldActivation: CheckedContinuation<Void, Never>?
 
     init(activations: [Result<SuggestionActivation, Error>]) {
         self.activations = activations
     }
 
+    var isHoldingActivation: Bool { lock.lock(); defer { lock.unlock() }; return heldActivation != nil }
+
+    func releaseActivation() {
+        lock.lock()
+        let continuation = heldActivation
+        heldActivation = nil
+        lock.unlock()
+        continuation?.resume()
+    }
+
     func activate(notificationID: String, scope: SuggestionScope?) async throws -> SuggestionActivation {
+        if holdsActivations {
+            await withCheckedContinuation { continuation in
+                lock.lock(); defer { lock.unlock() }
+                heldActivation = continuation
+            }
+        }
         guard !activations.isEmpty else { return .nothingToOffer }
         return try activations.removeFirst().get()
     }
@@ -130,6 +150,25 @@ final class SuggestionScreenHostedTests: XCTestCase {
         XCTAssertEqual(rendered[SuggestionView.stopIdentifier], "Stop suggesting this")
         XCTAssertEqual(rendered[SuggestionView.doneIdentifier], "Done")
         XCTAssertNil(rendered[SuggestionView.messageIdentifier])
+    }
+
+    func testTheLoadingLineIsRenderedWhileTheSuggestionIsFoundAndThenGivesWayToTheOffer() {
+        let responder = HostedResponder(activations: [.success(.offer(offer()))])
+        responder.holdsActivations = true
+        let model = host(responder: responder)
+        tapPromptAndAuthenticate(model)
+        settle { responder.isHoldingActivation && rendered[SuggestionView.messageIdentifier] != nil }
+
+        XCTAssertTrue(responder.isHoldingActivation, "the activation is still running")
+        XCTAssertEqual(model.state, .loading)
+        XCTAssertEqual(rendered[SuggestionView.messageIdentifier], SuggestionView.loadingLine)
+        XCTAssertFalse(SuggestionView.loadingLine.isEmpty)
+        XCTAssertNil(rendered[SuggestionView.textIdentifier], "no offer text while loading")
+
+        responder.releaseActivation()
+        settle { rendered[SuggestionView.textIdentifier] != nil }
+        XCTAssertEqual(rendered[SuggestionView.textIdentifier], Self.offerText)
+        XCTAssertNil(rendered[SuggestionView.messageIdentifier], "the loading line is gone")
     }
 
     func testAnEmptySetIsCalmAndRelockLeavesTheScreenAndDropsTheOffer() {

@@ -86,18 +86,58 @@ final class SuggestionScreenInterleavingTests: XCTestCase {
         XCTAssertEqual(model.state, .offer(offer("b")), "the newest prompt is shown, not the old answer")
     }
 
-    @MainActor func testAnOlderActivationFinishingLateDoesNotOverwriteTheNewerPrompt() async {
+    @MainActor func testAPromptTappedDuringAnActivationIsResolvedNextAndTheOlderResultIsNeverShown() async {
         let responder = GatedResponder()
         let model = SuggestionScreenModel(responder: responder)
         let older = Task { @MainActor in await model.open(notificationID: "prompt:one") }
         await waitUntil { responder.pendingActivations(for: "prompt:one") == 1 }
-        let newer = Task { @MainActor in await model.open(notificationID: "prompt:two") }
-        await waitUntil { responder.pendingActivations(for: "prompt:two") == 1 }
+        await model.open(notificationID: "prompt:two")
+        XCTAssertEqual(responder.activatedPrompts, ["prompt:one"], "one call to the core at a time")
 
-        responder.finishActivation(prompt: "prompt:two", with: .offer(offer("new")))
-        await newer.value
         responder.finishActivation(prompt: "prompt:one", with: .offer(offer("old")))
+        await waitUntil { responder.pendingActivations(for: "prompt:two") == 1 }
+        XCTAssertEqual(model.state, .loading, "the superseded result is dropped, not shown")
+        responder.finishActivation(prompt: "prompt:two", with: .offer(offer("new")))
         await older.value
         XCTAssertEqual(model.state, .offer(offer("new")))
+        XCTAssertFalse(model.isBusy)
+    }
+
+    @MainActor func testAThirdPromptTappedWhileTheQueuedPromptActivatesAfterAResponseIsNotDropped() async {
+        let responder = GatedResponder()
+        let model = SuggestionScreenModel(responder: responder)
+        let first = Task { @MainActor in await model.open(notificationID: "prompt:a") }
+        await waitUntil { responder.pendingActivations(for: "prompt:a") == 1 }
+        responder.finishActivation(prompt: "prompt:a", with: .offer(offer("a")))
+        await first.value
+
+        let responding = Task { @MainActor in await model.respond(.done) }
+        await waitUntil { responder.hasPendingResponse }
+        await model.open(notificationID: "prompt:b")
+        responder.finishResponse(with: .success(SuggestionResponseReceipt(replayed: false)))
+        await waitUntil { responder.pendingActivations(for: "prompt:b") == 1 }
+
+        await model.open(notificationID: "prompt:c")
+        responder.finishActivation(prompt: "prompt:b", with: .offer(offer("b")))
+        await waitUntil { responder.pendingActivations(for: "prompt:c") == 1 }
+        XCTAssertNotEqual(model.state, .offer(offer("b")), "prompt B was superseded before its result arrived")
+        responder.finishActivation(prompt: "prompt:c", with: .offer(offer("c")))
+        await responding.value
+        XCTAssertEqual(responder.activatedPrompts, ["prompt:a", "prompt:b", "prompt:c"])
+        XCTAssertEqual(model.state, .offer(offer("c")), "the newest prompt is shown")
+        XCTAssertFalse(model.isBusy)
+    }
+
+    @MainActor func testARelockWhileAQueuedPromptActivatesKeepsTheScreenLocked() async {
+        let responder = GatedResponder()
+        let model = SuggestionScreenModel(responder: responder)
+        let opening = Task { @MainActor in await model.open(notificationID: "prompt:one") }
+        await waitUntil { responder.pendingActivations(for: "prompt:one") == 1 }
+        await model.open(notificationID: "prompt:two")
+        model.lock()
+        responder.finishActivation(prompt: "prompt:one", with: .offer(offer("one")))
+        await opening.value
+        XCTAssertEqual(model.state, .locked)
+        XCTAssertEqual(responder.activatedPrompts, ["prompt:one"], "nothing more is requested after the relock")
     }
 }
