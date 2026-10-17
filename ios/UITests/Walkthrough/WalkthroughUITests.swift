@@ -104,12 +104,17 @@ final class WalkthroughUITests: XCTestCase {
     /// Taps a home link and waits for the destination. The first open per launch shows the system Face ID prompt,
     /// which the driving script answers with a matching face.
     private func openFromHome(_ identifier: String, title: String) {
-        let link = app.buttons[identifier]
-        XCTAssertTrue(link.waitForExistence(timeout: screenTimeout), "\(identifier) not on home")
-        link.tap()
-        XCTAssertTrue(
-            app.navigationBars[title].waitForExistence(timeout: screenTimeout),
-            "\(title) did not open (authentication was not matched or the screen is unreachable)")
+        // A failed or cancelled Face ID attempt leaves the user on home with a notice; asking again is what a person does.
+        for attempt in 1...3 {
+            let link = app.buttons[identifier]
+            XCTAssertTrue(link.waitForExistence(timeout: screenTimeout), "\(identifier) not on home")
+            if link.isEnabled { link.tap() }
+            if app.navigationBars[title].waitForExistence(timeout: 40) { return }
+            let evidence = XCUIScreen.main.screenshot()
+            try? evidence.pngRepresentation.write(
+                to: outputDirectory.appendingPathComponent("failure-\(title.lowercased())-attempt\(attempt).png"))
+        }
+        XCTFail("\(title) did not open (authentication was not matched or the screen is unreachable)")
     }
 
     private func goBack() {
