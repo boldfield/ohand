@@ -17,11 +17,14 @@ final class WalkthroughUITests: XCTestCase {
         "Remind me to book the dentist next month",
     ]
     private let searchQuery = "garage"
-    private let settingsScreens: [(title: String, label: String)] = [
-        ("Unfinished recordings", "Unfinished recordings"),
-        ("Audio retention", "Audio retention"),
-        ("Providers", "Providers"),
+    /// Each settings screen in the order of the Settings rows: the row's label, then the title the opened screen shows
+    /// (as its header text, or in its navigation bar).
+    private let settingsScreens: [(label: String, title: String)] = [
         ("Daily prompt", "Daily prompt"),
+        ("Unfinished recordings", "Unfinished recordings"),
+        ("Processing", "Providers"),
+        ("Audio", "Audio"),
+        ("Export", "Export"),
     ]
     private let screenTimeout: TimeInterval = 90
 
@@ -85,29 +88,46 @@ final class WalkthroughUITests: XCTestCase {
         ).firstMatch
         XCTAssertTrue(resultCount.waitForExistence(timeout: screenTimeout), "search for \(searchQuery) found no synthetic capture")
         capture(prefix, "search")
-        goBack()
+        goBack(to: homeLink("management.open.search"), "home")
 
         // Settings and each settings screen.
         openFromHome("management.open.settings", title: "Settings")
         capture(prefix, "settings")
         for screen in settingsScreens {
-            let row = app.buttons[screen.label].firstMatch
+            // A row reads its label, then its current value when one is known ("Processing, On this phone").
+            let row = app.buttons.matching(
+                NSPredicate(format: "label == %@ OR label BEGINSWITH %@", screen.label, "\(screen.label), ")
+            ).firstMatch
             XCTAssertTrue(row.waitForExistence(timeout: screenTimeout), "settings row \(screen.label) not found")
             row.tap()
-            XCTAssertTrue(
-                app.navigationBars[screen.title].waitForExistence(timeout: screenTimeout), "\(screen.title) did not open")
-            capture(prefix, screen.title)
-            if screen.title == "Audio retention" {
-                let exportLink = app.buttons["data-settings.retention.export-link"]
-                XCTAssertTrue(exportLink.waitForExistence(timeout: screenTimeout), "Export link not found")
-                exportLink.tap()
-                XCTAssertTrue(app.navigationBars["Export"].waitForExistence(timeout: screenTimeout), "Export did not open")
-                capture(prefix, "Export")
-                goBack()
+            XCTAssertTrue(waitForScreen(screen.title, leaving: row, timeout: screenTimeout), "\(screen.title) did not open")
+            capture(prefix, screen.label)
+            if screen.title == "Audio" {
+                // Export is also linked from the audio screen, beside the other data settings.
+                XCTAssertTrue(
+                    app.buttons["data-settings.retention.export-link"].waitForExistence(timeout: screenTimeout),
+                    "Export link not found on Audio")
             }
-            goBack()
+            goBack(to: settingsHeader, "Settings")
         }
-        goBack()
+        goBack(to: homeLink("management.open.settings"), "home")
+    }
+
+    private var settingsHeader: XCUIElement { app.staticTexts["Settings"] }
+
+    private func homeLink(_ identifier: String) -> XCUIElement { app.buttons[identifier] }
+
+    /// True once the screen titled `title` is showing: the restyled settings screens draw their title as header text
+    /// and hide the navigation bar, the others show it in the navigation bar. `leaving` is the control that opened the
+    /// screen; it must be gone, so a row or link with the same text as the title does not count as the screen.
+    private func waitForScreen(_ title: String, leaving origin: XCUIElement, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            let titleShown = app.navigationBars[title].exists || app.staticTexts[title].exists
+            if titleShown, !(origin.exists && origin.isHittable) { return true }
+            Thread.sleep(forTimeInterval: 0.5)
+        } while Date() < deadline
+        return false
     }
 
     private func saveCaptures() {
@@ -168,7 +188,7 @@ final class WalkthroughUITests: XCTestCase {
             let link = app.buttons[identifier]
             XCTAssertTrue(link.waitForExistence(timeout: screenTimeout), "\(identifier) not on home")
             if link.isEnabled { link.tap() }
-            if app.navigationBars[title].waitForExistence(timeout: 40) { return }
+            if waitForScreen(title, leaving: link, timeout: 40) { return }
             let evidence = XCUIScreen.main.screenshot()
             try? evidence.pngRepresentation.write(
                 to: outputDirectory.appendingPathComponent("failure-\(title.lowercased())-attempt\(attempt).png"))
@@ -176,10 +196,26 @@ final class WalkthroughUITests: XCTestCase {
         XCTFail("\(title) did not open (authentication was not matched or the screen is unreachable)")
     }
 
-    private func goBack() {
-        let back = app.navigationBars.buttons.element(boundBy: 0)
-        XCTAssertTrue(back.waitForExistence(timeout: 10), "no back button")
-        back.tap()
+    /// Goes back one screen and waits for `destination` to show again. The restyled settings screens have a glass
+    /// "Back" button in place of a navigation bar; the others go back from the navigation bar.
+    private func goBack(to destination: XCUIElement, _ destinationName: String) {
+        let glassBack = app.buttons["Back"].firstMatch
+        let barBack = app.navigationBars.buttons.element(boundBy: 0)
+        let deadline = Date().addingTimeInterval(10)
+        var tapped = false
+        repeat {
+            if glassBack.exists, glassBack.isHittable {
+                glassBack.tap()
+                tapped = true
+            } else if barBack.exists, barBack.isHittable {
+                barBack.tap()
+                tapped = true
+            } else {
+                Thread.sleep(forTimeInterval: 0.5)
+            }
+        } while !tapped && Date() < deadline
+        XCTAssertTrue(tapped, "no back button")
+        XCTAssertTrue(destination.waitForExistence(timeout: screenTimeout), "going back did not return to \(destinationName)")
     }
 
     private func capture(_ prefix: String, _ screen: String) {
