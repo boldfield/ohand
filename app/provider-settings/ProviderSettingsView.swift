@@ -54,6 +54,8 @@ enum ProviderSecretRejection: Equatable {
 @MainActor
 final class ProviderSecretBuffer: ObservableObject {
     @Published var text = ""
+    /// What the entry's button does. The entry sets it, so a hosted test can press it without a touch.
+    var press: (() -> Void)?
 
     enum Submission: Equatable {
         case secret(Data)
@@ -96,7 +98,10 @@ private struct ProviderSecretEntry: View {
             .submitLabel(.done)
             .onSubmit(submit)
             .accessibilityIdentifier(fieldIdentifier)
-            .onAppear { bufferProbe?(fieldIdentifier, buffer) }
+            .onAppear {
+                buffer.press = submit
+                bufferProbe?(fieldIdentifier, buffer)
+            }
             .onDisappear { buffer.clear() }
             .onChange(of: scenePhase) { phase in
                 if phase != .active { buffer.clear() }

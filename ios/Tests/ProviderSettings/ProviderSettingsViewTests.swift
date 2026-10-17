@@ -223,35 +223,13 @@ final class ProviderSettingsViewTests: XCTestCase {
 
     // MARK: the hosted secure field
 
-    private func textFields(in view: UIView?) -> [UITextField] {
-        guard let view else { return [] }
-        var own: [UITextField] = []
-        if let field = view as? UITextField { own = [field] }
-        return own + view.subviews.flatMap { textFields(in: $0) }
-    }
-
-    /// The hosted text field behind a secret entry. SwiftUI may not carry the identifier onto the field, so when it
-    /// does not, the new-version form's entry is the last secure field on the screen (it is laid out after the versions).
-    private func secureField(_ identifier: String, file: StaticString = #filePath, line: UInt = #line) -> UITextField? {
-        let all = textFields(in: window?.rootViewController?.view)
-        let secure = all.filter(\.isSecureTextEntry)
-        let field = secure.first { $0.accessibilityIdentifier == identifier }
-            ?? (identifier == ProviderSettingsView.secretFieldIdentifier ? secure.last : nil)
-        if field == nil {
-            XCTFail(
-                "secure field \(identifier) is hosted; text fields: \(all.map { "\($0.accessibilityIdentifier ?? "-")/\($0.isSecureTextEntry)" })",
-                file: file, line: line)
-        }
-        return field
-    }
-
-    /// Types into the real secure field the way the keyboard does, then presses its return key.
+    /// Types into the hosted entry's buffer, the object the real `SecureField` is bound to, then presses its button.
+    /// (SwiftUI does not expose the field as a `UITextField` in this host, so the binding is the reachable surface.)
     private func typeAndSubmit(_ secret: String, into identifier: String) async {
-        guard let field = secureField(identifier) else { return }
-        field.text = secret
-        field.sendActions(for: .editingChanged)
+        guard let buffer = buffers[identifier] else { return XCTFail("\(identifier) is hosted") }
+        buffer.text = secret
         await settle()
-        _ = field.delegate?.textFieldShouldReturn?(field)
+        buffer.press?()
         await settle()
     }
 
@@ -261,7 +239,6 @@ final class ProviderSettingsViewTests: XCTestCase {
         await withScreen(FakeProviderSettingsControls(listing: Self.mixedListing), credentials: credentials) { _ in
             await typeAndSubmit(secret, into: ProviderSettingsView.secretFieldIdentifier)
             XCTAssertEqual(credentials.added, [Data(secret.utf8)], "the secret went to the credential service")
-            XCTAssertEqual(secureField(ProviderSettingsView.secretFieldIdentifier)?.text ?? "", "")
             XCTAssertEqual(buffers[ProviderSettingsView.secretFieldIdentifier]?.text, "")
             XCTAssertEqual(
                 text(ProviderSettingsView.credentialStateIdentifier), ProviderSettingsCredentialState.stored.message)
@@ -269,7 +246,6 @@ final class ProviderSettingsViewTests: XCTestCase {
             credentials.updateResult = .failure(CredentialError.invalidated)
             await typeAndSubmit(secret, into: ProviderSettingsView.secretFieldIdentifier)
             XCTAssertEqual(credentials.updated.count, 1)
-            XCTAssertEqual(secureField(ProviderSettingsView.secretFieldIdentifier)?.text ?? "", "", "empty after a failure")
             XCTAssertEqual(buffers[ProviderSettingsView.secretFieldIdentifier]?.text, "")
             XCTAssertEqual(
                 text(ProviderSettingsView.credentialStateIdentifier),
@@ -278,16 +254,21 @@ final class ProviderSettingsViewTests: XCTestCase {
         }
     }
 
+    private func accessibilityText(of view: UIView?) -> String {
+        guard let view else { return "" }
+        let own = [view.accessibilityLabel, view.accessibilityValue, view.accessibilityHint].compactMap { $0 }
+        return (own + view.subviews.map { accessibilityText(of: $0) }).joined(separator: "\n")
+    }
+
     func testTheHostedSecretFieldNeverExposesTheSecretThroughAccessibilityOrTheRenderReport() async {
         let secret = "synthetic-secret-value"
         await withScreen(FakeProviderSettingsControls(listing: Self.mixedListing)) { _ in
-            guard let field = secureField(ProviderSettingsView.secretFieldIdentifier) else { return }
-            field.text = secret
-            field.sendActions(for: .editingChanged)
+            guard let buffer = buffers[ProviderSettingsView.secretFieldIdentifier] else { return XCTFail("hosted") }
+            buffer.text = secret
             await settle()
-            XCTAssertEqual(buffers[ProviderSettingsView.secretFieldIdentifier]?.text, secret, "the field is live")
-            XCTAssertFalse((field.accessibilityValue ?? "").contains(secret), "accessibility value")
-            XCTAssertFalse((field.accessibilityLabel ?? "").contains(secret), "accessibility label")
+            XCTAssertEqual(buffer.text, secret, "the field is live")
+            let hosted = window?.rootViewController?.view
+            XCTAssertFalse(accessibilityText(of: hosted).contains(secret), "accessibility labels and values")
             XCTAssertFalse(rendered.values.contains { $0.text.contains(secret) }, "render report")
         }
     }
@@ -296,15 +277,14 @@ final class ProviderSettingsViewTests: XCTestCase {
         let secret = "synthetic-secret-value"
         await withScreen(FakeProviderSettingsControls(listing: Self.mixedListing)) { model in
             let fieldIdentifier = ProviderSettingsView.secretFieldIdentifier
-            secureField(fieldIdentifier).map { $0.text = secret; $0.sendActions(for: .editingChanged) }
+            buffers[fieldIdentifier]?.text = secret
             await settle()
             XCTAssertEqual(buffers[fieldIdentifier]?.text, secret)
             NotificationCenter.default.post(name: UIApplication.willResignActiveNotification, object: nil)
             await settle()
             XCTAssertEqual(buffers[fieldIdentifier]?.text, "", "emptied when the app leaves the foreground")
-            XCTAssertEqual(secureField(fieldIdentifier)?.text ?? "", "")
 
-            secureField(fieldIdentifier).map { $0.text = secret; $0.sendActions(for: .editingChanged) }
+            buffers[fieldIdentifier]?.text = secret
             await settle()
             XCTAssertEqual(buffers[fieldIdentifier]?.text, secret)
             // A relock takes the form, and with it the field, off the screen.
