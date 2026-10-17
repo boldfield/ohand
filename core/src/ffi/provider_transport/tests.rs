@@ -283,6 +283,7 @@ impl Session {
         register(handle, &recorder);
         if scenario.profile.protocol() == ProviderProtocol::SelfHosted {
             protocols::enable_for_test(handle, &["anthropic", "open_ai", "self_hosted"]);
+            protocols::register_profile_for_test(handle, &scenario.profile);
         }
         let (sender, commands) = std::sync::mpsc::channel();
         Session {
@@ -1331,3 +1332,92 @@ fn native_failure_names_are_the_snake_case_transport_errors() {
 
 const DEFAULT_MAX_RESPONSE_BYTES_FOR_TEST: u64 =
     crate::providers::contracts::DEFAULT_MAX_RESPONSE_BYTES as u64;
+
+#[test]
+fn a_self_hosted_exchange_needs_its_profile_and_model_registered() {
+    let _guard = serial();
+    let scenario = Scenario::self_hosted();
+    let profile_version = scenario.profile.profile_version().to_string();
+    let model = scenario.profile.model().to_string();
+    let session = Session::open("sh-register", &scenario);
+    session.register_native();
+
+    let refusals: [(u64, &[(&str, &str)]); 3] = [
+        (81, &[]),
+        (
+            82,
+            &[("00000000-0000-4000-8000-00000000aaaa", model.as_str())],
+        ),
+        (83, &[(profile_version.as_str(), "another-model")]),
+    ];
+    for (operation_id, pairs) in refusals {
+        protocols::register_for_test(session.handle, pairs);
+        assert_eq!(
+            session.start(operation_id, JOB_ID).status,
+            OHAND_CORE_STATUS_OK
+        );
+        let (_, _, code) = failure_of(&session.event(operation_id));
+        assert_eq!(code, "self_hosted_not_registered");
+        session.assert_no_command();
+    }
+
+    // A second stored supported self-hosted profile sends nothing while the registered pair dispatches.
+    let connection = rusqlite::Connection::open(session.directory.join("core.sqlite")).unwrap();
+    connection
+        .execute(
+            "INSERT INTO provider_profiles (profile_version, profile_id, provider_type, endpoint, \
+             model, credential_ref, timeout_seconds, retry_policy, authorized_destinations, \
+             capabilities, created_at, revoked_at) SELECT '4b7a1bfe-88ff-4ba7-848e-a45069cf9083', \
+             'other-self-hosted', provider_type, endpoint, model, credential_ref, timeout_seconds, \
+             retry_policy, authorized_destinations, capabilities, created_at, NULL \
+             FROM provider_profiles",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO jobs (job_id, job_schema_version, item_id, job_type, source_revision, \
+             profile_version, request_version, status, attempt_count, created_at) SELECT \
+             'job-other-profile', job_schema_version, item_id, job_type, source_revision, \
+             '4b7a1bfe-88ff-4ba7-848e-a45069cf9083', request_version, status, attempt_count, \
+             created_at FROM jobs WHERE job_id = ?",
+            [JOB_ID],
+        )
+        .unwrap();
+    drop(connection);
+    protocols::register_for_test(session.handle, &[(&profile_version, &model)]);
+    assert_eq!(
+        session.start(87, "job-other-profile").status,
+        OHAND_CORE_STATUS_OK
+    );
+    let (_, _, code) = failure_of(&session.event(87));
+    assert_eq!(code, "self_hosted_not_registered");
+    session.assert_no_command();
+    assert_eq!(session.start(84, JOB_ID).status, OHAND_CORE_STATUS_OK);
+    assert_eq!(session.event(84).status, OHAND_CORE_STATUS_OK);
+    send_description(&session.command(84));
+    session.complete(84, 200, &self_hosted_reply(valid_proposal()));
+    assert_eq!(session.event(84).status, OHAND_CORE_STATUS_OK);
+    wait_until_idle(session.handle);
+
+    protocols::register_for_test(session.handle, &[]);
+    assert_eq!(session.start(85, JOB_ID).status, OHAND_CORE_STATUS_OK);
+    let (_, _, code) = failure_of(&session.event(85));
+    assert_eq!(code, "self_hosted_not_registered");
+    session.assert_no_command();
+    session.close();
+}
+
+#[test]
+fn a_registered_but_revoked_self_hosted_profile_is_still_refused() {
+    let _guard = serial();
+    let mut scenario = Scenario::self_hosted();
+    scenario.revoked = true;
+    let session = Session::open("sh-register-revoked", &scenario);
+    session.register_native();
+    assert_eq!(session.start(86, JOB_ID).status, OHAND_CORE_STATUS_OK);
+    let (_, _, code) = failure_of(&session.event(86));
+    assert_eq!(code, "profile_revoked");
+    session.assert_no_command();
+    session.close();
+}

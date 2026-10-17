@@ -396,6 +396,10 @@ public protocol CompositionModule: AnyObject {
     /// root enables the union of every module's declaration; a protocol no module declares stays disabled (self-hosted
     /// is disabled unless a module names it).
     var enabledProviderProtocols: Set<CoreProviderProtocol> { get }
+    /// The stored self-hosted profile versions and models this module lets the core send to. Enabling self-hosted
+    /// is not enough: the root passes the union of every module's declaration to the core, which refuses any
+    /// self-hosted request whose profile version and model are not named (default none).
+    var selfHostedRegistrations: Set<CoreSelfHostedRegistration> { get }
     func attach(to context: CompositionContext) throws
     /// Takes the event if it answers one of this module's operations.
     func handle(_ event: CoreEvent) -> Bool
@@ -406,6 +410,7 @@ public protocol CompositionModule: AnyObject {
 public extension CompositionModule {
     var jobCapabilities: [JobCapabilityHandler] { [] }
     var enabledProviderProtocols: Set<CoreProviderProtocol> { [] }
+    var selfHostedRegistrations: Set<CoreSelfHostedRegistration> { [] }
 }
 
 /// A module that owns the ordered launch and foreground reconciliation (staged-capture recovery, job activation and
@@ -448,6 +453,8 @@ struct CompositionAdapters {
     let recognizer: OnDeviceRecognizing?
     /// The read-authorization session every private read goes through.
     let readSession: ReadAuthenticationSession
+    /// The Keychain-backed credentials the transport resolves at dispatch and provider setup enters secrets into.
+    let credentials: CredentialService
 
     fileprivate init(
         kind: CompositionAdapterSet,
@@ -459,7 +466,8 @@ struct CompositionAdapters {
         backgroundGrant: BackgroundExecutionGrant?,
         lifecycleNotifications: NotificationCenter,
         recognizer: OnDeviceRecognizing?,
-        readSession: ReadAuthenticationSession
+        readSession: ReadAuthenticationSession,
+        credentials: CredentialService
     ) {
         self.kind = kind
         self.sender = sender
@@ -471,6 +479,7 @@ struct CompositionAdapters {
         self.lifecycleNotifications = lifecycleNotifications
         self.recognizer = recognizer
         self.readSession = readSession
+        self.credentials = credentials
     }
 
     fileprivate static func production(for configuration: CompositionConfiguration) -> CompositionAdapters {
@@ -485,7 +494,8 @@ struct CompositionAdapters {
             backgroundGrant: ApplicationBackgroundExecutionGrant(),
             lifecycleNotifications: .default,
             recognizer: nil,
-            readSession: ReadAuthenticationSession(boundary: LocalAuthenticationBoundary()))
+            readSession: ReadAuthenticationSession(boundary: LocalAuthenticationBoundary()),
+            credentials: credentials)
     }
 
     #if DEBUG
@@ -502,14 +512,16 @@ struct CompositionAdapters {
         reachability: NetworkReachability,
         backgroundGrant: BackgroundExecutionGrant? = nil,
         lifecycleNotifications: NotificationCenter = NotificationCenter(),
-        recognizer: OnDeviceRecognizing? = nil
+        recognizer: OnDeviceRecognizing? = nil,
+        credentials: CredentialService = CredentialService(
+            serviceName: "com.boldfield.ohand.tests.composition.\(UUID().uuidString)")
     ) -> CompositionAdapters {
         CompositionAdapters(
             kind: .injectedForTests, sender: sender, attachProviderTransport: attachProviderTransport,
             notificationCenter: notificationCenter,
             permissionObservations: permissionObservations, reachability: reachability,
             backgroundGrant: backgroundGrant, lifecycleNotifications: lifecycleNotifications,
-            recognizer: recognizer, readSession: readSession)
+            recognizer: recognizer, readSession: readSession, credentials: credentials)
     }
     #endif
 }
@@ -782,6 +794,35 @@ private final class OpenItemRelay: @unchecked Sendable {
     }
 }
 
+/// Holds the callback a prompt tap runs. A tap that arrives while none is set is held and handed over once, in order,
+/// when one is set, so it is never dropped.
+private final class PromptTapRelay: @unchecked Sendable {
+    private let lock = NSLock()
+    private var handler: (@Sendable (PromptNotificationEvent) -> Void)?
+    private var held: [PromptNotificationEvent] = []
+
+    func set(_ newHandler: (@Sendable (PromptNotificationEvent) -> Void)?) {
+        lock.lock()
+        handler = newHandler
+        let pending = newHandler == nil ? [] : held
+        if newHandler != nil { held = [] }
+        lock.unlock()
+        for event in pending { newHandler?(event) }
+    }
+
+    func receive(_ event: PromptNotificationEvent) {
+        guard event.kind == .opened else { return }
+        lock.lock()
+        guard let current = handler else {
+            held.append(event)
+            lock.unlock()
+            return
+        }
+        lock.unlock()
+        current(event)
+    }
+}
+
 /// The notification-action pieces the root owns: the core client, the durable journal's handler and the delegate.
 /// Nothing here is public; the root exposes the delegate, a reconcile and the open-item setter.
 final class NotificationActionClients: @unchecked Sendable {
@@ -792,6 +833,7 @@ final class NotificationActionClients: @unchecked Sendable {
     let ingestor: NotificationEventIngestor
     let receiver: NotificationEventReceiver
     fileprivate let openItem: OpenItemRelay
+    fileprivate let promptTap = PromptTapRelay()
     private let scopeToken: SessionScopeObserverToken
 
     init(
@@ -808,12 +850,14 @@ final class NotificationActionClients: @unchecked Sendable {
         let relay = OpenItemRelay()
         let handler = ActionHandler(
             core: client, journal: journal, authorization: session, openItem: { relay.open($0) })
+        let promptTap = promptTap
         let ingestor = NotificationEventIngestor(
             now: now,
             handler: { event in
                 handler.eventHandler(event)
                 environmentHandler(event)
-            })
+            },
+            promptHandler: { promptTap.receive($0) })
         self.client = client
         self.handler = handler
         self.ingestor = ingestor
@@ -925,6 +969,9 @@ public final class ServiceCompositionRoot {
     static let itemDetailClientName = "item detail"
     static let retentionControlClientName = "retention controls"
     static let jobConfigurationClientName = "job configuration"
+    static let providerProfileClientName = "provider profiles"
+    static let providerConnectionCheckClientName = "provider connection check"
+    static let routePolicyClientName = "route policy"
 
     /// One half-open interval of operation identifiers `[start, end)` that a client claims.
     public struct OperationRange: Equatable, Sendable {
@@ -968,6 +1015,9 @@ public final class ServiceCompositionRoot {
         fixedWidthRange(itemDetailClientName, from: CoreItemDetailClient.firstOperationID),
         fixedWidthRange(retentionControlClientName, from: CoreRetentionControlClient.firstOperationID),
         fixedWidthRange(jobConfigurationClientName, from: CoreJobConfigurationClient.firstOperationID),
+        fixedWidthRange(providerProfileClientName, from: CoreProviderProfileClient.firstOperationID),
+        fixedWidthRange(providerConnectionCheckClientName, from: CoreProviderConnectionCheckClient.firstOperationID),
+        fixedWidthRange(routePolicyClientName, from: CoreRoutePolicyClient.firstOperationID),
         OperationRange(
             name: processingHealthClientName, start: ProcessingHealthService.firstOperationID,
             end: JobRunnerService.firstOperationID),
@@ -996,9 +1046,21 @@ public final class ServiceCompositionRoot {
     /// Configures audio retention and acts on unresolved sole audio; reads are gated and writes need an authenticated
     /// session.
     public let retentionControls: RetentionControlService
+    /// Opens an item's retained audio for playback without exposing protected storage; needs an authenticated read
+    /// session. Open playback holds the audio in place and ends on deletion, relock and shutdown.
+    public let playback: PlaybackService
     /// Re-pins waiting work, requeues a job, revokes a profile and lists the jobs pinned to one; needs an authenticated
     /// read session.
     public let jobConfiguration: JobConfigurationService
+    /// Creates provider profiles, sets defaults, checks a connection on request and grants or revokes route processing;
+    /// every call needs an authenticated read session.
+    public let providerConfiguration: ProviderConfigurationService
+    /// Stores, replaces, deletes and reports the status of a provider secret, never returning one; every call needs an
+    /// authenticated read session.
+    public let providerCredentials: ProviderCredentialEntry
+    /// Prepares an export for the share sheet; needs an authenticated read session. Leftover export files are swept at
+    /// launch, after capture recovery has been started.
+    public let exportService: ExportService
 
     let adapters: CompositionAdapters
     /// The session whose scope gates every private read the root performs.
@@ -1025,6 +1087,10 @@ public final class ServiceCompositionRoot {
     private let itemDetailClient: CoreItemDetailClient
     private let retentionControlClient: CoreRetentionControlClient
     private let jobConfigurationClient: CoreJobConfigurationClient
+    private let providerProfileClient: CoreProviderProfileClient
+    private let providerConnectionCheckClient: CoreProviderConnectionCheckClient
+    private let routePolicyClient: CoreRoutePolicyClient
+    private let exportClient: CoreExportClient
     private let modules: [CompositionModule]
     private let foreground: ForegroundState
     private let stateLock = NSLock()
@@ -1035,6 +1101,7 @@ public final class ServiceCompositionRoot {
     private var permissionObserver: NotificationPermissionLifecycleObserver?
     private var foregroundTokens: [NSObjectProtocol] = []
     private var latestReminderReport: NotificationPermissionReport?
+    private var reminderReportObserver: (@Sendable (NotificationPermissionReport) -> Void)?
 
     /// Builds the production root: real adapters chosen from `configuration`.
     public convenience init(
@@ -1097,8 +1164,16 @@ public final class ServiceCompositionRoot {
         itemDetails = assembly.itemDetails
         retentionControlClient = assembly.retentionControlClient
         retentionControls = assembly.retentionControls
+        playback = assembly.playback
         jobConfigurationClient = assembly.jobConfigurationClient
         jobConfiguration = assembly.jobConfiguration
+        providerProfileClient = assembly.providerProfileClient
+        providerConnectionCheckClient = assembly.providerConnectionCheckClient
+        routePolicyClient = assembly.routePolicyClient
+        providerConfiguration = assembly.providerConfiguration
+        providerCredentials = assembly.providerCredentials
+        exportClient = assembly.exportClient
+        exportService = assembly.exportService
         reminderReconciler = assembly.permissionReconciler
         foreground = assembly.foreground
         assembly.rootReference.set(self)
@@ -1192,6 +1267,9 @@ public final class ServiceCompositionRoot {
         if ownsLifecycle {
             lifecycleOwner?.beginLifecycle(isActive: isActive)
         }
+        // After capture recovery has been started, and off the main queue so it never delays a capture.
+        let exportService = self.exportService
+        DispatchQueue.global(qos: .utility).async { exportService.sweepAtLaunch() }
     }
 
     /// Whether the app is active right now. Read it on the main queue, where the lifecycle notifications that change it
@@ -1254,8 +1332,14 @@ public final class ServiceCompositionRoot {
         itemLifecycleControlClient.shutDown()
         suggestionResponseClient.shutDown()
         itemDetailClient.shutDown()
+        itemDeletion.setIntentObserver(nil)
+        playback.shutDown()
         retentionControlClient.shutDown()
         jobConfigurationClient.shutDown()
+        providerProfileClient.shutDown()
+        providerConnectionCheckClient.shutDown()
+        routePolicyClient.shutDown()
+        exportClient.shutDown()
         reminderCore.invalidate()
         promptScheduleClient.shutDown()
         statusReader.shutDown()
@@ -1387,7 +1471,23 @@ public final class ServiceCompositionRoot {
         notificationActions.openItem.set(handler)
     }
 
+    /// Sets (or clears, with `nil`) what runs when a tapped daily prompt asks to open its suggestion. It receives the
+    /// opened prompt event and may run on any thread. A tap that arrives while none is set is held and delivered once
+    /// when one is set.
+    public func setOpenSuggestionHandler(_ handler: (@Sendable (PromptNotificationEvent) -> Void)?) {
+        notificationActions.promptTap.set(handler)
+    }
+
     // MARK: Reminders
+
+    /// Sets (or clears, with `nil`) what runs when a reminder pass produces a report different from the previous one,
+    /// including when reminders become undeliverable because permission was never requested
+    /// (`ReminderUndeliverableReason.permissionNotRequested`), so the app can ask then. It may run on any thread.
+    public func setReminderReportObserver(_ observer: (@Sendable (NotificationPermissionReport) -> Void)?) {
+        stateLock.lock()
+        reminderReportObserver = observer
+        stateLock.unlock()
+    }
 
     /// Runs one reminder pass now: the core decides what to install or cancel, and the notification bridge performs it.
     @discardableResult
@@ -1414,8 +1514,11 @@ public final class ServiceCompositionRoot {
 
     private func recordReminderReport(_ report: NotificationPermissionReport) {
         stateLock.lock()
+        let changed = latestReminderReport != report
         latestReminderReport = report
+        let observer = changed ? reminderReportObserver : nil
         stateLock.unlock()
+        observer?(report)
     }
 
     // MARK: Helpers
@@ -1531,8 +1634,16 @@ public final class ServiceCompositionRoot {
         let itemDetails: ItemDetailService
         let retentionControlClient: CoreRetentionControlClient
         let retentionControls: RetentionControlService
+        let playback: PlaybackService
         let jobConfigurationClient: CoreJobConfigurationClient
         let jobConfiguration: JobConfigurationService
+        let providerProfileClient: CoreProviderProfileClient
+        let providerConnectionCheckClient: CoreProviderConnectionCheckClient
+        let routePolicyClient: CoreRoutePolicyClient
+        let providerConfiguration: ProviderConfigurationService
+        let providerCredentials: ProviderCredentialEntry
+        let exportClient: CoreExportClient
+        let exportService: ExportService
         let permissionReconciler: NotificationPermissionReconciler
         let foreground: ForegroundState
     }
@@ -1675,11 +1786,34 @@ public final class ServiceCompositionRoot {
                 core: retentionControlClient, session: adapters.readSession,
                 pressureProbe: VolumeStoragePressureProbe(volumeURL: layout.rootDirectory),
                 removerProvider: { modules.lazy.compactMap { ($0 as? LifecycleCoordinator)?.audioRetention }.first })
+            let playback = PlaybackService(
+                core: retentionControlClient, session: adapters.readSession, layout: layout, fence: PlaybackFence(),
+                playerFactory: avPlaybackPlayerFactory)
+            undo.append { playback.shutDown() }
+            itemDeletion.setIntentObserver { [playback] itemID in playback.endPlayback(itemID: itemID) }
             let jobConfigurationClient = CoreJobConfigurationClient(core: core, gate: readGate)
             router.register { jobConfigurationClient.handle($0) }
             undo.append { jobConfigurationClient.shutDown() }
             let jobConfiguration = JobConfigurationService(
                 core: jobConfigurationClient, session: adapters.readSession)
+            let providerProfileClient = CoreProviderProfileClient(core: core)
+            router.register { providerProfileClient.handle($0) }
+            undo.append { providerProfileClient.shutDown() }
+            let providerConnectionCheckClient = CoreProviderConnectionCheckClient(core: core)
+            router.register { providerConnectionCheckClient.handle($0) }
+            undo.append { providerConnectionCheckClient.shutDown() }
+            let routePolicyClient = CoreRoutePolicyClient(core: core)
+            router.register { routePolicyClient.handle($0) }
+            undo.append { routePolicyClient.shutDown() }
+            let providerConfiguration = ProviderConfigurationService(
+                profiles: providerProfileClient, connectionChecks: providerConnectionCheckClient,
+                routePolicy: routePolicyClient, session: adapters.readSession)
+            let providerCredentials = ProviderCredentialEntry(
+                store: adapters.credentials, session: adapters.readSession)
+            let exportClient = CoreExportClient(core: core)
+            router.register { exportClient.handle($0) }
+            undo.append { exportClient.shutDown() }
+            let exportService = ExportService(core: exportClient, session: adapters.readSession, layout: layout)
             let permissionReconciler = NotificationPermissionReconciler(
                 center: adapters.notificationCenter, reconciliation: reminderCore,
                 observations: adapters.permissionObservations)
@@ -1704,11 +1838,15 @@ public final class ServiceCompositionRoot {
                 throw CompositionError.jobTypeConflict(capability.jobType)
             }
             var enabledProtocols = ServiceCompositionRoot.baseProviderProtocols
+            var selfHostedRegistrations = Set<CoreSelfHostedRegistration>()
             for module in modules {
                 enabledProtocols.formUnion(module.enabledProviderProtocols)
+                selfHostedRegistrations.formUnion(module.selfHostedRegistrations)
             }
             try core.setEnabledProviderProtocols(enabledProtocols)
             undo.append { try? core.setEnabledProviderProtocols(ServiceCompositionRoot.baseProviderProtocols) }
+            try core.setSelfHostedRegistrations(selfHostedRegistrations)
+            undo.append { try? core.setSelfHostedRegistrations([]) }
             let jobRunner = try JobRunnerService.attach(
                 to: core, storePath: layout.databaseURL.path, sender: adapters.sender,
                 capabilities: capabilities, isReachable: adapters.reachability.isReachable,
@@ -1741,9 +1879,13 @@ public final class ServiceCompositionRoot {
                 suggestionResponseClient: suggestionResponseClient,
                 suggestionResponses: suggestionResponses, itemDetailClient: itemDetailClient,
                 itemDetails: itemDetails, retentionControlClient: retentionControlClient,
-                retentionControls: retentionControls, jobConfigurationClient: jobConfigurationClient,
-                jobConfiguration: jobConfiguration, permissionReconciler: permissionReconciler,
-                foreground: foreground)
+                retentionControls: retentionControls, playback: playback,
+                jobConfigurationClient: jobConfigurationClient,
+                jobConfiguration: jobConfiguration, providerProfileClient: providerProfileClient,
+                providerConnectionCheckClient: providerConnectionCheckClient, routePolicyClient: routePolicyClient,
+                providerConfiguration: providerConfiguration, providerCredentials: providerCredentials,
+                exportClient: exportClient, exportService: exportService,
+                permissionReconciler: permissionReconciler, foreground: foreground)
         } catch {
             for step in undo.reversed() {
                 step()

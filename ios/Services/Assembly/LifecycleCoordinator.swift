@@ -527,8 +527,11 @@ extension LifecycleCoordinator {
         let notifications = NotificationBridge(
             center: root.adapters.notificationCenter, ingestor: NotificationEventIngestor(handler: { _ in }))
         let deletion = DeletionCleanupService(
-            core: deletionClient, notifications: notifications, localCleanup: DeletionLocalCleanup(layout: layout))
-        let retention = AudioRetentionService(core: retentionClient, layout: layout)
+            core: deletionClient, notifications: notifications,
+            localCleanup: DeletionLocalCleanup(
+                layout: layout, fileSystem: PlaybackFencedFileSystem(fence: root.playback.fence)))
+        let retention = AudioRetentionService(
+            core: retentionClient, layout: layout, playbackFence: root.playback.fence)
 
         lock.lock()
         notificationCenter = root.adapters.lifecycleNotifications

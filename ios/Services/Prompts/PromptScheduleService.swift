@@ -7,6 +7,17 @@ public enum PromptScheduleConfigurationError: Error, Equatable, Sendable {
     case installIncomplete(PromptScheduleOutcome, NotificationPermissionReport)
 }
 
+/// What a configure call persisted and what the reminder pass that followed it reported.
+public struct PromptScheduleChange: Sendable {
+    public let outcome: PromptScheduleOutcome
+    public let report: NotificationPermissionReport
+
+    public init(outcome: PromptScheduleOutcome, report: NotificationPermissionReport) {
+        self.outcome = outcome
+        self.report = report
+    }
+}
+
 /// Keeps the optional daily prompt schedule current and its prompts installed.
 ///
 /// The core owns the schedule, its ledger and the decision of which prompts exist; this service supplies the device's
@@ -48,13 +59,21 @@ public final class PromptScheduleService: @unchecked Sendable {
     /// converge; the choice stays persisted and the next launch, foreground or time-change pass converges.
     @discardableResult
     public func configure(_ setting: PromptScheduleSetting) async throws -> PromptScheduleOutcome {
+        let change = try await configureReportingPass(setting)
+        if change.report.reconciliationFailure != nil || !change.report.converged {
+            throw PromptScheduleConfigurationError.installIncomplete(change.outcome, change.report)
+        }
+        return change.outcome
+    }
+
+    /// Like `configure(_:)`, but returns the pass report instead of throwing when the pass did not converge, so a
+    /// caller can tell a withheld or deferred prompt (permission denied, no room) from a failure. The choice is
+    /// persisted before the pass runs; a thrown error means the choice or the pass itself could not run.
+    public func configureReportingPass(_ setting: PromptScheduleSetting) async throws -> PromptScheduleChange {
         let outcome = try await core.configure(setting, timeZoneIdentifier: timeZone().identifier)
         _ = try await install(.explicit)
         let report = try await install(.explicit)
-        if report.reconciliationFailure != nil || !report.converged {
-            throw PromptScheduleConfigurationError.installIncomplete(outcome, report)
-        }
-        return outcome
+        return PromptScheduleChange(outcome: outcome, report: report)
     }
 
     /// The system clock or time zone changed: the core drops occurrences that are no longer valid, using the zone the

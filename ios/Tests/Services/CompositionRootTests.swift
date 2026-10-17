@@ -140,11 +140,17 @@ private final class ProtocolDeclaringModule: CompositionModule {
     let identifier = "protocol.declarer"
     let firstOperationID: UInt64 = 1 << 44
     let enabledProviderProtocols: Set<CoreProviderProtocol>
+    let selfHostedRegistrations: Set<CoreSelfHostedRegistration>
     private let takesStatusClient: Bool
     private(set) var statusClient: CoreProviderProfileStatusClient?
 
-    init(enabledProviderProtocols: Set<CoreProviderProtocol>, takesStatusClient: Bool = false) {
+    init(
+        enabledProviderProtocols: Set<CoreProviderProtocol>,
+        selfHostedRegistrations: Set<CoreSelfHostedRegistration> = [],
+        takesStatusClient: Bool = false
+    ) {
         self.enabledProviderProtocols = enabledProviderProtocols
+        self.selfHostedRegistrations = selfHostedRegistrations
         self.takesStatusClient = takesStatusClient
     }
 
@@ -710,7 +716,11 @@ final class CompositionRootTests: XCTestCase {
     func testModuleDeclaringSelfHostedEnablesDispatch() throws {
         try prepareSelfHostedStore()
         let sender = ScriptedProviderSender(reply: Data())
-        let module = ProtocolDeclaringModule(enabledProviderProtocols: [.selfHosted])
+        let module = ProtocolDeclaringModule(
+            enabledProviderProtocols: [.selfHosted],
+            selfHostedRegistrations: [
+                CoreSelfHostedRegistration(profileVersion: Self.profileVersion, model: "synthetic-model")
+            ])
         let root = try makeTestRoot(sender: sender, modules: [module])
         defer { root.shutDown() }
         let itemID = try saveCapture(root)
@@ -721,6 +731,65 @@ final class CompositionRootTests: XCTestCase {
             pump(until: { !sender.requests.isEmpty }, timeout: 20),
             "the self-hosted job reaches the transport: \(jobDiagnostics(root, sender: sender))")
         XCTAssertEqual(sender.requests.first?.url.host, "spark.example.test")
+    }
+
+    func testModuleDeclaringSelfHostedWithoutRegistrationSendsNothing() throws {
+        try prepareSelfHostedStore()
+        let sender = ScriptedProviderSender(reply: Data())
+        let module = ProtocolDeclaringModule(enabledProviderProtocols: [.selfHosted])
+        let root = try makeTestRoot(sender: sender, modules: [module])
+        defer { root.shutDown() }
+        let itemID = try saveCapture(root)
+        try insertInterpretationJob(itemID: itemID)
+        root.start(isActive: true)
+
+        XCTAssertTrue(
+            pump(until: { root.jobRunner.finishedDrainCount > 0 }, timeout: 20),
+            "a drain ran: \(jobDiagnostics(root, sender: sender))")
+        _ = pump(until: { false }, timeout: 1)
+        XCTAssertTrue(sender.requests.isEmpty, "self-hosted is enabled but nothing is registered")
+        XCTAssertEqual(JobStoreInspector.job(at: databasePath, id: "job-composition-1")?.status, "queued")
+    }
+
+    func testRegistrationDispatchesOnlyTheRegisteredProfilesJob() throws {
+        try prepareSelfHostedStore()
+        let otherVersion = "4b7a1bfe-88ff-4ba7-848e-a45069cf9083"
+        try execute([
+            """
+            INSERT INTO provider_profiles (profile_version, profile_id, provider_type, endpoint, model, \
+            credential_ref, timeout_seconds, retry_policy, authorized_destinations, capabilities, created_at, \
+            revoked_at) SELECT '\(otherVersion)', 'other-self-hosted', provider_type, endpoint, model, \
+            credential_ref, timeout_seconds, retry_policy, authorized_destinations, capabilities, created_at, \
+            NULL FROM provider_profiles WHERE profile_version = '\(Self.profileVersion)'
+            """
+        ])
+        let sender = ScriptedProviderSender(reply: Data())
+        let module = ProtocolDeclaringModule(
+            enabledProviderProtocols: [.selfHosted],
+            selfHostedRegistrations: [
+                CoreSelfHostedRegistration(profileVersion: Self.profileVersion, model: "synthetic-model")
+            ])
+        let root = try makeTestRoot(sender: sender, modules: [module])
+        defer { root.shutDown() }
+        let registeredItemID = try saveCapture(root)
+        let otherItemID = try saveCapture(root)
+        try insertInterpretationJob(itemID: registeredItemID)
+        try execute([
+            """
+            INSERT INTO jobs (job_id, job_schema_version, item_id, job_type, source_revision, profile_version, \
+            request_version, status, attempt_count, created_at) VALUES ('job-composition-2', 1, \
+            '\(otherItemID)', 'interpret', 0, '\(otherVersion)', '\(Self.requestVersion)', 'queued', 0, \
+            '2026-10-08T09:30:03Z')
+            """
+        ])
+        root.start(isActive: true)
+
+        XCTAssertTrue(
+            pump(until: { !sender.requests.isEmpty }, timeout: 20),
+            "the registered job reaches the transport: \(jobDiagnostics(root, sender: sender))")
+        _ = pump(until: { false }, timeout: 2)
+        XCTAssertEqual(sender.requests.count, 1, "only the registered profile's job is sent")
+        XCTAssertEqual(JobStoreInspector.job(at: databasePath, id: "job-composition-2")?.status, "queued")
     }
 
     func testStatusClientReportsExistingRevokedAndMissingProfiles() throws {
@@ -1158,6 +1227,93 @@ final class CompositionRootTests: XCTestCase {
         XCTAssertEqual(itemLifecycle(itemID), "active", "opening changes nothing")
     }
 
+    func testPromptTapReachesTheOpenSuggestionHandler() throws {
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))
+        defer { root.shutDown() }
+        let opened = PromptEventsBox()
+        root.setOpenSuggestionHandler { opened.add($0) }
+
+        tapPrompt("prompt:2026-10-15", on: root)
+        XCTAssertEqual(opened.all.map(\.identifier.rawValue), ["prompt:2026-10-15"])
+        XCTAssertEqual(opened.all.map(\.kind), [.opened])
+    }
+
+    func testPromptTapBeforeAHandlerIsSetIsHeldAndDeliveredOnce() throws {
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))
+        defer { root.shutDown() }
+        tapPrompt("prompt:2026-10-15", on: root)
+
+        let first = PromptEventsBox()
+        root.setOpenSuggestionHandler { first.add($0) }
+        XCTAssertEqual(first.all.map(\.identifier.rawValue), ["prompt:2026-10-15"])
+
+        let second = PromptEventsBox()
+        root.setOpenSuggestionHandler { second.add($0) }
+        XCTAssertTrue(second.all.isEmpty, "a held tap is delivered once")
+    }
+
+    func testReminderReportChangesNotifyTheObserverIncludingPermissionNeverRequested() throws {
+        let center = FakeNotificationCenter()
+        center.authorizationStatus = .notDetermined
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), notifications: center)
+        defer { root.shutDown() }
+        let itemID = try saveSyntheticCapture(root)
+        try seedReminder(itemID: itemID)
+        let reports = ReportsBox()
+        root.setReminderReportObserver { reports.add($0) }
+
+        let finished = FinishedFlag()
+        Task {
+            _ = try? await root.reconcileReminders()
+            finished.finish()
+        }
+        XCTAssertTrue(pump(until: { finished.isFinished }), "the reminder pass finished")
+        let report = try XCTUnwrap(reports.all.last)
+        XCTAssertEqual(report.permission, .notRequested)
+        XCTAssertTrue(
+            report.readiness.reminders.contains { $0.outlook == .undeliverable(.permissionNotRequested) })
+        XCTAssertEqual(root.lastReminderReport, report)
+    }
+
+    private final class PromptEventsBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var events: [PromptNotificationEvent] = []
+
+        func add(_ event: PromptNotificationEvent) {
+            lock.lock()
+            events.append(event)
+            lock.unlock()
+        }
+
+        var all: [PromptNotificationEvent] {
+            lock.lock()
+            defer { lock.unlock() }
+            return events
+        }
+    }
+
+    private final class ReportsBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var reports: [NotificationPermissionReport] = []
+
+        func add(_ report: NotificationPermissionReport) {
+            lock.lock()
+            reports.append(report)
+            lock.unlock()
+        }
+
+        var all: [NotificationPermissionReport] {
+            lock.lock()
+            defer { lock.unlock() }
+            return reports
+        }
+    }
+
+    private func tapPrompt(_ identifier: String, on root: ServiceCompositionRoot) {
+        root.notificationIngestor.ingestResponse(
+            requestIdentifier: identifier, actionIdentifier: UNNotificationDefaultActionIdentifier, userInfo: [:])
+    }
+
     func testEventsAlsoReachTheEnvironmentHandlerTheCallerSupplied() throws {
         let received = ReceivedEventsBox()
         let session = makeSession(authenticated: true).0
@@ -1300,6 +1456,86 @@ final class CompositionRootTests: XCTestCase {
         defer { sqlite3_finalize(statement) }
         guard sqlite3_step(statement) == SQLITE_ROW, let text = sqlite3_column_text(statement, 0) else { return "" }
         return String(cString: text)
+    }
+
+    // MARK: export
+
+    private final class ExportResultBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: Result<PreparedExport, Error>?
+
+        var value: Result<PreparedExport, Error>? {
+            lock.lock()
+            defer { lock.unlock() }
+            return stored
+        }
+
+        func set(_ result: Result<PreparedExport, Error>) {
+            lock.lock()
+            stored = result
+            lock.unlock()
+        }
+    }
+
+    private func prepareExport(_ root: ServiceCompositionRoot) -> Result<PreparedExport, Error>? {
+        let box = ExportResultBox()
+        let service = root.exportService
+        Task.detached {
+            do {
+                box.set(.success(try await service.prepareExport(ExportSelection(scopes: [.personal, .work]))))
+            } catch {
+                box.set(.failure(error))
+            }
+        }
+        _ = pump(until: { box.value != nil }, timeout: 30)
+        return box.value
+    }
+
+    private var exportsDirectory: URL {
+        ProtectedStorageLayout(rootDirectory: storageRoot).directory(for: .temporaryFiles)
+            .appendingPathComponent(ExportService.exportsDirectoryName, isDirectory: true)
+    }
+
+    func testExportIsRefusedBeforeAuthentication() throws {
+        let (session, _) = makeSession(authenticated: false)
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()), readSession: session)
+        defer { root.shutDown() }
+        _ = try saveSyntheticCapture(root)
+
+        guard case .failure(let error)? = prepareExport(root) else {
+            return XCTFail("an export before authentication must be refused")
+        }
+        XCTAssertEqual(error as? ExportFailure, .notAuthenticated)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: exportsDirectory.path), "nothing was written")
+    }
+
+    func testRealExportRoundTripsThroughTheRoot() throws {
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))
+        defer { root.shutDown() }
+        _ = try saveSyntheticCapture(root)
+
+        guard case .success(let prepared)? = prepareExport(root) else {
+            return XCTFail("an authenticated export succeeds")
+        }
+        XCTAssertEqual(prepared.itemCount, 1)
+        let text = try String(contentsOf: prepared.exportFile, encoding: .utf8)
+        XCTAssertTrue(text.contains("synthetic capture"))
+
+        root.exportService.cancelExport(exportID: prepared.id)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.exportFile.path))
+    }
+
+    func testStaleTemporaryExportIsRemovedAtNextLaunch() throws {
+        let stale = exportsDirectory.appendingPathComponent("stale-export", isDirectory: true)
+        try FileManager.default.createDirectory(at: stale, withIntermediateDirectories: true)
+        try Data("stale".utf8).write(to: stale.appendingPathComponent(ExportService.exportFileName))
+
+        let root = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))
+        defer { root.shutDown() }
+        root.start(isActive: false)
+        XCTAssertTrue(
+            pump(until: { !FileManager.default.fileExists(atPath: stale.path) }, timeout: 15),
+            "the launch sweep removes the leftover export")
     }
 
     // MARK: helpers
