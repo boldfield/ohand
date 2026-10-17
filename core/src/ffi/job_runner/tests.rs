@@ -1484,7 +1484,11 @@ fn a_registered_but_revoked_profile_is_still_refused() {
         .unwrap();
     assert_eq!(session.register_host(&[]).status, OHAND_CORE_STATUS_OK);
     session.start(191);
-    let _ = session.event(191);
+    let summary = payload_of(&session.event(191));
+    assert!(
+        !summary.to_string().contains("self_hosted_not_registered"),
+        "the refusal comes from revocation, not a missing registration: {summary}"
+    );
     session.assert_no_command();
     wait_for_drain_to_end(session.handle);
     session.close();

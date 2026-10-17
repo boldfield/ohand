@@ -1066,23 +1066,36 @@ fn a_second_stored_self_hosted_review_profile_sends_nothing_under_the_registrati
             rusqlite::params![other_version, profile_version],
         )
         .unwrap();
-    let repin = |version: &str| {
-        connection
-            .execute(
-                "UPDATE jobs SET profile_version = ? WHERE job_id = ?",
-                rusqlite::params![version, job_id],
-            )
-            .unwrap();
-    };
-    repin(other_version);
+    // A second shadow case, pinned to that second profile, is denied; a denied case is finished.
+    let second_job_id = format!("{job_id}-second");
+    connection
+        .execute(
+            "INSERT INTO jobs (job_id, job_schema_version, item_id, job_type, source_revision, \
+             profile_version, request_version, status, failure_reason, attempt_count, \
+             next_attempt_at, lease_expires_at, created_at) SELECT ?, job_schema_version, \
+             item_id, job_type, source_revision, ?, request_version, status, failure_reason, \
+             attempt_count, next_attempt_at, lease_expires_at, created_at FROM jobs \
+             WHERE job_id = ?",
+            rusqlite::params![second_job_id, other_version, job_id],
+        )
+        .unwrap();
     assert_eq!(
-        session.start_review(2, &job_id).status,
+        session.start_review(2, &second_job_id).status,
         OHAND_CORE_STATUS_OK
     );
     let payload = payload_of(&session.event(2));
     assert_eq!(payload["denial"], "self_hosted_not_registered", "{payload}");
     session.assert_no_command();
     wait_until_idle(session.handle);
+
+    // The registered pair still dispatches under the same registrations and stored profiles.
+    let send = session.dispatch(3, &job_id);
+    assert_eq!(
+        send["url"],
+        "https://spark.example.test/v1/chat/completions"
+    );
+    session.complete(3, &self_hosted_reply("action"));
+    assert_eq!(session.final_record(3)["outcome"], "reviewed");
     session.close();
 }
 
@@ -1090,15 +1103,35 @@ fn a_second_stored_self_hosted_review_profile_sends_nothing_under_the_registrati
 fn replacing_the_registrations_with_none_stops_new_reviews() {
     let _guard = serial();
     let scenario = Scenario::self_hosted();
+    let profile_version = scenario.profile.profile_version().to_string();
+    let model = scenario.profile.model().to_string();
     let session = Session::open("sh-reg-replaced", &scenario);
     session.register_native();
-    protocols::register_for_test(session.handle, &[]);
+    protocols::register_for_test(session.handle, &[(&profile_version, &model)]);
     let job_id = session.select(1);
+    // A second shadow case on the same stored profile, kept for after the replacement.
+    let second_job_id = format!("{job_id}-second");
+    rusqlite::Connection::open(&session.path)
+        .unwrap()
+        .execute(
+            "INSERT INTO jobs (job_id, job_schema_version, item_id, job_type, source_revision, \
+             profile_version, request_version, status, failure_reason, attempt_count, \
+             next_attempt_at, lease_expires_at, created_at) SELECT ?, job_schema_version, \
+             item_id, job_type, source_revision, profile_version, request_version, 'queued', \
+             NULL, 0, NULL, NULL, created_at FROM jobs WHERE job_id = ?",
+            rusqlite::params![second_job_id, job_id],
+        )
+        .unwrap();
+    session.dispatch(2, &job_id);
+    session.complete(2, &self_hosted_reply("action"));
+    assert_eq!(session.final_record(2)["outcome"], "reviewed");
+
+    protocols::register_for_test(session.handle, &[]);
     assert_eq!(
-        session.start_review(2, &job_id).status,
+        session.start_review(3, &second_job_id).status,
         OHAND_CORE_STATUS_OK
     );
-    let payload = payload_of(&session.event(2));
+    let payload = payload_of(&session.event(3));
     assert_eq!(payload["denial"], "self_hosted_not_registered", "{payload}");
     session.assert_no_command();
     wait_until_idle(session.handle);
