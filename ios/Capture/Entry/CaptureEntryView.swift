@@ -1,130 +1,169 @@
 import SwiftUI
 import UIKit
 
-/// The surface a system entry opens: voice or silent capture and the acknowledgment, nothing else. It has no history,
-/// suggestions, dashboard or webview, and it is shown from the model alone.
+/// The composer home: a glass header, an empty body and the composer at the bottom. Voice or silent capture and the
+/// acknowledgment are all it shows. It has no history, suggestions, dashboard or webview, and it is shown from the
+/// model alone, so recents never appear here.
 struct CaptureEntryView: View {
-    static let modePickerIdentifier = "capture-entry.mode"
-    static let fieldIdentifier = "capture-entry.field"
-    static let saveIdentifier = "capture-entry.save"
-    static let recordIdentifier = "capture-entry.record"
-    static let stopIdentifier = "capture-entry.stop"
-    static let cancelIdentifier = "capture-entry.cancel"
     static let noticeIdentifier = "capture-entry.notice"
+    static let messageIdentifier = "capture-entry.message"
+    static let composerIdentifier = "capture-entry.composer"
+    static let savedPillIdentifier = "capture-entry.saved"
+    /// How long the Saved pill stays before it fades.
+    static let savedPillDuration: TimeInterval = 2
+    /// The widest the composer grows at regular width.
+    static let composerMaximumWidth: CGFloat = 500
 
     @ObservedObject var model: CaptureEntryModel
+    var actionsAreDisabled = false
+    var open: (String) -> Void = { _ in }
+    var notice: String?
+
     @Environment(\.scenePhase) private var scenePhase
-    @FocusState private var fieldIsFocused: Bool
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @FocusState private var composerIsFocused: Bool
+    @State private var keyboardIsVisible = false
+    @State private var savedPillIsVisible = false
+    @State private var savedPillGeneration = 0
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Picker("Capture mode", selection: Binding(get: { model.mode }, set: { model.switchMode(to: $0) })) {
-                Text("Voice").tag(CaptureEntryMode.voice)
-                Text("Silent").tag(CaptureEntryMode.silent)
+        Color.clear
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(DSColor.surface0.color.ignoresSafeArea())
+            .safeAreaInset(edge: .top, spacing: 0) { header }
+            .safeAreaInset(edge: .bottom, spacing: 0) { bottomArea }
+            .onAppear {
+                model.refreshProgress()
+                focusComposerIfSilent()
+                reportReady()
             }
-            .pickerStyle(.segmented)
-            .disabled(!model.isIdle)
-            .accessibilityIdentifier(Self.modePickerIdentifier)
-
-            if let notice = model.protectedDataNotice {
-                noticeText(notice)
+            .onChange(of: model.presentation) { _ in reportReady() }
+            .onChange(of: scenePhase) { phase in
+                if phase == .active { model.refreshProgress() }
             }
-            if let message = model.acknowledgment.map({ model.message(for: $0) }) {
-                CaptureAcknowledgmentView(message: message)
+            .onChange(of: model.mode) { _ in focusComposerIfSilent() }
+            .onReceive(model.$acknowledgment) { acknowledgment in
+                guard let acknowledgment = acknowledgment, !acknowledgment.isSaving else { return }
+                UIAccessibility.post(notification: .announcement, argument: model.message(for: acknowledgment))
+                if acknowledgment.savedItemID != nil { showSavedPill() }
             }
-            if let voiceNotice = model.voiceNotice {
-                noticeText(voiceNotice)
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+                keyboardIsVisible = true
             }
-
-            switch model.mode {
-            case .silent: silentCapture
-            case .voice: voiceCapture
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+                keyboardIsVisible = false
             }
-        }
-        .padding()
-        .onAppear {
-            model.refreshProgress()
-            focusFieldIfSilent()
-            reportReady()
-        }
-        .onChange(of: model.presentation) { _ in reportReady() }
-        .onChange(of: scenePhase) { phase in
-            if phase == .active { model.refreshProgress() }
-        }
-        .onChange(of: model.mode) { _ in focusFieldIfSilent() }
-        .onReceive(model.$acknowledgment) { acknowledgment in
-            guard let acknowledgment = acknowledgment, !acknowledgment.isSaving else { return }
-            UIAccessibility.post(notification: .announcement, argument: model.message(for: acknowledgment))
-        }
     }
 
-    private var silentCapture: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            TextEditor(text: Binding(get: { model.textModel.text }, set: { model.textModel.updateText($0) }))
-                .font(.body)
-                .focused($fieldIsFocused)
-                .frame(minHeight: 80, maxHeight: .infinity)
-                .accessibilityLabel("Capture text")
-                .accessibilityIdentifier(Self.fieldIdentifier)
-            Button(action: { model.saveText() }) {
-                Text("Save").frame(maxWidth: .infinity)
+    private var isRegularWidth: Bool { horizontalSizeClass == .regular }
+
+    private var sideMargin: CGFloat { DSSpacing.sideMargin(for: horizontalSizeClass) }
+
+    private var header: some View {
+        VStack(spacing: DSSpacing.xs) {
+            HomeHeader(
+                keyboardIsVisible: keyboardIsVisible,
+                actionsAreDisabled: actionsAreDisabled,
+                isRegularWidth: isRegularWidth,
+                onSearch: { open(ManagementCatalog.searchEntryID) },
+                onSettings: { open(ManagementCatalog.settingsEntryID) },
+                onDone: dismissKeyboard)
+            if let notice = notice {
+                messageText(notice, identifier: AppRootView.noticeIdentifier)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .disabled(!model.textModel.canSave)
-            .accessibilityIdentifier(Self.saveIdentifier)
         }
+        .padding(.horizontal, sideMargin)
+        .padding(.top, DSSpacing.xs)
+        .padding(.bottom, DSSpacing.xs)
     }
 
-    private var voiceCapture: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            switch model.recorderState {
-            case .idle:
-                Button(action: { model.startRecording() }) {
-                    Text("Record").frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .accessibilityIdentifier(Self.recordIdentifier)
-            case .requestingPermission:
-                Text("Waiting for microphone permission\u{2026}").font(.callout)
-            case .recording:
-                Text("Recording").font(.headline)
-                Button(action: { model.stopRecording() }) {
-                    Text("Stop and save").frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .accessibilityIdentifier(Self.stopIdentifier)
-                Button(action: { model.cancelRecording() }) {
-                    Text("Cancel").frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-                .accessibilityIdentifier(Self.cancelIdentifier)
-            case .finishing:
-                Text("Finishing\u{2026}").font(.callout)
+    private var bottomArea: some View {
+        VStack(spacing: DSSpacing.xs) {
+            if savedPillIsVisible {
+                DSSavedPill()
+                    .accessibilityIdentifier(Self.savedPillIdentifier)
+                    .transition(.opacity)
             }
-            Spacer(minLength: 0)
+            if let message = shortMessage {
+                messageText(message, identifier: Self.messageIdentifier)
+            }
+            composer
         }
+        .frame(maxWidth: isRegularWidth ? Self.composerMaximumWidth : .infinity)
+        .padding(.horizontal, sideMargin)
+        .padding(.bottom, DSSpacing.xs)
+        .frame(maxWidth: .infinity)
     }
 
-    private func noticeText(_ message: String) -> some View {
+    private var composer: some View {
+        Group {
+            if case .recording(_, let startedAt) = model.recorderState {
+                TimelineView(.periodic(from: startedAt, by: 1)) { context in
+                    composerView(state: .recording, elapsedText: CaptureMessages.elapsedText(since: startedAt, now: context.date))
+                }
+            } else {
+                composerView(state: model.textModel.text.isEmpty ? .rest : .typing, elapsedText: "0:00")
+            }
+        }
+        .accessibilityIdentifier(Self.composerIdentifier)
+    }
+
+    private func composerView(state: DSComposerState, elapsedText: String) -> some View {
+        DSComposer(
+            state: state,
+            text: Binding(get: { model.textModel.text }, set: { model.textModel.updateText($0) }),
+            elapsedText: elapsedText,
+            onMic: { model.startRecording() },
+            onSave: { if model.textModel.canSave { model.saveText() } },
+            onDiscard: { model.cancelRecording() },
+            onStop: { model.stopRecording() })
+            .focused($composerIsFocused)
+    }
+
+    /// One short line about the last capture or the recorder, if there is anything to say.
+    private var shortMessage: String? {
+        if let notice = model.voiceNotice { return notice }
+        if model.protectedDataNotice != nil { return CaptureMessages.protectedDataNotice }
+        switch model.recorderState {
+        case .requestingPermission: return CaptureMessages.waitingForMicrophone
+        case .finishing: return CaptureMessages.finishingRecording
+        case .idle, .recording: break
+        }
+        return model.acknowledgment.flatMap(CaptureMessages.message(for:))
+    }
+
+    private func messageText(_ message: String, identifier: String) -> some View {
         Text(message)
-            .font(.callout)
-            .foregroundColor(.secondary)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .font(DSFont.footer)
+            .foregroundColor(DSColor.inkMuted.color)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity)
             .fixedSize(horizontal: false, vertical: true)
-            .accessibilityIdentifier(Self.noticeIdentifier)
+            .accessibilityIdentifier(identifier)
     }
 
-    /// Runs after the focus request above has been queued, so the measurement ends once the field can take input.
+    private func showSavedPill() {
+        savedPillGeneration += 1
+        let generation = savedPillGeneration
+        withAnimation { savedPillIsVisible = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.savedPillDuration) {
+            guard generation == savedPillGeneration else { return }
+            withAnimation { savedPillIsVisible = false }
+        }
+    }
+
+    private func dismissKeyboard() {
+        composerIsFocused = false
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    }
+
+    /// Runs after the focus request below has been queued, so the measurement ends once the field can take input.
     private func reportReady() {
         DispatchQueue.main.async { model.surfaceDidBecomeReady() }
     }
 
-    private func focusFieldIfSilent() {
+    private func focusComposerIfSilent() {
         guard model.mode == .silent else { return }
-        DispatchQueue.main.async { fieldIsFocused = true }
+        DispatchQueue.main.async { composerIsFocused = true }
     }
 }
