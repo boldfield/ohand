@@ -2933,6 +2933,218 @@
         "core/src/ingress/import.rs:366",
         "core/src/privacy/routing/mod.rs:226"
       ]
+    },
+    {
+      "key": "DS01",
+      "parent": null,
+      "title": "Build the design-system foundations",
+      "file_scope": [
+        "app/design-system/",
+        "ios/Tests/DesignSystem/",
+        "ios/AppAssembly/Info.plist",
+        "ios/project.yml"
+      ],
+      "intent": "Build the design-system foundations per docs/features/m1-ui-design.md.",
+      "acceptance": [
+        "See the DS01 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "F18"
+      ],
+      "source_pointers": [
+        "docs/features/m1-ui-design.md"
+      ]
+    },
+    {
+      "key": "DS02",
+      "parent": null,
+      "title": "Produce the app icon and launch screen",
+      "file_scope": [
+        "ios/AppAssembly/",
+        "ios/project.yml",
+        "ios/scripts/"
+      ],
+      "intent": "Produce the app icon and launch screen per docs/features/m1-ui-design.md.",
+      "acceptance": [
+        "See the DS02 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "DS01",
+        "F18"
+      ],
+      "source_pointers": [
+        "docs/features/m1-ui-design.md"
+      ]
+    },
+    {
+      "key": "DS03",
+      "parent": null,
+      "title": "Try Face ID quietly at launch and on return to the foreground",
+      "file_scope": [
+        "ios/Services/Authentication/",
+        "ios/Tests/Authentication/",
+        "ios/AppAssembly/AppServices.swift",
+        "ios/Services/Assembly/CompositionRoot.swift:1418"
+      ],
+      "intent": "Try Face ID quietly at launch and on return to the foreground per docs/features/m1-ui-design.md.",
+      "acceptance": [
+        "See the DS03 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "A12"
+      ],
+      "source_pointers": [
+        "docs/features/m1-ui-design.md"
+      ]
+    },
+    {
+      "key": "R06",
+      "parent": null,
+      "title": "Read recent captures for the home screen",
+      "file_scope": [
+        "core/src/ffi/recent_items.rs",
+        "ios/OhAndCoreBridge/CoreHandle+RecentItems.swift",
+        "ios/Services/RecentItems/"
+      ],
+      "intent": "Read recent captures for the home screen per docs/features/m1-ui-design.md.",
+      "acceptance": [
+        "See the R06 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "docs/features/m1-ui-design.md"
+      ]
+    },
+    {
+      "key": "DS04a",
+      "parent": null,
+      "title": "Rebuild the capture surface as the composer home",
+      "file_scope": [
+        "ios/Capture/Entry/CaptureEntryView.swift",
+        "ios/Capture/Text/TextCaptureView.swift",
+        "ios/Capture/Voice/",
+        "ios/AppAssembly/AppRootView.swift",
+        "app/home/"
+      ],
+      "intent": "Rebuild the capture surface as the composer home per docs/features/m1-ui-design.md.",
+      "acceptance": [
+        "See the DS04a section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "DS01"
+      ],
+      "source_pointers": [
+        "docs/features/m1-ui-design.md"
+      ]
+    },
+    {
+      "key": "DS04b",
+      "parent": null,
+      "title": "Show recent captures and the lock states on the home",
+      "file_scope": [
+        "app/home/"
+      ],
+      "intent": "Show recent captures and the lock states on the home per docs/features/m1-ui-design.md.",
+      "acceptance": [
+        "See the DS04b section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "DS04a",
+        "DS03",
+        "R06"
+      ],
+      "source_pointers": [
+        "docs/features/m1-ui-design.md"
+      ]
+    },
+    {
+      "key": "DS05",
+      "parent": null,
+      "title": "Restyle Search",
+      "file_scope": [
+        "app/retrieval/",
+        "ios/Tests/Retrieval/"
+      ],
+      "intent": "Restyle Search per docs/features/m1-ui-design.md.",
+      "acceptance": [
+        "See the DS05 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "DS01"
+      ],
+      "source_pointers": [
+        "docs/features/m1-ui-design.md"
+      ]
+    },
+    {
+      "key": "DS06",
+      "parent": null,
+      "title": "Restyle Settings, Audio and Daily prompt",
+      "file_scope": [
+        "ios/AppAssembly/ManagementCatalog.swift",
+        "app/data-settings/",
+        "app/prompt-settings/"
+      ],
+      "intent": "Restyle Settings, Audio and Daily prompt per docs/features/m1-ui-design.md.",
+      "acceptance": [
+        "See the DS06 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "DS01",
+        "U07b"
+      ],
+      "source_pointers": [
+        "docs/features/m1-ui-design.md"
+      ]
+    },
+    {
+      "key": "DS07",
+      "parent": null,
+      "title": "Restyle Processing",
+      "file_scope": [
+        "app/provider-settings/"
+      ],
+      "intent": "Restyle Processing per docs/features/m1-ui-design.md.",
+      "acceptance": [
+        "See the DS07 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "DS01",
+        "U05b"
+      ],
+      "source_pointers": [
+        "docs/features/m1-ui-design.md"
+      ]
+    },
+    {
+      "key": "DS08",
+      "parent": null,
+      "title": "Capture a screenshot walkthrough in CI",
+      "file_scope": [
+        "ios/UITests/Walkthrough/",
+        "ios/project.yml",
+        ".github/workflows/ios.yml"
+      ],
+      "intent": "Capture a screenshot walkthrough in CI per docs/features/m1-ui-design.md.",
+      "acceptance": [
+        "See the DS08 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "F18"
+      ],
+      "source_pointers": [
+        "docs/features/m1-ui-design.md"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -3313,27 +3525,33 @@
       "U01d"
     ],
     "U02b": [
-      "U02a",
       "A01",
-      "A09"
+      "A09",
+      "DS01",
+      "DS05",
+      "U02a"
     ],
     "U03a": [
-      "U02b",
+      "A02",
       "D04",
-      "A02"
+      "DS01",
+      "U02b"
     ],
     "U03b": [
-      "U03a",
-      "A03"
+      "A03",
+      "DS01",
+      "U03a"
     ],
     "U04a": [
-      "U02b",
+      "A04",
+      "DS01",
       "N06",
-      "A04"
+      "U02b"
     ],
     "U04b": [
-      "U04a",
-      "A13"
+      "A13",
+      "DS01",
+      "U04a"
     ],
     "U05a": [
       "U01",
@@ -3343,24 +3561,28 @@
       "U01e"
     ],
     "U05b": [
+      "DS01",
       "U01f",
       "U05a"
     ],
     "U06a": [
+      "DS01",
+      "U01e",
+      "U02a",
       "U05b",
       "V02",
-      "V03",
-      "U01e",
-      "U02a"
+      "V03"
     ],
     "U06b": [
-      "U06a",
-      "A07"
+      "A07",
+      "DS01",
+      "U06a"
     ],
     "U11": [
-      "U06b",
+      "A10",
       "C06",
-      "A10"
+      "DS01",
+      "U06b"
     ],
     "L05a": [
       "L02",
@@ -3382,10 +3604,12 @@
       "A11"
     ],
     "U07c": [
-      "U07b",
       "A05",
       "A12",
-      "U02b"
+      "DS01",
+      "DS06",
+      "U02b",
+      "U07b"
     ],
     "U08a": [
       "U01",
@@ -3399,10 +3623,11 @@
       "A13"
     ],
     "U09": [
-      "U01",
-      "J03",
       "D05",
+      "DS01",
+      "J03",
       "N04b",
+      "U01",
       "U11"
     ],
     "S04": [
@@ -3411,12 +3636,16 @@
       "T08"
     ],
     "U10": [
+      "C06",
+      "DS04b",
+      "DS05",
+      "DS06",
+      "DS07",
       "U03b",
       "U04b",
       "U07c",
       "U08b",
-      "U09",
-      "C06"
+      "U09"
     ],
     "T03": [
       "N06",
@@ -3607,7 +3836,40 @@
       "A10"
     ],
     "U01f": [],
-    "F18": []
+    "F18": [],
+    "DS01": [
+      "F18"
+    ],
+    "DS02": [
+      "DS01",
+      "F18"
+    ],
+    "DS03": [
+      "A12"
+    ],
+    "R06": [],
+    "DS04a": [
+      "DS01"
+    ],
+    "DS04b": [
+      "DS04a",
+      "DS03",
+      "R06"
+    ],
+    "DS05": [
+      "DS01"
+    ],
+    "DS06": [
+      "DS01",
+      "U07b"
+    ],
+    "DS07": [
+      "DS01",
+      "U05b"
+    ],
+    "DS08": [
+      "F18"
+    ]
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -3777,6 +4039,10 @@
     {
       "date": "2026-10-17",
       "change": "F18 added: the app had no UILaunchScreen and ran letterboxed in legacy compatibility mode on every device; the project check now requires it."
+    },
+    {
+      "date": "2026-10-17",
+      "change": "UI design rework: DS01-DS08 and R06 added per docs/features/m1-ui-design.md (design system, icon and launch, quiet Face ID at launch, recent-captures read, composer home, restyles, CI screenshot walkthrough). Unstarted UI tasks depend on DS01; U02b on DS05; U07c on DS06; U10 on the restyles."
     }
   ]
 }

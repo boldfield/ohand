@@ -1,4 +1,5 @@
 import Foundation
+import OhAndCoreBridge
 
 /// What the root's `CredentialService` lets a settings flow do with a provider secret: store one, replace one, delete one
 /// and ask whether one is still there. No call returns a secret. The only values that come back are an opaque reference
@@ -20,13 +21,29 @@ extension CredentialService: ProviderCredentialStore {}
 /// checked when the call is made; a capture-only session gets `ProviderConfigurationError.notAuthenticated` and the
 /// Keychain is not touched. Deleting a credential that a stored profile version still references leaves that version
 /// unable to dispatch (its jobs wait for a credential); it changes no profile.
-public final class ProviderCredentialEntry {
+///
+/// A saved profile can also be repaired without its caller ever holding the reference: `replaceCredential`,
+/// `credentialStatus` and `removeCredential` take a stored profile version, resolve its reference inside the services
+/// layer (one core read that the listing never offers) and call the same `CredentialService` operations. Replacing
+/// writes in place under the same reference, so the profile, its version and the jobs pinned to it are unchanged and
+/// become dispatchable again. **Removing is by reference, not by version:** other stored versions that name the same
+/// reference lose their secret too and report `credentialMissing`. An unknown version (`core` with `profile_not_found`)
+/// and a version with no credential bound (`core` with `credential_not_bound`) throw distinct errors, and no answer or
+/// error carries a reference or a secret.
+public final class ProviderCredentialEntry: @unchecked Sendable {
     private let store: ProviderCredentialStore
     private let session: ReadAuthenticationSession
+    private let profiles: ProviderProfileCore?
 
-    init(store: ProviderCredentialStore, session: ReadAuthenticationSession) {
+    /// The `ProviderConfigurationError.core` code for a version that has no credential bound. An unknown version is the
+    /// core's own `profile_not_found`.
+    static let noCredentialBoundCode = "credential_not_bound"
+
+    /// `profiles` serves the by-version operations; without it they throw `ProviderConfigurationError.unreadable`.
+    init(store: ProviderCredentialStore, session: ReadAuthenticationSession, profiles: ProviderProfileCore? = nil) {
         self.store = store
         self.session = session
+        self.profiles = profiles
     }
 
     /// Stores `secret` and returns the opaque reference to name in a `ProviderProfileDraft`.
@@ -51,6 +68,60 @@ public final class ProviderCredentialEntry {
     public func credentialStatus(reference: String) throws -> CredentialStatus {
         try requireAuthentication()
         return try store.credentialStatus(reference: reference)
+    }
+
+    // MARK: by profile version
+
+    /// Replaces the secret bound to the stored profile version, in place under its existing reference.
+    public func replaceCredential(_ secret: Data, profileVersion: String) async throws {
+        let reference = try await resolveReference(profileVersion: profileVersion)
+        try store.updateCredential(secret, reference: reference)
+    }
+
+    /// Whether the secret bound to the stored profile version is present, absent or unusable. Never reads the secret.
+    public func credentialStatus(profileVersion: String) async throws -> CredentialStatus {
+        let reference = try await resolveReference(profileVersion: profileVersion)
+        return try store.credentialStatus(reference: reference)
+    }
+
+    /// Removes the secret bound to the stored profile version, leaving it `credentialMissing`. Every stored version
+    /// that names the same reference loses its secret too.
+    public func removeCredential(profileVersion: String) async throws {
+        let reference = try await resolveReference(profileVersion: profileVersion)
+        try store.deleteCredential(reference: reference)
+    }
+
+    /// Authenticates, asks the core for the version's reference and authenticates again before the caller touches the
+    /// Keychain, so a session that relocked during the read gets nothing.
+    private func resolveReference(profileVersion: String) async throws -> String {
+        try requireAuthentication()
+        guard !profileVersion.isEmpty, profileVersion.utf8.count <= 512 else {
+            throw ProviderConfigurationError.invalidRequest
+        }
+        guard let profiles else { throw ProviderConfigurationError.unreadable }
+        let result = await withCheckedContinuation {
+            (continuation: CheckedContinuation<Result<ProviderProfileAnswer, CoreFailure>, Never>) in
+            profiles.submit(.credentialReference(profileVersion: profileVersion)) { continuation.resume(returning: $0) }
+        }
+        try requireAuthentication()
+        switch result {
+        case .success(.credentialReference(let answer)):
+            guard let reference = answer.credentialReference, !reference.isEmpty else {
+                throw ProviderConfigurationError.core(
+                    CoreFailure(
+                        errorClass: .permanent, code: Self.noCredentialBoundCode,
+                        message: "the stored profile version has no credential bound"))
+            }
+            return reference
+        case .success:
+            throw ProviderConfigurationError.unreadable
+        case .failure(let failure):
+            switch failure.code {
+            case "invalid_request": throw ProviderConfigurationError.invalidRequest
+            case "read_not_authenticated", "read_relocked": throw ProviderConfigurationError.notAuthenticated
+            default: throw ProviderConfigurationError.core(failure)
+            }
+        }
     }
 
     private func requireAuthentication() throws {
