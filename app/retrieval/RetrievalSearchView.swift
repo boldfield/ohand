@@ -40,6 +40,13 @@ struct RetrievalSearchView: View {
     static let timeChipIdentifier = "retrieval.search.chip.time"
     static let topicChipIdentifier = "retrieval.search.chip.topic"
     static let loadMoreIdentifier = "retrieval.search.load-more"
+    static let filterSheetTitleIdentifier = "retrieval.search.sheet.title"
+    static let sinceToggleIdentifier = "retrieval.search.sheet.since"
+    static let untilToggleIdentifier = "retrieval.search.sheet.until"
+    static let sinceDateIdentifier = "retrieval.search.sheet.since-date"
+    static let untilDateIdentifier = "retrieval.search.sheet.until-date"
+    static let onlyWithTopicIdentifier = "retrieval.search.sheet.only-with-topic"
+    static let sheetDoneIdentifier = "retrieval.search.sheet.done"
 
     static let promptText = "Search runs on this device. Type words you captured, or choose a date, type or session topic."
     static let emptyText = "Nothing matches. Your captures are saved; try other words or fewer filters."
@@ -69,13 +76,20 @@ struct RetrievalSearchView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.dismiss) private var dismiss
     @FocusState private var queryIsFocused: Bool
-    @State private var presentedFilterSheet: RetrievalFilterSheet?
+    @StateObject private var filterPresentation: RetrievalFilterPresentation
+    /// What the screen and an open filter sheet report; a sheet is its own hierarchy, so its parts arrive separately.
+    @State private var screenElements: [String: RetrievalRenderedElement] = [:]
+    @State private var sheetElements: [String: RetrievalRenderedElement] = [:]
     /// The words of the search that produced the rows on screen, used to show which words of a replaced original matched.
     @State private var searchedQuery = ""
 
-    init(model: RetrievalSearchModel, renderReporter: (([String: RetrievalRenderedElement]) -> Void)? = nil) {
+    init(
+        model: RetrievalSearchModel, filterPresentation: RetrievalFilterPresentation? = nil,
+        renderReporter: (([String: RetrievalRenderedElement]) -> Void)? = nil
+    ) {
         self.model = model
         self.renderReporter = renderReporter
+        _filterPresentation = StateObject(wrappedValue: filterPresentation ?? RetrievalFilterPresentation())
     }
 
     private var sideMargin: CGFloat { DSSpacing.sideMargin(for: horizontalSizeClass) }
@@ -98,11 +112,20 @@ struct RetrievalSearchView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(DSColor.surface0.color.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
-        .sheet(item: $presentedFilterSheet) { sheet in
+        .sheet(item: $filterPresentation.sheet) { sheet in
             RetrievalFilterSheetView(sheet: sheet, model: model)
+                .onPreferenceChange(RetrievalRenderedKey.self) { elements in
+                    sheetElements = elements
+                    renderReporter?(screenElements.merging(elements) { _, sheetElement in sheetElement })
+                }
+                .onDisappear {
+                    sheetElements = [:]
+                    renderReporter?(screenElements)
+                }
         }
         .onPreferenceChange(RetrievalRenderedKey.self) { elements in
-            renderReporter?(elements)
+            screenElements = elements
+            renderReporter?(elements.merging(sheetElements) { _, sheetElement in sheetElement })
         }
         .onAppear {
             model.revalidate()
@@ -197,7 +220,7 @@ struct RetrievalSearchView: View {
             }
             Button("Past 7 days") { setSinceDaysAgo(6) }
             Button("Past 30 days") { setSinceDaysAgo(29) }
-            Button("Choose dates…") { presentedFilterSheet = .dates }
+            Button("Choose dates…") { filterPresentation.sheet = .dates }
         } label: {
             menuChipFace(title: timeTitle, isSelected: model.since != nil || model.until != nil)
         }
@@ -217,7 +240,7 @@ struct RetrievalSearchView: View {
                 model.sessionTopic = ""
                 model.onlyWithSessionTopic = true
             }
-            Button("Choose topic…") { presentedFilterSheet = .topic }
+            Button("Choose topic…") { filterPresentation.sheet = .topic }
         } label: {
             menuChipFace(title: topicTitle, isSelected: topicIsActive)
         }
@@ -352,11 +375,27 @@ struct RetrievalSearchView: View {
 }
 
 /// Which filter sheet is open.
-private enum RetrievalFilterSheet: String, Identifiable {
+enum RetrievalFilterSheet: String, Identifiable {
     case dates
     case topic
 
     var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .dates: return "Dates"
+        case .topic: return "Session topic"
+        }
+    }
+}
+
+/// The open filter sheet. The time and topic menus set it; a hosted test can hold it to open a sheet the same way.
+final class RetrievalFilterPresentation: ObservableObject {
+    @Published var sheet: RetrievalFilterSheet?
+
+    init(sheet: RetrievalFilterSheet? = nil) {
+        self.sheet = sheet
+    }
 }
 
 /// The date range and the session topic, which need more than a menu item.
@@ -367,13 +406,20 @@ private struct RetrievalFilterSheetView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: DSSpacing.md) {
+            Text(sheet.title)
+                .font(DSFont.sectionTitle)
+                .foregroundColor(DSColor.ink.color)
+                .accessibilityAddTraits(.isHeader)
+                .reportRendered(RetrievalSearchView.filterSheetTitleIdentifier, text: sheet.title)
             switch sheet {
             case .dates:
-                Text("Dates").font(DSFont.sectionTitle).foregroundColor(DSColor.ink.color)
-                OptionalDayPicker(title: "Since", day: $model.since)
-                OptionalDayPicker(title: "Until", day: $model.until)
+                OptionalDayPicker(
+                    title: "Since", day: $model.since, toggleIdentifier: RetrievalSearchView.sinceToggleIdentifier,
+                    dateIdentifier: RetrievalSearchView.sinceDateIdentifier)
+                OptionalDayPicker(
+                    title: "Until", day: $model.until, toggleIdentifier: RetrievalSearchView.untilToggleIdentifier,
+                    dateIdentifier: RetrievalSearchView.untilDateIdentifier)
             case .topic:
-                Text("Session topic").font(DSFont.sectionTitle).foregroundColor(DSColor.ink.color)
                 TextField("Session topic", text: $model.sessionTopic)
                     .font(DSFont.body)
                     .padding(DSSpacing.sm)
@@ -383,12 +429,17 @@ private struct RetrievalFilterSheetView: View {
                     .submitLabel(.done)
                     .onSubmit { dismiss() }
                     .accessibilityIdentifier(RetrievalSearchView.topicIdentifier)
+                    .reportRendered(RetrievalSearchView.topicIdentifier, text: model.sessionTopic)
                 Toggle("Only items with a session topic", isOn: $model.onlyWithSessionTopic)
                     .tint(DSColor.accent.color)
+                    .reportRendered(
+                        RetrievalSearchView.onlyWithTopicIdentifier,
+                        text: model.onlyWithSessionTopic ? "Only items with a session topic: on" : "Only items with a session topic: off")
             }
             Spacer(minLength: 0)
             DSPillButton(title: "Done", style: .primary) { dismiss() }
                 .frame(maxWidth: .infinity)
+                .reportRendered(RetrievalSearchView.sheetDoneIdentifier, text: "Done")
         }
         .padding(DSSpacing.lg)
         .background(DSColor.surface0.color.ignoresSafeArea())
@@ -400,6 +451,8 @@ private struct RetrievalFilterSheetView: View {
 private struct OptionalDayPicker: View {
     let title: String
     @Binding var day: Date?
+    let toggleIdentifier: String
+    let dateIdentifier: String
 
     var body: some View {
         Toggle(
@@ -407,11 +460,14 @@ private struct OptionalDayPicker: View {
             isOn: Binding(
                 get: { day != nil },
                 set: { day = $0 ? (day ?? Date()) : nil }))
+            .tint(DSColor.accent.color)
+            .reportRendered(toggleIdentifier, text: day != nil ? "\(title): on" : "\(title): off")
         if let current = day {
             DatePicker(
                 "\(title) date",
                 selection: Binding(get: { current }, set: { day = $0 }),
                 displayedComponents: .date)
+                .reportRendered(dateIdentifier, text: current.formatted(date: .abbreviated, time: .omitted))
         }
     }
 }
@@ -478,35 +534,58 @@ struct RetrievalResultRowView: View {
         return Text(AttributedString(snippet.before) + matched + AttributedString(snippet.after))
     }
 
-    /// Where the searched words occur in a replaced original; the core reports no span. Like the core, each searched
-    /// piece is split into letter-and-digit tokens that match, ignoring case and diacritics, as prefixes of the
-    /// original's tokens.
+    /// Where the searched words occur in a replaced original; the core reports no span. Like the core's query contract,
+    /// each whitespace piece is a phrase prefix: its letter-and-digit tokens must appear as consecutive tokens of the
+    /// original, every token but the last whole and the last as a prefix, ignoring case and diacritics.
     static func highlightRanges(in original: String, query: String) -> [Range<String.Index>] {
-        let queryTokens = query.split(whereSeparator: \.isWhitespace).flatMap { piece in
-            piece.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
+        let phrases = query.split(whereSeparator: \.isWhitespace).map { piece in
+            tokenRanges(in: piece).map { String(query[$0]) }
+        }.filter { !$0.isEmpty }
+        guard !phrases.isEmpty else { return [] }
+        let words = tokenRanges(in: original[...])
+        let options: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
+        var highlighted = [Range<String.Index>?](repeating: nil, count: words.count)
+        for start in words.indices {
+            for phrase in phrases where start + phrase.count <= words.count {
+                var spans: [Range<String.Index>] = []
+                for (offset, term) in phrase.enumerated() {
+                    let word = words[start + offset]
+                    if offset == phrase.count - 1 {
+                        guard let found = original.range(of: term, options: options.union(.anchored), range: word) else { break }
+                        spans.append(found)
+                    } else {
+                        guard original[word].compare(term, options: options) == .orderedSame else { break }
+                        spans.append(word)
+                    }
+                }
+                guard spans.count == phrase.count else { continue }
+                for (offset, span) in spans.enumerated() {
+                    let index = start + offset
+                    if let existing = highlighted[index], existing.upperBound >= span.upperBound { continue }
+                    highlighted[index] = span
+                }
+            }
         }
-        guard !queryTokens.isEmpty else { return [] }
-        let options: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive, .anchored]
-        var ranges: [Range<String.Index>] = []
-        var index = original.startIndex
-        while index < original.endIndex {
-            guard original[index].isLetter || original[index].isNumber else {
-                index = original.index(after: index)
+        return highlighted.compactMap { $0 }
+    }
+
+    /// The maximal letter-and-digit runs of the text, the tokens the search index compares.
+    private static func tokenRanges(in text: Substring) -> [Range<String.Index>] {
+        var tokens: [Range<String.Index>] = []
+        var index = text.startIndex
+        while index < text.endIndex {
+            guard text[index].isLetter || text[index].isNumber else {
+                index = text.index(after: index)
                 continue
             }
             var tokenEnd = index
-            while tokenEnd < original.endIndex, original[tokenEnd].isLetter || original[tokenEnd].isNumber {
-                tokenEnd = original.index(after: tokenEnd)
+            while tokenEnd < text.endIndex, text[tokenEnd].isLetter || text[tokenEnd].isNumber {
+                tokenEnd = text.index(after: tokenEnd)
             }
-            for queryToken in queryTokens {
-                if let found = original.range(of: queryToken, options: options, range: index..<tokenEnd) {
-                    ranges.append(found)
-                    break
-                }
-            }
+            tokens.append(index..<tokenEnd)
             index = tokenEnd
         }
-        return ranges
+        return tokens
     }
 
     /// "Original: …" with each matched word tinted and bold.

@@ -34,6 +34,7 @@ final class RetrievalSearchViewTests: XCTestCase {
     private var selected: [RetrievalItemReference] = []
     private var searcher = ScriptedViewSearcher()
     private var model: RetrievalSearchModel!
+    private var filterPresentation = RetrievalFilterPresentation()
     private var rendered: [String: RetrievalRenderedElement] = [:]
     private var retainedWindow: UIWindow?
     /// Off once a test replaces the phone-sized host, so only the host under test fills `rendered`.
@@ -46,13 +47,15 @@ final class RetrievalSearchViewTests: XCTestCase {
         searcher = ScriptedViewSearcher()
         rendered = [:]
         phoneHostReports = true
+        filterPresentation = RetrievalFilterPresentation()
         model = RetrievalSearchModel(
             searcher: searcher,
             readScope: { [unowned self] in self.scope },
             onSelect: { [unowned self] in self.selected.append($0) })
         let hosting = UIHostingController(
             rootView: RetrievalSearchView(
-                model: model, renderReporter: { [unowned self] in if phoneHostReports { rendered = $0 } }))
+                model: model, filterPresentation: filterPresentation,
+                renderReporter: { [unowned self] in if phoneHostReports { rendered = $0 } }))
         let window = UIWindow(frame: CGRect(origin: .zero, size: Self.phone))
         window.rootViewController = hosting
         window.makeKeyAndVisible()
@@ -93,6 +96,15 @@ final class RetrievalSearchViewTests: XCTestCase {
 
     private func renderedText(_ identifier: String) -> String? {
         rendered[identifier]?.text
+    }
+
+    /// Settles until the screen shows what the test waits for; a sheet takes a moment to present and lay out.
+    private func settle(until condition: () -> Bool) {
+        var waited = 0
+        while !condition(), waited < 30 {
+            settle()
+            waited += 1
+        }
     }
 
     private func assertNothingStoredIsShown(file: StaticString = #filePath, line: UInt = #line) {
@@ -244,10 +256,10 @@ final class RetrievalSearchViewTests: XCTestCase {
         XCTAssertEqual(RetrievalResultRowView.highlightedWords(in: attributed), ["roof"])
     }
 
-    private func supersededRow() -> RetrievalResultRow {
+    private func supersededRow(originalText: String = "synthetic proof roof") -> RetrievalResultRow {
         RetrievalResultRow(
             reference: RetrievalItemReference(candidate: Self.firstID)!, text: "synthetic roofer words",
-            originalText: "synthetic proof roof", basis: .corrected, matched: .supersededOriginal,
+            originalText: originalText, basis: .corrected, matched: .supersededOriginal,
             snippet: RetrievalSnippet(text: "synthetic roofer words", span: nil), scopeName: "Personal",
             capturedAt: Date(timeIntervalSince1970: 1_791_462_600), itemType: .idea)
     }
@@ -279,5 +291,78 @@ final class RetrievalSearchViewTests: XCTestCase {
         model.itemType = .idea
         settle()
         XCTAssertEqual(renderedText(RetrievalSearchView.typeChipIdentifier), "Idea")
+    }
+
+    func testAPunctuatedPieceHighlightsOnlyItsAdjacentPhraseLikeTheCore() {
+        let original = "football elsewhere foo bar, foo barn, food bar, foo-bar"
+        XCTAssertEqual(
+            RetrievalResultRowView.highlightRanges(in: original, query: "foo-bar").map { String(original[$0]) },
+            ["foo", "bar", "foo", "bar", "foo", "bar"],
+            "the earlier tokens match whole and adjacent, only the last as a prefix")
+        XCTAssertTrue(
+            RetrievalResultRowView.highlightRanges(in: "football elsewhere bar", query: "foo-bar").isEmpty,
+            "a phrase whose tokens are not adjacent matches nothing")
+        let mixed = "foo bar football"
+        XCTAssertEqual(
+            RetrievalResultRowView.highlightRanges(in: mixed, query: "foo-bar foot").map { String(mixed[$0]) },
+            ["foo", "bar", "foot"], "each piece matches on its own terms")
+    }
+
+    func testAReplacedOriginalCardHighlightsAPunctuatedPieceOnlyWhereThePhraseMatched() {
+        let shown = supersededRow(originalText: "football elsewhere foo bar")
+        model.query = "foo-bar"
+        model.search()
+        searcher.answerLatest(.success(RetrievalPage(totalAccessible: 1, rows: [shown], offset: 0)))
+        settle()
+        XCTAssertEqual(renderedText(RetrievalSearchView.rowOriginalIdentifier(shown)), "foo|bar")
+    }
+
+    func testChoosingDatesOpensTheDatesSheetWithItsDayControls() throws {
+        filterPresentation.sheet = .dates
+        settle { renderedText(RetrievalSearchView.filterSheetTitleIdentifier) != nil }
+
+        XCTAssertEqual(renderedText(RetrievalSearchView.filterSheetTitleIdentifier), "Dates")
+        XCTAssertEqual(renderedText(RetrievalSearchView.sinceToggleIdentifier), "Since: off")
+        XCTAssertEqual(renderedText(RetrievalSearchView.untilToggleIdentifier), "Until: off")
+        XCTAssertNil(renderedText(RetrievalSearchView.sinceDateIdentifier), "no day is offered until the filter is on")
+        XCTAssertEqual(renderedText(RetrievalSearchView.sheetDoneIdentifier), "Done")
+        XCTAssertNil(renderedText(RetrievalSearchView.topicIdentifier), "the dates sheet shows no topic field")
+
+        let since = Date(timeIntervalSince1970: 1_791_462_600)
+        model.since = since
+        settle { renderedText(RetrievalSearchView.sinceDateIdentifier) != nil }
+
+        XCTAssertEqual(renderedText(RetrievalSearchView.sinceToggleIdentifier), "Since: on")
+        XCTAssertEqual(
+            renderedText(RetrievalSearchView.sinceDateIdentifier), since.formatted(date: .abbreviated, time: .omitted))
+        XCTAssertNil(renderedText(RetrievalSearchView.untilDateIdentifier))
+        XCTAssertEqual(
+            renderedText(RetrievalSearchView.timeChipIdentifier),
+            "From \(since.formatted(date: .abbreviated, time: .omitted))", "the time chip shows the chosen day")
+
+        filterPresentation.sheet = nil
+        settle { renderedText(RetrievalSearchView.filterSheetTitleIdentifier) == nil }
+        XCTAssertNil(renderedText(RetrievalSearchView.filterSheetTitleIdentifier), "closing the sheet removes its controls")
+    }
+
+    func testChoosingATopicOpensTheTopicSheetWithItsFieldAndToggle() {
+        filterPresentation.sheet = .topic
+        settle { renderedText(RetrievalSearchView.filterSheetTitleIdentifier) != nil }
+
+        XCTAssertEqual(renderedText(RetrievalSearchView.filterSheetTitleIdentifier), "Session topic")
+        XCTAssertEqual(renderedText(RetrievalSearchView.topicIdentifier), "")
+        XCTAssertEqual(
+            renderedText(RetrievalSearchView.onlyWithTopicIdentifier), "Only items with a session topic: off")
+        XCTAssertEqual(renderedText(RetrievalSearchView.sheetDoneIdentifier), "Done")
+        XCTAssertNil(renderedText(RetrievalSearchView.sinceToggleIdentifier), "the topic sheet shows no day controls")
+
+        model.sessionTopic = "synthetic garden"
+        model.onlyWithSessionTopic = true
+        settle { renderedText(RetrievalSearchView.topicIdentifier) == "synthetic garden" }
+
+        XCTAssertEqual(renderedText(RetrievalSearchView.topicIdentifier), "synthetic garden")
+        XCTAssertEqual(renderedText(RetrievalSearchView.onlyWithTopicIdentifier), "Only items with a session topic: on")
+        XCTAssertEqual(
+            renderedText(RetrievalSearchView.topicChipIdentifier), "synthetic garden", "the topic chip shows the topic")
     }
 }
