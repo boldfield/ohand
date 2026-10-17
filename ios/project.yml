@@ -80,6 +80,7 @@ targets:
       PRODUCT_NAME: OhAnd
       PRODUCT_BUNDLE_IDENTIFIER: com.boldfield.ohand.app
       INFOPLIST_FILE: AppAssembly/Info.plist
+      ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
       CODE_SIGN_ENTITLEMENTS: Config/OhAndApp.entitlements
       OHAND_RUST_OUTPUT_DIR: $(PROJECT_TEMP_DIR)/ohand-rust-core/$(PLATFORM_NAME)
       HEADER_SEARCH_PATHS: $(OHAND_RUST_OUTPUT_DIR)
