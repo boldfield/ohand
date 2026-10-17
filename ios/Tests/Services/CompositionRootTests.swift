@@ -1752,6 +1752,43 @@ final class CompositionRootTests: XCTestCase {
         XCTAssertNotEqual(settled.outcome(of: .reminders), .deferred("reset_unsettled"))
     }
 
+    func testAFirstTimeChangePassAfterAnInactiveRelaunchStaysHeldUntilTheResetStatusIsRead() throws {
+        let first = try makeTestRoot(sender: ScriptedProviderSender(reply: Data()))
+        _ = try saveSyntheticCapture(first)
+        first.shutDown()
+
+        var wrapped: StatusFailingResetCore?
+        let coordinator = LifecycleCoordinator()
+        let root = try makeTestRoot(
+            sender: ScriptedProviderSender(reply: Data()), modules: [coordinator],
+            resetCore: { base in
+                let failing = StatusFailingResetCore(base: base)
+                wrapped = failing
+                return failing
+            })
+        defer { root.shutDown() }
+        let resetCore = try XCTUnwrap(wrapped)
+        // A background relaunch: no launch pass runs, so no reset step has proved anything yet.
+        root.start(isActive: false)
+        XCTAssertEqual(coordinator.finishedPassCount, 0, "starting inactive runs no pass")
+
+        guard case .success(let held)? = awaitReset({ await coordinator.reconcile(.systemTimeChange) }) else {
+            return XCTFail("the time-change pass finishes")
+        }
+        XCTAssertGreaterThan(resetCore.failedStatusReads, 0, "the time-change pass tried the reset resume first")
+        XCTAssertEqual(held.results.map(\.step), [.reminders, .promptEligibility])
+        XCTAssertEqual(held.outcome(of: .reminders), .deferred("reset_unsettled"))
+        XCTAssertEqual(held.outcome(of: .promptEligibility), .deferred("reset_unsettled"))
+        XCTAssertNil(root.lastReminderReport, "no reminder pass ran while the reset status was unknown")
+
+        resetCore.failsStatus = false
+        guard case .success(let settled)? = awaitReset({ await coordinator.reconcile(.systemTimeChange) }) else {
+            return XCTFail("the later time-change pass finishes")
+        }
+        XCTAssertNotEqual(settled.outcome(of: .reminders), .deferred("reset_unsettled"))
+        XCTAssertNotEqual(settled.outcome(of: .promptEligibility), .deferred("reset_unsettled"))
+    }
+
     // MARK: helpers
 
     private func authenticateReadsAndWait(_ root: ServiceCompositionRoot) -> CompositionAuthenticationOutcome? {

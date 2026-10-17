@@ -127,7 +127,9 @@ public final class LifecycleCoordinator: CompositionLifecycleOwner, @unchecked S
     private var queuedWaiters: [CheckedContinuation<LifecyclePassReport, Never>] = []
     private var activeRace: StepRace?
     private var isStopped = false
-    /// Whether the latest reset step ended without settling; later effectful steps wait for a pass that settles it.
+    /// Whether no reset step has settled since the hold closed; effectful steps wait for a pass that settles it. It
+    /// starts open for a coordinator driven only by injected actions, and closes when `connect(to:)` installs the real
+    /// reset resume, so after a crash nothing effectful runs until a resume proves no reset is outstanding or finishes it.
     private var resetUnsettled = false
     private var foregroundObserver: NSObjectProtocol?
     private var foregroundObserverCenter: NotificationCenter?
@@ -410,6 +412,7 @@ public final class LifecycleCoordinator: CompositionLifecycleOwner, @unchecked S
 
     private func runPass(triggers: Set<LifecycleTrigger>) async -> LifecyclePassReport {
         let wanted = Set(triggers.flatMap { $0.steps })
+        await settleResetBeforeHeldSteps(wanted: wanted, triggers: triggers)
         var results: [LifecycleStepResult] = []
         for step in LifecycleStep.allCases where wanted.contains(step) {
             if stopped() {
@@ -435,6 +438,18 @@ public final class LifecycleCoordinator: CompositionLifecycleOwner, @unchecked S
         return LifecyclePassReport(triggers: triggers, results: results)
     }
 
+    /// A pass whose triggers want held steps but not the reset step (a time change) cannot rely on an earlier pass
+    /// having settled the reset: an inactive relaunch runs no launch pass. While the hold is closed it runs the reset
+    /// resume first as a precondition, which proves no reset is outstanding or finishes the interrupted one. It is not a
+    /// step the trigger asked for, so it adds no result; if it does not settle, the held steps report `reset_unsettled`.
+    private func settleResetBeforeHeldSteps(wanted: Set<LifecycleStep>, triggers: Set<LifecycleTrigger>) async {
+        guard !wanted.contains(.reset), wanted.contains(where: Self.isHeldByUnsettledReset), isResetUnsettled(),
+            !stopped(), let resume = action(for: .reset)
+        else { return }
+        let outcome = await runBounded(resume, triggers: triggers)
+        setResetUnsettled(outcome != .completed)
+    }
+
     /// The steps that issue effects over durable state a reset deletes. Ingress stays open (the ingress gate holds
     /// captures itself), and the read-only health snapshot is harmless.
     private static func isHeldByUnsettledReset(_ step: LifecycleStep) -> Bool {
@@ -448,6 +463,11 @@ public final class LifecycleCoordinator: CompositionLifecycleOwner, @unchecked S
         lock.lock()
         defer { lock.unlock() }
         return resetUnsettled
+    }
+
+    /// Closes the reset hold until a reset step or precondition settles. `connect(to:)` calls it with the real resume.
+    func holdUntilResetSettles() {
+        setResetUnsettled(true)
     }
 
     private func setResetUnsettled(_ unsettled: Bool) {
@@ -592,6 +612,7 @@ extension LifecycleCoordinator {
                 guard let root else { return .deferred("root_unavailable") }
                 return Self.outcome(ofReset: await root.resumeInterruptedReset())
             }, for: .reset)
+        holdUntilResetSettles()
         setAction(
             { [weak root] _ in
                 // The check and the activation run together on the main queue, where the background notification
