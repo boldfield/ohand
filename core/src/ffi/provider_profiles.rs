@@ -15,6 +15,11 @@
 //!   capability support, whether a credential reference is bound (never the reference), the
 //!   revocation flag and the capabilities each version is the default for.
 //!
+//! * `credential_reference` (`profile_version`) -> `profile_version`, `credential_ref` (null when the
+//!   version has no credential bound; `profile_not_found` when no stored version has that
+//!   identifier): the one read of a version's reference, for native credential management. The
+//!   listing never carries a reference.
+//!
 //! A refusal is a normalized failure whose `code` is a fixed string from `providers::profiles`
 //! (for example `unknown_protocol`, `credential_required` or `credential_pending_removal`). Failure
 //! messages never echo the request.
@@ -25,8 +30,8 @@ use super::core_handle::failure::AbiFailure;
 use super::core_handle::instance::{self, lock, JobFn};
 use crate::providers::contracts::ErrorClass;
 use crate::providers::profiles::{
-    clear_default_profile, create_profile_version, list_profiles, parse_default_capability,
-    set_default_profile, ProfileDraft, ProfileFailure,
+    clear_default_profile, create_profile_version, credential_reference_of_version, list_profiles,
+    parse_default_capability, set_default_profile, ProfileDraft, ProfileFailure,
 };
 use crate::store::schema::Database;
 use chrono::Utc;
@@ -52,6 +57,9 @@ enum Command {
         capability: String,
     },
     List {},
+    CredentialReference {
+        profile_version: String,
+    },
 }
 
 impl Command {
@@ -68,6 +76,9 @@ impl Command {
                     && within_bound(capability)
             }
             Command::ClearDefault { capability } => within_bound(capability),
+            Command::CredentialReference { profile_version } => {
+                !profile_version.is_empty() && within_bound(profile_version)
+            }
         };
         if valid {
             Ok(())
@@ -122,6 +133,14 @@ fn run(database: &mut Database, command: &Command) -> Result<Value, AbiFailure> 
         Command::List {} => {
             let listing = list_profiles(database.conn()).map_err(|e| storage_failure(&e))?;
             serde_json::to_value(listing).map_err(|_| AbiFailure::INTERNAL)
+        }
+        Command::CredentialReference { profile_version } => {
+            let reference = credential_reference_of_version(database.conn(), profile_version)
+                .map_err(|failure| failure_for(&failure))?;
+            Ok(json!({
+                "profile_version": profile_version,
+                "credential_ref": reference,
+            }))
         }
     }
 }
