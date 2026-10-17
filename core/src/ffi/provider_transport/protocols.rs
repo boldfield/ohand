@@ -13,6 +13,14 @@
 //!   every dispatch that has not yet reached the transport. A refusal is the normalized
 //!   `protocol_not_enabled` and nothing is sent. The drain puts such a job back without spending
 //!   retry budget so that enabling the protocol later lets it run.
+//! * `ohand_core_set_self_hosted_registrations` replaces the handle's self-hosted registrations
+//!   with the JSON array `[{"profile_version","model"}]` at `registrations` (default none).
+//!   Enabling the self-hosted protocol is necessary but not sufficient: a self-hosted request
+//!   is sent only when the stored profile's version and model equal a registered pair. Otherwise
+//!   it is refused as the normalized `self_hosted_not_registered`, nothing is sent, and the
+//!   drain puts the job back without spending retry budget. A registration changes no other
+//!   check (a registered but revoked profile is still refused), and setting it reads no profile
+//!   content. An empty profile version or model is `invalid_request`.
 //! * `ohand_core_start_provider_profile_status` answers with one event
 //!   `{"operation_id","exists","protocol","revoked","serves_model"}` for the stored profile
 //!   version and model named in the JSON request. A missing profile reads `exists: false`,
@@ -25,7 +33,7 @@ use super::{failures, storage_failure};
 use crate::ffi::core_handle::exports::{guarded, OhandCoreHandle, OhandCoreResult};
 use crate::ffi::core_handle::failure::AbiFailure;
 use crate::ffi::core_handle::instance::{self, lock};
-use crate::providers::contracts::ProviderProtocol;
+use crate::providers::contracts::{ProviderProfile, ProviderProtocol};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -34,10 +42,60 @@ use std::sync::Mutex;
 /// The code recorded or reported when a protocol is not enabled for the handle.
 pub(crate) const PROTOCOL_NOT_ENABLED: &str = "protocol_not_enabled";
 
+/// The code recorded or reported when a self-hosted profile and model are not registered.
+pub(crate) const SELF_HOSTED_NOT_REGISTERED: &str = "self_hosted_not_registered";
+
 const DEFAULT_ENABLED: [ProviderProtocol; 2] =
     [ProviderProtocol::Anthropic, ProviderProtocol::OpenAi];
 
 static ENABLED: Mutex<BTreeMap<u64, Vec<ProviderProtocol>>> = Mutex::new(BTreeMap::new());
+static REGISTRATIONS: Mutex<BTreeMap<u64, Vec<SelfHostedRegistration>>> =
+    Mutex::new(BTreeMap::new());
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SelfHostedRegistration {
+    profile_version: String,
+    model: String,
+}
+
+/// Why a handle may not send to a profile, or that it may.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Permission {
+    Allowed,
+    ProtocolNotEnabled,
+    SelfHostedNotRegistered,
+}
+
+impl Permission {
+    /// The code a refused drain job is labelled with; `None` when allowed.
+    pub(crate) fn code(self) -> Option<&'static str> {
+        match self {
+            Permission::Allowed => None,
+            Permission::ProtocolNotEnabled => Some(PROTOCOL_NOT_ENABLED),
+            Permission::SelfHostedNotRegistered => Some(SELF_HOSTED_NOT_REGISTERED),
+        }
+    }
+}
+
+/// Whether `handle` may send to `profile`: its protocol must be enabled and, for self-hosted, its
+/// stored profile version and model must be a registered pair.
+pub(crate) fn permission(handle: u64, profile: &ProviderProfile) -> Permission {
+    if !is_enabled(handle, profile.protocol()) {
+        return Permission::ProtocolNotEnabled;
+    }
+    if profile.protocol() == ProviderProtocol::SelfHosted {
+        let registered = lock(&REGISTRATIONS).get(&handle).is_some_and(|pairs| {
+            pairs.iter().any(|pair| {
+                pair.profile_version == profile.profile_version() && pair.model == profile.model()
+            })
+        });
+        if !registered {
+            return Permission::SelfHostedNotRegistered;
+        }
+    }
+    Permission::Allowed
+}
 
 /// Whether `handle` may dispatch `protocol`.
 pub(crate) fn is_enabled(handle: u64, protocol: ProviderProtocol) -> bool {
@@ -47,12 +105,42 @@ pub(crate) fn is_enabled(handle: u64, protocol: ProviderProtocol) -> bool {
     }
 }
 
-pub(crate) fn ensure_enabled(handle: u64, protocol: ProviderProtocol) -> Result<(), AbiFailure> {
-    if is_enabled(handle, protocol) {
-        Ok(())
-    } else {
-        Err(failures::PROTOCOL_NOT_ENABLED)
+pub(crate) fn ensure_permitted(handle: u64, profile: &ProviderProfile) -> Result<(), AbiFailure> {
+    match permission(handle, profile) {
+        Permission::Allowed => Ok(()),
+        Permission::ProtocolNotEnabled => Err(failures::PROTOCOL_NOT_ENABLED),
+        Permission::SelfHostedNotRegistered => Err(failures::SELF_HOSTED_NOT_REGISTERED),
     }
+}
+
+/// Replaces the self-hosted registrations of `handle` with the JSON array of
+/// `{"profile_version","model"}` at `registrations`. See the module documentation.
+///
+/// # Safety
+/// `registrations` must point at `registrations_len` readable bytes (it may be null only when
+/// `registrations_len` is 0, which is rejected).
+#[no_mangle]
+pub unsafe extern "C" fn ohand_core_set_self_hosted_registrations(
+    handle: OhandCoreHandle,
+    registrations: *const u8,
+    registrations_len: usize,
+) -> OhandCoreResult {
+    guarded(|| {
+        instance::lookup(handle)?;
+        let mut requested: Vec<SelfHostedRegistration> =
+            parse_request(registrations, registrations_len)?;
+        if requested
+            .iter()
+            .any(|pair| pair.profile_version.is_empty() || pair.model.is_empty())
+        {
+            return Err(AbiFailure::INVALID_REQUEST);
+        }
+        requested.dedup();
+        let mut stored = lock(&REGISTRATIONS);
+        stored.retain(|owner, _| instance::lookup(*owner).is_ok());
+        stored.insert(handle, requested);
+        Ok(())
+    })
 }
 
 /// Replaces the provider protocols `handle` may dispatch with the JSON array of protocol names at
@@ -157,4 +245,29 @@ pub(crate) fn enable_for_test(handle: OhandCoreHandle, names: &[&str]) {
         ohand_core_set_enabled_provider_protocols(handle, request.as_ptr(), request.len())
     });
     assert_eq!(outcome.status, OHAND_CORE_STATUS_OK);
+}
+
+/// Test fixtures register self-hosted pairs through the same export the host uses.
+#[cfg(test)]
+pub(crate) fn register_for_test(handle: OhandCoreHandle, pairs: &[(&str, &str)]) {
+    use crate::ffi::core_handle::failure::OHAND_CORE_STATUS_OK;
+    let request = serde_json::to_vec(
+        &pairs
+            .iter()
+            .map(|(profile_version, model)| {
+                serde_json::json!({"profile_version": profile_version, "model": model})
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let outcome = crate::ffi::core_handle::tests::consume(unsafe {
+        ohand_core_set_self_hosted_registrations(handle, request.as_ptr(), request.len())
+    });
+    assert_eq!(outcome.status, OHAND_CORE_STATUS_OK);
+}
+
+/// Registers the stored profile version and model of `profile` as a self-hosted pair.
+#[cfg(test)]
+pub(crate) fn register_profile_for_test(handle: OhandCoreHandle, profile: &ProviderProfile) {
+    register_for_test(handle, &[(profile.profile_version(), profile.model())]);
 }

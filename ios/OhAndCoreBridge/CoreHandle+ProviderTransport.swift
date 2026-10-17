@@ -101,6 +101,23 @@ public struct ProviderExchangeEvent: Decodable, Equatable, Sendable {
     }
 }
 
+/// A stored profile version and the model it serves that the host allows the core to send to a self-hosted
+/// endpoint.
+public struct CoreSelfHostedRegistration: Codable, Hashable, Sendable {
+    public let profileVersion: String
+    public let model: String
+
+    public init(profileVersion: String, model: String) {
+        self.profileVersion = profileVersion
+        self.model = model
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case profileVersion = "profile_version"
+        case model
+    }
+}
+
 /// A provider wire protocol the host may enable for dispatch. The names are the core's.
 public enum CoreProviderProtocol: String, Codable, Equatable, Sendable {
     case anthropic
@@ -230,6 +247,20 @@ extension CoreHandle {
         let requestBytes = Array(try JSONEncoder().encode(enabledProtocols.map(\.rawValue).sorted()))
         let rawResult = requestBytes.withUnsafeBufferPointer { buffer in
             ohand_core_set_enabled_provider_protocols(handleIdentifier, buffer.baseAddress, buffer.count)
+        }
+        _ = try consumeCoreResult(rawResult)
+    }
+
+    /// Replaces the self-hosted registrations of this handle (default none). Enabling the self-hosted protocol
+    /// is necessary but not sufficient: a self-hosted request is sent only when the stored profile's version and
+    /// model equal a registered pair. Otherwise it is refused as `self_hosted_not_registered` with nothing sent,
+    /// and the job runner keeps the job queued without spending a retry. A registration changes no other check;
+    /// a revoked profile is still refused. An empty profile version or model is `invalid_request`.
+    public func setSelfHostedRegistrations(_ registrations: Set<CoreSelfHostedRegistration>) throws {
+        let ordered = registrations.sorted { ($0.profileVersion, $0.model) < ($1.profileVersion, $1.model) }
+        let requestBytes = Array(try JSONEncoder().encode(ordered))
+        let rawResult = requestBytes.withUnsafeBufferPointer { buffer in
+            ohand_core_set_self_hosted_registrations(handleIdentifier, buffer.baseAddress, buffer.count)
         }
         _ = try consumeCoreResult(rawResult)
     }

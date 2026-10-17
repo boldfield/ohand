@@ -396,6 +396,10 @@ public protocol CompositionModule: AnyObject {
     /// root enables the union of every module's declaration; a protocol no module declares stays disabled (self-hosted
     /// is disabled unless a module names it).
     var enabledProviderProtocols: Set<CoreProviderProtocol> { get }
+    /// The stored self-hosted profile versions and models this module lets the core send to. Enabling self-hosted
+    /// is not enough: the root passes the union of every module's declaration to the core, which refuses any
+    /// self-hosted request whose profile version and model are not named (default none).
+    var selfHostedRegistrations: Set<CoreSelfHostedRegistration> { get }
     func attach(to context: CompositionContext) throws
     /// Takes the event if it answers one of this module's operations.
     func handle(_ event: CoreEvent) -> Bool
@@ -406,6 +410,7 @@ public protocol CompositionModule: AnyObject {
 public extension CompositionModule {
     var jobCapabilities: [JobCapabilityHandler] { [] }
     var enabledProviderProtocols: Set<CoreProviderProtocol> { [] }
+    var selfHostedRegistrations: Set<CoreSelfHostedRegistration> { [] }
 }
 
 /// A module that owns the ordered launch and foreground reconciliation (staged-capture recovery, job activation and
@@ -1833,11 +1838,15 @@ public final class ServiceCompositionRoot {
                 throw CompositionError.jobTypeConflict(capability.jobType)
             }
             var enabledProtocols = ServiceCompositionRoot.baseProviderProtocols
+            var selfHostedRegistrations = Set<CoreSelfHostedRegistration>()
             for module in modules {
                 enabledProtocols.formUnion(module.enabledProviderProtocols)
+                selfHostedRegistrations.formUnion(module.selfHostedRegistrations)
             }
             try core.setEnabledProviderProtocols(enabledProtocols)
             undo.append { try? core.setEnabledProviderProtocols(ServiceCompositionRoot.baseProviderProtocols) }
+            try core.setSelfHostedRegistrations(selfHostedRegistrations)
+            undo.append { try? core.setSelfHostedRegistrations([]) }
             let jobRunner = try JobRunnerService.attach(
                 to: core, storePath: layout.databaseURL.path, sender: adapters.sender,
                 capabilities: capabilities, isReachable: adapters.reachability.isReachable,
