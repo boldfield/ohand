@@ -1198,6 +1198,25 @@ Acceptance:
 
 Source pointers: `tools/bench/src/transport/tests.rs:679`.
 
+### F18
+
+Run the app full screen instead of in legacy compatibility mode
+
+The app's Info.plist declares neither `UILaunchScreen` nor a launch storyboard. Without one, iOS runs the app at a legacy fixed screen size, scaled up and letterboxed, on every device. `check_project_config.py` bans `UILaunchStoryboardName`, so the storyboard was removed at some point and nothing replaced it. Found by the coordinator on 2026-10-17 in a simulator walkthrough (iPhone 17, iOS 26.5).
+
+Owned paths: `ios/AppAssembly/Info.plist` (only the new key), `ios/scripts/check_project_config.py` and `ios/scripts/test_check_project_config.py` (only the new rule and its tests), one new test file under `ios/Tests/AppAssembly/`.
+
+Dependencies: none.
+
+Acceptance:
+
+1. `ios/AppAssembly/Info.plist` declares `UILaunchScreen` as a dictionary. An empty dictionary is enough; a background colour from the asset catalogue is allowed if one already exists. No storyboard is added.
+2. `check_project_config.py` fails when the app's Info.plist lacks a `UILaunchScreen` dictionary. A unit test covers both the passing and the failing case. Probe Info.plists are not required to change.
+3. A hosted test in `OhAndTests` asserts that the app runs at the device's native size, not a legacy one: the key window's scene bounds equal `UIScreen.main.bounds`, and the screen height is greater than 667 points on the CI simulator. Today, before the fix, this test must fail. Show the failing run on the parent commit, or explain why it cannot be shown.
+4. The exact-head macOS CI run is linked, and its smoke screenshot shows the app filling the screen. `make check` passes.
+
+Source pointers: `ios/AppAssembly/Info.plist`; `ios/scripts/check_project_config.py:245` (`check_plists`), `:268` (banned storyboard key).
+
 ### A01
 
 Read one item's detail through a gated root client

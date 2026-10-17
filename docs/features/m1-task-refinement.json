@@ -2840,6 +2840,29 @@
       ]
     },
     {
+      "key": "F18",
+      "parent": null,
+      "title": "Run the app full screen instead of in legacy compatibility mode",
+      "file_scope": [
+        "ios/AppAssembly/Info.plist",
+        "ios/scripts/check_project_config.py",
+        "ios/scripts/test_check_project_config.py",
+        "ios/Tests/AppAssembly/"
+      ],
+      "intent": "Declare UILaunchScreen so the app runs at native size; make the project check require it and test native bounds.",
+      "acceptance": [
+        "App Info.plist declares a UILaunchScreen dictionary; no storyboard.",
+        "check_project_config fails without it, with tests.",
+        "Hosted test: scene bounds equal screen bounds and height > 667 pt on CI; fails before the fix.",
+        "Exact-head macOS CI run linked; make check passes."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/scripts/check_project_config.py:245"
+      ]
+    },
+    {
       "key": "R05",
       "parent": null,
       "title": "Carry each search hit's item type through the gated retrieval answer",
@@ -3583,7 +3606,8 @@
     "T11e": [
       "A10"
     ],
-    "U01f": []
+    "U01f": [],
+    "F18": []
   },
   "retained_dependency_overrides": {
     "V06": [
@@ -3749,6 +3773,10 @@
     {
       "date": "2026-10-17",
       "change": "U01f added: credential replace/status/remove by stored profile version, reference resolved inside ios/Services; U05b depends on U01f and its rework covers orphaned draft secrets, untrimmed input and view/real-core tests."
+    },
+    {
+      "date": "2026-10-17",
+      "change": "F18 added: the app had no UILaunchScreen and ran letterboxed in legacy compatibility mode on every device; the project check now requires it."
     }
   ]
 }
