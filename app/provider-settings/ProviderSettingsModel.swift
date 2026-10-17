@@ -1,4 +1,5 @@
 import Combine
+import CryptoKit
 import Foundation
 import OhAndCoreBridge
 import OhAndServices
@@ -10,9 +11,95 @@ protocol ProviderSettingsControlling: AnyObject {
     func setDefault(capability: String, profileVersion: String) async throws
     func clearDefault(capability: String) async throws
     func listProfiles() async throws -> ProviderProfileListAnswer
+    func checkConnection(profileVersion: String) async throws -> ProviderConnectionOutcome
 }
 
 extension ProviderConfigurationService: ProviderSettingsControlling {}
+
+/// The credential operations this screen uses. `ProviderCredentialEntry` is the production implementation: it hands the
+/// secret straight to the native credential service and returns only an opaque reference, a status or a redacted error.
+/// No call returns a secret.
+protocol ProviderSettingsCredentialControlling: AnyObject {
+    func addCredential(_ secret: Data) throws -> String
+    func updateCredential(_ secret: Data, reference: String) throws
+    func deleteCredential(reference: String) throws
+    func credentialStatus(reference: String) throws -> CredentialStatus
+    /// By stored profile version: the services layer resolves the version's reference itself and never returns it.
+    func replaceCredential(_ secret: Data, profileVersion: String) async throws
+    func credentialStatus(profileVersion: String) async throws -> CredentialStatus
+    func removeCredential(profileVersion: String) async throws
+}
+
+extension ProviderCredentialEntry: ProviderSettingsCredentialControlling {}
+
+/// A save that may come to name a journaled reference, recorded before the core is asked. If the process ends before
+/// the core answers, the next authenticated read compares it with the stored profiles: a version of the profile that
+/// was not there before and has a credential bound means the save committed and the secret is kept; otherwise the save
+/// never committed and the secret is deleted. The profile name is kept only as a digest.
+struct ProviderSettingsPendingSave: Codable, Equatable {
+    let profileDigest: String
+    /// The versions the profile already had when the save started.
+    let knownVersions: [String]
+
+    init(profileID: String, knownVersions: [String]) {
+        profileDigest = Self.digest(profileID)
+        self.knownVersions = knownVersions
+    }
+
+    /// Whether `listing` holds a version of the profile, made after the save started, that names a credential.
+    func committed(in listing: ProviderProfileListAnswer) -> Bool {
+        listing.profiles.contains { profile in
+            Self.digest(profile.profileID) == profileDigest
+                && profile.versions.contains { $0.credentialBound && !knownVersions.contains($0.profileVersion) }
+        }
+    }
+
+    private static func digest(_ profileID: String) -> String {
+        SHA256.hash(data: Data(profileID.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+/// One journaled reference, and the save that may have come to name it if one was in flight.
+struct ProviderSettingsJournalEntry: Codable, Equatable {
+    let reference: String
+    var pendingSave: ProviderSettingsPendingSave?
+}
+
+/// Durable record of the opaque references of secrets this screen stored that no saved profile version is known to
+/// name. It holds references only, never secret bytes. It survives the process ending, so an unsaved secret can still
+/// be found and deleted on the next authenticated read, including one named by a save the process did not see finish.
+protocol ProviderSettingsReferenceJournal: AnyObject {
+    func entries() -> [ProviderSettingsJournalEntry]
+    /// Adds the entry, or replaces the one with the same reference.
+    func record(_ entry: ProviderSettingsJournalEntry)
+    func forget(_ reference: String)
+}
+
+/// The journal the app uses: a list of entries in the app's own defaults.
+final class UserDefaultsReferenceJournal: ProviderSettingsReferenceJournal {
+    private static let key = "provider-settings.unsaved-credential-journal"
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) { self.defaults = defaults }
+
+    func entries() -> [ProviderSettingsJournalEntry] {
+        guard let data = defaults.data(forKey: Self.key) else { return [] }
+        return (try? JSONDecoder().decode([ProviderSettingsJournalEntry].self, from: data)) ?? []
+    }
+
+    func record(_ entry: ProviderSettingsJournalEntry) {
+        store(entries().filter { $0.reference != entry.reference } + [entry])
+    }
+
+    func forget(_ reference: String) {
+        store(entries().filter { $0.reference != reference })
+    }
+
+    private func store(_ entries: [ProviderSettingsJournalEntry]) {
+        guard let data = try? JSONEncoder().encode(entries) else { return }
+        defaults.set(data, forKey: Self.key)
+    }
+}
 
 /// A reason a draft cannot be saved yet, found before the core is asked.
 enum ProviderSettingsIssue: Equatable, Hashable {
@@ -73,6 +160,27 @@ enum ProviderSettingsActionState: Equatable {
     }
 }
 
+/// What the last credential entry, removal or status check reported. It never holds a secret or a reference.
+enum ProviderSettingsCredentialState: Equatable {
+    case working
+    case stored
+    case updated
+    case removed
+    case status(CredentialStatus)
+    case failed(String)
+
+    var message: String { ProviderSettingsText.credentialState(self) }
+}
+
+/// What a connection check of one stored version reported.
+enum ProviderSettingsConnectionState: Equatable {
+    case checking
+    case finished(ProviderConnectionOutcome)
+    case failed(String)
+
+    var message: String { ProviderSettingsText.connectionState(self) }
+}
+
 /// The text the user is typing into the profile form.
 struct ProviderSettingsDraft: Equatable {
     var profileName = ""
@@ -104,6 +212,10 @@ enum ProviderSettingsOperatingMode: Equatable {
 ///   its answer decides what is stored, and nothing is reported as saved unless it succeeded.
 /// * The destination is never typed: the draft carries a protocol and, for a private server, an https address. The core
 ///   derives the processing destination. A draft never names a credential secret.
+/// * A secret is never held here. It arrives as `Data` from a field that clears itself, goes directly to the credential
+///   service and is not stored, published or reported; only an opaque reference and fixed messages come back.
+/// * A connection check runs only when the user asks for one version, sends the core's fixed synthetic request (no
+///   capture text) and shows only the core's fixed outcome. Nothing runs one in the background.
 /// * Saving a profile or changing a default calls only the profile service. It never touches jobs, route grants or
 ///   captures, so work already queued stays pinned to the version it was created with.
 @MainActor
@@ -112,7 +224,13 @@ final class ProviderSettingsModel: ObservableObject {
     @Published private(set) var listing: ProviderProfileListAnswer?
     @Published private(set) var saveState: ProviderSettingsActionState?
     @Published private(set) var defaultState: ProviderSettingsActionState?
-    @Published var draft = ProviderSettingsDraft()
+    @Published private(set) var credentialState: ProviderSettingsCredentialState?
+    /// What the last secret replacement, status check or removal reported for a stored version.
+    @Published private(set) var savedCredentialStates: [String: ProviderSettingsCredentialState] = [:]
+    @Published private(set) var connectionStates: [String: ProviderSettingsConnectionState] = [:]
+    @Published var draft = ProviderSettingsDraft() {
+        didSet { if let added = addedReference, draft.credentialReference != added { discardAddedReference() } }
+    }
 
     static let capability = "text_interpretation"
     static let defaultTimeoutSeconds = 60
@@ -123,12 +241,28 @@ final class ProviderSettingsModel: ObservableObject {
     static let maximumCredentialReferenceBytes = 256
 
     private let controls: ProviderSettingsControlling
+    private let credentials: ProviderSettingsCredentialControlling
+    private let journal: ProviderSettingsReferenceJournal
     private let readScope: () -> CompositionReadScope
     private var generation = 0
     private var session = 0
+    /// The opaque reference of a secret this screen stored that no saved profile version names yet. It is deleted if
+    /// the draft is abandoned, so the screen never leaves a secret that nothing can find or remove. It is also in the
+    /// journal until a save takes it over or it is deleted, so a deletion that could not be done (for example the
+    /// session had locked) or an ended process is retried on the next authenticated read.
+    private var addedReference: String?
+    /// References named by a save this process is still waiting on. Their journal entries carry the pending save and
+    /// are left alone until the core answers.
+    private var referencesBeingSaved: Set<String> = []
 
-    nonisolated init(controls: ProviderSettingsControlling, readScope: @escaping () -> CompositionReadScope) {
+    nonisolated init(
+        controls: ProviderSettingsControlling, credentials: ProviderSettingsCredentialControlling,
+        journal: ProviderSettingsReferenceJournal = UserDefaultsReferenceJournal(),
+        readScope: @escaping () -> CompositionReadScope
+    ) {
         self.controls = controls
+        self.credentials = credentials
+        self.journal = journal
         self.readScope = readScope
     }
 
@@ -212,6 +346,7 @@ final class ProviderSettingsModel: ObservableObject {
     /// Reads the stored profiles and defaults again.
     func refresh() async {
         guard readScope() == .authenticated else { lock(); return }
+        sweepAbandonedReferences()
         generation += 1
         let thisGeneration = generation
         if listing == nil { phase = .loading }
@@ -219,6 +354,7 @@ final class ProviderSettingsModel: ObservableObject {
             let fresh = try await controls.listProfiles()
             guard thisGeneration == generation else { return }
             guard readScope() == .authenticated else { lock(); return }
+            reconcileInterruptedSaves(with: fresh)
             listing = fresh
             phase = .loaded
         } catch {
@@ -247,14 +383,37 @@ final class ProviderSettingsModel: ObservableObject {
             timeoutSeconds: draft.timeoutSeconds,
             capabilities: [Self.capability])
         saveState = .working
+        // The saved version may come to name the secret this screen added, so from here until the core answers the
+        // reference is not the screen's to delete: it leaves `addedReference`, and its journal entry records the save
+        // so that, if the process ends first, the next run can tell whether the save committed. A definite refusal
+        // gives it back below.
+        let namedReference = addedReference.flatMap { $0 == request.credentialReference ? $0 : nil }
+        if let namedReference {
+            addedReference = nil
+            referencesBeingSaved.insert(namedReference)
+            let knownVersions = listing?.profiles.first { $0.profileID == request.profileID }?.versions
+                .map(\.profileVersion) ?? []
+            let pendingSave = ProviderSettingsPendingSave(profileID: request.profileID, knownVersions: knownVersions)
+            journal.record(ProviderSettingsJournalEntry(reference: namedReference, pendingSave: pendingSave))
+        }
         do {
             _ = try await controls.createProfile(request)
+            if let namedReference {
+                // Committed: a saved version names it, whatever happened to the screen meanwhile.
+                referencesBeingSaved.remove(namedReference)
+                journal.forget(namedReference)
+            }
             guard thisSession == session else { return }
             guard readScope() == .authenticated else { lock(); return }
             saveState = .saved
+            credentialState = nil
             draft = ProviderSettingsDraft()
             await refresh()
         } catch {
+            if let namedReference {
+                referencesBeingSaved.remove(namedReference)
+                takeBackUnsavedReference(namedReference, sameSession: thisSession == session)
+            }
             guard thisSession == session else { return }
             if case ProviderConfigurationError.notAuthenticated = error { lock(); return }
             saveState = .failed(ProviderSettingsText.failure(error))
@@ -281,6 +440,207 @@ final class ProviderSettingsModel: ObservableObject {
         await changeDefault { [controls] in try await controls.clearDefault(capability: Self.capability) }
     }
 
+    // MARK: credentials
+
+    /// Stores `secret` for the draft: a new credential when the draft names none, otherwise a replacement behind the
+    /// named reference. The draft then names the opaque reference. The secret is passed on and not kept.
+    func storeCredential(_ secret: Data) {
+        guard readScope() == .authenticated else { lock(); return }
+        let reference = draft.credentialReference.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            if reference.isEmpty {
+                let added = try credentials.addCredential(secret)
+                journal.record(ProviderSettingsJournalEntry(reference: added))
+                addedReference = added
+                draft.credentialReference = added
+                credentialState = .stored
+            } else {
+                try credentials.updateCredential(secret, reference: reference)
+                credentialState = .updated
+            }
+        } catch {
+            credentialFailed(error)
+        }
+    }
+
+    /// Removes the secret behind the draft's reference and forgets the reference. A stored profile version that still
+    /// names it can no longer send, and its work waits.
+    func removeCredential() {
+        guard readScope() == .authenticated else { lock(); return }
+        let reference = draft.credentialReference.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !reference.isEmpty else { credentialState = .failed(ProviderSettingsText.credentialMissingReference); return }
+        do {
+            try credentials.deleteCredential(reference: reference)
+            journal.forget(reference)
+            if reference == addedReference { addedReference = nil }
+            draft.credentialReference = ""
+            credentialState = .removed
+        } catch {
+            credentialFailed(error)
+        }
+    }
+
+    /// Reports whether the secret behind the draft's reference is present, absent or unusable. Never reads the secret.
+    func checkCredential() {
+        guard readScope() == .authenticated else { lock(); return }
+        let reference = draft.credentialReference.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !reference.isEmpty else { credentialState = .failed(ProviderSettingsText.credentialMissingReference); return }
+        do {
+            credentialState = .status(try credentials.credentialStatus(reference: reference))
+        } catch {
+            credentialFailed(error)
+        }
+    }
+
+    /// Reports that no secret was entered, without calling the credential service.
+    func noteEmptySecret() {
+        credentialState = .failed(ProviderSettingsText.credentialEmptySecret)
+    }
+
+    /// Reports an input that was refused as typed, for the draft or for a stored version, without calling the
+    /// credential service. Nothing is stored and the input is not changed to make it acceptable.
+    func noteRejectedSecret(_ rejection: ProviderSecretRejection, for version: ProviderProfileListAnswer.Version? = nil) {
+        let state = ProviderSettingsCredentialState.failed(ProviderSettingsText.rejectedSecret(rejection))
+        if let version { savedCredentialStates[version.profileVersion] = state } else { credentialState = state }
+    }
+
+    // MARK: credentials of stored profile versions
+
+    /// Whether a secret action is running for `version`.
+    func isChangingSavedCredential(_ version: ProviderProfileListAnswer.Version) -> Bool {
+        savedCredentialStates[version.profileVersion] == .working
+    }
+
+    /// Replaces the secret bound to the stored `version` in place, so work pinned to it can send again. The services
+    /// layer resolves the reference; this screen never sees it.
+    func replaceSavedCredential(_ secret: Data, for version: ProviderProfileListAnswer.Version) async {
+        await changeSavedCredential(version, success: .updated) { [credentials] profileVersion in
+            try await credentials.replaceCredential(secret, profileVersion: profileVersion)
+            return nil
+        }
+    }
+
+    /// Reports whether the secret bound to the stored `version` is present, absent or unusable. Never reads it.
+    func checkSavedCredential(_ version: ProviderProfileListAnswer.Version) async {
+        await changeSavedCredential(version, success: nil) { [credentials] profileVersion in
+            .status(try await credentials.credentialStatus(profileVersion: profileVersion))
+        }
+    }
+
+    /// Removes the secret bound to the stored `version`. It stays saved but cannot send until a secret is entered.
+    func removeSavedCredential(_ version: ProviderProfileListAnswer.Version) async {
+        await changeSavedCredential(version, success: .removed) { [credentials] profileVersion in
+            try await credentials.removeCredential(profileVersion: profileVersion)
+            return nil
+        }
+    }
+
+    private func changeSavedCredential(
+        _ version: ProviderProfileListAnswer.Version, success: ProviderSettingsCredentialState?,
+        _ operation: (String) async throws -> ProviderSettingsCredentialState?
+    ) async {
+        guard readScope() == .authenticated else { lock(); return }
+        let profileVersion = version.profileVersion
+        guard savedCredentialStates[profileVersion] != .working else { return }
+        let thisSession = session
+        savedCredentialStates[profileVersion] = .working
+        do {
+            let reported = try await operation(profileVersion)
+            guard thisSession == session else { return }
+            guard readScope() == .authenticated else { lock(); return }
+            savedCredentialStates[profileVersion] = reported ?? success
+        } catch {
+            guard thisSession == session else { return }
+            if case ProviderConfigurationError.notAuthenticated = error { lock(); return }
+            savedCredentialStates[profileVersion] = .failed(ProviderSettingsText.credentialFailure(error))
+        }
+    }
+
+    /// Deletes the secret this screen added if no saved version names it. Called when the draft is abandoned. If the
+    /// deletion cannot be done now the reference stays in the journal and is retried on a later authenticated read.
+    private func discardAddedReference() {
+        guard let reference = addedReference else { return }
+        addedReference = nil
+        deleteUnsaved(reference)
+    }
+
+    private func deleteUnsaved(_ reference: String) {
+        do {
+            try credentials.deleteCredential(reference: reference)
+            journal.forget(reference)
+        } catch {}
+    }
+
+    /// A save the core refused, or that never reached it, names no version: the secret is unsaved again. It returns to
+    /// the draft if the draft is still there, otherwise it is deleted.
+    private func takeBackUnsavedReference(_ reference: String, sameSession: Bool) {
+        journal.record(ProviderSettingsJournalEntry(reference: reference))
+        if sameSession && draft.credentialReference == reference && addedReference == nil {
+            addedReference = reference
+        } else {
+            deleteUnsaved(reference)
+        }
+    }
+
+    /// Retries the deletion of every journaled reference that is not the draft's current one and no save may name.
+    /// Entries left by a save are settled against the stored profiles in `reconcileInterruptedSaves`.
+    private func sweepAbandonedReferences() {
+        for entry in journal.entries()
+        where entry.pendingSave == nil && entry.reference != addedReference
+            && !referencesBeingSaved.contains(entry.reference)
+        {
+            deleteUnsaved(entry.reference)
+        }
+    }
+
+    /// Settles the entries of saves an earlier process did not see finish: keeps the secret a committed version names,
+    /// deletes the one a save that never committed left behind.
+    private func reconcileInterruptedSaves(with listing: ProviderProfileListAnswer) {
+        for entry in journal.entries() where !referencesBeingSaved.contains(entry.reference) {
+            guard let pendingSave = entry.pendingSave else { continue }
+            if pendingSave.committed(in: listing) {
+                journal.forget(entry.reference)
+            } else {
+                deleteUnsaved(entry.reference)
+            }
+        }
+    }
+
+    private func credentialFailed(_ error: Error) {
+        if case ProviderConfigurationError.notAuthenticated = error { lock(); return }
+        credentialState = .failed(ProviderSettingsText.credentialFailure(error))
+    }
+
+    // MARK: connection check
+
+    func isChecking(_ version: ProviderProfileListAnswer.Version) -> Bool {
+        connectionStates[version.profileVersion] == .checking
+    }
+
+    /// Whether a check may be started for `version`: unrevoked and not already running.
+    func canCheckConnection(_ version: ProviderProfileListAnswer.Version) -> Bool {
+        !version.revoked && !isChecking(version)
+    }
+
+    /// Sends the core's one fixed synthetic request to `version`'s own destination, on the user's request only.
+    func checkConnection(_ version: ProviderProfileListAnswer.Version) async {
+        guard readScope() == .authenticated else { lock(); return }
+        guard canCheckConnection(version) else { return }
+        let thisSession = session
+        let profileVersion = version.profileVersion
+        connectionStates[profileVersion] = .checking
+        do {
+            let outcome = try await controls.checkConnection(profileVersion: profileVersion)
+            guard thisSession == session else { return }
+            guard readScope() == .authenticated else { lock(); return }
+            connectionStates[profileVersion] = .finished(outcome)
+        } catch {
+            guard thisSession == session else { return }
+            if case ProviderConfigurationError.notAuthenticated = error { lock(); return }
+            connectionStates[profileVersion] = .failed(ProviderSettingsText.failure(error))
+        }
+    }
+
     /// Call when the screen goes away or the app locks: drops every stored detail and ignores answers still pending.
     func clear() {
         generation += 1
@@ -288,6 +648,10 @@ final class ProviderSettingsModel: ObservableObject {
         listing = nil
         saveState = nil
         defaultState = nil
+        credentialState = nil
+        connectionStates = [:]
+        savedCredentialStates = [:]
+        discardAddedReference()
         draft = ProviderSettingsDraft()
         phase = .idle
     }

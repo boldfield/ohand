@@ -42,6 +42,81 @@ private extension View {
     }
 }
 
+/// Why a typed secret was refused before it reached the credential service.
+enum ProviderSecretRejection: Equatable {
+    case empty
+    case surroundingWhitespace
+}
+
+/// Holds a typed secret only until it is submitted. `take` empties the buffer before anything else can read it, whether
+/// or not the input is usable, and the owner clears it when the screen goes away or the app leaves the foreground. The
+/// secret is never trimmed or otherwise changed: input that would need changing is refused.
+@MainActor
+final class ProviderSecretBuffer: ObservableObject {
+    @Published var text = ""
+    /// What the entry's button does. The entry sets it, so a hosted test can press it without a touch.
+    var press: (() -> Void)?
+
+    enum Submission: Equatable {
+        case secret(Data)
+        case rejected(ProviderSecretRejection)
+    }
+
+    func take() -> Submission {
+        let typed = text
+        text = ""
+        if typed.isEmpty { return .rejected(.empty) }
+        if typed.trimmingCharacters(in: .whitespacesAndNewlines) != typed { return .rejected(.surroundingWhitespace) }
+        return .secret(Data(typed.utf8))
+    }
+
+    func clear() { text = "" }
+}
+
+/// A secure field with a button that hands the secret straight to `onSecret` and empties itself. The text lives only in
+/// the buffer; it is never rendered back, reported or kept anywhere else.
+private struct ProviderSecretEntry: View {
+    let fieldIdentifier: String
+    let buttonTitle: String
+    let buttonIdentifier: String
+    let onSecret: (Data) -> Void
+    let onRejected: (ProviderSecretRejection) -> Void
+    let bufferProbe: ((String, ProviderSecretBuffer) -> Void)?
+    @StateObject private var buffer = ProviderSecretBuffer()
+    @Environment(\.scenePhase) private var scenePhase
+
+    private func submit() {
+        switch buffer.take() {
+        case .secret(let secret): onSecret(secret)
+        case .rejected(let rejection): onRejected(rejection)
+        }
+    }
+
+    var body: some View {
+        SecureField("Secret (API key)", text: $buffer.text)
+            .textInputAutocapitalization(.never).autocorrectionDisabled().textContentType(.none)
+            .submitLabel(.done)
+            .onSubmit(submit)
+            .accessibilityIdentifier(fieldIdentifier)
+            .onAppear {
+                buffer.press = submit
+                bufferProbe?(fieldIdentifier, buffer)
+            }
+            .onDisappear { buffer.clear() }
+            .onChange(of: scenePhase) { phase in
+                if phase != .active { buffer.clear() }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+                buffer.clear()
+            }
+        Button(buttonTitle, action: submit)
+        .frame(minHeight: 44)
+        .buttonStyle(.bordered)
+        .reportRendered(buttonIdentifier, text: buttonTitle)
+        .accessibilityIdentifier(buttonIdentifier)
+    }
+}
+
 /// The provider settings screen: the current operating mode, the stored profile versions with default choices, and the
 /// form for a new version. Everything it shows comes from `ProviderSettingsModel`.
 struct ProviderSettingsView: View {
@@ -60,6 +135,18 @@ struct ProviderSettingsView: View {
     static let modelFieldIdentifier = "provider-settings.field.model"
     static let credentialFieldIdentifier = "provider-settings.field.credential"
     static let endpointFieldIdentifier = "provider-settings.field.endpoint"
+    static let secretFieldIdentifier = "provider-settings.field.secret"
+    static let storeSecretIdentifier = "provider-settings.store-secret"
+    static let removeSecretIdentifier = "provider-settings.remove-secret"
+    static let checkSecretIdentifier = "provider-settings.check-secret"
+    static let credentialStateIdentifier = "provider-settings.credential-state"
+    static func savedSecretFieldIdentifier(_ version: String) -> String { "provider-settings.saved-secret.field.\(version)" }
+    static func replaceSavedSecretIdentifier(_ version: String) -> String { "provider-settings.saved-secret.replace.\(version)" }
+    static func checkSavedSecretIdentifier(_ version: String) -> String { "provider-settings.saved-secret.check.\(version)" }
+    static func removeSavedSecretIdentifier(_ version: String) -> String { "provider-settings.saved-secret.remove.\(version)" }
+    static func savedSecretStateIdentifier(_ version: String) -> String { "provider-settings.saved-secret.state.\(version)" }
+    static func checkConnectionIdentifier(_ version: String) -> String { "provider-settings.check-connection.\(version)" }
+    static func connectionStateIdentifier(_ version: String) -> String { "provider-settings.connection-state.\(version)" }
 
     static func versionIdentifier(_ version: String) -> String { "provider-settings.version.\(version)" }
     static func makeDefaultIdentifier(_ version: String) -> String { "provider-settings.make-default.\(version)" }
@@ -69,13 +156,17 @@ struct ProviderSettingsView: View {
 
     @ObservedObject var model: ProviderSettingsModel
     var renderReporter: (([String: ProviderSettingsRenderedElement]) -> Void)?
+    /// Lets a hosted test see each secret field's buffer. It is called with the field identifier and the buffer.
+    var secretBufferProbe: ((String, ProviderSecretBuffer) -> Void)?
 
     init(
         model: ProviderSettingsModel,
-        renderReporter: (([String: ProviderSettingsRenderedElement]) -> Void)? = nil
+        renderReporter: (([String: ProviderSettingsRenderedElement]) -> Void)? = nil,
+        secretBufferProbe: ((String, ProviderSecretBuffer) -> Void)? = nil
     ) {
         self.model = model
         self.renderReporter = renderReporter
+        self.secretBufferProbe = secretBufferProbe
     }
 
     var body: some View {
@@ -182,6 +273,20 @@ struct ProviderSettingsView: View {
             } else if !version.defaultFor.isEmpty {
                 Text("Current default").font(.footnote)
             }
+            if model.canCheckConnection(version) {
+                Button {
+                    Task { await model.checkConnection(version) }
+                } label: {
+                    Text("Check connection").frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .buttonStyle(.bordered)
+                .reportRendered(Self.checkConnectionIdentifier(version.profileVersion), text: "Check connection")
+                .accessibilityIdentifier(Self.checkConnectionIdentifier(version.profileVersion))
+            }
+            if let state = model.connectionStates[version.profileVersion] {
+                note(state.message, identifier: Self.connectionStateIdentifier(version.profileVersion))
+            }
+            if !version.revoked { savedSecretControls(version) }
             if model.canMakeDefault(version) {
                 Button {
                     Task { await model.makeDefault(version) }
@@ -198,6 +303,36 @@ struct ProviderSettingsView: View {
         .cornerRadius(8)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(Self.versionIdentifier(version.profileVersion))
+    }
+
+    /// Replace, check or remove the secret of a stored version. The services layer finds the version's own secret; the
+    /// screen never learns its name.
+    @ViewBuilder
+    private func savedSecretControls(_ version: ProviderProfileListAnswer.Version) -> some View {
+        let profileVersion = version.profileVersion
+        ProviderSecretEntry(
+            fieldIdentifier: Self.savedSecretFieldIdentifier(profileVersion), buttonTitle: "Replace secret",
+            buttonIdentifier: Self.replaceSavedSecretIdentifier(profileVersion),
+            onSecret: { secret in Task { await model.replaceSavedCredential(secret, for: version) } },
+            onRejected: { model.noteRejectedSecret($0, for: version) }, bufferProbe: secretBufferProbe
+        )
+        // A second tap while the operation runs would empty the new buffer and have the model drop the secret.
+        .disabled(model.isChangingSavedCredential(version))
+        HStack {
+            Button("Check secret") { Task { await model.checkSavedCredential(version) } }
+                .frame(minHeight: 44)
+                .reportRendered(Self.checkSavedSecretIdentifier(profileVersion), text: "Check secret")
+                .accessibilityIdentifier(Self.checkSavedSecretIdentifier(profileVersion))
+            Button("Remove secret", role: .destructive) { Task { await model.removeSavedCredential(version) } }
+                .frame(minHeight: 44)
+                .reportRendered(Self.removeSavedSecretIdentifier(profileVersion), text: "Remove secret")
+                .accessibilityIdentifier(Self.removeSavedSecretIdentifier(profileVersion))
+        }
+        .buttonStyle(.bordered)
+        .disabled(model.isChangingSavedCredential(version))
+        if let state = model.savedCredentialStates[profileVersion] {
+            note(state.message, identifier: Self.savedSecretStateIdentifier(profileVersion))
+        }
     }
 
     @ViewBuilder
@@ -223,11 +358,32 @@ struct ProviderSettingsView: View {
             .textInputAutocapitalization(.never).autocorrectionDisabled()
             .reportRendered("provider-settings.field.model", text: model.draft.model)
             .accessibilityIdentifier("provider-settings.field.model")
-        TextField("Saved credential name", text: $model.draft.credentialReference)
-            .textInputAutocapitalization(.never).autocorrectionDisabled()
+        Text(model.draft.credentialReference.isEmpty
+            ? "Credential name: filled in when you store a secret" : "Credential name: \(model.draft.credentialReference)")
+            .font(.footnote).foregroundColor(.secondary)
             .reportRendered("provider-settings.field.credential", text: model.draft.credentialReference)
             .accessibilityIdentifier("provider-settings.field.credential")
+        ProviderSecretEntry(
+            fieldIdentifier: Self.secretFieldIdentifier, buttonTitle: "Store secret",
+            buttonIdentifier: Self.storeSecretIdentifier,
+            onSecret: { model.storeCredential($0) }, onRejected: { model.noteRejectedSecret($0) },
+            bufferProbe: secretBufferProbe)
+        HStack {
+            Button("Check saved") { model.checkCredential() }
+                .frame(minHeight: 44)
+                .reportRendered(Self.checkSecretIdentifier, text: "Check saved")
+                .accessibilityIdentifier(Self.checkSecretIdentifier)
+            Button("Remove", role: .destructive) { model.removeCredential() }
+                .frame(minHeight: 44)
+                .reportRendered(Self.removeSecretIdentifier, text: "Remove")
+                .accessibilityIdentifier(Self.removeSecretIdentifier)
+        }
+        .buttonStyle(.bordered)
+        if let state = model.credentialState {
+            note(state.message, identifier: Self.credentialStateIdentifier)
+        }
         note(ProviderSettingsText.credentialNote, identifier: "provider-settings.credential-note")
+        note(ProviderSettingsText.connectionCheckNote, identifier: "provider-settings.connection-note")
         Stepper(
             value: $model.draft.timeoutSeconds,
             in: ProviderSettingsModel.minimumTimeoutSeconds...ProviderSettingsModel.maximumTimeoutSeconds
@@ -268,6 +424,7 @@ extension ProviderSettingsModel {
     /// The model as the app assembles it: the root's provider configuration, gated by the root's read scope.
     nonisolated static func assembled(root: ServiceCompositionRoot) -> ProviderSettingsModel {
         ProviderSettingsModel(
-            controls: root.providerConfiguration, readScope: { [weak root] in root?.readScope ?? .captureOnly })
+            controls: root.providerConfiguration, credentials: root.providerCredentials,
+            readScope: { [weak root] in root?.readScope ?? .captureOnly })
     }
 }

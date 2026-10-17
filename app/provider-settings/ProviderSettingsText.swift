@@ -20,7 +20,79 @@ enum ProviderSettingsText {
         + "it was created with, and saved captures are never changed."
     static let capabilityNote = "Each profile serves text interpretation. No other capability can be selected."
     static let credentialNote =
-        "Enter only the name of a credential saved on this device. The secret itself is never typed here."
+        "The secret is stored in this device's secure storage and is never shown again. The profile holds only an "
+        + "opaque name for it."
+    static let noCredentialBoundCode = "credential_not_bound"
+    static let credentialMissingReference = "No saved credential is named yet."
+    static let credentialEmptySecret = "Enter the secret first. Nothing was stored."
+    static let connectionCheckNote =
+        "A connection check sends one fixed test message to this profile's own destination. It contains none of your "
+        + "notes and runs only when you ask."
+
+    static func rejectedSecret(_ rejection: ProviderSecretRejection) -> String {
+        switch rejection {
+        case .empty: return credentialEmptySecret
+        case .surroundingWhitespace:
+            return "The secret starts or ends with a space or line break. Remove it and try again. Nothing was stored."
+        }
+    }
+
+    static func credentialState(_ state: ProviderSettingsCredentialState) -> String {
+        switch state {
+        case .working: return "Working…"
+        case .stored: return "Secret stored on this device."
+        case .updated: return "Secret replaced."
+        case .removed: return "Secret removed. Profile versions that used it cannot send until you enter a new one."
+        case .status(.present): return "A secret is saved for this name."
+        case .status(.absent): return "No secret is saved for this name. Enter one to use it."
+        case .status(.invalidated): return "The saved secret cannot be used. Enter it again."
+        case .failed(let message): return message
+        }
+    }
+
+    static func credentialFailure(_ error: Error) -> String {
+        if let error = error as? ProviderConfigurationError, case .notAuthenticated = error { return lockedText }
+        if let error = error as? ProviderConfigurationError, case .core(let failure) = error,
+            failure.code == ProviderSettingsText.noCredentialBoundCode
+        {
+            return "This profile version has no secret bound to it. Nothing was changed."
+        }
+        guard let error = error as? CredentialError else { return "The credential could not be changed." }
+        switch error {
+        case .invalidReference: return "That credential name is not valid. Nothing was changed."
+        case .emptySecret: return credentialEmptySecret
+        case .notFound: return "No secret is saved for this name."
+        case .invalidated: return "The saved secret cannot be used. Enter it again."
+        case .deviceLocked: return "Unlock the device and try again. Nothing was changed."
+        case .storage: return "Secure storage could not complete that. Nothing was changed."
+        }
+    }
+
+    static func connectionState(_ state: ProviderSettingsConnectionState) -> String {
+        switch state {
+        case .checking: return "Checking…"
+        case .finished(let outcome): return connectionOutcome(outcome)
+        case .failed(let message): return message
+        }
+    }
+
+    /// One fixed sentence per outcome. None echoes an address, a response or a secret.
+    static func connectionOutcome(_ outcome: ProviderConnectionOutcome) -> String {
+        switch outcome {
+        case .ok: return "Connected. The provider accepted the test."
+        case .credentialMissing: return "No usable secret is saved for this profile. Enter it again."
+        case .credentialRejected: return "The provider rejected the saved secret. Replace it."
+        case .unreachable: return "The provider could not be reached. Check the network or the server address."
+        case .tlsFailure: return "A secure connection could not be made to the provider."
+        case .timeout: return "The provider did not answer in time."
+        case .capabilityMismatch: return "The provider does not offer this model or capability."
+        case .protocolNotEnabled: return "This provider type is not enabled in this version of the app. Nothing was sent."
+        case .rateLimited: return "The provider is limiting requests right now. Try again later."
+        case .providerError: return "The provider reported a problem. Try again later."
+        case .unexpectedResponse: return "The provider answered in a way the app does not understand."
+        case .cancelled: return "The check was cancelled."
+        }
+    }
 
     static func protocolName(_ providerProtocol: String) -> String {
         switch providerProtocol {
@@ -77,7 +149,7 @@ enum ProviderSettingsText {
         case .endpointNotHTTPS: return "The server address must be an https address."
         case .endpointHasQueryOrFragment: return "The server address cannot include a query or fragment."
         case .endpointNotAllowed: return "Only a private server takes an address."
-        case .credentialRequired: return "Name the saved credential this profile uses."
+        case .credentialRequired: return "Store the secret this profile uses."
         case .credentialTooLong: return "The credential name is too long."
         case .timeoutOutOfBounds:
             return "The timeout must be between \(ProviderSettingsModel.minimumTimeoutSeconds) and "
