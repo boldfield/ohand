@@ -78,8 +78,10 @@ final class WalkthroughUITests: XCTestCase {
         let searchKey = app.keyboards.buttons["Search"]
         XCTAssertTrue(searchKey.waitForExistence(timeout: screenTimeout), "keyboard Search key did not appear")
         searchKey.tap()
-        // The saved captures must be found: "garage" matches exactly one of them.
-        let resultCount = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Showing 1 of'")).firstMatch
+        // The saved captures must be found: "garage" matches at least one (the second appearance's run adds a second copy).
+        let resultCount = app.staticTexts.matching(
+            NSPredicate(format: "label BEGINSWITH 'Showing ' AND NOT label BEGINSWITH 'Showing 0 '")
+        ).firstMatch
         XCTAssertTrue(resultCount.waitForExistence(timeout: screenTimeout), "search for \(searchQuery) found no synthetic capture")
         capture(prefix, "search")
         goBack()
