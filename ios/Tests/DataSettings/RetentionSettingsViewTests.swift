@@ -93,9 +93,9 @@ final class RetentionSettingsViewTests: XCTestCase {
     func testTheDefaultPolicySoleSourceRuleAndTheCoresChoicesAreShown() async {
         await withScreen(FakeRetentionControls(status: Self.status())) { _ in
             XCTAssertEqual(text(RetentionSettingsView.policyIdentifier), "7 days (default)")
-            let explanation = text(RetentionSettingsView.explanationIdentifier) ?? ""
-            XCTAssertTrue(explanation.contains("kept for 7 days after they are successfully turned into text"))
-            XCTAssertEqual(text(RetentionSettingsView.soleSourceIdentifier), RetentionSettingsText.soleSourceExplanation)
+            XCTAssertTrue(RetentionSettingsText.policyExplanation(Self.status().policy)
+                .contains("kept for 7 days after they are successfully turned into text"))
+            XCTAssertEqual(text(RetentionSettingsView.footerIdentifier), RetentionSettingsView.footerText)
             XCTAssertEqual(text(RetentionSettingsView.periodStepperIdentifier), "7 days")
             assertTappable(RetentionSettingsView.applyIdentifier)
 
@@ -114,7 +114,7 @@ final class RetentionSettingsViewTests: XCTestCase {
     func testACustomStoredPeriodIsShownAndSevenDaysIsNamedOnlyAsTheDefault() async {
         await withScreen(FakeRetentionControls(status: Self.status(periodDays: 30, isDefault: false))) { _ in
             XCTAssertEqual(text(RetentionSettingsView.policyIdentifier), "30 days")
-            let explanation = text(RetentionSettingsView.explanationIdentifier) ?? ""
+            let explanation = RetentionSettingsText.policyExplanation(Self.status(periodDays: 30, isDefault: false).policy)
             XCTAssertTrue(explanation.contains("kept for 30 days"))
             XCTAssertFalse(explanation.contains("kept for 7 days"))
             XCTAssertTrue(explanation.contains("The default is 7 days."))

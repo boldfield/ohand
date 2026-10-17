@@ -143,32 +143,119 @@ struct SuggestionPlaceholderView: View {
 
 struct SettingsRootView: View {
     static let emptyIdentifier = "management.settings.empty"
+    static let eraseIdentifier = "management.settings.erase"
+    static let versionIdentifier = "management.settings.version"
+
+    /// Sections shown in the first group; the rest follow in the second.
+    static let firstGroupEntryIDs: Set<String> = ["prompt-settings", "voice-recovery"]
 
     let sections: [ManagementEntry]
     let context: ManagementContext
 
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
+    private var firstGroup: [ManagementEntry] { sections.filter { Self.firstGroupEntryIDs.contains($0.id) } }
+    private var secondGroup: [ManagementEntry] { sections.filter { !Self.firstGroupEntryIDs.contains($0.id) } }
+
+    private var versionText: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        return version.map { "Oh And \($0)" } ?? "Oh And"
+    }
+
     var body: some View {
-        Group {
-            if sections.isEmpty {
-                Text("There is nothing to set up yet.")
-                    .font(.body)
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding()
-                    .accessibilityIdentifier(Self.emptyIdentifier)
-            } else {
-                List(sections) { section in
+        ScrollView {
+            VStack(alignment: .leading, spacing: DSSpacing.lg) {
+                HStack {
+                    DSGlassButton(systemName: "chevron.left", accessibilityLabel: "Back") { dismiss() }
+                    Spacer()
+                }
+                Text("Settings")
+                    .font(DSFont.displayXL)
+                    .foregroundColor(DSColor.ink.color)
+                    .accessibilityAddTraits(.isHeader)
+                if sections.isEmpty {
+                    Text("There is nothing to set up yet.")
+                        .font(DSFont.body)
+                        .foregroundColor(DSColor.inkMuted.color)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityIdentifier(Self.emptyIdentifier)
+                } else {
+                    group(firstGroup)
+                    group(secondGroup)
+                }
+                DSCard {
+                    Text("Erase everything")
+                        .font(DSFont.button)
+                        .foregroundColor(DSColor.destructive.color)
+                        .frame(maxWidth: .infinity)
+                }
+                .accessibilityIdentifier(Self.eraseIdentifier)
+                Text(versionText)
+                    .font(DSFont.footer)
+                    .foregroundColor(DSColor.inkMuted.color)
+                    .frame(maxWidth: .infinity)
+                    .accessibilityIdentifier(Self.versionIdentifier)
+            }
+            .padding(.horizontal, DSSpacing.sideMargin(for: horizontalSizeClass))
+            .padding(.vertical, DSSpacing.md)
+        }
+        .background(DSColor.surface0.color.ignoresSafeArea())
+        .navigationBarBackButtonHidden(true)
+        .toolbar(.hidden, for: .navigationBar)
+    }
+
+    @ViewBuilder
+    private func group(_ entries: [ManagementEntry]) -> some View {
+        if !entries.isEmpty {
+            DSGroupedSection {
+                ForEach(entries) { entry in
                     NavigationLink {
-                        section.makeView(context)
+                        entry.makeView(context)
                     } label: {
-                        Label(section.title, systemImage: section.systemImage)
-                            .fixedSize(horizontal: false, vertical: true)
+                        SettingsEntryRow(entry: entry, context: context)
+                            .allowsHitTesting(false)
                     }
+                    .buttonStyle(.plain)
                 }
             }
         }
-        .navigationTitle("Settings")
-        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+/// One settings row with its current value. Only values that are settings are shown: nothing here is read from the
+/// stored history, so the root is the same whether or not the session is unlocked.
+private struct SettingsEntryRow: View {
+    let entry: ManagementEntry
+    let context: ManagementContext
+
+    var body: some View {
+        switch entry.id {
+        case "prompt-settings":
+            PromptValueRow(entry: entry, model: context.promptSettings)
+        case "audio-retention":
+            RetentionValueRow(entry: entry, model: context.retention)
+        default:
+            DSRow(label: entry.title, iconSystemName: entry.systemImage)
+        }
+    }
+}
+
+private struct PromptValueRow: View {
+    let entry: ManagementEntry
+    @ObservedObject var model: PromptSettingsModel
+
+    var body: some View {
+        DSRow(label: entry.title, iconSystemName: entry.systemImage, value: model.hasLoaded ? (model.isEnabled ? "On" : "Off") : nil)
+    }
+}
+
+private struct RetentionValueRow: View {
+    let entry: ManagementEntry
+    @ObservedObject var model: RetentionSettingsModel
+
+    var body: some View {
+        DSRow(label: "Audio", iconSystemName: entry.systemImage, value: model.status.map { RetentionSettingsText.periodSummary($0.policy) })
     }
 }

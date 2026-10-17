@@ -24,7 +24,7 @@ enum RetentionSettingsText {
         "This device is low on storage. Recordings that are the only copy of a note are still kept; free space by "
         + "deleting items you no longer need."
     static let lockedText = "Your saved items are locked. Go back and open Settings again to unlock them."
-    static let noUnresolvedText = "No recording is waiting on text. Your captures are saved."
+    static let noUnresolvedText = "None"
     static let periodChangeNote = "Changing the period moves when transcribed audio expires. It never deletes audio now."
 
     static func dayCount(_ days: Int) -> String { days == 1 ? "1 day" : "\(days) days" }
