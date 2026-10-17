@@ -33,17 +33,34 @@ final class WalkthroughUITests: XCTestCase {
         try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
     }
 
-    func testWalkthroughInLightAndDark() throws {
+    func testWalkthrough() throws {
+        let environment = ProcessInfo.processInfo.environment
+        let appearanceName = try XCTUnwrap(
+            environment["WALKTHROUGH_APPEARANCE"], "WALKTHROUGH_APPEARANCE (light or dark) is not set")
+        XCTAssertTrue(["light", "dark"].contains(appearanceName), "unknown appearance \(appearanceName)")
+        expectsDark = appearanceName == "dark"
         let widthName = UIDevice.current.userInterfaceIdiom == .pad ? "regular" : "compact"
-        for (appearance, appearanceName) in [(XCUIDevice.Appearance.light, "light"), (.dark, "dark")] {
-            XCUIDevice.shared.appearance = appearance
-            screenshotIndex = 0
-            app.terminate()
-            app.launchArguments = ["-AppleInterfaceStyle", appearanceName == "dark" ? "Dark" : "Light"]
-            app.launch()
-            try walk(prefix: "\(widthName)-\(appearanceName)")
+        app.launch()
+        try walk(prefix: "\(widthName)-\(appearanceName)")
+    }
+
+    /// True when the driving script put the simulator in dark appearance. The screenshots are checked against it, so a
+    /// run in which the appearance did not take effect fails instead of producing mislabelled pictures.
+    private var expectsDark = false
+
+    private func assertAppearanceApplied(_ screenshot: XCUIScreenshot) {
+        guard let image = screenshot.image.cgImage, let data = image.dataProvider?.data,
+            let bytes = CFDataGetBytePtr(data)
+        else { return XCTFail("cannot read the screenshot pixels") }
+        // A point in the empty lower part of the screen, which shows the screen's own background.
+        let bytesPerPixel = image.bitsPerPixel / 8
+        let pixelOffset = (image.height * 3 / 4) * image.bytesPerRow + 8 * bytesPerPixel
+        let luminance = (Int(bytes[pixelOffset]) + Int(bytes[pixelOffset + 1]) + Int(bytes[pixelOffset + 2])) / 3
+        if expectsDark {
+            XCTAssertLessThan(luminance, 100, "dark appearance was not applied")
+        } else {
+            XCTAssertGreaterThan(luminance, 150, "light appearance was not applied")
         }
-        XCUIDevice.shared.appearance = .light
     }
 
     private func walk(prefix: String) throws {
@@ -128,6 +145,7 @@ final class WalkthroughUITests: XCTestCase {
         let slug = screen.lowercased().replacingOccurrences(of: " ", with: "-")
         let name = String(format: "%@-%02d-%@.png", prefix, screenshotIndex, slug)
         let screenshot = XCUIScreen.main.screenshot()
+        if screen == "settings" { assertAppearanceApplied(screenshot) }
         let attachment = XCTAttachment(screenshot: screenshot)
         attachment.name = name
         attachment.lifetime = .keepAlways
