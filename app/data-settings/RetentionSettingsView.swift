@@ -163,6 +163,7 @@ struct RetentionSettingsView: View {
                 .padding(.horizontal, DSSpacing.md)
                 .frame(minHeight: DSLayout.rowMinimumHeight)
                 .accessibilityIdentifier(Self.stepperIdentifier)
+                .reportDataSettingsRendered(Self.stepperIdentifier, text: RetentionSettingsText.dayCount(model.chosenDays))
             }
             .accessibilityIdentifier(Self.periodStepperIdentifier)
             .reportDataSettingsRendered(Self.periodStepperIdentifier, text: RetentionSettingsText.dayCount(model.chosenDays))
