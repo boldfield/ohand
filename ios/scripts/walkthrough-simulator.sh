@@ -68,7 +68,7 @@ width="compact"
 case "${label}" in *regular*) width="regular" ;; esac
 missing=0
 for appearance in light dark; do
-  for screen in home search settings unfinished-recordings audio-retention providers daily-prompt; do
+  for screen in home search settings unfinished-recordings audio-retention export providers daily-prompt; do
     if ! ls "${output_dir}/${width}-${appearance}-"??"-${screen}.png" >/dev/null 2>&1; then
       echo "FAILURE: no screenshot for ${width} ${appearance} ${screen}" >&2
       missing=1

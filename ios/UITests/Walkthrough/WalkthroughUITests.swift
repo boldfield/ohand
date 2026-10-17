@@ -74,12 +74,13 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertTrue(queryField.waitForExistence(timeout: screenTimeout), "search query field did not appear")
         queryField.tap()
         queryField.typeText(searchQuery)
-        let submit = app.buttons["retrieval.search.submit"]
-        if submit.exists { submit.tap() }
-        // Put the keyboard away so the results are visible.
+        // The keyboard's Search key is the one way a person submits; it also puts the keyboard away.
         let searchKey = app.keyboards.buttons["Search"]
-        if searchKey.exists { searchKey.tap() }
-        _ = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Showing'")).firstMatch.waitForExistence(timeout: 10)
+        XCTAssertTrue(searchKey.waitForExistence(timeout: screenTimeout), "keyboard Search key did not appear")
+        searchKey.tap()
+        // The saved captures must be found: "garage" matches exactly one of them.
+        let resultCount = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Showing 1 of'")).firstMatch
+        XCTAssertTrue(resultCount.waitForExistence(timeout: screenTimeout), "search for \(searchQuery) found no synthetic capture")
         capture(prefix, "search")
         goBack()
 
@@ -95,12 +96,11 @@ final class WalkthroughUITests: XCTestCase {
             capture(prefix, screen.title)
             if screen.title == "Audio retention" {
                 let exportLink = app.buttons["data-settings.retention.export-link"]
-                if exportLink.waitForExistence(timeout: 10) {
-                    exportLink.tap()
-                    XCTAssertTrue(app.navigationBars["Export"].waitForExistence(timeout: screenTimeout), "Export did not open")
-                    capture(prefix, "Export")
-                    goBack()
-                }
+                XCTAssertTrue(exportLink.waitForExistence(timeout: screenTimeout), "Export link not found")
+                exportLink.tap()
+                XCTAssertTrue(app.navigationBars["Export"].waitForExistence(timeout: screenTimeout), "Export did not open")
+                capture(prefix, "Export")
+                goBack()
             }
             goBack()
         }
@@ -109,12 +109,14 @@ final class WalkthroughUITests: XCTestCase {
 
     private func saveCaptures() {
         let field = app.textViews["capture-entry.field"]
-        guard field.waitForExistence(timeout: screenTimeout) else { return }
+        XCTAssertTrue(field.waitForExistence(timeout: screenTimeout), "capture field did not appear")
         for text in syntheticCaptures {
             field.tap()
             field.typeText(text)
             let save = app.buttons["capture-entry.save"]
-            if save.waitForExistence(timeout: 10), save.isEnabled { save.tap() }
+            XCTAssertTrue(save.waitForExistence(timeout: screenTimeout), "Save button did not appear")
+            XCTAssertTrue(save.isEnabled, "Save button is disabled after typing a capture")
+            save.tap()
         }
     }
 
