@@ -173,7 +173,8 @@ struct SourceDetailScreen: View {
     @StateObject private var model: SourceDetailModel
 
     init(itemID: String, makeModel: (String) -> SourceDetailModel) {
-        _model = StateObject(wrappedValue: makeModel(itemID))
+        let built = makeModel(itemID)
+        _model = StateObject(wrappedValue: built)
     }
 
     var body: some View {
