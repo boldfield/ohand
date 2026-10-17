@@ -36,6 +36,8 @@ enum ExportSettingsOutcome: Equatable {
 /// * No scope is selected by default and audio is off by default; an export is never started without a scope.
 /// * Completion is reported only from the service's share outcome, which already distinguishes a completed activity
 ///   from a cancelled, failed or interrupted one. A cancelled or failed share is never shown as success.
+/// * The share sheet's own completion handler is the only source of the ending; the sheet going off screen is not an
+///   ending, because the handler runs only after the dismissal and, for share extensions, after they finish.
 /// * Every prepared export is handed back to the service exactly once, through `finishShare` or `cancelExport`, so its
 ///   protected temporaries are removed whatever happens; leaving the screen or locking cancels what is pending.
 /// * Messages carry counts only: no item, capture or file identifier, path or secret is shown.
@@ -112,6 +114,13 @@ final class ExportSettingsModel: ObservableObject {
                 phase = .finished(.failed(ExportSettingsText.failure(.storageUnavailable)))
             }
         }
+    }
+
+    /// The share sheet's ending for `exportID`. An ending for an export that is no longer pending, such as a late
+    /// answer from an earlier sheet, is ignored.
+    func shareEnded(_ ending: ExportShareEnding, exportID: String) {
+        guard pendingShare?.id == exportID else { return }
+        shareEnded(ending)
     }
 
     /// Call with how the share sheet ended. Reports success only when the service confirms the share completed.

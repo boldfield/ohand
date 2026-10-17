@@ -36,7 +36,10 @@ final class ExportSettingsViewTests: XCTestCase {
             rootView: NavigationStack {
                 ExportSettingsView(model: model, renderReporter: { [unowned self] in rendered = $0 })
             })
-        let shown = UIWindow(frame: CGRect(origin: .zero, size: Self.phone))
+        // The share sheet is presented from UIKit, which needs a window in a scene; the host app provides one.
+        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        let shown = scene.map { UIWindow(windowScene: $0) } ?? UIWindow()
+        shown.frame = CGRect(origin: .zero, size: Self.phone)
         shown.rootViewController = hosting
         shown.makeKeyAndVisible()
         window = shown
@@ -51,6 +54,7 @@ final class ExportSettingsViewTests: XCTestCase {
     }
 
     private func close() {
+        window?.rootViewController?.presentedViewController?.dismiss(animated: false)
         window?.isHidden = true
         window = nil
     }
@@ -65,6 +69,25 @@ final class ExportSettingsViewTests: XCTestCase {
     }
 
     private func text(_ identifier: String) -> String? { rendered[identifier]?.text }
+
+    /// Polls on the main actor, where the window and its presentations live.
+    private func waitForScreen(timeout: TimeInterval = 10, _ condition: () -> Bool) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        return condition()
+    }
+
+    /// The system share sheet the screen has put on screen, once its presentation has finished.
+    private func presentedShareSheet() async -> UIActivityViewController? {
+        var sheet: UIActivityViewController? {
+            window?.rootViewController?.presentedViewController as? UIActivityViewController
+        }
+        let shown = await waitForScreen { sheet.map { !$0.isBeingPresented } ?? false }
+        return shown ? sheet : nil
+    }
 
     func testControlsLimitsAndTheNoScopePromptAreShownBeforeAnythingIsChosen() async {
         await withScreen { _, _ in
@@ -144,6 +167,85 @@ final class ExportSettingsViewTests: XCTestCase {
             XCTAssertNil(rendered[ExportSettingsView.startIdentifier])
             XCTAssertNil(rendered[ExportSettingsView.scopeIdentifier(.personal)])
             XCTAssertEqual(world.core.requests, [])
+        }
+    }
+
+    func testThePreparedExportIsPresentedInTheSystemShareSheetAndItsCancelIsShownAsNothingSent() async {
+        await withScreen { model, world in
+            model.setScope(.personal, selected: true)
+            await model.startExport()
+            guard let sheet = await presentedShareSheet() else { return XCTFail("the share sheet is presented") }
+
+            sheet.completionWithItemsHandler?(nil, false, nil, nil)
+            await settle()
+
+            let shown = text(ExportSettingsView.stateIdentifier) ?? ""
+            XCTAssertTrue(shown.contains("Nothing was sent"), shown)
+            XCTAssertNil(model.pendingShare)
+            XCTAssertEqual(world.exportRemnants(), [])
+        }
+    }
+
+    /// The sheet goes off screen before its completion handler runs, and a share extension may still be sending. That
+    /// dismissal must not be taken as a cancel: the files stay, and the handler's later answer is the one shown.
+    func testDismissingTheSheetBeforeItsHandlerRunsKeepsTheExportUntilTheHandlerReportsCompletion() async {
+        await withScreen { model, world in
+            model.setScope(.personal, selected: true)
+            await model.startExport()
+            guard let sheet = await presentedShareSheet() else { return XCTFail("the share sheet is presented") }
+            let pending = model.pendingShare
+            let remnants = world.exportRemnants()
+            XCTAssertFalse(remnants.isEmpty)
+
+            sheet.dismiss(animated: false)
+            await settle()
+
+            XCTAssertNil(window?.rootViewController?.presentedViewController, "the sheet is off screen")
+            XCTAssertEqual(model.phase, .sharing, "a dismissal alone is not an ending")
+            XCTAssertEqual(model.pendingShare, pending)
+            XCTAssertEqual(world.exportRemnants(), remnants, "the files the activity may still read are kept")
+            XCTAssertEqual(text(ExportSettingsView.stateIdentifier), ExportSettingsText.readyText)
+
+            sheet.completionWithItemsHandler?(nil, true, nil, nil)
+            await settle()
+
+            let shown = text(ExportSettingsView.stateIdentifier) ?? ""
+            XCTAssertTrue(shown.hasPrefix("Shared"), shown)
+            XCTAssertEqual(world.exportRemnants(), [])
+
+            sheet.completionWithItemsHandler?(nil, false, nil, nil)
+            await settle()
+            XCTAssertEqual(text(ExportSettingsView.stateIdentifier), shown, "the export ends once")
+        }
+    }
+
+    func testAFailedActivityReportedByTheSheetIsShownAsAFailure() async {
+        await withScreen { model, world in
+            model.setScope(.work, selected: true)
+            await model.startExport()
+            guard let sheet = await presentedShareSheet() else { return XCTFail("the share sheet is presented") }
+
+            sheet.completionWithItemsHandler?(nil, true, nil, ExportFailure.storageUnavailable)
+            await settle()
+
+            guard case .finished(.failed(let failed)) = model.phase else { return XCTFail("got \(model.phase)") }
+            XCTAssertEqual(text(ExportSettingsView.stateIdentifier), failed)
+            XCTAssertEqual(world.exportRemnants(), [])
+        }
+    }
+
+    func testLeavingTheScreenTakesDownTheSheetAndRemovesTheExport() async {
+        await withScreen { model, world in
+            model.setScope(.personal, selected: true)
+            await model.startExport()
+            guard await presentedShareSheet() != nil else { return XCTFail("the share sheet is presented") }
+
+            model.clear()
+            let gone = await waitForScreen { window?.rootViewController?.presentedViewController == nil }
+
+            XCTAssertTrue(gone, "the sheet is dismissed")
+            XCTAssertEqual(model.phase, .idle)
+            XCTAssertEqual(world.exportRemnants(), [])
         }
     }
 }

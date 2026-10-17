@@ -3,16 +3,69 @@ import UIKit
 import OhAndCoreBridge
 import OhAndServices
 
-/// Presents the system share sheet for a prepared export and reports how it ended.
+/// Presents the system share sheet for the pending export straight from UIKit and passes on how it ended.
+///
+/// The sheet's `completionWithItemsHandler` is the only authority for the ending: it runs after the sheet is dismissed,
+/// whether the user cancelled, swiped it away or an activity finished, and for share extensions only once the
+/// extension is done. Nesting the sheet in a SwiftUI `.sheet` would add a second, earlier dismissal signal that cannot
+/// tell a cancel from a share still in progress, so the sheet is presented here instead. When the model drops the
+/// export without an ending (leaving the screen or locking), a sheet still on screen is dismissed with its handler
+/// detached.
 private struct ExportShareSheetPresenter: UIViewControllerRepresentable {
-    let export: PreparedExport
-    let onEnding: (ExportShareEnding) -> Void
+    let export: PreparedExport?
+    let onEnding: (_ exportID: String, _ ending: ExportShareEnding) -> Void
 
-    func makeUIViewController(context: Context) -> UIActivityViewController {
-        ExportShareSheet.makeController(for: export, onEnding: onEnding)
+    final class Coordinator {
+        var exportID: String?
+        weak var sheet: UIActivityViewController?
+
+        func detachSheet() -> UIActivityViewController? {
+            let detached = sheet
+            sheet = nil
+            detached?.completionWithItemsHandler = nil
+            return detached
+        }
     }
 
-    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIViewController(context: Context) -> UIViewController { UIViewController() }
+
+    func updateUIViewController(_ anchor: UIViewController, context: Context) {
+        let coordinator = context.coordinator
+        guard coordinator.exportID != export?.id else { return }
+        coordinator.exportID = export?.id
+        let stale = coordinator.detachSheet()
+        let export = self.export
+        let onEnding = self.onEnding
+        let present = { [weak anchor] in
+            guard let export, coordinator.exportID == export.id else { return }
+            guard let anchor, anchor.view.window?.windowScene != nil, anchor.presentedViewController == nil else {
+                // Without a sheet on screen nothing can be shared and no handler would ever answer; ending it now
+                // lets the service remove the files and the screen say so.
+                onEnding(export.id, .failed)
+                return
+            }
+            let sheet = ExportShareSheet.makeController(for: export) { ending in onEnding(export.id, ending) }
+            sheet.popoverPresentationController?.sourceView = anchor.view
+            coordinator.sheet = sheet
+            anchor.present(sheet, animated: true)
+        }
+        DispatchQueue.main.async {
+            if let stale, stale.presentingViewController != nil {
+                stale.dismiss(animated: false, completion: present)
+            } else {
+                present()
+            }
+        }
+    }
+
+    static func dismantleUIViewController(_ anchor: UIViewController, coordinator: Coordinator) {
+        coordinator.exportID = nil
+        if let stale = coordinator.detachSheet(), stale.presentingViewController != nil {
+            stale.dismiss(animated: false)
+        }
+    }
 }
 
 /// The export section of the data settings: scope and audio choices, the limits of an export, and how the last export
@@ -50,15 +103,13 @@ struct ExportSettingsView: View {
             renderReporter?(elements)
         }
         .onDisappear { model.clear() }
-        .sheet(
-            isPresented: Binding(
-                get: { model.pendingShare != nil },
-                set: { presented in if !presented { model.shareEnded(.cancelled) } })
-        ) {
-            if let export = model.pendingShare {
-                ExportShareSheetPresenter(export: export) { ending in model.shareEnded(ending) }
+        .background(
+            ExportShareSheetPresenter(export: model.pendingShare) { exportID, ending in
+                model.shareEnded(ending, exportID: exportID)
             }
-        }
+            .frame(width: 0, height: 0)
+            .accessibilityHidden(true)
+        )
     }
 
     @ViewBuilder

@@ -77,6 +77,7 @@ struct RetentionSettingsView: View {
                     NavigationLink("Export a copy of your notes") { ExportSettingsView(model: exportSettings, renderReporter: renderReporter) }
                         .frame(minHeight: 44)
                         .accessibilityIdentifier(Self.exportLinkIdentifier)
+                        .reportDataSettingsRendered(Self.exportLinkIdentifier, text: "Export a copy of your notes")
                 }
             }
             .padding()

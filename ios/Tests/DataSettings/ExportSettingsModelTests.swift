@@ -80,6 +80,26 @@ final class ExportSettingsModelTests: XCTestCase {
         XCTAssertTrue(world.finalizedAudioExists("cap1.m4a"), "the source audio is untouched")
     }
 
+    func testAnEndingForAnotherExportIsIgnoredAndTheSheetsOwnEndingIsReported() async throws {
+        let world = try makeWorld()
+        let model = makeModel(world)
+        model.setScope(.personal, selected: true)
+        await model.startExport()
+        guard let pending = model.pendingShare else { return XCTFail("an export is pending") }
+        let remnants = world.exportRemnants()
+
+        model.shareEnded(.cancelled, exportID: pending.id + "-earlier")
+
+        XCTAssertEqual(model.phase, .sharing)
+        XCTAssertEqual(model.pendingShare, pending)
+        XCTAssertEqual(world.exportRemnants(), remnants)
+
+        model.shareEnded(.completed, exportID: pending.id)
+
+        guard case .finished(.shared) = model.phase else { return XCTFail("got \(model.phase)") }
+        XCTAssertEqual(world.exportRemnants(), [])
+    }
+
     func testFailedShareReportsFailureAndCleansUp() async throws {
         let world = try makeWorld()
         let model = makeModel(world)
