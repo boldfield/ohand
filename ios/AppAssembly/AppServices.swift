@@ -117,7 +117,19 @@ final class AppServices {
         root.start(isActive: isActive)
         timeChange.start()
         notificationHooks.reconcile(root)
+        requestQuietAuthentication(isActive: isActive)
     }
+
+    /// One quiet Face ID attempt whenever the app becomes active. The attempt never blocks capture; a failure shows
+    /// nothing and is not retried until the next foreground.
+    private func requestQuietAuthentication(isActive: Bool) {
+        guard isActive else { return }
+        root.requestQuietReadAuthentication(reason: Self.quietAuthenticationReason) { [weak self] _ in
+            self?.captureEntry.refreshAccess()
+        }
+    }
+
+    private static let quietAuthenticationReason = "Show your recent captures."
 
     /// Presents the suggestion screen for a tapped prompt. The prompt identifier is kept first; the navigation model
     /// shows the screen only once the session is authenticated, and the screen reads nothing before that.
@@ -136,6 +148,7 @@ final class AppServices {
     func sceneWillEnterForeground() {
         // Callbacks do not arrive while the app is suspended, so compare the clocks on return.
         timeChange.checkNow()
+        requestQuietAuthentication(isActive: true)
         if let presentation = entrySession.willEnterForeground() {
             present(presentation)
         }
