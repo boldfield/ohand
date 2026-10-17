@@ -12,6 +12,8 @@ final class FakeProviderSettingsControls: ProviderSettingsControlling, @unchecke
     private(set) var created: [ProviderProfileDraft] = []
     private(set) var defaultsSet: [String] = []
     private(set) var defaultsCleared = 0
+    var checkResult: Result<ProviderConnectionOutcome, Error> = .success(.ok)
+    private(set) var checked: [String] = []
     /// Invoked in the middle of every call, so a test can change the session while it is in flight.
     var during: (() -> Void)?
 
@@ -39,6 +41,41 @@ final class FakeProviderSettingsControls: ProviderSettingsControlling, @unchecke
         during?()
         return try listing.get()
     }
+
+    func checkConnection(profileVersion: String) async throws -> ProviderConnectionOutcome {
+        checked.append(profileVersion)
+        during?()
+        return try checkResult.get()
+    }
+}
+
+/// Records what reached the credential service and answers from canned results. It keeps secrets only so a test can
+/// prove where they went.
+final class FakeProviderSettingsCredentials: ProviderSettingsCredentialControlling {
+    var addResult: Result<String, Error> = .success("11111111-1111-1111-1111-111111111111")
+    var updateResult: Result<Void, Error> = .success(())
+    var deleteResult: Result<Void, Error> = .success(())
+    var statusResult: Result<CredentialStatus, Error> = .success(.present)
+    private(set) var added: [Data] = []
+    private(set) var updated: [(Data, String)] = []
+    private(set) var deleted: [String] = []
+
+    func addCredential(_ secret: Data) throws -> String {
+        added.append(secret)
+        return try addResult.get()
+    }
+
+    func updateCredential(_ secret: Data, reference: String) throws {
+        updated.append((secret, reference))
+        try updateResult.get()
+    }
+
+    func deleteCredential(reference: String) throws {
+        deleted.append(reference)
+        try deleteResult.get()
+    }
+
+    func credentialStatus(reference: String) throws -> CredentialStatus { try statusResult.get() }
 }
 
 private func decodeCreated(profileID: String, version: String) -> ProviderProfileCreatedAnswer {
@@ -82,8 +119,10 @@ func providerListing(
 final class ProviderSettingsModelTests: XCTestCase {
     private var scope: CompositionReadScope = .authenticated
 
+    private let credentials = FakeProviderSettingsCredentials()
+
     private func makeModel(_ controls: FakeProviderSettingsControls) -> ProviderSettingsModel {
-        ProviderSettingsModel(controls: controls, readScope: { [unowned self] in scope })
+        ProviderSettingsModel(controls: controls, credentials: credentials, readScope: { [unowned self] in scope })
     }
 
     private static let twoVersions = providerListing(
@@ -289,5 +328,159 @@ private extension Result {
     var failureValue: Failure? {
         if case .failure(let failure) = self { return failure }
         return nil
+    }
+
+    // MARK: credentials and connection checks
+
+    private static let syntheticSecret = Data("synthetic-secret-value".utf8)
+
+    private func allVisibleText(_ model: ProviderSettingsModel) -> String {
+        [
+            model.credentialState?.message ?? "", model.draft.credentialReference,
+            model.connectionStates.values.map(\.message).joined(separator: " "),
+        ].joined(separator: " ")
+    }
+
+    func testANewSecretGoesToTheCredentialServiceAndOnlyItsReferenceIsKept() {
+        let model = makeModel(FakeProviderSettingsControls(listing: Self.twoVersions))
+        model.storeCredential(Self.syntheticSecret)
+
+        XCTAssertEqual(credentials.added, [Self.syntheticSecret])
+        XCTAssertEqual(model.draft.credentialReference, "11111111-1111-1111-1111-111111111111")
+        XCTAssertEqual(model.credentialState, .stored)
+        XCTAssertFalse(allVisibleText(model).contains("synthetic-secret-value"))
+    }
+
+    func testANamedCredentialIsReplacedInPlaceAndRemovalForgetsTheReference() {
+        let model = makeModel(FakeProviderSettingsControls(listing: Self.twoVersions))
+        model.draft.credentialReference = "22222222-2222-2222-2222-222222222222"
+        model.storeCredential(Self.syntheticSecret)
+        XCTAssertEqual(credentials.updated.map(\.1), ["22222222-2222-2222-2222-222222222222"])
+        XCTAssertEqual(model.credentialState, .updated)
+
+        model.removeCredential()
+        XCTAssertEqual(credentials.deleted, ["22222222-2222-2222-2222-222222222222"])
+        XCTAssertEqual(model.draft.credentialReference, "")
+        XCTAssertEqual(model.credentialState, .removed)
+    }
+
+    func testCredentialFailuresAreFixedSentencesThatEchoNothing() {
+        let model = makeModel(FakeProviderSettingsControls(listing: Self.twoVersions))
+        model.draft.credentialReference = "secret-looking-reference"
+        let failures: [CredentialError] = [
+            .invalidReference, .emptySecret, .notFound, .invalidated, .deviceLocked(.update), .storage(.update, -25299),
+        ]
+        for failure in failures {
+            credentials.updateResult = .failure(failure)
+            model.storeCredential(Self.syntheticSecret)
+            guard case .failed(let message) = model.credentialState else { return XCTFail("\(failure) is reported") }
+            XCTAssertFalse(message.contains("secret-looking-reference"))
+            XCTAssertFalse(message.contains("25299"))
+            XCTAssertFalse(message.contains("synthetic-secret-value"))
+        }
+    }
+
+    func testCredentialStatusReportsPresentAbsentAndInvalidatedWithoutReadingASecret() {
+        let model = makeModel(FakeProviderSettingsControls(listing: Self.twoVersions))
+        model.checkCredential()
+        XCTAssertEqual(model.credentialState, .failed(ProviderSettingsText.credentialMissingReference))
+
+        model.draft.credentialReference = "33333333-3333-3333-3333-333333333333"
+        for status in [CredentialStatus.present, .absent, .invalidated] {
+            credentials.statusResult = .success(status)
+            model.checkCredential()
+            XCTAssertEqual(model.credentialState, .status(status))
+        }
+    }
+
+    func testAnEmptySecretIsRefusedBeforeTheCredentialServiceIsAsked() {
+        let model = makeModel(FakeProviderSettingsControls(listing: Self.twoVersions))
+        model.noteEmptySecret()
+        XCTAssertEqual(model.credentialState, .failed(ProviderSettingsText.credentialEmptySecret))
+        XCTAssertEqual(credentials.added.count, 0)
+    }
+
+    func testACapturelessSessionCannotTouchCredentials() async {
+        let model = makeModel(FakeProviderSettingsControls(listing: Self.twoVersions))
+        await model.refresh()
+        scope = .captureOnly
+        model.storeCredential(Self.syntheticSecret)
+        model.removeCredential()
+        XCTAssertEqual(credentials.added.count, 0)
+        XCTAssertEqual(credentials.deleted, [])
+        XCTAssertEqual(model.phase, .locked)
+    }
+
+    func testAnAuthenticationLapseInsideTheCredentialServiceLocksTheScreen() async {
+        let model = makeModel(FakeProviderSettingsControls(listing: Self.twoVersions))
+        await model.refresh()
+        credentials.addResult = .failure(ProviderConfigurationError.notAuthenticated)
+        model.storeCredential(Self.syntheticSecret)
+        XCTAssertEqual(model.phase, .locked)
+        XCTAssertNil(model.credentialState)
+    }
+
+    func testEveryConnectionOutcomeHasAFixedRedactedSentence() async {
+        let controls = FakeProviderSettingsControls(listing: Self.twoVersions)
+        let model = makeModel(controls)
+        await model.refresh()
+        let version = model.listing!.profiles.flatMap(\.versions).first { $0.profileVersion == "hosted-v1" }!
+        let outcomes: [ProviderConnectionOutcome] = [
+            .ok, .credentialMissing, .credentialRejected, .unreachable, .tlsFailure, .timeout, .capabilityMismatch,
+            .protocolNotEnabled, .rateLimited, .providerError, .unexpectedResponse, .cancelled,
+        ]
+        var sentences = Set<String>()
+        for outcome in outcomes {
+            controls.checkResult = .success(outcome)
+            await model.checkConnection(version)
+            XCTAssertEqual(model.connectionStates["hosted-v1"], .finished(outcome))
+            let message = model.connectionStates["hosted-v1"]!.message
+            sentences.insert(message)
+            XCTAssertFalse(message.contains("https"), message)
+        }
+        XCTAssertEqual(sentences.count, outcomes.count, "each outcome reads differently")
+        XCTAssertEqual(controls.checked, Array(repeating: "hosted-v1", count: outcomes.count))
+    }
+
+    func testAConnectionCheckRunsOnlyOnRequestAndNeverForARevokedVersion() async {
+        let controls = FakeProviderSettingsControls(listing: Self.twoVersions)
+        let model = makeModel(controls)
+        await model.refresh()
+        XCTAssertEqual(controls.checked, [], "loading the screen sends nothing")
+        let revoked = model.listing!.profiles.flatMap(\.versions).first { $0.profileVersion == "old-v1" }!
+        XCTAssertFalse(model.canCheckConnection(revoked))
+        await model.checkConnection(revoked)
+        XCTAssertEqual(controls.checked, [])
+        XCTAssertNil(model.connectionStates["old-v1"])
+    }
+
+    func testAFailedCheckIsRedactedAndALockDuringItShowsNothing() async {
+        let controls = FakeProviderSettingsControls(listing: Self.twoVersions)
+        let model = makeModel(controls)
+        await model.refresh()
+        let version = model.listing!.profiles.flatMap(\.versions).first { $0.profileVersion == "hosted-v1" }!
+        controls.checkResult = .failure(
+            ProviderConfigurationError.core(CoreFailure(errorClass: .permanent, code: "profile_revoked", message: "https://leak.example")))
+        await model.checkConnection(version)
+        XCTAssertEqual(
+            model.connectionStates["hosted-v1"],
+            .failed(ProviderSettingsText.failure(controls.checkResult.failureValueForView!)))
+        XCTAssertFalse(allVisibleText(model).contains("leak.example"))
+
+        controls.checkResult = .success(.ok)
+        controls.during = { [unowned self] in scope = .captureOnly }
+        await model.checkConnection(version)
+        XCTAssertEqual(model.phase, .locked)
+        XCTAssertTrue(model.connectionStates.isEmpty)
+    }
+
+    func testClearingTheScreenDropsCredentialAndCheckFeedback() async {
+        let model = makeModel(FakeProviderSettingsControls(listing: Self.twoVersions))
+        await model.refresh()
+        model.storeCredential(Self.syntheticSecret)
+        model.clear()
+        XCTAssertNil(model.credentialState)
+        XCTAssertEqual(model.draft.credentialReference, "")
+        XCTAssertTrue(model.connectionStates.isEmpty)
     }
 }

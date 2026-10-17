@@ -183,6 +183,23 @@ final class ProviderSettingsRealCoreTests: XCTestCase {
         XCTAssertEqual(model.operatingMode, .localOnly)
     }
 
+    func testAConnectionCheckOfAProfileWithNoStoredSecretReportsItWithoutSendingAnything() async throws {
+        let model = try await makeModel()
+        await model.refresh()
+        fill(model, name: "hosted", providerProtocol: .openAI)
+        model.draft.credentialReference = UUID().uuidString
+        await model.save()
+        XCTAssertEqual(model.saveState, .saved)
+
+        let hosted = try version(model, profile: "hosted")
+        await model.checkConnection(hosted)
+
+        XCTAssertEqual(model.connectionStates[hosted.profileVersion], .finished(.credentialMissing))
+        XCTAssertEqual(
+            model.connectionStates[hosted.profileVersion]?.message,
+            ProviderSettingsText.connectionOutcome(.credentialMissing))
+    }
+
     func testAnUnverifiedPrivateServerIsDeclaredUnavailableByTheCoreAndRefusedAsDefault() async throws {
         let model = try await makeModel()
         await model.refresh()

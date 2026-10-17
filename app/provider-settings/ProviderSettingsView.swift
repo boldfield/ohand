@@ -60,6 +60,13 @@ struct ProviderSettingsView: View {
     static let modelFieldIdentifier = "provider-settings.field.model"
     static let credentialFieldIdentifier = "provider-settings.field.credential"
     static let endpointFieldIdentifier = "provider-settings.field.endpoint"
+    static let secretFieldIdentifier = "provider-settings.field.secret"
+    static let storeSecretIdentifier = "provider-settings.store-secret"
+    static let removeSecretIdentifier = "provider-settings.remove-secret"
+    static let checkSecretIdentifier = "provider-settings.check-secret"
+    static let credentialStateIdentifier = "provider-settings.credential-state"
+    static func checkConnectionIdentifier(_ version: String) -> String { "provider-settings.check-connection.\(version)" }
+    static func connectionStateIdentifier(_ version: String) -> String { "provider-settings.connection-state.\(version)" }
 
     static func versionIdentifier(_ version: String) -> String { "provider-settings.version.\(version)" }
     static func makeDefaultIdentifier(_ version: String) -> String { "provider-settings.make-default.\(version)" }
@@ -68,6 +75,10 @@ struct ProviderSettingsView: View {
     }
 
     @ObservedObject var model: ProviderSettingsModel
+    /// The secret as typed. It lives only here: it is handed to the model as `Data` and emptied at once, whether or not
+    /// the store succeeded, and whenever the app leaves the foreground.
+    @State private var secretText = ""
+    @Environment(\.scenePhase) private var scenePhase
     var renderReporter: (([String: ProviderSettingsRenderedElement]) -> Void)?
 
     init(
@@ -91,7 +102,21 @@ struct ProviderSettingsView: View {
         .onPreferenceChange(ProviderSettingsRenderedKey.self) { elements in
             renderReporter?(elements)
         }
-        .onDisappear { model.clear() }
+        .onDisappear {
+            secretText = ""
+            model.clear()
+        }
+        .onChange(of: scenePhase) { phase in
+            if phase != .active { secretText = "" }
+        }
+    }
+
+    /// Hands the typed secret to the model as `Data` and empties the field before anything else can read it.
+    private func submitSecret() {
+        let trimmed = secretText.trimmingCharacters(in: .whitespacesAndNewlines)
+        secretText = ""
+        guard !trimmed.isEmpty else { model.noteEmptySecret(); return }
+        model.storeCredential(Data(trimmed.utf8))
     }
 
     @ViewBuilder
@@ -182,6 +207,19 @@ struct ProviderSettingsView: View {
             } else if !version.defaultFor.isEmpty {
                 Text("Current default").font(.footnote)
             }
+            if model.canCheckConnection(version) {
+                Button {
+                    Task { await model.checkConnection(version) }
+                } label: {
+                    Text("Check connection").frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .buttonStyle(.bordered)
+                .reportRendered(Self.checkConnectionIdentifier(version.profileVersion), text: "Check connection")
+                .accessibilityIdentifier(Self.checkConnectionIdentifier(version.profileVersion))
+            }
+            if let state = model.connectionStates[version.profileVersion] {
+                note(state.message, identifier: Self.connectionStateIdentifier(version.profileVersion))
+            }
             if model.canMakeDefault(version) {
                 Button {
                     Task { await model.makeDefault(version) }
@@ -223,11 +261,33 @@ struct ProviderSettingsView: View {
             .textInputAutocapitalization(.never).autocorrectionDisabled()
             .reportRendered("provider-settings.field.model", text: model.draft.model)
             .accessibilityIdentifier("provider-settings.field.model")
-        TextField("Saved credential name", text: $model.draft.credentialReference)
+        TextField("Credential name (filled in when you store a secret)", text: $model.draft.credentialReference)
             .textInputAutocapitalization(.never).autocorrectionDisabled()
             .reportRendered("provider-settings.field.credential", text: model.draft.credentialReference)
             .accessibilityIdentifier("provider-settings.field.credential")
+        SecureField("Secret (API key)", text: $secretText)
+            .textInputAutocapitalization(.never).autocorrectionDisabled().textContentType(.none)
+            .accessibilityIdentifier(Self.secretFieldIdentifier)
+        HStack {
+            Button("Store secret") { submitSecret() }
+                .frame(minHeight: 44)
+                .reportRendered(Self.storeSecretIdentifier, text: "Store secret")
+                .accessibilityIdentifier(Self.storeSecretIdentifier)
+            Button("Check saved") { model.checkCredential() }
+                .frame(minHeight: 44)
+                .reportRendered(Self.checkSecretIdentifier, text: "Check saved")
+                .accessibilityIdentifier(Self.checkSecretIdentifier)
+            Button("Remove", role: .destructive) { model.removeCredential() }
+                .frame(minHeight: 44)
+                .reportRendered(Self.removeSecretIdentifier, text: "Remove")
+                .accessibilityIdentifier(Self.removeSecretIdentifier)
+        }
+        .buttonStyle(.bordered)
+        if let state = model.credentialState {
+            note(state.message, identifier: Self.credentialStateIdentifier)
+        }
         note(ProviderSettingsText.credentialNote, identifier: "provider-settings.credential-note")
+        note(ProviderSettingsText.connectionCheckNote, identifier: "provider-settings.connection-note")
         Stepper(
             value: $model.draft.timeoutSeconds,
             in: ProviderSettingsModel.minimumTimeoutSeconds...ProviderSettingsModel.maximumTimeoutSeconds
@@ -268,6 +328,6 @@ extension ProviderSettingsModel {
     /// The model as the app assembles it: the root's provider configuration, gated by the root's read scope.
     nonisolated static func assembled(root: ServiceCompositionRoot) -> ProviderSettingsModel {
         ProviderSettingsModel(
-            controls: root.providerConfiguration, readScope: { [weak root] in root?.readScope ?? .captureOnly })
+            controls: root.providerConfiguration, credentials: root.providerCredentials, readScope: { [weak root] in root?.readScope ?? .captureOnly })
     }
 }

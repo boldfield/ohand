@@ -28,7 +28,8 @@ final class ProviderSettingsViewTests: XCTestCase {
         _ controls: FakeProviderSettingsControls, _ body: (ProviderSettingsModel) async throws -> Void
     ) async rethrows {
         rendered = [:]
-        let model = ProviderSettingsModel(controls: controls, readScope: { [unowned self] in scope })
+        let model = ProviderSettingsModel(
+            controls: controls, credentials: FakeProviderSettingsCredentials(), readScope: { [unowned self] in scope })
         let hosting = UIHostingController(
             rootView: NavigationStack {
                 ProviderSettingsView(model: model, renderReporter: { [unowned self] in rendered = $0 })
