@@ -79,6 +79,7 @@ public final class ItemDeletionService: @unchecked Sendable {
     private let session: ReadAuthenticationSession
     private let lock = NSLock()
     private var cleanupProvider: (@Sendable () -> ItemDeletionCleanup?)?
+    private var intentObserver: (@Sendable (String) -> Void)?
 
     init(core: ItemDeletionCore, session: ReadAuthenticationSession) {
         self.core = core
@@ -90,6 +91,14 @@ public final class ItemDeletionService: @unchecked Sendable {
     func setCleanupProvider(_ provider: (@Sendable () -> ItemDeletionCleanup?)?) {
         lock.lock()
         cleanupProvider = provider
+        lock.unlock()
+    }
+
+    /// Sets what is told, once the core has recorded the deletion of `itemID` and before cleanup runs, that it is
+    /// deleted (it ends the item's open audio playback).
+    func setIntentObserver(_ observer: (@Sendable (String) -> Void)?) {
+        lock.lock()
+        intentObserver = observer
         lock.unlock()
     }
 
@@ -106,6 +115,11 @@ public final class ItemDeletionService: @unchecked Sendable {
         guard !itemID.isEmpty, expectedRevision >= 0 else { throw ItemDeletionError.invalidRequest }
         let answer = try await ask(.markDeleted(itemID: itemID, expectedRevision: expectedRevision))
         let recorded = try Self.recorded(from: answer)
+        // Only a recorded deletion (a replay counts) ends playback; a refused, stale or failed one never reaches here.
+        lock.lock()
+        let observer = intentObserver
+        lock.unlock()
+        observer?(recorded.itemID)
 
         var cleanupSettled = false
         if let cleanup {
