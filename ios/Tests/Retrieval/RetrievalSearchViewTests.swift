@@ -112,7 +112,7 @@ final class RetrievalSearchViewTests: XCTestCase {
 
         runSearch(answering: .success(RetrievalPage(totalAccessible: 2, rows: [typed, corrected], offset: 0)))
 
-        XCTAssertEqual(renderedText(RetrievalSearchView.countIdentifier), "Showing 2 of 2")
+        XCTAssertEqual(renderedText(RetrievalSearchView.countIdentifier), "2 results")
         XCTAssertEqual(renderedText(RetrievalSearchView.rowTextIdentifier(typed)), "synthetic idea words")
         let typedDetails = try XCTUnwrap(renderedText(RetrievalSearchView.rowDetailsIdentifier(typed)))
         XCTAssertEqual(typedDetails, RetrievalResultRowView.detailsText(for: typed))
@@ -195,7 +195,25 @@ final class RetrievalSearchViewTests: XCTestCase {
         let first = row(Self.firstID, text: "synthetic one", itemType: .action)
         runSearch(answering: .success(RetrievalPage(totalAccessible: 5, rows: [first], offset: 0)))
 
-        XCTAssertEqual(renderedText(RetrievalSearchView.countIdentifier), "Showing 1 of 5")
+        XCTAssertEqual(renderedText(RetrievalSearchView.countIdentifier), "5 results")
         XCTAssertEqual(renderedText(RetrievalSearchView.loadMoreIdentifier), "Load more")
+    }
+
+    func testRegularWidthPutsResultsInANarrowLeftColumnWithRoomForTheItemPane() throws {
+        let regular = CGSize(width: 700, height: 900)
+        let hosting = UIHostingController(
+            rootView: RetrievalSearchView(model: model, renderReporter: { [unowned self] in rendered = $0 })
+                .environment(\.horizontalSizeClass, .regular))
+        retainedWindow?.isHidden = true
+        let window = UIWindow(frame: CGRect(origin: .zero, size: regular))
+        window.rootViewController = hosting
+        window.makeKeyAndVisible()
+        retainedWindow = window
+        let shown = row(Self.firstID, text: "synthetic idea words", itemType: .idea)
+        runSearch(answering: .success(RetrievalPage(totalAccessible: 1, rows: [shown], offset: 0)))
+
+        let frame = try XCTUnwrap(rendered[RetrievalSearchView.rowIdentifier(shown)]?.frame)
+        XCTAssertLessThanOrEqual(frame.width, RetrievalSearchView.regularResultsColumnWidth)
+        XCTAssertLessThan(frame.maxX, regular.width / 2, "the results sit on the left, leaving the right for the item pane")
     }
 }
