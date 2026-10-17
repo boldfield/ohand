@@ -193,6 +193,7 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
   - **Missing seams, round 2 (coordinator, 2026-10-16).** Two tasks blocked with accurate reports. Each was checked against main `f2594f2`.
     - **A09** needs a deletion hook in A05's `ItemDeletionService` and a playback fence in the services that `LifecycleCoordinator` builds. Both reviewers of PR #252 rejected those edits as outside A09's paths. GPT also found a race: the PR ended playback *before* the core accepted the deletion. A stale or refused deletion then stopped playback for nothing, and an open between the callback and the commit survived the deletion. A05 has landed, so A09 gets a narrow grant instead of a predecessor task (see A09). The observer fires only after the intent is recorded.
     - **T11**'s round-2 rejection is correct. Self-hosted enablement is decided once, synchronously, before modules attach (`CompositionRoot.swift:1755-1760`). The profile-status read answers later and has no consumer. So a registration naming a missing, revoked, wrong-protocol or wrong-model profile still enables self-hosted dispatch for *every* stored self-hosted profile. The coordinator chose a core gate over a root hook that switches the protocol on after the async read. A root hook would still enable every self-hosted profile once the registered one validated, and it opens a window between attach and the read. A core gate checks at each dispatch and needs no ordering. T11e restricts self-hosted dispatch to registered (profile version, model) pairs and lets modules declare them. T11 depends on T11e and needs no root edit.
+    - **U05b** (2026-10-17, after PR #267 round 1) cannot replace, check or remove the secret of a profile that is already saved. The listing deliberately returns only `credential_bound`, never `credential_ref` (`core/src/providers/profiles/mod.rs:588`). Once a draft is saved, the settings screen has no way to name the stored version's Keychain item. So the "enter or replace the secret" guidance for `credential_missing`/`credential_rejected` cannot repair the profile that pinned jobs are waiting on. The reference must stay out of `app/`. But the native services layer already receives references: the transport at dispatch, and reset through `profile_credentials` (`core/src/ffi/reset.rs:175`). U01f adds credential operations keyed by profile version. They resolve the reference inside the services layer and never return it. U05b depends on U01f.
 
 ## Why some tasks stay together
 
@@ -1107,6 +1108,42 @@ Acceptance:
 
 Source pointers: `ios/Services/Assembly/CompositionRoot.swift:162`, `:349`; `ios/Services/Credentials/CredentialService.swift:58`.
 
+### U01f
+
+Manage a stored profile version's credential without exposing its reference
+
+Let the provider-configuration services replace, check and remove the secret bound to a stored profile version, by profile version, so that settings can repair a saved profile without ever holding its credential reference.
+
+Owned paths:
+- `core/src/ffi/provider_profiles.rs`, `core/src/ffi/provider_profiles/`;
+- in `core/src/providers/profiles/mod.rs`, only one read of a version's credential reference;
+- `ios/OhAndCoreBridge/CoreHandle+ProviderProfiles.swift`;
+- `ios/Services/ProviderConfiguration/`;
+- `ios/Tests/ProviderConfiguration/`, `ios/Tests/Credentials/` (only new cases);
+- in `ios/Services/Assembly/CompositionRoot.swift`, only the `ProviderCredentialEntry(...)` construction (`:1811-1812`), to pass it the profile client.
+
+Dependencies: none.
+
+Acceptance:
+
+1. A provider-profiles command returns the credential reference of one stored profile version, or reports that the version is unknown or has no credential bound. It is not part of the listing. It is reachable only from `ios/Services/`: no `app/` client, view model or diagnostic receives a reference, and the listing still never returns one.
+2. `ProviderCredentialEntry` gains three operations keyed by profile version: replace the secret, report the credential status, and remove the secret.
+   - Each requires an authenticated read session at call time, and a capture-only session gets `notAuthenticated` without touching the core or the Keychain.
+   - Each resolves the reference internally and calls the existing `CredentialService` operation. Replacing writes in place under the same reference, so the profile, its version and jobs pinned to it are unchanged and become dispatchable again.
+   - An unknown version and a version with no credential bound give distinct errors. No answer or error carries a reference or a secret.
+3. Removing a secret leaves the version `credentialMissing`. If other stored versions name the same reference, it affects them too; the entry documents this and a test shows it.
+4. Tests:
+   - **Rust:** the reference read returns the right reference, and handles unknown and unbound versions; the listing still omits references.
+   - **Real-core Swift:**
+     - save a profile with a stored secret, replace it by version, and show that the status is `present` and the reference is unchanged;
+     - remove it by version, and show that a connection check reports `credentialMissing`;
+     - show that an unknown or unbound version is refused, and that a capture-only session is refused.
+   - No test output contains a reference or secret.
+
+   `make check` and `make test` pass. The exact-head macOS CI run is linked.
+
+Source pointers: `core/src/ffi/provider_profiles.rs:42` (`Command`), `:95`; `core/src/ffi/reset.rs:175` (existing reference read); `ios/Services/ProviderConfiguration/ProviderCredentialEntry.swift:23`; `ios/Services/Assembly/CompositionRoot.swift:1811`.
+
 ### F15
 
 Find and fix the memory corruption in the notification reconciliation FFI tests
@@ -1992,7 +2029,9 @@ Connect profile credential references to native secure entry/update/removal and 
 
 Owned paths: `app/provider-settings/`.
 
-Dependencies: U05a.
+Dependencies: U05a, U01f (credential operations by profile version).
+
+Rework (coordinator, 2026-10-17, after PR #267 round 1): use U01f's operations to replace, check and remove the credential of a saved profile version. A secret stored for a draft must never be orphaned. Either defer the Keychain add until the profile saves, or delete a reference this screen added but never saved when the draft is cleared, abandoned, edited or the session relocks. Test whichever is chosen. Reject a secret with leading or trailing whitespace instead of trimming it. The view tests must cover: the secret field emptied after store success and failure, on disappear and on leaving the foreground; the secret never in `renderReporter` or the accessibility value. Real-core cases must cover a stored-then-checked secret, a removed secret reporting `credentialMissing`, and an invalid reference reported redacted.
 
 Acceptance:
 
