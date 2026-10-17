@@ -216,4 +216,19 @@ final class RetrievalSearchViewTests: XCTestCase {
         XCTAssertLessThanOrEqual(frame.width, RetrievalSearchView.regularResultsColumnWidth)
         XCTAssertLessThan(frame.maxX, regular.width / 2, "the results sit on the left, leaving the right for the item pane")
     }
+
+    func testAReplacedOriginalHighlightsTheWordsThatMatched() {
+        let original = "Call the Rooter, then RÖOTER again"
+        let ranges = RetrievalResultRowView.highlightRanges(in: original, query: "rooter")
+        XCTAssertEqual(ranges.map { String(original[$0]) }, ["Rooter", "RÖOTER"])
+        XCTAssertTrue(RetrievalResultRowView.highlightRanges(in: original, query: "plumber").isEmpty)
+    }
+
+    func testFilterChipsReportTheActiveFilterAsTheirTitle() {
+        settle()
+        XCTAssertEqual(renderedText(RetrievalSearchView.typeChipIdentifier), "Type")
+        model.itemType = .idea
+        settle()
+        XCTAssertEqual(renderedText(RetrievalSearchView.typeChipIdentifier), "Idea")
+    }
 }

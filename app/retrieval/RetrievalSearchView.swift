@@ -36,6 +36,9 @@ struct RetrievalSearchView: View {
     static let failureIdentifier = "retrieval.search.failure"
     static let problemIdentifier = "retrieval.search.problem"
     static let countIdentifier = "retrieval.search.count"
+    static let typeChipIdentifier = "retrieval.search.chip.type"
+    static let timeChipIdentifier = "retrieval.search.chip.time"
+    static let topicChipIdentifier = "retrieval.search.chip.topic"
     static let loadMoreIdentifier = "retrieval.search.load-more"
 
     static let promptText = "Search runs on this device. Type words you captured, or choose a date, type or session topic."
@@ -63,6 +66,8 @@ struct RetrievalSearchView: View {
     @Environment(\.dismiss) private var dismiss
     @FocusState private var queryIsFocused: Bool
     @State private var presentedFilterSheet: RetrievalFilterSheet?
+    /// The words of the search that produced the rows on screen, used to show which words of a replaced original matched.
+    @State private var searchedQuery = ""
 
     init(model: RetrievalSearchModel, renderReporter: (([String: RetrievalRenderedElement]) -> Void)? = nil) {
         self.model = model
@@ -100,6 +105,9 @@ struct RetrievalSearchView: View {
             queryIsFocused = true
         }
         .onDisappear { model.screenDidDisappear() }
+        .onReceive(model.$phase) { phase in
+            if phase == .searching { searchedQuery = model.query }
+        }
     }
 
     /// Room for the item detail on the right at regular width; the detail card fills it.
@@ -128,7 +136,8 @@ struct RetrievalSearchView: View {
                         model.search()
                     } label: {
                         Image(systemName: "arrow.right.circle.fill")
-                            .font(.system(size: 22))
+                            .font(DSFont.body)
+                            .imageScale(.large)
                             .foregroundColor(DSColor.accent.color)
                             .frame(minWidth: DSLayout.minimumTouchTarget, minHeight: DSLayout.minimumTouchTarget)
                             .contentShape(Rectangle())
@@ -166,6 +175,9 @@ struct RetrievalSearchView: View {
             RetrievalFilterChipLabel(title: model.itemType?.title ?? "Type", isSelected: model.itemType != nil)
         }
         .accessibilityLabel("Type filter")
+        .accessibilityValue(model.itemType != nil ? model.itemType?.title ?? "Type" : "Any")
+        .accessibilityAddTraits(model.itemType != nil ? .isSelected : [])
+        .reportRendered(Self.typeChipIdentifier, text: model.itemType?.title ?? "Type")
     }
 
     private var timeChip: some View {
@@ -185,6 +197,9 @@ struct RetrievalSearchView: View {
             RetrievalFilterChipLabel(title: timeTitle, isSelected: model.since != nil || model.until != nil)
         }
         .accessibilityLabel("Time filter")
+        .accessibilityValue(model.since != nil || model.until != nil ? timeTitle : "Any")
+        .accessibilityAddTraits(model.since != nil || model.until != nil ? .isSelected : [])
+        .reportRendered(Self.timeChipIdentifier, text: timeTitle)
     }
 
     private var topicChip: some View {
@@ -202,6 +217,9 @@ struct RetrievalSearchView: View {
             RetrievalFilterChipLabel(title: topicTitle, isSelected: topicIsActive)
         }
         .accessibilityLabel("Topic filter")
+        .accessibilityValue(topicIsActive ? topicTitle : "Any")
+        .accessibilityAddTraits(topicIsActive ? .isSelected : [])
+        .reportRendered(Self.topicChipIdentifier, text: topicTitle)
     }
 
     private func setSinceDaysAgo(_ days: Int) {
@@ -276,7 +294,7 @@ struct RetrievalSearchView: View {
             Button {
                 model.select(row)
             } label: {
-                RetrievalResultRowView(row: row)
+                RetrievalResultRowView(row: row, highlightedQuery: searchedQuery)
             }
             .buttonStyle(.plain)
             .accessibilityElement(children: .combine)
@@ -339,7 +357,8 @@ private struct RetrievalFilterChipLabel: View {
         HStack(spacing: DSSpacing.xxs) {
             Text(title).lineLimit(1)
             Image(systemName: "chevron.down")
-                .font(.system(size: 11, weight: .semibold))
+                .font(DSFont.chip)
+                .imageScale(.small)
                 .accessibilityHidden(true)
         }
         .font(DSFont.chip)
@@ -412,6 +431,8 @@ private struct OptionalDayPicker: View {
 
 struct RetrievalResultRowView: View {
     let row: RetrievalResultRow
+    /// The searched words, to highlight inside a replaced original that the core matched but gave no span for.
+    var highlightedQuery = ""
 
     var body: some View {
         DSCard {
@@ -434,7 +455,7 @@ struct RetrievalResultRowView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .reportRendered(RetrievalSearchView.rowTextIdentifier(row), text: row.text)
                 if let original = row.originalText {
-                    Text("Original: \(original)")
+                    Self.originalText(original, highlighting: row.matched == .supersededOriginal ? highlightedQuery : "")
                         .font(DSFont.footer)
                         .foregroundColor(DSColor.inkMuted.color)
                         .lineLimit(3)
@@ -460,6 +481,37 @@ struct RetrievalResultRowView: View {
         matched.backgroundColor = DSColor.tint.color
         matched.inlinePresentationIntent = .stronglyEmphasized
         return Text(AttributedString(snippet.before) + matched + AttributedString(snippet.after))
+    }
+
+    /// Where each searched word occurs in a replaced original, ignoring case and diacritics; the core reports no span.
+    static func highlightRanges(in original: String, query: String) -> [Range<String.Index>] {
+        let words = query.split(whereSeparator: { $0.isWhitespace || $0.isPunctuation }).map(String.init)
+        var ranges: [Range<String.Index>] = []
+        for word in words {
+            var searchStart = original.startIndex
+            while searchStart < original.endIndex,
+                let found = original.range(
+                    of: word, options: [.caseInsensitive, .diacriticInsensitive], range: searchStart..<original.endIndex)
+            {
+                ranges.append(found)
+                searchStart = found.upperBound
+            }
+        }
+        return ranges
+    }
+
+    /// "Original: …" with each searched word tinted and bold.
+    static func originalText(_ original: String, highlighting query: String) -> Text {
+        let prefix = "Original: "
+        var attributed = AttributedString(prefix + original)
+        for found in highlightRanges(in: original, query: query) {
+            let lower = attributed.index(
+                attributed.startIndex, offsetByCharacters: prefix.count + original.distance(from: original.startIndex, to: found.lowerBound))
+            let upper = attributed.index(lower, offsetByCharacters: original.distance(from: found.lowerBound, to: found.upperBound))
+            attributed[lower..<upper].backgroundColor = DSColor.tint.color
+            attributed[lower..<upper].inlinePresentationIntent = .stronglyEmphasized
+        }
+        return Text(attributed)
     }
 
     /// The line under a result: when it was captured, its type, whether the words are original or corrected, and scope.
