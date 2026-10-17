@@ -69,6 +69,10 @@ final class SuggestionScreenModel: ObservableObject {
     private let makeCommandID: () -> String
     private var notificationID: String?
     private var pendingResponse: PendingResponse?
+    /// Bumped by every `open`, so a response can tell that a newer prompt arrived while it was being stored.
+    private var openGeneration = 0
+    /// Bumped by every resolve and by `lock`, so only the newest activation result is applied.
+    private var resolveSequence = 0
 
     init(
         responder: SuggestionResponding,
@@ -84,11 +88,13 @@ final class SuggestionScreenModel: ObservableObject {
     }
 
     /// Opens the daily prompt `notificationID` and shows the item the core offers now, if any. Without a prompt there is
-    /// nothing to open, and the screen says so calmly. A call while an answer is being stored is ignored, so a late
-    /// result cannot overwrite what the newer call shows; the screen resolves again once the answer is stored.
+    /// nothing to open, and the screen says so calmly. The latest prompt is always kept: a call while an answer is being
+    /// stored records the prompt and the response resolves it once the answer is stored, and an older activation that
+    /// finishes late is ignored.
     @MainActor func open(notificationID: String?) async {
-        guard !isBusy else { return }
+        openGeneration += 1
         self.notificationID = notificationID
+        guard !isBusy else { return }
         pendingResponse = nil
         notice = nil
         await resolve()
@@ -102,6 +108,7 @@ final class SuggestionScreenModel: ObservableObject {
 
     /// Drops everything private from the screen. The host calls it when the session relocks.
     @MainActor func lock() {
+        resolveSequence += 1
         pendingResponse = nil
         notice = nil
         state = .locked
@@ -111,13 +118,18 @@ final class SuggestionScreenModel: ObservableObject {
         guard !isBusy, case .offer(let offer) = state, offer.responses.contains(response) else { return }
         isBusy = true
         defer { isBusy = false }
+        let startedGeneration = openGeneration
         let commandID = commandID(for: offer, response: response)
         do {
             _ = try await responder.respond(
                 commandID: commandID, itemID: offer.itemID, expectedRevision: offer.revision, response: response)
             pendingResponse = nil
             notice = nil
-            state = .responded(response)
+            if openGeneration != startedGeneration {
+                await resolve()
+            } else {
+                state = .responded(response)
+            }
         } catch SuggestionResponseError.notAuthenticated, SuggestionResponseError.relockedBeforeDelivery {
             lock()
         } catch SuggestionResponseError.staleRevision, SuggestionResponseError.noLongerCurrent,
@@ -127,7 +139,12 @@ final class SuggestionScreenModel: ObservableObject {
             await resolve()
             if state != .locked { notice = .changed }
         } catch {
-            notice = .notSaved
+            if openGeneration != startedGeneration {
+                pendingResponse = nil
+                await resolve()
+            } else {
+                notice = .notSaved
+            }
         }
     }
 
@@ -151,15 +168,21 @@ final class SuggestionScreenModel: ObservableObject {
             state = .nothingToOffer
             return
         }
+        resolveSequence += 1
+        let sequence = resolveSequence
         state = .loading
         do {
-            switch try await responder.activate(notificationID: notificationID, scope: nil) {
+            let activation = try await responder.activate(notificationID: notificationID, scope: nil)
+            guard sequence == resolveSequence else { return }
+            switch activation {
             case .offer(let offer): state = .offer(offer)
             case .nothingToOffer: state = .nothingToOffer
             }
         } catch SuggestionResponseError.notAuthenticated, SuggestionResponseError.relockedBeforeDelivery {
+            guard sequence == resolveSequence else { return }
             lock()
         } catch {
+            guard sequence == resolveSequence else { return }
             state = .unavailable
         }
     }

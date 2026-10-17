@@ -170,4 +170,38 @@ final class SuggestionScreenHostedTests: XCTestCase {
         XCTAssertEqual(rendered[SuggestionView.messageIdentifier], SuggestionView.text(forResponded: .done))
         XCTAssertNil(rendered[SuggestionView.notNowIdentifier])
     }
+
+    func testAnUnavailableSuggestionIsRendered() {
+        let model = host(responder: HostedResponder(activations: [.failure(SuggestionResponseError.unreadable)]))
+        tapPromptAndAuthenticate(model)
+        settle { rendered[SuggestionView.messageIdentifier] != nil }
+        XCTAssertEqual(rendered[SuggestionView.messageIdentifier], SuggestionView.unavailableLine)
+        XCTAssertNil(rendered[SuggestionView.textIdentifier])
+    }
+
+    func testANotSavedAnswerKeepsTheOfferAndRendersTheRetryNotice() {
+        let responder = HostedResponder(activations: [.success(.offer(offer()))])
+        responder.responses = [.failure(SuggestionResponseError.unreadable)]
+        let model = host(responder: responder)
+        tapPromptAndAuthenticate(model)
+        settle { rendered[SuggestionView.textIdentifier] != nil }
+
+        Task { @MainActor in await model.respond(.done) }
+        settle { rendered[SuggestionView.noticeIdentifier] != nil }
+        XCTAssertEqual(rendered[SuggestionView.noticeIdentifier], SuggestionView.text(for: .notSaved))
+        XCTAssertEqual(rendered[SuggestionView.textIdentifier], Self.offerText, "the offer stays for a retry")
+    }
+
+    func testALockedScreenRendersTheUnlockLineAndNoOfferText() {
+        let responder = HostedResponder(activations: [.success(.offer(offer()))])
+        responder.responses = [.failure(SuggestionResponseError.relockedBeforeDelivery)]
+        let model = host(responder: responder)
+        tapPromptAndAuthenticate(model)
+        settle { rendered[SuggestionView.textIdentifier] != nil }
+
+        Task { @MainActor in await model.respond(.done) }
+        settle { rendered[SuggestionView.messageIdentifier] != nil }
+        XCTAssertEqual(rendered[SuggestionView.messageIdentifier], SuggestionView.lockedLine)
+        XCTAssertNil(rendered[SuggestionView.textIdentifier])
+    }
 }
