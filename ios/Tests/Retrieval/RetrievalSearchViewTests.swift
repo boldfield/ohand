@@ -36,6 +36,8 @@ final class RetrievalSearchViewTests: XCTestCase {
     private var model: RetrievalSearchModel!
     private var rendered: [String: RetrievalRenderedElement] = [:]
     private var retainedWindow: UIWindow?
+    /// Off once a test replaces the phone-sized host, so only the host under test fills `rendered`.
+    private var phoneHostReports = true
 
     override func setUp() {
         super.setUp()
@@ -43,12 +45,14 @@ final class RetrievalSearchViewTests: XCTestCase {
         selected = []
         searcher = ScriptedViewSearcher()
         rendered = [:]
+        phoneHostReports = true
         model = RetrievalSearchModel(
             searcher: searcher,
             readScope: { [unowned self] in self.scope },
             onSelect: { [unowned self] in self.selected.append($0) })
         let hosting = UIHostingController(
-            rootView: RetrievalSearchView(model: model, renderReporter: { [unowned self] in rendered = $0 }))
+            rootView: RetrievalSearchView(
+                model: model, renderReporter: { [unowned self] in if phoneHostReports { rendered = $0 } }))
         let window = UIWindow(frame: CGRect(origin: .zero, size: Self.phone))
         window.rootViewController = hosting
         window.makeKeyAndVisible()
@@ -205,7 +209,7 @@ final class RetrievalSearchViewTests: XCTestCase {
             rootView: RetrievalSearchView(model: model, renderReporter: { [unowned self] in rendered = $0 })
                 .environment(\.horizontalSizeClass, .regular))
         retainedWindow?.isHidden = true
-        retainedWindow?.rootViewController = nil
+        phoneHostReports = false
         rendered = [:]
         let window = UIWindow(frame: CGRect(origin: .zero, size: regular))
         window.rootViewController = hosting
