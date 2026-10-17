@@ -313,7 +313,7 @@ final class AppServicesTests: XCTestCase {
         XCTAssertEqual(boundary.authenticateCallCount, 0)
     }
 
-    func testAnInactiveLaunchWaitsForActivationAndSuccessAuthorizesReads() throws {
+    func testAnInactiveLaunchWaitsForActivationAndSuccessAuthorizesReads() async throws {
         let boundary = FakeReadAuthenticationBoundary()
         let center = NotificationCenter()
         let services = try makeQuietServices(boundary: boundary, lifecycleCenter: center)
@@ -324,7 +324,8 @@ final class AppServicesTests: XCTestCase {
 
         XCTAssertEqual(boundary.quietCallCount, 1)
         XCTAssertEqual(services.root.readScope, .authenticated)
-        XCTAssertTrue(services.captureEntry.access.readAuthorized, "the capture surface learns of the success")
+        let refreshed = await timeChangeWaitUntil { services.captureEntry.access.readAuthorized }
+        XCTAssertTrue(refreshed, "the capture surface learns of the success")
     }
 
     func testEachForegroundAfterABackgroundMakesOneAttemptAndTheRelockDoesNotCancelIt() throws {
@@ -358,6 +359,8 @@ final class AppServicesTests: XCTestCase {
             XCTAssertEqual(boundary.quietCallCount, 1, "\(outcome)")
             XCTAssertEqual(services.root.readScope, .captureOnly, "\(outcome)")
             XCTAssertNil(services.captureEntry.acknowledgment, "no error is shown for \(outcome)")
+            services.shutDown()
+            created.removeAll { $0 === services }
         }
     }
 
