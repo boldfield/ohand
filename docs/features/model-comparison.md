@@ -67,6 +67,7 @@ Each row is a separately reviewed task, with two concrete acceptance clauses and
 | XB09 | M1 optional | Compose explicit synthetic benchmark CLI commands | XB08 |
 | XB10 | M1 optional | Render readable paired benchmark reports | XB09 |
 | XB11 | M1 optional | Register verified self-hosted profiles in the benchmark | XB10, V09 |
+| XB12 | M1 optional | Make the benchmark temperature optional and show why a provider rejected a request | XB11 |
 | XL01 | M2 core | Add protected comparison configuration and record storage | T06, XB05, T08 |
 | XL02 | M2 core | Bind comparison lifetime to source deletion reset and retention | XL01, L05b |
 | XL03 | M2 core | Select eligible comparisons and reserve request budgets | XL02, E03a, J01 |
@@ -233,6 +234,37 @@ Acceptance:
 2. Fixtures verify configured profile/model selection, missing credentials and network failure with no silent fallback. Live self-hosted quality claims require actual run provenance; do not require a reachable Spark to run existing cloud or fake comparisons.
 
 Source pointers: `core/src/providers/contracts/mod.rs:16`, `core/src/providers/contracts/dispatch.rs:124`, `core/src/providers/contracts/request.rs:43`, `core/src/providers/self_hosted/mod.rs:1`.
+
+### XB12
+
+Added 2026-10-18 by the coordinator after a live run. The benchmark cannot run current Anthropic models: `tools/bench/src/cli/corpus.rs:20` always requests temperature 0. `claude-sonnet-5-5` and `claude-haiku-5-5` answer that with HTTP 400 `invalid_request_error`, "`temperature` is deprecated for this model", and all 66 planned requests of a Sonnet versus Haiku run failed. The journal and the run output recorded only "provider permanently rejected the request". The cause was found by sending the same request by hand. The production interpretation path sends no temperature to Anthropic and is unaffected: the same three smoke captures, sent the adapter's way, succeeded on both models.
+
+Owned paths: `tools/bench/src/cli/`, `tools/bench/src/executor/`, `tools/bench/src/report/`, `tools/bench/src/lib.rs`, `docs/validation/model-benchmark.md`, `core/src/providers/contracts/diagnostic.rs`, `core/src/providers/anthropic/`, `core/src/providers/openai/`, `core/tests/providers_anthropic/`, `core/tests/providers_openai/`. Only the diagnostic paths of the two adapters may change. Their production `invoke` requests, failure classes and failure messages stay byte-for-byte the same.
+
+Acceptance:
+
+1. Temperature is requested only when the operator asks for it. By default the benchmark requests no temperature for either arm, so the field is absent from every request and each provider's default applies. `--temperature <0.0–1.0>` requests it explicitly, for both arms alike, and the adapters' existing range checks still apply. The experiment record states the requested settings truthfully, `provider default` or the value, in place of the fixed `settings-temperature-0` text at `tools/bench/src/cli/mod.rs:201`. Profile and experiment versions differ between the two cases, so resuming a journal under different temperature settings is refused like any other configuration change. The report's comparability section names the setting. Fixture-server tests cover the two models:
+   - A fixture that rejects any body containing `temperature` with the Anthropic deprecation envelope above completes a default run.
+   - The same fixture with `--temperature 0` records rejected attempts.
+   - The request bodies are asserted, not inferred: the field is absent in the first case and 0.0 in the second.
+   - The same pair of tests runs against an OpenAI fixture that rejects non-default temperatures.
+2. A diagnostic rejection records why. When the response carries a provider error envelope, the Anthropic and OpenAI diagnostic paths keep three things:
+   - the HTTP status;
+   - the envelope's error type: a documented value of that protocol, or `unrecognized` for anything else;
+   - the provider's message, with control characters removed and cut to at most 300 bytes at a character boundary.
+
+   This travels as an additive optional detail through `DiagnosticTransportFailure` and the diagnostic failure, and existing constructors and callers compile unchanged. The bench writes it into the attempt's journal `detail` and `failure_reason`. The run output shows it through the existing `sanitize_to` bound, and the report counts rejections by error type. A body over the size bound, or one that is not an error envelope, yields the status alone: oversized bodies are never parsed. Tests use fixture servers for both protocols:
+   - The deprecation case journals `400`, `invalid_request_error` and the message.
+   - An oversized gateway page journals only the status.
+   - A message containing control characters, or more than 300 bytes, is cleaned and bounded.
+   - An error message that echoes the resolved credential reaches the journal and the output masked, which proves the transport's existing `mask_secret` still applies on this path.
+   - The production `invoke` path of both adapters returns the same failure as before for the same responses.
+
+Workers have no hosted credentials and must not run the benchmark live. Fixture evidence is the acceptance. After landing, the coordinator reruns the Sonnet versus Haiku synthetic corpus locally, as a check rather than a gate.
+
+Execution: Sonnet, escalate=true, independent Opus and gpt-5.6-sol review, required checks, separate automatic merger. This departs from the Haiku default above for the reason recorded in AGENTS.md.
+
+Source pointers: `tools/bench/src/cli/corpus.rs:20`, `tools/bench/src/cli/corpus.rs:34`, `tools/bench/src/cli/mod.rs:201`, `tools/bench/src/executor/run.rs:564`, `tools/bench/src/transport/redact.rs:11`, `core/src/providers/anthropic/wire.rs:96`, `core/src/providers/anthropic/wire.rs:135`, `core/src/providers/anthropic/wire.rs:247`, `core/src/providers/contracts/diagnostic.rs:279`, `core/src/providers/openai/mod.rs:234`.
 
 ### XL01
 

@@ -287,6 +287,38 @@
       ]
     },
     {
+      "key": "XB12",
+      "milestone": "M1 optional",
+      "title": "Make the benchmark temperature optional and show why a provider rejected a request",
+      "depends_on": [
+        "XB11"
+      ],
+      "file_scope": [
+        "tools/bench/src/cli/",
+        "tools/bench/src/executor/",
+        "tools/bench/src/report/",
+        "tools/bench/src/lib.rs",
+        "docs/validation/model-benchmark.md",
+        "core/src/providers/contracts/diagnostic.rs",
+        "core/src/providers/anthropic/",
+        "core/src/providers/openai/",
+        "core/tests/providers_anthropic/",
+        "core/tests/providers_openai/"
+      ],
+      "intent": "Let the benchmark run current Anthropic models, which reject any temperature, and record the provider's own rejection reason instead of a bare class.",
+      "acceptance": [
+        "By default no temperature is requested for either arm; --temperature <0.0-1.0> requests it for both. The experiment record, profile versions, resume refusal and report comparability reflect the requested settings truthfully. Fixture servers for Anthropic and OpenAI assert the request bodies: the field is absent by default and present when requested.",
+        "Diagnostic rejections carry the HTTP status, the documented error type (or unrecognized) and a cleaned message of at most 300 bytes into the journal, the run output and the report counts. Oversized or non-envelope bodies yield the status only. An echoed credential is masked. The production invoke paths of both adapters are unchanged."
+      ],
+      "source_pointers": [
+        "tools/bench/src/cli/corpus.rs:20",
+        "tools/bench/src/cli/mod.rs:201",
+        "tools/bench/src/executor/run.rs:564",
+        "core/src/providers/anthropic/wire.rs:96",
+        "core/src/providers/contracts/diagnostic.rs:279"
+      ]
+    },
+    {
       "key": "XL01",
       "milestone": "M2 core",
       "title": "Add protected comparison configuration and record storage",
@@ -689,7 +721,7 @@
     "acyclic": true,
     "overlapping_paths_serialized": true,
     "base_m1_has_no_feature_dependency": true,
-    "effective_task_count": 151
+    "effective_task_count": 152
   },
   "addenda": [
     {
@@ -703,6 +735,10 @@
     {
       "date": "2026-10-10",
       "change": "XB06 allowance (one-time, recorded after PR #152 round 2): XB06 may carry the test-only fix in core/src/ffi/job_health/tests.rs that clears the event-callback registration (ohand_core_set_event_callback(handle, None, null)) before dropping the recorder, which repairs the pre-existing SIGSEGV flake that was the only failing required check on the PR and which no other board task touches. Not a transfer of FFI ownership; no non-test change is authorized."
+    },
+    {
+      "date": "2026-10-18",
+      "change": "XB12 added by the coordinator after a live Sonnet versus Haiku run: all 66 requests were rejected because the bench always requests temperature 0, which current Anthropic models refuse, and the journal recorded no reason. XB12 is a code task on Sonnet, per AGENTS.md, not the Haiku default of this manifest. It depends on XB11, which has landed, and adds no dependency to the base M1 graph."
     }
   ]
 }
