@@ -1,19 +1,19 @@
 import Foundation
 
 /// Where a core reset generation stands. Only the core decides this: it is derived from durable rows.
-enum ResetPhase: String, Equatable, Sendable {
+public enum ResetPhase: String, Equatable, Sendable {
     case pending
     case completed
 }
 
 /// A reset generation and what still keeps the core from completing it.
-struct ResetProgress: Equatable, Sendable {
-    let generation: Int64
-    let phase: ResetPhase
-    let boundaryRowID: Int64
-    let itemsAwaitingTombstone: Int
-    let cleanupPending: Int
-    let cleanupFailed: Int
+public struct ResetProgress: Equatable, Sendable {
+    public let generation: Int64
+    public let phase: ResetPhase
+    public let boundaryRowID: Int64
+    public let itemsAwaitingTombstone: Int
+    public let cleanupPending: Int
+    public let cleanupFailed: Int
 }
 
 /// A stored provider profile version and the Keychain reference its credential lives under.
@@ -25,7 +25,7 @@ struct ResetProfileCredential: Equatable, Sendable {
 
 /// The user's explicit answer about provider profiles and their stored credentials. Reset never removes them unless the
 /// user chose `remove`.
-enum ResetCredentialChoice: Equatable, Sendable {
+public enum ResetCredentialChoice: Equatable, Sendable {
     case keep
     case remove
 }
@@ -272,7 +272,7 @@ extension ResetMarkerStore {
 }
 
 /// Why the reset is not finished. Fixed codes only: never identifiers, paths, content or error text.
-enum ResetBlocker: String, Equatable, Sendable {
+public enum ResetBlocker: String, Equatable, Sendable {
     case coreUnavailable = "core_unavailable"
     case markerNotRecorded = "reset_marker_not_recorded"
     case markerUnreadable = "reset_marker_unreadable"
@@ -288,7 +288,7 @@ enum ResetBlocker: String, Equatable, Sendable {
     case cancelled = "cancelled"
 }
 
-enum ResetState: Equatable, Sendable {
+public enum ResetState: Equatable, Sendable {
     /// No reset is running or pending.
     case notStarted
     case pending

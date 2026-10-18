@@ -111,6 +111,19 @@ private func lifecycleWaitUntil(timeout: TimeInterval = 10, _ condition: () -> B
     return condition()
 }
 
+private final class ResetOutcomeScript: @unchecked Sendable {
+    private let lock = NSLock()
+    private var remaining: [LifecycleStepOutcome]
+
+    init(_ outcomes: [LifecycleStepOutcome]) { remaining = outcomes }
+
+    func next() -> LifecycleStepOutcome {
+        lock.lock()
+        defer { lock.unlock() }
+        return remaining.count > 1 ? remaining.removeFirst() : (remaining.first ?? .completed)
+    }
+}
+
 // MARK: - Ordering, serialization and interruption
 
 final class LifecycleCoordinatorTests: XCTestCase {
@@ -139,7 +152,7 @@ final class LifecycleCoordinatorTests: XCTestCase {
         let coordinator = makeCoordinator(log: log)
         let report = await coordinator.reconcile(.launch)
         XCTAssertEqual(
-            log.order, ["ingress", "jobs", "deletion", "reminders", "retention", "promptEligibility", "health"])
+            log.order, ["reset", "ingress", "jobs", "deletion", "reminders", "retention", "promptEligibility", "health"])
         XCTAssertEqual(report.results.map(\.step), LifecycleStep.allCases)
         XCTAssertTrue(report.results.allSatisfy { $0.outcome == .completed })
         XCTAssertEqual(report.triggers, [.launch])
@@ -164,6 +177,82 @@ final class LifecycleCoordinatorTests: XCTestCase {
         XCTAssertEqual(report.outcome(of: .deletion), .deferred("synthetic"))
         XCTAssertEqual(log.order.count, LifecycleStep.allCases.count)
         XCTAssertEqual(report.outcome(of: .health), .completed)
+    }
+
+    func testAnUnsettledResetHoldsEffectfulStepsUntilALaterPassSettlesIt() async {
+        let log = StepLog()
+        let resetOutcomes = ResetOutcomeScript([.deferred("reset_pending"), .deferred("reset_pending"), .completed])
+        let coordinator = makeCoordinator(log: log)
+        coordinator.setAction({ _ in resetOutcomes.next() }, for: .reset)
+
+        let held = await coordinator.reconcile(.launch)
+        XCTAssertEqual(held.outcome(of: .reset), .deferred("reset_pending"))
+        XCTAssertEqual(held.outcome(of: .ingress), .completed, "captures are still recovered")
+        for step in [LifecycleStep.jobs, .deletion, .reminders, .retention, .promptEligibility] {
+            XCTAssertEqual(held.outcome(of: step), .deferred("reset_unsettled"), "\(step) must wait for the reset")
+        }
+        XCTAssertEqual(held.outcome(of: .health), .completed)
+        XCTAssertEqual(log.order, ["ingress", "health"])
+
+        let timeChange = await coordinator.reconcile(.systemTimeChange)
+        XCTAssertEqual(timeChange.outcome(of: .reminders), .deferred("reset_unsettled"))
+        XCTAssertEqual(timeChange.outcome(of: .promptEligibility), .deferred("reset_unsettled"))
+
+        let settled = await coordinator.reconcile(.foreground)
+        XCTAssertEqual(settled.outcome(of: .jobs), .completed)
+        XCTAssertEqual(settled.outcome(of: .reminders), .completed)
+    }
+
+    func testAClosedHoldDefersAFirstTimeChangePassUntilItsResetPreconditionSettles() async {
+        let log = StepLog()
+        let resetOutcomes = ResetOutcomeScript([.deferred("reset_pending"), .completed])
+        let coordinator = makeCoordinator(log: log, steps: LifecycleStep.allCases.filter { $0 != .reset })
+        coordinator.setAction(
+            { _ in
+                log.begin("reset")
+                defer { log.end() }
+                return resetOutcomes.next()
+            }, for: .reset)
+        // As after `connect(to:)` on a relaunch that runs no launch pass (an inactive start).
+        coordinator.holdUntilResetSettles()
+
+        let held = await coordinator.reconcile(.systemTimeChange)
+        XCTAssertEqual(log.order, ["reset"], "the pass ran the reset resume first and nothing effectful")
+        XCTAssertEqual(held.results.map(\.step), [.reminders, .promptEligibility], "the precondition is not a step")
+        XCTAssertEqual(held.outcome(of: .reminders), .deferred("reset_unsettled"))
+        XCTAssertEqual(held.outcome(of: .promptEligibility), .deferred("reset_unsettled"))
+
+        let settled = await coordinator.reconcile(.systemTimeChange)
+        XCTAssertEqual(log.order, ["reset", "reset", "reminders", "promptEligibility"])
+        XCTAssertEqual(settled.outcome(of: .reminders), .completed)
+        XCTAssertEqual(settled.outcome(of: .promptEligibility), .completed)
+
+        _ = await coordinator.reconcile(.systemTimeChange)
+        XCTAssertEqual(
+            log.order, ["reset", "reset", "reminders", "promptEligibility", "reminders", "promptEligibility"],
+            "once settled, a time change runs no reset")
+    }
+
+    func testAClosedHoldWithNoResetActionDefersEveryEffectfulStep() async {
+        let log = StepLog()
+        let coordinator = makeCoordinator(log: log, steps: LifecycleStep.allCases.filter { $0 != .reset })
+        coordinator.holdUntilResetSettles()
+
+        let timeChange = await coordinator.reconcile(.systemTimeChange)
+        XCTAssertEqual(timeChange.outcome(of: .reminders), .deferred("reset_unsettled"))
+        XCTAssertEqual(timeChange.outcome(of: .promptEligibility), .deferred("reset_unsettled"))
+        XCTAssertEqual(log.order, [])
+    }
+
+    func testOnlyAProvenAbsentOrFinishedResetSettlesTheResetStep() {
+        func outcome(_ state: ResetState, _ blockers: [ResetBlocker]) -> LifecycleStepOutcome {
+            LifecycleCoordinator.outcome(ofReset: ResetOutcome(state: state, progress: nil, blockers: blockers))
+        }
+        XCTAssertEqual(outcome(.notStarted, []), .completed, "no reset was ever started")
+        XCTAssertEqual(outcome(.completed, []), .completed)
+        XCTAssertEqual(outcome(.notStarted, [.coreUnavailable]), .deferred("reset_status_unknown"))
+        XCTAssertEqual(outcome(.notStarted, [.cancelled]), .deferred("reset_status_unknown"))
+        XCTAssertEqual(outcome(.pending, [.markerUnreadable]), .deferred("reset_pending"))
     }
 
     func testAHungStepTimesOutAndLaterStepsStillRun() async {
