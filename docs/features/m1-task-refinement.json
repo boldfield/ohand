@@ -3208,6 +3208,26 @@
         "ios/Tests/AppAssembly/AppServicesTests.swift",
         "ios/AppAssembly/AppServices.swift"
       ]
+    },
+    {
+      "key": "E02a",
+      "parent": null,
+      "title": "Build a live end-to-end provider harness",
+      "file_scope": [
+        "core/tests/live_providers/",
+        "core/Cargo.toml"
+      ],
+      "intent": "An ignored live harness, with a networkless CI twin, that runs the contrastive suite through production ingress, adapter, dispatch and apply for any configured backend and writes sanitized evidence.",
+      "acceptance": [
+        "See the E02a section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/tests/providers_self_hosted/live_smoke.rs",
+        "core/src/interpretation/apply/",
+        "tools/bench/src/transport/"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -3441,10 +3461,11 @@
       "N03"
     ],
     "E02": [
-      "V06",
-      "V07",
+      "E01",
+      "E02a",
       "I06",
-      "E01"
+      "V06",
+      "V07"
     ],
     "N04a": [
       "N03",
@@ -3939,7 +3960,8 @@
       "DS01",
       "U07c"
     ],
-    "F20": []
+    "F20": [],
+    "E02a": []
   },
   "retained_dependency_overrides": {
     "V06": [

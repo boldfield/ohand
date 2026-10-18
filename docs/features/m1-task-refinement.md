@@ -179,6 +179,7 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
 
     Nothing else in those files changes. Every read of stored history or state derived from it goes through the read gate. Every write that changes stored history, reminders, deletion or what leaves the device requires an authenticated read session, and a capture-only session is refused. Conflicts are resolved by rebasing, and the merger bounces the PR for rework on conflict. Reviewers reject edits beyond these registrations. Root behaviour changes (the ingress path, launch order, notification handling) are not covered; they stay on the serialized root chain S05b → T11d → A10 → A11 → A12. U01d and U01e now register under this allowance, so they no longer wait on T11d or on each other.
   - **Management context allowance (standing).** Each UI slice may add exactly one field to `ManagementContext` (`ios/AppAssembly/ManagementCatalog.swift`) and one line that builds it in `AppServices` (`ios/AppAssembly/AppServices.swift`). The field carries only seams that already exist on main or in the slice's dependencies. This supplements the shared host allowance. U07c may additionally add exactly one section entry to U02b's source-detail host, for its per-item delete control.
+  - **E02 restructured (coordinator, 2026-10-18).** E02 blocked on missing credentials. The maintainer supplied an Anthropic key and the Spark configuration, but no harness can run E02's acceptance; see E02a. E02a builds the harness. The coordinator then runs it on the maintainer's machine against every model Spark serves and one Anthropic model, and commits the sanitized evidence under `docs/validation/evidence/live-providers/`. E02 then writes `docs/validation/live-providers.md` from that evidence and depends on E02a. E02's acceptance is unchanged. Spark's endpoint lists six models, but `ollama ls` on spark01 shows five; `glm-5.3-flash` is served from elsewhere, and the evidence records it separately.
   - **Walkthrough allowance (standing, coordinator, 2026-10-18).** DS08's walkthrough (`ios/UITests/Walkthrough/WalkthroughUITests.swift`) names each screen's controls and titles, so any UI task that changes a screen it visits breaks it. On 2026-10-18 this blocked DS04a, DS07 and U02b. Any UI task may update the walkthrough for the screens it builds or changes:
     - their entries in the screen tables (for example `settingsScreens`);
     - their accessibility identifiers, expected titles and waits;
@@ -2698,6 +2699,62 @@ The change:
 - A hosted test asserts that the host's launcher built no services during the test run.
 
 Acceptance 1 can be met with this source evidence plus a CI run. Acceptance 3 still applies: no settling delay, retry or tolerance, and no test-side shutdown of the host's services as a substitute.
+
+### E02a
+
+Build a live end-to-end provider harness
+
+E02 must run synthetic captures through two genuinely different live backends, selected by configuration, including the adapter and apply behaviour. On 2026-10-18 the coordinator found that no harness can do this:
+- `tools/bench` refuses self-hosted profiles in practice ("the adapter declares no support for diagnostic calls"), and it has no store or apply step (`tools/bench/src/executor/mod.rs:10`).
+- `core/tests/providers_self_hosted/live_smoke.rs` covers only the adapter, with three captures and one fixed model (`CHAT_VERIFIED_MODEL`).
+
+This task builds the harness. It does not collect live evidence: the fleet holds no hosted-provider credential. The coordinator runs the harness with the maintainer's credentials and commits the sanitized evidence, and E02 then records it.
+
+Owned paths:
+- `core/tests/live_providers/` (new);
+- one `[[test]]` entry in `core/Cargo.toml`, containing only `name` and a `path` inside that directory (the same terms as the test-target registration allowance).
+
+Dependencies: none.
+
+Acceptance:
+
+1. **Configuration.** The backends are chosen by environment, never by code edits.
+   - A list of profile specs `<protocol>:<model>` with protocol `self-hosted`, `anthropic` or `openai`. Any model the endpoint lists may be named; models without earlier chat evidence are allowed, because producing that evidence is the point.
+   - The self-hosted endpoint is read from the provider configuration file `live_smoke.rs` already uses (`OHAND_PROVIDER_CONFIG_PATH`, provider key `ollama`).
+   - Hosted credentials come from environment variables named on the command line, never from values.
+   - A per-request timeout of up to 300 seconds.
+   - Endpoints and credentials are never printed, logged or written to an artifact.
+2. **Production path per fixture.** For every fixture in `fixtures/intent/contrastive-fixtures.json` and each configured backend, the harness:
+   - stores the fixture as a synthetic capture through production ingress in a temporary store;
+   - configures the provider profile and route grant through the production configuration path;
+   - dispatches through the production adapter and applies through the production proposal application (`core/src/interpretation/apply/`).
+
+   No step is replaced by a fake on the live path. Reuse an existing HTTPS transport (the `live_smoke.rs` transport, or the host transport in `tools/bench/src/transport/`) rather than writing a new client.
+3. **Recorded per fixture and backend:**
+   - provider, model, profile version, instruction version, build revision and collection time;
+   - the semantic outcome against the fixture's oracle;
+   - forbidden-mutation counts: the raw capture must be byte-identical after apply, and no authoritative field may be overwritten;
+   - latency per call and provider-reported tokens;
+   - a cost estimate only when a rates file is supplied at run time, labelled as an estimate.
+4. **Switching.** After backend A has run, switching the configuration to backend B on the same store leaves every raw capture byte-identical. Earlier applied results stay attributed to A's profile version.
+5. **Failure behaviour, each asserted:**
+   - an unreachable endpoint;
+   - an invalid credential on a hosted backend;
+   - a revoked profile version, revoked through the production revoke path;
+   - an invalid or malformed response.
+
+   Each failure is classified as retriable or not. The capture stays durable and nothing is applied.
+6. **Evidence.** Sanitized JSON artifacts go to a directory named by environment. They carry no endpoint, credential, captured text or model output text. Raw exchanges go to the private evidence directory, with the run id, file name, size and SHA-256 recorded in the artifact. This is the same convention as `live_smoke.rs`, and the harness refuses a private directory inside the repository. A leak check covers both.
+7. **CI proof with no network.** A non-ignored test runs the whole harness against a local TLS fixture server serving self-hosted-shaped and Anthropic-shaped responses. It shows:
+   - the production path and apply;
+   - switching invariance;
+   - every failure classification;
+   - that artifacts contain none of the endpoint, the credential or the capture text.
+
+   The live run is `#[ignore]`, and its exact command is documented in the module header.
+8. Do not run the live path: no credential is available to workers. `make check` and `make test` pass.
+
+Source pointers: `core/tests/providers_self_hosted/live_smoke.rs` (configuration, evidence conventions); `core/src/interpretation/dispatch/`, `core/src/interpretation/apply/`; `tools/bench/src/report/` (oracle scoring of forbidden mutations); `tools/bench/src/transport/` (credential binding to a granted origin).
 
 ## Original acceptance coverage
 
