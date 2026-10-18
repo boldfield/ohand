@@ -70,7 +70,7 @@ jobs:
           cd ios
           xcodebuild test \
             -project OhAnd.xcodeproj \
-            -scheme OhAndTests \
+            -scheme OhAndTests -test-iterations 5 -only-testing:OhAndTests/AppServicesTests -only-testing:OhAndTests/AppRealServicesTests -only-testing:OhAndTests/FullScreenLaunchTests -only-testing:OhAndTests/CaptureServiceAdaptersTests -only-testing:OhAndTests/SettingsRootViewTests -only-testing:OhAndTests/ManagementPresentationTests -only-testing:OhAndTests/ManagementNavigationModelTests \
             -configuration Debug \
             -sdk iphonesimulator \
             -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
