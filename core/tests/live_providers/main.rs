@@ -299,7 +299,7 @@ fn sha2_digest(bytes: &[u8]) -> impl std::fmt::LowerHex {
 }
 
 #[test]
-#[should_panic(expected = "must not carry the endpoint")]
+#[should_panic(expected = "must not carry a forbidden value")]
 fn leak_check_rejects_a_credential_in_an_artifact() {
     assert_no_leaks(
         "artifact",
@@ -308,28 +308,31 @@ fn leak_check_rejects_a_credential_in_an_artifact() {
     );
 }
 
-#[test]
-#[should_panic(expected = "must not carry the endpoint")]
-fn leak_check_rejects_a_credential_in_raw_request_data() {
-    let backends = fixture_backends();
-    assert_no_leaks(
-        "raw evidence",
-        &format!("{{\"request\": \"echo {FIXTURE_CREDENTIAL}\"}}"),
-        &evidence::forbidden_in_raw(&backends),
-    );
+fn raw_exchange(request_body: &str, response_body: &str) -> serde_json::Value {
+    serde_json::json!({"request_body": request_body, "response_body": response_body})
 }
 
 #[test]
-#[should_panic(expected = "must not carry the endpoint")]
+#[should_panic(expected = "must not carry a forbidden value")]
+fn leak_check_rejects_a_credential_in_raw_request_data() {
+    let exchanges = vec![raw_exchange(&format!("echo {FIXTURE_CREDENTIAL}"), "ok")];
+    let raw_text = serde_json::to_string(&exchanges).unwrap();
+    evidence::assert_raw_clean(&exchanges, &raw_text, &fixture_backends());
+}
+
+#[test]
+#[should_panic(expected = "must not carry a forbidden value")]
 fn leak_check_rejects_a_scenario_credential_in_raw_request_data() {
-    assert_no_leaks(
-        "raw evidence",
-        &format!(
-            "{{\"request\": \"{}\"}}",
-            harness::INVALID_SCENARIO_CREDENTIAL
-        ),
-        &evidence::forbidden_in_raw(&fixture_backends()),
-    );
+    let exchanges = vec![raw_exchange(harness::INVALID_SCENARIO_CREDENTIAL, "ok")];
+    let raw_text = serde_json::to_string(&exchanges).unwrap();
+    evidence::assert_raw_clean(&exchanges, &raw_text, &fixture_backends());
+}
+
+#[test]
+fn leak_check_accepts_a_credential_echoed_in_a_response_body() {
+    let exchanges = vec![raw_exchange("{}", &format!("fp_{FIXTURE_CREDENTIAL}"))];
+    let raw_text = serde_json::to_string(&exchanges).unwrap();
+    evidence::assert_raw_clean(&exchanges, &raw_text, &fixture_backends());
 }
 
 #[test]

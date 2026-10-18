@@ -151,7 +151,7 @@ pub fn assert_no_leaks(what: &str, text: &str, forbidden: &[String]) {
     for needle in forbidden.iter().filter(|needle| needle.len() >= 4) {
         assert!(
             !text.contains(needle.as_str()),
-            "{what} must not carry the endpoint, a credential, captured text or model output"
+            "{what} must not carry a forbidden value (endpoint, credential, captured text or model output)"
         );
     }
 }
@@ -182,16 +182,10 @@ pub fn forbidden_in_artifact(
     forbidden
 }
 
-/// Strings the private raw file must not contain: endpoints, origins and every credential,
-/// including those of the failure scenarios. (A credential can only reach a request header,
-/// never a body, so a body carrying one is a leak.)
+/// Strings the private raw file must not contain anywhere: endpoints, hosts and origins.
 pub fn forbidden_in_raw(backends: &[Backend]) -> Vec<String> {
-    let mut forbidden = vec![
-        super::harness::INVALID_SCENARIO_CREDENTIAL.to_string(),
-        super::harness::UNREACHABLE_SCENARIO_CREDENTIAL.to_string(),
-    ];
+    let mut forbidden = Vec::new();
     for backend in backends {
-        forbidden.push(backend.credential.clone());
         if let Some(endpoint) = &backend.endpoint {
             forbidden.push(endpoint.clone());
             if let Some(origin) = super::transport::origin_of(endpoint) {
@@ -200,6 +194,30 @@ pub fn forbidden_in_raw(backends: &[Backend]) -> Vec<String> {
         }
     }
     forbidden
+}
+
+/// Every credential, including those of the failure scenarios. These are checked against
+/// request bodies only (a credential can only reach a header, so a request body carrying one
+/// is a leak). Response bodies are exempt: the self-hosted endpoint enforces no credential, so
+/// its placeholder may legitimately appear in model output or metadata.
+pub fn credentials_for_request_bodies(backends: &[Backend]) -> Vec<String> {
+    let mut credentials = vec![
+        super::harness::INVALID_SCENARIO_CREDENTIAL.to_string(),
+        super::harness::UNREACHABLE_SCENARIO_CREDENTIAL.to_string(),
+    ];
+    credentials.extend(backends.iter().map(|backend| backend.credential.clone()));
+    credentials
+}
+
+/// Leak-check the raw evidence: endpoints against the whole text, credentials against each
+/// exchange's request body only.
+pub fn assert_raw_clean(exchanges: &[Value], raw_text: &str, backends: &[Backend]) {
+    assert_no_leaks("raw evidence", raw_text, &forbidden_in_raw(backends));
+    let credentials = credentials_for_request_bodies(backends);
+    for exchange in exchanges {
+        let request_body = exchange["request_body"].as_str().unwrap_or_default();
+        assert_no_leaks("raw request body", request_body, &credentials);
+    }
 }
 
 pub struct Written {
@@ -221,18 +239,15 @@ pub fn write_evidence(
     let rates = load_rates();
 
     let raw_file_name = format!("{}.raw.json", inputs.run_id);
+    let exchanges = raw_exchanges(inputs.report);
     let mut raw_text = serde_json::to_string_pretty(&json!({
         "run_id": inputs.run_id,
         "collected_at": collected_at,
-        "exchanges": raw_exchanges(inputs.report),
+        "exchanges": exchanges,
     }))
     .unwrap();
     raw_text.push('\n');
-    assert_no_leaks(
-        "raw evidence",
-        &raw_text,
-        &forbidden_in_raw(inputs.backends),
-    );
+    assert_raw_clean(&exchanges, &raw_text, inputs.backends);
     let raw_path = private_dir.join(&raw_file_name);
     write_private_file(&raw_path, raw_text.as_bytes());
     let raw_sha256 = format!("{:x}", Sha256::digest(raw_text.as_bytes()));
