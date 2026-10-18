@@ -188,6 +188,14 @@ final class AppServicesTests: XCTestCase {
 
     // MARK: launcher
 
+    @MainActor
+    func testTheUnitTestHostBuiltNoProductionServices() throws {
+        let hostLauncher = try XCTUnwrap(
+            (UIApplication.shared.delegate as? AppDelegate)?.launcher, "the hosted app has its launcher")
+        hostLauncher.launch()
+        XCTAssertNil(hostLauncher.services, "the host never builds production services while hosting unit tests")
+    }
+
     func testTheLauncherBuildsAndStartsTheServicesOnce() throws {
         var started: [Bool] = []
         var builds = 0
