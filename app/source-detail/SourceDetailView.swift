@@ -1,4 +1,3 @@
-import Combine
 import SwiftUI
 
 /// The authenticated source-detail screen: where the item's words came from, the original and corrected text, and
@@ -42,7 +41,8 @@ struct SourceDetailView: View {
     }
 
     @ObservedObject var model: SourceDetailModel
-    private let poll = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    /// Told when an identified element comes on or goes off the screen; tests use it to check what is rendered.
+    var renderReporter: ((String, Bool) -> Void)?
 
     var body: some View {
         ScrollView {
@@ -65,7 +65,13 @@ struct SourceDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .task { await model.load() }
         .onDisappear { model.close() }
-        .onReceive(poll) { _ in model.checkSession() }
+        .task {
+            // Watches for a relock, deletion or the clip ending for as long as the screen is shown.
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                model.checkSession()
+            }
+        }
     }
 
     private static func text(for failure: SourceDetailFailure) -> String {
@@ -89,7 +95,7 @@ struct SourceDetailView: View {
             .font(.body)
             .foregroundColor(.secondary)
             .fixedSize(horizontal: false, vertical: true)
-            .accessibilityIdentifier(identifier)
+            .reported(identifier, renderReporter)
     }
 
     private func details(_ content: SourceDetailContent) -> some View {
@@ -115,7 +121,7 @@ struct SourceDetailView: View {
                     Text(current).fixedSize(horizontal: false, vertical: true)
                 }
                 .accessibilityElement(children: .combine)
-                .accessibilityIdentifier(Self.currentTextIdentifier)
+                .reported(Self.currentTextIdentifier, renderReporter)
             }
             ForEach(content.sections) { section in
                 VStack(alignment: .leading, spacing: 4) {
@@ -126,7 +132,7 @@ struct SourceDetailView: View {
                     }
                 }
                 .accessibilityElement(children: .combine)
-                .accessibilityIdentifier(Self.sectionIdentifier(section.kind))
+                .reported(Self.sectionIdentifier(section.kind), renderReporter)
             }
         }
     }
@@ -137,17 +143,17 @@ struct SourceDetailView: View {
             EmptyView()
         case .available, .paused:
             Button { Task { await model.play() } } label: { Label("Play audio", systemImage: "play.fill") }
-                .accessibilityIdentifier(Self.playButtonIdentifier)
+                .reported(Self.playButtonIdentifier, renderReporter)
         case .playing:
             Button { model.pause() } label: { Label("Pause audio", systemImage: "pause.fill") }
-                .accessibilityIdentifier(Self.pauseButtonIdentifier)
+                .reported(Self.pauseButtonIdentifier, renderReporter)
         case .removed, .unplayable, .locked:
             if let text = Self.audioNotice(for: model.audio) {
                 Label(text, systemImage: "speaker.slash")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier(Self.audioNoticeIdentifier)
+                    .reported(Self.audioNoticeIdentifier, renderReporter)
             }
         }
     }
@@ -168,16 +174,26 @@ struct SourceDetailView: View {
     }
 }
 
+private extension View {
+    func reported(_ identifier: String, _ reporter: ((String, Bool) -> Void)?) -> some View {
+        accessibilityIdentifier(identifier)
+            .onAppear { reporter?(identifier, true) }
+            .onDisappear { reporter?(identifier, false) }
+    }
+}
+
 /// Owns the model for one item's screen, so that the host rebuilding its views does not start the read over.
 struct SourceDetailScreen: View {
     @StateObject private var model: SourceDetailModel
+    private let renderReporter: ((String, Bool) -> Void)?
 
-    init(itemID: String, makeModel: (String) -> SourceDetailModel) {
+    init(itemID: String, renderReporter: ((String, Bool) -> Void)? = nil, makeModel: (String) -> SourceDetailModel) {
+        self.renderReporter = renderReporter
         let built = makeModel(itemID)
         _model = StateObject(wrappedValue: built)
     }
 
     var body: some View {
-        SourceDetailView(model: model)
+        SourceDetailView(model: model, renderReporter: renderReporter)
     }
 }

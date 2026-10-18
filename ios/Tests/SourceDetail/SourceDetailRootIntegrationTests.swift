@@ -120,6 +120,50 @@ final class SourceDetailRootIntegrationTests: XCTestCase {
         XCTAssertEqual(model.failure, .locked)
     }
 
+    func testRelockingDropsTextThatIsShownWithoutAnyPlayback() throws {
+        let session = ReadAuthenticationSession(boundary: FakeReadAuthenticationBoundary())
+        session.authenticate(reason: "test") { _ in }
+        let root = try makeRoot(session: session, modules: [])
+        defer { root.shutDown() }
+        let (itemID, _) = try saveCapture(root)
+        let model = SourceDetailModel.assembled(itemID: itemID, root: root)
+        try runOnMain { await model.load() }
+        XCTAssertEqual(model.content?.sections.map(\.text), ["synthetic capture to play"])
+
+        session.relock(.explicit)
+        try runOnMain { model.checkSession() }
+
+        XCTAssertNil(model.content, "no text stays once the read session is locked")
+        XCTAssertEqual(model.failure, .locked)
+    }
+
+    func testAClipThatPlaysToItsEndReleasesTheFileAndCanBePlayedAgain() throws {
+        let session = ReadAuthenticationSession(boundary: FakeReadAuthenticationBoundary())
+        session.authenticate(reason: "test") { _ in }
+        let root = try makeRoot(session: session, modules: [])
+        defer { root.shutDown() }
+        let (itemID, captureID) = try saveCapture(root)
+        let audioURL = try seedAudio(captureID: captureID)
+        let model = SourceDetailModel.assembled(itemID: itemID, root: root)
+        try runOnMain { await model.load() }
+        try runOnMain { await model.play() }
+        XCTAssertEqual(model.audio, .playing)
+        XCTAssertTrue(root.playback.fence.isHeld(audioURL))
+
+        XCTAssertTrue(pump(until: {
+            MainActor.assumeIsolated { model.checkSession() }
+            return model.audio != .playing
+        }), "the half-second clip finishes")
+
+        XCTAssertEqual(model.audio, .available, "the control offers play again, not pause")
+        XCTAssertFalse(root.playback.fence.isHeld(audioURL), "the file is no longer held in place")
+        try runOnMain { await model.play() }
+        XCTAssertEqual(model.audio, .playing, "replay opens the clip afresh")
+        XCTAssertTrue(root.playback.fence.isHeld(audioURL))
+        try runOnMain { model.close() }
+        XCTAssertFalse(root.playback.fence.isHeld(audioURL))
+    }
+
     func testWithoutAuthenticationNeitherTextNorAudioIsOffered() throws {
         let root = try makeRoot(session: ReadAuthenticationSession(boundary: FakeReadAuthenticationBoundary()), modules: [])
         defer { root.shutDown() }

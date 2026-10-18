@@ -124,16 +124,21 @@ final class SourceDetailModel: ObservableObject {
     let itemID: String
     private let reader: SourceDetailReading
     private let opener: SourceAudioOpening
+    private let readScope: () -> CompositionReadScope
     private var session: SourceAudioSession?
     private var loadGeneration = 0
     private var openGeneration = 0
     private let timestampParser: ISO8601DateFormatter
     private let fractionalTimestampParser: ISO8601DateFormatter
 
-    init(itemID: String, reader: SourceDetailReading, opener: SourceAudioOpening) {
+    init(
+        itemID: String, reader: SourceDetailReading, opener: SourceAudioOpening,
+        readScope: @escaping () -> CompositionReadScope = { .authenticated }
+    ) {
         self.itemID = itemID
         self.reader = reader
         self.opener = opener
+        self.readScope = readScope
         timestampParser = ISO8601DateFormatter()
         timestampParser.formatOptions = [.withInternetDateTime]
         fractionalTimestampParser = ISO8601DateFormatter()
@@ -200,9 +205,12 @@ final class SourceDetailModel: ObservableObject {
         guard canPlay else { return }
         if let session {
             checkSession()
-            guard self.session != nil else { return }
-            if session.play() { audio = .playing } else { checkSession(playRefused: true) }
-            return
+            if self.session != nil {
+                if session.play() { audio = .playing } else { checkSession(playRefused: true) }
+                return
+            }
+            // The session ended on its own (finished or closed) and the control is playable again: open it afresh.
+            guard canPlay else { return }
         }
         openGeneration += 1
         let generation = openGeneration
@@ -231,6 +239,13 @@ final class SourceDetailModel: ObservableObject {
 
     /// Notices that the open playback ended on its own (deletion requested, relock, shutdown) and turns the control off.
     @MainActor func checkSession(playRefused: Bool = false) {
+        // The text is private too: a session that is no longer authenticated drops it even when nothing is playing.
+        if content != nil, readScope() != .authenticated {
+            endAudio()
+            audio = .locked
+            dropText()
+            return
+        }
         guard let session else { return }
         switch session.endReason {
         case .some(.relocked):
@@ -240,7 +255,8 @@ final class SourceDetailModel: ObservableObject {
         case .some(.deletionRequested):
             self.session = nil
             audio = .removed
-        case .some(.closed):
+        case .some(.closed), .some(.finished):
+            // Closed or played to the end: the file is released and the clip can be played again from the start.
             self.session = nil
             audio = .available
         case .none:
@@ -345,7 +361,8 @@ final class SourceDetailModel: ObservableObject {
     }
 
     static func assembled(itemID: String, root: ServiceCompositionRoot) -> SourceDetailModel {
-        SourceDetailModel(itemID: itemID, reader: root.itemDetails, opener: root.playback)
+        SourceDetailModel(
+            itemID: itemID, reader: root.itemDetails, opener: root.playback, readScope: { root.readScope })
     }
 }
 

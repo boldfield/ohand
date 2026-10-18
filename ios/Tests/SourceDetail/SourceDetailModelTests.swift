@@ -281,4 +281,56 @@ final class SourceDetailModelTests: XCTestCase {
         XCTAssertEqual(model.audio, .unplayable)
         XCTAssertEqual(session.closes, 1)
     }
+
+    func testALockedReadScopeDropsTextEvenWhenNothingIsPlaying() async {
+        var scope = CompositionReadScope.authenticated
+        let model = SourceDetailModel(
+            itemID: Self.itemID, reader: FakeDetailReader(.success(detail())), opener: FakeAudioOpener(),
+            readScope: { scope })
+        await model.load()
+        XCTAssertNotNil(model.content)
+
+        scope = .captureOnly
+        model.checkSession()
+
+        XCTAssertNil(model.content)
+        XCTAssertEqual(model.failure, .locked)
+    }
+
+    func testAClipThatFinishedTurnsBackIntoAPlayableControlAndReplaysThroughAFreshOpen() async {
+        let first = FakeAudioSession()
+        let opener = FakeAudioOpener(.success(first))
+        let model = make(FakeDetailReader(.success(detail(audioReference: "audio:1"))), opener)
+        await model.load()
+        await model.play()
+        XCTAssertEqual(model.audio, .playing)
+
+        first.endReason = .finished
+        model.checkSession()
+        XCTAssertEqual(model.audio, .available)
+
+        let second = FakeAudioSession()
+        opener.result = .success(second)
+        await model.play()
+        XCTAssertEqual(opener.opens, 2)
+        XCTAssertEqual(second.plays, 1)
+        XCTAssertEqual(model.audio, .playing)
+    }
+
+    func testPressingPlayAfterAPausedSessionWasClosedStartsPlaybackInTheSamePress() async {
+        let first = FakeAudioSession()
+        let opener = FakeAudioOpener(.success(first))
+        let model = make(FakeDetailReader(.success(detail(audioReference: "audio:1"))), opener)
+        await model.load()
+        await model.play()
+        model.pause()
+        first.endReason = .closed
+        let second = FakeAudioSession()
+        opener.result = .success(second)
+
+        await model.play()
+
+        XCTAssertEqual(model.audio, .playing)
+        XCTAssertEqual(second.plays, 1)
+    }
 }
