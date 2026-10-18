@@ -7,7 +7,6 @@ struct PromptSettingsView: View {
     static let timeIdentifier = "prompt-settings.time"
     static let noticeIdentifier = "prompt-settings.notice"
     static let nextIdentifier = "prompt-settings.next"
-    static let explanationIdentifier = "prompt-settings.explanation"
 
     static let introText = "A daily prompt is a gentle nudge to look at one saved item. It is off unless you turn it on."
     static let horizonText = "Oh And plans at most the next \(PromptSettingsModel.horizonDays) days of prompts and tops them up each time you open the app. If you do not open it for \(PromptSettingsModel.horizonDays) days, prompts pause until you do. Missed days are skipped, never sent together."
@@ -25,43 +24,89 @@ struct PromptSettingsView: View {
         }
     }
 
+    static let footerText = "A gentle nudge to look at one thing you saved. Never shown on the lock screen."
+    static let previewText = "Something you saved is ready."
+    static let previewIdentifier = "prompt-settings.preview"
+
+    /// The full explanation behind the info button.
+    static let infoParagraphs = [introText, horizonText, privacyText, remindersText]
+    /// The mark in the notification preview is drawn at the size of a notification's app icon.
+    private static let previewMarkSize: CGFloat = 28
+
     @ObservedObject var model: PromptSettingsModel
 
     var body: some View {
-        Form {
-            Section {
-                Toggle("Daily prompt", isOn: Binding(
+        SettingsScreenChrome(
+            title: "Daily prompt", infoTitle: "Daily prompt",
+            infoParagraphs: Self.infoParagraphs
+        ) {
+            DSGroupedSection(footer: Self.footerText) {
+                DSToggleRow(label: "Daily prompt", iconSystemName: "bell.badge", isOn: Binding(
                     get: { model.isEnabled },
                     set: { value in Task { await model.setEnabled(value) } }))
                     .disabled(model.isBusy || !model.hasLoaded)
                     .accessibilityIdentifier(Self.toggleIdentifier)
-                DatePicker("Time", selection: Binding(
-                    get: { model.time },
-                    set: { value in Task { await model.setTime(value) } }),
-                    displayedComponents: .hourAndMinute)
-                    .disabled(model.isBusy || !model.isEnabled)
-                    .accessibilityIdentifier(Self.timeIdentifier)
-                if let next = model.nextPrompt {
-                    Text("Next prompt: \(next.formatted(date: .abbreviated, time: .shortened))")
-                        .accessibilityIdentifier(Self.nextIdentifier)
+                HStack(spacing: DSSpacing.sm) {
+                    DatePicker("Time", selection: Binding(
+                        get: { model.time },
+                        set: { value in Task { await model.setTime(value) } }),
+                        displayedComponents: .hourAndMinute)
+                        .font(DSFont.rowLabel)
+                        .foregroundColor(DSColor.ink.color)
+                        .tint(DSColor.accent.color)
                 }
-                if let notice = model.notice {
-                    Text(Self.text(for: notice))
-                        .foregroundColor(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityIdentifier(Self.noticeIdentifier)
+                .padding(.horizontal, DSSpacing.md)
+                .padding(.vertical, DSSpacing.xs)
+                .frame(minHeight: DSLayout.rowMinimumHeight)
+                .disabled(model.isBusy || !model.isEnabled)
+                .accessibilityIdentifier(Self.timeIdentifier)
+                if let next = model.nextPrompt {
+                    HStack {
+                        Text("Next prompt")
+                            .font(DSFont.rowLabel)
+                            .foregroundColor(DSColor.ink.color)
+                        Spacer()
+                        Text(next.formatted(date: .abbreviated, time: .shortened))
+                            .font(DSFont.rowLabel)
+                            .foregroundColor(DSColor.inkMuted.color)
+                    }
+                    .padding(.horizontal, DSSpacing.md)
+                    .padding(.vertical, DSSpacing.xs)
+                    .frame(minHeight: DSLayout.rowMinimumHeight)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier(Self.nextIdentifier)
                 }
             }
-            Section {
-                Text("\(Self.introText)\n\n\(Self.horizonText)\n\n\(Self.privacyText)\n\n\(Self.remindersText)")
-                    .font(.footnote)
-                    .foregroundColor(.secondary)
+            if let notice = model.notice {
+                Text(Self.text(for: notice))
+                    .font(DSFont.footer)
+                    .foregroundColor(DSColor.inkMuted.color)
                     .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier(Self.explanationIdentifier)
+                    .padding(.horizontal, DSSpacing.md)
+                    .accessibilityIdentifier(Self.noticeIdentifier)
+            }
+            notificationPreview
+        }
+        .task { await model.load() }
+    }
+
+    /// What a prompt looks like: it says only that something is ready and never shows an item.
+    private var notificationPreview: some View {
+        DSCard {
+            HStack(spacing: DSSpacing.sm) {
+                DSMark(size: Self.previewMarkSize)
+                    .frame(width: DSLayout.iconTileSide, height: DSLayout.iconTileSide)
+                VStack(alignment: .leading, spacing: DSSpacing.xxs) {
+                    Text("Oh And")
+                        .font(DSFont.sectionTitle)
+                        .foregroundColor(DSColor.ink.color)
+                    Text(Self.previewText)
+                        .font(DSFont.footer)
+                        .foregroundColor(DSColor.inkMuted.color)
+                }
             }
         }
-        .navigationTitle("Daily prompt")
-        .navigationBarTitleDisplayMode(.inline)
-        .task { await model.load() }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier(Self.previewIdentifier)
     }
 }
