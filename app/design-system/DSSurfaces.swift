@@ -76,42 +76,54 @@ struct DSIconTile: View {
     }
 }
 
-/// A row at least 52 pt high: optional icon tile, label, optional value and a chevron.
+/// A row at least 52 pt high: optional icon tile, label, optional value and a chevron. With an `action` the row is a
+/// button; without one it is a plain label, so a `NavigationLink` using it as its label takes the tap on the whole
+/// row, padding included.
 struct DSRow: View {
     let label: String
     var iconSystemName: String?
     var value: String?
     var showsChevron = true
-    var action: () -> Void = {}
+    var action: (() -> Void)?
+
+    /// True when the row is its own button. A row used as a link label has no action and must not be one, or the
+    /// inner button would take the link's tap.
+    var rendersAsButton: Bool { action != nil }
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: DSSpacing.sm) {
-                if let iconSystemName {
-                    DSIconTile(systemName: iconSystemName)
-                }
-                Text(label)
-                    .font(DSFont.rowLabel)
-                    .foregroundColor(DSColor.ink.color)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                if let value {
-                    Text(value)
-                        .font(DSFont.rowLabel)
-                        .foregroundColor(DSColor.inkMuted.color)
-                }
-                if showsChevron {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(DSColor.inkFaint.color)
-                        .accessibilityHidden(true)
-                }
-            }
-            .padding(.horizontal, DSSpacing.md)
-            .padding(.vertical, DSSpacing.xs)
-            .frame(minHeight: DSLayout.rowMinimumHeight)
-            .contentShape(Rectangle())
+        if let action {
+            Button(action: action) { content }
+                .buttonStyle(.plain)
+        } else {
+            content
         }
-        .buttonStyle(.plain)
+    }
+
+    private var content: some View {
+        HStack(spacing: DSSpacing.sm) {
+            if let iconSystemName {
+                DSIconTile(systemName: iconSystemName)
+            }
+            Text(label)
+                .font(DSFont.rowLabel)
+                .foregroundColor(DSColor.ink.color)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if let value {
+                Text(value)
+                    .font(DSFont.rowLabel)
+                    .foregroundColor(DSColor.inkMuted.color)
+            }
+            if showsChevron {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(DSColor.inkFaint.color)
+                    .accessibilityHidden(true)
+            }
+        }
+        .padding(.horizontal, DSSpacing.md)
+        .padding(.vertical, DSSpacing.xs)
+        .frame(minHeight: DSLayout.rowMinimumHeight)
+        .contentShape(Rectangle())
     }
 }
 

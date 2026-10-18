@@ -1955,6 +1955,30 @@ Owned paths: `app/source-detail/`.
 
 Dependencies: U02a.
 
+Grant (coordinator, 2026-10-17, after PR #269 round 2): playback lives in `ios/Services/Playback/`, owned by A09, which has landed. U02b may make two narrow changes there.
+
+1. **Natural completion.** `PlaybackSession` learns that its player finished, and `PlaybackEndReason` gains `.finished`. On finish the session:
+   - ends itself;
+   - releases its fence lease exactly once;
+   - stays idempotent under a later `close()`, relock, deletion or shutdown, with no second release and no second end callback.
+
+   Files: `ios/Services/Playback/PlaybackSession.swift` and `PlaybackFence.swift`.
+2. **Availability before the tap.** Audio retention removes the file and records the removal only in its native ledger. The core's `audio_reference` stays set, so source detail cannot tell from the item read that the audio is gone. `PlaybackService` gains one read-only query, in `ios/Services/Playback/PlaybackService.swift`. For an item it reports whether the audio can be played now, using the same checks `open(itemID:)` makes before the fence:
+   - the current authorization;
+   - `readAudio`;
+   - `finalizedAudioURL`;
+   - `fileSystem.isPresent`.
+
+   It takes no lease, opens no player, reads no audio bytes and needs an authenticated session. Its outcomes: available, no audio, missing, unreadable and not authenticated. `SourceDetailModel.load` uses it, so removed audio first renders as the disabled notice with no Play button. The tap-time `audioMissing` handling stays, for removals after load.
+
+Owned-path additions: those three files (only the changes above) and service tests under `ios/Tests/Playback/`.
+
+Required tests:
+- **Service tests:**
+  - completion gives `.finished`, releases once, and a later close or relock changes nothing;
+  - availability for present, never-recorded and removed audio, and for a locked session.
+- **Source detail test on the production retention path:** remove a synthetic item's audio through the real `AudioRetentionService` (an expiry sweep or a user removal) before opening detail. Assert that the first render shows the disabled notice and no Play button. Setting `captures.audio_reference` to NULL by hand does not count.
+
 Acceptance:
 
 1. Authentication/relock is enforced for text and playback; deleted/expired/unavailable audio has an honest disabled state and no stale file access.
@@ -2070,6 +2094,39 @@ Owned paths: `app/provider-settings/`.
 Dependencies: U05a, U01f (credential operations by profile version).
 
 Rework (coordinator, 2026-10-17, after PR #267 round 1): use U01f's operations to replace, check and remove the credential of a saved profile version. A secret stored for a draft must never be orphaned. Either defer the Keychain add until the profile saves, or delete a reference this screen added but never saved when the draft is cleared, abandoned, edited or the session relocks. Test whichever is chosen. Reject a secret with leading or trailing whitespace instead of trimming it. The view tests must cover: the secret field emptied after store success and failure, on disappear and on leaving the foreground; the secret never in `renderReporter` or the accessibility value. Real-core cases must cover a stored-then-checked secret, a removed secret reporting `credentialMissing`, and an invalid reference reported redacted.
+
+Grant (coordinator, 2026-10-17, after PR #283 round 1; posted on the PR): replace the durable reference journal with a Keychain sweep. Five review rounds found new crash windows in keeping a separate journal in step with saves. A sweep has no second record to drift.
+
+- **List.** `CredentialService` gains a reference listing:
+  - one `SecItemCopyMatching` on its service name, with `kSecMatchLimitAll` and `kSecReturnAttributes`, never `kSecReturnData`, so no secret bytes are read;
+  - it returns the account names, which are the references;
+  - a listing failure, including the device not yet being unlocked since restart, is an error, never an empty list.
+- **Lease.** `CredentialService` keeps an in-process lease set, guarded by a lock.
+  - `addCredential` leases the new reference before the Keychain insert.
+  - The caller releases the lease only after the core has committed a profile that holds the reference, or after deleting the secret.
+  - A dead process's leases vanish with it, which is correct.
+- **Sweep.** A sweep in `ios/Services/ProviderConfiguration/` runs in this order:
+  1. list the Keychain references K;
+  2. read the leases L;
+  3. read every reference any profile version holds, revoked ones included, plus the reset claims (the core's `profile_credentials` and `credential_claims`).
+
+  It then deletes K minus all of those. This order is load-bearing:
+  - a reference added after step 1 is not in K;
+  - a save that commits and releases its lease between steps 2 and 3 is caught at step 3.
+
+  It skips the whole pass while a reset is pending, and does nothing if either listing fails.
+- **Trigger.** The sweep runs when the provider settings screen loads, before it accepts a save. That screen is the only creator of references, so each visit cleans up after any earlier interrupted run. The root's launch order is not changed.
+- **Removed.** `UserDefaultsReferenceJournal`, `ProviderSettingsPendingSave` reconciliation and journal-based restart cleanup. A draft cleared, abandoned, edited away or relocked still deletes its reference at once, best effort. The sweep is the backstop.
+
+Owned-path additions: the listing and lease in `ios/Services/Credentials/CredentialService.swift` and `KeychainBoundary.swift`; the sweep under `ios/Services/ProviderConfiguration/`; tests under `ios/Tests/Credentials/` and `ios/Tests/ProviderConfiguration/`; and the one-line DS06 call site in `ios/Tests/AppAssembly/SettingsRootViewTests.swift`, needed to compile against the new initializer.
+
+Required tests:
+- two interrupted saves of the same profile with exactly one committed: after a restart, the sweep keeps the committed secret and deletes the other;
+- an interruption at each step of a save: before the insert, after the insert, during the core commit, and after commit but before the lease release;
+- a sweep racing a save in the same process deletes nothing live;
+- a listing failure deletes nothing;
+- a pending reset skips the pass;
+- a revoked version's reference is kept.
 
 Acceptance:
 
@@ -2600,6 +2657,26 @@ Acceptance:
 4. It holds under repetition. A CI run passes that repeats the involved classes at least five times in the failing order. A temporary workflow commit is fine for this: link its run, then remove the commit from the final branch. The normal exact-head macOS CI run is also linked, and `make check` passes.
 
 Source pointers: `ios/Tests/AppAssembly/AppServicesTests.swift:12-27`; `ios/AppAssembly/AppServices.swift:162` (`shutDown`); DS03's quiet authentication tests in the same file (`makeQuietServices`).
+
+Grant (2026-10-17, after the F20 worker's diagnosis): the cause is confirmed in the source.
+- `OhAndTests` runs inside the app (`TEST_HOST` is `OhAnd.app`, `ios/project.yml:106`).
+- `AppDelegate` (`ios/AppAssembly/AppDelegate.swift:12`) and `SceneDelegate` (`ios/AppAssembly/SceneDelegate.swift:17`) both call `launcher.launch()`.
+- As a result, real production services run in the same process as every unit test: launch recovery, the job runner, the live notification reconcile and the quiet authentication attempt. They use the simulator's real app storage.
+- `liveResultBufferCount` is process-wide, so the leak check sees their buffers.
+
+F20 may change the following:
+- `ios/AppAssembly/AppDelegate.swift`;
+- `ios/AppAssembly/SceneDelegate.swift`;
+- `AppLauncher` in `ios/AppAssembly/AppServices.swift`;
+- tests for these.
+
+The change:
+- When the process is hosting unit tests (`XCTestConfigurationFilePath` is set in the environment), the app never builds production services: `AppServices.production()` is not called and no launch work starts. The scene still gets a window, so hosted window tests such as `FullScreenLaunchTests` keep working.
+- The check is read in one place at the app's entry. Nothing else branches on it.
+- It cannot change a normal launch. UI-test and smoke launches run the app as its own process without that variable, so the smoke test and DS08's walkthrough still start real services.
+- A hosted test asserts that the host's launcher built no services during the test run.
+
+Acceptance 1 can be met with this source evidence plus a CI run. Acceptance 3 still applies: no settling delay, retry or tolerance, and no test-side shutdown of the host's services as a substitute.
 
 ## Original acceptance coverage
 

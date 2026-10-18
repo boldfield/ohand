@@ -979,7 +979,11 @@
       "parent": "U02",
       "title": "Build authenticated source detail and retained-audio playback",
       "file_scope": [
-        "app/source-detail/"
+        "app/source-detail/",
+        "ios/Services/Playback/PlaybackSession.swift",
+        "ios/Services/Playback/PlaybackFence.swift",
+        "ios/Services/Playback/PlaybackService.swift",
+        "ios/Tests/Playback/"
       ],
       "intent": "Show source/correction provenance and offer playback only for retained authorized source audio.",
       "acceptance": [
@@ -1140,7 +1144,13 @@
       "parent": "U05",
       "title": "Add native credential setup and redacted connection checks",
       "file_scope": [
-        "app/provider-settings/"
+        "app/provider-settings/",
+        "ios/Services/Credentials/CredentialService.swift",
+        "ios/Services/Credentials/KeychainBoundary.swift",
+        "ios/Services/ProviderConfiguration/",
+        "ios/Tests/Credentials/",
+        "ios/Tests/ProviderConfiguration/",
+        "ios/Tests/AppAssembly/SettingsRootViewTests.swift"
       ],
       "intent": "Connect profile credential references to native secure entry/update/removal and an explicitly authorized connection test.",
       "acceptance": [
@@ -3177,7 +3187,9 @@
       "title": "Stop the result-buffer leak check from failing on test order",
       "file_scope": [
         "ios/Tests/AppAssembly/AppServicesTests.swift",
-        "ios/AppAssembly/AppServices.swift"
+        "ios/AppAssembly/AppServices.swift",
+        "ios/AppAssembly/AppDelegate.swift",
+        "ios/AppAssembly/SceneDelegate.swift"
       ],
       "intent": "Find and remove the async work that leaves result buffers alive after a test teardown, without weakening the leak checks.",
       "acceptance": [
