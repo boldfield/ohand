@@ -309,6 +309,88 @@ fn leak_check_rejects_a_credential_in_an_artifact() {
 }
 
 #[test]
+#[should_panic(expected = "must not carry the endpoint")]
+fn leak_check_rejects_a_credential_in_raw_request_data() {
+    let backends = fixture_backends();
+    assert_no_leaks(
+        "raw evidence",
+        &format!("{{\"request\": \"echo {FIXTURE_CREDENTIAL}\"}}"),
+        &evidence::forbidden_in_raw(&backends),
+    );
+}
+
+#[test]
+#[should_panic(expected = "must not carry the endpoint")]
+fn leak_check_rejects_a_scenario_credential_in_raw_request_data() {
+    assert_no_leaks(
+        "raw evidence",
+        &format!(
+            "{{\"request\": \"{}\"}}",
+            harness::INVALID_SCENARIO_CREDENTIAL
+        ),
+        &evidence::forbidden_in_raw(&fixture_backends()),
+    );
+}
+
+#[test]
+fn a_transient_failure_stays_with_its_own_fixture_and_switching_holds() {
+    let server = TlsFixture::start();
+    let transport = CurlTransport::new(
+        30,
+        TestRouting {
+            ca_file: Some(server.ca_file()),
+            connect_to: vec![
+                (SELF_HOSTED_HOST.to_string(), SELF_HOSTED_PORT, server.port),
+                ("api.anthropic.com".to_string(), 443, server.port),
+            ],
+        },
+    );
+    let mut harness = Harness::new(transport, 30);
+    let backends = fixture_backends();
+    let fixtures: Vec<OracleFixture> = load_fixtures().into_iter().take(4).collect();
+    let flaky = fixtures[1].id.clone();
+
+    let report = harness.run_backends(&backends, &fixtures, &mut |backend, fixture| {
+        server.set_reply(&oracle_proposal(fixture));
+        let first_backend = backend.label() == backends[0].label();
+        server.set_mode(if first_backend && fixture.id == flaky {
+            "unavailable_once"
+        } else {
+            "ok"
+        });
+    });
+
+    assert!(report.configure_failures.is_empty());
+    let record_of = |backend: &Backend, fixture: &OracleFixture| {
+        report
+            .records
+            .iter()
+            .find(|record| record.backend == backend.label() && record.fixture_id == fixture.id)
+            .expect("record")
+    };
+    let flaky_record = record_of(&backends[0], &fixtures[1]);
+    // Its own retry is inside its own record: a 503 followed by a success, one final outcome.
+    assert_eq!(
+        flaky_record.run.exchanges.len(),
+        2,
+        "{:?}",
+        flaky_record.run.outcome
+    );
+    assert_eq!(flaky_record.run.outcome.result, "applied");
+    assert_eq!(flaky_record.run.job_status.as_deref(), Some("completed"));
+    for fixture in [&fixtures[0], &fixtures[2], &fixtures[3]] {
+        for backend in &backends {
+            let record = record_of(backend, fixture);
+            if record.run.outcome.route.as_deref() == Some("provider") {
+                assert_eq!(record.run.exchanges.len(), 1, "{}", record.fixture_id);
+            }
+            assert_eq!(record.run.forbidden.total(), 0);
+        }
+    }
+    assert!(report.switching[0].holds(), "{:?}", report.switching[0]);
+}
+
+#[test]
 #[should_panic(expected = "outside the repository")]
 fn private_directory_inside_the_repository_is_refused() {
     ensure_private_directory(

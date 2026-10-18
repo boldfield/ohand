@@ -1,6 +1,9 @@
 //! One HTTPS transport for all three adapters: a `curl` subprocess, as in `live_smoke.rs`
 //! (https only, certificate validation on, redirects not followed, credential on stdin).
 //!
+//! This is an adapted copy of the `live_smoke.rs` transport, not a reuse of it: that one is private
+//! to another test target, and the bench transport lives in a different crate.
+//!
 //! Credentials are bound to the origin they were registered for and are refused for any other,
 //! the same rule as the host transport in `tools/bench/src/transport/`. The CI proof adds two
 //! test-only knobs, both off on the live path: a trusted CA file and host remapping

@@ -182,11 +182,16 @@ pub fn forbidden_in_artifact(
     forbidden
 }
 
-/// Strings the private raw file must not contain: endpoints and origins. (A credential can only
-/// reach a request header, never a body; short placeholder secrets may occur in model output.)
+/// Strings the private raw file must not contain: endpoints, origins and every credential,
+/// including those of the failure scenarios. (A credential can only reach a request header,
+/// never a body, so a body carrying one is a leak.)
 pub fn forbidden_in_raw(backends: &[Backend]) -> Vec<String> {
-    let mut forbidden = Vec::new();
+    let mut forbidden = vec![
+        super::harness::INVALID_SCENARIO_CREDENTIAL.to_string(),
+        super::harness::UNREACHABLE_SCENARIO_CREDENTIAL.to_string(),
+    ];
     for backend in backends {
+        forbidden.push(backend.credential.clone());
         if let Some(endpoint) = &backend.endpoint {
             forbidden.push(endpoint.clone());
             if let Some(origin) = super::transport::origin_of(endpoint) {

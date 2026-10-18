@@ -8,7 +8,7 @@ Anthropic-shaped (messages) endpoint. Behaviour is steered by files in <state-di
 can change it between requests:
 
 - credential.txt: the secret both header styles must carry, else 401;
-- mode.txt: "ok" (default), "malformed" (200 with a body that is not JSON) or "unavailable" (503);
+- mode.txt: "ok" (default), "malformed" (200 with a body that is not JSON) "unavailable" (503) or "unavailable_once" (one 503, then "ok");
 - reply.json: the proposal object returned in "ok" mode.
 
 Every request appends one line (path, status) to requests.log. No body is ever logged.
@@ -48,6 +48,10 @@ class Handler(BaseHTTPRequestHandler):
         if not secret or ("Bearer " + secret) not in presented:
             return self.reply(401, {"error": {"type": "authentication_error"}})
         mode = read("mode.txt", "ok")
+        if mode == "unavailable_once":
+            with open(os.path.join(STATE, "mode.txt"), "w", encoding="utf-8") as handle:
+                handle.write("ok")
+            return self.reply(503, {"error": {"type": "overloaded_error"}})
         if mode == "unavailable":
             return self.reply(503, {"error": {"type": "overloaded_error"}})
         if mode == "malformed":

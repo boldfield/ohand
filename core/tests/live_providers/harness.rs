@@ -59,6 +59,11 @@ const LOCALE: &str = "en-US";
 /// Free-form text with no fast-path command, so the provider is always the route.
 pub const PROVIDER_ONLY_TEXT: &str = "call the roofer about the leak before the weekend";
 
+/// Most attempts one capture's job is given inside a single `run`.
+const MAX_ATTEMPTS_PER_CAPTURE: usize = 8;
+/// A next-attempt time no run reaches; parks jobs that must not run under another capture.
+const DEFERRED_UNTIL: &str = "9999-12-31T00:00:00+00:00";
+
 pub fn rfc3339(instant: DateTime<Utc>) -> String {
     instant.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
@@ -436,8 +441,14 @@ impl Harness {
         }
     }
 
-    /// Claim and run every runnable job, as the production runner does, then read the result.
-    pub fn run(&mut self, ingested: &Ingested) -> CaptureRun {
+    /// Claim and run the target job through the production dispatcher, then read the result.
+    /// Every other queued job is deferred first, so a job left backed off by an earlier capture
+    /// can neither run under this capture nor add its exchanges to this record. With
+    /// `retry_transient`, a transient failure is retried at once (the dispatcher's own attempt
+    /// limit still applies) so the record carries the job's final outcome; without it the single
+    /// attempt is recorded, backed off.
+    pub fn run(&mut self, ingested: &Ingested, retry_transient: bool) -> CaptureRun {
+        self.defer_other_jobs(&ingested.target_job_id);
         let _ = self.transport.drain_exchanges();
         let clock = SystemClock::new();
         let dispatcher = InterpretationDispatcher::new(&self.registry, &clock);
@@ -445,19 +456,34 @@ impl Harness {
         let lease = chrono::Duration::seconds(i64::from(self.timeout_seconds) + 120);
         let mut outcome = Outcome::of("not_run");
         let mut dispatched = None;
-        for _ in 0..4 {
+        let mut exchanges = Vec::new();
+        for _ in 0..MAX_ATTEMPTS_PER_CAPTURE {
             let Some(job) =
                 claim_job_with_lease(&mut self.database, lease, Utc::now()).expect("claim a job")
             else {
                 break;
             };
+            assert_eq!(
+                job.job_id, ingested.target_job_id,
+                "only the target job is runnable"
+            );
             let result = dispatcher
                 .run_job(&mut self.database, &job, &cancel, Utc::now())
                 .expect("the dispatcher runs the claimed job");
-            if job.job_id == ingested.target_job_id {
-                outcome = classify(&result);
-                dispatched = Some(result);
+            exchanges.extend(self.transport.drain_exchanges());
+            outcome = classify(&result);
+            let backed_off = matches!(result, DispatchOutcome::BackedOff { .. });
+            dispatched = Some(result);
+            if !(retry_transient && backed_off && outcome.retriable == Some(true)) {
+                break;
             }
+            self.database
+                .conn()
+                .execute(
+                    "UPDATE jobs SET next_attempt_at = ? WHERE job_id = ? AND status = 'queued'",
+                    rusqlite::params![Utc::now().to_rfc3339(), &ingested.target_job_id],
+                )
+                .expect("make the retry runnable now");
         }
         let abstained = matches!(
             &dispatched,
@@ -466,7 +492,6 @@ impl Harness {
                 ..
             })
         );
-        let exchanges = self.transport.drain_exchanges();
         let mut state = self.read_state(&ingested.item_id);
         state.abstained = abstained;
 
@@ -530,6 +555,17 @@ impl Harness {
             job_failure_reason,
             capture_text_durable: text_now.as_deref() == Some(ingested.spec.raw_input.as_str()),
         }
+    }
+
+    /// Push every other queued job's next attempt out of reach of this run.
+    fn defer_other_jobs(&mut self, target_job_id: &str) {
+        self.database
+            .conn()
+            .execute(
+                "UPDATE jobs SET next_attempt_at = ? WHERE status = 'queued' AND job_id != ?",
+                rusqlite::params![DEFERRED_UNTIL, target_job_id],
+            )
+            .expect("defer the other jobs");
     }
 
     pub fn capture_digest(&self, capture_id: &str) -> String {
@@ -722,7 +758,7 @@ impl Harness {
             for fixture in fixtures {
                 before_fixture(backend, fixture);
                 let ingested = self.ingest(CaptureSpec::of_fixture(fixture));
-                let run = self.run(&ingested);
+                let run = self.run(&ingested, true);
                 snapshot.captures.push((
                     ingested.capture_id.clone(),
                     self.capture_digest(&ingested.capture_id),
@@ -822,6 +858,9 @@ pub struct ScenarioInputs<'a> {
     pub malformed: Vec<&'a Backend>,
 }
 
+pub const INVALID_SCENARIO_CREDENTIAL: &str = "invalid-credential-for-harness";
+pub const UNREACHABLE_SCENARIO_CREDENTIAL: &str = "unreachable-credential";
+
 fn closed_local_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
     let port = listener.local_addr().unwrap().port();
@@ -844,7 +883,7 @@ impl Harness {
             protocol: Protocol::SelfHosted,
             model: inputs.primary.model.clone(),
             endpoint: Some(format!("https://127.0.0.1:{}/v1", closed_local_port())),
-            credential: "unreachable-credential".to_string(),
+            credential: UNREACHABLE_SCENARIO_CREDENTIAL.to_string(),
         };
         records.push(self.failing_scenario(
             "unreachable_endpoint",
@@ -859,7 +898,7 @@ impl Harness {
                 records.push(self.failing_scenario(
                     "invalid_hosted_credential",
                     hosted,
-                    Some("invalid-credential-for-harness"),
+                    Some(INVALID_SCENARIO_CREDENTIAL),
                     |outcome| {
                         outcome.result == "failed"
                             && outcome.reason.as_deref() == Some("unauthorized")
@@ -908,7 +947,7 @@ impl Harness {
             return not_exercised(name, &format!("configuration refused: {reason}"));
         }
         let ingested = self.ingest(CaptureSpec::plain(PROVIDER_ONLY_TEXT));
-        let run = self.run(&ingested);
+        let run = self.run(&ingested, false);
         let nothing_applied = run.state.applied_proposals == 0
             && run.state.item_type.is_none()
             && !run.state.has_reminder;
@@ -938,7 +977,7 @@ impl Harness {
         };
         let ingested = self.ingest(CaptureSpec::plain(PROVIDER_ONLY_TEXT));
         self.revoke(&configured.profile_version);
-        let run = self.run(&ingested);
+        let run = self.run(&ingested, false);
         let retired = run.job_status.as_deref() == Some("cancelled")
             && run.job_failure_reason.as_deref() == Some("profile_revoked");
         let passed = retired
