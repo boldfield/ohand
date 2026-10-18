@@ -179,6 +179,8 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
 
     Nothing else in those files changes. Every read of stored history or state derived from it goes through the read gate. Every write that changes stored history, reminders, deletion or what leaves the device requires an authenticated read session, and a capture-only session is refused. Conflicts are resolved by rebasing, and the merger bounces the PR for rework on conflict. Reviewers reject edits beyond these registrations. Root behaviour changes (the ingress path, launch order, notification handling) are not covered; they stay on the serialized root chain S05b → T11d → A10 → A11 → A12. U01d and U01e now register under this allowance, so they no longer wait on T11d or on each other.
   - **Management context allowance (standing).** Each UI slice may add exactly one field to `ManagementContext` (`ios/AppAssembly/ManagementCatalog.swift`) and one line that builds it in `AppServices` (`ios/AppAssembly/AppServices.swift`). The field carries only seams that already exist on main or in the slice's dependencies. This supplements the shared host allowance. U07c may additionally add exactly one section entry to U02b's source-detail host, for its per-item delete control.
+  - **E02 restructured (coordinator, 2026-10-18).** E02 blocked on missing credentials. The maintainer supplied an Anthropic key and the Spark configuration, but no harness can run E02's acceptance; see E02a. E02a builds the harness. The coordinator then runs it on the maintainer's machine against every model Spark serves and one Anthropic model, and commits the sanitized evidence under `docs/validation/evidence/live-providers/`. E02 then writes `docs/validation/live-providers.md` from that evidence and depends on E02a. E02's acceptance is unchanged. Spark's endpoint lists six models, but `ollama ls` on spark01 shows five; `glm-5.3-flash` is served from elsewhere, and the evidence records it separately.
+  - **F21 added (coordinator, 2026-10-18).** A live replay on Spark found that the self-hosted adapter's strict schema suppresses every optional proposal, reminders included, on all five Ollama models. E02's evidence run also waits for F21, so it measures the fixed request. See F21.
   - **Walkthrough allowance (standing, coordinator, 2026-10-18).** DS08's walkthrough (`ios/UITests/Walkthrough/WalkthroughUITests.swift`) names each screen's controls and titles, so any UI task that changes a screen it visits breaks it. On 2026-10-18 this blocked DS04a, DS07 and U02b. Any UI task may update the walkthrough for the screens it builds or changes:
     - their entries in the screen tables (for example `settingsScreens`);
     - their accessibility identifiers, expected titles and waits;
@@ -2698,6 +2700,114 @@ The change:
 - A hosted test asserts that the host's launcher built no services during the test run.
 
 Acceptance 1 can be met with this source evidence plus a CI run. Acceptance 3 still applies: no settling delay, retry or tolerance, and no test-side shutdown of the host's services as a substitute.
+
+### E02a
+
+Build a live end-to-end provider harness
+
+E02 must run synthetic captures through two genuinely different live backends, selected by configuration, including the adapter and apply behaviour. On 2026-10-18 the coordinator found that no harness can do this:
+- `tools/bench` refuses self-hosted profiles in practice ("the adapter declares no support for diagnostic calls"), and it has no store or apply step (`tools/bench/src/executor/mod.rs:10`).
+- `core/tests/providers_self_hosted/live_smoke.rs` covers only the adapter, with three captures and one fixed model (`CHAT_VERIFIED_MODEL`).
+
+This task builds the harness. It does not collect live evidence: the fleet holds no hosted-provider credential. The coordinator runs the harness with the maintainer's credentials and commits the sanitized evidence, and E02 then records it.
+
+Owned paths:
+- `core/tests/live_providers/` (new);
+- one `[[test]]` entry in `core/Cargo.toml`, containing only `name` and a `path` inside that directory (the same terms as the test-target registration allowance).
+
+Dependencies: none.
+
+Acceptance:
+
+1. **Configuration.** The backends are chosen by environment, never by code edits.
+   - A list of profile specs `<protocol>:<model>` with protocol `self-hosted`, `anthropic` or `openai`. Any model the endpoint lists may be named; models without earlier chat evidence are allowed, because producing that evidence is the point.
+   - The self-hosted endpoint is read from the provider configuration file `live_smoke.rs` already uses (`OHAND_PROVIDER_CONFIG_PATH`, provider key `ollama`).
+   - Hosted credentials come from environment variables named on the command line, never from values.
+   - A per-request timeout of up to 300 seconds.
+   - Endpoints and credentials are never printed, logged or written to an artifact.
+2. **Production path per fixture.** For every fixture in `fixtures/intent/contrastive-fixtures.json` and each configured backend, the harness:
+   - stores the fixture as a synthetic capture through production ingress in a temporary store;
+   - configures the provider profile and route grant through the production configuration path;
+   - dispatches through the production adapter and applies through the production proposal application (`core/src/interpretation/apply/`).
+
+   No step is replaced by a fake on the live path. Reuse an existing HTTPS transport (the `live_smoke.rs` transport, or the host transport in `tools/bench/src/transport/`) rather than writing a new client.
+3. **Recorded per fixture and backend:**
+   - provider, model, profile version, instruction version, build revision and collection time;
+   - the semantic outcome against the fixture's oracle;
+   - forbidden-mutation counts: the raw capture must be byte-identical after apply, and no authoritative field may be overwritten;
+   - latency per call and provider-reported tokens;
+   - a cost estimate only when a rates file is supplied at run time, labelled as an estimate.
+4. **Switching.** After backend A has run, switching the configuration to backend B on the same store leaves every raw capture byte-identical. Earlier applied results stay attributed to A's profile version.
+5. **Failure behaviour, each asserted:**
+   - an unreachable endpoint;
+   - an invalid credential on a hosted backend;
+   - a revoked profile version, revoked through the production revoke path;
+   - an invalid or malformed response.
+
+   Each failure is classified as retriable or not. The capture stays durable and nothing is applied.
+6. **Evidence.** Sanitized JSON artifacts go to a directory named by environment. They carry no endpoint, credential, captured text or model output text. Raw exchanges go to the private evidence directory, with the run id, file name, size and SHA-256 recorded in the artifact. This is the same convention as `live_smoke.rs`, and the harness refuses a private directory inside the repository. A leak check covers both.
+7. **CI proof with no network.** A non-ignored test runs the whole harness against a local TLS fixture server serving self-hosted-shaped and Anthropic-shaped responses. It shows:
+   - the production path and apply;
+   - switching invariance;
+   - every failure classification;
+   - that artifacts contain none of the endpoint, the credential or the capture text.
+
+   The live run is `#[ignore]`, and its exact command is documented in the module header.
+8. Do not run the live path: no credential is available to workers. `make check` and `make test` pass.
+
+Source pointers: `core/tests/providers_self_hosted/live_smoke.rs` (configuration, evidence conventions); `core/src/interpretation/dispatch/`, `core/src/interpretation/apply/`; `tools/bench/src/report/` (oracle scoring of forbidden mutations); `tools/bench/src/transport/` (credential binding to a granted origin).
+
+### F21
+
+Stop the self-hosted request from suppressing optional proposals
+
+The self-hosted adapter sends `output_schema()` as a strict `json_schema` `response_format` (`core/src/providers/self_hosted/mod.rs:247-251`). In that schema only `operation` is required; `reminder_proposal`, `session_topic_proposal`, `abstention` and nested fields such as `instant` and `timezone_id` are optional.
+
+Found by the coordinator on 2026-10-18, on the maintainer's Spark endpoint, at adapter revision a0fa6b4. The coordinator replayed the adapter's own request bodies, prompt and schema unchanged, against every model the endpoint serves under Ollama: `deepseek-flash-iq3:latest`, `qwen3.8:27b`, `gpt-oss:20b`, `gpt-oss:120b` and `qwen3.5:122b`.
+- **Strict schema:** the synthetic capture "remind me to call the dentist tomorrow at 3pm" never produced a `reminder_proposal`, 10 of 10 tries across all five models. The prompt asks for one explicitly, and includes a worked example.
+- **Same prompt, `json_object` or no format:** `gpt-oss:20b` returned an `explicit` reminder at the correct instant.
+- **Top-level properties required but nullable:** `gpt-oss:20b` and `qwen3.8:27b` returned the reminder, and gave none for an idea capture. But nested optional fields were still dropped (`instant` came back null), and `gpt-oss:20b` filled `abstention` and `session_topic_proposal`.
+
+Hypothesis: Ollama compiles the schema into a decoding grammar under which optional properties are effectively never emitted.
+
+The adapter smoke run that marks `deepseek-flash-iq3:latest` `Supported` passed because each reply mapped to a valid proposal. It never checked that the reminder was there. The offline fast path (`core/src/interpretation/fast_path/`) catches plain "remind me …" commands, but every reminder phrased outside its grammar depends on this request.
+
+The OpenAI adapter sends no strict schema, and the Anthropic adapter uses a tool call, so neither is affected.
+
+Owned paths:
+- `core/src/providers/self_hosted/`: request building, reply normalization and the compatibility boundary text;
+- `core/tests/providers_self_hosted/`;
+- new sanitized artifacts under `docs/validation/evidence/spark-adapter-smoke/`, plus their rows in the "V09 adapter smoke run" table of `docs/validation/spark-protocol.md`.
+
+`output_schema()` (`core/src/interpretation/instructions/text.rs:66`) is not changed. The self-hosted wire schema is derived from it.
+
+Dependencies: none.
+
+Acceptance:
+
+1. **Wire schema.** Preferred: the self-hosted request carries a schema derived recursively from `output_schema()`.
+   - Every object property at every depth is listed in `required`.
+   - Each property `output_schema()` leaves optional accepts `null`.
+   - `additionalProperties: false` and every type, enum and nesting are preserved.
+
+   It is derived at build time, so it cannot drift from `output_schema()`. A unit test walks every nested object and asserts the transform.
+
+   If the live evidence in item 4 shows this does not bring the reminder back on the verified model, `json_object` with local validation is acceptable instead. The PR then shows the failing derived-schema run.
+2. **Normalization.** Before validation, a `null` in an optional position is treated as absent. Validation and mapping are otherwise unchanged; no rule is relaxed, so an `abstention` that comes with a proposal is handled exactly as today. Unit tests with fixture replies cover:
+   - a top-level null;
+   - a nested null;
+   - a non-null field that existing validation rejects.
+3. **Smoke semantics.** `live_smoke.rs` checks meaning, not only shape.
+   - The reminder capture must yield a `reminder_proposal` with `quality` `explicit` and an `instant` at the right moment: 2026-01-06T15:00 America/Chicago for its reference time.
+   - The idea and plain-note captures must yield none.
+   - The model can be chosen by environment, defaulting to `CHAT_VERIFIED_MODEL`. The artifact records the model and the semantic results, never output text.
+4. **Live evidence.** Run the live smoke from the worker against `deepseek-flash-iq3:latest`, `gpt-oss:20b` and `qwen3.8:27b`, and commit the sanitized artifacts. Every model must pass item 3, with each run's artifact listed in the PR. A model that cannot pass is recorded honestly and is not counted as passed.
+5. **Compatibility boundary.** `compatibility_boundary()` and the `Supported` claim are updated.
+   - Each model is `Supported` only with a passing semantic artifact.
+   - The suppression found here is recorded as an observed failure of the previous request shape.
+6. `make check` and `make test` pass.
+
+Source pointers: `core/src/providers/self_hosted/mod.rs:247` (request), `:104` (`Supported` claim); `core/tests/providers_self_hosted/live_smoke.rs:215` (fixed model); `core/src/interpretation/instructions/text.rs:66` (`output_schema`).
 
 ## Original acceptance coverage
 
