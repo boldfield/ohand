@@ -22,7 +22,7 @@ final class WalkthroughUITests: XCTestCase {
     private let settingsScreens: [(label: String, title: String)] = [
         ("Daily prompt", "Daily prompt"),
         ("Unfinished recordings", "Unfinished recordings"),
-        ("Processing", "Providers"),
+        ("Processing", "Processing"),
         ("Audio", "Audio"),
         ("Export", "Export"),
     ]
