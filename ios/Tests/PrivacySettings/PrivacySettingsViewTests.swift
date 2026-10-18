@@ -54,7 +54,10 @@ final class PrivacySettingsViewTests: XCTestCase {
 
     func testAFreshScreenShowsTheLocalOnlyNoticeRouteStatusAndOffersForUngrantedCapabilities() {
         XCTAssertEqual(rendered[PrivacySettingsView.noticeIdentifier], PrivacySettingsText.localFirstNotice)
-        XCTAssertEqual(rendered[PrivacySettingsView.stickyIdentifier], PrivacySettingsText.stickyNotice)
+        XCTAssertEqual(
+            PrivacySettingsText.infoParagraphs,
+            [PrivacySettingsText.localFirstExplanation, PrivacySettingsText.stickyNotice, PrivacySettingsText.confirmationNote],
+            "the full explanation moves to the info sheet; the screen keeps one footer line")
         XCTAssertEqual(
             rendered[PrivacySettingsView.routeIdentifier("route-personal")], "Personal route · Local capture")
         XCTAssertEqual(
@@ -72,7 +75,7 @@ final class PrivacySettingsViewTests: XCTestCase {
         settle()
         let proposal = try XCTUnwrap(model.proposal)
         XCTAssertEqual(rendered[PrivacySettingsView.questionIdentifier], PrivacySettingsText.proposalQuestion(proposal))
-        XCTAssertEqual(rendered[PrivacySettingsView.confirmationNoteIdentifier], PrivacySettingsText.confirmationNote)
+        XCTAssertEqual(rendered[PrivacySettingsView.confirmationNoteIdentifier], PrivacySettingsText.confirmationFooter)
         XCTAssertEqual(rendered[PrivacySettingsView.allowIdentifier], "Allow")
         XCTAssertEqual(rendered[PrivacySettingsView.cancelIdentifier], "Not now")
         XCTAssertTrue(controls.grants.isEmpty, "showing the question authorizes nothing")

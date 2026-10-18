@@ -6,19 +6,23 @@ import OhAndServices
 /// case that produces it.
 enum PrivacySettingsText {
     static let lockedText = "Your saved items are locked. Go back and open Settings again to unlock them."
-    static let localFirstNotice =
+    /// The screen's one footer line under the routes.
+    static let localFirstNotice = "Nothing leaves the device unless you allow it here."
+    /// The full explanation behind the info button.
+    static let localFirstExplanation =
         "Capturing, saving and searching work on this device without any setup. Nothing is sent anywhere unless you "
-        + "allow it below."
+        + "allow it on this screen."
     static let stickyNotice =
         "Each route keeps the scope and permissions you gave it. Nothing the app reads or a provider answers can "
         + "change them; only you can, here."
     static let confirmationNote =
         "Allowing this lets notes saved on this route be sent to the destination named above for this one purpose "
         + "only. It does not allow any other purpose, destination or route, and it changes nothing already saved."
-    static let noProfilesNotice =
-        "No provider profile is saved yet. You can add one in Providers whenever you like; until then everything "
-        + "stays on this device."
-    static let routeLocalOnly = "Local only: nothing from this route is sent anywhere."
+    /// The question card's one footer line; `confirmationNote` is its full explanation in the info sheet.
+    static let confirmationFooter = "Only this purpose, destination and route."
+    static let infoParagraphs = [localFirstExplanation, stickyNotice, confirmationNote]
+    static let noProfilesNotice = "No provider yet. Add one in Processing; until then everything stays here."
+    static let routeLocalOnly = "Nothing leaves the device"
     static let cancelledNotice = "Nothing was changed. Everything still works on this device."
 
     static func scopeName(_ scope: String) -> String {
