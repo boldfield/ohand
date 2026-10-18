@@ -68,6 +68,7 @@ final class WalkthroughUITests: XCTestCase {
 
     private func walk(prefix: String) throws {
         XCTAssertTrue(app.buttons["management.open.search"].waitForExistence(timeout: screenTimeout), "home screen did not appear")
+        waitForLaunchAuthentication()
         saveCaptures()
         dismissKeyboard()
         capture(prefix, "home")
@@ -133,6 +134,27 @@ final class WalkthroughUITests: XCTestCase {
             Thread.sleep(forTimeInterval: 0.5)
         } while Date() < deadline
         return false
+    }
+
+    /// The app makes one quiet Face ID attempt at launch. Its system prompt takes focus, so typing while it is up loses
+    /// text, and the runner's alert handler can race the matching face and fail the test. Wait until the driving script's
+    /// matching face has answered it, as a person looks at the phone before typing.
+    private func waitForLaunchAuthentication() {
+        let promptIdentifier = "com.apple.localauthentication.ax.authentication.alert"
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let prompts = [springboard.alerts[promptIdentifier], app.alerts[promptIdentifier]]
+        let deadline = Date().addingTimeInterval(15)
+        var shown = false
+        repeat {
+            shown = prompts.contains { $0.exists }
+            if !shown { Thread.sleep(forTimeInterval: 0.5) }
+        } while !shown && Date() < deadline
+        guard shown else { return }
+        let answered = Date().addingTimeInterval(screenTimeout)
+        while prompts.contains(where: { $0.exists }) && Date() < answered {
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        XCTAssertFalse(prompts.contains { $0.exists }, "the launch Face ID prompt was not answered")
     }
 
     private func saveCaptures() {
