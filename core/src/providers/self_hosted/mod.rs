@@ -6,8 +6,10 @@
 //!
 //! - The profile endpoint is the server's base URL, and the adapter posts to
 //!   `<base>/chat/completions`. The request carries `model`, `messages`, `temperature: 0`,
-//!   `max_tokens`, `stream: false` and a strict `json_schema` `response_format`, the shape the
-//!   probe sent and the endpoint answered with an OpenAI-compatible chat completion.
+//!   `max_tokens`, `stream: false` and a `json_object` `response_format`. The output contract travels in the prompt and
+//!   the reply is validated locally against `output_schema()`: a strict `json_schema` made Ollama
+//!   suppress optional proposals (see [`compatibility_boundary`]). A `null` in an optional
+//!   position is treated as absent before validation.
 //! - Transport is the shared [`HttpTransport`] seam, so the native layer keeps enforcing https,
 //!   certificate validation, the profile's authorized origin and secret handling. The adapter
 //!   never sees a credential and contacts only the profile's own endpoint: there is no default
@@ -82,7 +84,6 @@ pub const LISTED_MODELS: [&str; 6] = [
 pub const MAX_COMPLETION_TOKENS: u32 = 4096;
 /// Path appended to the profile's base URL.
 pub const CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
-const RESPONSE_SCHEMA_NAME: &str = "interpretation_output";
 
 /// The exact verified compatibility boundary, one statement per entry.
 pub fn compatibility_boundary() -> &'static [&'static str] {
@@ -131,7 +132,7 @@ pub fn text_interpretation_capability(model: &str, input_size_limit: usize) -> C
     };
     capability
         .with_input_size_limit(input_size_limit)
-        .with_structured_output(StructuredOutputMode::JsonSchema)
+        .with_structured_output(StructuredOutputMode::JsonObject)
 }
 
 /// Every capability a self-hosted profile should declare: text interpretation for `model` plus
@@ -166,14 +167,6 @@ struct Message {
 struct ResponseFormat {
     #[serde(rename = "type")]
     kind: &'static str,
-    json_schema: JsonSchemaFormat,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct JsonSchemaFormat {
-    name: &'static str,
-    strict: bool,
-    schema: Value,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -244,12 +237,7 @@ impl<T: HttpTransport> ProviderAdapter for SelfHostedAdapter<T> {
                 },
             ],
             response_format: ResponseFormat {
-                kind: "json_schema",
-                json_schema: JsonSchemaFormat {
-                    name: RESPONSE_SCHEMA_NAME,
-                    strict: true,
-                    schema: output_schema(),
-                },
+                kind: "json_object",
             },
             max_tokens: MAX_COMPLETION_TOKENS,
             temperature: 0.0,
@@ -308,11 +296,67 @@ fn decode_response(status: u16, response_bytes: &[u8]) -> Result<Vec<u8>, Transp
     {
         return Err(TransportError::InvalidOutput);
     }
-    choice
+    let content = choice
         .message
         .content
-        .map(String::into_bytes)
-        .ok_or(TransportError::InvalidOutput)
+        .ok_or(TransportError::InvalidOutput)?;
+    Ok(normalize_optional_nulls(content, &output_schema()).into_bytes())
+}
+
+/// Treats a `null` in an optional position of `content` as absent, judged against `schema`.
+/// Content that is not JSON is returned unchanged for the existing validation to reject; a
+/// `null` in a required position, or any non-null value, is left exactly as received.
+pub fn normalize_optional_nulls(content: String, schema: &Value) -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(&content) else {
+        return content;
+    };
+    drop_optional_nulls(&mut value, schema);
+    serde_json::to_string(&value).unwrap_or(content)
+}
+
+fn drop_optional_nulls(value: &mut Value, schema: &Value) {
+    match value {
+        Value::Object(members) => {
+            let object_schema = schema
+                .get("properties")
+                .map(|_| schema)
+                .or_else(|| branches_of(schema).find(|branch| branch.get("properties").is_some()));
+            let Some(object_schema) = object_schema else {
+                return;
+            };
+            let properties = object_schema["properties"].as_object();
+            let required: Vec<&str> = object_schema
+                .get("required")
+                .and_then(Value::as_array)
+                .map(|keys| keys.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            members.retain(|name, member| {
+                !member.is_null()
+                    || required.contains(&name.as_str())
+                    || !properties.is_some_and(|known| known.contains_key(name))
+            });
+            for (name, member) in members.iter_mut() {
+                if let Some(property_schema) = properties.and_then(|known| known.get(name)) {
+                    drop_optional_nulls(member, property_schema);
+                }
+            }
+        }
+        Value::Array(elements) => {
+            if let Some(items) = schema.get("items") {
+                elements
+                    .iter_mut()
+                    .for_each(|element| drop_optional_nulls(element, items));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn branches_of(schema: &Value) -> impl Iterator<Item = &Value> {
+    ["anyOf", "oneOf"]
+        .into_iter()
+        .filter_map(|keyword| schema.get(keyword).and_then(Value::as_array))
+        .flatten()
 }
 
 /// Status decides the class. A redirect or server error means the private endpoint is not
@@ -324,5 +368,74 @@ fn map_status(status: u16) -> TransportError {
         429 => TransportError::RateLimited,
         300..=399 | 408 | 500..=599 => TransportError::Unavailable,
         _ => TransportError::Rejected,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn normalized(content: Value) -> Value {
+        let text = normalize_optional_nulls(content.to_string(), &output_schema());
+        serde_json::from_str(&text).expect("still JSON")
+    }
+
+    #[test]
+    fn top_level_nulls_become_absent() {
+        let reply = json!({
+            "operation": {"kind": "annotate"},
+            "item_type": "idea",
+            "reminder_proposal": null,
+            "session_topic_proposal": null,
+            "abstention": null
+        });
+        assert_eq!(
+            normalized(reply),
+            json!({"operation": {"kind": "annotate"}, "item_type": "idea"})
+        );
+    }
+
+    #[test]
+    fn nested_nulls_become_absent() {
+        let reply = json!({
+            "operation": {"kind": "annotate"},
+            "item_type": "action",
+            "source_spans": [{"start": 0, "end": 3}],
+            "reminder_proposal": {
+                "quality": "ambiguous",
+                "instant": null,
+                "timezone_id": null,
+                "source_span": {"start": 1, "end": 2}
+            }
+        });
+        assert_eq!(
+            normalized(reply)["reminder_proposal"],
+            json!({"quality": "ambiguous", "source_span": {"start": 1, "end": 2}})
+        );
+    }
+
+    #[test]
+    fn values_validation_rejects_are_left_untouched() {
+        let reply = json!({
+            "operation": null,
+            "reminder_proposal": {"quality": null, "source_span": null, "instant": 5},
+            "abstention": {"Other": null},
+            "unknown": null
+        });
+        let result = normalized(reply);
+        assert!(result["operation"].is_null());
+        assert!(result["reminder_proposal"]["quality"].is_null());
+        assert!(result["reminder_proposal"]["source_span"].is_null());
+        assert_eq!(result["reminder_proposal"]["instant"], json!(5));
+        assert!(result["abstention"]["Other"].is_null());
+        assert!(
+            result.get("unknown").is_some(),
+            "unknown keys are not mine to drop"
+        );
+        assert_eq!(
+            normalize_optional_nulls("not json".to_string(), &output_schema()),
+            "not json"
+        );
     }
 }

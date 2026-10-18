@@ -1,0 +1,114 @@
+{
+  "adapter_revision": {
+    "commit": "25b37d9cf56361e500302123ef356a52ade2c393",
+    "dirty": false
+  },
+  "collected_at": "2026-10-18T18:48:43Z",
+  "collection_context": "odonian-worker",
+  "configured_scheme": "https",
+  "evidence_id": "self-hosted-adapter-smoke-20261018T184843Z-25b37d9c",
+  "failures": [
+    "reminder-capture: proposal-did-not-validate",
+    "idea-capture: proposal-did-not-validate",
+    "plain-note-capture: proposal-did-not-validate"
+  ],
+  "max_tokens": 4096,
+  "model": "gpt-oss:20b",
+  "private_raw_evidence": {
+    "bytes": 30932,
+    "contents": "request and response bodies of every exchange; no endpoint address or credential",
+    "file_name": "self-hosted-adapter-smoke-20261018T184843Z-25b37d9c.raw.json",
+    "location": "private evidence directory of the collecting Odonian worker (OHAND_PRIVATE_EVIDENCE_DIR, default ~/.ohand-private-evidence), outside Git; mode 0600 in a 0700 directory",
+    "run_id": "self-hosted-adapter-smoke-20261018T184843Z-25b37d9c",
+    "sha256": "5de87ed0d9a78bce912328eca6b70173c65f3e124cb8f855518add5efe3ff446"
+  },
+  "request_shape": "adapter-built: interpretation prompt, strict json_schema response_format derived from output_schema() (every property required, optional ones nullable)",
+  "requests": [
+    {
+      "conforms_to_output_schema_top_level": true,
+      "content_bytes": 308,
+      "curl_failure": null,
+      "dispatch_result": "ok",
+      "elapsed_ms": 26520,
+      "finish_reason": "stop",
+      "http_status": 200,
+      "mapped_to_validated_proposal": false,
+      "message_role": "assistant",
+      "name": "reminder-capture",
+      "proposal_keys": [
+        "abstention",
+        "item_type",
+        "operation",
+        "reminder_proposal",
+        "source_spans"
+      ],
+      "reminder_expected": true,
+      "response_bytes": 3660,
+      "semantic": {
+        "reminder_instant_matches_expected": true,
+        "reminder_proposal_present": true,
+        "reminder_quality": "explicit"
+      }
+    },
+    {
+      "conforms_to_output_schema_top_level": true,
+      "content_bytes": 176,
+      "curl_failure": null,
+      "dispatch_result": "ok",
+      "elapsed_ms": 3097,
+      "finish_reason": "stop",
+      "http_status": 200,
+      "mapped_to_validated_proposal": false,
+      "message_role": "assistant",
+      "name": "idea-capture",
+      "proposal_keys": [
+        "abstention",
+        "item_type",
+        "operation",
+        "source_spans"
+      ],
+      "reminder_expected": false,
+      "response_bytes": 945,
+      "semantic": {
+        "reminder_instant_matches_expected": false,
+        "reminder_proposal_present": false,
+        "reminder_quality": null
+      }
+    },
+    {
+      "conforms_to_output_schema_top_level": true,
+      "content_bytes": 176,
+      "curl_failure": null,
+      "dispatch_result": "ok",
+      "elapsed_ms": 3591,
+      "finish_reason": "stop",
+      "http_status": 200,
+      "mapped_to_validated_proposal": false,
+      "message_role": "assistant",
+      "name": "plain-note-capture",
+      "proposal_keys": [
+        "abstention",
+        "item_type",
+        "operation",
+        "source_spans"
+      ],
+      "reminder_expected": false,
+      "response_bytes": 1025,
+      "semantic": {
+        "reminder_instant_matches_expected": false,
+        "reminder_proposal_present": false,
+        "reminder_quality": null
+      }
+    }
+  ],
+  "result": "fail",
+  "schema_version": 1,
+  "semantic_checks": "reminder capture: reminder_proposal with quality explicit and instant 2026-01-06T15:00 America/Chicago; idea and plain-note captures: no reminder_proposal",
+  "synthetic_context_time": "2026-01-05T09:00:00+00:00",
+  "transport": "curl subprocess standing in for the native https transport; certificate validation on, redirects not followed",
+  "unverified": [
+    "phone-context reachability of chat requests (owned by V08b)",
+    "models other than the one named above",
+    "endpoint credential validation (V08a: not enforced)"
+  ]
+}

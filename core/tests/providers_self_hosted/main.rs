@@ -10,9 +10,7 @@ use chrono::{DateTime, Duration, TimeZone, Utc};
 use ohand_core::interpretation::dispatch::{
     AdapterRegistry, DispatchOutcome, InterpretationDispatcher, WaitReason,
 };
-use ohand_core::interpretation::instructions::{
-    output_schema, M1_INSTRUCTION_TEXT, M1_INSTRUCTION_VERSION,
-};
+use ohand_core::interpretation::instructions::{M1_INSTRUCTION_TEXT, M1_INSTRUCTION_VERSION};
 use ohand_core::jobs::queue::{claim_job_with_lease, enqueue_job, Job};
 use ohand_core::privacy::routing::JOB_TYPE_INTERPRET;
 use ohand_core::providers::anthropic::fake::FakeAnthropicTransport;
@@ -668,16 +666,37 @@ fn request_body_has_the_verified_shape_with_the_interpretation_schema() {
     assert_eq!(body["temperature"], 0.0);
     assert_eq!(body["stream"], false);
     assert_eq!(body["max_tokens"], MAX_COMPLETION_TOKENS);
-    assert_eq!(body["response_format"]["type"], "json_schema");
-    assert_eq!(body["response_format"]["json_schema"]["strict"], true);
-    assert_eq!(
-        body["response_format"]["json_schema"]["schema"],
-        output_schema()
-    );
+    // A strict json_schema made Ollama suppress optional proposals, so the contract travels in
+    // the prompt and the reply is validated locally.
+    assert_eq!(body["response_format"], json!({"type": "json_object"}));
     assert_eq!(body["messages"].as_array().unwrap().len(), 2);
     assert_eq!(body["messages"][0]["role"], "system");
     assert_eq!(body["messages"][0]["content"], M1_INSTRUCTION_TEXT);
     assert_eq!(body["messages"][1]["role"], "user");
+}
+
+#[test]
+fn nulls_in_optional_positions_are_treated_as_absent_and_other_values_are_not_relaxed() {
+    let nulled = r#"{"operation":{"kind":"annotate"},"item_type":"action","reminder_proposal":{"quality":"ambiguous","instant":null,"timezone_id":null,"source_span":{"start":0,"end":3}},"session_topic_proposal":null,"abstention":null}"#;
+    let harness = Harness::new(vec![Step::ok(nulled)]);
+    let output = harness
+        .run()
+        .expect("nulls in optional positions are absent");
+    assert!(!output.proposal.contains_key("session_topic_proposal"));
+    assert!(!output.proposal.contains_key("abstention"));
+    assert_eq!(
+        output.proposal["reminder_proposal"],
+        json!({"quality": "ambiguous", "source_span": {"start": 0, "end": 3}})
+    );
+
+    let required_null = r#"{"operation":null,"item_type":"action"}"#;
+    let output = Harness::new(vec![Step::ok(required_null)])
+        .run()
+        .expect("dispatch hands the reply on; mapping validation rejects it");
+    assert!(
+        output.proposal["operation"].is_null(),
+        "a null in a required position is kept for validation to reject"
+    );
 }
 
 #[test]
