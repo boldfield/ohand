@@ -55,8 +55,8 @@ let avPlaybackPlayerFactory: PlaybackPlayerFactory = { url in try AVPlaybackPlay
 
 /// One item's retained audio, open for playback. It holds the audio in place while open and exposes no path: the
 /// listener can play, pause and close, and nothing else. The session ends by `close()`, by the item's deletion being
-/// requested, by the clip playing to its end, by the read session relocking or by the service shutting down; afterwards `play()` does nothing and
-/// `endReason` says why.
+/// requested, by the clip playing to its end, by the read session relocking or by the service shutting down;
+/// afterwards `play()` does nothing and `endReason` says why.
 public final class PlaybackSession: @unchecked Sendable {
     public let itemID: String
 

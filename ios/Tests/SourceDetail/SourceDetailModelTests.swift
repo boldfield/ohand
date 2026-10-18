@@ -37,7 +37,14 @@ private final class FakeAudioSession: SourceAudioSession {
 
 private final class FakeAudioOpener: SourceAudioOpening, @unchecked Sendable {
     var result: Result<FakeAudioSession, Error>
+    var availability: PlaybackAvailability = .available
     private(set) var opens = 0
+    private(set) var availabilityChecks = 0
+
+    func audioAvailability(itemID: String) async -> PlaybackAvailability {
+        availabilityChecks += 1
+        return availability
+    }
 
     init(_ result: Result<FakeAudioSession, Error> = .success(FakeAudioSession())) { self.result = result }
 
@@ -225,6 +232,32 @@ final class SourceDetailModelTests: XCTestCase {
             XCTAssertFalse(model.canPause, "\(error)")
             XCTAssertNotNil(SourceDetailView.audioNotice(for: model.audio), "\(error)")
         }
+    }
+
+    func testAudioThatIsAlreadyGoneIsDisabledOnTheFirstLoadWithoutOpeningIt() async {
+        let cases: [(PlaybackAvailability, SourceAudioState)] = [
+            (.noAudio, .removed), (.missing, .removed), (.unreadable, .unplayable), (.notAuthenticated, .locked),
+        ]
+        for (availability, expected) in cases {
+            let opener = FakeAudioOpener()
+            opener.availability = availability
+            let model = make(FakeDetailReader(.success(detail(audioReference: "audio:1"))), opener)
+            await model.load()
+            XCTAssertEqual(model.audio, expected, "\(availability)")
+            XCTAssertFalse(model.canPlay, "\(availability)")
+            XCTAssertNotNil(SourceDetailView.audioNotice(for: model.audio), "\(availability)")
+            XCTAssertEqual(opener.opens, 0, "\(availability)")
+            if availability == .notAuthenticated { XCTAssertNil(model.content) }
+        }
+    }
+
+    func testAvailableAudioIsOfferedAfterOneAvailabilityCheck() async {
+        let opener = FakeAudioOpener()
+        let model = make(FakeDetailReader(.success(detail(audioReference: "audio:1"))), opener)
+        await model.load()
+        XCTAssertEqual(model.audio, .available)
+        XCTAssertEqual(opener.availabilityChecks, 1)
+        XCTAssertEqual(opener.opens, 0)
     }
 
     func testALockedPlaybackRefusalAlsoClearsTheText() async {

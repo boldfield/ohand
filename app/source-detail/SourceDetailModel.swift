@@ -26,11 +26,17 @@ extension PlaybackSession: SourceAudioSession {}
 /// asks the core whether the item still has audio and holds the file in place while it plays.
 protocol SourceAudioOpening: AnyObject, Sendable {
     func openAudio(itemID: String) async throws -> SourceAudioSession
+    /// Whether the audio can be played now, without opening it or holding the file.
+    func audioAvailability(itemID: String) async -> PlaybackAvailability
 }
 
 extension PlaybackService: SourceAudioOpening {
     func openAudio(itemID: String) async throws -> SourceAudioSession {
         try await open(itemID: itemID)
+    }
+
+    func audioAvailability(itemID: String) async -> PlaybackAvailability {
+        await availability(itemID: itemID)
     }
 }
 
@@ -158,7 +164,13 @@ final class SourceDetailModel: ObservableObject {
         do {
             let detail = try await reader.detail(itemID: itemID)
             guard generation == loadGeneration else { return }
-            adopt(detail)
+            // Retention removes the file without clearing the core's audio reference, so ask before offering Play.
+            var availability: PlaybackAvailability?
+            if detail.audioReference != nil, detail.lifecycleState != "deleted", session == nil {
+                availability = await opener.audioAvailability(itemID: itemID)
+                guard generation == loadGeneration else { return }
+            }
+            adopt(detail, availability: availability)
         } catch {
             guard generation == loadGeneration else { return }
             reject(error)
@@ -166,11 +178,12 @@ final class SourceDetailModel: ObservableObject {
         isLoading = false
     }
 
-    @MainActor private func adopt(_ detail: CoreItemDetail) {
+    @MainActor private func adopt(_ detail: CoreItemDetail, availability: PlaybackAvailability?) {
         failure = nil
         let built = makeContent(detail)
         content = built
-        refreshAudio(afterRead: built)
+        refreshAudio(afterRead: built, availability: availability)
+        if audio == .locked { dropText() }
     }
 
     @MainActor private func reject(_ error: Error) {
@@ -184,7 +197,7 @@ final class SourceDetailModel: ObservableObject {
         }
     }
 
-    @MainActor private func refreshAudio(afterRead built: SourceDetailContent) {
+    @MainActor private func refreshAudio(afterRead built: SourceDetailContent, availability: PlaybackAvailability?) {
         if built.isDeleted {
             endAudio()
             audio = .removed
@@ -193,8 +206,13 @@ final class SourceDetailModel: ObservableObject {
             let hadAudio = session != nil || audio != .none
             endAudio()
             audio = hadAudio ? .removed : .none
-        } else if session == nil, audio == .none || audio == .removed {
-            audio = .available
+        } else if session == nil {
+            switch availability ?? .available {
+            case .available: if audio == .none || audio == .removed || audio == .unplayable { audio = .available }
+            case .noAudio, .missing: audio = .removed
+            case .unreadable: audio = .unplayable
+            case .notAuthenticated: audio = .locked
+            }
         }
     }
 

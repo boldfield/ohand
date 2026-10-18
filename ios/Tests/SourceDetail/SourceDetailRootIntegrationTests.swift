@@ -196,6 +196,32 @@ final class SourceDetailRootIntegrationTests: XCTestCase {
         XCTAssertFalse(model.canPlay)
     }
 
+    func testAudioRemovedByTheRealRetentionServiceFirstRendersAsUnavailableWithNoPlayControl() throws {
+        let coordinator = LifecycleCoordinator(stepTimeoutSeconds: 30)
+        let session = ReadAuthenticationSession(boundary: FakeReadAuthenticationBoundary())
+        session.authenticate(reason: "test") { _ in }
+        let root = try makeRoot(session: session, modules: [coordinator])
+        defer { root.shutDown() }
+        try coordinator.connect(to: root)
+        let (itemID, captureID) = try saveCapture(root)
+        let audioURL = try seedAudio(captureID: captureID)
+        let reference = IngressRecord.audioReference(finalizedFileName: audioURL.lastPathComponent)
+        let retention = try XCTUnwrap(coordinator.audioRetention)
+
+        let outcome = try run { await retention.removeAudioForUser(itemID: itemID, audioReference: reference) }
+
+        XCTAssertEqual(outcome, .removed)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: audioURL.path))
+        let model = SourceDetailModel.assembled(itemID: itemID, root: root)
+        try runOnMain { await model.load() }
+
+        XCTAssertEqual(model.content?.sections.map(\.text), ["synthetic capture to play"])
+        XCTAssertEqual(model.audio, .removed, "the first render is already the disabled state")
+        XCTAssertFalse(model.canPlay)
+        XCTAssertNotNil(SourceDetailView.audioNotice(for: model.audio))
+        XCTAssertFalse(root.playback.fence.isHeld(audioURL))
+    }
+
     private func runOnMain(_ operation: @escaping @MainActor @Sendable () async -> Void) throws {
         let box = SourceDetailRootResultBox<Void>()
         Task { @MainActor in
