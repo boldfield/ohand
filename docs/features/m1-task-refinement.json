@@ -3132,7 +3132,10 @@
       "file_scope": [
         "ios/UITests/Walkthrough/",
         "ios/project.yml",
-        ".github/workflows/ios.yml"
+        ".github/workflows/ios.yml",
+        "app/design-system/DSSurfaces.swift",
+        "ios/AppAssembly/ManagementCatalog.swift",
+        "app/data-settings/RetentionSettingsView.swift"
       ],
       "intent": "Capture a screenshot walkthrough in CI per docs/features/m1-ui-design.md.",
       "acceptance": [
@@ -3140,7 +3143,8 @@
       ],
       "covers_parent_criteria": [],
       "depends_on": [
-        "F18"
+        "F18",
+        "DS06"
       ],
       "source_pointers": [
         "docs/features/m1-ui-design.md"
@@ -3165,6 +3169,25 @@
       ],
       "source_pointers": [
         "docs/features/m1-ui-design.md"
+      ]
+    },
+    {
+      "key": "F20",
+      "parent": null,
+      "title": "Stop the result-buffer leak check from failing on test order",
+      "file_scope": [
+        "ios/Tests/AppAssembly/AppServicesTests.swift",
+        "ios/AppAssembly/AppServices.swift"
+      ],
+      "intent": "Find and remove the async work that leaves result buffers alive after a test teardown, without weakening the leak checks.",
+      "acceptance": [
+        "See the F20 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/Tests/AppAssembly/AppServicesTests.swift",
+        "ios/AppAssembly/AppServices.swift"
       ]
     }
   ],
@@ -3890,12 +3913,14 @@
       "U05b"
     ],
     "DS08": [
-      "F18"
+      "F18",
+      "DS06"
     ],
     "DS09": [
       "DS01",
       "U07c"
-    ]
+    ],
+    "F20": []
   },
   "retained_dependency_overrides": {
     "V06": [
