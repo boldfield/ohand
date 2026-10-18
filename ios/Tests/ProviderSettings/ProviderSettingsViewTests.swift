@@ -507,7 +507,6 @@ final class ProviderSettingsViewTests: XCTestCase {
             XCTAssertEqual(credentials.deleted, ["11111111-1111-1111-1111-111111111111"])
             XCTAssertEqual(model.draft.credentialReference, "")
             XCTAssertEqual(model.draft.profileName, "")
-            XCTAssertNil(model.credentialState)
         }
     }
 

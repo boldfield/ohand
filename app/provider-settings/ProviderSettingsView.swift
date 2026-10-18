@@ -203,7 +203,6 @@ extension ProviderSettingsModel {
     /// form is left without saving.
     func abandonDraft() {
         draft = ProviderSettingsDraft()
-        credentialState = nil
     }
 }
 
