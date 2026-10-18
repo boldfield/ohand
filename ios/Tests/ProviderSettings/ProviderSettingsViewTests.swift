@@ -495,6 +495,56 @@ final class ProviderSettingsViewTests: XCTestCase {
         }
     }
 
+    func testBackingOutOfTheFormDeletesTheUnsavedSecretAndClearsTheDraft() async {
+        let credentials = FakeProviderSettingsCredentials()
+        await withScreen(FakeProviderSettingsControls(listing: Self.mixedListing), credentials: credentials) { model in
+            model.draft.profileName = "unsaved"
+            model.storeCredential(Data("synthetic-secret-value".utf8))
+            XCTAssertEqual(model.draft.credentialReference, "11111111-1111-1111-1111-111111111111")
+            // What the Processing screen calls when Add provider or Advanced is dismissed.
+            model.abandonDraft()
+            await settle()
+            XCTAssertEqual(credentials.deleted, ["11111111-1111-1111-1111-111111111111"])
+            XCTAssertEqual(model.draft.credentialReference, "")
+            XCTAssertEqual(model.draft.profileName, "")
+            XCTAssertNil(model.credentialState)
+        }
+    }
+
+    func testTheChoiceRowsActionSetsTheDefaultOrReturnsToThisPhoneAndIgnoresTheSelectedChoice() async {
+        let controls = FakeProviderSettingsControls(listing: Self.mixedListing)
+        await withScreen(controls, showing: .main) { model in
+            await model.select(.onThisPhone)
+            XCTAssertEqual(controls.defaultsCleared, 0, "the choice already in use does nothing")
+            await model.select(.ownServer)
+            XCTAssertEqual(controls.defaultsSet, [], "an unverified server cannot be chosen")
+            await model.select(.cloudProvider)
+            XCTAssertEqual(controls.defaultsSet, ["hosted-v1"])
+        }
+        let hostedDefault = providerListing(
+            supportLevels: [("hosted", "hosted-v1", "open_ai", false, "supported")], defaultVersion: "hosted-v1")
+        let selected = FakeProviderSettingsControls(listing: hostedDefault)
+        await withScreen(selected, showing: .main) { model in
+            await model.select(.cloudProvider)
+            XCTAssertEqual(selected.defaultsSet, [], "the selected choice does nothing")
+            await model.select(.onThisPhone)
+            XCTAssertEqual(selected.defaultsCleared, 1)
+        }
+    }
+
+    func testAStoredServerThatCannotBeChosenYetIsNotToldToAddAProvider() async {
+        await withScreen(FakeProviderSettingsControls(listing: Self.mixedListing), showing: .main) { model in
+            XCTAssertTrue(model.hasStoredVersion(for: .ownServer))
+            XCTAssertNil(model.candidateVersion(for: .ownServer))
+        }
+        let hostedOnly = providerListing(
+            supportLevels: [("hosted", "hosted-v1", "open_ai", false, "supported")], defaultVersion: nil)
+        await withScreen(FakeProviderSettingsControls(listing: hostedOnly), showing: .main) { model in
+            XCTAssertFalse(model.hasStoredVersion(for: .ownServer))
+            XCTAssertTrue(model.hasStoredVersion(for: .cloudProvider))
+        }
+    }
+
     func testALockedSessionShowsOnlyTheLockedNotice() async {
         scope = .captureOnly
         for screen in [Screen.main, .add, .advanced] {

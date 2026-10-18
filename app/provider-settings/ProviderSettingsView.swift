@@ -157,6 +157,7 @@ enum ProviderProcessingChoice: String, CaseIterable, Identifiable {
     }
 
     static let needsProviderDetail = "Add a provider first"
+    static let needsCheckDetail = "Run its connection check in Advanced"
 }
 
 extension ProviderSettingsModel {
@@ -168,13 +169,41 @@ extension ProviderSettingsModel {
         }
     }
 
-    /// The newest stored version that choosing `choice` would make the default, if one may be.
+    /// The newest version of the first stored profile, in listing order, that has a version choosing `choice` would
+    /// make the default, if there is one.
     func candidateVersion(for choice: ProviderProcessingChoice) -> ProviderProfileListAnswer.Version? {
         guard choice != .onThisPhone else { return nil }
         let wantsPrivateServer = choice == .ownServer
         return listing?.profiles.flatMap { $0.versions.reversed() }.first {
             ($0.providerProtocol == "self_hosted") == wantsPrivateServer && canMakeDefault($0)
         }
+    }
+
+    /// Whether any version of the kind `choice` names is stored, usable or not.
+    func hasStoredVersion(for choice: ProviderProcessingChoice) -> Bool {
+        guard choice != .onThisPhone else { return false }
+        let wantsPrivateServer = choice == .ownServer
+        return listing?.profiles.contains { profile in
+            profile.versions.contains { ($0.providerProtocol == "self_hosted") == wantsPrivateServer }
+        } ?? false
+    }
+
+    /// What choosing `choice` does: nothing when it is already in use, otherwise it returns to this phone or makes the
+    /// candidate version the default.
+    func select(_ choice: ProviderProcessingChoice) async {
+        guard !isSelected(choice) else { return }
+        if choice == .onThisPhone {
+            await useLocalOnly()
+        } else if let target = candidateVersion(for: choice) {
+            await makeDefault(target)
+        }
+    }
+
+    /// Drops the draft and deletes a secret stored for it that no saved version names, when the screen that held the
+    /// form is left without saving.
+    func abandonDraft() {
+        draft = ProviderSettingsDraft()
+        credentialState = nil
     }
 }
 
@@ -305,6 +334,9 @@ struct ProviderSettingsView: View {
             renderReporter?(elements)
         }
         .onDisappear { if !showsAddProvider && !showsAdvanced { model.clear() } }
+        // Backing out of a screen one level down abandons what was typed there, as leaving the form always has.
+        .onChange(of: showsAddProvider) { shown in if !shown { model.abandonDraft() } }
+        .onChange(of: showsAdvanced) { shown in if !shown { model.abandonDraft() } }
     }
 
     @ViewBuilder
@@ -345,16 +377,12 @@ struct ProviderSettingsView: View {
         let isSelected = model.isSelected(choice)
         let target = model.candidateVersion(for: choice)
         let isAvailable = choice == .onThisPhone || isSelected || target != nil
+        let unavailableDetail = model.hasStoredVersion(for: choice)
+            ? ProviderProcessingChoice.needsCheckDetail : ProviderProcessingChoice.needsProviderDetail
         return DSChoiceRow(
-            label: choice.label, detail: isAvailable ? choice.detail : ProviderProcessingChoice.needsProviderDetail,
-            isSelected: isSelected
+            label: choice.label, detail: isAvailable ? choice.detail : unavailableDetail, isSelected: isSelected
         ) {
-            guard !isSelected else { return }
-            if choice == .onThisPhone {
-                Task { await model.useLocalOnly() }
-            } else if let target {
-                Task { await model.makeDefault(target) }
-            }
+            Task { await model.select(choice) }
         }
         .reportRendered(Self.choiceIdentifier(choice), text: choice.label, isSelected: isSelected)
         .disabled(model.isChangingDefault || !isAvailable)
