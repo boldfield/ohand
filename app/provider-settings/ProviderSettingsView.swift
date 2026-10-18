@@ -246,7 +246,6 @@ private func providerNote(_ text: String, identifier: String) -> some View {
 /// Everything it shows comes from `ProviderSettingsModel`.
 /// Which screen one level down is open. The owner of the Processing screen keeps it, so it survives this screen being
 /// rebuilt, and a hosted test can open and dismiss a screen the way a tap on its link and on Back do.
-@MainActor
 final class ProviderSettingsNavigation: ObservableObject {
     @Published var showsAddProvider = false
     @Published var showsAdvanced = false
