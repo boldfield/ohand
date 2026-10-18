@@ -983,7 +983,10 @@
         "ios/Services/Playback/PlaybackSession.swift",
         "ios/Services/Playback/PlaybackFence.swift",
         "ios/Services/Playback/PlaybackService.swift",
-        "ios/Tests/Playback/"
+        "ios/Tests/Playback/",
+        "ios/UITests/Walkthrough/WalkthroughUITests.swift",
+        "app/retrieval/",
+        "ios/Tests/Retrieval/"
       ],
       "intent": "Show source/correction provenance and offer playback only for retained authorized source audio.",
       "acceptance": [
@@ -1178,7 +1181,9 @@
       "parent": "U06",
       "title": "Build local-first processing-policy onboarding",
       "file_scope": [
-        "app/privacy-settings/"
+        "app/privacy-settings/",
+        "ios/AppAssembly/ManagementCatalog.swift",
+        "ios/Tests/AppAssembly/"
       ],
       "intent": "Offer deliberate destination/capability authorization while preserving a functional local-only initial state.",
       "acceptance": [
@@ -3038,7 +3043,8 @@
         "ios/Capture/Text/TextCaptureView.swift",
         "ios/Capture/Voice/",
         "ios/AppAssembly/AppRootView.swift",
-        "app/home/"
+        "app/home/",
+        "ios/UITests/Walkthrough/WalkthroughUITests.swift"
       ],
       "intent": "Rebuild the capture surface as the composer home per docs/features/m1-ui-design.md.",
       "acceptance": [
@@ -3120,7 +3126,8 @@
       "parent": null,
       "title": "Restyle Processing",
       "file_scope": [
-        "app/provider-settings/"
+        "app/provider-settings/",
+        "ios/UITests/Walkthrough/WalkthroughUITests.swift"
       ],
       "intent": "Restyle Processing per docs/features/m1-ui-design.md.",
       "acceptance": [
