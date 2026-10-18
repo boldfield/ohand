@@ -22,6 +22,8 @@ struct HomeComposer: View {
     var levels: [CGFloat] = [0.3, 0.6, 0.9, 0.5, 0.7, 0.4, 0.8, 0.35]
     /// Record and Save. The text field is never disabled.
     var entryActionsAreEnabled = true
+    /// Save alone: off while the text has nothing to save, such as whitespace only.
+    var saveIsEnabled = true
     var focus: FocusState<Bool>.Binding
     var onMic: () -> Void = {}
     var onSave: () -> Void = {}
@@ -71,7 +73,7 @@ struct HomeComposer: View {
                 micButton(foreground: DSColor.accent, fill: DSColor.tint)
                 DSPillButton(title: "Save", style: .primary, action: onSave)
                     .modifier(ReportsEnabledFrame(identifier: Self.saveIdentifier))
-                    .disabled(!entryActionsAreEnabled)
+                    .disabled(!(entryActionsAreEnabled && saveIsEnabled))
             } else {
                 micButton(foreground: DSColor.onAccent, fill: DSColor.accent)
             }

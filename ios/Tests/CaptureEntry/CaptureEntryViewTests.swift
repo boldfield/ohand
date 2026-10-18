@@ -33,9 +33,9 @@ final class CaptureEntryViewTests: XCTestCase {
         super.tearDown()
     }
 
-    private func makeModel(access: CaptureEntryAccess) -> CaptureEntryModel {
+    private func makeModel(access: CaptureEntryAccess, progressReader: CaptureProgressReading? = nil) -> CaptureEntryModel {
         CaptureEntryModel(
-            textIngress: textIngress, voice: voice, progressReader: nil, defaultMode: .silent,
+            textIngress: textIngress, voice: voice, progressReader: progressReader, defaultMode: .silent,
             access: { access }, wording: CaptureEntryFixtures.wording,
             makeCaptureID: { "text-capture-1" }, now: { Date(timeIntervalSince1970: 1_790_000_000) })
     }
@@ -269,6 +269,24 @@ final class CaptureEntryViewTests: XCTestCase {
         XCTAssertNotNil(frames[HomeComposer.focusedIdentifier], "and keeps focus, so the keyboard stays up")
     }
 
+    func testWhitespaceOnlyTextDrawsSaveDisabled() {
+        host(keyboardHeight: Self.standardPhoneKeyboardHeight)
+
+        model.textModel.updateText("   ")
+        settle()
+        assertComposerStateName("typing")
+        XCTAssertNotNil(
+            frames[HomeComposer.disabledIdentifier(HomeComposer.saveIdentifier)], "Save is disabled with nothing to save")
+        XCTAssertNil(frames[HomeComposer.saveIdentifier])
+        XCTAssertNotNil(frames[HomeComposer.recordIdentifier], "Record still works")
+        XCTAssertNotNil(frames[HomeComposer.fieldIdentifier], "the text field stays enabled")
+
+        model.textModel.updateText("  buy oat milk ")
+        settle()
+        XCTAssertNotNil(frames[HomeComposer.saveIdentifier], "Save is enabled once there is something to save")
+        XCTAssertNil(frames[HomeComposer.disabledIdentifier(HomeComposer.saveIdentifier)])
+    }
+
     func testRecordAndSaveAreDisabledWhileTheRecorderStartsOrFinishes() {
         host(keyboardHeight: Self.standardPhoneKeyboardHeight)
 
@@ -310,6 +328,76 @@ final class CaptureEntryViewTests: XCTestCase {
         settle(for: CaptureEntryView.savedPillDuration + 0.6)
         XCTAssertNil(frames[CaptureEntryView.savedPillIdentifier], "the pill fades after about two seconds")
         XCTAssertNotEqual(frame(CaptureEntryView.messageIdentifier), .zero, "the message outlives the pill")
+    }
+
+    func testTheSavedPillMarksOnlyANewSave() {
+        let saved = CaptureSaveState.saved(itemID: "item-1", alreadySaved: false)
+        let observed = { (save: CaptureSaveState?) in CaptureEntryView.ObservedSave(save: save) }
+        XCTAssertEqual(CaptureEntryView.savedPillChange(from: nil, to: saved), .keep, "an acknowledgment already on screen")
+        XCTAssertEqual(CaptureEntryView.savedPillChange(from: observed(.saving), to: saved), .show)
+        XCTAssertEqual(CaptureEntryView.savedPillChange(from: observed(nil), to: saved), .show, "a recording that saved")
+        XCTAssertEqual(CaptureEntryView.savedPillChange(from: observed(saved), to: saved), .keep, "a progress refresh")
+        XCTAssertEqual(
+            CaptureEntryView.savedPillChange(from: observed(saved), to: .saved(itemID: "item-2", alreadySaved: false)), .show)
+        XCTAssertEqual(CaptureEntryView.savedPillChange(from: observed(saved), to: .saving), .hide)
+        XCTAssertEqual(CaptureEntryView.savedPillChange(from: observed(saved), to: .notSaved), .hide)
+        XCTAssertEqual(CaptureEntryView.savedPillChange(from: observed(saved), to: .keptOnDevice), .hide)
+        XCTAssertEqual(CaptureEntryView.savedPillChange(from: observed(saved), to: nil), .hide)
+    }
+
+    func testAProgressOrForegroundRefreshNeitherReplaysNorExtendsTheSavedPill() {
+        let reader = ScriptedProgressReader()
+        reader.result = .status(CaptureEntryFixtures.installedStatus())
+        reader.holdsCompletions = true
+        model = makeModel(access: CaptureEntryFixtures.openAccess, progressReader: reader)
+        host(keyboardHeight: Self.standardPhoneKeyboardHeight)
+        textIngress.outcomes = [.saved(captureID: "text-capture-1", itemID: "item-1", alreadySaved: false)]
+        model.textModel.updateText("buy oat milk")
+        model.saveText()
+        let savedAt = Date()
+        settle()
+        XCTAssertNotNil(frames[CaptureEntryView.savedPillIdentifier], "the Saved pill is shown")
+
+        settle(for: 1.2)
+        reader.release()
+        settle()
+        XCTAssertNotNil(model.acknowledgment?.progress, "the delayed progress read republished the acknowledgment")
+
+        settle(for: max(0, CaptureEntryView.savedPillDuration + 0.6 - Date().timeIntervalSince(savedAt)))
+        XCTAssertNil(frames[CaptureEntryView.savedPillIdentifier], "the progress read did not extend the pill")
+
+        model.refreshProgress()
+        reader.release()
+        settle()
+        XCTAssertEqual(model.acknowledgment?.savedItemID, "item-1")
+        XCTAssertNil(frames[CaptureEntryView.savedPillIdentifier], "a foreground refresh does not replay the pill")
+    }
+
+    func testASecondAttemptHidesTheSavedPillAndAFailureIsNeverShownBesideIt() {
+        host(keyboardHeight: Self.standardPhoneKeyboardHeight)
+        textIngress.outcomes = [.saved(captureID: "text-capture-1", itemID: "item-1", alreadySaved: false)]
+        model.textModel.updateText("buy oat milk")
+        model.saveText()
+        settle()
+        XCTAssertNotNil(frames[CaptureEntryView.savedPillIdentifier], "the first capture is Saved")
+
+        textIngress.holdsCompletions = true
+        textIngress.outcomes = [.notStaged(captureID: "text-capture-1")]
+        model.textModel.updateText("call the dentist")
+        model.saveText()
+        settle()
+        XCTAssertEqual(model.acknowledgment?.save, .saving)
+        XCTAssertNil(frames[CaptureEntryView.savedPillIdentifier], "the pill goes once the next save starts")
+
+        textIngress.release()
+        settle()
+        XCTAssertEqual(model.acknowledgment?.save, .notSaved)
+        XCTAssertNil(frames[CaptureEntryView.savedPillIdentifier], "Saved is never shown beside Not saved")
+        XCTAssertNotEqual(frame(CaptureEntryView.messageIdentifier), .zero, "the failure is stated")
+        XCTAssertEqual(model.textModel.text, "call the dentist", "the text is kept")
+
+        settle(for: CaptureEntryView.savedPillDuration)
+        XCTAssertNil(frames[CaptureEntryView.savedPillIdentifier], "the first save's timer does not bring it back")
     }
 
     func testAFailedSaveKeepsTheTextAndIsShownBesideAStandingNotice() {

@@ -30,6 +30,8 @@ struct CaptureEntryView: View {
     @State private var keyboardIsVisible = false
     @State private var savedPillIsVisible = false
     @State private var savedPillGeneration = 0
+    /// The save state the pill last reacted to; nil until the first acknowledgment publication has been seen.
+    @State private var observedSave: ObservedSave?
 
     var body: some View {
         Color.clear
@@ -38,6 +40,7 @@ struct CaptureEntryView: View {
             .safeAreaInset(edge: .top, spacing: 0) { header }
             .safeAreaInset(edge: .bottom, spacing: 0) { bottomArea }
             .onAppear {
+                if observedSave == nil { observedSave = ObservedSave(save: model.acknowledgment?.save) }
                 model.refreshProgress()
                 focusComposerIfSilent()
                 reportReady()
@@ -49,10 +52,10 @@ struct CaptureEntryView: View {
             }
             .onChange(of: model.mode) { _ in focusComposerIfSilent() }
             .onReceive(model.$acknowledgment) { acknowledgment in
+                updateSavedPill(for: acknowledgment?.save)
                 guard let acknowledgment = acknowledgment, !acknowledgment.isSaving else { return }
                 let spoken = CaptureMessages.message(for: acknowledgment) ?? model.message(for: acknowledgment)
                 UIAccessibility.post(notification: .announcement, argument: spoken)
-                if acknowledgment.savedItemID != nil { showSavedPill() }
             }
             .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
                 keyboardIsVisible = true
@@ -153,6 +156,7 @@ struct CaptureEntryView: View {
             text: Binding(get: { model.textModel.text }, set: { model.textModel.updateText($0) }),
             elapsedText: elapsedText,
             entryActionsAreEnabled: entryActionsAreEnabled,
+            saveIsEnabled: model.textModel.canSave,
             focus: $composerIsFocused,
             onMic: { if entryActionsAreEnabled { model.startRecording() } },
             onSave: { if entryActionsAreEnabled, model.textModel.canSave { model.saveText() } },
@@ -189,6 +193,42 @@ struct CaptureEntryView: View {
             .fixedSize(horizontal: false, vertical: true)
             .accessibilityIdentifier(identifier)
             .reportHomeFrame(identifier)
+    }
+
+    struct ObservedSave: Equatable {
+        let save: CaptureSaveState?
+    }
+
+    enum SavedPillChange: Equatable {
+        case show
+        case hide
+        case keep
+    }
+
+    /// The pill marks one save: it shows when a capture newly becomes saved, not when the same saved acknowledgment is
+    /// republished by a progress or foreground refresh, and it goes as soon as the next attempt or outcome begins.
+    /// What is already on screen when the home appears is not a new save.
+    static func savedPillChange(from previous: ObservedSave?, to current: CaptureSaveState?) -> SavedPillChange {
+        guard let previous = previous else { return .keep }
+        if previous.save == current { return .keep }
+        if case .saved = current { return .show }
+        return .hide
+    }
+
+    private func updateSavedPill(for save: CaptureSaveState?) {
+        let change = Self.savedPillChange(from: observedSave, to: save)
+        observedSave = ObservedSave(save: save)
+        switch change {
+        case .show: showSavedPill()
+        case .hide: hideSavedPill()
+        case .keep: break
+        }
+    }
+
+    private func hideSavedPill() {
+        savedPillGeneration += 1
+        guard savedPillIsVisible else { return }
+        withAnimation { savedPillIsVisible = false }
     }
 
     private func showSavedPill() {
