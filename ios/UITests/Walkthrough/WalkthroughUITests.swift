@@ -100,7 +100,10 @@ final class WalkthroughUITests: XCTestCase {
             ).firstMatch
             XCTAssertTrue(row.waitForExistence(timeout: screenTimeout), "settings row \(screen.label) not found")
             row.tap()
-            XCTAssertTrue(waitForScreen(screen.title, leaving: row, timeout: screenTimeout), "\(screen.title) did not open")
+            // The row query is re-resolved on every check and can match a control on the opened screen (Export's own
+            // "Export" button), so the screen counts as open once the Settings header has gone.
+            XCTAssertTrue(
+                waitForScreen(screen.title, leaving: settingsHeader, timeout: screenTimeout), "\(screen.title) did not open")
             capture(prefix, screen.label)
             if screen.title == "Audio" {
                 // Export is also linked from the audio screen, beside the other data settings. The link must open it.
