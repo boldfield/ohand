@@ -16,6 +16,8 @@ final class ProviderSettingsViewTests: XCTestCase {
     private var scope: CompositionReadScope = .authenticated
     private var rendered: [String: ProviderSettingsRenderedElement] = [:]
     private var window: UIWindow?
+    private var buffers: [String: ProviderSecretBuffer] = [:]
+    private let sweep = FakeProviderSettingsSweep()
 
     private static let mixedListing = providerListing(
         supportLevels: [
@@ -25,13 +27,19 @@ final class ProviderSettingsViewTests: XCTestCase {
 
     /// Shows the screen over `controls`, lets its first read land, runs `body`, then takes the screen away.
     private func withScreen(
-        _ controls: FakeProviderSettingsControls, _ body: (ProviderSettingsModel) async throws -> Void
+        _ controls: FakeProviderSettingsControls,
+        credentials: FakeProviderSettingsCredentials = FakeProviderSettingsCredentials(),
+        _ body: (ProviderSettingsModel) async throws -> Void
     ) async rethrows {
         rendered = [:]
-        let model = ProviderSettingsModel(controls: controls, readScope: { [unowned self] in scope })
+        buffers = [:]
+        let model = ProviderSettingsModel(
+            controls: controls, credentials: credentials, sweep: sweep, readScope: { [unowned self] in scope })
         let hosting = UIHostingController(
             rootView: NavigationStack {
-                ProviderSettingsView(model: model, renderReporter: { [unowned self] in rendered = $0 })
+                ProviderSettingsView(
+                    model: model, renderReporter: { [unowned self] in rendered = $0 },
+                    secretBufferProbe: { [unowned self] in buffers[$0] = $1 })
             })
         let shown = UIWindow(frame: CGRect(origin: .zero, size: Self.phone))
         shown.rootViewController = hosting
@@ -210,6 +218,181 @@ final class ProviderSettingsViewTests: XCTestCase {
             XCTAssertEqual(Set(shown).count, 4, "each capability row is distinguishable")
             XCTAssertFalse(shown.contains { $0.contains("Unsupported capability") })
             XCTAssertNil(rendered[ProviderSettingsView.makeDefaultIdentifier("private-v1")])
+        }
+    }
+
+    // MARK: the hosted secure field
+
+    /// Types into the hosted entry's buffer, the object the real `SecureField` is bound to, then presses its button.
+    /// (SwiftUI does not expose the field as a `UITextField` in this host, so the binding is the reachable surface.)
+    private func typeAndSubmit(_ secret: String, into identifier: String) async {
+        guard let buffer = buffers[identifier] else { return XCTFail("\(identifier) is hosted") }
+        buffer.text = secret
+        await settle()
+        buffer.press?()
+        await settle()
+    }
+
+    func testTheHostedSecretFieldIsEmptyAfterStoreSucceedsAndAfterItFails() async {
+        let credentials = FakeProviderSettingsCredentials()
+        let secret = "synthetic-secret-value"
+        await withScreen(FakeProviderSettingsControls(listing: Self.mixedListing), credentials: credentials) { _ in
+            await typeAndSubmit(secret, into: ProviderSettingsView.secretFieldIdentifier)
+            XCTAssertEqual(credentials.added, [Data(secret.utf8)], "the secret went to the credential service")
+            XCTAssertEqual(buffers[ProviderSettingsView.secretFieldIdentifier]?.text, "")
+            XCTAssertEqual(
+                text(ProviderSettingsView.credentialStateIdentifier), ProviderSettingsCredentialState.stored.message)
+
+            credentials.updateResult = .failure(CredentialError.invalidated)
+            await typeAndSubmit(secret, into: ProviderSettingsView.secretFieldIdentifier)
+            XCTAssertEqual(credentials.updated.count, 1)
+            XCTAssertEqual(buffers[ProviderSettingsView.secretFieldIdentifier]?.text, "")
+            XCTAssertEqual(
+                text(ProviderSettingsView.credentialStateIdentifier),
+                ProviderSettingsText.credentialFailure(CredentialError.invalidated))
+            XCTAssertFalse(rendered.values.contains { $0.text.contains(secret) })
+        }
+    }
+
+    private func accessibilityText(of view: UIView?) -> String {
+        guard let view else { return "" }
+        let own = [view.accessibilityLabel, view.accessibilityValue, view.accessibilityHint].compactMap { $0 }
+        return (own + view.subviews.map { accessibilityText(of: $0) }).joined(separator: "\n")
+    }
+
+    func testTheHostedSecretFieldNeverExposesTheSecretThroughAccessibilityOrTheRenderReport() async {
+        let secret = "synthetic-secret-value"
+        await withScreen(FakeProviderSettingsControls(listing: Self.mixedListing)) { _ in
+            guard let buffer = buffers[ProviderSettingsView.secretFieldIdentifier] else { return XCTFail("hosted") }
+            buffer.text = secret
+            await settle()
+            XCTAssertEqual(buffer.text, secret, "the field is live")
+            let hosted = window?.rootViewController?.view
+            XCTAssertFalse(accessibilityText(of: hosted).contains(secret), "accessibility labels and values")
+            XCTAssertFalse(rendered.values.contains { $0.text.contains(secret) }, "render report")
+        }
+    }
+
+    func testTheHostedSecretFieldsEmptyWhenTheAppResignsActiveAndWhenTheyLeaveTheScreen() async {
+        let secret = "synthetic-secret-value"
+        await withScreen(FakeProviderSettingsControls(listing: Self.mixedListing)) { model in
+            let fieldIdentifier = ProviderSettingsView.secretFieldIdentifier
+            buffers[fieldIdentifier]?.text = secret
+            await settle()
+            XCTAssertEqual(buffers[fieldIdentifier]?.text, secret)
+            NotificationCenter.default.post(name: UIApplication.willResignActiveNotification, object: nil)
+            await settle()
+            XCTAssertEqual(buffers[fieldIdentifier]?.text, "", "emptied when the app leaves the foreground")
+
+            buffers[fieldIdentifier]?.text = secret
+            await settle()
+            XCTAssertEqual(buffers[fieldIdentifier]?.text, secret)
+            // A relock takes the form, and with it the field, off the screen.
+            scope = .captureOnly
+            await model.refresh()
+            await settle()
+            XCTAssertNil(rendered[ProviderSettingsView.storeSecretIdentifier])
+            XCTAssertEqual(buffers[fieldIdentifier]?.text, "", "emptied when the field leaves the screen")
+        }
+    }
+
+    func testTheReplaceSecretEntryIsDisabledWhileItsOperationRuns() async throws {
+        let credentials = FakeProviderSettingsCredentials()
+        var release: CheckedContinuation<Void, Never>?
+        credentials.suspendReplaceByVersion = { await withCheckedContinuation { release = $0 } }
+        try await withScreen(FakeProviderSettingsControls(listing: Self.mixedListing), credentials: credentials) { model in
+            assertTappable(ProviderSettingsView.replaceSavedSecretIdentifier("hosted-v1"))
+            let hosted = try XCTUnwrap(
+                model.listing?.profiles.flatMap(\.versions).first { $0.profileVersion == "hosted-v1" })
+            let running = Task { await model.replaceSavedCredential(Data("synthetic-secret-value".utf8), for: hosted) }
+            await settle()
+            assertTappable(ProviderSettingsView.replaceSavedSecretIdentifier("hosted-v1"), enabled: false)
+
+            release?.resume()
+            await running.value
+            await settle()
+            assertTappable(ProviderSettingsView.replaceSavedSecretIdentifier("hosted-v1"))
+        }
+    }
+
+    func testEverySubmissionEmptiesTheSecretBufferWhetherOrNotItIsUsable() {
+        let buffer = ProviderSecretBuffer()
+
+        buffer.text = "synthetic-secret-value"
+        XCTAssertEqual(buffer.take(), .secret(Data("synthetic-secret-value".utf8)))
+        XCTAssertEqual(buffer.text, "", "emptied after a usable secret")
+
+        buffer.text = ""
+        XCTAssertEqual(buffer.take(), .rejected(.empty))
+        XCTAssertEqual(buffer.text, "")
+
+        buffer.text = " synthetic-secret-value\n"
+        XCTAssertEqual(
+            buffer.take(), .rejected(.surroundingWhitespace),
+            "input that would need trimming is refused, not changed")
+        XCTAssertEqual(buffer.text, "", "emptied after a refused secret")
+
+        buffer.text = "synthetic-secret-value"
+        buffer.clear()
+        XCTAssertEqual(buffer.text, "", "emptied when the screen goes away or the app leaves the foreground")
+    }
+
+    func testStoredVersionsOfferReplaceCheckAndRemoveAndEmptyVersionsOfferNone() async {
+        let listing = providerListing(
+            supportLevels: [
+                ("hosted", "hosted-v1", "open_ai", false, "supported"),
+                ("old", "old-v1", "anthropic", true, "supported"),
+            ], defaultVersion: nil)
+        await withScreen(FakeProviderSettingsControls(listing: listing)) { _ in
+            assertTappable(ProviderSettingsView.replaceSavedSecretIdentifier("hosted-v1"))
+            assertTappable(ProviderSettingsView.checkSavedSecretIdentifier("hosted-v1"))
+            assertTappable(ProviderSettingsView.removeSavedSecretIdentifier("hosted-v1"))
+            assertTappable(ProviderSettingsView.checkConnectionIdentifier("hosted-v1"))
+            XCTAssertNil(rendered[ProviderSettingsView.replaceSavedSecretIdentifier("old-v1")], "a revoked version is closed")
+            XCTAssertNil(rendered[ProviderSettingsView.removeSavedSecretIdentifier("old-v1")])
+        }
+    }
+
+    func testTheSecretIsNeverRenderedAndFeedbackIsFixedTextAtTheDraftAndTheStoredVersion() async throws {
+        let credentials = FakeProviderSettingsCredentials()
+        let secret = "synthetic-secret-value"
+        try await withScreen(FakeProviderSettingsControls(listing: Self.mixedListing), credentials: credentials) { model in
+            assertTappable(ProviderSettingsView.storeSecretIdentifier)
+            assertTappable(ProviderSettingsView.checkSecretIdentifier)
+            assertTappable(ProviderSettingsView.removeSecretIdentifier)
+
+            model.storeCredential(Data(secret.utf8))
+            await settle()
+            XCTAssertEqual(text(ProviderSettingsView.credentialStateIdentifier), ProviderSettingsCredentialState.stored.message)
+            XCTAssertEqual(text(ProviderSettingsView.credentialFieldIdentifier), "11111111-1111-1111-1111-111111111111")
+
+            let hosted = try XCTUnwrap(model.listing?.profiles.flatMap(\.versions).first { $0.profileVersion == "hosted-v1" })
+            await model.replaceSavedCredential(Data(secret.utf8), for: hosted)
+            await settle()
+            XCTAssertEqual(
+                text(ProviderSettingsView.savedSecretStateIdentifier("hosted-v1")),
+                ProviderSettingsCredentialState.updated.message)
+
+            credentials.replaceByVersionResult = .failure(CredentialError.invalidated)
+            await model.replaceSavedCredential(Data(secret.utf8), for: hosted)
+            await settle()
+            XCTAssertEqual(
+                text(ProviderSettingsView.savedSecretStateIdentifier("hosted-v1")),
+                ProviderSettingsText.credentialFailure(CredentialError.invalidated))
+
+            XCTAssertFalse(rendered.values.contains { $0.text.contains(secret) }, "no rendered element shows the secret")
+            XCTAssertEqual(credentials.replacedByVersion.map(\.1), ["hosted-v1", "hosted-v1"])
+        }
+    }
+
+    func testLeavingTheScreenDeletesAnUnsavedSecretAndRemovesTheSavedControls() async {
+        let credentials = FakeProviderSettingsCredentials()
+        await withScreen(FakeProviderSettingsControls(listing: Self.mixedListing), credentials: credentials) { model in
+            model.storeCredential(Data("synthetic-secret-value".utf8))
+            model.clear()
+            await settle()
+            XCTAssertEqual(credentials.deleted, ["11111111-1111-1111-1111-111111111111"])
+            XCTAssertEqual(model.draft.credentialReference, "")
         }
     }
 

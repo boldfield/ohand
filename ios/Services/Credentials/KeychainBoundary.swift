@@ -27,6 +27,12 @@ struct KeychainReadResult {
     let secret: Data?
 }
 
+/// The accounts stored under one service name. Contains no secret material.
+struct KeychainAccountListing {
+    let status: OSStatus
+    let accounts: [String]
+}
+
 /// Narrow seam over the Security calls the credential service needs. Production uses `SecurityKeychain`;
 /// tests inject a fake to produce exact `OSStatus` outcomes that the simulator cannot be made to return.
 protocol KeychainBoundary {
@@ -38,6 +44,16 @@ protocol KeychainBoundary {
     /// Reads the secret. Reserved for dispatch-time resolution.
     func read(key: KeychainItemKey) -> KeychainReadResult
     func remove(key: KeychainItemKey) -> OSStatus
+    /// Lists the account of every item under `service` from attributes only, so no secret bytes are read. No items is
+    /// an empty list with `errSecSuccess`; any other failure is reported as its status, never as an empty list.
+    func accounts(service: String) -> KeychainAccountListing
+}
+
+extension KeychainBoundary {
+    /// A boundary that cannot enumerate its items says so, and a caller that needs the listing then does nothing.
+    func accounts(service: String) -> KeychainAccountListing {
+        KeychainAccountListing(status: errSecUnimplemented, accounts: [])
+    }
 }
 
 /// The real data-protection Keychain. Items use the app's own default access group only, are never synchronized,
@@ -89,5 +105,23 @@ struct SecurityKeychain: KeychainBoundary {
 
     func remove(key: KeychainItemKey) -> OSStatus {
         SecItemDelete(identityQuery(for: key) as CFDictionary)
+    }
+
+    func accounts(service: String) -> KeychainAccountListing {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecMatchLimit as String: kSecMatchLimitAll,
+            kSecReturnAttributes as String: true,
+        ]
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return KeychainAccountListing(status: errSecSuccess, accounts: []) }
+        guard status == errSecSuccess else { return KeychainAccountListing(status: status, accounts: []) }
+        guard let items = result as? [[String: Any]] else {
+            return KeychainAccountListing(status: errSecDecode, accounts: [])
+        }
+        return KeychainAccountListing(
+            status: errSecSuccess, accounts: items.compactMap { $0[kSecAttrAccount as String] as? String })
     }
 }

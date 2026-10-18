@@ -3,7 +3,16 @@ import UIKit
 @main
 class AppDelegate: UIResponder, UIApplicationDelegate {
     /// Built once per process, before any scene connects, so launch reconciliation does not wait for a window.
-    let launcher = AppLauncher()
+    /// When the process hosts unit tests (the one place this is read) it never builds production services: they would
+    /// run launch work against real storage in the test process and add to its process-wide result-buffer count. The
+    /// scene still gets its window, showing the unavailable screen.
+    let launcher: AppLauncher = {
+        struct HostingUnitTests: Error {}
+        guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else {
+            return AppLauncher(makeServices: { throw HostingUnitTests() })
+        }
+        return AppLauncher()
+    }()
 
     func application(
         _ application: UIApplication,

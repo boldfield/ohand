@@ -14,6 +14,23 @@ public enum ProviderConfigurationError: Error, Equatable, Sendable {
     case unreadable
 }
 
+extension ProviderConfigurationError {
+    /// Whether the request certainly did not take effect: it was refused before it reached the core, or the core refused
+    /// it. A failure the client reports itself (`client_shut_down`, `unreadable_event`) or an answer of the wrong kind
+    /// leaves the outcome unknown, because the core may have committed the request all the same.
+    public static func isDefiniteRefusal(_ error: Error) -> Bool {
+        switch error as? ProviderConfigurationError {
+        case .notAuthenticated?, .invalidRequest?:
+            return true
+        case .core(let failure)?:
+            return failure.code != ProviderConfigurationClientFailure.shutDown.code
+                && failure.code != ProviderConfigurationClientFailure.unreadableAnswer.code
+        case .unreadable?, nil:
+            return false
+        }
+    }
+}
+
 /// Provider profiles, connection checks and route policy, as the settings flows use them. Every rule belongs to the core:
 /// validation and versioning of profiles, which version may be a default, which destinations a grant covers and what a
 /// connection check reports. This service adds the authentication requirement and typed results.

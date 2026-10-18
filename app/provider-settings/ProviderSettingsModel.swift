@@ -10,9 +10,37 @@ protocol ProviderSettingsControlling: AnyObject {
     func setDefault(capability: String, profileVersion: String) async throws
     func clearDefault(capability: String) async throws
     func listProfiles() async throws -> ProviderProfileListAnswer
+    func checkConnection(profileVersion: String) async throws -> ProviderConnectionOutcome
 }
 
 extension ProviderConfigurationService: ProviderSettingsControlling {}
+
+/// The credential operations this screen uses. `ProviderCredentialEntry` is the production implementation: it hands the
+/// secret straight to the native credential service and returns only an opaque reference, a status or a redacted error.
+/// No call returns a secret.
+protocol ProviderSettingsCredentialControlling: AnyObject {
+    /// Stores `secret` as a new credential, leased so the sweep leaves it alone until `releaseLease`.
+    func addCredential(_ secret: Data) throws -> String
+    func updateCredential(_ secret: Data, reference: String) throws
+    func deleteCredential(reference: String) throws
+    func credentialStatus(reference: String) throws -> CredentialStatus
+    /// Ends the lease on a new credential: once a committed version holds it, or once nothing will and deleting it
+    /// failed, so a later sweep can remove it.
+    func releaseLease(reference: String)
+    /// By stored profile version: the services layer resolves the version's reference itself and never returns it.
+    func replaceCredential(_ secret: Data, profileVersion: String) async throws
+    func credentialStatus(profileVersion: String) async throws -> CredentialStatus
+    func removeCredential(profileVersion: String) async throws
+}
+
+extension ProviderCredentialEntry: ProviderSettingsCredentialControlling {}
+
+/// The sweep of provider secrets nothing owns. `ProviderCredentialSweep` is the production implementation.
+protocol ProviderSettingsCredentialSweeping: AnyObject {
+    func run() async -> ProviderCredentialSweepOutcome
+}
+
+extension ProviderCredentialSweep: ProviderSettingsCredentialSweeping {}
 
 /// A reason a draft cannot be saved yet, found before the core is asked.
 enum ProviderSettingsIssue: Equatable, Hashable {
@@ -73,6 +101,27 @@ enum ProviderSettingsActionState: Equatable {
     }
 }
 
+/// What the last credential entry, removal or status check reported. It never holds a secret or a reference.
+enum ProviderSettingsCredentialState: Equatable {
+    case working
+    case stored
+    case updated
+    case removed
+    case status(CredentialStatus)
+    case failed(String)
+
+    var message: String { ProviderSettingsText.credentialState(self) }
+}
+
+/// What a connection check of one stored version reported.
+enum ProviderSettingsConnectionState: Equatable {
+    case checking
+    case finished(ProviderConnectionOutcome)
+    case failed(String)
+
+    var message: String { ProviderSettingsText.connectionState(self) }
+}
+
 /// The text the user is typing into the profile form.
 struct ProviderSettingsDraft: Equatable {
     var profileName = ""
@@ -104,6 +153,15 @@ enum ProviderSettingsOperatingMode: Equatable {
 ///   its answer decides what is stored, and nothing is reported as saved unless it succeeded.
 /// * The destination is never typed: the draft carries a protocol and, for a private server, an https address. The core
 ///   derives the processing destination. A draft never names a credential secret.
+/// * A secret is never held here. It arrives as `Data` from a field that clears itself, goes directly to the credential
+///   service and is not stored, published or reported; only an opaque reference and fixed messages come back.
+/// * A secret stored for the draft is deleted at once, best effort, when the draft is abandoned. Whatever that misses
+///   (a failed deletion, an ended process) is removed by the credential sweep, which runs each time the screen loads,
+///   before a save is accepted. The credential service leases a new secret until a committed version holds it, so the
+///   sweep never takes a secret still being saved for garbage. A secret is taken back from a save only when the save was
+///   definitely refused; when its outcome is unknown the lease ends and the sweep keeps the secret if a version holds it.
+/// * A connection check runs only when the user asks for one version, sends the core's fixed synthetic request (no
+///   capture text) and shows only the core's fixed outcome. Nothing runs one in the background.
 /// * Saving a profile or changing a default calls only the profile service. It never touches jobs, route grants or
 ///   captures, so work already queued stays pinned to the version it was created with.
 @MainActor
@@ -112,7 +170,13 @@ final class ProviderSettingsModel: ObservableObject {
     @Published private(set) var listing: ProviderProfileListAnswer?
     @Published private(set) var saveState: ProviderSettingsActionState?
     @Published private(set) var defaultState: ProviderSettingsActionState?
-    @Published var draft = ProviderSettingsDraft()
+    @Published private(set) var credentialState: ProviderSettingsCredentialState?
+    /// What the last secret replacement, status check or removal reported for a stored version.
+    @Published private(set) var savedCredentialStates: [String: ProviderSettingsCredentialState] = [:]
+    @Published private(set) var connectionStates: [String: ProviderSettingsConnectionState] = [:]
+    @Published var draft = ProviderSettingsDraft() {
+        didSet { if let added = addedReference, draft.credentialReference != added { discardAddedReference() } }
+    }
 
     static let capability = "text_interpretation"
     static let defaultTimeoutSeconds = 60
@@ -123,12 +187,23 @@ final class ProviderSettingsModel: ObservableObject {
     static let maximumCredentialReferenceBytes = 256
 
     private let controls: ProviderSettingsControlling
+    private let credentials: ProviderSettingsCredentialControlling
+    private let sweep: ProviderSettingsCredentialSweeping
     private let readScope: () -> CompositionReadScope
     private var generation = 0
     private var session = 0
+    /// The opaque reference of a secret this screen stored that no saved profile version names yet. It is deleted if
+    /// the draft is abandoned. While a save that names it is waiting on the core it is not here, so leaving the screen
+    /// cannot delete a secret the core is committing.
+    private var addedReference: String?
 
-    nonisolated init(controls: ProviderSettingsControlling, readScope: @escaping () -> CompositionReadScope) {
+    nonisolated init(
+        controls: ProviderSettingsControlling, credentials: ProviderSettingsCredentialControlling,
+        sweep: ProviderSettingsCredentialSweeping, readScope: @escaping () -> CompositionReadScope
+    ) {
         self.controls = controls
+        self.credentials = credentials
+        self.sweep = sweep
         self.readScope = readScope
     }
 
@@ -209,12 +284,17 @@ final class ProviderSettingsModel: ObservableObject {
             && defaultVersion?.profileVersion != version.profileVersion
     }
 
-    /// Reads the stored profiles and defaults again.
+    /// Reads the stored profiles and defaults again. When the screen loads, it first sweeps secrets nothing owns.
     func refresh() async {
         guard readScope() == .authenticated else { lock(); return }
         generation += 1
         let thisGeneration = generation
-        if listing == nil { phase = .loading }
+        if listing == nil {
+            phase = .loading
+            _ = await sweep.run()
+            guard thisGeneration == generation else { return }
+            guard readScope() == .authenticated else { lock(); return }
+        }
         do {
             let fresh = try await controls.listProfiles()
             guard thisGeneration == generation else { return }
@@ -223,15 +303,17 @@ final class ProviderSettingsModel: ObservableObject {
             phase = .loaded
         } catch {
             guard thisGeneration == generation else { return }
-            if case ProviderConfigurationError.notAuthenticated = error { lock() }
-            else { phase = .failed(ProviderSettingsText.failure(error)) }
+            if case ProviderConfigurationError.notAuthenticated = error { lock(); return }
+            guard readScope() == .authenticated else { lock(); return }
+            phase = .failed(ProviderSettingsText.failure(error))
         }
     }
 
-    /// Stores the draft as a new immutable profile version. It does not become the default.
+    /// Stores the draft as a new immutable profile version. It does not become the default. Accepted only once the
+    /// screen has loaded, so the sweep has run first.
     func save() async {
         guard readScope() == .authenticated else { lock(); return }
-        guard !isSaving else { return }
+        guard !isSaving, phase == .loaded else { return }
         guard issues.isEmpty else {
             saveState = .failed(issues.map(ProviderSettingsText.issue).joined(separator: " "))
             return
@@ -247,16 +329,28 @@ final class ProviderSettingsModel: ObservableObject {
             timeoutSeconds: draft.timeoutSeconds,
             capabilities: [Self.capability])
         saveState = .working
+        // The saved version may come to name the secret this screen added, so until the core answers the reference is
+        // not the screen's to delete. A definite refusal gives it back below; an unknown outcome leaves it to the sweep.
+        let namedReference = addedReference.flatMap { $0 == request.credentialReference ? $0 : nil }
+        if namedReference != nil { addedReference = nil }
         do {
             _ = try await controls.createProfile(request)
-            guard thisSession == session else { return }
-            guard readScope() == .authenticated else { lock(); return }
+            // Committed: a stored version holds the reference, whatever happened to the screen meanwhile.
+            credentials.releaseLease(reference: request.credentialReference)
+            guard mayPublish(from: thisSession) else { return }
             saveState = .saved
+            credentialState = nil
             draft = ProviderSettingsDraft()
             await refresh()
         } catch {
-            guard thisSession == session else { return }
-            if case ProviderConfigurationError.notAuthenticated = error { lock(); return }
+            if let namedReference {
+                if ProviderConfigurationError.isDefiniteRefusal(error) {
+                    takeBackUnsavedReference(namedReference, sameSession: thisSession == session)
+                } else {
+                    leaveUnknownReferenceToTheSweep(namedReference, sameSession: thisSession == session)
+                }
+            }
+            guard mayPublish(from: thisSession, after: error) else { return }
             saveState = .failed(ProviderSettingsText.failure(error))
         }
     }
@@ -281,6 +375,188 @@ final class ProviderSettingsModel: ObservableObject {
         await changeDefault { [controls] in try await controls.clearDefault(capability: Self.capability) }
     }
 
+    // MARK: credentials
+
+    /// Stores `secret` for the draft: a new credential when the draft names none, otherwise a replacement behind the
+    /// named reference. The draft then names the opaque reference. The secret is passed on and not kept.
+    func storeCredential(_ secret: Data) {
+        guard readScope() == .authenticated else { lock(); return }
+        let reference = draft.credentialReference.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            if reference.isEmpty {
+                let added = try credentials.addCredential(secret)
+                addedReference = added
+                draft.credentialReference = added
+                credentialState = .stored
+            } else {
+                try credentials.updateCredential(secret, reference: reference)
+                credentialState = .updated
+            }
+        } catch {
+            credentialFailed(error)
+        }
+    }
+
+    /// Removes the secret behind the draft's reference and forgets the reference. A stored profile version that still
+    /// names it can no longer send, and its work waits.
+    func removeCredential() {
+        guard readScope() == .authenticated else { lock(); return }
+        let reference = draft.credentialReference.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !reference.isEmpty else { credentialState = .failed(ProviderSettingsText.credentialMissingReference); return }
+        do {
+            try credentials.deleteCredential(reference: reference)
+            if reference == addedReference { addedReference = nil }
+            draft.credentialReference = ""
+            credentialState = .removed
+        } catch {
+            credentialFailed(error)
+        }
+    }
+
+    /// Reports whether the secret behind the draft's reference is present, absent or unusable. Never reads the secret.
+    func checkCredential() {
+        guard readScope() == .authenticated else { lock(); return }
+        let reference = draft.credentialReference.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !reference.isEmpty else { credentialState = .failed(ProviderSettingsText.credentialMissingReference); return }
+        do {
+            credentialState = .status(try credentials.credentialStatus(reference: reference))
+        } catch {
+            credentialFailed(error)
+        }
+    }
+
+    /// Reports that no secret was entered, without calling the credential service.
+    func noteEmptySecret() {
+        credentialState = .failed(ProviderSettingsText.credentialEmptySecret)
+    }
+
+    /// Reports an input that was refused as typed, for the draft or for a stored version, without calling the
+    /// credential service. Nothing is stored and the input is not changed to make it acceptable.
+    func noteRejectedSecret(_ rejection: ProviderSecretRejection, for version: ProviderProfileListAnswer.Version? = nil) {
+        let state = ProviderSettingsCredentialState.failed(ProviderSettingsText.rejectedSecret(rejection))
+        if let version { savedCredentialStates[version.profileVersion] = state } else { credentialState = state }
+    }
+
+    // MARK: credentials of stored profile versions
+
+    /// Whether a secret action is running for `version`.
+    func isChangingSavedCredential(_ version: ProviderProfileListAnswer.Version) -> Bool {
+        savedCredentialStates[version.profileVersion] == .working
+    }
+
+    /// Replaces the secret bound to the stored `version` in place, so work pinned to it can send again. The services
+    /// layer resolves the reference; this screen never sees it.
+    func replaceSavedCredential(_ secret: Data, for version: ProviderProfileListAnswer.Version) async {
+        await changeSavedCredential(version, success: .updated) { [credentials] profileVersion in
+            try await credentials.replaceCredential(secret, profileVersion: profileVersion)
+            return nil
+        }
+    }
+
+    /// Reports whether the secret bound to the stored `version` is present, absent or unusable. Never reads it.
+    func checkSavedCredential(_ version: ProviderProfileListAnswer.Version) async {
+        await changeSavedCredential(version, success: nil) { [credentials] profileVersion in
+            .status(try await credentials.credentialStatus(profileVersion: profileVersion))
+        }
+    }
+
+    /// Removes the secret bound to the stored `version`. It stays saved but cannot send until a secret is entered.
+    func removeSavedCredential(_ version: ProviderProfileListAnswer.Version) async {
+        await changeSavedCredential(version, success: .removed) { [credentials] profileVersion in
+            try await credentials.removeCredential(profileVersion: profileVersion)
+            return nil
+        }
+    }
+
+    private func changeSavedCredential(
+        _ version: ProviderProfileListAnswer.Version, success: ProviderSettingsCredentialState?,
+        _ operation: (String) async throws -> ProviderSettingsCredentialState?
+    ) async {
+        guard readScope() == .authenticated else { lock(); return }
+        let profileVersion = version.profileVersion
+        guard savedCredentialStates[profileVersion] != .working else { return }
+        let thisSession = session
+        savedCredentialStates[profileVersion] = .working
+        do {
+            let reported = try await operation(profileVersion)
+            guard mayPublish(from: thisSession) else { return }
+            savedCredentialStates[profileVersion] = reported ?? success
+        } catch {
+            guard mayPublish(from: thisSession, after: error) else { return }
+            savedCredentialStates[profileVersion] = .failed(ProviderSettingsText.credentialFailure(error))
+        }
+    }
+
+    /// Deletes the secret this screen added, which no saved version names. Called when the draft is abandoned.
+    private func discardAddedReference() {
+        guard let reference = addedReference else { return }
+        addedReference = nil
+        deleteUnsaved(reference)
+    }
+
+    /// Deletes a secret nothing will save. If that fails (for example the session has locked) its lease ends instead,
+    /// so the next sweep removes it.
+    private func deleteUnsaved(_ reference: String) {
+        do {
+            try credentials.deleteCredential(reference: reference)
+        } catch {
+            credentials.releaseLease(reference: reference)
+        }
+    }
+
+    /// A save the core refused, or that never reached it, names no version: the secret is unsaved again. It returns to
+    /// the draft if the draft is still there, otherwise it is deleted.
+    private func takeBackUnsavedReference(_ reference: String, sameSession: Bool) {
+        if sameSession && draft.credentialReference == reference && addedReference == nil {
+            addedReference = reference
+        } else {
+            deleteUnsaved(reference)
+        }
+    }
+
+    /// A save whose outcome is unknown (the client shut down, or the answer could not be read) may have committed a
+    /// version that names the secret, so it is neither taken back nor deleted. Its lease ends and the draft stops naming
+    /// it; the next sweep deletes it only if no stored version holds it.
+    private func leaveUnknownReferenceToTheSweep(_ reference: String, sameSession: Bool) {
+        credentials.releaseLease(reference: reference)
+        guard sameSession, draft.credentialReference == reference else { return }
+        draft.credentialReference = ""
+        credentialState = nil
+    }
+
+    private func credentialFailed(_ error: Error) {
+        if case ProviderConfigurationError.notAuthenticated = error { lock(); return }
+        credentialState = .failed(ProviderSettingsText.credentialFailure(error))
+    }
+
+    // MARK: connection check
+
+    func isChecking(_ version: ProviderProfileListAnswer.Version) -> Bool {
+        connectionStates[version.profileVersion] == .checking
+    }
+
+    /// Whether a check may be started for `version`: unrevoked and not already running.
+    func canCheckConnection(_ version: ProviderProfileListAnswer.Version) -> Bool {
+        !version.revoked && !isChecking(version)
+    }
+
+    /// Sends the core's one fixed synthetic request to `version`'s own destination, on the user's request only.
+    func checkConnection(_ version: ProviderProfileListAnswer.Version) async {
+        guard readScope() == .authenticated else { lock(); return }
+        guard canCheckConnection(version) else { return }
+        let thisSession = session
+        let profileVersion = version.profileVersion
+        connectionStates[profileVersion] = .checking
+        do {
+            let outcome = try await controls.checkConnection(profileVersion: profileVersion)
+            guard mayPublish(from: thisSession) else { return }
+            connectionStates[profileVersion] = .finished(outcome)
+        } catch {
+            guard mayPublish(from: thisSession, after: error) else { return }
+            connectionStates[profileVersion] = .failed(ProviderSettingsText.failure(error))
+        }
+    }
+
     /// Call when the screen goes away or the app locks: drops every stored detail and ignores answers still pending.
     func clear() {
         generation += 1
@@ -288,6 +564,10 @@ final class ProviderSettingsModel: ObservableObject {
         listing = nil
         saveState = nil
         defaultState = nil
+        credentialState = nil
+        connectionStates = [:]
+        savedCredentialStates = [:]
+        discardAddedReference()
         draft = ProviderSettingsDraft()
         phase = .idle
     }
@@ -297,15 +577,29 @@ final class ProviderSettingsModel: ObservableObject {
         defaultState = .working
         do {
             try await operation()
-            guard thisSession == session else { return }
-            guard readScope() == .authenticated else { lock(); return }
+            guard mayPublish(from: thisSession) else { return }
             defaultState = .defaultChanged
         } catch {
-            guard thisSession == session else { return }
-            if case ProviderConfigurationError.notAuthenticated = error { lock(); return }
+            guard mayPublish(from: thisSession, after: error) else { return }
             defaultState = .failed(ProviderSettingsText.failure(error))
         }
         await refresh()
+    }
+
+    /// Whether an answer that has just arrived may be shown: the session that asked is still on screen and still
+    /// authenticated. A relock since the call empties the screen instead, whatever the answer was.
+    private func mayPublish(from thisSession: Int) -> Bool {
+        guard thisSession == session else { return false }
+        guard readScope() == .authenticated else { lock(); return false }
+        return true
+    }
+
+    /// Whether a failure that has just arrived may be shown. Besides the checks above, a lapse the service itself
+    /// reported locks the screen; any other failure is shown only if the session is still authenticated now.
+    private func mayPublish(from thisSession: Int, after error: Error) -> Bool {
+        guard thisSession == session else { return false }
+        if case ProviderConfigurationError.notAuthenticated = error { lock(); return false }
+        return mayPublish(from: thisSession)
     }
 
     private func lock() {
