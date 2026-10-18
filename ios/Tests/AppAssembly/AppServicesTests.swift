@@ -18,15 +18,20 @@ final class AppServicesTests: XCTestCase {
         created = []
     }
 
-    override func tearDown() async throws {
+    override func tearDownWithError() throws {
         // The services are released inside this scope, so the counters are read after their handles close.
         do {
             let services = created
             created = []
             services.forEach { $0.shutDown() }
-            for stopped in services {
-                await stopped.waitForShutDownWork()
+            let finished = expectation(description: "cancelled shutdown work has ended")
+            Task {
+                for stopped in services {
+                    await stopped.waitForShutDownWork()
+                }
+                finished.fulfill()
             }
+            wait(for: [finished], timeout: 60)
         }
         XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
         XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
