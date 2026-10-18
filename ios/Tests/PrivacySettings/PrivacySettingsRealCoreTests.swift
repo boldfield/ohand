@@ -48,6 +48,8 @@ private final class PrivacySaveOutcomeBox: @unchecked Sendable {
 /// provisioning, grant derivation and policy listing.
 @MainActor
 final class PrivacySettingsRealCoreTests: XCTestCase {
+    private static let interpretableText = "Remind me 2099-01-15 11:00:00 to call the roofer about the quarterly estimate"
+
     private var baselineHandles = 0
     private var baselineBuffers = 0
     private var world: RealCoreRetentionWorld!
@@ -170,7 +172,7 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         let reference = try root.providerCredentials.addCredential(Data("synthetic-key-0001".utf8))
         let created = try await root.providerConfiguration.createProfile(
             ProviderProfileDraft(
-                profileID: "hosted", providerProtocol: "open_ai", endpoint: nil, model: "synthetic-model",
+                profileID: "hosted", providerProtocol: "anthropic", endpoint: nil, model: "synthetic-model",
                 credentialReference: reference, timeoutSeconds: 30))
         try await root.providerConfiguration.setDefault(
             capability: "text_interpretation", profileVersion: created.profileVersion)
@@ -242,12 +244,15 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         let before = try XCTUnwrap(model.routes.first { $0.routeID == "route-personal" })
         XCTAssertTrue(before.grantedCapabilities.isEmpty)
 
-        try await saveCapture("remind me to call the roofer tomorrow")
-        let jobProfile = scalar("SELECT profile_version FROM jobs LIMIT 1")
-        XCTAssertEqual(jobProfile, version, "the job is pinned to the default, so only the grant stands in the way")
+        try await saveCapture(Self.interpretableText)
         startProcessing()
-        let failed = try await waitUntil { self.scalar("SELECT failure_reason FROM jobs LIMIT 1") == "unauthorized" }
-        XCTAssertTrue(failed, "processing ran and dispatch failed authorization: \(scalar("SELECT status FROM jobs LIMIT 1"))")
+        let settled = try await waitUntil {
+            let status = self.scalar("SELECT status FROM jobs LIMIT 1")
+            return status == "completed" || status == "failed" || status == "dead"
+        }
+        XCTAssertTrue(settled, "processing ran and the job settled: \(scalar("SELECT status FROM jobs LIMIT 1"))")
+        XCTAssertNotEqual(
+            scalar("SELECT profile_version FROM jobs LIMIT 1"), version, "without a grant the job was not pinned to the profile")
         await model.refresh()
 
         XCTAssertTrue(model.isLocalOnly, "processing a capture created no grant")
@@ -261,10 +266,10 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         model.propose(routeID: "route-personal", capability: "text_interpretation", profileVersion: version)
         await model.confirm(try XCTUnwrap(model.proposal))
 
-        try await saveCapture("remind me to call the roofer tomorrow")
+        try await saveCapture(Self.interpretableText)
         startProcessing()
         let attempted = try await waitUntil { self.sender.attemptCount > 0 }
-        XCTAssertTrue(attempted, "the granted capability's request was attempted")
+        XCTAssertTrue(attempted, "the granted capability's request was attempted: \(scalar("SELECT status || '/' || profile_version FROM jobs LIMIT 1"))")
         XCTAssertNotEqual(scalar("SELECT failure_reason FROM jobs LIMIT 1"), "unauthorized")
         await model.refresh()
 
