@@ -47,12 +47,14 @@ struct SourceDetailView: View {
     var layoutReporter: ((String, CGRect) -> Void)?
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.dismiss) private var dismiss
+    /// Beside the search results the pane has no back button of its own and takes the search screen's margins.
+    @Environment(\.isInItemPane) private var isInItemPane
 
-    private var sideMargin: CGFloat { DSSpacing.sideMargin(for: horizontalSizeClass) }
+    private var sideMargin: CGFloat { isInItemPane ? 0 : DSSpacing.sideMargin(for: horizontalSizeClass) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: DSSpacing.sm) {
-            header
+            if !isInItemPane { header }
             ScrollView {
                 VStack(alignment: .leading, spacing: DSSpacing.lg) {
                     if let content = model.content {

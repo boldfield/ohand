@@ -84,7 +84,7 @@ enum ManagementCatalog {
 
     /// Screens the capture surface links to. They are secondary: capture is always the first screen.
     static let secondaryEntries: [ManagementEntry] = [
-        ManagementEntry(id: searchEntryID, title: "Search", systemImage: "magnifyingglass") { context in AnyView(RetrievalSearchView(model: context.retrieval, renderReporter: context.retrievalRenderReporter)) },
+        ManagementEntry(id: searchEntryID, title: "Search", systemImage: "magnifyingglass") { context in AnyView(RetrievalSearchView(model: context.retrieval, makeItemPane: { ManagementCatalog.destinations.view(for: .item($0), context: context) }, renderReporter: context.retrievalRenderReporter)) },
         ManagementEntry(id: settingsEntryID, title: "Settings", systemImage: "gearshape") { context in AnyView(SettingsRootView(sections: ManagementCatalog.settingsSections, context: context)) },
     ]
 
