@@ -166,13 +166,6 @@ final class AppServices {
         root.shutDown()
     }
 
-    /// Returns once none of the work that `shutDown()` cancelled is still running: lifecycle steps and reminder passes
-    /// that ignore cancellation. After it, nothing calls into the core.
-    func waitForShutDownWork() async {
-        await lifecycle.waitForRunningActions()
-        await root.waitForReminderPasses()
-    }
-
     // MARK: Scene events
 
     func sceneWillEnterForeground() {

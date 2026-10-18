@@ -19,20 +19,8 @@ final class AppServicesTests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
-        // The services are released inside this scope, so the counters are read after their handles close.
-        do {
-            let services = created
-            created = []
-            services.forEach { $0.shutDown() }
-            let finished = expectation(description: "cancelled shutdown work has ended")
-            Task {
-                for stopped in services {
-                    await stopped.waitForShutDownWork()
-                }
-                finished.fulfill()
-            }
-            wait(for: [finished], timeout: 60)
-        }
+        created.forEach { $0.shutDown() }
+        created = []
         XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
         XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
         try? FileManager.default.removeItem(at: storageRoot)
@@ -199,6 +187,14 @@ final class AppServicesTests: XCTestCase {
     }
 
     // MARK: launcher
+
+    @MainActor
+    func testTheUnitTestHostBuiltNoProductionServices() throws {
+        let hostLauncher = try XCTUnwrap(
+            (UIApplication.shared.delegate as? AppDelegate)?.launcher, "the hosted app has its launcher")
+        hostLauncher.launch()
+        XCTAssertNil(hostLauncher.services, "the host never builds production services while hosting unit tests")
+    }
 
     func testTheLauncherBuildsAndStartsTheServicesOnce() throws {
         var started: [Bool] = []

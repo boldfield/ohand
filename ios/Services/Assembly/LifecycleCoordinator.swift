@@ -126,7 +126,6 @@ public final class LifecycleCoordinator: CompositionLifecycleOwner, @unchecked S
     private var queuedTriggers = Set<LifecycleTrigger>()
     private var queuedWaiters: [CheckedContinuation<LifecyclePassReport, Never>] = []
     private var activeRace: StepRace?
-    private let inFlightActions = InFlightWork()
     private var isStopped = false
     /// Whether no reset step has settled since the hold closed; effectful steps wait for a pass that settles it. It
     /// starts open for a coordinator driven only by injected actions, and closes when `connect(to:)` installs the real
@@ -489,11 +488,8 @@ public final class LifecycleCoordinator: CompositionLifecycleOwner, @unchecked S
                 race.finish(.interrupted)
                 return
             }
-            let inFlight = inFlightActions
-            inFlight.begin()
             race.track(
                 Task {
-                    defer { inFlight.end() }
                     race.finish(await action(triggers))
                 })
             race.track(
@@ -504,13 +500,6 @@ public final class LifecycleCoordinator: CompositionLifecycleOwner, @unchecked S
         }
         endRace()
         return outcome
-    }
-
-    /// Returns once no step action is executing. `shutDown()` cancels the actions, but one that ignores cancellation
-    /// keeps running after it returns; a caller that must not overlap that work (a test checking the core's buffers,
-    /// for example) awaits this after `shutDown()`. It does not delay anything: it resumes when the last action ends.
-    public func waitForRunningActions() async {
-        await inFlightActions.waitUntilIdle()
     }
 
     private func beginRace(_ race: StepRace) -> Bool {
@@ -525,41 +514,6 @@ public final class LifecycleCoordinator: CompositionLifecycleOwner, @unchecked S
         lock.lock()
         activeRace = nil
         lock.unlock()
-    }
-}
-
-/// Counts work that may outlive its owner's `shutDown()` and lets a caller wait for the count to reach zero.
-final class InFlightWork: @unchecked Sendable {
-    private let lock = NSLock()
-    private var count = 0
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-
-    func begin() {
-        lock.lock()
-        count += 1
-        lock.unlock()
-    }
-
-    func end() {
-        lock.lock()
-        count -= 1
-        let released = count == 0 ? waiters : []
-        if count == 0 { waiters = [] }
-        lock.unlock()
-        released.forEach { $0.resume() }
-    }
-
-    func waitUntilIdle() async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            lock.lock()
-            if count == 0 {
-                lock.unlock()
-                continuation.resume()
-                return
-            }
-            waiters.append(continuation)
-            lock.unlock()
-        }
     }
 }
 
