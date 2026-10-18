@@ -179,6 +179,27 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
 
     Nothing else in those files changes. Every read of stored history or state derived from it goes through the read gate. Every write that changes stored history, reminders, deletion or what leaves the device requires an authenticated read session, and a capture-only session is refused. Conflicts are resolved by rebasing, and the merger bounces the PR for rework on conflict. Reviewers reject edits beyond these registrations. Root behaviour changes (the ingress path, launch order, notification handling) are not covered; they stay on the serialized root chain S05b → T11d → A10 → A11 → A12. U01d and U01e now register under this allowance, so they no longer wait on T11d or on each other.
   - **Management context allowance (standing).** Each UI slice may add exactly one field to `ManagementContext` (`ios/AppAssembly/ManagementCatalog.swift`) and one line that builds it in `AppServices` (`ios/AppAssembly/AppServices.swift`). The field carries only seams that already exist on main or in the slice's dependencies. This supplements the shared host allowance. U07c may additionally add exactly one section entry to U02b's source-detail host, for its per-item delete control.
+  - **Walkthrough allowance (standing, coordinator, 2026-10-18).** DS08's walkthrough (`ios/UITests/Walkthrough/WalkthroughUITests.swift`) names each screen's controls and titles, so any UI task that changes a screen it visits breaks it. On 2026-10-18 this blocked DS04a, DS07 and U02b. Any UI task may update the walkthrough for the screens it builds or changes:
+    - their entries in the screen tables (for example `settingsScreens`);
+    - their accessibility identifiers, expected titles and waits;
+    - how the keyboard is dismissed on them.
+
+    A task that builds a new screen may also add steps that capture it in both appearances, at compact width and, when available, at regular width.
+
+    It may not:
+    - remove a screen or a capture;
+    - skip or soften a step, including making a step tolerate a missing screen;
+    - lengthen `screenTimeout`;
+    - turn a "did not appear" failure into anything weaker;
+    - change shared helpers.
+
+    The PR links the exact-head walkthrough job and lists the screenshots that changed. Conflicts between concurrent tasks are resolved by rebasing.
+  - **U06a settings entry (coordinator, 2026-10-18, after PR #292 round 3).** U06a may add exactly one entry to U01's settings host, `ManagementCatalog.settingsSections` (`ios/AppAssembly/ManagementCatalog.swift:91`). The entry has the id `privacy-settings` and builds `PrivacySettingsView` from `context.privacySettings`. This is in addition to its management-context field and `AppServices` line. U06a may also add one app-shell reachability assertion under `ios/Tests/AppAssembly/`. These are the same terms as the shared host allowance; U06a was missing from that list.
+  - **U02b regular-width Search pane (coordinator, 2026-10-18, after PR #290 round 1).** The design puts the item detail beside the results at regular width (`docs/features/m1-ui-design.md`, Search). DS05 left a placeholder (`RetrievalSearchView.itemPanePlaceholder` is `Color.clear`), and `RetrievalSearchModel.onSelect` always pushes. U02b may add a pane seam in `app/retrieval/` (`RetrievalSearchView`, `RetrievalSearchModel`, `RetrievalSearchModule`):
+    - at regular width, keep the selected reference, outline the selected result in `accent`, and render the injected source-detail pane in place of the placeholder instead of pushing;
+    - compact width is unchanged.
+
+    U02b may also add a hosted test under `ios/Tests/Retrieval/` and at most a one-line pass-through in `ios/AppAssembly/ManagementCatalog.swift`. The walkthrough allowance covers capturing source detail.
   - **S04 deferred.** As scoped it cannot be built:
     - `PayloadKind` has only `Generic` (`core/src/reminders/reconcile/effects.rs:48`), and prompts hard-code it (`core/src/suggestions/schedule/apply.rs:178`).
     - The preview opt-in has no store, and `routes.preview_safe` is only ever written as 0 (`core/src/ffi/route_provisioning.rs:99`).
