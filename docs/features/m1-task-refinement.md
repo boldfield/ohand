@@ -1955,6 +1955,30 @@ Owned paths: `app/source-detail/`.
 
 Dependencies: U02a.
 
+Grant (coordinator, 2026-10-17, after PR #269 round 2): playback lives in `ios/Services/Playback/`, owned by A09, which has landed. U02b may make two narrow changes there.
+
+1. **Natural completion.** `PlaybackSession` learns that its player finished, and `PlaybackEndReason` gains `.finished`. On finish the session:
+   - ends itself;
+   - releases its fence lease exactly once;
+   - stays idempotent under a later `close()`, relock, deletion or shutdown, with no second release and no second end callback.
+
+   Files: `ios/Services/Playback/PlaybackSession.swift` and `PlaybackFence.swift`.
+2. **Availability before the tap.** Audio retention removes the file and records the removal only in its native ledger. The core's `audio_reference` stays set, so source detail cannot tell from the item read that the audio is gone. `PlaybackService` gains one read-only query, in `ios/Services/Playback/PlaybackService.swift`. For an item it reports whether the audio can be played now, using the same checks `open(itemID:)` makes before the fence:
+   - the current authorization;
+   - `readAudio`;
+   - `finalizedAudioURL`;
+   - `fileSystem.isPresent`.
+
+   It takes no lease, opens no player, reads no audio bytes and needs an authenticated session. Its outcomes: available, no audio, missing, unreadable and not authenticated. `SourceDetailModel.load` uses it, so removed audio first renders as the disabled notice with no Play button. The tap-time `audioMissing` handling stays, for removals after load.
+
+Owned-path additions: those three files (only the changes above) and service tests under `ios/Tests/Playback/`.
+
+Required tests:
+- **Service tests:**
+  - completion gives `.finished`, releases once, and a later close or relock changes nothing;
+  - availability for present, never-recorded and removed audio, and for a locked session.
+- **Source detail test on the production retention path:** remove a synthetic item's audio through the real `AudioRetentionService` (an expiry sweep or a user removal) before opening detail. Assert that the first render shows the disabled notice and no Play button. Setting `captures.audio_reference` to NULL by hand does not count.
+
 Acceptance:
 
 1. Authentication/relock is enforced for text and playback; deleted/expired/unavailable audio has an honest disabled state and no stale file access.
