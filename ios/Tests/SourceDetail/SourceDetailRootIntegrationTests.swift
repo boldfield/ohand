@@ -1,5 +1,7 @@
 import Foundation
 import SQLite3
+import SwiftUI
+import UIKit
 import XCTest
 @testable import OhAndCoreBridge
 @testable import OhAndServices
@@ -212,13 +214,42 @@ final class SourceDetailRootIntegrationTests: XCTestCase {
 
         XCTAssertEqual(outcome, .removed)
         XCTAssertFalse(FileManager.default.fileExists(atPath: audioURL.path))
+        // Host the real screen and let it load itself, recording every identified element it ever puts on screen,
+        // so a Play button that showed up even briefly before the notice would be caught.
         let model = SourceDetailModel.assembled(itemID: itemID, root: root)
-        try runOnMain { await model.load() }
+        var onScreen: Set<String> = []
+        var everShown: Set<String> = []
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        window.rootViewController = UIHostingController(rootView: NavigationStack {
+            SourceDetailView(model: model, renderReporter: { identifier, shown in
+                if shown {
+                    onScreen.insert(identifier)
+                    everShown.insert(identifier)
+                } else {
+                    onScreen.remove(identifier)
+                }
+            })
+        })
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            _ = pump(until: { false }, timeout: 0.2)
+        }
 
+        XCTAssertTrue(
+            pump(until: {
+                window.rootViewController?.view.layoutIfNeeded()
+                return onScreen.contains(SourceDetailView.sectionIdentifier(.original))
+                    && onScreen.contains(SourceDetailView.audioNoticeIdentifier)
+            }),
+            "the loaded screen shows the text and the disabled audio notice")
         XCTAssertEqual(model.content?.sections.map(\.text), ["synthetic capture to play"])
         XCTAssertEqual(model.audio, .removed, "the first render is already the disabled state")
         XCTAssertFalse(model.canPlay)
-        XCTAssertNotNil(SourceDetailView.audioNotice(for: model.audio))
+        XCTAssertTrue(onScreen.contains(SourceDetailView.audioNoticeIdentifier), "the disabled notice is visible")
+        XCTAssertFalse(onScreen.contains(SourceDetailView.playButtonIdentifier), "no Play button is shown")
+        XCTAssertFalse(everShown.contains(SourceDetailView.playButtonIdentifier), "Play was never rendered")
+        XCTAssertFalse(everShown.contains(SourceDetailView.pauseButtonIdentifier), "Pause was never rendered")
         XCTAssertFalse(root.playback.fence.isHeld(audioURL))
     }
 
