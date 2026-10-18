@@ -26,9 +26,8 @@ use ohand_core::providers::self_hosted::{
     compatibility_boundary, declared_capabilities, text_interpretation_capability,
     SelfHostedAdapter, CHAT_COMPLETIONS_PATH, CHAT_VERIFIED_MODEL, LISTED_MODELS,
     MAX_COMPLETION_TOKENS, PHONE_EVIDENCE_ARTIFACT, PHONE_EVIDENCE_COLLECTED_AT, PHONE_EVIDENCE_ID,
-    SMOKE_ADAPTER_REVISION, SMOKE_EVIDENCE_ARTIFACT, SMOKE_EVIDENCE_COLLECTED_AT,
-    SMOKE_EVIDENCE_ID, WORKER_EVIDENCE_ARTIFACT, WORKER_EVIDENCE_COLLECTED_AT, WORKER_EVIDENCE_ID,
-    WORKER_PROBE_REVISION,
+    SMOKE_ADAPTER_REVISION, SMOKE_EVIDENCE, WORKER_EVIDENCE_ARTIFACT, WORKER_EVIDENCE_COLLECTED_AT,
+    WORKER_EVIDENCE_ID, WORKER_PROBE_REVISION,
 };
 use ohand_core::store::schema::{Clock as StoreClock, Database};
 use ohand_core::time::TimeContext;
@@ -369,45 +368,61 @@ fn worker_artifact_matches_the_cited_evidence_identifier_revision_and_time() {
 }
 
 #[test]
-fn smoke_artifact_matches_the_cited_identifier_revision_and_time_and_passed() {
-    let artifact = repository_json(SMOKE_EVIDENCE_ARTIFACT);
-    assert_eq!(artifact["evidence_id"], SMOKE_EVIDENCE_ID);
-    assert_eq!(
-        artifact["adapter_revision"]["commit"],
-        SMOKE_ADAPTER_REVISION
-    );
-    assert_eq!(artifact["adapter_revision"]["dirty"], false);
-    assert_eq!(artifact["collected_at"], SMOKE_EVIDENCE_COLLECTED_AT);
-    assert_eq!(artifact["model"], CHAT_VERIFIED_MODEL);
-    assert_eq!(artifact["max_tokens"], MAX_COMPLETION_TOKENS);
-    assert_eq!(artifact["configured_scheme"], "https");
-    assert_eq!(artifact["result"], "pass");
-    assert!(SMOKE_EVIDENCE_ARTIFACT.contains(SMOKE_EVIDENCE_ID));
-    let raw = &artifact["private_raw_evidence"];
-    assert_eq!(raw["run_id"], SMOKE_EVIDENCE_ID);
-    assert_eq!(
-        raw["file_name"],
-        format!("{SMOKE_EVIDENCE_ID}.raw.json").as_str()
-    );
-    assert!(raw["bytes"].as_u64().unwrap_or(0) > 0);
-    let digest = raw["sha256"].as_str().expect("raw evidence digest");
-    assert!(digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
-    assert!(raw["location"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("outside Git"));
-    let requests = artifact["requests"].as_array().expect("requests");
-    assert!(!requests.is_empty());
-    for request in requests {
-        assert_eq!(request["http_status"], 200);
-        assert_eq!(request["finish_reason"], "stop");
-        assert_eq!(request["message_role"], "assistant");
-        assert_eq!(request["dispatch_result"], "ok");
-        assert_eq!(request["conforms_to_output_schema_top_level"], true);
-        assert_eq!(request["mapped_to_validated_proposal"], true);
+fn every_supported_model_has_a_passing_semantic_smoke_artifact() {
+    assert!(SMOKE_EVIDENCE
+        .iter()
+        .any(|evidence| evidence.model == CHAT_VERIFIED_MODEL));
+    for evidence in SMOKE_EVIDENCE {
+        let artifact = repository_json(evidence.artifact);
+        assert_eq!(artifact["evidence_id"], evidence.id);
+        assert_eq!(
+            artifact["adapter_revision"]["commit"],
+            SMOKE_ADAPTER_REVISION
+        );
+        assert_eq!(artifact["adapter_revision"]["dirty"], false);
+        assert_eq!(artifact["collected_at"], evidence.collected_at);
+        assert_eq!(artifact["model"], evidence.model);
+        assert_eq!(artifact["max_tokens"], MAX_COMPLETION_TOKENS);
+        assert_eq!(artifact["configured_scheme"], "https");
+        assert_eq!(artifact["result"], "pass");
+        assert_eq!(artifact["failures"], json!([]));
+        assert!(evidence.artifact.contains(evidence.id));
+        let raw = &artifact["private_raw_evidence"];
+        assert_eq!(raw["run_id"], evidence.id);
+        assert_eq!(
+            raw["file_name"],
+            format!("{}.raw.json", evidence.id).as_str()
+        );
+        assert!(raw["bytes"].as_u64().unwrap_or(0) > 0);
+        let digest = raw["sha256"].as_str().expect("raw evidence digest");
+        assert!(digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert!(raw["location"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("outside Git"));
+        let requests = artifact["requests"].as_array().expect("requests");
+        assert_eq!(requests.len(), 3);
+        for request in requests {
+            assert_eq!(request["http_status"], 200);
+            assert_eq!(request["finish_reason"], "stop");
+            assert_eq!(request["message_role"], "assistant");
+            assert_eq!(request["dispatch_result"], "ok");
+            assert_eq!(request["conforms_to_output_schema_top_level"], true);
+            assert_eq!(request["mapped_to_validated_proposal"], true);
+            let semantic = &request["semantic"];
+            if request["name"] == "reminder-capture" {
+                assert_eq!(request["reminder_expected"], true);
+                assert_eq!(semantic["reminder_proposal_present"], true);
+                assert_eq!(semantic["reminder_quality"], "explicit");
+                assert_eq!(semantic["reminder_instant_matches_expected"], true);
+            } else {
+                assert_eq!(request["reminder_expected"], false);
+                assert_eq!(semantic["reminder_proposal_present"], false);
+            }
+        }
+        let text = artifact.to_string();
+        assert!(!text.contains("http://") && !text.contains("https://"));
     }
-    let text = artifact.to_string();
-    assert!(!text.contains("http://") && !text.contains("https://"));
 }
 
 #[test]
@@ -493,8 +508,9 @@ fn compatibility_boundary_names_the_tailnet_base_url_and_the_unverified_areas() 
         "tailnet hostname",
         "302",
         "Tailscale disconnected",
-        "five other listed models",
-        "adapter smoke",
+        "qwen3.5:122b, gpt-oss:120b and glm-5.3-flash",
+        "Observed failure of the previous request shape",
+        "adapter semantic smoke",
         "finish_reason",
     ] {
         assert!(boundary.contains(expected), "boundary mentions {expected}");
@@ -504,33 +520,38 @@ fn compatibility_boundary_names_the_tailnet_base_url_and_the_unverified_areas() 
 // ---- Capabilities ----
 
 #[test]
-fn verified_model_is_supported_and_cites_artifact_revision_and_time() {
-    let capability = text_capability(CHAT_VERIFIED_MODEL);
-    assert_eq!(capability.support, CapabilitySupport::Supported);
-    assert_eq!(
-        capability.structured_output,
-        StructuredOutputMode::JsonSchema
-    );
-    let evidence = capability
-        .evidence
-        .expect("supported capability has evidence");
-    for cited in [
-        SMOKE_EVIDENCE_ID,
-        SMOKE_EVIDENCE_ARTIFACT,
-        SMOKE_ADAPTER_REVISION,
-        SMOKE_EVIDENCE_COLLECTED_AT,
-        WORKER_EVIDENCE_ID,
-        WORKER_EVIDENCE_ARTIFACT,
-        WORKER_PROBE_REVISION,
-        WORKER_EVIDENCE_COLLECTED_AT,
-    ] {
-        assert!(evidence.contains(cited), "evidence cites {cited}");
+fn smoke_verified_models_are_supported_and_cite_artifact_revision_and_time() {
+    for smoke in SMOKE_EVIDENCE {
+        let capability = text_capability(smoke.model);
+        assert_eq!(capability.support, CapabilitySupport::Supported);
+        assert_eq!(
+            capability.structured_output,
+            StructuredOutputMode::JsonObject
+        );
+        let evidence = capability
+            .evidence
+            .expect("supported capability has evidence");
+        for cited in [
+            smoke.id,
+            smoke.artifact,
+            smoke.collected_at,
+            SMOKE_ADAPTER_REVISION,
+            WORKER_EVIDENCE_ID,
+            WORKER_EVIDENCE_ARTIFACT,
+            WORKER_PROBE_REVISION,
+            WORKER_EVIDENCE_COLLECTED_AT,
+        ] {
+            assert!(evidence.contains(cited), "evidence cites {cited}");
+        }
     }
 }
 
 #[test]
 fn listed_but_unprobed_and_unlisted_models_are_unverified_with_a_reason() {
-    for model in LISTED_MODELS.iter().filter(|m| **m != CHAT_VERIFIED_MODEL) {
+    for model in LISTED_MODELS
+        .iter()
+        .filter(|m| SMOKE_EVIDENCE.iter().all(|evidence| evidence.model != **m))
+    {
         let capability = text_capability(model);
         assert_eq!(capability.support, CapabilitySupport::Unverified, "{model}");
         assert!(capability.evidence.is_none());
@@ -572,7 +593,7 @@ fn profiles_for_every_listed_model_validate() {
 
 #[test]
 fn an_unverified_model_is_refused_before_any_transport_call() {
-    let unverified = builder_for("qwen3.8:27b").build().unwrap();
+    let unverified = builder_for("qwen3.5:122b").build().unwrap();
     let harness = Harness::with_profile(unverified, vec![Step::ok(PROPOSAL)]);
     let failure = failure_of(harness.run());
     assert_eq!(failure.kind, FailureKind::CapabilityUnavailable);

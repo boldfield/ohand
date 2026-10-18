@@ -1,7 +1,7 @@
 //! Live smoke run of `SelfHostedAdapter` against the configured Spark endpoint (V09).
 //!
 //! Ignored by default: it needs the worker-mounted provider configuration and network access.
-//! Run it with
+//! Run it with `OHAND_SMOKE_MODEL` (default: the verified model) and
 //! `OHAND_SMOKE_EVIDENCE_DIR=docs/validation/evidence/spark-adapter-smoke \
 //!  cargo test --test providers_self_hosted live_endpoint_smoke -- --ignored --nocapture`.
 //!

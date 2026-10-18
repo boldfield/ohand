@@ -1,0 +1,107 @@
+{
+  "adapter_revision": {
+    "commit": "d2d81c46f9fa60ac97e8b92b267d152e0700aee1",
+    "dirty": false
+  },
+  "collected_at": "2026-10-18T19:02:51Z",
+  "collection_context": "odonian-worker",
+  "configured_scheme": "https",
+  "evidence_id": "self-hosted-adapter-smoke-20261018T190251Z-d2d81c46",
+  "failures": [],
+  "max_tokens": 4096,
+  "model": "qwen3.8:27b",
+  "private_raw_evidence": {
+    "bytes": 25625,
+    "contents": "request and response bodies of every exchange; no endpoint address or credential",
+    "file_name": "self-hosted-adapter-smoke-20261018T190251Z-d2d81c46.raw.json",
+    "location": "private evidence directory of the collecting Odonian worker (OHAND_PRIVATE_EVIDENCE_DIR, default ~/.ohand-private-evidence), outside Git; mode 0600 in a 0700 directory",
+    "run_id": "self-hosted-adapter-smoke-20261018T190251Z-d2d81c46",
+    "sha256": "a22a4e41361e2458e333a38068c9252aed361c9ab3896addf388cad91c985c4f"
+  },
+  "request_shape": "adapter-built: interpretation prompt carrying the output contract, json_object response_format, reply validated locally; optional nulls treated as absent",
+  "requests": [
+    {
+      "conforms_to_output_schema_top_level": true,
+      "content_bytes": 262,
+      "curl_failure": null,
+      "dispatch_result": "ok",
+      "elapsed_ms": 43027,
+      "finish_reason": "stop",
+      "http_status": 200,
+      "mapped_to_validated_proposal": true,
+      "message_role": "assistant",
+      "name": "reminder-capture",
+      "proposal_keys": [
+        "item_type",
+        "operation",
+        "reminder_proposal",
+        "source_spans"
+      ],
+      "reminder_expected": true,
+      "response_bytes": 3227,
+      "semantic": {
+        "reminder_instant_matches_expected": true,
+        "reminder_proposal_present": true,
+        "reminder_quality": "explicit"
+      }
+    },
+    {
+      "conforms_to_output_schema_top_level": true,
+      "content_bytes": 99,
+      "curl_failure": null,
+      "dispatch_result": "ok",
+      "elapsed_ms": 13094,
+      "finish_reason": "stop",
+      "http_status": 200,
+      "mapped_to_validated_proposal": true,
+      "message_role": "assistant",
+      "name": "idea-capture",
+      "proposal_keys": [
+        "item_type",
+        "operation",
+        "source_spans"
+      ],
+      "reminder_expected": false,
+      "response_bytes": 1677,
+      "semantic": {
+        "reminder_instant_matches_expected": false,
+        "reminder_proposal_present": false,
+        "reminder_quality": null
+      }
+    },
+    {
+      "conforms_to_output_schema_top_level": true,
+      "content_bytes": 90,
+      "curl_failure": null,
+      "dispatch_result": "ok",
+      "elapsed_ms": 13007,
+      "finish_reason": "stop",
+      "http_status": 200,
+      "mapped_to_validated_proposal": true,
+      "message_role": "assistant",
+      "name": "plain-note-capture",
+      "proposal_keys": [
+        "item_type",
+        "operation",
+        "source_spans"
+      ],
+      "reminder_expected": false,
+      "response_bytes": 1570,
+      "semantic": {
+        "reminder_instant_matches_expected": false,
+        "reminder_proposal_present": false,
+        "reminder_quality": null
+      }
+    }
+  ],
+  "result": "pass",
+  "schema_version": 1,
+  "semantic_checks": "reminder capture: reminder_proposal with quality explicit and instant 2026-01-06T15:00 America/Chicago; idea and plain-note captures: no reminder_proposal",
+  "synthetic_context_time": "2026-01-05T09:00:00+00:00",
+  "transport": "curl subprocess standing in for the native https transport; certificate validation on, redirects not followed",
+  "unverified": [
+    "phone-context reachability of chat requests (owned by V08b)",
+    "models other than the one named above",
+    "endpoint credential validation (V08a: not enforced)"
+  ]
+}

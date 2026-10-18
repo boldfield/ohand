@@ -25,8 +25,8 @@
 //!   the endpoint is not reachable from this network, so it is reported as unavailable and the
 //!   capture stays queued.
 //!
-//! Model support is per model: only the model that answered this adapter's own request in the
-//! smoke run [`SMOKE_EVIDENCE_ID`] is `Supported`; see [`text_interpretation_capability`].
+//! Model support is per model: only a model with a passing semantic smoke artifact in
+//! [`SMOKE_EVIDENCE`] is `Supported`; see [`text_interpretation_capability`].
 
 use crate::interpretation::instructions::{output_schema, render_prompt};
 use crate::providers::contracts::{
@@ -47,16 +47,41 @@ pub const WORKER_PROBE_REVISION: &str = "22c47772849c77b3d3a5e2b03be87098690e738
 /// Collection time recorded by the V08a artifact.
 pub const WORKER_EVIDENCE_COLLECTED_AT: &str = "2026-10-08T09:39:09Z";
 
-/// Evidence identifier of the adapter smoke run: this adapter's own request, built from the real
-/// interpretation prompt and `output_schema()`, sent to the configured endpoint.
-pub const SMOKE_EVIDENCE_ID: &str = "self-hosted-adapter-smoke-20261009T145738Z-e45f02b4";
-/// Repository path of the sanitized smoke artifact.
-pub const SMOKE_EVIDENCE_ARTIFACT: &str =
-    "docs/validation/evidence/spark-adapter-smoke/self-hosted-adapter-smoke-20261009T145738Z-e45f02b4.json";
-/// Adapter build revision recorded by the smoke artifact.
-pub const SMOKE_ADAPTER_REVISION: &str = "e45f02b4cdec971bdd0e16cd162af60afe8a4a16";
-/// Collection time recorded by the smoke artifact.
-pub const SMOKE_EVIDENCE_COLLECTED_AT: &str = "2026-10-09T14:57:38Z";
+/// Adapter build revision of the semantic smoke runs below.
+pub const SMOKE_ADAPTER_REVISION: &str = "d2d81c46f9fa60ac97e8b92b267d152e0700aee1";
+
+/// One passing semantic smoke artifact for one model: the reminder capture yielded an `explicit`
+/// `reminder_proposal` at 2026-01-06T15:00 America/Chicago, and the idea and plain-note captures
+/// yielded none. The adapter's own request was sent, built from the real interpretation prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SmokeEvidence {
+    pub model: &'static str,
+    pub id: &'static str,
+    pub artifact: &'static str,
+    pub collected_at: &'static str,
+}
+
+/// Every model with a passing semantic smoke artifact, and so every `Supported` model.
+pub const SMOKE_EVIDENCE: [SmokeEvidence; 3] = [
+    SmokeEvidence {
+        model: "deepseek-flash-iq3:latest",
+        id: "self-hosted-adapter-smoke-20261018T190108Z-d2d81c46",
+        artifact: "docs/validation/evidence/spark-adapter-smoke/self-hosted-adapter-smoke-20261018T190108Z-d2d81c46.json",
+        collected_at: "2026-10-18T19:01:08Z",
+    },
+    SmokeEvidence {
+        model: "gpt-oss:20b",
+        id: "self-hosted-adapter-smoke-20261018T190141Z-d2d81c46",
+        artifact: "docs/validation/evidence/spark-adapter-smoke/self-hosted-adapter-smoke-20261018T190141Z-d2d81c46.json",
+        collected_at: "2026-10-18T19:01:41Z",
+    },
+    SmokeEvidence {
+        model: "qwen3.8:27b",
+        id: "self-hosted-adapter-smoke-20261018T190251Z-d2d81c46",
+        artifact: "docs/validation/evidence/spark-adapter-smoke/self-hosted-adapter-smoke-20261018T190251Z-d2d81c46.json",
+        collected_at: "2026-10-18T19:02:51Z",
+    },
+];
 
 /// Evidence identifier of the V08b phone-context artifact (revision 2).
 pub const PHONE_EVIDENCE_ID: &str = "spark-phone-2026-10-08";
@@ -90,11 +115,13 @@ pub fn compatibility_boundary() -> &'static [&'static str] {
     &[
         "Verified: https with certificate validation; GET /models and POST /chat/completions answer 200 in OpenAI-compatible form (worker context).",
         "Verified (probe): a strict json_schema response_format returned content matching a two-key schema for deepseek-flash-iq3:latest only.",
-        "Verified (adapter smoke, worker context, max_tokens 4096): the adapter's own request, carrying the interpretation output schema (optional properties included) as a strict json_schema, was answered 200 with an assistant message and finish_reason stop for three synthetic captures, and each reply mapped to a validated proposal. Calls took up to about 56 seconds; the smoke profile's timeout was 300 seconds.",
+        "Observed failure of the previous request shape (strict json_schema carrying output_schema(), coordinator replay 2026-10-18): on deepseek-flash-iq3:latest, qwen3.8:27b, gpt-oss:20b, gpt-oss:120b and qwen3.5:122b, 10 of 10 tries on the reminder capture produced no reminder_proposal, because Ollama's grammar for the schema effectively never emits optional properties. The earlier smoke run passed only because each reply mapped to a valid proposal; it did not check that the reminder was present.",
+        "Observed failure of the derived required-but-nullable strict json_schema (artifacts self-hosted-adapter-smoke-20261018T184843Z-25b37d9c and -20261018T184927Z-25b37d9c, gpt-oss:20b): the reminder returned at the right instant, but the model filled abstention on every capture, and an abstention with a proposal fails validation, so no reply mapped to a validated proposal.",
+        "Verified (adapter semantic smoke, worker context, max_tokens 4096): with a json_object response_format, the output contract in the prompt and local validation, the reminder capture yielded an explicit reminder_proposal at 2026-01-06T15:00 America/Chicago and the idea and plain-note captures yielded none, each reply mapping to a validated proposal, for deepseek-flash-iq3:latest, gpt-oss:20b and qwen3.8:27b (SMOKE_EVIDENCE). A null in an optional position is treated as absent before validation. Calls took up to about 108 seconds; the smoke profile's timeout was 300 seconds.",
         "Observed failure at max_tokens 1024 (artifacts self-hosted-adapter-smoke-20261009T145407Z-d1243e1f and -20261009T145540Z-d1243e1f): the reminder capture ended with finish_reason length and empty content because the model's separate reasoning output used the whole budget; the adapter reports InvalidOutput (not retriable). A request that needs more than the bound is therefore not interpreted; the capture itself stays durable.",
-        "Not verified: reminder_proposal and session_topic_proposal output (no smoke capture produced them), other finish_reason values, streaming, rate limits.",
+        "Not verified: session_topic_proposal output (no smoke capture produced it), ambiguous reminder phrasing, other finish_reason values, streaming, rate limits.",
         "Not verified: the credential is validated; the endpoint answered requests with and without it.",
-        "Not verified: chat requests from the phone context, and for the five other listed models.",
+        "Not verified: chat requests from the phone context, and for qwen3.5:122b, gpt-oss:120b and glm-5.3-flash.",
         "Off the home network the configured hostname answers 302 (POST included) toward the tailnet name; the phone base URL must be the tailnet hostname with Tailscale connected.",
         "Not verified: behaviour with Tailscale disconnected; the endpoint is unreachable and captures stay queued.",
     ]
@@ -102,18 +129,21 @@ pub fn compatibility_boundary() -> &'static [&'static str] {
 
 /// Capability a profile may declare for text interpretation with `model`.
 ///
-/// Only [`CHAT_VERIFIED_MODEL`] is `Supported`, citing the adapter smoke artifact (revision and
-/// collection time) and the V08a probe artifact. Other listed models and unlisted models are `Unverified` with a reason, so
+/// Only a model in [`SMOKE_EVIDENCE`] is `Supported`, citing its semantic smoke artifact (revision
+/// and collection time) and the V08a probe artifact. Other listed models and unlisted models are `Unverified` with a reason, so
 /// the dispatcher refuses to use them until evidence exists.
 pub fn text_interpretation_capability(model: &str, input_size_limit: usize) -> CapabilityMetadata {
-    let capability = if model == CHAT_VERIFIED_MODEL {
+    let smoke = SMOKE_EVIDENCE
+        .iter()
+        .find(|evidence| evidence.model == model);
+    let capability = if let Some(smoke) = smoke {
         CapabilityMetadata::supported(
             ProviderCapability::TextInterpretation,
             format!(
-                "{SMOKE_EVIDENCE_ID} ({SMOKE_EVIDENCE_ARTIFACT}), adapter revision \
-                 {SMOKE_ADAPTER_REVISION}, collected {SMOKE_EVIDENCE_COLLECTED_AT}; \
+                "{} ({}), adapter revision {SMOKE_ADAPTER_REVISION}, collected {}; \
                  {WORKER_EVIDENCE_ID} ({WORKER_EVIDENCE_ARTIFACT}), probe revision \
-                 {WORKER_PROBE_REVISION}, collected {WORKER_EVIDENCE_COLLECTED_AT}"
+                 {WORKER_PROBE_REVISION}, collected {WORKER_EVIDENCE_COLLECTED_AT}",
+                smoke.id, smoke.artifact, smoke.collected_at
             ),
         )
     } else if LISTED_MODELS.contains(&model) {
