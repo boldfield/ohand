@@ -1580,7 +1580,7 @@ public final class ServiceCompositionRoot {
 
     /// Returns once no reminder pass started after a job drain is executing. Await it after `shutDown()` when nothing
     /// may still be calling into the core.
-    func waitForReminderPasses() async {
+    public func waitForReminderPasses() async {
         await inFlightReminderPasses.waitUntilIdle()
     }
 
