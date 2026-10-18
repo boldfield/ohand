@@ -2601,6 +2601,26 @@ Acceptance:
 
 Source pointers: `ios/Tests/AppAssembly/AppServicesTests.swift:12-27`; `ios/AppAssembly/AppServices.swift:162` (`shutDown`); DS03's quiet authentication tests in the same file (`makeQuietServices`).
 
+Grant (2026-10-17, after the F20 worker's diagnosis): the cause is confirmed in the source.
+- `OhAndTests` runs inside the app (`TEST_HOST` is `OhAnd.app`, `ios/project.yml:106`).
+- `AppDelegate` (`ios/AppAssembly/AppDelegate.swift:12`) and `SceneDelegate` (`ios/AppAssembly/SceneDelegate.swift:17`) both call `launcher.launch()`.
+- As a result, real production services run in the same process as every unit test: launch recovery, the job runner, the live notification reconcile and the quiet authentication attempt. They use the simulator's real app storage.
+- `liveResultBufferCount` is process-wide, so the leak check sees their buffers.
+
+F20 may change the following:
+- `ios/AppAssembly/AppDelegate.swift`;
+- `ios/AppAssembly/SceneDelegate.swift`;
+- `AppLauncher` in `ios/AppAssembly/AppServices.swift`;
+- tests for these.
+
+The change:
+- When the process is hosting unit tests (`XCTestConfigurationFilePath` is set in the environment), the app never builds production services: `AppServices.production()` is not called and no launch work starts. The scene still gets a window, so hosted window tests such as `FullScreenLaunchTests` keep working.
+- The check is read in one place at the app's entry. Nothing else branches on it.
+- It cannot change a normal launch. UI-test and smoke launches run the app as its own process without that variable, so the smoke test and DS08's walkthrough still start real services.
+- A hosted test asserts that the host's launcher built no services during the test run.
+
+Acceptance 1 can be met with this source evidence plus a CI run. Acceptance 3 still applies: no settling delay, retry or tolerance, and no test-side shutdown of the host's services as a substitute.
+
 ## Original acceptance coverage
 
 The following original criteria remain required collectively across the replacement children. Child task acceptance above determines each individual stopping point.

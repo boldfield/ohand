@@ -3177,7 +3177,9 @@
       "title": "Stop the result-buffer leak check from failing on test order",
       "file_scope": [
         "ios/Tests/AppAssembly/AppServicesTests.swift",
-        "ios/AppAssembly/AppServices.swift"
+        "ios/AppAssembly/AppServices.swift",
+        "ios/AppAssembly/AppDelegate.swift",
+        "ios/AppAssembly/SceneDelegate.swift"
       ],
       "intent": "Find and remove the async work that leaves result buffers alive after a test teardown, without weakening the leak checks.",
       "acceptance": [
