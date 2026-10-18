@@ -1140,7 +1140,13 @@
       "parent": "U05",
       "title": "Add native credential setup and redacted connection checks",
       "file_scope": [
-        "app/provider-settings/"
+        "app/provider-settings/",
+        "ios/Services/Credentials/CredentialService.swift",
+        "ios/Services/Credentials/KeychainBoundary.swift",
+        "ios/Services/ProviderConfiguration/",
+        "ios/Tests/Credentials/",
+        "ios/Tests/ProviderConfiguration/",
+        "ios/Tests/AppAssembly/SettingsRootViewTests.swift"
       ],
       "intent": "Connect profile credential references to native secure entry/update/removal and an explicitly authorized connection test.",
       "acceptance": [
@@ -3177,7 +3183,9 @@
       "title": "Stop the result-buffer leak check from failing on test order",
       "file_scope": [
         "ios/Tests/AppAssembly/AppServicesTests.swift",
-        "ios/AppAssembly/AppServices.swift"
+        "ios/AppAssembly/AppServices.swift",
+        "ios/AppAssembly/AppDelegate.swift",
+        "ios/AppAssembly/SceneDelegate.swift"
       ],
       "intent": "Find and remove the async work that leaves result buffers alive after a test teardown, without weakening the leak checks.",
       "acceptance": [
