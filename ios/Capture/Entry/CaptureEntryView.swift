@@ -57,6 +57,10 @@ struct CaptureEntryView: View {
                 let spoken = CaptureMessages.message(for: acknowledgment) ?? model.message(for: acknowledgment)
                 UIAccessibility.post(notification: .announcement, argument: spoken)
             }
+            // A voice attempt that fails to start leaves the acknowledgment alone, so its notice hides the pill.
+            .onReceive(model.$voiceNotice) { voiceNotice in
+                if voiceNotice != nil { hideSavedPill() }
+            }
             .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
                 keyboardIsVisible = true
             }
@@ -158,7 +162,11 @@ struct CaptureEntryView: View {
             entryActionsAreEnabled: entryActionsAreEnabled,
             saveIsEnabled: model.textModel.canSave,
             focus: $composerIsFocused,
-            onMic: { if entryActionsAreEnabled { model.startRecording() } },
+            onMic: {
+                guard entryActionsAreEnabled else { return }
+                hideSavedPill()
+                model.startRecording()
+            },
             onSave: { if entryActionsAreEnabled, model.textModel.canSave { model.saveText() } },
             onDiscard: { model.cancelRecording() },
             onStop: { model.stopRecording() })

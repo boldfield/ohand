@@ -400,6 +400,27 @@ final class CaptureEntryViewTests: XCTestCase {
         XCTAssertNil(frames[CaptureEntryView.savedPillIdentifier], "the first save's timer does not bring it back")
     }
 
+    func testAVoiceAttemptThatFailsToStartHidesTheSavedPill() {
+        host(keyboardHeight: Self.standardPhoneKeyboardHeight)
+        textIngress.outcomes = [.saved(captureID: "text-capture-1", itemID: "item-1", alreadySaved: false)]
+        model.textModel.updateText("buy oat milk")
+        model.saveText()
+        settle()
+        XCTAssertNotNil(frames[CaptureEntryView.savedPillIdentifier], "the first capture is Saved")
+
+        voice.startResult = .failure(.microphoneDenied)
+        model.startRecording()
+        settle()
+        XCTAssertEqual(voice.startCount, 1)
+        XCTAssertEqual(model.recorderState, .idle, "nothing was recorded")
+        XCTAssertEqual(model.acknowledgment?.savedItemID, "item-1", "the start failure leaves the acknowledgment alone")
+        XCTAssertNotEqual(frame(CaptureEntryView.noticeIdentifier), .zero, "the start failure is stated")
+        XCTAssertNil(frames[CaptureEntryView.savedPillIdentifier], "Saved is never shown beside the start failure")
+
+        settle(for: CaptureEntryView.savedPillDuration)
+        XCTAssertNil(frames[CaptureEntryView.savedPillIdentifier], "the first save's timer does not bring it back")
+    }
+
     func testAFailedSaveKeepsTheTextAndIsShownBesideAStandingNotice() {
         model = makeModel(access: CaptureEntryAccess(protectedDataAvailable: false, readAuthorized: true))
         host(keyboardHeight: Self.standardPhoneKeyboardHeight)
