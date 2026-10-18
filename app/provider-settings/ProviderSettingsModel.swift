@@ -303,8 +303,9 @@ final class ProviderSettingsModel: ObservableObject {
             phase = .loaded
         } catch {
             guard thisGeneration == generation else { return }
-            if case ProviderConfigurationError.notAuthenticated = error { lock() }
-            else { phase = .failed(ProviderSettingsText.failure(error)) }
+            if case ProviderConfigurationError.notAuthenticated = error { lock(); return }
+            guard readScope() == .authenticated else { lock(); return }
+            phase = .failed(ProviderSettingsText.failure(error))
         }
     }
 
@@ -336,8 +337,7 @@ final class ProviderSettingsModel: ObservableObject {
             _ = try await controls.createProfile(request)
             // Committed: a stored version holds the reference, whatever happened to the screen meanwhile.
             credentials.releaseLease(reference: request.credentialReference)
-            guard thisSession == session else { return }
-            guard readScope() == .authenticated else { lock(); return }
+            guard mayPublish(from: thisSession) else { return }
             saveState = .saved
             credentialState = nil
             draft = ProviderSettingsDraft()
@@ -350,8 +350,7 @@ final class ProviderSettingsModel: ObservableObject {
                     leaveUnknownReferenceToTheSweep(namedReference, sameSession: thisSession == session)
                 }
             }
-            guard thisSession == session else { return }
-            if case ProviderConfigurationError.notAuthenticated = error { lock(); return }
+            guard mayPublish(from: thisSession, after: error) else { return }
             saveState = .failed(ProviderSettingsText.failure(error))
         }
     }
@@ -480,12 +479,10 @@ final class ProviderSettingsModel: ObservableObject {
         savedCredentialStates[profileVersion] = .working
         do {
             let reported = try await operation(profileVersion)
-            guard thisSession == session else { return }
-            guard readScope() == .authenticated else { lock(); return }
+            guard mayPublish(from: thisSession) else { return }
             savedCredentialStates[profileVersion] = reported ?? success
         } catch {
-            guard thisSession == session else { return }
-            if case ProviderConfigurationError.notAuthenticated = error { lock(); return }
+            guard mayPublish(from: thisSession, after: error) else { return }
             savedCredentialStates[profileVersion] = .failed(ProviderSettingsText.credentialFailure(error))
         }
     }
@@ -552,12 +549,10 @@ final class ProviderSettingsModel: ObservableObject {
         connectionStates[profileVersion] = .checking
         do {
             let outcome = try await controls.checkConnection(profileVersion: profileVersion)
-            guard thisSession == session else { return }
-            guard readScope() == .authenticated else { lock(); return }
+            guard mayPublish(from: thisSession) else { return }
             connectionStates[profileVersion] = .finished(outcome)
         } catch {
-            guard thisSession == session else { return }
-            if case ProviderConfigurationError.notAuthenticated = error { lock(); return }
+            guard mayPublish(from: thisSession, after: error) else { return }
             connectionStates[profileVersion] = .failed(ProviderSettingsText.failure(error))
         }
     }
@@ -582,15 +577,29 @@ final class ProviderSettingsModel: ObservableObject {
         defaultState = .working
         do {
             try await operation()
-            guard thisSession == session else { return }
-            guard readScope() == .authenticated else { lock(); return }
+            guard mayPublish(from: thisSession) else { return }
             defaultState = .defaultChanged
         } catch {
-            guard thisSession == session else { return }
-            if case ProviderConfigurationError.notAuthenticated = error { lock(); return }
+            guard mayPublish(from: thisSession, after: error) else { return }
             defaultState = .failed(ProviderSettingsText.failure(error))
         }
         await refresh()
+    }
+
+    /// Whether an answer that has just arrived may be shown: the session that asked is still on screen and still
+    /// authenticated. A relock since the call empties the screen instead, whatever the answer was.
+    private func mayPublish(from thisSession: Int) -> Bool {
+        guard thisSession == session else { return false }
+        guard readScope() == .authenticated else { lock(); return false }
+        return true
+    }
+
+    /// Whether a failure that has just arrived may be shown. Besides the checks above, a lapse the service itself
+    /// reported locks the screen; any other failure is shown only if the session is still authenticated now.
+    private func mayPublish(from thisSession: Int, after error: Error) -> Bool {
+        guard thisSession == session else { return false }
+        if case ProviderConfigurationError.notAuthenticated = error { lock(); return false }
+        return mayPublish(from: thisSession)
     }
 
     private func lock() {

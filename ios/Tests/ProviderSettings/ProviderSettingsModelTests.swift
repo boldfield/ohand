@@ -527,6 +527,24 @@ final class ProviderSettingsModelTests: XCTestCase {
         XCTAssertTrue(model.connectionStates.isEmpty)
     }
 
+    func testARelockDuringACheckThatThenFailsEmptiesTheScreenInsteadOfReporting() async {
+        let controls = FakeProviderSettingsControls(listing: Self.twoVersions)
+        let model = makeModel(controls)
+        await model.refresh()
+        let version = model.listing!.profiles.flatMap(\.versions).first { $0.profileVersion == "hosted-v1" }!
+        controls.checkResult = .failure(
+            ProviderConfigurationError.core(CoreFailure(errorClass: .transient, code: "sender_busy", message: "")))
+        controls.during = { [unowned self] in scope = .captureOnly }
+
+        await model.checkConnection(version)
+
+        XCTAssertEqual(controls.checked, ["hosted-v1"])
+        XCTAssertEqual(model.phase, .locked, "a failure that arrives after a relock locks rather than reports")
+        XCTAssertTrue(model.connectionStates.isEmpty)
+        XCTAssertNil(model.listing)
+        XCTAssertEqual(model.draft, ProviderSettingsDraft())
+    }
+
     // MARK: unsaved secrets are not orphaned
 
     private func storedModel() async -> ProviderSettingsModel {
@@ -732,12 +750,70 @@ final class ProviderSettingsModelTests: XCTestCase {
                 XCTAssertEqual(controls.created.count, 1, label)
                 XCTAssertEqual(credentials.deleted, [], "\(label): the secret is not deleted")
                 XCTAssertEqual(credentials.released, [Self.reference], "\(label): its lease ends for the sweep")
+                XCTAssertNil(model.saveState, "\(label): no failure is shown on a screen that was left or locked")
+                XCTAssertNil(model.listing, label)
+                XCTAssertEqual(model.draft, ProviderSettingsDraft(), label)
+                if interruption == "relocked" {
+                    XCTAssertEqual(model.phase, .locked, "\(label): the relock is honored on the failure path too")
+                }
 
                 scope = .authenticated
                 await model.refresh()
                 XCTAssertEqual(credentials.deleted, [], "\(label): a reload deletes nothing itself")
             }
         }
+    }
+
+    func testARelockDuringASaveTheCoreThenRefusesEmptiesTheScreenAndDeletesTheUnsavedSecret() async {
+        let controls = FakeProviderSettingsControls(listing: Self.twoVersions)
+        controls.createResult = .failure(
+            ProviderConfigurationError.core(CoreFailure(errorClass: .permanent, code: "model_invalid", message: "")))
+        let model = makeModel(controls)
+        await model.refresh()
+        storeAndNameSecret(model)
+        controls.suspendCreate = { [unowned self] in scope = .captureOnly }
+
+        await model.save()
+
+        XCTAssertEqual(controls.created.count, 1)
+        XCTAssertEqual(model.phase, .locked, "a refusal that arrives after a relock locks rather than reports")
+        XCTAssertNil(model.saveState)
+        XCTAssertNil(model.listing)
+        XCTAssertEqual(model.draft, ProviderSettingsDraft())
+        XCTAssertEqual(
+            credentials.deleted, [Self.reference], "nothing saved it and the draft is gone, so it is deleted")
+        XCTAssertEqual(credentials.released, [])
+    }
+
+    func testARelockDuringAFailingReloadLocksInsteadOfReportingTheFailure() async {
+        let controls = FakeProviderSettingsControls(listing: Self.twoVersions)
+        let model = makeModel(controls)
+        await model.refresh()
+        XCTAssertEqual(model.phase, .loaded)
+        controls.listing = .failure(ProviderConfigurationError.unreadable)
+        controls.during = { [unowned self] in scope = .captureOnly }
+
+        await model.refresh()
+
+        XCTAssertEqual(model.phase, .locked)
+        XCTAssertNil(model.listing, "the earlier listing is not kept behind a failure notice")
+    }
+
+    func testARelockDuringAFailingDefaultChangeEmptiesTheScreen() async {
+        let controls = FakeProviderSettingsControls(listing: Self.twoVersions)
+        controls.setDefaultResult = .failure(
+            ProviderConfigurationError.core(CoreFailure(errorClass: .transient, code: "storage_busy", message: "")))
+        let model = makeModel(controls)
+        await model.refresh()
+        let version = model.listing!.profiles.flatMap(\.versions).first { $0.profileVersion == "hosted-v1" }!
+        controls.during = { [unowned self] in scope = .captureOnly }
+
+        await model.makeDefault(version)
+
+        XCTAssertEqual(controls.defaultsSet, ["hosted-v1"])
+        XCTAssertEqual(model.phase, .locked)
+        XCTAssertNil(model.defaultState)
+        XCTAssertNil(model.listing)
     }
 
     func testOnlyAFailureTheCoreIssuedOrARefusalBeforeSubmissionIsADefiniteRefusal() {
@@ -871,6 +947,35 @@ final class ProviderSettingsModelTests: XCTestCase {
         XCTAssertEqual(model.phase, .locked)
         XCTAssertTrue(model.savedCredentialStates.isEmpty)
         XCTAssertNil(model.listing)
+    }
+
+    func testARelockDuringAStoredVersionActionThatThenFailsEmptiesTheScreen() async throws {
+        let actions: [(String, @MainActor (ProviderSettingsModel, ProviderProfileListAnswer.Version) async -> Void)] = [
+            ("replace", { await $0.replaceSavedCredential(Self.syntheticSecret, for: $1) }),
+            ("check", { await $0.checkSavedCredential($1) }),
+            ("remove", { await $0.removeSavedCredential($1) }),
+        ]
+        for (name, act) in actions {
+            scope = .authenticated
+            let credentials = FakeProviderSettingsCredentials()
+            credentials.replaceByVersionResult = .failure(CredentialError.storage(.update, -25299))
+            credentials.statusByVersionResult = .failure(CredentialError.storage(.status, -25299))
+            credentials.removeByVersionResult = .failure(CredentialError.storage(.delete, -25299))
+            credentials.duringByVersion = { [unowned self] in scope = .captureOnly }
+            let model = ProviderSettingsModel(
+                controls: FakeProviderSettingsControls(listing: Self.twoVersions), credentials: credentials,
+                sweep: sweep, readScope: { [unowned self] in scope })
+            await model.refresh()
+            let hosted = try hostedVersion(model)
+
+            await act(model, hosted)
+
+            XCTAssertEqual(
+                model.phase, .locked, "\(name): a failure that arrives after a relock locks rather than reports")
+            XCTAssertTrue(model.savedCredentialStates.isEmpty, name)
+            XCTAssertNil(model.listing, name)
+            XCTAssertEqual(model.draft, ProviderSettingsDraft(), name)
+        }
     }
 
     func testACapturelessSessionNeverReachesTheStoredVersionOperations() async throws {
