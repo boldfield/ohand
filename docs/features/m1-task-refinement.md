@@ -2071,6 +2071,39 @@ Dependencies: U05a, U01f (credential operations by profile version).
 
 Rework (coordinator, 2026-10-17, after PR #267 round 1): use U01f's operations to replace, check and remove the credential of a saved profile version. A secret stored for a draft must never be orphaned. Either defer the Keychain add until the profile saves, or delete a reference this screen added but never saved when the draft is cleared, abandoned, edited or the session relocks. Test whichever is chosen. Reject a secret with leading or trailing whitespace instead of trimming it. The view tests must cover: the secret field emptied after store success and failure, on disappear and on leaving the foreground; the secret never in `renderReporter` or the accessibility value. Real-core cases must cover a stored-then-checked secret, a removed secret reporting `credentialMissing`, and an invalid reference reported redacted.
 
+Grant (coordinator, 2026-10-17, after PR #283 round 1; posted on the PR): replace the durable reference journal with a Keychain sweep. Five review rounds found new crash windows in keeping a separate journal in step with saves. A sweep has no second record to drift.
+
+- **List.** `CredentialService` gains a reference listing:
+  - one `SecItemCopyMatching` on its service name, with `kSecMatchLimitAll` and `kSecReturnAttributes`, never `kSecReturnData`, so no secret bytes are read;
+  - it returns the account names, which are the references;
+  - a listing failure, including the device not yet being unlocked since restart, is an error, never an empty list.
+- **Lease.** `CredentialService` keeps an in-process lease set, guarded by a lock.
+  - `addCredential` leases the new reference before the Keychain insert.
+  - The caller releases the lease only after the core has committed a profile that holds the reference, or after deleting the secret.
+  - A dead process's leases vanish with it, which is correct.
+- **Sweep.** A sweep in `ios/Services/ProviderConfiguration/` runs in this order:
+  1. list the Keychain references K;
+  2. read the leases L;
+  3. read every reference any profile version holds, revoked ones included, plus the reset claims (the core's `profile_credentials` and `credential_claims`).
+
+  It then deletes K minus all of those. This order is load-bearing:
+  - a reference added after step 1 is not in K;
+  - a save that commits and releases its lease between steps 2 and 3 is caught at step 3.
+
+  It skips the whole pass while a reset is pending, and does nothing if either listing fails.
+- **Trigger.** The sweep runs when the provider settings screen loads, before it accepts a save. That screen is the only creator of references, so each visit cleans up after any earlier interrupted run. The root's launch order is not changed.
+- **Removed.** `UserDefaultsReferenceJournal`, `ProviderSettingsPendingSave` reconciliation and journal-based restart cleanup. A draft cleared, abandoned, edited away or relocked still deletes its reference at once, best effort. The sweep is the backstop.
+
+Owned-path additions: the listing and lease in `ios/Services/Credentials/CredentialService.swift` and `KeychainBoundary.swift`; the sweep under `ios/Services/ProviderConfiguration/`; tests under `ios/Tests/Credentials/` and `ios/Tests/ProviderConfiguration/`; and the one-line DS06 call site in `ios/Tests/AppAssembly/SettingsRootViewTests.swift`, needed to compile against the new initializer.
+
+Required tests:
+- two interrupted saves of the same profile with exactly one committed: after a restart, the sweep keeps the committed secret and deletes the other;
+- an interruption at each step of a save: before the insert, after the insert, during the core commit, and after commit but before the lease release;
+- a sweep racing a save in the same process deletes nothing live;
+- a listing failure deletes nothing;
+- a pending reset skips the pass;
+- a revoked version's reference is kept.
+
 Acceptance:
 
 1. Secret input goes directly to the native credential service, is cleared promptly, and is never rendered back into a webview, persisted UI state or diagnostic output.
