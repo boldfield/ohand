@@ -2538,6 +2538,21 @@ Acceptance:
 2. The job uploads the screenshots as an artifact with `retention-days: 7`. A screen the walkthrough cannot reach fails the job, not just the screenshot.
 3. The exact-head CI run is linked, along with a list of the screenshots it produced.
 
+Grant (2026-10-17, after DS06 landed): DS06 made the Settings rows and the Audio screen's Export row untappable, and this walkthrough found it. In run 39078862072, tapping "Daily prompt, Off" opened nothing for 90 seconds.
+
+The cause is `DSRow` (`app/design-system/DSSurfaces.swift:80`). It is always a `Button`, with a no-op default action. Used as a `NavigationLink` label, the inner button took the tap. To stop that, DS06 put `.allowsHitTesting(false)` on the label (`ios/AppAssembly/ManagementCatalog.swift:256`, `app/data-settings/RetentionSettingsView.swift:92`), which removes the link's hit area entirely.
+
+DS08 fixes this in the same PR, and the walkthrough is the regression test:
+
+- `DSRow` renders without a `Button` when it has no action, or a label-only row is added for link labels. The whole row, padding included, is the hit area.
+- Both `.allowsHitTesting(false)` modifiers are removed. No row inside a `NavigationLink` label contains a `Button`.
+- The walkthrough taps each Settings row and the Export row, and fails if that row's screen does not open.
+- The existing DS06 and design-system tests still pass. Run 39078862072 counts as the failing run without the fix; link it beside the passing run with the fix.
+
+Owned-path additions: `DSRow` in `app/design-system/DSSurfaces.swift`, the link label in `ios/AppAssembly/ManagementCatalog.swift`, the Export link label in `app/data-settings/RetentionSettingsView.swift`, and tests for these.
+
+The `AppServicesTests` "no result buffer leaks" failure in the same run is not caused by DS08; it is F20. DS08 does not change that test. If it fails again, rerun the job and say so in the PR.
+
 ### DS09
 
 Restyle Export
@@ -2552,6 +2567,39 @@ Acceptance:
 
 1. Export has a serif title, one grouped section for what is exported and one for the action, a primary export button and one footer line. The full explanation goes in an info sheet.
 2. Every export behaviour and authentication test passes: the authenticated share lifecycle and the share sheet are unchanged. The layout passes the design checklist. The exact-head macOS CI run is linked.
+
+### F20
+
+Stop the result-buffer leak check from failing on test order
+
+`AppServicesTests` snapshots `CoreHandle.liveResultBufferCount`, a process-wide counter, in `setUpWithError`. In `tearDownWithError` it requires the counter to be back at that baseline (`ios/Tests/AppAssembly/AppServicesTests.swift:17`, `:25`).
+
+DS08's run 39078862072 (head b45727f) changes no app or test code, yet `testProductionServicesResolveTheRealAdaptersAndTheLifecycleModule` failed with `("0") is not equal to ("2") - no result buffer leaks`. Two buffers were alive when the test started and gone by its end. So something earlier in the suite creates or holds result buffers after its own teardown has run. The likely culprit is async work that outlives `AppServices.shutDown()` (`ios/AppAssembly/AppServices.swift:162`): a `Task`, a `.task` load, a quiet authentication attempt, or a notification reconcile. The failure is intermittent and can fail any native PR. Found by the coordinator on 2026-10-17.
+
+Owned paths:
+- `ios/Tests/AppAssembly/AppServicesTests.swift`;
+- the test file of the test that leaves the buffers behind;
+- if the cause is production work that outlives shutdown: `AppServices.shutDown` and the cancellation in the service that owns that work.
+
+Dependencies: none.
+
+Acceptance:
+
+1. **Diagnosis before change.** The PR names the test and the work that creates or holds result buffers after that test's teardown. Evidence is one of:
+   - per-test counter values at setup and teardown, in the failing order;
+   - a reproduction using `-only-testing` in the failing order, or using `-test-iterations` or `-run-tests-until-failure`.
+
+   A cause it cannot confirm is labelled as a hypothesis.
+2. The fix removes the cause.
+   - If production work outlives `shutDown()`, `shutDown()` cancels it, and nothing calls into the core after `shutDown()` returns. A test shows this.
+   - If a test only fails to wait for its own work, that test waits for it before teardown.
+3. The leak checks are not weakened:
+   - both counters are still compared for exact equality in teardown;
+   - there is no settling delay, retry or tolerance around either snapshot;
+   - no test is skipped, reordered or split out to hide the failure.
+4. It holds under repetition. A CI run passes that repeats the involved classes at least five times in the failing order. A temporary workflow commit is fine for this: link its run, then remove the commit from the final branch. The normal exact-head macOS CI run is also linked, and `make check` passes.
+
+Source pointers: `ios/Tests/AppAssembly/AppServicesTests.swift:12-27`; `ios/AppAssembly/AppServices.swift:162` (`shutDown`); DS03's quiet authentication tests in the same file (`makeQuietServices`).
 
 ## Original acceptance coverage
 
