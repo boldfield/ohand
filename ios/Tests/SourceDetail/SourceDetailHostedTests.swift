@@ -183,10 +183,62 @@ final class SourceDetailHostedTests: XCTestCase {
         XCTAssertFalse(onScreen.contains(SourceDetailView.currentTextIdentifier))
     }
 
+    func testTheScreenFitsCompactAndRegularWidthInBothAppearancesAndAtTheLargestText() throws {
+        let (itemID, captureID) = try saveCapture()
+        try correctText(itemID: itemID, to: "synthetic corrected words")
+        _ = try seedAudio(captureID: captureID)
+        let layouts: [(size: CGSize, sizeClass: UserInterfaceSizeClass)] = [
+            (CGSize(width: 390, height: 844), .compact), (CGSize(width: 700, height: 900), .regular),
+        ]
+        let identifiers = [
+            SourceDetailView.currentTextIdentifier, SourceDetailView.sectionIdentifier(.original),
+            SourceDetailView.sectionIdentifier(.correction), SourceDetailView.playButtonIdentifier,
+        ]
+        for layout in layouts {
+            for style in [UIUserInterfaceStyle.light, .dark] {
+                for category in [ContentSizeCategory.large, .accessibilityExtraExtraExtraLarge] {
+                    let label = "\(layout.sizeClass) \(style == .dark ? "dark" : "light") \(category)"
+                    var frames: [String: CGRect] = [:]
+                    let model = SourceDetailModel.assembled(itemID: itemID, root: root)
+                    let screen = NavigationStack {
+                        SourceDetailView(model: model, layoutReporter: { id, frame in frames[id] = frame })
+                    }
+                    .environment(\.horizontalSizeClass, layout.sizeClass)
+                    .environment(\.sizeCategory, category)
+                    host(AnyView(screen), size: layout.size, style: style)
+                    settle { identifiers.allSatisfy { frames[$0].map { !$0.isEmpty } ?? false } }
+
+                    XCTAssertEqual(
+                        retainedWindow?.rootViewController?.traitCollection.userInterfaceStyle, style, label)
+                    for identifier in identifiers {
+                        let frame = try XCTUnwrap(frames[identifier], "\(identifier) is laid out, \(label)")
+                        XCTAssertGreaterThanOrEqual(frame.minX, 0, "\(identifier) is not clipped, \(label)")
+                        XCTAssertLessThanOrEqual(
+                            frame.maxX, layout.size.width, "\(identifier) is not clipped, \(label)")
+                    }
+                    let original = try XCTUnwrap(frames[SourceDetailView.sectionIdentifier(.original)])
+                    let correction = try XCTUnwrap(frames[SourceDetailView.sectionIdentifier(.correction)])
+                    XCTAssertLessThanOrEqual(original.maxY, correction.minY, "the sections do not overlap, \(label)")
+                    let play = try XCTUnwrap(frames[SourceDetailView.playButtonIdentifier])
+                    XCTAssertGreaterThanOrEqual(play.height, 44, "play is a full touch target, \(label)")
+                    XCTAssertGreaterThanOrEqual(play.minY, correction.maxY, "play sits below the text, \(label)")
+                    let margin = DSSpacing.sideMargin(for: layout.sizeClass)
+                    XCTAssertGreaterThanOrEqual(original.minX, margin, "the card keeps the side margin, \(label)")
+                    retainedWindow?.isHidden = true
+                    retainedWindow = nil
+                    settle { true }
+                }
+            }
+        }
+    }
+
     // MARK: helpers
 
-    private func host(_ view: AnyView) {
-        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+    private func host(
+        _ view: AnyView, size: CGSize = CGSize(width: 390, height: 844), style: UIUserInterfaceStyle = .unspecified
+    ) {
+        let window = UIWindow(frame: CGRect(origin: .zero, size: size))
+        window.overrideUserInterfaceStyle = style
         window.rootViewController = UIHostingController(rootView: view)
         window.makeKeyAndVisible()
         retainedWindow = window

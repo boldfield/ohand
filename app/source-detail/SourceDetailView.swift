@@ -43,26 +43,41 @@ struct SourceDetailView: View {
     @ObservedObject var model: SourceDetailModel
     /// Told when an identified element comes on or goes off the screen; tests use it to check what is rendered.
     var renderReporter: ((String, Bool) -> Void)?
+    /// Told where an identified element sits, in window coordinates; layout tests use it to check for clipping.
+    var layoutReporter: ((String, CGRect) -> Void)?
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.dismiss) private var dismiss
+
+    private var sideMargin: CGFloat { DSSpacing.sideMargin(for: horizontalSizeClass) }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                if let content = model.content {
-                    details(content)
-                    textSections(content)
-                    audioControl
-                    history(content)
-                } else if let failure = model.failure {
-                    notice(Self.text(for: failure), identifier: Self.identifier(for: failure))
-                } else {
-                    notice("Loading…", identifier: Self.loadingIdentifier)
+        VStack(alignment: .leading, spacing: DSSpacing.sm) {
+            header
+            ScrollView {
+                VStack(alignment: .leading, spacing: DSSpacing.lg) {
+                    if let content = model.content {
+                        detailCard(content)
+                        history(content)
+                    } else if let failure = model.failure {
+                        emptyState(
+                            title: Self.title(for: failure), message: Self.text(for: failure),
+                            identifier: Self.identifier(for: failure))
+                    } else {
+                        ProgressView()
+                            .tint(DSColor.accent.color)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, DSSpacing.xl)
+                            .accessibilityLabel("Loading")
+                            .reported(Self.loadingIdentifier, renderReporter, layoutReporter)
+                    }
                 }
+                .padding(.bottom, DSSpacing.lg)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding()
         }
-        .navigationTitle("Item")
-        .navigationBarTitleDisplayMode(.inline)
+        .padding(.horizontal, sideMargin)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(DSColor.surface0.color.ignoresSafeArea())
+        .toolbar(.hidden, for: .navigationBar)
         .task { await model.load() }
         .onDisappear { model.close() }
         .task {
@@ -71,6 +86,22 @@ struct SourceDetailView: View {
                 try? await Task.sleep(nanoseconds: 500_000_000)
                 model.checkSession()
             }
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: DSSpacing.sm) {
+            DSGlassButton(systemName: "chevron.left", accessibilityLabel: "Back") { dismiss() }
+            Spacer(minLength: 0)
+        }
+        .padding(.top, DSSpacing.xs)
+    }
+
+    private static func title(for failure: SourceDetailFailure) -> String {
+        switch failure {
+        case .locked: return "Locked"
+        case .notFound: return "Not here"
+        case .unreadable: return "Couldn't open"
         }
     }
 
@@ -90,49 +121,113 @@ struct SourceDetailView: View {
         }
     }
 
-    private func notice(_ text: String, identifier: String) -> some View {
-        Text(text)
-            .font(.body)
-            .foregroundColor(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
-            .reported(identifier, renderReporter)
+    /// The design's empty-state pattern: the Mark in a faint tint, a serif line and one muted line.
+    private func emptyState(title: String, message: String, identifier: String) -> some View {
+        VStack(spacing: DSSpacing.xs) {
+            DSMark(size: 88, color: DSColor.tint.color)
+            Text(title)
+                .font(DSFont.wordmark)
+                .foregroundColor(DSColor.ink.color)
+            Text(message)
+                .font(DSFont.footer)
+                .foregroundColor(DSColor.inkMuted.color)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, DSSpacing.xl)
+        .accessibilityElement(children: .combine)
+        .reported(identifier, renderReporter, layoutReporter)
+    }
+
+    /// The item as one card: type chip and date, the words in force in serif, where they came from, then playback.
+    private func detailCard(_ content: SourceDetailContent) -> some View {
+        DSCard(padding: DSSpacing.md) {
+            VStack(alignment: .leading, spacing: DSSpacing.md) {
+                details(content)
+                if let current = content.currentText {
+                    Text(current)
+                        .font(DSFont.detailSerif)
+                        .foregroundColor(DSColor.ink.color)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .reported(Self.currentTextIdentifier, renderReporter, layoutReporter)
+                }
+                textSections(content)
+                audioControl
+            }
+        }
     }
 
     private func details(_ content: SourceDetailContent) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if let capturedAt = content.capturedAt {
-                Text("Captured \(capturedAt.formatted(date: .abbreviated, time: .shortened))")
+        VStack(alignment: .leading, spacing: DSSpacing.xs) {
+            // Side by side when they fit; stacked at the largest text sizes so neither is clipped.
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: DSSpacing.xs) { typeAndDate(content) }
+                VStack(alignment: .leading, spacing: DSSpacing.xs) { typeAndDate(content) }
             }
-            Text([content.typeLabel, content.scopeName, content.lifecycleLabel].compactMap { $0 }.joined(separator: " · "))
-            if let topic = content.sessionTopic { Text("Session topic: \(topic)") }
+            Text(
+                ([content.scopeName, content.lifecycleLabel] + [content.sessionTopic.map { "Topic: \($0)" }])
+                    .compactMap { $0 }.joined(separator: " · "))
+                .font(DSFont.footer)
+                .foregroundColor(DSColor.inkMuted.color)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .font(.subheadline)
-        .foregroundColor(.secondary)
-        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder private func typeAndDate(_ content: SourceDetailContent) -> some View {
+        if let typeLabel = content.typeLabel {
+            DSChip(title: typeLabel)
+                .allowsHitTesting(false)
+                .accessibilityRemoveTraits(.isButton)
+        }
+        if let capturedAt = content.capturedAt {
+            Text(capturedAt.formatted(date: .abbreviated, time: .shortened))
+                .font(DSFont.footer)
+                .foregroundColor(DSColor.inkMuted.color)
+        }
     }
 
     @ViewBuilder private func textSections(_ content: SourceDetailContent) -> some View {
         if content.sections.isEmpty {
-            notice(Self.noTextText, identifier: Self.noTextIdentifier)
+            Text(Self.noTextText)
+                .font(DSFont.footer)
+                .foregroundColor(DSColor.inkMuted.color)
+                .fixedSize(horizontal: false, vertical: true)
+                .reported(Self.noTextIdentifier, renderReporter, layoutReporter)
         } else {
-            if let current = content.currentText {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Current text").font(.headline)
-                    Text(current).fixedSize(horizontal: false, vertical: true)
-                }
-                .accessibilityElement(children: .combine)
-                .reported(Self.currentTextIdentifier, renderReporter)
-            }
-            ForEach(content.sections) { section in
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(Self.sectionTitle(section.kind)).font(.headline)
-                    Text(section.text).fixedSize(horizontal: false, vertical: true)
-                    if let provenance = section.provenance {
-                        Text(provenance).font(.footnote).foregroundColor(.secondary)
+            VStack(alignment: .leading, spacing: DSSpacing.xs) {
+                Text("What you wrote")
+                    .font(DSFont.sectionTitle)
+                    .foregroundColor(DSColor.ink.color)
+                    .accessibilityAddTraits(.isHeader)
+                VStack(alignment: .leading, spacing: DSSpacing.sm) {
+                    ForEach(content.sections) { section in
+                        VStack(alignment: .leading, spacing: DSSpacing.xxs) {
+                            Text(Self.sectionTitle(section.kind))
+                                .font(DSFont.groupHeading)
+                                .foregroundColor(DSColor.inkMuted.color)
+                            Text(section.text)
+                                .font(DSFont.body)
+                                .foregroundColor(DSColor.ink.color)
+                                .fixedSize(horizontal: false, vertical: true)
+                            if let provenance = section.provenance {
+                                Text(provenance)
+                                    .font(DSFont.footer)
+                                    .foregroundColor(DSColor.inkMuted.color)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityElement(children: .combine)
+                        .reported(Self.sectionIdentifier(section.kind), renderReporter, layoutReporter)
                     }
                 }
-                .accessibilityElement(children: .combine)
-                .reported(Self.sectionIdentifier(section.kind), renderReporter)
+                .padding(DSSpacing.sm)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: DSRadius.field, style: .continuous)
+                        .fill(DSColor.surface2.color))
             }
         }
     }
@@ -143,31 +238,38 @@ struct SourceDetailView: View {
             EmptyView()
         case .available, .paused:
             Button { Task { await model.play() } } label: { Label("Play audio", systemImage: "play.fill") }
-                .reported(Self.playButtonIdentifier, renderReporter)
+                .buttonStyle(DSPillButtonStyle(style: .secondary))
+                .reported(Self.playButtonIdentifier, renderReporter, layoutReporter)
         case .playing:
             Button { model.pause() } label: { Label("Pause audio", systemImage: "pause.fill") }
-                .reported(Self.pauseButtonIdentifier, renderReporter)
+                .buttonStyle(DSPillButtonStyle(style: .secondary))
+                .reported(Self.pauseButtonIdentifier, renderReporter, layoutReporter)
         case .removed, .unplayable, .locked:
             if let text = Self.audioNotice(for: model.audio) {
-                Label(text, systemImage: "speaker.slash")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .reported(Self.audioNoticeIdentifier, renderReporter)
+                HStack(alignment: .top, spacing: DSSpacing.sm) {
+                    DSIconTile(systemName: "speaker.slash")
+                    Text(text)
+                        .font(DSFont.footer)
+                        .foregroundColor(DSColor.inkMuted.color)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .accessibilityElement(children: .combine)
+                .reported(Self.audioNoticeIdentifier, renderReporter, layoutReporter)
             }
         }
     }
 
     @ViewBuilder private func history(_ content: SourceDetailContent) -> some View {
         if !content.history.isEmpty {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("History").font(.headline)
+            DSGroupedSection(
+                title: "History", footer: content.historyTruncated ? "Older changes are not shown." : nil
+            ) {
                 ForEach(content.history) { row in
-                    Text(row.happenedAt.map { "\(row.summary) · \($0.formatted(date: .abbreviated, time: .shortened))" } ?? row.summary)
-                        .font(.footnote)
-                }
-                if content.historyTruncated {
-                    Text("Older changes are not shown.").font(.footnote).foregroundColor(.secondary)
+                    DSRow(
+                        label: row.summary,
+                        value: row.happenedAt?.formatted(date: .abbreviated, time: .shortened),
+                        showsChevron: false)
                 }
             }
         }
@@ -175,10 +277,18 @@ struct SourceDetailView: View {
 }
 
 private extension View {
-    func reported(_ identifier: String, _ reporter: ((String, Bool) -> Void)?) -> some View {
+    func reported(
+        _ identifier: String, _ reporter: ((String, Bool) -> Void)?, _ layoutReporter: ((String, CGRect) -> Void)?
+    ) -> some View {
         accessibilityIdentifier(identifier)
             .onAppear { reporter?(identifier, true) }
             .onDisappear { reporter?(identifier, false) }
+            .background(
+                GeometryReader { proxy in
+                    Color.clear
+                        .onAppear { layoutReporter?(identifier, proxy.frame(in: .global)) }
+                        .onChange(of: proxy.frame(in: .global)) { frame in layoutReporter?(identifier, frame) }
+                })
     }
 }
 
@@ -187,10 +297,13 @@ struct SourceDetailScreen: View {
     @StateObject private var model: SourceDetailModel
     private let renderReporter: ((String, Bool) -> Void)?
 
-    init(itemID: String, renderReporter: ((String, Bool) -> Void)? = nil, makeModel: (String) -> SourceDetailModel) {
+    init(
+        itemID: String, renderReporter: ((String, Bool) -> Void)? = nil,
+        makeModel: @escaping (String) -> SourceDetailModel
+    ) {
         self.renderReporter = renderReporter
-        let built = makeModel(itemID)
-        _model = StateObject(wrappedValue: built)
+        // Built only when SwiftUI first creates the state, not each time the host rebuilds this struct.
+        _model = StateObject(wrappedValue: makeModel(itemID))
     }
 
     var body: some View {
