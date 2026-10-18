@@ -8,6 +8,7 @@ struct ProviderSettingsRenderedElement: Equatable {
     let frame: CGRect
     let text: String
     let isEnabled: Bool
+    var isSelected = false
 }
 
 private struct ProviderSettingsRenderedKey: PreferenceKey {
@@ -24,6 +25,7 @@ private struct ProviderSettingsRenderedKey: PreferenceKey {
 private struct ProviderSettingsRenderReport: ViewModifier {
     let identifier: String
     let text: String
+    let isSelected: Bool
     @Environment(\.isEnabled) private var isEnabled
 
     func body(content: Content) -> some View {
@@ -31,14 +33,14 @@ private struct ProviderSettingsRenderReport: ViewModifier {
             Color.clear.preference(
                 key: ProviderSettingsRenderedKey.self,
                 value: [identifier: ProviderSettingsRenderedElement(
-                    frame: proxy.frame(in: .global), text: text, isEnabled: isEnabled)])
+                    frame: proxy.frame(in: .global), text: text, isEnabled: isEnabled, isSelected: isSelected)])
         })
     }
 }
 
 private extension View {
-    func reportRendered(_ identifier: String, text: String) -> some View {
-        modifier(ProviderSettingsRenderReport(identifier: identifier, text: text))
+    func reportRendered(_ identifier: String, text: String, isSelected: Bool = false) -> some View {
+        modifier(ProviderSettingsRenderReport(identifier: identifier, text: text, isSelected: isSelected))
     }
 }
 
@@ -97,6 +99,7 @@ private struct ProviderSecretEntry: View {
             .textInputAutocapitalization(.never).autocorrectionDisabled().textContentType(.none)
             .submitLabel(.done)
             .onSubmit(submit)
+            .providerFieldStyle()
             .accessibilityIdentifier(fieldIdentifier)
             .onAppear {
                 buffer.press = submit
@@ -110,15 +113,109 @@ private struct ProviderSecretEntry: View {
                 buffer.clear()
             }
         Button(buttonTitle, action: submit)
-        .frame(minHeight: 44)
-        .buttonStyle(.bordered)
-        .reportRendered(buttonIdentifier, text: buttonTitle)
-        .accessibilityIdentifier(buttonIdentifier)
+            .buttonStyle(DSPillButtonStyle(style: .secondary))
+            .reportRendered(buttonIdentifier, text: buttonTitle)
+            .accessibilityIdentifier(buttonIdentifier)
     }
 }
 
-/// The provider settings screen: the current operating mode, the stored profile versions with default choices, and the
-/// form for a new version. Everything it shows comes from `ProviderSettingsModel`.
+extension View {
+    /// An input field sitting inside a card: `surface2` at the field radius.
+    fileprivate func providerFieldStyle() -> some View {
+        self.font(DSFont.rowLabel)
+            .foregroundColor(DSColor.ink.color)
+            .padding(.horizontal, DSSpacing.sm)
+            .frame(minHeight: DSLayout.minimumTouchTarget)
+            .background(RoundedRectangle(cornerRadius: DSRadius.field, style: .continuous).fill(DSColor.surface2.color))
+    }
+}
+
+
+/// The three ways to sort captures. The choice follows the stored default: none is "on this phone", a private server
+/// is "my own server" and any other provider is "a cloud provider".
+enum ProviderProcessingChoice: String, CaseIterable, Identifiable {
+    case onThisPhone = "local"
+    case cloudProvider = "cloud"
+    case ownServer = "server"
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .onThisPhone: return "On this phone"
+        case .cloudProvider: return "With a cloud provider"
+        case .ownServer: return "With my own server"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .onThisPhone: return "Nothing leaves the device"
+        case .cloudProvider: return "Sent to a provider you set up"
+        case .ownServer: return "Sent only to the server you name"
+        }
+    }
+
+    static let needsProviderDetail = "Add a provider first"
+}
+
+extension ProviderSettingsModel {
+    /// Whether the current operating mode is `choice`.
+    func isSelected(_ choice: ProviderProcessingChoice) -> Bool {
+        switch (operatingMode, choice) {
+        case (.localOnly, .onThisPhone), (.hosted, .cloudProvider), (.privateServer, .ownServer): return true
+        default: return false
+        }
+    }
+
+    /// The newest stored version that choosing `choice` would make the default, if one may be.
+    func candidateVersion(for choice: ProviderProcessingChoice) -> ProviderProfileListAnswer.Version? {
+        guard choice != .onThisPhone else { return nil }
+        let wantsPrivateServer = choice == .ownServer
+        return listing?.profiles.flatMap { $0.versions.reversed() }.first {
+            ($0.providerProtocol == "self_hosted") == wantsPrivateServer && canMakeDefault($0)
+        }
+    }
+}
+
+/// What a screen shows for each phase of the model, so the three screens answer a lock, a failure and a load the same
+/// way. `loaded` is built only once the stored state has been read.
+private struct ProviderPhaseContent<Loaded: View>: View {
+    @ObservedObject var model: ProviderSettingsModel
+    @ViewBuilder let loaded: () -> Loaded
+
+    var body: some View {
+        switch model.phase {
+        case .idle:
+            EmptyView()
+        case .loading:
+            ProgressView("Loading").frame(maxWidth: .infinity)
+        case .locked:
+            providerNote(ProviderSettingsText.lockedText, identifier: ProviderSettingsView.lockedIdentifier)
+        case .failed(let message):
+            providerNote(message, identifier: ProviderSettingsView.failureIdentifier)
+            DSPillButton(title: "Try again", style: .secondary) { Task { await model.refresh() } }
+                .accessibilityIdentifier(ProviderSettingsView.tryAgainIdentifier)
+        case .loaded:
+            loaded()
+        }
+    }
+}
+
+/// A line of muted explanation or feedback under a section.
+private func providerNote(_ text: String, identifier: String) -> some View {
+    Text(text)
+        .font(DSFont.footer)
+        .foregroundColor(DSColor.inkMuted.color)
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, DSSpacing.md)
+        .reportRendered(identifier, text: text)
+        .accessibilityIdentifier(identifier)
+}
+
+/// The Processing screen: how new captures are sorted, with the providers and the finer controls one level down.
+/// Everything it shows comes from `ProviderSettingsModel`.
 struct ProviderSettingsView: View {
     static let modeIdentifier = "provider-settings.mode"
     static let defaultNoteIdentifier = "provider-settings.default-note"
@@ -140,6 +237,10 @@ struct ProviderSettingsView: View {
     static let removeSecretIdentifier = "provider-settings.remove-secret"
     static let checkSecretIdentifier = "provider-settings.check-secret"
     static let credentialStateIdentifier = "provider-settings.credential-state"
+    static let addProviderIdentifier = "provider-settings.add-provider"
+    static let advancedIdentifier = "provider-settings.advanced"
+    static let timeoutIdentifier = "provider-settings.field.timeout"
+    static func choiceIdentifier(_ choice: ProviderProcessingChoice) -> String { "provider-settings.choice.\(choice.rawValue)" }
     static func savedSecretFieldIdentifier(_ version: String) -> String { "provider-settings.saved-secret.field.\(version)" }
     static func replaceSavedSecretIdentifier(_ version: String) -> String { "provider-settings.saved-secret.replace.\(version)" }
     static func checkSavedSecretIdentifier(_ version: String) -> String { "provider-settings.saved-secret.check.\(version)" }
@@ -154,10 +255,15 @@ struct ProviderSettingsView: View {
         "provider-settings.capability.\(version).\(capability)"
     }
 
+    static let footerText = "Applies to new captures. What you saved is never changed."
+
     @ObservedObject var model: ProviderSettingsModel
     var renderReporter: (([String: ProviderSettingsRenderedElement]) -> Void)?
     /// Lets a hosted test see each secret field's buffer. It is called with the field identifier and the buffer.
     var secretBufferProbe: ((String, ProviderSecretBuffer) -> Void)?
+    /// Whether a screen one level down is open. Opening one hides this screen, which must not drop the stored state.
+    @State private var showsAddProvider = false
+    @State private var showsAdvanced = false
 
     init(
         model: ProviderSettingsModel,
@@ -169,68 +275,7 @@ struct ProviderSettingsView: View {
         self.secretBufferProbe = secretBufferProbe
     }
 
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                content
-            }
-            .padding()
-        }
-        .navigationTitle("Providers")
-        .navigationBarTitleDisplayMode(.inline)
-        .task { await model.refresh() }
-        .onPreferenceChange(ProviderSettingsRenderedKey.self) { elements in
-            renderReporter?(elements)
-        }
-        .onDisappear { model.clear() }
-    }
-
-    @ViewBuilder
-    private var content: some View {
-        switch model.phase {
-        case .idle:
-            EmptyView()
-        case .loading:
-            ProgressView("Loading").frame(maxWidth: .infinity)
-        case .locked:
-            note(ProviderSettingsText.lockedText, identifier: Self.lockedIdentifier)
-        case .failed(let message):
-            note(message, identifier: Self.failureIdentifier)
-            Button("Try again") { Task { await model.refresh() } }
-                .frame(minHeight: 44)
-                .accessibilityIdentifier(Self.tryAgainIdentifier)
-        case .loaded:
-            modeSection
-            versionsSection
-            formSection
-        }
-    }
-
-    private var modeSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Current provider").font(.headline)
-            note(Self.modeText(model.operatingMode), identifier: Self.modeIdentifier)
-            if let availability = model.defaultAvailability, availability != .ready {
-                note(ProviderSettingsText.unavailableDefaultNotice, identifier: Self.defaultUnavailableIdentifier)
-            }
-            note(ProviderSettingsText.defaultChangeNote, identifier: Self.defaultNoteIdentifier)
-            if model.defaultVersion != nil {
-                Button {
-                    Task { await model.useLocalOnly() }
-                } label: {
-                    Text("Use this device only").frame(maxWidth: .infinity, minHeight: 44)
-                }
-                .buttonStyle(.bordered)
-                .reportRendered(Self.localOnlyIdentifier, text: "Use this device only")
-                .disabled(model.isChangingDefault)
-                .accessibilityIdentifier(Self.localOnlyIdentifier)
-            }
-            if let message = model.defaultState?.message {
-                note(message, identifier: Self.defaultStateIdentifier)
-            }
-        }
-    }
-
+    /// What the choice is showing, for the info sheet and the summary row one level down.
     static func modeText(_ mode: ProviderSettingsOperatingMode) -> String {
         switch mode {
         case .localOnly: return ProviderSettingsText.localOnlyNotice
@@ -239,70 +284,226 @@ struct ProviderSettingsView: View {
         }
     }
 
-    @ViewBuilder
-    private var versionsSection: some View {
-        Text("Saved profiles").font(.headline)
-        if let profiles = model.listing?.profiles, !profiles.isEmpty {
-            ForEach(profiles, id: \.profileID) { profile in
-                ForEach(profile.versions.reversed(), id: \.profileVersion) { version in
-                    versionRow(profile.profileID, version)
-                }
-            }
-        } else {
-            note("No profiles saved yet.", identifier: "provider-settings.none")
+    /// The short form of the current mode, as a row value.
+    static func modeSummary(_ mode: ProviderSettingsOperatingMode) -> String {
+        switch mode {
+        case .localOnly: return ProviderProcessingChoice.onThisPhone.label
+        case .privateServer(let model): return "Private server · \(model)"
+        case .hosted(let name, let model): return "\(name) · \(model)"
         }
     }
 
-    private func versionRow(_ profileID: String, _ version: ProviderProfileListAnswer.Version) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(profileID).font(.body)
+    var body: some View {
+        SettingsScreenChrome(
+            title: "Processing", infoTitle: "Processing",
+            infoParagraphs: [Self.modeText(model.operatingMode), ProviderSettingsText.defaultChangeNote]
+        ) {
+            ProviderPhaseContent(model: model) { loaded }
+        }
+        .task { await model.refresh() }
+        .onPreferenceChange(ProviderSettingsRenderedKey.self) { elements in
+            renderReporter?(elements)
+        }
+        .onDisappear { if !showsAddProvider && !showsAdvanced { model.clear() } }
+    }
+
+    @ViewBuilder
+    private var loaded: some View {
+        DSGroupedSection(title: "Sort my captures", footer: Self.footerText) {
+            ForEach(ProviderProcessingChoice.allCases) { choice in
+                choiceRow(choice)
+            }
+        }
+        if let availability = model.defaultAvailability, availability != .ready {
+            providerNote(ProviderSettingsText.unavailableDefaultNotice, identifier: ProviderSettingsView.defaultUnavailableIdentifier)
+        }
+        if let message = model.defaultState?.message {
+            providerNote(message, identifier: Self.defaultStateIdentifier)
+        }
+        VStack(alignment: .leading, spacing: DSSpacing.xs) {
+            DSPillButton(title: "Add provider", style: .secondary) { showsAddProvider = true }
+                .reportRendered(Self.addProviderIdentifier, text: "Add provider")
+                .accessibilityIdentifier(Self.addProviderIdentifier)
+            DSPillButton(title: "Advanced", style: .plain) { showsAdvanced = true }
+                .reportRendered(Self.advancedIdentifier, text: "Advanced")
+                .accessibilityIdentifier(Self.advancedIdentifier)
+        }
+        .background(
+            Group {
+                NavigationLink(isActive: $showsAddProvider) {
+                    ProviderAddView(model: model, renderReporter: renderReporter, secretBufferProbe: secretBufferProbe)
+                } label: { EmptyView() }
+                NavigationLink(isActive: $showsAdvanced) {
+                    ProviderAdvancedView(model: model, renderReporter: renderReporter, secretBufferProbe: secretBufferProbe)
+                } label: { EmptyView() }
+            }
+            .hidden()
+            .accessibilityHidden(true))
+    }
+
+    private func choiceRow(_ choice: ProviderProcessingChoice) -> some View {
+        let isSelected = model.isSelected(choice)
+        let target = model.candidateVersion(for: choice)
+        let isAvailable = choice == .onThisPhone || isSelected || target != nil
+        return DSChoiceRow(
+            label: choice.label, detail: isAvailable ? choice.detail : ProviderProcessingChoice.needsProviderDetail,
+            isSelected: isSelected
+        ) {
+            guard !isSelected else { return }
+            if choice == .onThisPhone {
+                Task { await model.useLocalOnly() }
+            } else if let target {
+                Task { await model.makeDefault(target) }
+            }
+        }
+        .reportRendered(Self.choiceIdentifier(choice), text: choice.label, isSelected: isSelected)
+        .disabled(model.isChangingDefault || !isAvailable)
+        .accessibilityIdentifier(Self.choiceIdentifier(choice))
+    }
+}
+
+/// Adding a provider: its type, address, model and secret, then Save. Timeout and the saved-secret controls are
+/// one level further down, on the Advanced screen.
+struct ProviderAddView: View {
+    @ObservedObject var model: ProviderSettingsModel
+    var renderReporter: (([String: ProviderSettingsRenderedElement]) -> Void)?
+    var secretBufferProbe: ((String, ProviderSecretBuffer) -> Void)?
+
+    var body: some View {
+        SettingsScreenChrome(
+            title: "Add provider", infoTitle: "Add provider",
+            infoParagraphs: [ProviderSettingsText.credentialNote, ProviderSettingsText.capabilityNote]
+        ) {
+            ProviderPhaseContent(model: model) {
+                ProviderProfileForm(model: model, showsAdvancedFields: false, secretBufferProbe: secretBufferProbe)
+            }
+        }
+        .task { if model.phase == .idle { await model.refresh() } }
+        .onPreferenceChange(ProviderSettingsRenderedKey.self) { renderReporter?($0) }
+    }
+}
+
+/// The finer controls: the current provider, every stored profile version with its connection check, secret and default
+/// controls, and the full form for a new version including the timeout.
+struct ProviderAdvancedView: View {
+    @ObservedObject var model: ProviderSettingsModel
+    var renderReporter: (([String: ProviderSettingsRenderedElement]) -> Void)?
+    var secretBufferProbe: ((String, ProviderSecretBuffer) -> Void)?
+
+    var body: some View {
+        SettingsScreenChrome(
+            title: "Advanced", infoTitle: "Advanced",
+            infoParagraphs: [
+                ProviderSettingsText.defaultChangeNote, ProviderSettingsText.credentialNote,
+                ProviderSettingsText.connectionCheckNote, ProviderSettingsText.capabilityNote,
+            ]
+        ) {
+            ProviderPhaseContent(model: model) {
+                currentProviderSection
+                savedProfilesSection
+                ProviderProfileForm(model: model, showsAdvancedFields: true, secretBufferProbe: secretBufferProbe)
+            }
+        }
+        .task { if model.phase == .idle { await model.refresh() } }
+        .onPreferenceChange(ProviderSettingsRenderedKey.self) { renderReporter?($0) }
+    }
+
+    private var currentProviderSection: some View {
+        let summary = ProviderSettingsView.modeSummary(model.operatingMode)
+        return VStack(alignment: .leading, spacing: DSSpacing.xs) {
+            DSGroupedSection(title: "Current provider") {
+                DSRow(label: "In use", value: summary, showsChevron: false)
+                    .reportRendered(ProviderSettingsView.modeIdentifier, text: summary)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier(ProviderSettingsView.modeIdentifier)
+            }
+            if model.defaultVersion != nil {
+                DSPillButton(title: "Use this device only", style: .secondary) { Task { await model.useLocalOnly() } }
+                    .reportRendered(ProviderSettingsView.localOnlyIdentifier, text: "Use this device only")
+                    .disabled(model.isChangingDefault)
+                    .accessibilityIdentifier(ProviderSettingsView.localOnlyIdentifier)
+            }
+            if let availability = model.defaultAvailability, availability != .ready {
+                providerNote(
+                    ProviderSettingsText.unavailableDefaultNotice,
+                    identifier: ProviderSettingsView.defaultUnavailableIdentifier)
+            }
+            if let message = model.defaultState?.message {
+                providerNote(message, identifier: ProviderSettingsView.defaultStateIdentifier)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var savedProfilesSection: some View {
+        if let profiles = model.listing?.profiles, !profiles.isEmpty {
+            ForEach(profiles, id: \.profileID) { profile in
+                ForEach(profile.versions.reversed(), id: \.profileVersion) { version in
+                    DSGroupedSection(title: profile.profileID) { versionRows(version) }
+                }
+            }
+        } else {
+            DSGroupedSection(title: "Saved profiles") {
+                Text("No profiles saved yet.")
+                    .font(DSFont.rowLabel)
+                    .foregroundColor(DSColor.inkMuted.color)
+                    .padding(DSSpacing.md)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .reportRendered("provider-settings.none", text: "No profiles saved yet.")
+                    .accessibilityIdentifier("provider-settings.none")
+            }
+        }
+    }
+
+    private func versionRows(_ version: ProviderProfileListAnswer.Version) -> some View {
+        VStack(alignment: .leading, spacing: DSSpacing.xs) {
             Text("\(ProviderSettingsText.protocolName(version.providerProtocol)) · \(version.model)")
-                .font(.footnote).foregroundColor(.secondary)
+                .font(DSFont.rowLabel).foregroundColor(DSColor.ink.color)
             if let endpoint = version.endpoint {
-                Text(endpoint).font(.footnote).foregroundColor(.secondary)
+                Text(endpoint).font(DSFont.footer).foregroundColor(DSColor.inkMuted.color)
             }
             ForEach(version.capabilities, id: \.capability) { capability in
                 let status = ProviderSettingsText.capabilityStatus(capability.capability, support: capability.support)
                 Text(status)
-                    .font(.footnote).foregroundColor(.secondary)
+                    .font(DSFont.footer).foregroundColor(DSColor.inkMuted.color)
                     .fixedSize(horizontal: false, vertical: true)
-                    .reportRendered(Self.capabilityIdentifier(version.profileVersion, capability.capability), text: status)
+                    .reportRendered(ProviderSettingsView.capabilityIdentifier(version.profileVersion, capability.capability), text: status)
             }
             if version.revoked {
-                Text("Revoked").font(.footnote)
+                Text("Revoked").font(DSFont.footer).foregroundColor(DSColor.inkMuted.color)
             } else if !version.defaultFor.isEmpty {
-                Text("Current default").font(.footnote)
+                Text("Current default").font(DSFont.footer).foregroundColor(DSColor.inkMuted.color)
             }
             if model.canCheckConnection(version) {
-                Button {
-                    Task { await model.checkConnection(version) }
-                } label: {
-                    Text("Check connection").frame(maxWidth: .infinity, minHeight: 44)
-                }
-                .buttonStyle(.bordered)
-                .reportRendered(Self.checkConnectionIdentifier(version.profileVersion), text: "Check connection")
-                .accessibilityIdentifier(Self.checkConnectionIdentifier(version.profileVersion))
+                DSPillButton(title: "Check connection", style: .secondary) { Task { await model.checkConnection(version) } }
+                    .reportRendered(ProviderSettingsView.checkConnectionIdentifier(version.profileVersion), text: "Check connection")
+                    .accessibilityIdentifier(ProviderSettingsView.checkConnectionIdentifier(version.profileVersion))
             }
             if let state = model.connectionStates[version.profileVersion] {
-                note(state.message, identifier: Self.connectionStateIdentifier(version.profileVersion))
+                versionNote(state.message, identifier: ProviderSettingsView.connectionStateIdentifier(version.profileVersion))
             }
             if !version.revoked { savedSecretControls(version) }
             if model.canMakeDefault(version) {
-                Button {
-                    Task { await model.makeDefault(version) }
-                } label: {
-                    Text("Make default").frame(maxWidth: .infinity, minHeight: 44)
-                }
-                .buttonStyle(.bordered)
-                .reportRendered(Self.makeDefaultIdentifier(version.profileVersion), text: "Make default")
-                .accessibilityIdentifier(Self.makeDefaultIdentifier(version.profileVersion))
+                DSPillButton(title: "Make default", style: .secondary) { Task { await model.makeDefault(version) } }
+                    .reportRendered(ProviderSettingsView.makeDefaultIdentifier(version.profileVersion), text: "Make default")
+                    .accessibilityIdentifier(ProviderSettingsView.makeDefaultIdentifier(version.profileVersion))
             }
         }
-        .padding()
-        .background(Color(.secondarySystemBackground))
-        .cornerRadius(8)
+        .padding(DSSpacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
-        .accessibilityIdentifier(Self.versionIdentifier(version.profileVersion))
+        .accessibilityIdentifier(ProviderSettingsView.versionIdentifier(version.profileVersion))
+    }
+
+    /// Feedback inside a version's card: it already has the card's padding.
+    private func versionNote(_ text: String, identifier: String) -> some View {
+        Text(text)
+            .font(DSFont.footer)
+            .foregroundColor(DSColor.inkMuted.color)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .reportRendered(identifier, text: text)
+            .accessibilityIdentifier(identifier)
     }
 
     /// Replace, check or remove the secret of a stored version. The services layer finds the version's own secret; the
@@ -311,112 +512,122 @@ struct ProviderSettingsView: View {
     private func savedSecretControls(_ version: ProviderProfileListAnswer.Version) -> some View {
         let profileVersion = version.profileVersion
         ProviderSecretEntry(
-            fieldIdentifier: Self.savedSecretFieldIdentifier(profileVersion), buttonTitle: "Replace secret",
-            buttonIdentifier: Self.replaceSavedSecretIdentifier(profileVersion),
+            fieldIdentifier: ProviderSettingsView.savedSecretFieldIdentifier(profileVersion), buttonTitle: "Replace secret",
+            buttonIdentifier: ProviderSettingsView.replaceSavedSecretIdentifier(profileVersion),
             onSecret: { secret in Task { await model.replaceSavedCredential(secret, for: version) } },
             onRejected: { model.noteRejectedSecret($0, for: version) }, bufferProbe: secretBufferProbe
         )
         // A second tap while the operation runs would empty the new buffer and have the model drop the secret.
         .disabled(model.isChangingSavedCredential(version))
         HStack {
-            Button("Check secret") { Task { await model.checkSavedCredential(version) } }
-                .frame(minHeight: 44)
-                .reportRendered(Self.checkSavedSecretIdentifier(profileVersion), text: "Check secret")
-                .accessibilityIdentifier(Self.checkSavedSecretIdentifier(profileVersion))
-            Button("Remove secret", role: .destructive) { Task { await model.removeSavedCredential(version) } }
-                .frame(minHeight: 44)
-                .reportRendered(Self.removeSavedSecretIdentifier(profileVersion), text: "Remove secret")
-                .accessibilityIdentifier(Self.removeSavedSecretIdentifier(profileVersion))
+            DSPillButton(title: "Check secret", style: .plain) { Task { await model.checkSavedCredential(version) } }
+                .reportRendered(ProviderSettingsView.checkSavedSecretIdentifier(profileVersion), text: "Check secret")
+                .accessibilityIdentifier(ProviderSettingsView.checkSavedSecretIdentifier(profileVersion))
+            DSPillButton(title: "Remove secret", style: .destructive) { Task { await model.removeSavedCredential(version) } }
+                .reportRendered(ProviderSettingsView.removeSavedSecretIdentifier(profileVersion), text: "Remove secret")
+                .accessibilityIdentifier(ProviderSettingsView.removeSavedSecretIdentifier(profileVersion))
         }
-        .buttonStyle(.bordered)
         .disabled(model.isChangingSavedCredential(version))
         if let state = model.savedCredentialStates[profileVersion] {
-            note(state.message, identifier: Self.savedSecretStateIdentifier(profileVersion))
+            versionNote(state.message, identifier: ProviderSettingsView.savedSecretStateIdentifier(profileVersion))
+        }
+    }
+}
+
+/// The form for a new profile version. The Add provider screen shows the short form; the Advanced screen adds the
+/// credential name, the saved-secret check and removal, and the timeout.
+private struct ProviderProfileForm: View {
+    @ObservedObject var model: ProviderSettingsModel
+    let showsAdvancedFields: Bool
+    var secretBufferProbe: ((String, ProviderSecretBuffer) -> Void)?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: DSSpacing.xs) {
+            DSGroupedSection(title: showsAdvancedFields ? "New profile version" : nil) {
+                VStack(alignment: .leading, spacing: DSSpacing.xs) { fields }
+                    .padding(DSSpacing.md)
+            }
+            if !model.issues.isEmpty {
+                providerNote(
+                    model.issues.map(ProviderSettingsText.issue).joined(separator: " "),
+                    identifier: ProviderSettingsView.issuesIdentifier)
+            }
+            DSPillButton(title: "Save profile", style: .primary) { Task { await model.save() } }
+                .reportRendered(ProviderSettingsView.saveIdentifier, text: "Save profile")
+                .disabled(!model.canSave)
+                .accessibilityIdentifier(ProviderSettingsView.saveIdentifier)
+            if let message = model.saveState?.message {
+                providerNote(message, identifier: ProviderSettingsView.saveStateIdentifier)
+            }
         }
     }
 
     @ViewBuilder
-    private var formSection: some View {
-        Text("New profile version").font(.headline)
-        TextField("Profile name", text: $model.draft.profileName)
-            .textInputAutocapitalization(.never).autocorrectionDisabled()
-            .reportRendered("provider-settings.field.name", text: model.draft.profileName)
-            .accessibilityIdentifier("provider-settings.field.name")
+    private var fields: some View {
         Picker("Provider type", selection: $model.draft.providerProtocol) {
             ForEach(ProviderSettingsProtocol.allCases, id: \.self) { choice in
                 Text(ProviderSettingsText.protocolName(choice.rawValue)).tag(choice)
             }
         }
+        .pickerStyle(.menu)
+        .tint(DSColor.accent.color)
         .accessibilityIdentifier("provider-settings.field.protocol")
+        TextField("Profile name", text: $model.draft.profileName)
+            .textInputAutocapitalization(.never).autocorrectionDisabled()
+            .providerFieldStyle()
+            .reportRendered(ProviderSettingsView.nameFieldIdentifier, text: model.draft.profileName)
+            .accessibilityIdentifier(ProviderSettingsView.nameFieldIdentifier)
         if model.draft.providerProtocol.takesEndpoint {
             TextField("https://server address", text: $model.draft.endpoint)
                 .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
-                .reportRendered(Self.endpointFieldIdentifier, text: model.draft.endpoint)
-                .accessibilityIdentifier(Self.endpointFieldIdentifier)
+                .providerFieldStyle()
+                .reportRendered(ProviderSettingsView.endpointFieldIdentifier, text: model.draft.endpoint)
+                .accessibilityIdentifier(ProviderSettingsView.endpointFieldIdentifier)
         }
         TextField("Model", text: $model.draft.model)
             .textInputAutocapitalization(.never).autocorrectionDisabled()
-            .reportRendered("provider-settings.field.model", text: model.draft.model)
-            .accessibilityIdentifier("provider-settings.field.model")
-        Text(model.draft.credentialReference.isEmpty
-            ? "Credential name: filled in when you store a secret" : "Credential name: \(model.draft.credentialReference)")
-            .font(.footnote).foregroundColor(.secondary)
-            .reportRendered("provider-settings.field.credential", text: model.draft.credentialReference)
-            .accessibilityIdentifier("provider-settings.field.credential")
+            .providerFieldStyle()
+            .reportRendered(ProviderSettingsView.modelFieldIdentifier, text: model.draft.model)
+            .accessibilityIdentifier(ProviderSettingsView.modelFieldIdentifier)
+        if showsAdvancedFields {
+            Text(model.draft.credentialReference.isEmpty
+                ? "Credential name: filled in when you store a secret" : "Credential name: \(model.draft.credentialReference)")
+                .font(DSFont.footer).foregroundColor(DSColor.inkMuted.color)
+                .reportRendered(ProviderSettingsView.credentialFieldIdentifier, text: model.draft.credentialReference)
+                .accessibilityIdentifier(ProviderSettingsView.credentialFieldIdentifier)
+        }
         ProviderSecretEntry(
-            fieldIdentifier: Self.secretFieldIdentifier, buttonTitle: "Store secret",
-            buttonIdentifier: Self.storeSecretIdentifier,
+            fieldIdentifier: ProviderSettingsView.secretFieldIdentifier, buttonTitle: "Store secret",
+            buttonIdentifier: ProviderSettingsView.storeSecretIdentifier,
             onSecret: { model.storeCredential($0) }, onRejected: { model.noteRejectedSecret($0) },
             bufferProbe: secretBufferProbe)
-        HStack {
-            Button("Check saved") { model.checkCredential() }
-                .frame(minHeight: 44)
-                .reportRendered(Self.checkSecretIdentifier, text: "Check saved")
-                .accessibilityIdentifier(Self.checkSecretIdentifier)
-            Button("Remove", role: .destructive) { model.removeCredential() }
-                .frame(minHeight: 44)
-                .reportRendered(Self.removeSecretIdentifier, text: "Remove")
-                .accessibilityIdentifier(Self.removeSecretIdentifier)
+        if showsAdvancedFields {
+            HStack {
+                DSPillButton(title: "Check saved", style: .plain) { model.checkCredential() }
+                    .reportRendered(ProviderSettingsView.checkSecretIdentifier, text: "Check saved")
+                    .accessibilityIdentifier(ProviderSettingsView.checkSecretIdentifier)
+                DSPillButton(title: "Remove", style: .destructive) { model.removeCredential() }
+                    .reportRendered(ProviderSettingsView.removeSecretIdentifier, text: "Remove")
+                    .accessibilityIdentifier(ProviderSettingsView.removeSecretIdentifier)
+            }
         }
-        .buttonStyle(.bordered)
         if let state = model.credentialState {
-            note(state.message, identifier: Self.credentialStateIdentifier)
+            Text(state.message)
+                .font(DSFont.footer).foregroundColor(DSColor.inkMuted.color)
+                .fixedSize(horizontal: false, vertical: true)
+                .reportRendered(ProviderSettingsView.credentialStateIdentifier, text: state.message)
+                .accessibilityIdentifier(ProviderSettingsView.credentialStateIdentifier)
         }
-        note(ProviderSettingsText.credentialNote, identifier: "provider-settings.credential-note")
-        note(ProviderSettingsText.connectionCheckNote, identifier: "provider-settings.connection-note")
-        Stepper(
-            value: $model.draft.timeoutSeconds,
-            in: ProviderSettingsModel.minimumTimeoutSeconds...ProviderSettingsModel.maximumTimeoutSeconds
-        ) {
-            Text("Timeout \(model.draft.timeoutSeconds) seconds")
+        if showsAdvancedFields {
+            Stepper(
+                value: $model.draft.timeoutSeconds,
+                in: ProviderSettingsModel.minimumTimeoutSeconds...ProviderSettingsModel.maximumTimeoutSeconds
+            ) {
+                Text("Timeout \(model.draft.timeoutSeconds) seconds")
+                    .font(DSFont.rowLabel).foregroundColor(DSColor.ink.color)
+            }
+            .accessibilityIdentifier(ProviderSettingsView.timeoutIdentifier)
         }
-        .accessibilityIdentifier("provider-settings.field.timeout")
-        note(ProviderSettingsText.capabilityNote, identifier: "provider-settings.capability-note")
-        if !model.issues.isEmpty {
-            note(model.issues.map(ProviderSettingsText.issue).joined(separator: " "), identifier: Self.issuesIdentifier)
-        }
-        Button {
-            Task { await model.save() }
-        } label: {
-            Text("Save profile").frame(maxWidth: .infinity, minHeight: 44)
-        }
-        .buttonStyle(.borderedProminent)
-        .reportRendered(Self.saveIdentifier, text: "Save profile")
-        .disabled(!model.canSave)
-        .accessibilityIdentifier(Self.saveIdentifier)
-        if let message = model.saveState?.message {
-            note(message, identifier: Self.saveStateIdentifier)
-        }
-    }
-
-    private func note(_ text: String, identifier: String) -> some View {
-        Text(text)
-            .font(.body)
-            .foregroundColor(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .reportRendered(identifier, text: text)
-            .accessibilityIdentifier(identifier)
     }
 }
 
