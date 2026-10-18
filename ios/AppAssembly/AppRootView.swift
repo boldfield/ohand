@@ -1,9 +1,8 @@
 import SwiftUI
 
-/// What the app shows once its services exist: the capture surface first, with search and settings as secondary links
-/// below it. There is no backlog count, to-do list or catch-up flow on this screen.
+/// What the app shows once its services exist: the composer home first, with search and settings in its glass header.
+/// There is no backlog count, to-do list or catch-up flow on this screen.
 struct AppRootView: View {
-    static let managementLinksIdentifier = "app.management-links"
     static let noticeIdentifier = "app.management-notice"
 
     @ObservedObject var navigation: ManagementNavigationModel
@@ -16,10 +15,12 @@ struct AppRootView: View {
 
     var body: some View {
         NavigationStack(path: $navigation.path) {
-            CaptureEntryView(model: captureEntry)
-                .navigationTitle("Oh And")
-                .navigationBarTitleDisplayMode(.inline)
-                .safeAreaInset(edge: .bottom) { managementLinks }
+            CaptureEntryView(
+                model: captureEntry,
+                actionsAreDisabled: navigation.isAuthenticating,
+                open: { navigation.open(entryID: $0) },
+                notice: navigation.notice)
+                .toolbar(.hidden, for: .navigationBar)
                 .navigationDestination(for: String.self) { pathComponent in
                     destinationView(for: ManagementRoute(pathComponent: pathComponent))
                 }
@@ -38,45 +39,6 @@ struct AppRootView: View {
             .onAppear { presentationReporter?(.appeared(route, isPlaceholder: !destinations.isRegistered(route))) }
             .onDisappear { presentationReporter?(.disappeared(route)) }
             .onPreferenceChange(ManagementPlaceholderFrameKey.self) { placeholderFrameReporter?($0) }
-    }
-
-    private var managementLinks: some View {
-        VStack(spacing: 8) {
-            if let notice = navigation.notice {
-                Text(notice)
-                    .font(.callout)
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityIdentifier(Self.noticeIdentifier)
-            }
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 12) { managementButtons }
-                VStack(spacing: 8) { managementButtons }
-            }
-        }
-        .padding(.horizontal)
-        .padding(.vertical, 8)
-        .background(.bar)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier(Self.managementLinksIdentifier)
-    }
-
-    private var managementButtons: some View {
-        ForEach(ManagementCatalog.secondaryEntries) { entry in
-            Button {
-                navigation.open(entryID: entry.id)
-            } label: {
-                Label(entry.title, systemImage: entry.systemImage)
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.large)
-            .disabled(navigation.isAuthenticating)
-            .accessibilityIdentifier("management.open.\(entry.id)")
-        }
     }
 }
 
