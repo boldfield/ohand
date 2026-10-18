@@ -3,7 +3,7 @@ import XCTest
 
 /// Walks every main screen of the app in light and dark and writes one PNG per screen into the directory named by
 /// `WALKTHROUGH_OUTPUT_DIR` (passed as `TEST_RUNNER_WALKTHROUGH_OUTPUT_DIR`), so a reviewer can see what a change looks
-/// like. Captures are synthetic text typed through the capture screen. Opening Search or Settings asks for the device
+/// like. Captures are synthetic text typed into the home's composer. Opening Search or Settings asks for the device
 /// owner; the driving script (`ios/scripts/walkthrough-simulator.sh`) enrols Face ID on the simulator and sends matching
 /// faces, so the app's own authentication runs unmodified. A screen that cannot be reached fails the test.
 final class WalkthroughUITests: XCTestCase {
@@ -68,7 +68,7 @@ final class WalkthroughUITests: XCTestCase {
     }
 
     private func walk(prefix: String) throws {
-        XCTAssertTrue(app.buttons["management.open.search"].waitForExistence(timeout: screenTimeout), "home screen did not appear")
+        XCTAssertTrue(app.buttons[homeSearch].waitForExistence(timeout: screenTimeout), "home screen did not appear")
         waitForLaunchAuthentication()
         saveCaptures()
         dismissKeyboard()
@@ -77,7 +77,7 @@ final class WalkthroughUITests: XCTestCase {
         // Search, with a query.
         // The restyled Search has no title; its query field is what shows the screen is open.
         let queryField = app.textFields["retrieval.search.query"].firstMatch
-        openFromHome("management.open.search", name: "Search", shows: queryField)
+        openFromHome(homeSearch, name: "Search", shows: queryField)
         queryField.tap()
         queryField.typeText(searchQuery)
         // The keyboard's Search key is the one way a person submits; it also puts the keyboard away.
@@ -89,10 +89,12 @@ final class WalkthroughUITests: XCTestCase {
         let resultCount = app.staticTexts["retrieval.search.count"]
         XCTAssertTrue(resultCount.waitForExistence(timeout: screenTimeout), "search for \(searchQuery) found no synthetic capture")
         capture(prefix, "search")
-        goBack(to: homeLink("management.open.search"), "home")
+        goBack(to: homeLink(homeSearch), "home")
 
-        // Settings and each settings screen.
-        openFromHome("management.open.settings", name: "Settings", shows: settingsHeader)
+        // Settings and each settings screen. The home focuses its composer again when it comes back, and its header shows
+        // Done in place of Settings while the keyboard is up, so the keyboard goes away first.
+        dismissKeyboard()
+        openFromHome(homeSettings, name: "Settings", shows: settingsHeader)
         capture(prefix, "settings")
         for screen in settingsScreens {
             // A row reads its label, then its current value when one is known ("Processing, On this phone").
@@ -116,8 +118,14 @@ final class WalkthroughUITests: XCTestCase {
             }
             goBack(to: settingsHeader, "Settings")
         }
-        goBack(to: homeLink("management.open.settings"), "home")
+        goBack(to: homeLink(homeSearch), "home")
     }
+
+    /// The home's glass header: Search is always there, so it is what shows the home is back; Settings becomes Done while
+    /// the keyboard is up.
+    private let homeSearch = "home.search"
+    private let homeSettings = "home.settings"
+    private let homeDone = "home.done"
 
     private var settingsHeader: XCUIElement { app.staticTexts["Settings"] }
 
@@ -162,14 +170,18 @@ final class WalkthroughUITests: XCTestCase {
     }
 
     private func saveCaptures() {
-        let field = app.textViews["capture-entry.field"]
-        XCTAssertTrue(field.waitForExistence(timeout: screenTimeout), "capture field did not appear")
+        let field = composerField
+        if !field.waitForExistence(timeout: screenTimeout) {
+            // What the home exposed instead, so a wrong identifier or element kind can be read off the evidence.
+            try? app.debugDescription.write(
+                to: outputDirectory.appendingPathComponent("failure-home-hierarchy.txt"), atomically: true, encoding: .utf8)
+            XCTFail("composer field did not appear")
+        }
+        let save = app.buttons["home.composer.save"]
+        // The composer shows Save only while there is text, and enables it once that text has content and no earlier
+        // save is still in flight.
+        let saveIsReady = NSPredicate(format: "exists == true AND isEnabled == true")
         for text in syntheticCaptures {
-            // The field is disabled while the previous capture is being saved; typing then would be lost.
-            expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: field)
-            waitForExpectations(timeout: 30)
-            let save = app.buttons["capture-entry.save"]
-            XCTAssertTrue(save.waitForExistence(timeout: screenTimeout), "Save button did not appear")
             // The system can take focus (the launch Face ID check, keyboard tips) and drop typed text; a person types again.
             var typed = false
             for attempt in 1...3 where !typed {
@@ -177,34 +189,41 @@ final class WalkthroughUITests: XCTestCase {
                 // Typing before the keyboard is up makes the UI-test runner fail while it looks for interrupting alerts.
                 XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: screenTimeout), "keyboard did not appear")
                 field.typeText(text)
-                let enabled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isEnabled == true"), object: save)
+                let enabled = XCTNSPredicateExpectation(predicate: saveIsReady, object: save)
                 typed = XCTWaiter().wait(for: [enabled], timeout: 8) == .completed
                 if !typed {
                     try? XCUIScreen.main.screenshot().pngRepresentation.write(
                         to: outputDirectory.appendingPathComponent("failure-capture-attempt\(attempt).png"))
                 }
             }
-            XCTAssertTrue(typed, "Save stayed disabled after typing a capture")
+            XCTAssertTrue(typed, "Save did not appear enabled after typing a capture")
             save.tap()
-            // A saved capture empties the field, which disables Save again.
-            expectation(for: NSPredicate(format: "isEnabled == false"), evaluatedWith: save)
+            // A saved capture empties the field and keeps the keyboard up, so the composer is back at rest, which has no
+            // Save. Typing before then would go into the text still being saved.
+            expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: save)
             waitForExpectations(timeout: 30)
         }
     }
 
-    /// Puts the keyboard away by showing the Voice capture mode (after the slide-to-type tip, if the system shows it) so the home screenshot shows the
-    /// app. The walkthrough fails if the keyboard cannot be dismissed, rather than saving a covered home screen.
+    /// The composer's text field. It grows with its text, and a growing SwiftUI field is exposed as a text view rather
+    /// than a text field, so it is found by its identifier alone.
+    private var composerField: XCUIElement {
+        app.descendants(matching: .any).matching(identifier: "home.composer.field").firstMatch
+    }
+
+    /// Puts the keyboard away with the header's Done button (after the slide-to-type tip, if the system shows it) so the
+    /// home screenshot shows the app. The composer takes focus whenever the home appears, including on the way back from
+    /// Search or Settings, so the keyboard is given a moment to come up before it is looked for. The walkthrough fails if
+    /// the keyboard cannot be dismissed, rather than saving a covered home screen.
     private func dismissKeyboard() {
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         for button in [app.buttons["Continue"], springboard.buttons["Continue"]] where button.waitForExistence(timeout: 2) {
             button.tap()
         }
-        // The silent capture field takes focus whenever it appears and the screen has no control that puts the keyboard
-        // away, so a person gets the whole home screen by choosing Voice capture, which has no text field.
-        if app.keyboards.count > 0 {
-            let voice = app.buttons["Voice"]
-            XCTAssertTrue(voice.waitForExistence(timeout: screenTimeout), "capture mode picker did not appear")
-            voice.tap()
+        if app.keyboards.firstMatch.waitForExistence(timeout: 5) {
+            let done = app.buttons[homeDone]
+            XCTAssertTrue(done.waitForExistence(timeout: screenTimeout), "Done did not replace Settings while the keyboard is up")
+            done.tap()
         }
         let gone = NSPredicate(format: "count == 0")
         expectation(for: gone, evaluatedWith: app.keyboards)
