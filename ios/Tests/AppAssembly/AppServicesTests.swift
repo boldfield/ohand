@@ -18,9 +18,16 @@ final class AppServicesTests: XCTestCase {
         created = []
     }
 
-    override func tearDownWithError() throws {
-        created.forEach { $0.shutDown() }
-        created = []
+    override func tearDown() async throws {
+        // The services are released inside this scope, so the counters are read after their handles close.
+        do {
+            let services = created
+            created = []
+            services.forEach { $0.shutDown() }
+            for stopped in services {
+                await stopped.waitForShutDownWork()
+            }
+        }
         XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
         XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
         try? FileManager.default.removeItem(at: storageRoot)

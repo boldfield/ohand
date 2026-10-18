@@ -1123,6 +1123,8 @@ public final class ServiceCompositionRoot {
     private var jobObserver: JobRunnerLifecycleObserver?
     private var permissionObserver: NotificationPermissionLifecycleObserver?
     private var foregroundTokens: [NSObjectProtocol] = []
+    private let inFlightReminderPasses = InFlightWork()
+    private var reminderPassTasks: [Task<Void, Never>] = []
     private var latestReminderReport: NotificationPermissionReport?
     private var reminderReportObserver: (@Sendable (NotificationPermissionReport) -> Void)?
 
@@ -1353,8 +1355,11 @@ public final class ServiceCompositionRoot {
         self.permissionObserver = nil
         foregroundTokens = []
         ingress = nil
+        let reminderPasses = reminderPassTasks
+        reminderPassTasks = []
         stateLock.unlock()
 
+        reminderPasses.forEach { $0.cancel() }
         jobObserver?.stop()
         permissionObserver?.stop()
         tokens.forEach { adapters.lifecycleNotifications.removeObserver($0) }
@@ -1559,11 +1564,24 @@ public final class ServiceCompositionRoot {
         stateLock.unlock()
         guard !stopped else { return }
         let reconciler = reminderReconciler
-        Task { [weak self] in
+        let inFlight = inFlightReminderPasses
+        inFlight.begin()
+        let pass = Task { [weak self] in
+            defer { inFlight.end() }
+            if Task.isCancelled { return }
             if let report = try? await reconciler.refresh(trigger: .explicit) {
                 self?.recordReminderReport(report)
             }
         }
+        stateLock.lock()
+        reminderPassTasks.append(pass)
+        stateLock.unlock()
+    }
+
+    /// Returns once no reminder pass started after a job drain is executing. Await it after `shutDown()` when nothing
+    /// may still be calling into the core.
+    func waitForReminderPasses() async {
+        await inFlightReminderPasses.waitUntilIdle()
     }
 
     private func recordReminderReport(_ report: NotificationPermissionReport) {
