@@ -22,9 +22,22 @@ struct PrivacySettingsView: View {
         "privacy-settings.offer.\(route).\(capability).\(version)"
     }
 
-    @ObservedObject var model: PrivacySettingsModel
+    /// What each identified part of the screen shows, collected so a hosted test can read the rendered words.
+    struct RenderedKey: PreferenceKey {
+        static var defaultValue: [String: String] { [:] }
+        static func reduce(value: inout [String: String], nextValue: () -> [String: String]) {
+            value.merge(nextValue()) { _, new in new }
+        }
+    }
 
-    init(model: PrivacySettingsModel) { self.model = model }
+    @ObservedObject var model: PrivacySettingsModel
+    /// Lets a hosted test see what the screen renders; production leaves it unset.
+    var renderReporter: (([String: String]) -> Void)?
+
+    init(model: PrivacySettingsModel, renderReporter: (([String: String]) -> Void)? = nil) {
+        self.model = model
+        self.renderReporter = renderReporter
+    }
 
     var body: some View {
         ScrollView {
@@ -34,6 +47,7 @@ struct PrivacySettingsView: View {
         .navigationBarTitleDisplayMode(.inline)
         .task { await model.refresh() }
         .onDisappear { model.clear() }
+        .onPreferenceChange(RenderedKey.self) { renderReporter?($0) }
     }
 
     @ViewBuilder
@@ -68,6 +82,9 @@ struct PrivacySettingsView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text(PrivacySettingsText.routeLabel(route)).font(.headline)
                 .accessibilityIdentifier(Self.routeIdentifier(route.routeID))
+                .preference(
+                    key: RenderedKey.self,
+                    value: [Self.routeIdentifier(route.routeID): PrivacySettingsText.routeLabel(route)])
             if route.grantedCapabilities.isEmpty {
                 note(PrivacySettingsText.routeLocalOnly, identifier: Self.routeStatusIdentifier(route.routeID))
             } else {
@@ -75,6 +92,12 @@ struct PrivacySettingsView: View {
                     Text(PrivacySettingsText.grantSummary(grant)).font(.footnote)
                 }
                 .accessibilityIdentifier(Self.routeStatusIdentifier(route.routeID))
+                .preference(
+                    key: RenderedKey.self,
+                    value: [
+                        Self.routeStatusIdentifier(route.routeID):
+                            route.grantedCapabilities.map(PrivacySettingsText.grantSummary).joined(separator: "\n")
+                    ])
             }
             ForEach(PrivacySettingsModel.grantableCapabilities, id: \.self) { capability in
                 if !model.isGranted(routeID: route.routeID, capability: capability) {
@@ -94,6 +117,13 @@ struct PrivacySettingsView: View {
                         .disabled(model.isWorking)
                         .accessibilityIdentifier(
                             Self.offerIdentifier(route.routeID, capability, offer.version.profileVersion))
+                        .preference(
+                            key: RenderedKey.self,
+                            value: [
+                                Self.offerIdentifier(route.routeID, capability, offer.version.profileVersion):
+                                    "Allow \(PrivacySettingsText.capabilityName(capability).lowercased()) via "
+                                    + PrivacySettingsText.versionLabel(profileID: offer.profileID, version: offer.version)
+                            ])
                     }
                 }
             }
@@ -112,6 +142,7 @@ struct PrivacySettingsView: View {
             .buttonStyle(.borderedProminent)
             .disabled(model.isWorking)
             .accessibilityIdentifier(Self.allowIdentifier)
+            .preference(key: RenderedKey.self, value: [Self.allowIdentifier: model.isWorking ? "Allow (disabled)" : "Allow"])
             Button {
                 model.cancel()
             } label: {
@@ -120,6 +151,8 @@ struct PrivacySettingsView: View {
             .buttonStyle(.bordered)
             .disabled(model.isWorking)
             .accessibilityIdentifier(Self.cancelIdentifier)
+            .preference(
+                key: RenderedKey.self, value: [Self.cancelIdentifier: model.isWorking ? "Not now (disabled)" : "Not now"])
         }
     }
 
@@ -127,6 +160,7 @@ struct PrivacySettingsView: View {
         Text(text).font(.footnote).foregroundColor(.secondary)
             .fixedSize(horizontal: false, vertical: true)
             .accessibilityIdentifier(identifier)
+            .preference(key: RenderedKey.self, value: [identifier: text])
     }
 }
 

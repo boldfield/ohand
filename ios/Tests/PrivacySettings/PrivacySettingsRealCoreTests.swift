@@ -7,6 +7,24 @@ import XCTest
 private struct PrivacyBuiltRoot: @unchecked Sendable {
     let root: ServiceCompositionRoot
     let coordinator: LifecycleCoordinator
+    let search: RetrievalSearchModule
+}
+
+private final class PrivacySearchOutcomeBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Result<RetrievalPage, RetrievalSearchFailure>?
+
+    var value: Result<RetrievalPage, RetrievalSearchFailure>? {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+
+    func set(_ result: Result<RetrievalPage, RetrievalSearchFailure>) {
+        lock.lock()
+        stored = result
+        lock.unlock()
+    }
 }
 
 private final class PrivacySaveOutcomeBox: @unchecked Sendable {
@@ -38,10 +56,13 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
     private var coordinator: LifecycleCoordinator!
     private var keychain: FakeKeychain!
     private var credentialService: CredentialService!
+    private var sender: PrivacyUnreachableSender!
+    private var searchModule: RetrievalSearchModule!
 
     override func setUpWithError() throws {
         try super.setUpWithError()
         keychain = FakeKeychain()
+        sender = PrivacyUnreachableSender()
         credentialService = CredentialService(
             serviceName: "com.boldfield.ohand.tests.privacy-settings.\(UUID().uuidString)", keychain: keychain)
         baselineHandles = CoreHandle.liveHandleCount
@@ -68,23 +89,28 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         let layoutPath = world.layout.rootDirectory.path
         let readSession = session!
         let credentials = credentialService!
+        let requestSender = sender!
         let built = try await Task.detached { () -> PrivacyBuiltRoot in
             let coordinator = LifecycleCoordinator(stepTimeoutSeconds: 30)
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = TimeZone(identifier: "UTC")!
+            let search = RetrievalSearchModule(calendar: calendar)
             let root = try ServiceCompositionRoot(
                 testing: CompositionConfiguration(
                     storageRootPath: layoutPath, captureRouteID: "route-personal", jobRetryDelaySeconds: 3600),
                 environment: CompositionEnvironment(
                     timeZone: { TimeZone(identifier: "UTC")! }, locale: { Locale(identifier: "en_US") }),
                 adapters: .injectedForTests(
-                    sender: PrivacyUnreachableSender(), readSession: readSession,
+                    sender: requestSender, readSession: readSession,
                     notificationCenter: FakeNotificationCenter(), reachability: FakeReachability(reachable: true),
                     credentials: credentials),
-                modules: [coordinator])
+                modules: [coordinator, search])
             try coordinator.connect(to: root)
-            return PrivacyBuiltRoot(root: root, coordinator: coordinator)
+            return PrivacyBuiltRoot(root: root, coordinator: coordinator, search: search)
         }.value
         root = built.root
         coordinator = built.coordinator
+        searchModule = built.search
         return PrivacySettingsModel.assembled(root: root)
     }
 
@@ -99,9 +125,29 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         XCTAssertEqual(code, SQLITE_OK)
     }
 
-    private func saveCapture() async throws {
+    /// Closes the root and opens a new one over the same on-disk store, as a relaunch does.
+    private func relaunch() async throws -> PrivacySettingsModel {
+        root.shutDown()
+        root = nil
+        return try await makeModel()
+    }
+
+    private func search(_ query: String) async throws -> RetrievalPage {
+        let box = PrivacySearchOutcomeBox()
+        searchModule.search(RetrievalSearchRequest(query: query)) { box.set($0) }
+        let deadline = Date().addingTimeInterval(30)
+        while box.value == nil && Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
+        return try XCTUnwrap(box.value, "the search completed").get()
+    }
+
+    /// Gives job processing time to run on a saved capture, so a test can show it authorized and sent nothing.
+    private func letProcessingRun() async throws {
+        try await Task.sleep(nanoseconds: 2_000_000_000)
+    }
+
+    private func saveCapture(_ text: String = "Synthetic capture text") async throws {
         let box = PrivacySaveOutcomeBox()
-        root.saveText(captureID: UUID().uuidString.lowercased(), text: "Synthetic capture text", capturedAt: Date()) {
+        root.saveText(captureID: UUID().uuidString.lowercased(), text: text, capturedAt: Date()) {
             box.set($0)
         }
         let deadline = Date().addingTimeInterval(30)
@@ -122,12 +168,71 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
 
     func testFreshInstallCapturesBeforeAnyProviderSetupAndEveryRouteIsLocalOnly() async throws {
         let model = try await makeModel()
-        try await saveCapture()
+        try await saveCapture("synthetic roofer words")
         await model.refresh()
         XCTAssertEqual(model.phase, .loaded)
         XCTAssertTrue(model.isLocalOnly)
         XCTAssertEqual(model.routes.map(\.routeID), ["route-personal"])
         XCTAssertTrue(model.offeredVersions(for: "text_interpretation").isEmpty)
+
+        let page = try await search("roofer")
+        XCTAssertEqual(page.totalAccessible, 1, "the capture is retrieved with no provider profile saved")
+        XCTAssertEqual(page.rows.first?.text, "synthetic roofer words")
+        XCTAssertEqual(sender.attemptCount, 0, "capture and search asked no provider anything")
+        await model.refresh()
+        XCTAssertTrue(model.isLocalOnly, "capture and search authorized nothing")
+    }
+
+    func testAConfirmedGrantAndTheRouteLabelsAreStickyAcrossARelaunch() async throws {
+        var model = try await makeModel()
+        let version = try await createProfile("hosted", providerProtocol: "open_ai")
+        await model.refresh()
+        let before = try XCTUnwrap(model.routes.first { $0.routeID == "route-personal" })
+        model.propose(routeID: "route-personal", capability: "text_interpretation", profileVersion: version)
+        await model.confirm(try XCTUnwrap(model.proposal))
+        guard case .allowed = model.actionState else { return XCTFail("expected allowed") }
+
+        model = try await relaunch()
+        await model.refresh()
+
+        XCTAssertEqual(model.phase, .loaded)
+        let after = try XCTUnwrap(model.routes.first { $0.routeID == "route-personal" })
+        XCTAssertEqual(after.routeName, before.routeName)
+        XCTAssertEqual(after.scope, before.scope)
+        XCTAssertEqual(after.grantedCapabilities.map(\.capability), ["text_interpretation"])
+        XCTAssertEqual(after.grantedCapabilities.map(\.destinationClasses), [["cloud"]])
+    }
+
+    func testProcessingACaptureCreatesNoGrantAndSendsNothingWithoutOne() async throws {
+        let model = try await makeModel()
+        _ = try await createProfile("hosted", providerProtocol: "open_ai")
+        await model.refresh()
+        let before = try XCTUnwrap(model.routes.first { $0.routeID == "route-personal" })
+        XCTAssertTrue(before.grantedCapabilities.isEmpty)
+        XCTAssertEqual(model.offeredVersions(for: "text_interpretation").count, 1, "a usable profile exists")
+
+        try await saveCapture("remind me to call the roofer tomorrow")
+        try await letProcessingRun()
+        await model.refresh()
+
+        XCTAssertTrue(model.isLocalOnly, "processing a capture created no grant")
+        XCTAssertEqual(sender.attemptCount, 0, "no request reached a provider without a grant")
+    }
+
+    func testAGrantOnOneCapabilityLeavesTheOtherUngrantedAfterProcessing() async throws {
+        let model = try await makeModel()
+        let version = try await createProfile("hosted", providerProtocol: "open_ai")
+        await model.refresh()
+        model.propose(routeID: "route-personal", capability: "text_interpretation", profileVersion: version)
+        await model.confirm(try XCTUnwrap(model.proposal))
+
+        try await saveCapture("remind me to call the roofer tomorrow")
+        try await letProcessingRun()
+        await model.refresh()
+
+        let personal = try XCTUnwrap(model.routes.first { $0.routeID == "route-personal" })
+        XCTAssertEqual(personal.grantedCapabilities.map(\.capability), ["text_interpretation"])
+        XCTAssertFalse(model.isGranted(routeID: "route-personal", capability: "review"))
     }
 
     func testCancellingSetupLeavesPolicyUnchangedAndCaptureUsable() async throws {
@@ -162,14 +267,34 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         XCTAssertFalse(model.isGranted(routeID: "route-personal", capability: "review"))
         let personal = try XCTUnwrap(model.routes.first { $0.routeID == "route-personal" })
         XCTAssertEqual(personal.grantedCapabilities.map(\.destinationClasses), [["cloud"]])
-        XCTAssertNotEqual(personal.grantedCapabilities.first?.destinationClasses, ["private_server"])
-        _ = privateServer
+
+        // The private server version has no grant of its own: proposing and cancelling it changes nothing.
+        model.propose(routeID: "route-personal", capability: "text_interpretation", profileVersion: privateServer)
+        XCTAssertNotNil(model.proposal)
+        model.cancel()
+        await model.refresh()
+        let afterCancel = try XCTUnwrap(model.routes.first { $0.routeID == "route-personal" })
+        XCTAssertEqual(afterCancel.grantedCapabilities.map(\.destinationClasses), [["cloud"]])
+        let work = try XCTUnwrap(model.routes.first { $0.routeID == "route-work" })
+        XCTAssertTrue(work.grantedCapabilities.isEmpty)
     }
 }
 
 /// No request ever leaves the test.
 private final class PrivacyUnreachableSender: ProviderRequestSender, @unchecked Sendable {
+    private let lock = NSLock()
+    private var attempts = 0
+
+    var attemptCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return attempts
+    }
+
     func send(_ request: ProviderHTTPRequest) async throws -> ProviderHTTPResponse {
+        lock.lock()
+        attempts += 1
+        lock.unlock()
         throw ProviderTransportError.connectionFailed
     }
 }
