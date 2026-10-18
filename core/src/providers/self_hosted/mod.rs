@@ -35,7 +35,7 @@ use crate::providers::contracts::{
 };
 use crate::providers::openai::HttpTransport;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 /// Evidence identifier of the V08a worker-context probe artifact.
 pub const WORKER_EVIDENCE_ID: &str = "spark-probe-20261008T093909Z-22c47772";
@@ -197,6 +197,15 @@ struct Message {
 struct ResponseFormat {
     #[serde(rename = "type")]
     kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    json_schema: Option<JsonSchemaFormat>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct JsonSchemaFormat {
+    name: &'static str,
+    strict: bool,
+    schema: Value,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -267,7 +276,12 @@ impl<T: HttpTransport> ProviderAdapter for SelfHostedAdapter<T> {
                 },
             ],
             response_format: ResponseFormat {
-                kind: "json_object",
+                kind: "json_schema",
+                json_schema: Some(JsonSchemaFormat {
+                    name: "interpretation_output",
+                    strict: true,
+                    schema: required_nullable_schema(&output_schema()),
+                }),
             },
             max_tokens: MAX_COMPLETION_TOKENS,
             temperature: 0.0,
@@ -331,6 +345,48 @@ fn decode_response(status: u16, response_bytes: &[u8]) -> Result<Vec<u8>, Transp
         .content
         .ok_or(TransportError::InvalidOutput)?;
     Ok(normalize_optional_nulls(content, &output_schema()).into_bytes())
+}
+
+/// Derives the wire schema from `schema`: every object property at every depth is required, and
+/// a property the source leaves optional also accepts `null`.
+pub fn required_nullable_schema(schema: &Value) -> Value {
+    let mut derived = schema.clone();
+    make_required_nullable(&mut derived);
+    derived
+}
+
+fn make_required_nullable(schema: &mut Value) {
+    let Some(node) = schema.as_object_mut() else {
+        return;
+    };
+    let originally_required: Vec<String> = node
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|keys| {
+            keys.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(properties) = node.get_mut("properties").and_then(Value::as_object_mut) {
+        let names: Vec<String> = properties.keys().cloned().collect();
+        for (name, property) in properties.iter_mut() {
+            make_required_nullable(property);
+            if !originally_required.contains(name) {
+                *property = json!({"anyOf": [property.clone(), {"type": "null"}]});
+            }
+        }
+        node.insert("required".to_string(), json!(names));
+    }
+    if let Some(items) = node.get_mut("items") {
+        make_required_nullable(items);
+    }
+    for keyword in ["anyOf", "oneOf"] {
+        if let Some(branches) = node.get_mut(keyword).and_then(Value::as_array_mut) {
+            branches.iter_mut().for_each(make_required_nullable);
+        }
+    }
 }
 
 /// Treats a `null` in an optional position of `content` as absent, judged against `schema`.
@@ -404,8 +460,6 @@ fn map_status(status: u16) -> TransportError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-
     fn normalized(content: Value) -> Value {
         let text = normalize_optional_nulls(content.to_string(), &output_schema());
         serde_json::from_str(&text).expect("still JSON")

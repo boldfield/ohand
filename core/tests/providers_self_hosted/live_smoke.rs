@@ -508,7 +508,7 @@ fn live_endpoint_smoke_records_sanitized_evidence() {
         "transport": "curl subprocess standing in for the native https transport; certificate validation on, redirects not followed",
         "model": model,
         "max_tokens": MAX_COMPLETION_TOKENS,
-        "request_shape": "adapter-built: interpretation prompt carrying the output contract, json_object response_format, reply validated locally; optional nulls treated as absent",
+        "request_shape": "adapter-built: interpretation prompt, strict json_schema response_format derived from output_schema() with every property required and optional ones nullable; optional nulls treated as absent",
         "semantic_checks": "reminder capture: reminder_proposal with quality explicit and instant 2026-01-06T15:00 America/Chicago; idea and plain-note captures: no reminder_proposal",
         "synthetic_context_time": time_context().reference_time.to_rfc3339(),
         "requests": request_records,
