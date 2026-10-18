@@ -979,7 +979,11 @@
       "parent": "U02",
       "title": "Build authenticated source detail and retained-audio playback",
       "file_scope": [
-        "app/source-detail/"
+        "app/source-detail/",
+        "ios/Services/Playback/PlaybackSession.swift",
+        "ios/Services/Playback/PlaybackFence.swift",
+        "ios/Services/Playback/PlaybackService.swift",
+        "ios/Tests/Playback/"
       ],
       "intent": "Show source/correction provenance and offer playback only for retained authorized source audio.",
       "acceptance": [
