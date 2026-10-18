@@ -136,7 +136,7 @@ Success moves the session to `authenticated` exactly as the existing flow does, 
 
 - **Layout:** a glass back button, then a `displayXL` "Settings".
 - **First GroupedSection:** Daily prompt (value On/Off) and Unfinished recordings (value: a count or None).
-- **Second GroupedSection:** Processing (value e.g. "On this phone"), Audio (value e.g. "7 days") and Export.
+- **Second GroupedSection:** Processing (value e.g. "On this phone"), Privacy (the per-route grants of what may leave the device; its value is set by U06b), Audio (value e.g. "7 days") and Export.
 - **Erase everything:** its own card, centred, `destructive`.
 - **Version:** the version line at the bottom.
 
