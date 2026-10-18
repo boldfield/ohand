@@ -10,6 +10,7 @@ protocol ProviderCredentialStore: AnyObject {
     func updateCredential(_ secret: Data, reference: String) throws
     func deleteCredential(reference: String) throws
     func credentialStatus(reference: String) throws -> CredentialStatus
+    func releaseLease(reference: String)
 }
 
 extension CredentialService: ProviderCredentialStore {}
@@ -33,7 +34,8 @@ extension CredentialService: ProviderCredentialStore {}
 public final class ProviderCredentialEntry: @unchecked Sendable {
     private let store: ProviderCredentialStore
     private let session: ReadAuthenticationSession
-    private let profiles: ProviderProfileCore?
+    /// Also read by the credential sweep, which lists what every stored version holds.
+    let profiles: ProviderProfileCore?
 
     /// The `ProviderConfigurationError.core` code for a version that has no credential bound. An unknown version is the
     /// core's own `profile_not_found`.
@@ -70,12 +72,21 @@ public final class ProviderCredentialEntry: @unchecked Sendable {
         return try store.credentialStatus(reference: reference)
     }
 
+    /// Ends the in-process lease that keeps a newly stored secret from the credential sweep. Call it once the core has
+    /// committed a profile version that holds `reference`, or when nothing will save it and its deletion failed, so a
+    /// later sweep can remove it. Needs no session: it touches no secret and widens nothing that can leave the device.
+    public func releaseLease(reference: String) {
+        store.releaseLease(reference: reference)
+    }
+
     // MARK: by profile version
 
     /// Replaces the secret bound to the stored profile version, in place under its existing reference.
     public func replaceCredential(_ secret: Data, profileVersion: String) async throws {
         let reference = try await resolveReference(profileVersion: profileVersion)
         try store.updateCredential(secret, reference: reference)
+        // A stored version holds the reference, so the item needs no lease even if the write had to re-create it.
+        store.releaseLease(reference: reference)
     }
 
     /// Whether the secret bound to the stored profile version is present, absent or unusable. Never reads the secret.
