@@ -253,7 +253,6 @@ struct SettingsRootView: View {
                         entry.makeView(context)
                     } label: {
                         SettingsEntryRow(entry: entry, context: context)
-                            .allowsHitTesting(false)
                     }
                     .buttonStyle(.plain)
                 }

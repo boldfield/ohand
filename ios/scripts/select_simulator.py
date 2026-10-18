@@ -24,7 +24,7 @@ def parse_version(text):
     return tuple(int(part) for part in parts)
 
 
-def select_simulator(simctl_json, max_runtime=None):
+def select_simulator(simctl_json, max_runtime=None, family="iPhone"):
     devices_by_runtime = simctl_json.get("devices", {})
     ceiling = parse_version(max_runtime) if max_runtime else None
 
@@ -42,7 +42,7 @@ def select_simulator(simctl_json, max_runtime=None):
         for device in devices:
             if not device.get("isAvailable", False):
                 continue
-            if not device.get("name", "").startswith("iPhone"):
+            if not device.get("name", "").startswith(family):
                 continue
             if not device.get("udid"):
                 continue
@@ -50,7 +50,7 @@ def select_simulator(simctl_json, max_runtime=None):
 
     if not candidates:
         suffix = f" at or below iOS {max_runtime}" if max_runtime else ""
-        raise SelectionError(f"No available iPhone simulator found{suffix}")
+        raise SelectionError(f"No available {family} simulator found{suffix}")
 
     newest_version = max(candidate[0] for candidate in candidates)
     newest = [candidate for candidate in candidates if candidate[0] == newest_version]
@@ -69,6 +69,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", help="simctl JSON file (default: stdin)")
     parser.add_argument("--max-runtime", help="highest iOS runtime version to consider, e.g. 26.6")
+    parser.add_argument("--family", default="iPhone", choices=["iPhone", "iPad"], help="device family (default: iPhone)")
     args = parser.parse_args(argv)
 
     if args.input:
@@ -78,7 +79,7 @@ def main(argv=None):
         simctl_json = json.load(sys.stdin)
 
     try:
-        selected = select_simulator(simctl_json, args.max_runtime)
+        selected = select_simulator(simctl_json, args.max_runtime, args.family)
     except SelectionError as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 1
