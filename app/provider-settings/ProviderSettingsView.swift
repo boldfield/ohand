@@ -244,6 +244,14 @@ private func providerNote(_ text: String, identifier: String) -> some View {
 
 /// The Processing screen: how new captures are sorted, with the providers and the finer controls one level down.
 /// Everything it shows comes from `ProviderSettingsModel`.
+/// Which screen one level down is open. The owner of the Processing screen keeps it, so it survives this screen being
+/// rebuilt, and a hosted test can open and dismiss a screen the way a tap on its link and on Back do.
+@MainActor
+final class ProviderSettingsNavigation: ObservableObject {
+    @Published var showsAddProvider = false
+    @Published var showsAdvanced = false
+}
+
 struct ProviderSettingsView: View {
     static let modeIdentifier = "provider-settings.mode"
     static let defaultNoteIdentifier = "provider-settings.default-note"
@@ -290,15 +298,16 @@ struct ProviderSettingsView: View {
     /// Lets a hosted test see each secret field's buffer. It is called with the field identifier and the buffer.
     var secretBufferProbe: ((String, ProviderSecretBuffer) -> Void)?
     /// Whether a screen one level down is open. Opening one hides this screen, which must not drop the stored state.
-    @State private var showsAddProvider = false
-    @State private var showsAdvanced = false
+    @StateObject private var navigation: ProviderSettingsNavigation
 
     init(
         model: ProviderSettingsModel,
         renderReporter: (([String: ProviderSettingsRenderedElement]) -> Void)? = nil,
-        secretBufferProbe: ((String, ProviderSecretBuffer) -> Void)? = nil
+        secretBufferProbe: ((String, ProviderSecretBuffer) -> Void)? = nil,
+        navigation: ProviderSettingsNavigation = ProviderSettingsNavigation()
     ) {
         self.model = model
+        _navigation = StateObject(wrappedValue: navigation)
         self.renderReporter = renderReporter
         self.secretBufferProbe = secretBufferProbe
     }
@@ -332,10 +341,10 @@ struct ProviderSettingsView: View {
         .onPreferenceChange(ProviderSettingsRenderedKey.self) { elements in
             renderReporter?(elements)
         }
-        .onDisappear { if !showsAddProvider && !showsAdvanced { model.clear() } }
+        .onDisappear { if !navigation.showsAddProvider && !navigation.showsAdvanced { model.clear() } }
         // Backing out of a screen one level down abandons what was typed there, as leaving the form always has.
-        .onChange(of: showsAddProvider) { shown in if !shown { model.abandonDraft() } }
-        .onChange(of: showsAdvanced) { shown in if !shown { model.abandonDraft() } }
+        .onChange(of: navigation.showsAddProvider) { shown in if !shown { model.abandonDraft() } }
+        .onChange(of: navigation.showsAdvanced) { shown in if !shown { model.abandonDraft() } }
     }
 
     @ViewBuilder
@@ -352,19 +361,19 @@ struct ProviderSettingsView: View {
             providerNote(message, identifier: Self.defaultStateIdentifier)
         }
         VStack(alignment: .leading, spacing: DSSpacing.xs) {
-            DSPillButton(title: "Add provider", style: .secondary) { showsAddProvider = true }
+            DSPillButton(title: "Add provider", style: .secondary) { navigation.showsAddProvider = true }
                 .reportRendered(Self.addProviderIdentifier, text: "Add provider")
                 .accessibilityIdentifier(Self.addProviderIdentifier)
-            DSPillButton(title: "Advanced", style: .plain) { showsAdvanced = true }
+            DSPillButton(title: "Advanced", style: .plain) { navigation.showsAdvanced = true }
                 .reportRendered(Self.advancedIdentifier, text: "Advanced")
                 .accessibilityIdentifier(Self.advancedIdentifier)
         }
         .background(
             Group {
-                NavigationLink(isActive: $showsAddProvider) {
+                NavigationLink(isActive: $navigation.showsAddProvider) {
                     ProviderAddView(model: model, renderReporter: renderReporter, secretBufferProbe: secretBufferProbe)
                 } label: { EmptyView() }
-                NavigationLink(isActive: $showsAdvanced) {
+                NavigationLink(isActive: $navigation.showsAdvanced) {
                     ProviderAdvancedView(model: model, renderReporter: renderReporter, secretBufferProbe: secretBufferProbe)
                 } label: { EmptyView() }
             }

@@ -18,6 +18,8 @@ final class ProviderSettingsViewTests: XCTestCase {
     private var window: UIWindow?
     private var buffers: [String: ProviderSecretBuffer] = [:]
     private let sweep = FakeProviderSettingsSweep()
+    private var navigation = ProviderSettingsNavigation()
+    private var textSize = DynamicTypeSize.large
 
     private static let mixedListing = providerListing(
         supportLevels: [
@@ -39,6 +41,7 @@ final class ProviderSettingsViewTests: XCTestCase {
     ) async rethrows {
         rendered = [:]
         buffers = [:]
+        navigation = ProviderSettingsNavigation()
         let model = ProviderSettingsModel(
             controls: controls, credentials: credentials, sweep: sweep, readScope: { [unowned self] in scope })
         let hosting = UIHostingController(
@@ -47,7 +50,8 @@ final class ProviderSettingsViewTests: XCTestCase {
                 case .main:
                     ProviderSettingsView(
                         model: model, renderReporter: { [unowned self] in rendered = $0 },
-                        secretBufferProbe: { [unowned self] in buffers[$0] = $1 })
+                        secretBufferProbe: { [unowned self] in buffers[$0] = $1 },
+                        navigation: navigation)
                 case .add:
                     ProviderAddView(
                         model: model, renderReporter: { [unowned self] in rendered = $0 },
@@ -57,7 +61,8 @@ final class ProviderSettingsViewTests: XCTestCase {
                         model: model, renderReporter: { [unowned self] in rendered = $0 },
                         secretBufferProbe: { [unowned self] in buffers[$0] = $1 })
                 }
-            })
+            }
+            .environment(\.dynamicTypeSize, textSize))
         let shown = UIWindow(frame: CGRect(origin: .zero, size: Self.phone))
         shown.rootViewController = hosting
         shown.makeKeyAndVisible()
@@ -507,6 +512,52 @@ final class ProviderSettingsViewTests: XCTestCase {
             XCTAssertEqual(credentials.deleted, ["11111111-1111-1111-1111-111111111111"])
             XCTAssertEqual(model.draft.credentialReference, "")
             XCTAssertEqual(model.draft.profileName, "")
+        }
+    }
+
+    func testBackingOutOfAScreenOneLevelDownThroughTheProcessingScreenDeletesTheUnsavedSecret() async {
+        for route in [\ProviderSettingsNavigation.showsAddProvider, \.showsAdvanced] {
+            let credentials = FakeProviderSettingsCredentials()
+            await withScreen(
+                FakeProviderSettingsControls(listing: Self.mixedListing), showing: .main, credentials: credentials
+            ) { model in
+                navigation[keyPath: route] = true
+                await settle()
+                model.draft.profileName = "unsaved"
+                model.storeCredential(Data("synthetic-secret-value".utf8))
+                await settle()
+                XCTAssertEqual(credentials.deleted, [], "the secret is kept while its screen is open")
+                XCTAssertEqual(model.draft.credentialReference, "11111111-1111-1111-1111-111111111111")
+                // Back on the pushed screen sets the link's binding to false.
+                navigation[keyPath: route] = false
+                await settle()
+                XCTAssertEqual(credentials.deleted, ["11111111-1111-1111-1111-111111111111"])
+                XCTAssertEqual(model.draft.credentialReference, "")
+                XCTAssertEqual(model.draft.profileName, "")
+            }
+        }
+    }
+
+    func testEveryScreenStaysInsideTheWindowAtTheLargestTextSize() async {
+        textSize = .accessibility5
+        defer { textSize = .large }
+        for screen in [Screen.main, .add, .advanced] {
+            await withScreen(FakeProviderSettingsControls(listing: Self.mixedListing), showing: screen) { _ in
+                XCTAssertFalse(rendered.isEmpty)
+                for (identifier, element) in rendered where !element.frame.isEmpty {
+                    XCTAssertGreaterThanOrEqual(element.frame.minX, 0, identifier)
+                    XCTAssertLessThanOrEqual(element.frame.maxX, Self.phone.width, identifier)
+                }
+                if screen == .main {
+                    let rows = ProviderProcessingChoice.allCases
+                        .compactMap { rendered[ProviderSettingsView.choiceIdentifier($0)]?.frame }
+                        .sorted { $0.minY < $1.minY }
+                    XCTAssertEqual(rows.count, ProviderProcessingChoice.allCases.count)
+                    for (upper, lower) in zip(rows, rows.dropFirst()) {
+                        XCTAssertLessThanOrEqual(upper.maxY, lower.minY + 0.5, "choice rows do not overlap")
+                    }
+                }
+            }
         }
     }
 
