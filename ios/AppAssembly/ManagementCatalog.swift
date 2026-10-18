@@ -8,6 +8,7 @@ struct ManagementContext {
     let providerSettings: ProviderSettingsModel
     let promptSettings: PromptSettingsModel
     let suggestion: SuggestionScreenModel
+    let privacySettings: PrivacySettingsModel
     /// Lets a hosted test see what the search screen shows; production leaves it unset.
     var retrievalRenderReporter: (([String: RetrievalRenderedElement]) -> Void)?
 }
@@ -93,6 +94,7 @@ enum ManagementCatalog {
         ManagementEntry(id: "audio-retention", title: "Audio retention", systemImage: "externaldrive") { context in AnyView(RetentionSettingsView(model: context.retention)) },
         ManagementEntry(id: "provider-settings", title: "Providers", systemImage: "server.rack") { context in AnyView(ProviderSettingsView(model: context.providerSettings)) },
         ManagementEntry(id: "prompt-settings", title: "Daily prompt", systemImage: "bell.badge") { context in AnyView(PromptSettingsView(model: context.promptSettings)) },
+        ManagementEntry(id: "privacy-settings", title: "Privacy", systemImage: "hand.raised") { context in AnyView(PrivacySettingsView(model: context.privacySettings)) },
     ]
 
     /// Where a slice registers the screen for an item or the current suggestion. Set the slice's own line, nothing else.
@@ -158,7 +160,7 @@ struct SettingsRootView: View {
 
     /// The design's row order for the two groups. Rows missing from `sections` are skipped.
     static let firstGroupEntryIDs = ["prompt-settings", "voice-recovery"]
-    static let secondGroupEntryIDs = ["provider-settings", "audio-retention", exportEntryID]
+    static let secondGroupEntryIDs = ["provider-settings", "privacy-settings", "audio-retention", exportEntryID]
 
     let sections: [ManagementEntry]
     let context: ManagementContext
@@ -170,7 +172,7 @@ struct SettingsRootView: View {
 
     private var firstGroup: [ManagementEntry] { Self.ordered(Self.firstGroupEntryIDs, from: sections) }
 
-    /// Processing, Audio, then Export, which lives with the other data settings.
+    /// Processing, Privacy, Audio, then Export, which lives with the other data settings.
     private var secondGroup: [ManagementEntry] {
         Self.ordered(Self.secondGroupEntryIDs, from: sections + (context.retention.exportSettings == nil ? [] : [Self.exportEntry]))
     }
