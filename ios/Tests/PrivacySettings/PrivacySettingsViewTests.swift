@@ -67,10 +67,10 @@ final class PrivacySettingsViewTests: XCTestCase {
         XCTAssertTrue(controls.grants.isEmpty)
     }
 
-    func testChoosingAnOfferShowsTheQuestionWithAllowAndNotNowAndGrantsNothing() {
+    func testChoosingAnOfferShowsTheQuestionWithAllowAndNotNowAndGrantsNothing() throws {
         model.propose(routeID: "route-personal", capability: "text_interpretation", profileVersion: "hosted-v1")
         settle()
-        let proposal = try! XCTUnwrap(model.proposal)
+        let proposal = try XCTUnwrap(model.proposal)
         XCTAssertEqual(rendered[PrivacySettingsView.questionIdentifier], PrivacySettingsText.proposalQuestion(proposal))
         XCTAssertEqual(rendered[PrivacySettingsView.confirmationNoteIdentifier], PrivacySettingsText.confirmationNote)
         XCTAssertEqual(rendered[PrivacySettingsView.allowIdentifier], "Allow")

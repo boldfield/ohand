@@ -140,9 +140,41 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         return try XCTUnwrap(box.value, "the search completed").get()
     }
 
-    /// Gives job processing time to run on a saved capture, so a test can show it authorized and sent nothing.
-    private func letProcessingRun() async throws {
-        try await Task.sleep(nanoseconds: 2_000_000_000)
+    private func scalar(_ query: String) -> String {
+        var database: OpaquePointer?
+        guard sqlite3_open_v2(world.databasePath, &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else { return "" }
+        defer { sqlite3_close(database) }
+        sqlite3_busy_timeout(database, 5000)
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, query, -1, &statement, nil) == SQLITE_OK else { return "" }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW, let text = sqlite3_column_text(statement, 0) else { return "" }
+        return String(cString: text)
+    }
+
+    private func waitUntil(timeout: TimeInterval = 30, _ condition: () -> Bool) async throws -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() && Date() < deadline { try await Task.sleep(nanoseconds: 50_000_000) }
+        return condition()
+    }
+
+    /// Starts the job runner in the foreground and drains it, as a launch does.
+    private func startProcessing() {
+        root.start(isActive: true)
+        root.jobRunner.requestDrain()
+    }
+
+    /// A profile that is the `text_interpretation` default with a stored credential bound, so a new capture's job is
+    /// pinned to it and only a missing grant can stop its dispatch.
+    private func createDispatchableDefault() async throws -> String {
+        let reference = try root.providerCredentials.addCredential(Data("synthetic-key-0001".utf8))
+        let created = try await root.providerConfiguration.createProfile(
+            ProviderProfileDraft(
+                profileID: "hosted", providerProtocol: "open_ai", endpoint: nil, model: "synthetic-model",
+                credentialReference: reference, timeoutSeconds: 30))
+        try await root.providerConfiguration.setDefault(
+            capability: "text_interpretation", profileVersion: created.profileVersion)
+        return created.profileVersion
     }
 
     private func saveCapture(_ text: String = "Synthetic capture text") async throws {
@@ -205,14 +237,17 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
 
     func testProcessingACaptureCreatesNoGrantAndSendsNothingWithoutOne() async throws {
         let model = try await makeModel()
-        _ = try await createProfile("hosted", providerProtocol: "open_ai")
+        let version = try await createDispatchableDefault()
         await model.refresh()
         let before = try XCTUnwrap(model.routes.first { $0.routeID == "route-personal" })
         XCTAssertTrue(before.grantedCapabilities.isEmpty)
-        XCTAssertEqual(model.offeredVersions(for: "text_interpretation").count, 1, "a usable profile exists")
 
         try await saveCapture("remind me to call the roofer tomorrow")
-        try await letProcessingRun()
+        let jobProfile = scalar("SELECT profile_version FROM jobs LIMIT 1")
+        XCTAssertEqual(jobProfile, version, "the job is pinned to the default, so only the grant stands in the way")
+        startProcessing()
+        let failed = try await waitUntil { self.scalar("SELECT failure_reason FROM jobs LIMIT 1") == "unauthorized" }
+        XCTAssertTrue(failed, "processing ran and dispatch failed authorization: \(scalar("SELECT status FROM jobs LIMIT 1"))")
         await model.refresh()
 
         XCTAssertTrue(model.isLocalOnly, "processing a capture created no grant")
@@ -221,13 +256,16 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
 
     func testAGrantOnOneCapabilityLeavesTheOtherUngrantedAfterProcessing() async throws {
         let model = try await makeModel()
-        let version = try await createProfile("hosted", providerProtocol: "open_ai")
+        let version = try await createDispatchableDefault()
         await model.refresh()
         model.propose(routeID: "route-personal", capability: "text_interpretation", profileVersion: version)
         await model.confirm(try XCTUnwrap(model.proposal))
 
         try await saveCapture("remind me to call the roofer tomorrow")
-        try await letProcessingRun()
+        startProcessing()
+        let attempted = try await waitUntil { self.sender.attemptCount > 0 }
+        XCTAssertTrue(attempted, "the granted capability's request was attempted")
+        XCTAssertNotEqual(scalar("SELECT failure_reason FROM jobs LIMIT 1"), "unauthorized")
         await model.refresh()
 
         let personal = try XCTUnwrap(model.routes.first { $0.routeID == "route-personal" })
