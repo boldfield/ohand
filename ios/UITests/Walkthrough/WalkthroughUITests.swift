@@ -103,10 +103,12 @@ final class WalkthroughUITests: XCTestCase {
             XCTAssertTrue(waitForScreen(screen.title, leaving: row, timeout: screenTimeout), "\(screen.title) did not open")
             capture(prefix, screen.label)
             if screen.title == "Audio" {
-                // Export is also linked from the audio screen, beside the other data settings.
-                XCTAssertTrue(
-                    app.buttons["data-settings.retention.export-link"].waitForExistence(timeout: screenTimeout),
-                    "Export link not found on Audio")
+                // Export is also linked from the audio screen, beside the other data settings. The link must open it.
+                let exportLink = app.buttons["data-settings.retention.export-link"]
+                XCTAssertTrue(exportLink.waitForExistence(timeout: screenTimeout), "Export link not found on Audio")
+                exportLink.tap()
+                XCTAssertTrue(waitForScreen("Export", leaving: exportLink, timeout: screenTimeout), "Export did not open from Audio")
+                goBack(to: app.staticTexts[screen.title], screen.title)
             }
             goBack(to: settingsHeader, "Settings")
         }

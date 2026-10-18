@@ -89,7 +89,6 @@ struct RetentionSettingsView: View {
                     ExportSettingsView(model: exportSettings, renderReporter: renderReporter)
                 } label: {
                     DSRow(label: "Export a copy of your notes", iconSystemName: "square.and.arrow.up")
-                        .allowsHitTesting(false)
                 }
                 .buttonStyle(.plain)
                 .background(RoundedRectangle(cornerRadius: DSRadius.card, style: .continuous).fill(DSColor.surface1.color))
