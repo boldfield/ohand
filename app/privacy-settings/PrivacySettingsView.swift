@@ -63,9 +63,11 @@ struct PrivacySettingsView: View {
                 .reportPrivacyRendered(Self.tryAgainIdentifier, text: "Try again")
         case .loaded:
             ForEach(model.routes, id: \.routeID) { route in routeSection(route) }
-            note(PrivacySettingsText.localFirstNotice, identifier: Self.noticeIdentifier)
+            // One footer line: with no provider saved, it says where to add one.
             if model.listing?.profiles.isEmpty ?? true {
                 note(PrivacySettingsText.noProfilesNotice, identifier: Self.noProfilesIdentifier)
+            } else {
+                note(PrivacySettingsText.localFirstNotice, identifier: Self.noticeIdentifier)
             }
             if let proposal = model.proposal { proposalCard(proposal) }
             if let state = model.actionState {
