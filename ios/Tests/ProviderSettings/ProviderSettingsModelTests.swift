@@ -55,7 +55,9 @@ final class FakeProviderSettingsControls: ProviderSettingsControlling, @unchecke
 /// Records what reached the credential service and answers from canned results. It keeps secrets only so a test can
 /// prove where they went.
 final class FakeProviderSettingsCredentials: ProviderSettingsCredentialControlling {
-    var addResult: Result<String, Error> = .success("11111111-1111-1111-1111-111111111111")
+    /// The references handed out for new credentials, in order; the last one repeats.
+    var newReferences = ["11111111-1111-1111-1111-111111111111"]
+    var addResult: Result<Void, Error> = .success(())
     var updateResult: Result<Void, Error> = .success(())
     var deleteResult: Result<Void, Error> = .success(())
     var statusResult: Result<CredentialStatus, Error> = .success(.present)
@@ -63,9 +65,20 @@ final class FakeProviderSettingsCredentials: ProviderSettingsCredentialControlli
     private(set) var updated: [(Data, String)] = []
     private(set) var deleted: [String] = []
 
-    func addCredential(_ secret: Data) throws -> String {
+    private(set) var addedReferences: [String] = []
+
+    func newCredentialReference() -> String {
+        newReferences.count > 1 ? newReferences.removeFirst() : newReferences[0]
+    }
+
+    /// Invoked as a new credential is written, so a test can see what was recorded before the write.
+    var duringAdd: ((String) -> Void)?
+
+    func addCredential(_ secret: Data, reference: String) throws {
         added.append(secret)
-        return try addResult.get()
+        addedReferences.append(reference)
+        duringAdd?(reference)
+        try addResult.get()
     }
 
     func updateCredential(_ secret: Data, reference: String) throws {
@@ -352,10 +365,11 @@ final class ProviderSettingsModelTests: XCTestCase {
         let model = makeModel(controls)
         await model.refresh()
         validDraft(model)
-        controls.during = { [unowned self] in scope = .captureOnly }
+        controls.suspendCreate = { [unowned self] in scope = .captureOnly }
 
         await model.save()
 
+        XCTAssertEqual(controls.created.count, 1)
         XCTAssertEqual(model.phase, .locked)
         XCTAssertNil(model.listing)
         XCTAssertEqual(model.draft, ProviderSettingsDraft())
@@ -603,7 +617,7 @@ final class ProviderSettingsModelTests: XCTestCase {
         let model = makeModel(controls)
         await model.refresh()
         storeAndNameSecret(model)
-        controls.during = { model.clear() }
+        controls.suspendCreate = { model.clear() }
 
         await model.save()
 
@@ -618,9 +632,10 @@ final class ProviderSettingsModelTests: XCTestCase {
         await model.refresh()
         storeAndNameSecret(model)
         credentials.deleteResult = .failure(ProviderConfigurationError.notAuthenticated)
-        controls.during = { [unowned self] in scope = .captureOnly }
+        controls.suspendCreate = { [unowned self] in scope = .captureOnly }
 
         await model.save()
+        XCTAssertEqual(controls.created.count, 1)
         XCTAssertEqual(model.phase, .locked)
 
         scope = .authenticated
@@ -636,10 +651,11 @@ final class ProviderSettingsModelTests: XCTestCase {
         let model = makeModel(controls)
         await model.refresh()
         storeAndNameSecret(model)
-        controls.during = { model.clear() }
+        controls.suspendCreate = { model.clear() }
 
         await model.save()
 
+        XCTAssertEqual(controls.created.count, 1)
         XCTAssertEqual(credentials.deleted, ["11111111-1111-1111-1111-111111111111"])
         XCTAssertEqual(journal.references, [])
     }
@@ -712,6 +728,133 @@ final class ProviderSettingsModelTests: XCTestCase {
         }
         XCTAssertEqual(deletedAfterRestart, [], "the new version of the profile names it")
         XCTAssertEqual(journalAfterRestart, [], "settled, so nothing is swept later")
+    }
+
+    private static let firstReference = "11111111-1111-1111-1111-111111111111"
+    private static let secondReference = "33333333-3333-3333-3333-333333333333"
+
+    /// Saves a first secret for "work" and, while the core has not answered, leaves the screen, reopens it, stores a
+    /// second secret for "work" and tries to save it too. Then the process ends and a second model reads
+    /// `nextListing`. Returns what was deleted and journaled after the restart, how many saves reached the core and what
+    /// the second attempt reported.
+    private func overlapSaves(
+        nextListing: ProviderProfileListAnswer
+    ) async -> (deleted: [String], journaled: [String], created: Int, refusal: ProviderSettingsActionState?) {
+        credentials.newReferences = [Self.firstReference, Self.secondReference]
+        let controls = FakeProviderSettingsControls(listing: Self.twoVersions)
+        let firstRun = makeModel(controls)
+        await firstRun.refresh()
+        storeAndNameSecret(firstRun)
+        var outcome: (deleted: [String], journaled: [String], created: Int, refusal: ProviderSettingsActionState?) =
+            ([], [], 0, nil)
+        controls.suspendCreate = { [unowned self, unowned controls] in
+            firstRun.clear()
+            await firstRun.refresh()
+            storeAndNameSecret(firstRun)
+            XCTAssertEqual(firstRun.draft.credentialReference, Self.secondReference)
+            XCTAssertFalse(firstRun.canSave, "the reopened screen cannot save while the first save is unanswered")
+            await firstRun.save()
+            let refusal = firstRun.saveState
+
+            // The process ends here.
+            let secondRun = makeModel(FakeProviderSettingsControls(listing: nextListing))
+            await secondRun.refresh()
+            outcome = (credentials.deleted, journal.references, controls.created.count, refusal)
+        }
+        await firstRun.save()
+        return outcome
+    }
+
+    func testTwoSavesOfOneProfileNeverOverlapSoARestartKeepsOnlyTheCommittedSecret() async {
+        let outcome = await overlapSaves(nextListing: Self.twoVersionsAndWork)
+        XCTAssertEqual(outcome.created, 1, "the second save never reached the core")
+        XCTAssertEqual(outcome.refusal, .failed(ProviderSettingsText.earlierSaveStillFinishing))
+        XCTAssertEqual(outcome.deleted, [Self.secondReference], "work-v1 names the first secret, nothing names the second")
+        XCTAssertEqual(outcome.journaled, [])
+    }
+
+    func testTwoSavesOfOneProfileNeverOverlapSoARestartDeletesBothWhenNeitherCommitted() async {
+        let outcome = await overlapSaves(nextListing: Self.twoVersions)
+        XCTAssertEqual(outcome.created, 1)
+        XCTAssertEqual(outcome.refusal, .failed(ProviderSettingsText.earlierSaveStillFinishing))
+        XCTAssertEqual(Set(outcome.deleted), [Self.firstReference, Self.secondReference])
+        XCTAssertEqual(outcome.journaled, [])
+    }
+
+    func testASaveAfterAnUnseenCommitIsSettledOnlyByItsOwnVersion() async {
+        credentials.newReferences = [Self.firstReference, Self.secondReference]
+        let controls = FakeProviderSettingsControls(listing: Self.twoVersions)
+        let model = makeModel(controls)
+        await model.refresh()
+        storeAndNameSecret(model)
+        // The screen is left and reopened while the first save is pending; it reads the list before that save
+        // commits, so the list it shows lacks work-v1.
+        controls.suspendCreate = { [unowned self, unowned controls] in
+            model.clear()
+            await model.refresh()
+            controls.listing = .success(Self.twoVersionsAndWork)
+        }
+        await model.save()
+        XCTAssertEqual(model.listing, Self.twoVersions, "the shown list predates the first save's version")
+        XCTAssertEqual(journal.references, [], "the first save committed")
+
+        storeAndNameSecret(model)
+        var deletedAfterRestart: [String] = ["unset"]
+        var journalAfterRestart: [String] = ["unset"]
+        controls.suspendCreate = { [unowned self] in
+            XCTAssertEqual(journal.stored.first?.pendingSave?.knownVersions, ["work-v1"], "read afresh, not from the list")
+            // The process ends here, before the second save commits.
+            let secondRun = makeModel(FakeProviderSettingsControls(listing: Self.twoVersionsAndWork))
+            await secondRun.refresh()
+            deletedAfterRestart = credentials.deleted
+            journalAfterRestart = journal.references
+        }
+        await model.save()
+
+        XCTAssertEqual(deletedAfterRestart, [Self.secondReference], "work-v1 is the first save's, not the second's")
+        XCTAssertEqual(journalAfterRestart, [])
+    }
+
+    func testAnInterruptedSaveFoundUncommittedStaysUnsavedWhenItsDeletionFails() async {
+        journal.record(
+            ProviderSettingsJournalEntry(
+                reference: Self.firstReference,
+                pendingSave: ProviderSettingsPendingSave(profileID: "work", knownVersions: [])))
+        credentials.deleteResult = .failure(ProviderConfigurationError.notAuthenticated)
+        let controls = FakeProviderSettingsControls(listing: Self.twoVersions)
+        let model = makeModel(controls)
+        await model.refresh()
+        XCTAssertEqual(
+            journal.stored, [ProviderSettingsJournalEntry(reference: Self.firstReference)],
+            "settled as never committed, so no later version of the profile can claim it")
+
+        credentials.deleteResult = .success(())
+        controls.listing = .success(Self.twoVersionsAndWork)
+        await model.refresh()
+        XCTAssertEqual(credentials.deleted, [Self.firstReference, Self.firstReference])
+        XCTAssertEqual(journal.references, [])
+    }
+
+    func testANewSecretIsJournaledBeforeItIsWrittenAndKeptForLaterIfItsWriteAndCleanupFail() async {
+        let model = await storedModel()
+        var journaledDuringWrite: [String] = []
+        credentials.duringAdd = { [unowned self] _ in journaledDuringWrite = journal.references }
+        model.storeCredential(Self.syntheticSecret)
+        XCTAssertEqual(journaledDuringWrite, [Self.firstReference])
+        XCTAssertEqual(credentials.addedReferences, [Self.firstReference])
+        model.removeCredential()
+
+        credentials.newReferences = [Self.secondReference]
+        credentials.addResult = .failure(CredentialError.emptySecret)
+        credentials.deleteResult = .failure(ProviderConfigurationError.notAuthenticated)
+        model.storeCredential(Self.syntheticSecret)
+        XCTAssertEqual(model.draft.credentialReference, "", "a failed write names nothing")
+        XCTAssertEqual(journal.references, [Self.secondReference], "kept so a later read can delete it")
+
+        credentials.deleteResult = .success(())
+        await model.refresh()
+        XCTAssertEqual(credentials.deleted.last, Self.secondReference)
+        XCTAssertEqual(journal.references, [])
     }
 
     func testAnInterruptedSaveIsNotSettledByAVersionThatExistedBeforeIt() {

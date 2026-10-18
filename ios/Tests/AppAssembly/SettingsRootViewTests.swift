@@ -53,6 +53,7 @@ final class SettingsRootViewTests: XCTestCase {
             exportSettings: current.retention.exportSettings)
         let providers = ProviderSettingsModel(
             controls: FakeProviderSettingsControls(listing: providerListing(versions: [], defaultVersion: nil)),
+            credentials: FakeProviderSettingsCredentials(), journal: FakeProviderSettingsJournal(),
             readScope: { .authenticated })
         let context = ManagementContext(
             voiceRecovery: current.voiceRecovery, retrieval: current.retrieval, retention: retention,
