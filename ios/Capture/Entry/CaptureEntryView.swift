@@ -125,7 +125,9 @@ struct CaptureEntryView: View {
                 composerView(state: state, elapsedText: "0:00")
             }
         }
-        .accessibilityIdentifier(Self.composerIdentifier)
+        // The composer's frame is reported under this identifier, but the group carries no accessibility identifier of
+        // its own: SwiftUI hands a container's identifier to every element inside it, which would hide the field's and
+        // the buttons' own identifiers from the screenshot walkthrough.
         .reportHomeFrame(Self.composerIdentifier)
         .reportHomeFrame(Self.composerStateIdentifier(Self.name(of: state)))
     }

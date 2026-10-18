@@ -170,7 +170,12 @@ final class WalkthroughUITests: XCTestCase {
 
     private func saveCaptures() {
         let field = composerField
-        XCTAssertTrue(field.waitForExistence(timeout: screenTimeout), "composer field did not appear")
+        if !field.waitForExistence(timeout: screenTimeout) {
+            // What the home exposed instead, so a wrong identifier or element kind can be read off the evidence.
+            try? app.debugDescription.write(
+                to: outputDirectory.appendingPathComponent("failure-home-hierarchy.txt"), atomically: true, encoding: .utf8)
+            XCTFail("composer field did not appear")
+        }
         let save = app.buttons["home.composer.save"]
         // The composer shows Save only while there is text, and enables it once that text has content and no earlier
         // save is still in flight.
@@ -200,12 +205,9 @@ final class WalkthroughUITests: XCTestCase {
     }
 
     /// The composer's text field. It grows with its text, and a growing SwiftUI field is exposed as a text view rather
-    /// than a text field, so both kinds are accepted.
+    /// than a text field, so it is found by its identifier alone.
     private var composerField: XCUIElement {
-        let kinds = [XCUIElement.ElementType.textView, .textField].map { NSNumber(value: $0.rawValue) }
-        return app.descendants(matching: .any).matching(
-            NSPredicate(format: "identifier == %@ AND elementType IN %@", "home.composer.field", kinds)
-        ).firstMatch
+        app.descendants(matching: .any).matching(identifier: "home.composer.field").firstMatch
     }
 
     /// Puts the keyboard away with the header's Done button (after the slide-to-type tip, if the system shows it) so the
