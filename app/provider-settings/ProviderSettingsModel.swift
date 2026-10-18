@@ -158,7 +158,8 @@ enum ProviderSettingsOperatingMode: Equatable {
 /// * A secret stored for the draft is deleted at once, best effort, when the draft is abandoned. Whatever that misses
 ///   (a failed deletion, an ended process) is removed by the credential sweep, which runs each time the screen loads,
 ///   before a save is accepted. The credential service leases a new secret until a committed version holds it, so the
-///   sweep never takes a secret still being saved for garbage.
+///   sweep never takes a secret still being saved for garbage. A secret is taken back from a save only when the save was
+///   definitely refused; when its outcome is unknown the lease ends and the sweep keeps the secret if a version holds it.
 /// * A connection check runs only when the user asks for one version, sends the core's fixed synthetic request (no
 ///   capture text) and shows only the core's fixed outcome. Nothing runs one in the background.
 /// * Saving a profile or changing a default calls only the profile service. It never touches jobs, route grants or
@@ -328,7 +329,7 @@ final class ProviderSettingsModel: ObservableObject {
             capabilities: [Self.capability])
         saveState = .working
         // The saved version may come to name the secret this screen added, so until the core answers the reference is
-        // not the screen's to delete. A definite refusal gives it back below.
+        // not the screen's to delete. A definite refusal gives it back below; an unknown outcome leaves it to the sweep.
         let namedReference = addedReference.flatMap { $0 == request.credentialReference ? $0 : nil }
         if namedReference != nil { addedReference = nil }
         do {
@@ -342,7 +343,13 @@ final class ProviderSettingsModel: ObservableObject {
             draft = ProviderSettingsDraft()
             await refresh()
         } catch {
-            if let namedReference { takeBackUnsavedReference(namedReference, sameSession: thisSession == session) }
+            if let namedReference {
+                if ProviderConfigurationError.isDefiniteRefusal(error) {
+                    takeBackUnsavedReference(namedReference, sameSession: thisSession == session)
+                } else {
+                    leaveUnknownReferenceToTheSweep(namedReference, sameSession: thisSession == session)
+                }
+            }
             guard thisSession == session else { return }
             if case ProviderConfigurationError.notAuthenticated = error { lock(); return }
             saveState = .failed(ProviderSettingsText.failure(error))
@@ -508,6 +515,16 @@ final class ProviderSettingsModel: ObservableObject {
         } else {
             deleteUnsaved(reference)
         }
+    }
+
+    /// A save whose outcome is unknown (the client shut down, or the answer could not be read) may have committed a
+    /// version that names the secret, so it is neither taken back nor deleted. Its lease ends and the draft stops naming
+    /// it; the next sweep deletes it only if no stored version holds it.
+    private func leaveUnknownReferenceToTheSweep(_ reference: String, sameSession: Bool) {
+        credentials.releaseLease(reference: reference)
+        guard sameSession, draft.credentialReference == reference else { return }
+        draft.credentialReference = ""
+        credentialState = nil
     }
 
     private func credentialFailed(_ error: Error) {

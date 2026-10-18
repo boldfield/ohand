@@ -69,6 +69,38 @@ private final class SaveOutcomeBox: @unchecked Sendable {
     }
 }
 
+/// The real profile service, except that a save ends the way the client reports a lost answer: after the core committed
+/// it (`unreadable_event`), or without the core having run it (`client_shut_down`).
+private final class LostSaveAnswerControls: ProviderSettingsControlling, @unchecked Sendable {
+    private let service: ProviderConfigurationService
+    private let coreCommits: Bool
+
+    init(service: ProviderConfigurationService, coreCommits: Bool) {
+        self.service = service
+        self.coreCommits = coreCommits
+    }
+
+    func createProfile(_ draft: ProviderProfileDraft) async throws -> ProviderProfileCreatedAnswer {
+        if coreCommits {
+            _ = try await service.createProfile(draft)
+            throw ProviderConfigurationError.core(ProviderConfigurationClientFailure.unreadableAnswer)
+        }
+        throw ProviderConfigurationError.core(ProviderConfigurationClientFailure.shutDown)
+    }
+
+    func setDefault(capability: String, profileVersion: String) async throws {
+        try await service.setDefault(capability: capability, profileVersion: profileVersion)
+    }
+
+    func clearDefault(capability: String) async throws { try await service.clearDefault(capability: capability) }
+
+    func listProfiles() async throws -> ProviderProfileListAnswer { try await service.listProfiles() }
+
+    func checkConnection(profileVersion: String) async throws -> ProviderConnectionOutcome {
+        try await service.checkConnection(profileVersion: profileVersion)
+    }
+}
+
 /// Drives `ProviderSettingsModel` over the real composition root and Rust core on an on-disk store: the core's own
 /// validation, versioning and default pointer.
 @MainActor
@@ -359,6 +391,48 @@ final class ProviderSettingsRealCoreTests: XCTestCase {
         XCTAssertFalse(keychain.items.keys.contains { $0.account == orphan })
         await model.checkSavedCredential(hosted)
         XCTAssertEqual(model.savedCredentialStates[hosted.profileVersion], .status(.present), "the saved one stays")
+    }
+
+    private func modelLosingTheSaveAnswer(coreCommits: Bool) async throws -> ProviderSettingsModel {
+        _ = try await makeModel()
+        let liveRoot = root!
+        return ProviderSettingsModel(
+            controls: LostSaveAnswerControls(service: liveRoot.providerConfiguration, coreCommits: coreCommits),
+            credentials: liveRoot.providerCredentials, sweep: liveRoot.providerCredentialSweep,
+            readScope: { [weak liveRoot] in liveRoot?.readScope ?? .captureOnly })
+    }
+
+    private func saveWithLostAnswer(_ model: ProviderSettingsModel) async {
+        await model.refresh()
+        model.storeCredential(Self.syntheticSecret)
+        model.draft.profileName = "lost"
+        model.draft.model = "synthetic-model"
+        await model.save()
+        XCTAssertNotEqual(model.saveState, .saved)
+        XCTAssertEqual(keychain.items.count, 1, "an unknown outcome deletes nothing at once")
+        XCTAssertEqual(model.draft.credentialReference, "")
+        model.clear()
+        XCTAssertEqual(keychain.items.count, 1, "nor does leaving the screen")
+        await model.refresh()
+        XCTAssertEqual(model.phase, .loaded)
+    }
+
+    func testASaveCommittedByTheCoreWhoseAnswerWasLostKeepsItsSecretThroughTheSweep() async throws {
+        let model = try await modelLosingTheSaveAnswer(coreCommits: true)
+        await saveWithLostAnswer(model)
+
+        XCTAssertEqual(keychain.items.count, 1, "the sweep keeps the secret the committed version holds")
+        let lost = try version(model, profile: "lost")
+        await model.checkSavedCredential(lost)
+        XCTAssertEqual(model.savedCredentialStates[lost.profileVersion], .status(.present))
+    }
+
+    func testASaveTheCoreNeverRanIsSweptOnTheNextLoad() async throws {
+        let model = try await modelLosingTheSaveAnswer(coreCommits: false)
+        await saveWithLostAnswer(model)
+
+        XCTAssertTrue(keychain.items.isEmpty, "no version holds the secret, so the sweep deleted it")
+        XCTAssertNil(model.listing?.profiles.first { $0.profileID == "lost" })
     }
 
     func testAnUnverifiedPrivateServerIsDeclaredUnavailableByTheCoreAndRefusedAsDefault() async throws {

@@ -675,6 +675,83 @@ final class ProviderSettingsModelTests: XCTestCase {
         XCTAssertEqual(credentials.released, [], "deleted, so no lease is left to end")
     }
 
+    /// Failures the client reports itself after submitting: the core may have committed the version all the same.
+    private static let unknownSaveOutcomes: [(String, Error)] = [
+        ("unreadable_event", ProviderConfigurationError.core(ProviderConfigurationClientFailure.unreadableAnswer)),
+        ("client_shut_down", ProviderConfigurationError.core(ProviderConfigurationClientFailure.shutDown)),
+        ("unreadable", ProviderConfigurationError.unreadable),
+    ]
+
+    func testASaveWithAnUnknownOutcomeNeverDeletesTheSecretAndLeavesItToTheSweep() async {
+        for (name, failure) in Self.unknownSaveOutcomes {
+            let credentials = FakeProviderSettingsCredentials()
+            let controls = FakeProviderSettingsControls(listing: Self.twoVersions)
+            controls.createResult = .failure(failure)
+            let model = ProviderSettingsModel(
+                controls: controls, credentials: credentials, sweep: sweep, readScope: { [unowned self] in scope })
+            await model.refresh()
+            model.storeCredential(Self.syntheticSecret)
+            model.draft.profileName = "work"
+            model.draft.model = "synthetic-model"
+
+            await model.save()
+
+            XCTAssertEqual(controls.created.count, 1, name)
+            XCTAssertEqual(credentials.deleted, [], "\(name): a version the core may have committed keeps its secret")
+            XCTAssertEqual(credentials.released, [Self.reference], "\(name): the lease ends so the sweep can decide")
+            XCTAssertEqual(model.draft.credentialReference, "", "\(name): the draft no longer names it")
+            XCTAssertNotEqual(model.saveState, .saved, name)
+
+            model.clear()
+            XCTAssertEqual(credentials.deleted, [], "\(name): leaving the screen does not delete it either")
+        }
+    }
+
+    func testLeavingTheScreenOrRelockingDuringASaveWithAnUnknownOutcomeNeverDeletesTheSecret() async {
+        let interruptions: [(String, @MainActor (ProviderSettingsModel) -> Void)] = [
+            ("left", { $0.clear() }),
+            ("relocked", { [unowned self] _ in scope = .captureOnly }),
+        ]
+        for (name, failure) in Self.unknownSaveOutcomes {
+            for (interruption, interrupt) in interruptions {
+                scope = .authenticated
+                let label = "\(name) after the screen was \(interruption)"
+                let credentials = FakeProviderSettingsCredentials()
+                let controls = FakeProviderSettingsControls(listing: Self.twoVersions)
+                controls.createResult = .failure(failure)
+                let model = ProviderSettingsModel(
+                    controls: controls, credentials: credentials, sweep: sweep, readScope: { [unowned self] in scope })
+                await model.refresh()
+                model.storeCredential(Self.syntheticSecret)
+                model.draft.profileName = "work"
+                model.draft.model = "synthetic-model"
+                controls.suspendCreate = { interrupt(model) }
+
+                await model.save()
+
+                XCTAssertEqual(controls.created.count, 1, label)
+                XCTAssertEqual(credentials.deleted, [], "\(label): the secret is not deleted")
+                XCTAssertEqual(credentials.released, [Self.reference], "\(label): its lease ends for the sweep")
+
+                scope = .authenticated
+                await model.refresh()
+                XCTAssertEqual(credentials.deleted, [], "\(label): a reload deletes nothing itself")
+            }
+        }
+    }
+
+    func testOnlyAFailureTheCoreIssuedOrARefusalBeforeSubmissionIsADefiniteRefusal() {
+        XCTAssertTrue(ProviderConfigurationError.isDefiniteRefusal(ProviderConfigurationError.notAuthenticated))
+        XCTAssertTrue(ProviderConfigurationError.isDefiniteRefusal(ProviderConfigurationError.invalidRequest))
+        XCTAssertTrue(
+            ProviderConfigurationError.isDefiniteRefusal(
+                ProviderConfigurationError.core(CoreFailure(errorClass: .permanent, code: "model_invalid", message: ""))))
+        for (name, failure) in Self.unknownSaveOutcomes {
+            XCTAssertFalse(ProviderConfigurationError.isDefiniteRefusal(failure), name)
+        }
+        XCTAssertFalse(ProviderConfigurationError.isDefiniteRefusal(CoreFailure.handleClosed), "an unknown error type")
+    }
+
     func testTheSweepRunsWhenTheScreenLoadsBeforeTheListAndBeforeAnySaveIsAccepted() async {
         let controls = FakeProviderSettingsControls(listing: Self.twoVersions)
         let model = makeModel(controls)
