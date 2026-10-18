@@ -74,9 +74,9 @@ final class WalkthroughUITests: XCTestCase {
         capture(prefix, "home")
 
         // Search, with a query.
-        openFromHome("management.open.search", title: "Search")
+        // The restyled Search has no title; its query field is what shows the screen is open.
         let queryField = app.textFields["retrieval.search.query"].firstMatch
-        XCTAssertTrue(queryField.waitForExistence(timeout: screenTimeout), "search query field did not appear")
+        openFromHome("management.open.search", name: "Search", shows: queryField)
         queryField.tap()
         queryField.typeText(searchQuery)
         // The keyboard's Search key is the one way a person submits; it also puts the keyboard away.
@@ -84,15 +84,14 @@ final class WalkthroughUITests: XCTestCase {
         XCTAssertTrue(searchKey.waitForExistence(timeout: screenTimeout), "keyboard Search key did not appear")
         searchKey.tap()
         // The saved captures must be found: "garage" matches at least one (the second appearance's run adds a second copy).
-        let resultCount = app.staticTexts.matching(
-            NSPredicate(format: "label BEGINSWITH 'Showing ' AND NOT label BEGINSWITH 'Showing 0 '")
-        ).firstMatch
+        // The count ("1 result", "2 results") is shown only when there are results; no match shows "No matches".
+        let resultCount = app.staticTexts["retrieval.search.count"]
         XCTAssertTrue(resultCount.waitForExistence(timeout: screenTimeout), "search for \(searchQuery) found no synthetic capture")
         capture(prefix, "search")
         goBack(to: homeLink("management.open.search"), "home")
 
         // Settings and each settings screen.
-        openFromHome("management.open.settings", title: "Settings")
+        openFromHome("management.open.settings", name: "Settings", shows: settingsHeader)
         capture(prefix, "settings")
         for screen in settingsScreens {
             // A row reads its label, then its current value when one is known ("Processing, On this phone").
@@ -127,10 +126,14 @@ final class WalkthroughUITests: XCTestCase {
     /// and hide the navigation bar, the others show it in the navigation bar. `leaving` is the control that opened the
     /// screen; it must be gone, so a row or link with the same text as the title does not count as the screen.
     private func waitForScreen(_ title: String, leaving origin: XCUIElement, timeout: TimeInterval) -> Bool {
+        waitForScreen(shownBy: [app.navigationBars[title], app.staticTexts[title]], leaving: origin, timeout: timeout)
+    }
+
+    /// True once any of `markers` exists and `origin` has gone.
+    private func waitForScreen(shownBy markers: [XCUIElement], leaving origin: XCUIElement, timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         repeat {
-            let titleShown = app.navigationBars[title].exists || app.staticTexts[title].exists
-            if titleShown, !(origin.exists && origin.isHittable) { return true }
+            if markers.contains(where: { $0.exists }), !(origin.exists && origin.isHittable) { return true }
             Thread.sleep(forTimeInterval: 0.5)
         } while Date() < deadline
         return false
@@ -209,18 +212,18 @@ final class WalkthroughUITests: XCTestCase {
 
     /// Taps a home link and waits for the destination. The first open per launch shows the system Face ID prompt,
     /// which the driving script answers with a matching face.
-    private func openFromHome(_ identifier: String, title: String) {
+    private func openFromHome(_ identifier: String, name: String, shows marker: XCUIElement) {
         // A failed or cancelled Face ID attempt leaves the user on home with a notice; asking again is what a person does.
         for attempt in 1...3 {
             let link = app.buttons[identifier]
             XCTAssertTrue(link.waitForExistence(timeout: screenTimeout), "\(identifier) not on home")
             if link.isEnabled { link.tap() }
-            if waitForScreen(title, leaving: link, timeout: 40) { return }
+            if waitForScreen(shownBy: [marker], leaving: link, timeout: 40) { return }
             let evidence = XCUIScreen.main.screenshot()
             try? evidence.pngRepresentation.write(
-                to: outputDirectory.appendingPathComponent("failure-\(title.lowercased())-attempt\(attempt).png"))
+                to: outputDirectory.appendingPathComponent("failure-\(name.lowercased())-attempt\(attempt).png"))
         }
-        XCTFail("\(title) did not open (authentication was not matched or the screen is unreachable)")
+        XCTFail("\(name) did not open (authentication was not matched or the screen is unreachable)")
     }
 
     /// Goes back one screen and waits for `destination` to show again. The restyled settings screens have a glass
