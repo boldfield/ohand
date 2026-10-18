@@ -101,3 +101,16 @@ final class DesignSystemFontTests: XCTestCase {
         XCTAssertEqual(registered?.sorted(), DSFontRegistry.bundledFontFileNames.sorted())
     }
 }
+
+final class DesignSystemRowTests: XCTestCase {
+    /// A row used as a `NavigationLink` label has no action and must not be a button, or the inner button takes the
+    /// link's tap and the link never opens. The walkthrough UI test taps each Settings row to cover the link itself.
+    func testARowIsAButtonOnlyWhenItHasAnAction() {
+        XCTAssertFalse(DSRow(label: "Daily prompt", iconSystemName: "bell", value: "On").rendersAsButton)
+        var tapped = false
+        let row = DSRow(label: "Daily prompt") { tapped = true }
+        XCTAssertTrue(row.rendersAsButton)
+        row.action?()
+        XCTAssertTrue(tapped)
+    }
+}

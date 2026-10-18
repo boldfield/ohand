@@ -95,6 +95,16 @@ class SelectSimulatorTests(unittest.TestCase):
         self.assertEqual(lines["name"], "iPhone 16")
         self.assertEqual(lines["runtime"], "18.5")
 
+    def test_family_selects_an_ipad_and_ignores_iphones(self):
+        data = simctl(**{"18_5": [device("iPhone 16", "PHONE"), device("iPad Pro 13-inch", "PAD")]})
+        self.assertEqual(selector.select_simulator(data, family="iPad")["udid"], "PAD")
+        self.assertEqual(selector.select_simulator(data)["udid"], "PHONE")
+
+    def test_family_reports_a_missing_ipad(self):
+        data = simctl(**{"18_5": [device("iPhone 16", "PHONE")]})
+        with self.assertRaisesRegex(selector.SelectionError, "No available iPad simulator"):
+            selector.select_simulator(data, family="iPad")
+
     def test_main_reports_failure_with_nonzero_status(self):
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
             json.dump({"devices": {}}, handle)
