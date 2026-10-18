@@ -202,6 +202,32 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
     - compact width is unchanged.
 
     U02b may also add a hosted test under `ios/Tests/Retrieval/` and at most a one-line pass-through in `ios/AppAssembly/ManagementCatalog.swift`. The walkthrough allowance covers capturing source detail.
+  - **U06a Privacy row (coordinator, 2026-10-18, after PR #295 round 1).** The settings host draws only the ids listed in its two groups, so an entry in `settingsSections` alone cannot be reached. The design now has a Privacy row in the second group: Processing, Privacy, Audio, Export (`docs/features/m1-ui-design.md`, Settings). U06a may therefore:
+    - add `privacy-settings` after `provider-settings` in `SettingsRootView.secondGroupEntryIDs` (`ios/AppAssembly/ManagementCatalog.swift:163`);
+    - update the design-order assertion in `ios/Tests/AppAssembly/SettingsRootViewTests.swift` to match.
+
+    Privacy is a separate row from Processing. Processing chooses who sorts captures and holds provider setup. Privacy holds the per-route grants: which purpose may reach which destination. The row's value is left for U06b. Nothing else in the host changes.
+  - **F21 per-model evidence (coordinator, 2026-10-18, after PR #297 round 1).** F21 replaced the single verified model with `SMOKE_EVIDENCE`, three models each citing its own semantic smoke artifact. Two consumers mirror the old constants and must follow it. F21 may edit:
+    - `ios/Services/OptionalCapabilities/SelfHostedEvidence.swift`, `ios/Services/OptionalCapabilities/OptionalCapabilitiesConfiguration.swift` and `ios/Tests/OptionalCapabilities/`;
+    - `tools/bench/src/adapters/self_hosted.rs` and `tools/bench/src/cli/tests.rs`, limited to adapting to the three `Supported` models.
+
+    The iOS mirror represents the evidence as follows. `SelfHostedVerifiedBoundary` keeps one shared worker-probe reference and one shared phone-reachability reference. Next to them it holds `models`, an ordered list mirroring `SMOKE_EVIDENCE`, in which each element pairs a model with its own adapter-smoke reference. The gate enables self-hosted only when all three hold:
+    - the registration's model is one of `models`;
+    - the registration cites both shared references;
+    - the registration cites that model's own smoke reference. Another model's smoke reference does not count.
+
+    `testTheVerifiedBoundaryMatchesTheCoreSource` checks each element's model, id, artifact path and collection time against the core source. It also checks that the number of elements equals the number of `SmokeEvidence` entries in the core source, so a model added only in core fails, and that every artifact exists. Integration tests cover three cases:
+    - a second verified model (`gpt-oss:20b`) enables;
+    - an unlisted model stays disabled with `modelNotVerified`;
+    - a verified model that cites another model's smoke artifact stays disabled.
+
+    These are native edits, so the exact-head macOS run is required. F21's remaining in-scope rework, as its block note lists it, still applies. XB12, which also owns `tools/bench/src/cli/`, now depends on F21.
+  - **DS04b home seam (coordinator, 2026-10-18, after DS04a landed as #288).** Owning only `app/home/` cannot fill the home. DS04b may edit these files, for these purposes only:
+    - `ios/Capture/Entry/CaptureEntryView.swift`: replace the `Color.clear` body with an injected home-body slot. The composer, header and capture behaviour are unchanged.
+    - `ios/AppAssembly/AppRootView.swift` and `ios/AppAssembly/AppServices.swift`: pass `RecentItemsService`, the current read scope, the quiet-attempt state and an unlock closure that calls the existing explicit authentication into the home.
+    - `ios/Services/Authentication/ReadAuthenticationSession.swift`: publish a read-only `isQuietAttemptInFlight`, derived from the existing `attemptInFlight`. If relock is not already observable, add a relock observation.
+
+    The read gate, relock policy, attempt rules and every gated read stay unchanged. A test under `ios/Tests/Authentication/` shows the flag rising and falling around a quiet attempt, and that observing it changes no scope. DS04b now also depends on U06a and U02b, which edit `AppServices.swift` in open PRs, so these edits are serialized rather than raced.
   - **S04 deferred.** As scoped it cannot be built:
     - `PayloadKind` has only `Generic` (`core/src/reminders/reconcile/effects.rs:48`), and prompts hard-code it (`core/src/suggestions/schedule/apply.rs:178`).
     - The preview opt-in has no store, and `routes.preview_safe` is only ever written as 0 (`core/src/ffi/route_provisioning.rs:99`).

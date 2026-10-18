@@ -67,7 +67,7 @@ Each row is a separately reviewed task, with two concrete acceptance clauses and
 | XB09 | M1 optional | Compose explicit synthetic benchmark CLI commands | XB08 |
 | XB10 | M1 optional | Render readable paired benchmark reports | XB09 |
 | XB11 | M1 optional | Register verified self-hosted profiles in the benchmark | XB10, V09 |
-| XB12 | M1 optional | Make the benchmark temperature optional and show why a provider rejected a request | XB11 |
+| XB12 | M1 optional | Make the benchmark temperature optional and show why a provider rejected a request | XB11, F21 |
 | XL01 | M2 core | Add protected comparison configuration and record storage | T06, XB05, T08 |
 | XL02 | M2 core | Bind comparison lifetime to source deletion reset and retention | XL01, L05b |
 | XL03 | M2 core | Select eligible comparisons and reserve request budgets | XL02, E03a, J01 |

@@ -291,7 +291,8 @@
       "milestone": "M1 optional",
       "title": "Make the benchmark temperature optional and show why a provider rejected a request",
       "depends_on": [
-        "XB11"
+        "XB11",
+        "F21"
       ],
       "file_scope": [
         "tools/bench/src/cli/",
@@ -738,7 +739,7 @@
     },
     {
       "date": "2026-10-18",
-      "change": "XB12 added by the coordinator after a live Sonnet versus Haiku run: all 66 requests were rejected because the bench always requests temperature 0, which current Anthropic models refuse, and the journal recorded no reason. XB12 is a code task on Sonnet, per AGENTS.md, not the Haiku default of this manifest. It depends on XB11, which has landed, and adds no dependency to the base M1 graph."
+      "change": "XB12 added by the coordinator after a live Sonnet versus Haiku run: all 66 requests were rejected because the bench always requests temperature 0, which current Anthropic models refuse, and the journal recorded no reason. XB12 is a code task on Sonnet, per AGENTS.md, not the Haiku default of this manifest. It depends on XB11, which has landed, and adds no dependency to the base M1 graph. XB12 also depends on F21, which edits tools/bench/src/adapters/self_hosted.rs and tools/bench/src/cli/tests.rs under a coordinator grant."
     }
   ]
 }
