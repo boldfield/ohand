@@ -90,7 +90,8 @@ final class WalkthroughUITests: XCTestCase {
         capture(prefix, "search")
 
         // Source detail for the first result: pushed above Search at compact width, beside the results at regular width.
-        let isRegularWidth = app.horizontalSizeClass == .regular
+        // The same width rule as the screenshot names: an iPad runs Search at regular width, with the item pane.
+        let isRegularWidth = UIDevice.current.userInterfaceIdiom == .pad
         let firstResult = app.buttons.matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "retrieval.search.row.")).firstMatch
         XCTAssertTrue(firstResult.waitForExistence(timeout: screenTimeout), "no search result to open")
