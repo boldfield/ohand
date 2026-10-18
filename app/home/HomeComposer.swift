@@ -3,7 +3,8 @@ import SwiftUI
 /// The home's composer. It draws `DSComposer`'s three states with the same tokens, and adds what the home needs and the
 /// design-system composer has no seam for: Record and Save can be disabled on their own, so the text field keeps focus
 /// (and the keyboard stays up) while a save or the recorder is busy. Each control it actually renders reports its frame,
-/// so a hosted test checks the drawn output rather than a parallel computation.
+/// so a hosted test checks the drawn output rather than a parallel computation, and carries the accessibility identifier
+/// the screenshot walkthrough finds it by.
 struct HomeComposer: View {
     static let placeholderIdentifier = "home.composer.placeholder"
     static let fieldIdentifier = "home.composer.field"
@@ -60,6 +61,7 @@ struct HomeComposer: View {
                     .tint(DSColor.accent.color)
                     .lineLimit(1...8)
                     .accessibilityLabel("What's on your mind?")
+                    .accessibilityIdentifier(Self.fieldIdentifier)
                     .focused(focus)
                     .modifier(ReportsEnabledFrame(identifier: Self.fieldIdentifier))
                     .background {
@@ -72,6 +74,7 @@ struct HomeComposer: View {
             if state == .typing {
                 micButton(foreground: DSColor.accent, fill: DSColor.tint)
                 DSPillButton(title: "Save", style: .primary, action: onSave)
+                    .accessibilityIdentifier(Self.saveIdentifier)
                     .modifier(ReportsEnabledFrame(identifier: Self.saveIdentifier))
                     .disabled(!(entryActionsAreEnabled && saveIsEnabled))
             } else {
@@ -91,6 +94,7 @@ struct HomeComposer: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Record")
+        .accessibilityIdentifier(Self.recordIdentifier)
         .modifier(ReportsEnabledFrame(identifier: Self.recordIdentifier))
         .disabled(!entryActionsAreEnabled)
     }
@@ -120,6 +124,7 @@ struct HomeComposer: View {
             .accessibilityHidden(true)
             HStack {
                 DSPillButton(title: "Discard", style: .destructive, action: onDiscard)
+                    .accessibilityIdentifier(Self.discardIdentifier)
                     .modifier(ReportsEnabledFrame(identifier: Self.discardIdentifier))
                 Spacer()
                 Button(action: onStop) {
@@ -132,6 +137,7 @@ struct HomeComposer: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Stop recording")
+                .accessibilityIdentifier(Self.stopIdentifier)
                 .modifier(ReportsEnabledFrame(identifier: Self.stopIdentifier))
                 Spacer()
                 Color.clear.frame(width: DSLayout.minimumTouchTarget, height: DSLayout.minimumTouchTarget)
