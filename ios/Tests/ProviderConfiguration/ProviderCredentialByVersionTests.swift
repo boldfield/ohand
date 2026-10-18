@@ -150,6 +150,32 @@ final class ProviderCredentialByVersionTests: XCTestCase {
         XCTAssertEqual(keychain.items.values.map(\.secret), [Data(Self.firstSecret.utf8)], "the secret is untouched")
     }
 
+    func testTheSweepKeepsEveryReferenceAStoredVersionHoldsRevokedOnesIncludedAndDeletesOnlyTheOrphan() throws {
+        let keychain = FakeKeychain()
+        let root = try makeRoot(authenticated: true, keychain: keychain)
+        defer { root.shutDown() }
+        let entry = root.providerCredentials
+        let revokedReference = try entry.addCredential(Data(Self.firstSecret.utf8))
+        let revoked = try run { try await root.providerConfiguration.createProfile(self.draft(reference: revokedReference)) }
+        entry.releaseLease(reference: revokedReference)
+        try run { try await root.jobConfiguration.revokeProfile(revoked.profileVersion) }
+        let lowercaseReference = try entry.addCredential(Data(Self.firstSecret.utf8))
+        _ = try run {
+            try await root.providerConfiguration.createProfile(self.draft(reference: lowercaseReference.lowercased()))
+        }
+        entry.releaseLease(reference: lowercaseReference)
+        let draftReference = try entry.addCredential(Data(Self.secondSecret.utf8))
+        let orphanReference = try entry.addCredential(Data(Self.secondSecret.utf8))
+        entry.releaseLease(reference: orphanReference)
+
+        let outcome = try run { await root.providerCredentialSweep.run() }
+
+        XCTAssertEqual(outcome, .swept(deleted: 1, failed: 0))
+        XCTAssertEqual(
+            Set(keychain.items.keys.map(\.account)), [revokedReference, lowercaseReference, draftReference],
+            "the revoked version's secret, a secret named in another case and a draft's leased secret stay")
+    }
+
     func testACaptureOnlySessionIsRefusedBeforeTheCoreOrTheKeychainIsTouched() throws {
         let keychain = FakeKeychain()
         let core = RecordingProfileCore()

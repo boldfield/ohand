@@ -8,6 +8,7 @@ enum FakeKeychainOperation: Hashable {
     case inspect
     case read
     case remove
+    case accounts
 }
 
 /// In-memory `KeychainBoundary` for tests. Holds synthetic secrets only. Faults are injected per operation, either
@@ -74,5 +75,11 @@ final class FakeKeychain: KeychainBoundary {
         if let injected = injectedStatus(for: .remove) { return injected }
         if items.removeValue(forKey: key) == nil { return errSecItemNotFound }
         return errSecSuccess
+    }
+
+    func accounts(service: String) -> KeychainAccountListing {
+        if let injected = injectedStatus(for: .accounts) { return KeychainAccountListing(status: injected, accounts: []) }
+        return KeychainAccountListing(
+            status: errSecSuccess, accounts: items.keys.filter { $0.service == service }.map(\.account).sorted())
     }
 }

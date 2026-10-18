@@ -421,10 +421,11 @@ struct ProviderSettingsView: View {
 }
 
 extension ProviderSettingsModel {
-    /// The model as the app assembles it: the root's provider configuration, gated by the root's read scope.
+    /// The model as the app assembles it: the root's provider configuration, credentials and credential sweep, gated by
+    /// the root's read scope.
     nonisolated static func assembled(root: ServiceCompositionRoot) -> ProviderSettingsModel {
         ProviderSettingsModel(
             controls: root.providerConfiguration, credentials: root.providerCredentials,
-            readScope: { [weak root] in root?.readScope ?? .captureOnly })
+            sweep: root.providerCredentialSweep, readScope: { [weak root] in root?.readScope ?? .captureOnly })
     }
 }

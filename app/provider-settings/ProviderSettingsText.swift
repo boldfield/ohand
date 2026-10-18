@@ -25,7 +25,6 @@ enum ProviderSettingsText {
     static let noCredentialBoundCode = "credential_not_bound"
     static let credentialMissingReference = "No saved credential is named yet."
     static let credentialEmptySecret = "Enter the secret first. Nothing was stored."
-    static let earlierSaveStillFinishing = "An earlier save is still finishing. Try again in a moment."
     static let connectionCheckNote =
         "A connection check sends one fixed test message to this profile's own destination. It contains none of your "
         + "notes and runs only when you ask."

@@ -343,6 +343,24 @@ final class ProviderSettingsRealCoreTests: XCTestCase {
         XCTAssertTrue(keychain.items.isEmpty, "the unsaved secret was removed from the Keychain")
     }
 
+    func testLoadingTheScreenSweepsASecretAnEarlierRunLeftAndKeepsTheSavedOne() async throws {
+        let model = try await makeModel()
+        let hosted = try await savedProfileWithSecret(model)
+        // What an earlier process left: a secret stored for a draft that never saved, its lease gone with the process.
+        let orphan = try credentialService.addCredential(Self.syntheticSecret)
+        credentialService.releaseLease(reference: orphan)
+        XCTAssertEqual(keychain.items.count, 2)
+
+        model.clear()
+        await model.refresh()
+
+        XCTAssertEqual(model.phase, .loaded)
+        XCTAssertEqual(keychain.items.count, 1, "the unowned secret was swept")
+        XCTAssertFalse(keychain.items.keys.contains { $0.account == orphan })
+        await model.checkSavedCredential(hosted)
+        XCTAssertEqual(model.savedCredentialStates[hosted.profileVersion], .status(.present), "the saved one stays")
+    }
+
     func testAnUnverifiedPrivateServerIsDeclaredUnavailableByTheCoreAndRefusedAsDefault() async throws {
         let model = try await makeModel()
         await model.refresh()

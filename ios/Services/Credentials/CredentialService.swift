@@ -55,11 +55,18 @@ public enum CredentialError: Error, Equatable, CustomStringConvertible, Localize
 /// Secret bytes come back only through `resolveSecret`, which is module-internal so that the native provider
 /// transport (same module) can attach a secret at dispatch while the app, control extensions, webview and
 /// core bridge cannot call it. This type never logs.
+///
+/// **Leases.** A reference this service writes a new item under is leased first, in memory, until its owner releases
+/// it: after the core has committed a profile that holds it, or by deleting it. A sweep for unowned items lists the
+/// Keychain, then reads the leases, then reads what the core holds, so an item still being saved is never taken for
+/// garbage. Leases are not persisted: a process that ended holds nothing live, so its unsaved items become sweepable.
 public final class CredentialService {
     public static let defaultServiceName = "com.boldfield.ohand.credentials"
 
     private let serviceName: String
     private let keychain: KeychainBoundary
+    private let leaseLock = NSLock()
+    private var leases: Set<String> = []
 
     public convenience init(serviceName: String = CredentialService.defaultServiceName) {
         self.init(serviceName: serviceName, keychain: SecurityKeychain())
@@ -74,9 +81,16 @@ public final class CredentialService {
     public func addCredential(_ secret: Data) throws -> String {
         guard !secret.isEmpty else { throw CredentialError.emptySecret }
         let reference = UUID().uuidString
+        // Leased before the item exists, so any listing that can see the item is followed by a lease read that does.
+        lease(reference)
         let status = keychain.insert(
             key: itemKey(for: reference), secret: secret, accessibility: .afterFirstUnlockThisDeviceOnly)
-        try requireSuccess(status, operation: .add)
+        do {
+            try requireSuccess(status, operation: .add)
+        } catch {
+            releaseLease(reference: reference)
+            throw error
+        }
         return reference
     }
 
@@ -89,6 +103,8 @@ public final class CredentialService {
 
         var status = keychain.replace(key: key, secret: secret, accessibility: accessibility)
         if status == errSecItemNotFound {
+            // A new item, like one `addCredential` makes, is leased before it exists.
+            lease(key.account)
             status = keychain.insert(key: key, secret: secret, accessibility: accessibility)
             if status == errSecDuplicateItem {
                 // Another writer created the item between our replace and insert; retry the replace once.
@@ -98,12 +114,43 @@ public final class CredentialService {
         try requireSuccess(status, operation: .update)
     }
 
-    /// Removes the secret behind a reference. Deleting an absent credential succeeds.
+    /// Removes the secret behind a reference. Deleting an absent credential succeeds, and either way its lease ends.
     public func deleteCredential(reference: String) throws {
         let key = try validatedItemKey(for: reference)
         let status = keychain.remove(key: key)
-        if status == errSecItemNotFound { return }
-        try requireSuccess(status, operation: .delete)
+        if status != errSecItemNotFound { try requireSuccess(status, operation: .delete) }
+        releaseLease(reference: key.account)
+    }
+
+    /// Ends the lease on `reference`, once the core has committed a profile that holds it or its owner no longer
+    /// needs it. Releasing a reference that holds no lease does nothing.
+    public func releaseLease(reference: String) {
+        let canonical = UUID(uuidString: reference)?.uuidString ?? reference
+        leaseLock.lock()
+        leases.remove(canonical)
+        leaseLock.unlock()
+    }
+
+    /// The references currently leased in this process.
+    public func leasedReferences() -> Set<String> {
+        leaseLock.lock()
+        defer { leaseLock.unlock() }
+        return leases
+    }
+
+    /// The reference of every item stored under this service, read from item attributes only: no secret bytes are
+    /// read. An account that is not a reference this service could have made is left out. A Keychain that cannot be
+    /// listed, including before the first unlock after a restart, throws; it never reads as empty.
+    public func listReferences() throws -> Set<String> {
+        let listing = keychain.accounts(service: serviceName)
+        try requireSuccess(listing.status, operation: .status)
+        return Set(listing.accounts.compactMap { UUID(uuidString: $0)?.uuidString })
+    }
+
+    private func lease(_ reference: String) {
+        leaseLock.lock()
+        leases.insert(reference)
+        leaseLock.unlock()
     }
 
     /// Reports the health of the item behind a reference from its metadata only. Secret bytes are never read on

@@ -17,7 +17,7 @@ final class ProviderSettingsViewTests: XCTestCase {
     private var rendered: [String: ProviderSettingsRenderedElement] = [:]
     private var window: UIWindow?
     private var buffers: [String: ProviderSecretBuffer] = [:]
-    private let journal = FakeProviderSettingsJournal()
+    private let sweep = FakeProviderSettingsSweep()
 
     private static let mixedListing = providerListing(
         supportLevels: [
@@ -34,7 +34,7 @@ final class ProviderSettingsViewTests: XCTestCase {
         rendered = [:]
         buffers = [:]
         let model = ProviderSettingsModel(
-            controls: controls, credentials: credentials, journal: journal, readScope: { [unowned self] in scope })
+            controls: controls, credentials: credentials, sweep: sweep, readScope: { [unowned self] in scope })
         let hosting = UIHostingController(
             rootView: NavigationStack {
                 ProviderSettingsView(
