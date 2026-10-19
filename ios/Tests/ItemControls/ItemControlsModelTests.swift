@@ -112,7 +112,7 @@ final class ItemControlsModelTests: XCTestCase {
         model.topicDraft = "kitchen"
         model.pendingType = .note
         model.textDraft = "new words"
-        reader.failure = .unreadable
+        reader.failure = .core(.handleClosed)
         await model.saveText()
         XCTAssertEqual(model.outcome, .saved(.text))
         XCTAssertEqual(model.refreshFailure, .unreadable)
