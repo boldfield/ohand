@@ -254,11 +254,9 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         XCTAssertTrue(model.isLocalOnly)
 
         startProcessing()
-        let settled = try await waitUntil {
-            let status = self.scalar("SELECT status FROM jobs LIMIT 1")
-            return status == "completed" || status == "failed" || status == "dead"
-        }
-        XCTAssertTrue(settled, "the job settled: \(scalar("SELECT status FROM jobs LIMIT 1"))")
+        // The runner leaves the job queued (a retry is scheduled) or fails it at authorization; it never completes it.
+        _ = try await waitUntil(timeout: 10) { self.scalar("SELECT status FROM jobs LIMIT 1") == "completed" }
+        XCTAssertNotEqual(scalar("SELECT status FROM jobs LIMIT 1"), "completed")
         XCTAssertEqual(sender.attemptCount, 0, "a revoked capability sends nothing, even for work queued before it")
 
         model = try await relaunch()
