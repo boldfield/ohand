@@ -10,6 +10,8 @@ struct ItemControlsView: View {
     static let typeApplyIdentifier = "item-controls.type.apply"
     static let topicFieldIdentifier = "item-controls.topic.field"
     static let topicSaveIdentifier = "item-controls.topic.save"
+    static let sectionIdentifier = "item-controls.section"
+    static let actionWarningIdentifier = "item-controls.type.action-warning"
     static let outcomeIdentifier = "item-controls.outcome"
 
     static let actionWarning =
@@ -36,10 +38,13 @@ struct ItemControlsView: View {
         case .itemGone: return "This item is not available. It may have been deleted."
         case .invalid: return "That change could not be saved. Check it and try again."
         case .failed: return "That change could not be saved right now. Try again."
+        case .loadFailed: return "This item could not be read right now."
         }
     }
 
     @ObservedObject var model: ItemControlsModel
+    /// Told when an identified element comes on or goes off the screen; tests use it to check what is rendered.
+    var renderReporter: ((String, Bool) -> Void)?
 
     var body: some View {
         Group {
@@ -49,6 +54,7 @@ struct ItemControlsView: View {
                         .font(DSFont.sectionTitle)
                         .foregroundColor(DSColor.ink.color)
                         .accessibilityAddTraits(.isHeader)
+                        .rendered(Self.sectionIdentifier, renderReporter)
                     textControl
                     typeControl
                     topicControl
@@ -58,6 +64,7 @@ struct ItemControlsView: View {
                             .foregroundColor(DSColor.inkMuted.color)
                             .fixedSize(horizontal: false, vertical: true)
                             .accessibilityIdentifier(Self.outcomeIdentifier)
+                            .rendered(Self.outcomeIdentifier, renderReporter)
                     }
                 }
                 .disabled(model.snapshot?.isDeleted == true)
@@ -88,7 +95,7 @@ struct ItemControlsView: View {
                 .font(DSFont.groupHeading)
                 .foregroundColor(DSColor.inkMuted.color)
             Picker("Type", selection: $model.pendingType) {
-                Text("Not set").tag(ItemCorrectionItemType?.none)
+                if model.snapshot?.itemType == nil { Text("Not set").tag(ItemCorrectionItemType?.none) }
                 ForEach(ItemCorrectionItemType.allCases, id: \.self) { type in
                     Text(Self.typeTitle(type)).tag(ItemCorrectionItemType?.some(type))
                 }
@@ -97,6 +104,7 @@ struct ItemControlsView: View {
             .accessibilityIdentifier(Self.typePickerIdentifier)
             if model.pendingTypeMakesAction {
                 Text(Self.actionWarning)
+                    .rendered(Self.actionWarningIdentifier, renderReporter)
                     .font(DSFont.footer)
                     .foregroundColor(DSColor.inkMuted.color)
                     .fixedSize(horizontal: false, vertical: true)
@@ -125,5 +133,13 @@ struct ItemControlsView: View {
                 .disabled(!model.canSaveTopic)
                 .accessibilityIdentifier(Self.topicSaveIdentifier)
         }
+    }
+}
+
+private extension View {
+    func rendered(_ identifier: String, _ reporter: ((String, Bool) -> Void)?) -> some View {
+        accessibilityIdentifier(identifier)
+            .onAppear { reporter?(identifier, true) }
+            .onDisappear { reporter?(identifier, false) }
     }
 }

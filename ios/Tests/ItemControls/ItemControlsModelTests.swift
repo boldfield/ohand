@@ -70,15 +70,50 @@ final class ItemControlsModelTests: XCTestCase {
         XCTAssertFalse(model.canApplyType)
     }
 
-    func testTopicChangeSendsOnlyATopicCorrectionAndNeverTouchesScopeOrType() async {
+    /// Stored scope and type are checked against the real core in `ItemControlsRealCoreTests`; this only pins what is sent.
+    func testTopicChangeSendsOnlyATopicCorrection() async {
         let corrector = RecordingCorrector()
         let model = make(StubDetailReader(detail()), corrector)
         await model.load()
         model.topicDraft = "kitchen"
         await model.saveSessionTopic()
         XCTAssertEqual(corrector.calls, [.topic(command: "command-1", revision: 3, topic: "kitchen")])
-        XCTAssertEqual(model.snapshot?.scope, "work")
-        XCTAssertEqual(model.snapshot?.itemType, .idea)
+    }
+
+    func testSavingOneFieldKeepsUnsavedEditsInTheOthers() async {
+        let reader = StubDetailReader(detail(type: "idea", topic: "garage", text: "old"))
+        let corrector = RecordingCorrector()
+        let model = make(reader, corrector)
+        await model.load()
+        model.topicDraft = "kitchen"
+        model.pendingType = .note
+        model.textDraft = "new words"
+        reader.detail = detail(revision: 4, type: "idea", topic: "garage", text: "new words")
+        await model.saveText()
+        XCTAssertEqual(model.textDraft, "new words")
+        XCTAssertEqual(model.topicDraft, "kitchen", "the unsaved topic edit survives saving the words")
+        XCTAssertEqual(model.pendingType, .note, "the unapplied type pick survives saving the words")
+        XCTAssertTrue(model.canSaveTopic)
+        XCTAssertTrue(model.canApplyType)
+    }
+
+    func testAConflictRefreshesTheHostSoItAgreesWithTheNewerValues() async {
+        let corrector = RecordingCorrector()
+        corrector.results = [.failure(.staleRevision(currentRevision: 5))]
+        var refreshes = 0
+        let model = ItemControlsModel(
+            itemID: Self.itemID, reader: StubDetailReader(detail()), corrector: corrector, onCorrected: { refreshes += 1 })
+        await model.load()
+        model.topicDraft = "kitchen"
+        await model.saveSessionTopic()
+        XCTAssertEqual(model.outcome, .conflict(.sessionTopic, currentRevision: 5))
+        XCTAssertEqual(refreshes, 1)
+    }
+
+    func testEveryOutcomeHasAMessageAndTheReminderOneSaysSo() {
+        XCTAssertTrue(ItemControlsView.message(for: .savedAndReminderCancelled).contains("reminder"))
+        XCTAssertTrue(ItemControlsView.message(for: .conflict(.text, currentRevision: 2)).contains("nothing was saved"))
+        XCTAssertFalse(ItemControlsView.message(for: .loadFailed).isEmpty)
     }
 
     func testPickingActionDoesNotApplyItUntilTheUserConfirms() async {

@@ -42,9 +42,13 @@ enum ItemControlsOutcome: Equatable {
     case itemGone
     case invalid(ItemControlsField)
     case failed(ItemControlsField)
+    /// The stored values could not be read, so nothing is offered to edit.
+    case loadFailed
 }
 
 /// The correction controls for one item: edit the words, correct the type, set the session topic.
+///
+/// A session topic is set or replaced here; the core refuses a blank topic, so clearing one is not offered.
 ///
 /// Rules this type keeps:
 /// * Each control writes exactly one kind of correction through the existing revisioned operation. A topic change never
@@ -106,8 +110,9 @@ final class ItemControlsModel: ObservableObject {
 
     // MARK: loading
 
-    /// Reads the stored values. Drafts are replaced only when `resetDrafts` is true; a conflict keeps what the user typed.
-    @MainActor func load(resetDrafts: Bool = true) async {
+    /// Reads the stored values. Only the drafts named in `resetting` are replaced by what is stored, so saving one
+    /// field never discards unsaved edits in the others, and a conflict (`resetting: []`) keeps everything typed.
+    @MainActor func load(resetting fields: Set<ItemControlsField> = [.text, .type, .sessionTopic]) async {
         loadGeneration += 1
         let generation = loadGeneration
         do {
@@ -119,11 +124,9 @@ final class ItemControlsModel: ObservableObject {
                 sessionTopic: detail.sessionTopic, scope: detail.scope,
                 isDeleted: detail.lifecycleState == "deleted")
             snapshot = loaded
-            if resetDrafts {
-                textDraft = loaded.text ?? ""
-                topicDraft = loaded.sessionTopic ?? ""
-                pendingType = loaded.itemType
-            }
+            if fields.contains(.text) { textDraft = loaded.text ?? "" }
+            if fields.contains(.sessionTopic) { topicDraft = loaded.sessionTopic ?? "" }
+            if fields.contains(.type) { pendingType = loaded.itemType }
         } catch {
             guard generation == loadGeneration else { return }
             snapshot = nil
@@ -133,7 +136,7 @@ final class ItemControlsModel: ObservableObject {
             switch error as? ItemDetailError {
             case .some(.notAuthenticated), .some(.relocked): outcome = .locked
             case .some(.notFound), .some(.invalidItemID): outcome = .itemGone
-            default: outcome = .failed(.text)
+            default: outcome = .loadFailed
             }
         }
     }
@@ -186,7 +189,7 @@ final class ItemControlsModel: ObservableObject {
             heldCommand = nil
             outcome = receipt.reminderCancelled && field == .type ? .savedAndReminderCancelled : .saved(field)
             isWorking = false
-            await load()
+            await load(resetting: [field])
             onCorrected()
             return
         } catch let error as ItemCorrectionError {
@@ -196,7 +199,9 @@ final class ItemControlsModel: ObservableObject {
                 outcome = .conflict(field, currentRevision: current)
                 isWorking = false
                 // Show what is stored now but keep the draft the user typed.
-                await load(resetDrafts: false)
+                await load(resetting: [])
+                // The detail card above shows the same stored values, so it refreshes too.
+                onCorrected()
                 return
             case .notAuthenticated:
                 outcome = .locked
