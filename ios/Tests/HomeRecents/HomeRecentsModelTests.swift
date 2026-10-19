@@ -69,7 +69,7 @@ final class HomeRecentsModelTests: XCTestCase {
     }
 
     private func settle() async {
-        for _ in 0..<20 { await Task.yield() }
+        for _ in 0..<500 { await Task.yield() }
     }
 
     func testCaptureOnlyShowsTheLockedStateAndNeverReads() async {

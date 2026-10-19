@@ -200,8 +200,12 @@ final class HomeRecentsModel: ObservableObject {
 
     private func handleFailure(_ error: Error, startedIn: Int) {
         guard startedIn == generation else { return }
-        accessDidChange()
-        if bodyState == .unlocked { loadFailed = true }
+        // A refusal means access ended under the read; anything else leaves the list and offers a retry.
+        guard source.isAuthenticated else {
+            accessDidChange()
+            return
+        }
+        loadFailed = true
     }
 
     /// Replaces the head of the list with a fresh first page, keeping the pages already scrolled to.
