@@ -12,11 +12,16 @@ final class ReminderEditViewTests: XCTestCase {
     private static let clock = Date(timeIntervalSince1970: 1_800_000_000)
     private var rendered: [String: String] = [:]
     private var retainedWindow: UIWindow?
+    private var lastModel: ReminderEditModel?
 
     override func tearDown() async throws {
         retainedWindow?.isHidden = true
         retainedWindow = nil
         try await super.tearDown()
+    }
+
+    private var diagnostics: String {
+        "rendered=\(rendered) reminder=\(String(describing: lastModel?.reminder)) unavailable=\(String(describing: lastModel?.unavailable))"
     }
 
     private func record(
@@ -42,11 +47,16 @@ final class ReminderEditViewTests: XCTestCase {
         window.makeKeyAndVisible()
         retainedWindow = window
         await model.load()
-        for _ in 0..<5 {
+        // Give the hosted view time to take the loaded state and report it, yielding so its own tasks can run.
+        for _ in 0..<60 {
             hosting.view.setNeedsLayout()
             hosting.view.layoutIfNeeded()
-            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.2))
+            if rendered[ReminderEditSection.standingIdentifier] != nil { break }
+            try? await Task.sleep(nanoseconds: 100_000_000)
         }
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        hosting.view.layoutIfNeeded()
+        lastModel = model
     }
 
     func testAPassedStoredTimeIsShownInItsZoneWithTheExpiredStateAndNoCancelOffer() async {
@@ -55,24 +65,24 @@ final class ReminderEditViewTests: XCTestCase {
                 state: "unschedulable", reason: "time_in_past", due: Self.clock.addingTimeInterval(-3600),
                 zone: "Asia/Tokyo"))
 
-        XCTAssertTrue(rendered[ReminderEditSection.storedTimeIdentifier]?.hasPrefix("Stored time: 2027-01-15 16:00 ") == true)
-        XCTAssertTrue(rendered[ReminderEditSection.standingIdentifier]?.hasPrefix("Time has passed") == true)
-        XCTAssertEqual(rendered[ReminderEditSection.saveIdentifier], "Save time")
+        XCTAssertTrue(rendered[ReminderEditSection.storedTimeIdentifier]?.hasPrefix("Stored time: 2027-01-15 16:00 ") == true, diagnostics)
+        XCTAssertTrue(rendered[ReminderEditSection.standingIdentifier]?.hasPrefix("Time has passed") == true, diagnostics)
+        XCTAssertEqual(rendered[ReminderEditSection.saveIdentifier], "Save time", diagnostics)
     }
 
     func testAResolvedReminderShowsItsZoneStoredTimeAndHonestSavedStateWithCancel() async {
         await host(record(state: "resolved", due: Self.clock.addingTimeInterval(7200), zone: "UTC"))
 
-        XCTAssertEqual(rendered[ReminderEditSection.zoneIdentifier], "Time zone of this reminder: UTC")
-        XCTAssertEqual(rendered[ReminderEditSection.storedTimeIdentifier], "Stored time: 2027-01-15 10:00 UTC")
-        XCTAssertTrue(rendered[ReminderEditSection.standingIdentifier]?.hasPrefix("Saved") == true)
-        XCTAssertEqual(rendered[ReminderEditSection.cancelIdentifier], "Cancel reminder")
+        XCTAssertEqual(rendered[ReminderEditSection.zoneIdentifier], "Time zone of this reminder: UTC", diagnostics)
+        XCTAssertEqual(rendered[ReminderEditSection.storedTimeIdentifier], "Stored time: 2027-01-15 10:00 UTC", diagnostics)
+        XCTAssertTrue(rendered[ReminderEditSection.standingIdentifier]?.hasPrefix("Saved") == true, diagnostics)
+        XCTAssertEqual(rendered[ReminderEditSection.cancelIdentifier], "Cancel reminder", diagnostics)
     }
 
     func testAnUnsupportedRepeatIsNamedAndNothingIsStored() async {
         await host(record(state: "unsupported_recurrence", due: nil, zone: nil))
 
-        XCTAssertTrue(rendered[ReminderEditSection.standingIdentifier]?.hasPrefix("Repeat not supported") == true)
+        XCTAssertTrue(rendered[ReminderEditSection.standingIdentifier]?.hasPrefix("Repeat not supported") == true, diagnostics)
         XCTAssertNil(rendered[ReminderEditSection.storedTimeIdentifier])
     }
 }
