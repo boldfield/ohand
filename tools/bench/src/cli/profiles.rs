@@ -24,7 +24,7 @@ use ohand_core::providers::openai::{
 use url::Url;
 
 use super::args::{protocol_label, ProfileSpec};
-use super::corpus::requested_settings;
+use super::corpus::{requested_settings, temperature_label};
 use crate::adapters::self_hosted::{self, SelfHostedEndpoint};
 use crate::transport::HostTransport;
 
@@ -79,6 +79,7 @@ pub struct EndpointOverrides<'a> {
 pub fn build_profile(
     spec: &ProfileSpec,
     timeout_seconds: u32,
+    temperature_milli: Option<u32>,
     overrides: EndpointOverrides<'_>,
 ) -> Result<ArmProfile, String> {
     let (endpoint, origin, declared_endpoint, pinned_endpoint) = match spec.protocol {
@@ -111,14 +112,21 @@ pub fn build_profile(
     let protocol = protocol_label(spec.protocol);
     let profile_id = format!("{protocol}-{}", spec.model);
     let timeout = timeout_seconds.to_string();
-    let profile_version = derived_uuid(&[
+    // The requested temperature is part of what an arm pins: a different setting is a different
+    // profile revision, so a journal cannot silently mix them. The pin is always part of the
+    // digest, including "provider default", so journals written with the old fixed temperature 0
+    // are refused rather than resumed.
+    let temperature_pin = format!("temperature-{}", temperature_label(temperature_milli));
+    let mut version_parts = vec![
         "bench-profile-v1",
         &profile_id,
         &spec.model,
         &spec.credential_ref,
         &pinned_endpoint,
         &timeout,
-    ]);
+    ];
+    version_parts.push(&temperature_pin);
+    let profile_version = derived_uuid(&version_parts);
     let declared: Vec<CapabilityMetadata> = match spec.protocol {
         ProviderProtocol::SelfHosted => self_hosted::capabilities(&spec.model, INPUT_SIZE_LIMIT),
         _ => vec![CapabilityMetadata::supported(
@@ -150,7 +158,7 @@ pub fn build_profile(
     });
     let profile: ProviderProfile =
         serde_json::from_value(record).map_err(|error| format!("profile is not valid: {error}"))?;
-    let blockers = pairing_blockers(&profile, spec.protocol);
+    let blockers = pairing_blockers(&profile, spec.protocol, temperature_milli);
     Ok(ArmProfile {
         spec: spec.clone(),
         profile,
@@ -163,7 +171,11 @@ pub fn build_profile(
 /// What stands in the way of pairing a case through this arm, read from the profile's declared
 /// capability and the adapter's declared diagnostic support. The executor refuses on the same
 /// facts and records each case as not eligible; this names them before anything is journaled.
-fn pairing_blockers(profile: &ProviderProfile, protocol: ProviderProtocol) -> Vec<String> {
+fn pairing_blockers(
+    profile: &ProviderProfile,
+    protocol: ProviderProtocol,
+    temperature_milli: Option<u32>,
+) -> Vec<String> {
     let mut blockers = Vec::new();
     match profile.capability(ProviderCapability::TextInterpretation) {
         Some(capability) => match capability.support {
@@ -181,7 +193,7 @@ fn pairing_blockers(profile: &ProviderProfile, protocol: ProviderProtocol) -> Ve
     if !support.is_supported() {
         blockers.push("the adapter declares no support for diagnostic calls".to_string());
     } else {
-        let unsupported: Vec<String> = requested_settings()
+        let unsupported: Vec<String> = requested_settings(temperature_milli)
             .values()
             .iter()
             .map(|value| value.setting())

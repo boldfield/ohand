@@ -9,8 +9,8 @@ use super::{AnthropicSettings, HttpResponse, INTERPRETATION_TOOL_NAME};
 use crate::interpretation::instructions::render_prompt;
 use crate::providers::contracts::{
     CallObservations, DiagnosticRequest, DiagnosticResponse, DiagnosticSetting,
-    DiagnosticTransportFailure, InterpretationRequest, ProviderProfile, SettingValue,
-    StructuredOutputMode, TokenUsage, TransportError,
+    DiagnosticTransportFailure, InterpretationRequest, ProviderProfile, RejectionDetail,
+    SettingValue, StructuredOutputMode, TokenUsage, TransportError,
 };
 
 /// Schema the `interpret` tool advertises and the extracted input must satisfy. Only a profile
@@ -157,13 +157,37 @@ fn map_status(status: u16) -> TransportError {
     }
 }
 
-/// The `error.type` of an Anthropic error envelope, if the body is one.
-fn error_envelope_type(body: &[u8]) -> Option<String> {
+/// Error types the Messages API documents.
+const DOCUMENTED_ERROR_TYPES: &[&str] = &[
+    "invalid_request_error",
+    "authentication_error",
+    "billing_error",
+    "permission_error",
+    "not_found_error",
+    "conflict_error",
+    "request_too_large",
+    "rate_limit_error",
+    "timeout_error",
+    "api_error",
+    "overloaded_error",
+];
+
+/// The `error.type` and `error.message` of an Anthropic error envelope, if the body is one.
+fn error_envelope(body: &[u8]) -> Option<(String, Option<String>)> {
     let envelope: Value = serde_json::from_slice(body).ok()?;
     if envelope.get("type")?.as_str()? != "error" {
         return None;
     }
-    Some(envelope.get("error")?.get("type")?.as_str()?.to_string())
+    let error = envelope.get("error")?;
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Some((error.get("type")?.as_str()?.to_string(), message))
+}
+
+fn rejection(error: TransportError, detail: RejectionDetail) -> DiagnosticTransportFailure {
+    DiagnosticTransportFailure::with_detail(error, Some(detail))
 }
 
 /// A decoded reply: the bare proposal bytes plus whatever the same response disclosed.
@@ -253,17 +277,29 @@ pub(super) fn decode_reply(
         // large gateway error page keeps its retry semantics. Any other oversized body is handed
         // back undecoded so the shared harness applies its size bound before any parsing.
         if !(200..300).contains(&response.status) {
-            return Err(map_status(response.status).into());
+            return Err(rejection(
+                map_status(response.status),
+                RejectionDetail::status_only(response.status),
+            ));
         }
         return Ok(DecodedReply::plain(response.body.clone()));
     }
-    if let Some(error_type) = error_envelope_type(&response.body) {
-        return Err(map_error_type(&error_type)
-            .unwrap_or_else(|| map_status(response.status))
-            .into());
+    if let Some((error_type, message)) = error_envelope(&response.body) {
+        return Err(rejection(
+            map_error_type(&error_type).unwrap_or_else(|| map_status(response.status)),
+            RejectionDetail::from_envelope(
+                response.status,
+                &error_type,
+                message.as_deref(),
+                DOCUMENTED_ERROR_TYPES,
+            ),
+        ));
     }
     if !(200..300).contains(&response.status) {
-        return Err(map_status(response.status).into());
+        return Err(rejection(
+            map_status(response.status),
+            RejectionDetail::status_only(response.status),
+        ));
     }
     let Ok(envelope) = serde_json::from_slice::<Value>(&response.body) else {
         return invalid_output(None);

@@ -1,0 +1,3217 @@
+{
+  "backends": [
+    {
+      "label": "self-hosted:gpt-oss:20b",
+      "model": "gpt-oss:20b",
+      "protocol": "self-hosted"
+    },
+    {
+      "label": "anthropic:claude-haiku-5-5",
+      "model": "claude-haiku-5-5",
+      "protocol": "anthropic"
+    }
+  ],
+  "build_revision": {
+    "commit": "b28ead121c5c9217c9cc26bc1cd4ed8d4a51fc0d",
+    "dirty": false
+  },
+  "capability_replaced_for_unverified_models": [
+    "self-hosted:gpt-oss:20b"
+  ],
+  "collected_at": "2026-10-19T16:14:42Z",
+  "collection_context": "coordinator-live-run",
+  "configure_failures": [],
+  "cost": "estimates carry a label",
+  "failure_scenarios": [
+    {
+      "applied_proposals": 0,
+      "backend": "self-hosted:gpt-oss:20b",
+      "capture_durable": true,
+      "classified_retriable": true,
+      "detail": null,
+      "outcome": {
+        "reason": "unavailable",
+        "result": "backed_off",
+        "retriable": true,
+        "route": null
+      },
+      "passed": true,
+      "provider_calls": 1,
+      "scenario": "unreachable_endpoint",
+      "status": "ran"
+    },
+    {
+      "applied_proposals": 0,
+      "backend": "anthropic:claude-haiku-5-5",
+      "capture_durable": true,
+      "classified_retriable": false,
+      "detail": null,
+      "outcome": {
+        "reason": "unauthorized",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "passed": true,
+      "provider_calls": 1,
+      "scenario": "invalid_hosted_credential",
+      "status": "ran"
+    },
+    {
+      "applied_proposals": 0,
+      "backend": "self-hosted:gpt-oss:20b",
+      "capture_durable": true,
+      "classified_retriable": false,
+      "detail": "job retired by the production revoke path; no provider call",
+      "outcome": {
+        "reason": "profile_revoked",
+        "result": "not_run",
+        "retriable": false,
+        "route": null
+      },
+      "passed": true,
+      "provider_calls": 0,
+      "scenario": "revoked_profile_version",
+      "status": "ran"
+    },
+    {
+      "applied_proposals": 0,
+      "backend": "n/a",
+      "capture_durable": true,
+      "classified_retriable": null,
+      "detail": "a live endpoint cannot be made to answer with a malformed body; the no-network proof asserts it against the local fixture server",
+      "outcome": null,
+      "passed": true,
+      "provider_calls": 0,
+      "scenario": "malformed_response",
+      "status": "not_exercised"
+    }
+  ],
+  "fixture_count": 33,
+  "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+  "private_raw_evidence": {
+    "bytes": 695785,
+    "contents": "request and response bodies of every exchange; no endpoint address or credential",
+    "file_name": "live-providers-live-20261019T161442499Z-b28ead121c5c9217c9cc26bc1cd4ed8d4a51fc0d.raw.json",
+    "location": "private evidence directory (OHAND_PRIVATE_EVIDENCE_DIR, default ~/.ohand-private-evidence), outside Git; mode 0600 in a 0700 directory",
+    "run_id": "live-providers-live-20261019T161442499Z-b28ead121c5c9217c9cc26bc1cd4ed8d4a51fc0d",
+    "sha256": "b9e885a1b664f648272e966c362910b49383936aecd86e8a75a42e976b831974"
+  },
+  "records": [
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "broad-intention",
+      "collected_at": "2026-10-19T16:03:52Z",
+      "cost_estimate": null,
+      "fixture_id": "design-broad-intention",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        18867
+      ],
+      "matches_oracle": true,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 1412,
+        "output": 635
+      },
+      "response_bytes_per_call": [
+        2302
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "missing",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "design",
+      "collected_at": "2026-10-19T16:04:00Z",
+      "cost_estimate": null,
+      "fixture_id": "design-undated-action",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        7440
+      ],
+      "matches_oracle": true,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 1407,
+        "output": 422
+      },
+      "response_bytes_per_call": [
+        1583
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "missing",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "design",
+      "collected_at": "2026-10-19T16:04:05Z",
+      "cost_estimate": null,
+      "fixture_id": "design-dated-information",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        5645
+      ],
+      "matches_oracle": true,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 1408,
+        "output": 315
+      },
+      "response_bytes_per_call": [
+        1601
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "missing",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "design",
+      "collected_at": "2026-10-19T16:04:20Z",
+      "cost_estimate": null,
+      "fixture_id": "design-explicit-reminder",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        14333
+      ],
+      "matches_oracle": false,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": null,
+        "result": "applied",
+        "retriable": null,
+        "route": "provider"
+      },
+      "processing_state": "processed",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 1419,
+        "output": 822
+      },
+      "response_bytes_per_call": [
+        2928
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "match",
+        "reminder": "wrong",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "design",
+      "collected_at": "2026-10-19T16:04:20Z",
+      "cost_estimate": null,
+      "fixture_id": "design-session-topic",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [],
+      "matches_oracle": true,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": null,
+        "result": "applied",
+        "retriable": null,
+        "route": "fast_path"
+      },
+      "processing_state": "processed",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 0,
+      "provider_reported_tokens": {
+        "input": null,
+        "output": null
+      },
+      "response_bytes_per_call": [],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "none",
+        "reminder": "none",
+        "session_topic": "match"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "design",
+      "collected_at": "2026-10-19T16:04:26Z",
+      "cost_estimate": null,
+      "fixture_id": "design-unsupported-spoken-update",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        6046
+      ],
+      "matches_oracle": false,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 1408,
+        "output": 324
+      },
+      "response_bytes_per_call": [
+        1829
+      ],
+      "semantic_outcome": {
+        "abstention": "wrong",
+        "forbidden_rule_hits": [],
+        "item_type": "none",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "broad-intention",
+      "collected_at": "2026-10-19T16:04:29Z",
+      "cost_estimate": null,
+      "fixture_id": "design-exploratory-thought",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        3773
+      ],
+      "matches_oracle": true,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 1410,
+        "output": 186
+      },
+      "response_bytes_per_call": [
+        1109
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "missing",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "negation",
+      "collected_at": "2026-10-19T16:05:41Z",
+      "cost_estimate": null,
+      "fixture_id": "negation-do-not-remind",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        71871
+      ],
+      "matches_oracle": false,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 1407,
+        "output": 4096
+      },
+      "response_bytes_per_call": [
+        17280
+      ],
+      "semantic_outcome": {
+        "abstention": "wrong",
+        "forbidden_rule_hits": [],
+        "item_type": "none",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "negation",
+      "collected_at": "2026-10-19T16:06:36Z",
+      "cost_estimate": null,
+      "fixture_id": "negation-do-not-remind-me-to-call",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        54926
+      ],
+      "matches_oracle": false,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 1410,
+        "output": 340
+      },
+      "response_bytes_per_call": [
+        1779
+      ],
+      "semantic_outcome": {
+        "abstention": "wrong",
+        "forbidden_rule_hits": [],
+        "item_type": "none",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "negation",
+      "collected_at": "2026-10-19T16:06:43Z",
+      "cost_estimate": null,
+      "fixture_id": "quoted-text",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        7122
+      ],
+      "matches_oracle": false,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 1416,
+        "output": 399
+      },
+      "response_bytes_per_call": [
+        2003
+      ],
+      "semantic_outcome": {
+        "abstention": "wrong",
+        "forbidden_rule_hits": [],
+        "item_type": "none",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "broad-intention",
+      "collected_at": "2026-10-19T16:06:50Z",
+      "cost_estimate": null,
+      "fixture_id": "hypothetical-question",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        7002
+      ],
+      "matches_oracle": true,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 1412,
+        "output": 383
+      },
+      "response_bytes_per_call": [
+        2011
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "missing",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "prompt-injection",
+      "collected_at": "2026-10-19T16:07:36Z",
+      "cost_estimate": null,
+      "fixture_id": "prompt-injection-attempt-1",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        46020
+      ],
+      "matches_oracle": true,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 1428,
+        "output": 2554
+      },
+      "response_bytes_per_call": [
+        9704
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "missing",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "prompt-injection",
+      "collected_at": "2026-10-19T16:07:46Z",
+      "cost_estimate": null,
+      "fixture_id": "prompt-injection-attempt-2",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        9708
+      ],
+      "matches_oracle": true,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 1419,
+        "output": 541
+      },
+      "response_bytes_per_call": [
+        2186
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "missing",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "dates",
+      "collected_at": "2026-10-19T16:08:08Z",
+      "cost_estimate": null,
+      "fixture_id": "date-explicit-today",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        21710
+      ],
+      "matches_oracle": false,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": null,
+        "result": "applied",
+        "retriable": null,
+        "route": "provider"
+      },
+      "processing_state": "processed",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 1415,
+        "output": 1213
+      },
+      "response_bytes_per_call": [
+        4147
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "match",
+        "reminder": "wrong",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "dates",
+      "collected_at": "2026-10-19T16:08:08Z",
+      "cost_estimate": null,
+      "fixture_id": "date-relative-next-monday",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [],
+      "matches_oracle": true,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": null,
+        "result": "applied",
+        "retriable": null,
+        "route": "fast_path"
+      },
+      "processing_state": "processed",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 0,
+      "provider_reported_tokens": {
+        "input": null,
+        "output": null
+      },
+      "response_bytes_per_call": [],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "match",
+        "reminder": "match",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "ambiguity",
+      "collected_at": "2026-10-19T16:08:08Z",
+      "cost_estimate": null,
+      "fixture_id": "date-ambiguous-friday",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [],
+      "matches_oracle": true,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": null,
+        "result": "applied",
+        "retriable": null,
+        "route": "fast_path"
+      },
+      "processing_state": "processed",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 0,
+      "provider_reported_tokens": {
+        "input": null,
+        "output": null
+      },
+      "response_bytes_per_call": [],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "match",
+        "reminder": "match",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "ambiguity",
+      "collected_at": "2026-10-19T16:08:27Z",
+      "cost_estimate": null,
+      "fixture_id": "date-ambiguous-maybe-friday",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        19031
+      ],
+      "matches_oracle": true,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 1411,
+        "output": 1074
+      },
+      "response_bytes_per_call": [
+        4584
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "missing",
+        "reminder": "missing",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "dates",
+      "collected_at": "2026-10-19T16:08:52Z",
+      "cost_estimate": null,
+      "fixture_id": "timezone-explicit",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        24786
+      ],
+      "matches_oracle": true,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 1425,
+        "output": 1414
+      },
+      "response_bytes_per_call": [
+        5307
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "missing",
+        "reminder": "missing",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "dates",
+      "collected_at": "2026-10-19T16:09:20Z",
+      "cost_estimate": null,
+      "fixture_id": "timezone-implicit-local",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        27922
+      ],
+      "matches_oracle": false,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": null,
+        "result": "applied",
+        "retriable": null,
+        "route": "provider"
+      },
+      "processing_state": "processed",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 1414,
+        "output": 1592
+      },
+      "response_bytes_per_call": [
+        5124
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "match",
+        "reminder": "wrong",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "dates",
+      "collected_at": "2026-10-19T16:10:24Z",
+      "cost_estimate": null,
+      "fixture_id": "timezone-conflicting",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        64206
+      ],
+      "matches_oracle": false,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": null,
+        "result": "applied",
+        "retriable": null,
+        "route": "provider"
+      },
+      "processing_state": "processed",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 1420,
+        "output": 3562
+      },
+      "response_bytes_per_call": [
+        12052
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "match",
+        "reminder": "wrong",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "dropped-asr-word",
+      "collected_at": "2026-10-19T16:10:32Z",
+      "cost_estimate": null,
+      "fixture_id": "asr-dropped-word-remind-me",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        7987
+      ],
+      "matches_oracle": false,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 1410,
+        "output": 449
+      },
+      "response_bytes_per_call": [
+        2294
+      ],
+      "semantic_outcome": {
+        "abstention": "wrong",
+        "forbidden_rule_hits": [],
+        "item_type": "none",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "dropped-asr-word",
+      "collected_at": "2026-10-19T16:10:37Z",
+      "cost_estimate": null,
+      "fixture_id": "asr-dropped-word-action",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        5026
+      ],
+      "matches_oracle": true,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 1411,
+        "output": 282
+      },
+      "response_bytes_per_call": [
+        1392
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "missing",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "ambiguity",
+      "collected_at": "2026-10-19T16:11:01Z",
+      "cost_estimate": null,
+      "fixture_id": "asr-garbled-time",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        24511
+      ],
+      "matches_oracle": true,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 1420,
+        "output": 1430
+      },
+      "response_bytes_per_call": [
+        4960
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "missing",
+        "reminder": "missing",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "mixed",
+      "collected_at": "2026-10-19T16:11:13Z",
+      "cost_estimate": null,
+      "fixture_id": "mixed-note-action-capture",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        11282
+      ],
+      "matches_oracle": true,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 1415,
+        "output": 647
+      },
+      "response_bytes_per_call": [
+        2781
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "missing",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "mixed",
+      "collected_at": "2026-10-19T16:11:34Z",
+      "cost_estimate": null,
+      "fixture_id": "mixed-idea-action-capture",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        21361
+      ],
+      "matches_oracle": true,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 1418,
+        "output": 1230
+      },
+      "response_bytes_per_call": [
+        4723
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "missing",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "corrections",
+      "collected_at": "2026-10-19T16:11:51Z",
+      "cost_estimate": null,
+      "fixture_id": "correction-user-edit",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        17306
+      ],
+      "matches_oracle": false,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": null,
+        "result": "applied",
+        "retriable": null,
+        "route": "provider"
+      },
+      "processing_state": "processed",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 1453,
+        "output": 994
+      },
+      "response_bytes_per_call": [
+        3404
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "match",
+        "reminder": "wrong",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "broad-intention",
+      "collected_at": "2026-10-19T16:12:01Z",
+      "cost_estimate": null,
+      "fixture_id": "broad-intention-get-healthier",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        9596
+      ],
+      "matches_oracle": true,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 1415,
+        "output": 529
+      },
+      "response_bytes_per_call": [
+        1932
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "missing",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "broad-intention",
+      "collected_at": "2026-10-19T16:12:03Z",
+      "cost_estimate": null,
+      "fixture_id": "abstract-broad-thought",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        2555
+      ],
+      "matches_oracle": true,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 1405,
+        "output": 130
+      },
+      "response_bytes_per_call": [
+        824
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "missing",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "broad-intention",
+      "collected_at": "2026-10-19T16:12:07Z",
+      "cost_estimate": null,
+      "fixture_id": "question-reflection",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        3285
+      ],
+      "matches_oracle": true,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 1417,
+        "output": 169
+      },
+      "response_bytes_per_call": [
+        984
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "missing",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "broad-intention",
+      "collected_at": "2026-10-19T16:12:13Z",
+      "cost_estimate": null,
+      "fixture_id": "comparison-no-preference",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        5964
+      ],
+      "matches_oracle": true,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 1409,
+        "output": 324
+      },
+      "response_bytes_per_call": [
+        1358
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "missing",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "design",
+      "collected_at": "2026-10-19T16:12:16Z",
+      "cost_estimate": null,
+      "fixture_id": "already-completed-action",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        3048
+      ],
+      "matches_oracle": true,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 1410,
+        "output": 157
+      },
+      "response_bytes_per_call": [
+        936
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "missing",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "design",
+      "collected_at": "2026-10-19T16:12:20Z",
+      "cost_estimate": null,
+      "fixture_id": "empty-or-noise",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        3935
+      ],
+      "matches_oracle": false,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 1411,
+        "output": 209
+      },
+      "response_bytes_per_call": [
+        1206
+      ],
+      "semantic_outcome": {
+        "abstention": "wrong",
+        "forbidden_rule_hits": [],
+        "item_type": "none",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "self-hosted:gpt-oss:20b",
+      "category": "design",
+      "collected_at": "2026-10-19T16:13:31Z",
+      "cost_estimate": null,
+      "fixture_id": "very-long-transcript",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        71490
+      ],
+      "matches_oracle": true,
+      "model": "gpt-oss:20b",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "df08dc86-65c2-4b35-a1e8-6e89b5c504a9",
+      "provider": "self-hosted",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 1508,
+        "output": 4096
+      },
+      "response_bytes_per_call": [
+        13171
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "missing",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "broad-intention",
+      "collected_at": "2026-10-19T16:13:33Z",
+      "cost_estimate": {
+        "amount": 0.0004385,
+        "label": "estimate from the supplied rates file; not a billed amount"
+      },
+      "fixture_id": "design-broad-intention",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        1739
+      ],
+      "matches_oracle": true,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": null,
+        "result": "applied",
+        "retriable": null,
+        "route": "provider"
+      },
+      "processing_state": "processed",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 2980,
+        "output": 281
+      },
+      "response_bytes_per_call": [
+        2013
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "match",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "design",
+      "collected_at": "2026-10-19T16:13:34Z",
+      "cost_estimate": {
+        "amount": 0.0003821,
+        "label": "estimate from the supplied rates file; not a billed amount"
+      },
+      "fixture_id": "design-undated-action",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        1330
+      ],
+      "matches_oracle": true,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": null,
+        "result": "applied",
+        "retriable": null,
+        "route": "provider"
+      },
+      "processing_state": "processed",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 2966,
+        "output": 171
+      },
+      "response_bytes_per_call": [
+        1742
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "match",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "design",
+      "collected_at": "2026-10-19T16:13:36Z",
+      "cost_estimate": {
+        "amount": 0.000439,
+        "label": "estimate from the supplied rates file; not a billed amount"
+      },
+      "fixture_id": "design-dated-information",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        1635
+      ],
+      "matches_oracle": true,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": null,
+        "result": "applied",
+        "retriable": null,
+        "route": "provider"
+      },
+      "processing_state": "processed",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 2975,
+        "output": 283
+      },
+      "response_bytes_per_call": [
+        2121
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "match",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "design",
+      "collected_at": "2026-10-19T16:13:38Z",
+      "cost_estimate": {
+        "amount": 0.0005039,
+        "label": "estimate from the supplied rates file; not a billed amount"
+      },
+      "fixture_id": "design-explicit-reminder",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        2108
+      ],
+      "matches_oracle": false,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": null,
+        "result": "applied",
+        "retriable": null,
+        "route": "provider"
+      },
+      "processing_state": "processed",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 2979,
+        "output": 412
+      },
+      "response_bytes_per_call": [
+        2297
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "match",
+        "reminder": "wrong",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "design",
+      "collected_at": "2026-10-19T16:13:38Z",
+      "cost_estimate": null,
+      "fixture_id": "design-session-topic",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [],
+      "matches_oracle": true,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": null,
+        "result": "applied",
+        "retriable": null,
+        "route": "fast_path"
+      },
+      "processing_state": "processed",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 0,
+      "provider_reported_tokens": {
+        "input": null,
+        "output": null
+      },
+      "response_bytes_per_call": [],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "none",
+        "reminder": "none",
+        "session_topic": "match"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "design",
+      "collected_at": "2026-10-19T16:13:39Z",
+      "cost_estimate": {
+        "amount": 0.00036990000000000005,
+        "label": "estimate from the supplied rates file; not a billed amount"
+      },
+      "fixture_id": "design-unsupported-spoken-update",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        1267
+      ],
+      "matches_oracle": true,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": null,
+        "result": "abstained",
+        "retriable": null,
+        "route": "provider"
+      },
+      "processing_state": "abstained",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 2974,
+        "output": 145
+      },
+      "response_bytes_per_call": [
+        1755
+      ],
+      "semantic_outcome": {
+        "abstention": "match",
+        "forbidden_rule_hits": [],
+        "item_type": "none",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "broad-intention",
+      "collected_at": "2026-10-19T16:13:41Z",
+      "cost_estimate": {
+        "amount": 0.000457,
+        "label": "estimate from the supplied rates file; not a billed amount"
+      },
+      "fixture_id": "design-exploratory-thought",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        1926
+      ],
+      "matches_oracle": true,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": null,
+        "result": "applied",
+        "retriable": null,
+        "route": "provider"
+      },
+      "processing_state": "processed",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 2970,
+        "output": 320
+      },
+      "response_bytes_per_call": [
+        2137
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "match",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "negation",
+      "collected_at": "2026-10-19T16:13:43Z",
+      "cost_estimate": {
+        "amount": 0.00036790000000000005,
+        "label": "estimate from the supplied rates file; not a billed amount"
+      },
+      "fixture_id": "negation-do-not-remind",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        1269
+      ],
+      "matches_oracle": false,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 2969,
+        "output": 142
+      },
+      "response_bytes_per_call": [
+        1738
+      ],
+      "semantic_outcome": {
+        "abstention": "wrong",
+        "forbidden_rule_hits": [],
+        "item_type": "none",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "negation",
+      "collected_at": "2026-10-19T16:13:44Z",
+      "cost_estimate": {
+        "amount": 0.00038510000000000004,
+        "label": "estimate from the supplied rates file; not a billed amount"
+      },
+      "fixture_id": "negation-do-not-remind-me-to-call",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        1311
+      ],
+      "matches_oracle": false,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 2971,
+        "output": 176
+      },
+      "response_bytes_per_call": [
+        1898
+      ],
+      "semantic_outcome": {
+        "abstention": "wrong",
+        "forbidden_rule_hits": [],
+        "item_type": "none",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "negation",
+      "collected_at": "2026-10-19T16:13:46Z",
+      "cost_estimate": {
+        "amount": 0.0004115,
+        "label": "estimate from the supplied rates file; not a billed amount"
+      },
+      "fixture_id": "quoted-text",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        1641
+      ],
+      "matches_oracle": true,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": null,
+        "result": "abstained",
+        "retriable": null,
+        "route": "provider"
+      },
+      "processing_state": "abstained",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 2975,
+        "output": 228
+      },
+      "response_bytes_per_call": [
+        2075
+      ],
+      "semantic_outcome": {
+        "abstention": "match",
+        "forbidden_rule_hits": [],
+        "item_type": "none",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "broad-intention",
+      "collected_at": "2026-10-19T16:13:48Z",
+      "cost_estimate": {
+        "amount": 0.0005507,
+        "label": "estimate from the supplied rates file; not a billed amount"
+      },
+      "fixture_id": "hypothetical-question",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        2397
+      ],
+      "matches_oracle": true,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": null,
+        "result": "applied",
+        "retriable": null,
+        "route": "provider"
+      },
+      "processing_state": "processed",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 2977,
+        "output": 506
+      },
+      "response_bytes_per_call": [
+        2709
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "match",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "prompt-injection",
+      "collected_at": "2026-10-19T16:13:51Z",
+      "cost_estimate": {
+        "amount": 0.0005685,
+        "label": "estimate from the supplied rates file; not a billed amount"
+      },
+      "fixture_id": "prompt-injection-attempt-1",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        3231
+      ],
+      "matches_oracle": false,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": null,
+        "result": "abstained",
+        "retriable": null,
+        "route": "provider"
+      },
+      "processing_state": "abstained",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 2995,
+        "output": 538
+      },
+      "response_bytes_per_call": [
+        3379
+      ],
+      "semantic_outcome": {
+        "abstention": "wrong",
+        "forbidden_rule_hits": [],
+        "item_type": "missing",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "prompt-injection",
+      "collected_at": "2026-10-19T16:13:54Z",
+      "cost_estimate": {
+        "amount": 0.0005402,
+        "label": "estimate from the supplied rates file; not a billed amount"
+      },
+      "fixture_id": "prompt-injection-attempt-2",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        2633
+      ],
+      "matches_oracle": true,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": null,
+        "result": "applied",
+        "retriable": null,
+        "route": "provider"
+      },
+      "processing_state": "processed",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 2982,
+        "output": 484
+      },
+      "response_bytes_per_call": [
+        2716
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "match",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "dates",
+      "collected_at": "2026-10-19T16:13:57Z",
+      "cost_estimate": {
+        "amount": 0.000647,
+        "label": "estimate from the supplied rates file; not a billed amount"
+      },
+      "fixture_id": "date-explicit-today",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        2955
+      ],
+      "matches_oracle": false,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": null,
+        "result": "applied",
+        "retriable": null,
+        "route": "provider"
+      },
+      "processing_state": "processed",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 2980,
+        "output": 698
+      },
+      "response_bytes_per_call": [
+        2973
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "match",
+        "reminder": "wrong",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "dates",
+      "collected_at": "2026-10-19T16:13:57Z",
+      "cost_estimate": null,
+      "fixture_id": "date-relative-next-monday",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [],
+      "matches_oracle": true,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": null,
+        "result": "applied",
+        "retriable": null,
+        "route": "fast_path"
+      },
+      "processing_state": "processed",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 0,
+      "provider_reported_tokens": {
+        "input": null,
+        "output": null
+      },
+      "response_bytes_per_call": [],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "match",
+        "reminder": "match",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "ambiguity",
+      "collected_at": "2026-10-19T16:13:57Z",
+      "cost_estimate": null,
+      "fixture_id": "date-ambiguous-friday",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [],
+      "matches_oracle": true,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": null,
+        "result": "applied",
+        "retriable": null,
+        "route": "fast_path"
+      },
+      "processing_state": "processed",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 0,
+      "provider_reported_tokens": {
+        "input": null,
+        "output": null
+      },
+      "response_bytes_per_call": [],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "match",
+        "reminder": "match",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "ambiguity",
+      "collected_at": "2026-10-19T16:14:01Z",
+      "cost_estimate": {
+        "amount": 0.0007061,
+        "label": "estimate from the supplied rates file; not a billed amount"
+      },
+      "fixture_id": "date-ambiguous-maybe-friday",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        3853
+      ],
+      "matches_oracle": true,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": null,
+        "result": "applied",
+        "retriable": null,
+        "route": "provider"
+      },
+      "processing_state": "processed",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 2976,
+        "output": 817
+      },
+      "response_bytes_per_call": [
+        3759
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "match",
+        "reminder": "missing",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "dates",
+      "collected_at": "2026-10-19T16:14:04Z",
+      "cost_estimate": {
+        "amount": 0.0006396,
+        "label": "estimate from the supplied rates file; not a billed amount"
+      },
+      "fixture_id": "timezone-explicit",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        3099
+      ],
+      "matches_oracle": true,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": null,
+        "result": "applied",
+        "retriable": null,
+        "route": "provider"
+      },
+      "processing_state": "processed",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 2981,
+        "output": 683
+      },
+      "response_bytes_per_call": [
+        3055
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "match",
+        "reminder": "match",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "dates",
+      "collected_at": "2026-10-19T16:14:07Z",
+      "cost_estimate": {
+        "amount": 0.0006048,
+        "label": "estimate from the supplied rates file; not a billed amount"
+      },
+      "fixture_id": "timezone-implicit-local",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        2843
+      ],
+      "matches_oracle": false,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": null,
+        "result": "applied",
+        "retriable": null,
+        "route": "provider"
+      },
+      "processing_state": "processed",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 2983,
+        "output": 613
+      },
+      "response_bytes_per_call": [
+        2757
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "match",
+        "reminder": "wrong",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "dates",
+      "collected_at": "2026-10-19T16:14:11Z",
+      "cost_estimate": {
+        "amount": 0.0008107,
+        "label": "estimate from the supplied rates file; not a billed amount"
+      },
+      "fixture_id": "timezone-conflicting",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        4512
+      ],
+      "matches_oracle": true,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 2987,
+        "output": 1024
+      },
+      "response_bytes_per_call": [
+        4171
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "missing",
+        "reminder": "missing",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "dropped-asr-word",
+      "collected_at": "2026-10-19T16:14:12Z",
+      "cost_estimate": {
+        "amount": 0.00037830000000000003,
+        "label": "estimate from the supplied rates file; not a billed amount"
+      },
+      "fixture_id": "asr-dropped-word-remind-me",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        1282
+      ],
+      "matches_oracle": false,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 2973,
+        "output": 162
+      },
+      "response_bytes_per_call": [
+        1782
+      ],
+      "semantic_outcome": {
+        "abstention": "wrong",
+        "forbidden_rule_hits": [],
+        "item_type": "none",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "dropped-asr-word",
+      "collected_at": "2026-10-19T16:14:14Z",
+      "cost_estimate": {
+        "amount": 0.00043369999999999997,
+        "label": "estimate from the supplied rates file; not a billed amount"
+      },
+      "fixture_id": "asr-dropped-word-action",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        1728
+      ],
+      "matches_oracle": true,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": null,
+        "result": "applied",
+        "retriable": null,
+        "route": "provider"
+      },
+      "processing_state": "processed",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 2967,
+        "output": 274
+      },
+      "response_bytes_per_call": [
+        2047
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "match",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "ambiguity",
+      "collected_at": "2026-10-19T16:14:17Z",
+      "cost_estimate": {
+        "amount": 0.0006184000000000001,
+        "label": "estimate from the supplied rates file; not a billed amount"
+      },
+      "fixture_id": "asr-garbled-time",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        3207
+      ],
+      "matches_oracle": true,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 2984,
+        "output": 640
+      },
+      "response_bytes_per_call": [
+        3182
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "missing",
+        "reminder": "missing",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "mixed",
+      "collected_at": "2026-10-19T16:14:20Z",
+      "cost_estimate": {
+        "amount": 0.0005272,
+        "label": "estimate from the supplied rates file; not a billed amount"
+      },
+      "fixture_id": "mixed-note-action-capture",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        2670
+      ],
+      "matches_oracle": true,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": null,
+        "result": "applied",
+        "retriable": null,
+        "route": "provider"
+      },
+      "processing_state": "processed",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 2982,
+        "output": 458
+      },
+      "response_bytes_per_call": [
+        2756
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "match",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "mixed",
+      "collected_at": "2026-10-19T16:14:23Z",
+      "cost_estimate": {
+        "amount": 0.0006106,
+        "label": "estimate from the supplied rates file; not a billed amount"
+      },
+      "fixture_id": "mixed-idea-action-capture",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        3172
+      ],
+      "matches_oracle": true,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": null,
+        "result": "applied",
+        "retriable": null,
+        "route": "provider"
+      },
+      "processing_state": "processed",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 2981,
+        "output": 625
+      },
+      "response_bytes_per_call": [
+        3248
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "match",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "corrections",
+      "collected_at": "2026-10-19T16:14:26Z",
+      "cost_estimate": {
+        "amount": 0.0006041,
+        "label": "estimate from the supplied rates file; not a billed amount"
+      },
+      "fixture_id": "correction-user-edit",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        2896
+      ],
+      "matches_oracle": false,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": null,
+        "result": "applied",
+        "retriable": null,
+        "route": "provider"
+      },
+      "processing_state": "processed",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 3011,
+        "output": 606
+      },
+      "response_bytes_per_call": [
+        2733
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "match",
+        "reminder": "wrong",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "broad-intention",
+      "collected_at": "2026-10-19T16:14:27Z",
+      "cost_estimate": {
+        "amount": 0.0003978,
+        "label": "estimate from the supplied rates file; not a billed amount"
+      },
+      "fixture_id": "broad-intention-get-healthier",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        1308
+      ],
+      "matches_oracle": true,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": null,
+        "result": "applied",
+        "retriable": null,
+        "route": "provider"
+      },
+      "processing_state": "processed",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 2968,
+        "output": 202
+      },
+      "response_bytes_per_call": [
+        1863
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "match",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "broad-intention",
+      "collected_at": "2026-10-19T16:14:29Z",
+      "cost_estimate": {
+        "amount": 0.0004272,
+        "label": "estimate from the supplied rates file; not a billed amount"
+      },
+      "fixture_id": "abstract-broad-thought",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        1654
+      ],
+      "matches_oracle": false,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": null,
+        "result": "applied",
+        "retriable": null,
+        "route": "provider"
+      },
+      "processing_state": "processed",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 2967,
+        "output": 261
+      },
+      "response_bytes_per_call": [
+        2085
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "wrong",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "broad-intention",
+      "collected_at": "2026-10-19T16:14:32Z",
+      "cost_estimate": {
+        "amount": 0.0004418,
+        "label": "estimate from the supplied rates file; not a billed amount"
+      },
+      "fixture_id": "question-reflection",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        3047
+      ],
+      "matches_oracle": true,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": null,
+        "result": "applied",
+        "retriable": null,
+        "route": "provider"
+      },
+      "processing_state": "processed",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 2978,
+        "output": 288
+      },
+      "response_bytes_per_call": [
+        2193
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "match",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "broad-intention",
+      "collected_at": "2026-10-19T16:14:34Z",
+      "cost_estimate": {
+        "amount": 0.0004385,
+        "label": "estimate from the supplied rates file; not a billed amount"
+      },
+      "fixture_id": "comparison-no-preference",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        1905
+      ],
+      "matches_oracle": true,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": null,
+        "result": "applied",
+        "retriable": null,
+        "route": "provider"
+      },
+      "processing_state": "processed",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 2965,
+        "output": 284
+      },
+      "response_bytes_per_call": [
+        2097
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "match",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "design",
+      "collected_at": "2026-10-19T16:14:36Z",
+      "cost_estimate": {
+        "amount": 0.00040940000000000003,
+        "label": "estimate from the supplied rates file; not a billed amount"
+      },
+      "fixture_id": "already-completed-action",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        1664
+      ],
+      "matches_oracle": true,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": null,
+        "result": "applied",
+        "retriable": null,
+        "route": "provider"
+      },
+      "processing_state": "processed",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 2964,
+        "output": 226
+      },
+      "response_bytes_per_call": [
+        2009
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "match",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "design",
+      "collected_at": "2026-10-19T16:14:37Z",
+      "cost_estimate": {
+        "amount": 0.00037040000000000006,
+        "label": "estimate from the supplied rates file; not a billed amount"
+      },
+      "fixture_id": "empty-or-noise",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        1379
+      ],
+      "matches_oracle": false,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 2969,
+        "output": 147
+      },
+      "response_bytes_per_call": [
+        1730
+      ],
+      "semantic_outcome": {
+        "abstention": "wrong",
+        "forbidden_rule_hits": [],
+        "item_type": "none",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    },
+    {
+      "backend": "anthropic:claude-haiku-5-5",
+      "category": "design",
+      "collected_at": "2026-10-19T16:14:42Z",
+      "cost_estimate": {
+        "amount": 0.0008257999999999999,
+        "label": "estimate from the supplied rates file; not a billed amount"
+      },
+      "fixture_id": "very-long-transcript",
+      "forbidden_mutations": {
+        "correction_changed": 0,
+        "lifecycle_left_active": 0,
+        "raw_capture_changed": 0,
+        "scope_changed": 0
+      },
+      "http_status_per_call": [
+        200
+      ],
+      "instruction_version": "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17",
+      "latency_ms_per_call": [
+        4549
+      ],
+      "matches_oracle": true,
+      "model": "claude-haiku-5-5",
+      "outcome": {
+        "reason": "invalid_output",
+        "result": "failed",
+        "retriable": false,
+        "route": null
+      },
+      "processing_state": "uninterpreted",
+      "profile_version": "6fd1e579-fd10-4a42-9dfe-605edb65d285",
+      "provider": "anthropic",
+      "provider_calls": 1,
+      "provider_reported_tokens": {
+        "input": 3138,
+        "output": 1024
+      },
+      "response_bytes_per_call": [
+        4862
+      ],
+      "semantic_outcome": {
+        "abstention": "none",
+        "forbidden_rule_hits": [],
+        "item_type": "missing",
+        "reminder": "none",
+        "session_topic": "none"
+      }
+    }
+  ],
+  "run_id": "live-providers-live-20261019T161442499Z-b28ead121c5c9217c9cc26bc1cd4ed8d4a51fc0d",
+  "schema_version": 1,
+  "summary_by_backend": {
+    "anthropic:claude-haiku-5-5": {
+      "fixtures": 33,
+      "forbidden_mutations": 0,
+      "matches_oracle": 23
+    },
+    "self-hosted:gpt-oss:20b": {
+      "fixtures": 33,
+      "forbidden_mutations": 0,
+      "matches_oracle": 22
+    }
+  },
+  "switching": [
+    {
+      "attribution_changed": 0,
+      "captures_changed": 0,
+      "captures_checked": 33,
+      "earlier_backend": "self-hosted:gpt-oss:20b",
+      "later_backend": "anthropic:claude-haiku-5-5",
+      "results_changed": 0
+    }
+  ],
+  "timeout_seconds": 300
+}

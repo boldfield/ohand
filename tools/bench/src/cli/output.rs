@@ -18,6 +18,8 @@ use crate::journal::JournalReader;
 use crate::records::Experiment;
 
 const MAX_FREE_TEXT: usize = 160;
+/// A rejection note carries a status, an error type and up to 300 bytes of the provider's message.
+const MAX_REASON: usize = 480;
 
 pub fn sanitize(text: &str) -> String {
     sanitize_to(text, MAX_FREE_TEXT)
@@ -512,7 +514,7 @@ pub fn render_report(view: &ReportView<'_>) -> String {
                     "{} {}: {}",
                     sanitize(&case.case_id),
                     arm_name(side.arm),
-                    sanitize(reason)
+                    sanitize_to(reason, MAX_REASON)
                 ));
             }
         }

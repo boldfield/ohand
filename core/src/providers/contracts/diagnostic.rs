@@ -272,6 +272,65 @@ pub struct DiagnosticResponse {
     pub observations: Option<CallObservations>,
 }
 
+/// Longest provider message a [`RejectionDetail`] keeps.
+pub const MAX_REJECTION_MESSAGE_BYTES: usize = 300;
+/// Error type recorded for an envelope whose type is not a documented value of its protocol.
+pub const UNRECOGNIZED_ERROR_TYPE: &str = "unrecognized";
+
+/// Why a provider rejected a diagnostic request, as far as the response said. The status is
+/// always known; the error type and message are present only when the response was a provider
+/// error envelope within the size bound. Oversized bodies are never parsed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RejectionDetail {
+    pub status: u16,
+    /// A documented error type of the protocol, or `unrecognized`.
+    pub error_type: Option<String>,
+    /// The provider's message with control characters removed, at most
+    /// [`MAX_REJECTION_MESSAGE_BYTES`] bytes.
+    pub message: Option<String>,
+}
+
+impl RejectionDetail {
+    pub fn status_only(status: u16) -> RejectionDetail {
+        RejectionDetail {
+            status,
+            error_type: None,
+            message: None,
+        }
+    }
+
+    /// `documented_types` lists the error types the protocol defines; any other value is
+    /// recorded as `unrecognized` so provider-controlled text never becomes a label.
+    pub fn from_envelope(
+        status: u16,
+        error_type: &str,
+        message: Option<&str>,
+        documented_types: &[&str],
+    ) -> RejectionDetail {
+        let error_type = if documented_types.contains(&error_type) {
+            error_type
+        } else {
+            UNRECOGNIZED_ERROR_TYPE
+        };
+        RejectionDetail {
+            status,
+            error_type: Some(error_type.to_string()),
+            message: message.map(clean_rejection_message),
+        }
+    }
+}
+
+fn clean_rejection_message(message: &str) -> String {
+    let mut cleaned = String::new();
+    for character in message.chars().filter(|character| !character.is_control()) {
+        if cleaned.len() + character.len_utf8() > MAX_REJECTION_MESSAGE_BYTES {
+            break;
+        }
+        cleaned.push(character);
+    }
+    cleaned
+}
+
 /// A transport failure of a diagnostic call together with whatever the provider disclosed in
 /// the same exchange before failing, such as the usage on a refusal. The failure class is
 /// exactly `error`'s; the observations only enrich the failed attempt's evidence.
@@ -279,9 +338,22 @@ pub struct DiagnosticResponse {
 pub struct DiagnosticTransportFailure {
     pub error: TransportError,
     pub observations: Option<CallObservations>,
+    /// Why the provider rejected the request, when the response said.
+    pub detail: Option<Box<RejectionDetail>>,
 }
 
 impl DiagnosticTransportFailure {
+    pub fn with_detail(
+        error: TransportError,
+        detail: Option<RejectionDetail>,
+    ) -> DiagnosticTransportFailure {
+        DiagnosticTransportFailure {
+            error,
+            observations: None,
+            detail: detail.map(Box::new),
+        }
+    }
+
     pub fn with_observations(
         error: TransportError,
         observations: Option<CallObservations>,
@@ -289,6 +361,7 @@ impl DiagnosticTransportFailure {
         DiagnosticTransportFailure {
             error,
             observations,
+            detail: None,
         }
     }
 }
@@ -298,6 +371,7 @@ impl From<TransportError> for DiagnosticTransportFailure {
         DiagnosticTransportFailure {
             error,
             observations: None,
+            detail: None,
         }
     }
 }
@@ -387,6 +461,9 @@ pub enum DiagnosticFailureKind {
 pub struct DiagnosticFailure {
     pub kind: DiagnosticFailureKind,
     pub usage: UsageAvailability,
+    /// Why the provider rejected the request, when the response said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<RejectionDetail>,
 }
 
 impl DiagnosticFailure {
@@ -394,6 +471,7 @@ impl DiagnosticFailure {
         DiagnosticFailure {
             kind,
             usage: UsageAvailability::Unavailable,
+            detail: None,
         }
     }
 
@@ -561,9 +639,13 @@ pub fn dispatch_diagnostic(
         cancel,
         clock,
     };
-    let (body, observations) = match adapter.invoke_diagnostic_observed(&call) {
-        Ok(response) => (Ok(response.body), response.observations),
-        Err(failure) => (Err(failure.error), failure.observations),
+    let (body, observations, detail) = match adapter.invoke_diagnostic_observed(&call) {
+        Ok(response) => (Ok(response.body), response.observations, None),
+        Err(failure) => (
+            Err(failure.error),
+            failure.observations,
+            failure.detail.map(|detail| *detail),
+        ),
     };
     let reported_usage =
         UsageAvailability::from_reported(observations.as_ref().and_then(|observed| observed.usage));
@@ -591,6 +673,7 @@ pub fn dispatch_diagnostic(
         Err(failure) => Err(DiagnosticFailure {
             kind: DiagnosticFailureKind::Provider { failure },
             usage: reported_usage,
+            detail,
         }),
     }
 }
