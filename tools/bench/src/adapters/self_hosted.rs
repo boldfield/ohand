@@ -104,7 +104,7 @@ mod tests {
         AdapterCall, CapabilitySupport, InterpretationRequest, ProviderCapability, ProviderProfile,
         ProviderProfileBuilder, ProviderProtocol, SystemClock, TextBasis,
     };
-    use ohand_core::providers::self_hosted::{CHAT_VERIFIED_MODEL, LISTED_MODELS};
+    use ohand_core::providers::self_hosted::{CHAT_VERIFIED_MODEL, LISTED_MODELS, SMOKE_EVIDENCE};
     use ohand_core::time::TimeContext;
     use uuid::Uuid;
 
@@ -236,15 +236,17 @@ mod tests {
                 .find(|capability| capability.capability == ProviderCapability::TextInterpretation)
                 .expect("text interpretation is always declared")
         };
-        let verified = support_of(CHAT_VERIFIED_MODEL);
-        assert_eq!(verified.support, CapabilitySupport::Supported);
-        assert!(verified
-            .evidence
-            .as_deref()
-            .is_some_and(|evidence| !evidence.is_empty()));
+        for smoke in SMOKE_EVIDENCE {
+            let verified = support_of(smoke.model);
+            assert_eq!(verified.support, CapabilitySupport::Supported);
+            assert!(verified
+                .evidence
+                .as_deref()
+                .is_some_and(|evidence| evidence.contains(smoke.id)));
+        }
         for model in LISTED_MODELS
             .iter()
-            .filter(|model| **model != CHAT_VERIFIED_MODEL)
+            .filter(|model| SMOKE_EVIDENCE.iter().all(|smoke| smoke.model != **model))
         {
             let declared = support_of(model);
             assert_eq!(declared.support, CapabilitySupport::Unverified, "{model}");

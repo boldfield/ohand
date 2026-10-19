@@ -1,0 +1,115 @@
+{
+  "adapter_revision": {
+    "commit": "511d119f44d8038cfed5d7ae35a57cbbf26825c9",
+    "dirty": false
+  },
+  "collected_at": "2026-10-18T23:59:22Z",
+  "collection_context": "odonian-worker",
+  "configured_scheme": "https",
+  "evidence_id": "self-hosted-adapter-smoke-20261018T235922Z-511d119f",
+  "failures": [
+    "reminder-capture: proposal-did-not-validate",
+    "idea-capture: proposal-did-not-validate",
+    "plain-note-capture: proposal-did-not-validate"
+  ],
+  "max_tokens": 4096,
+  "model": "gpt-oss:20b",
+  "private_raw_evidence": {
+    "bytes": 31573,
+    "contents": "request and response bodies of every exchange; no endpoint address or credential",
+    "file_name": "self-hosted-adapter-smoke-20261018T235922Z-511d119f.raw.json",
+    "location": "private evidence directory of the collecting Odonian worker (OHAND_PRIVATE_EVIDENCE_DIR, default ~/.ohand-private-evidence), outside Git; mode 0600 in a 0700 directory",
+    "run_id": "self-hosted-adapter-smoke-20261018T235922Z-511d119f",
+    "sha256": "600ebb2f8792d4e4a9d4f7af35c48d8a585f6f747e27956f228569f8f3b3c03a"
+  },
+  "request_shape": "adapter-built: interpretation prompt, strict json_schema response_format derived from output_schema() with every property required and optional ones nullable; optional nulls treated as absent",
+  "requests": [
+    {
+      "conforms_to_output_schema_top_level": true,
+      "content_bytes": 360,
+      "curl_failure": null,
+      "dispatch_result": "ok",
+      "elapsed_ms": 29876,
+      "finish_reason": "stop",
+      "http_status": 200,
+      "mapped_to_validated_proposal": false,
+      "message_role": "assistant",
+      "name": "reminder-capture",
+      "proposal_keys": [
+        "abstention",
+        "item_type",
+        "operation",
+        "reminder_proposal",
+        "session_topic_proposal",
+        "source_spans"
+      ],
+      "reminder_expected": true,
+      "response_bytes": 4114,
+      "semantic": {
+        "reminder_instant_matches_expected": true,
+        "reminder_proposal_present": true,
+        "reminder_quality": "explicit"
+      }
+    },
+    {
+      "conforms_to_output_schema_top_level": true,
+      "content_bytes": 181,
+      "curl_failure": null,
+      "dispatch_result": "ok",
+      "elapsed_ms": 3017,
+      "finish_reason": "stop",
+      "http_status": 200,
+      "mapped_to_validated_proposal": false,
+      "message_role": "assistant",
+      "name": "idea-capture",
+      "proposal_keys": [
+        "abstention",
+        "item_type",
+        "operation",
+        "source_spans"
+      ],
+      "reminder_expected": false,
+      "response_bytes": 944,
+      "semantic": {
+        "reminder_instant_matches_expected": false,
+        "reminder_proposal_present": false,
+        "reminder_quality": null
+      }
+    },
+    {
+      "conforms_to_output_schema_top_level": true,
+      "content_bytes": 176,
+      "curl_failure": null,
+      "dispatch_result": "ok",
+      "elapsed_ms": 3500,
+      "finish_reason": "stop",
+      "http_status": 200,
+      "mapped_to_validated_proposal": false,
+      "message_role": "assistant",
+      "name": "plain-note-capture",
+      "proposal_keys": [
+        "abstention",
+        "item_type",
+        "operation",
+        "source_spans"
+      ],
+      "reminder_expected": false,
+      "response_bytes": 1036,
+      "semantic": {
+        "reminder_instant_matches_expected": false,
+        "reminder_proposal_present": false,
+        "reminder_quality": null
+      }
+    }
+  ],
+  "result": "fail",
+  "schema_version": 1,
+  "semantic_checks": "reminder capture: reminder_proposal with quality explicit and instant 2026-01-06T15:00 America/Chicago; idea and plain-note captures: no reminder_proposal",
+  "synthetic_context_time": "2026-01-05T09:00:00+00:00",
+  "transport": "curl subprocess standing in for the native https transport; certificate validation on, redirects not followed",
+  "unverified": [
+    "phone-context reachability of chat requests (owned by V08b)",
+    "models other than the one named above",
+    "endpoint credential validation (V08a: not enforced)"
+  ]
+}

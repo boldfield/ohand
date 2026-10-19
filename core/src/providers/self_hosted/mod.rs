@@ -6,8 +6,10 @@
 //!
 //! - The profile endpoint is the server's base URL, and the adapter posts to
 //!   `<base>/chat/completions`. The request carries `model`, `messages`, `temperature: 0`,
-//!   `max_tokens`, `stream: false` and a strict `json_schema` `response_format`, the shape the
-//!   probe sent and the endpoint answered with an OpenAI-compatible chat completion.
+//!   `max_tokens`, `stream: false` and a strict `json_schema` `response_format`. The schema is
+//!   derived from `output_schema()` by [`required_nullable_schema`]: sending `output_schema()`
+//!   itself made Ollama suppress optional proposals (see [`compatibility_boundary`]). A `null` in
+//!   an optional position of the reply is treated as absent before validation.
 //! - Transport is the shared [`HttpTransport`] seam, so the native layer keeps enforcing https,
 //!   certificate validation, the profile's authorized origin and secret handling. The adapter
 //!   never sees a credential and contacts only the profile's own endpoint: there is no default
@@ -23,8 +25,8 @@
 //!   the endpoint is not reachable from this network, so it is reported as unavailable and the
 //!   capture stays queued.
 //!
-//! Model support is per model: only the model that answered this adapter's own request in the
-//! smoke run [`SMOKE_EVIDENCE_ID`] is `Supported`; see [`text_interpretation_capability`].
+//! Model support is per model: only a model with a passing semantic smoke artifact in
+//! [`SMOKE_EVIDENCE`] is `Supported`; see [`text_interpretation_capability`].
 
 use crate::interpretation::instructions::{output_schema, render_prompt};
 use crate::providers::contracts::{
@@ -33,7 +35,7 @@ use crate::providers::contracts::{
 };
 use crate::providers::openai::HttpTransport;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 /// Evidence identifier of the V08a worker-context probe artifact.
 pub const WORKER_EVIDENCE_ID: &str = "spark-probe-20261008T093909Z-22c47772";
@@ -45,16 +47,35 @@ pub const WORKER_PROBE_REVISION: &str = "22c47772849c77b3d3a5e2b03be87098690e738
 /// Collection time recorded by the V08a artifact.
 pub const WORKER_EVIDENCE_COLLECTED_AT: &str = "2026-10-08T09:39:09Z";
 
-/// Evidence identifier of the adapter smoke run: this adapter's own request, built from the real
-/// interpretation prompt and `output_schema()`, sent to the configured endpoint.
-pub const SMOKE_EVIDENCE_ID: &str = "self-hosted-adapter-smoke-20261009T145738Z-e45f02b4";
-/// Repository path of the sanitized smoke artifact.
-pub const SMOKE_EVIDENCE_ARTIFACT: &str =
-    "docs/validation/evidence/spark-adapter-smoke/self-hosted-adapter-smoke-20261009T145738Z-e45f02b4.json";
-/// Adapter build revision recorded by the smoke artifact.
-pub const SMOKE_ADAPTER_REVISION: &str = "e45f02b4cdec971bdd0e16cd162af60afe8a4a16";
-/// Collection time recorded by the smoke artifact.
-pub const SMOKE_EVIDENCE_COLLECTED_AT: &str = "2026-10-09T14:57:38Z";
+/// Adapter build revision of the semantic smoke runs below.
+pub const SMOKE_ADAPTER_REVISION: &str = "511d119f44d8038cfed5d7ae35a57cbbf26825c9";
+
+/// One passing semantic smoke artifact for one model: the reminder capture yielded an `explicit`
+/// `reminder_proposal` at 2026-01-06T15:00 America/Chicago, and the idea and plain-note captures
+/// yielded none. The adapter's own request was sent, built from the real interpretation prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SmokeEvidence {
+    pub model: &'static str,
+    pub id: &'static str,
+    pub artifact: &'static str,
+    pub collected_at: &'static str,
+}
+
+/// Every model with a passing semantic smoke artifact, and so every `Supported` model.
+pub const SMOKE_EVIDENCE: [SmokeEvidence; 2] = [
+    SmokeEvidence {
+        model: "deepseek-flash-iq3:latest",
+        id: "self-hosted-adapter-smoke-20261018T235846Z-511d119f",
+        artifact: "docs/validation/evidence/spark-adapter-smoke/self-hosted-adapter-smoke-20261018T235846Z-511d119f.json",
+        collected_at: "2026-10-18T23:58:46Z",
+    },
+    SmokeEvidence {
+        model: "qwen3.8:27b",
+        id: "self-hosted-adapter-smoke-20261019T000049Z-511d119f",
+        artifact: "docs/validation/evidence/spark-adapter-smoke/self-hosted-adapter-smoke-20261019T000049Z-511d119f.json",
+        collected_at: "2026-10-19T00:00:49Z",
+    },
+];
 
 /// Evidence identifier of the V08b phone-context artifact (revision 2).
 pub const PHONE_EVIDENCE_ID: &str = "spark-phone-2026-10-08";
@@ -82,18 +103,19 @@ pub const LISTED_MODELS: [&str; 6] = [
 pub const MAX_COMPLETION_TOKENS: u32 = 4096;
 /// Path appended to the profile's base URL.
 pub const CHAT_COMPLETIONS_PATH: &str = "/chat/completions";
-const RESPONSE_SCHEMA_NAME: &str = "interpretation_output";
 
 /// The exact verified compatibility boundary, one statement per entry.
 pub fn compatibility_boundary() -> &'static [&'static str] {
     &[
         "Verified: https with certificate validation; GET /models and POST /chat/completions answer 200 in OpenAI-compatible form (worker context).",
         "Verified (probe): a strict json_schema response_format returned content matching a two-key schema for deepseek-flash-iq3:latest only.",
-        "Verified (adapter smoke, worker context, max_tokens 4096): the adapter's own request, carrying the interpretation output schema (optional properties included) as a strict json_schema, was answered 200 with an assistant message and finish_reason stop for three synthetic captures, and each reply mapped to a validated proposal. Calls took up to about 56 seconds; the smoke profile's timeout was 300 seconds.",
+        "Observed failure of the previous request shape (strict json_schema carrying output_schema(), coordinator replay 2026-10-18): on deepseek-flash-iq3:latest, qwen3.8:27b, gpt-oss:20b, gpt-oss:120b and qwen3.5:122b, 10 of 10 tries on the reminder capture produced no reminder_proposal, because Ollama's grammar for the schema effectively never emits optional properties. The earlier smoke run passed only because each reply mapped to a valid proposal; it did not check that the reminder was present.",
+        "Observed failure of the derived request shape on gpt-oss:20b (artifact self-hosted-adapter-smoke-20261018T235922Z-511d119f): the reminder returned at the right instant, but the model filled abstention on every capture, and an abstention with a proposal fails validation, so no reply mapped to a validated proposal. gpt-oss:20b is therefore not Supported; validation was not relaxed to admit it.",
+        "Verified (adapter semantic smoke, worker context, max_tokens 4096): with a strict json_schema derived from output_schema() (every property required, optional ones also accepting null) and local validation, the reminder capture yielded an explicit reminder_proposal at 2026-01-06T15:00 America/Chicago and the idea and plain-note captures yielded none, each reply mapping to a validated proposal, for deepseek-flash-iq3:latest and qwen3.8:27b (SMOKE_EVIDENCE). A null in an optional position is treated as absent before validation. Calls took up to about 90 seconds; the smoke profile's timeout was 300 seconds.",
         "Observed failure at max_tokens 1024 (artifacts self-hosted-adapter-smoke-20261009T145407Z-d1243e1f and -20261009T145540Z-d1243e1f): the reminder capture ended with finish_reason length and empty content because the model's separate reasoning output used the whole budget; the adapter reports InvalidOutput (not retriable). A request that needs more than the bound is therefore not interpreted; the capture itself stays durable.",
-        "Not verified: reminder_proposal and session_topic_proposal output (no smoke capture produced them), other finish_reason values, streaming, rate limits.",
+        "Not verified: session_topic_proposal output (no smoke capture produced it), ambiguous reminder phrasing, other finish_reason values, streaming, rate limits.",
         "Not verified: the credential is validated; the endpoint answered requests with and without it.",
-        "Not verified: chat requests from the phone context, and for the five other listed models.",
+        "Not verified: chat requests from the phone context, and for qwen3.5:122b, gpt-oss:20b, gpt-oss:120b and glm-5.3-flash.",
         "Off the home network the configured hostname answers 302 (POST included) toward the tailnet name; the phone base URL must be the tailnet hostname with Tailscale connected.",
         "Not verified: behaviour with Tailscale disconnected; the endpoint is unreachable and captures stay queued.",
     ]
@@ -101,18 +123,21 @@ pub fn compatibility_boundary() -> &'static [&'static str] {
 
 /// Capability a profile may declare for text interpretation with `model`.
 ///
-/// Only [`CHAT_VERIFIED_MODEL`] is `Supported`, citing the adapter smoke artifact (revision and
-/// collection time) and the V08a probe artifact. Other listed models and unlisted models are `Unverified` with a reason, so
+/// Only a model in [`SMOKE_EVIDENCE`] is `Supported`, citing its semantic smoke artifact (revision
+/// and collection time) and the V08a probe artifact. Other listed models and unlisted models are `Unverified` with a reason, so
 /// the dispatcher refuses to use them until evidence exists.
 pub fn text_interpretation_capability(model: &str, input_size_limit: usize) -> CapabilityMetadata {
-    let capability = if model == CHAT_VERIFIED_MODEL {
+    let smoke = SMOKE_EVIDENCE
+        .iter()
+        .find(|evidence| evidence.model == model);
+    let capability = if let Some(smoke) = smoke {
         CapabilityMetadata::supported(
             ProviderCapability::TextInterpretation,
             format!(
-                "{SMOKE_EVIDENCE_ID} ({SMOKE_EVIDENCE_ARTIFACT}), adapter revision \
-                 {SMOKE_ADAPTER_REVISION}, collected {SMOKE_EVIDENCE_COLLECTED_AT}; \
+                "{} ({}), adapter revision {SMOKE_ADAPTER_REVISION}, collected {}; \
                  {WORKER_EVIDENCE_ID} ({WORKER_EVIDENCE_ARTIFACT}), probe revision \
-                 {WORKER_PROBE_REVISION}, collected {WORKER_EVIDENCE_COLLECTED_AT}"
+                 {WORKER_PROBE_REVISION}, collected {WORKER_EVIDENCE_COLLECTED_AT}",
+                smoke.id, smoke.artifact, smoke.collected_at
             ),
         )
     } else if LISTED_MODELS.contains(&model) {
@@ -166,7 +191,8 @@ struct Message {
 struct ResponseFormat {
     #[serde(rename = "type")]
     kind: &'static str,
-    json_schema: JsonSchemaFormat,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    json_schema: Option<JsonSchemaFormat>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -245,11 +271,11 @@ impl<T: HttpTransport> ProviderAdapter for SelfHostedAdapter<T> {
             ],
             response_format: ResponseFormat {
                 kind: "json_schema",
-                json_schema: JsonSchemaFormat {
-                    name: RESPONSE_SCHEMA_NAME,
+                json_schema: Some(JsonSchemaFormat {
+                    name: "interpretation_output",
                     strict: true,
-                    schema: output_schema(),
-                },
+                    schema: required_nullable_schema(&output_schema()),
+                }),
             },
             max_tokens: MAX_COMPLETION_TOKENS,
             temperature: 0.0,
@@ -308,11 +334,109 @@ fn decode_response(status: u16, response_bytes: &[u8]) -> Result<Vec<u8>, Transp
     {
         return Err(TransportError::InvalidOutput);
     }
-    choice
+    let content = choice
         .message
         .content
-        .map(String::into_bytes)
-        .ok_or(TransportError::InvalidOutput)
+        .ok_or(TransportError::InvalidOutput)?;
+    Ok(normalize_optional_nulls(content, &output_schema()).into_bytes())
+}
+
+/// Derives the wire schema from `schema`: every object property at every depth is required, and
+/// a property the source leaves optional also accepts `null`.
+pub fn required_nullable_schema(schema: &Value) -> Value {
+    let mut derived = schema.clone();
+    make_required_nullable(&mut derived);
+    derived
+}
+
+fn make_required_nullable(schema: &mut Value) {
+    let Some(node) = schema.as_object_mut() else {
+        return;
+    };
+    let originally_required: Vec<String> = node
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|keys| {
+            keys.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(properties) = node.get_mut("properties").and_then(Value::as_object_mut) {
+        let names: Vec<String> = properties.keys().cloned().collect();
+        for (name, property) in properties.iter_mut() {
+            make_required_nullable(property);
+            if !originally_required.contains(name) {
+                *property = json!({"anyOf": [property.clone(), {"type": "null"}]});
+            }
+        }
+        node.insert("required".to_string(), json!(names));
+    }
+    if let Some(items) = node.get_mut("items") {
+        make_required_nullable(items);
+    }
+    for keyword in ["anyOf", "oneOf"] {
+        if let Some(branches) = node.get_mut(keyword).and_then(Value::as_array_mut) {
+            branches.iter_mut().for_each(make_required_nullable);
+        }
+    }
+}
+
+/// Treats a `null` in an optional position of `content` as absent, judged against `schema`.
+/// Content that is not JSON is returned unchanged for the existing validation to reject; a
+/// `null` in a required position, or any non-null value, is left exactly as received.
+pub fn normalize_optional_nulls(content: String, schema: &Value) -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(&content) else {
+        return content;
+    };
+    drop_optional_nulls(&mut value, schema);
+    serde_json::to_string(&value).unwrap_or(content)
+}
+
+fn drop_optional_nulls(value: &mut Value, schema: &Value) {
+    match value {
+        Value::Object(members) => {
+            let object_schema = schema
+                .get("properties")
+                .map(|_| schema)
+                .or_else(|| branches_of(schema).find(|branch| branch.get("properties").is_some()));
+            let Some(object_schema) = object_schema else {
+                return;
+            };
+            let properties = object_schema["properties"].as_object();
+            let required: Vec<&str> = object_schema
+                .get("required")
+                .and_then(Value::as_array)
+                .map(|keys| keys.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            members.retain(|name, member| {
+                !member.is_null()
+                    || required.contains(&name.as_str())
+                    || !properties.is_some_and(|known| known.contains_key(name))
+            });
+            for (name, member) in members.iter_mut() {
+                if let Some(property_schema) = properties.and_then(|known| known.get(name)) {
+                    drop_optional_nulls(member, property_schema);
+                }
+            }
+        }
+        Value::Array(elements) => {
+            if let Some(items) = schema.get("items") {
+                elements
+                    .iter_mut()
+                    .for_each(|element| drop_optional_nulls(element, items));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn branches_of(schema: &Value) -> impl Iterator<Item = &Value> {
+    ["anyOf", "oneOf"]
+        .into_iter()
+        .filter_map(|keyword| schema.get(keyword).and_then(Value::as_array))
+        .flatten()
 }
 
 /// Status decides the class. A redirect or server error means the private endpoint is not
@@ -324,5 +448,72 @@ fn map_status(status: u16) -> TransportError {
         429 => TransportError::RateLimited,
         300..=399 | 408 | 500..=599 => TransportError::Unavailable,
         _ => TransportError::Rejected,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn normalized(content: Value) -> Value {
+        let text = normalize_optional_nulls(content.to_string(), &output_schema());
+        serde_json::from_str(&text).expect("still JSON")
+    }
+
+    #[test]
+    fn top_level_nulls_become_absent() {
+        let reply = json!({
+            "operation": {"kind": "annotate"},
+            "item_type": "idea",
+            "reminder_proposal": null,
+            "session_topic_proposal": null,
+            "abstention": null
+        });
+        assert_eq!(
+            normalized(reply),
+            json!({"operation": {"kind": "annotate"}, "item_type": "idea"})
+        );
+    }
+
+    #[test]
+    fn nested_nulls_become_absent() {
+        let reply = json!({
+            "operation": {"kind": "annotate"},
+            "item_type": "action",
+            "source_spans": [{"start": 0, "end": 3}],
+            "reminder_proposal": {
+                "quality": "ambiguous",
+                "instant": null,
+                "timezone_id": null,
+                "source_span": {"start": 1, "end": 2}
+            }
+        });
+        assert_eq!(
+            normalized(reply)["reminder_proposal"],
+            json!({"quality": "ambiguous", "source_span": {"start": 1, "end": 2}})
+        );
+    }
+
+    #[test]
+    fn values_validation_rejects_are_left_untouched() {
+        let reply = json!({
+            "operation": null,
+            "reminder_proposal": {"quality": null, "source_span": null, "instant": 5},
+            "abstention": {"Other": null},
+            "unknown": null
+        });
+        let result = normalized(reply);
+        assert!(result["operation"].is_null());
+        assert!(result["reminder_proposal"]["quality"].is_null());
+        assert!(result["reminder_proposal"]["source_span"].is_null());
+        assert_eq!(result["reminder_proposal"]["instant"], json!(5));
+        assert!(result["abstention"]["Other"].is_null());
+        assert!(
+            result.get("unknown").is_some(),
+            "unknown keys are not mine to drop"
+        );
+        assert_eq!(
+            normalize_optional_nulls("not json".to_string(), &output_schema()),
+            "not json"
+        );
     }
 }

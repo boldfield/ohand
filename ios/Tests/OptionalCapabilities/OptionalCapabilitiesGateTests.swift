@@ -76,8 +76,27 @@ final class OptionalCapabilitiesGateTests: XCTestCase {
         XCTAssertEqual(OptionalCapabilityVerification.selfHostedState(empty), .disabled(.evidenceIncomplete))
     }
 
+    func testEverySmokeVerifiedModelIsEnabledWithItsOwnEvidence() {
+        let boundary = SelfHostedVerifiedBoundary.current
+        XCTAssertGreaterThanOrEqual(boundary.models.count, 2)
+        for verifiedModel in boundary.models {
+            let registration = SelfHostedRegistration(profileVersion: selfHostedProfileVersion, model: verifiedModel.model)
+            XCTAssertEqual(OptionalCapabilityVerification.selfHostedState(registration), .enabled, verifiedModel.model)
+        }
+    }
+
+    func testAVerifiedModelCitingAnotherModelsSmokeArtifactStaysDisabled() {
+        let boundary = SelfHostedVerifiedBoundary.current
+        let first = boundary.models[0]
+        let second = boundary.models[1]
+        let borrowed = SelfHostedRegistration(
+            profileVersion: selfHostedProfileVersion, model: second.model,
+            evidence: [boundary.workerProbe, first.adapterSmoke, boundary.phoneReachability])
+        XCTAssertEqual(OptionalCapabilityVerification.selfHostedState(borrowed), .disabled(.evidenceIncomplete))
+    }
+
     func testAModelOutsideTheVerifiedBoundaryStaysDisabled() {
-        for model in ["", "deepseek-flash-iq3", "another-listed-model:latest", "DEEPSEEK-FLASH-IQ3:LATEST"] {
+        for model in ["", "deepseek-flash-iq3", "another-listed-model:latest", "DEEPSEEK-FLASH-IQ3:LATEST", "gpt-oss:20b"] {
             var registration = verified
             registration.model = model
             XCTAssertEqual(
@@ -133,16 +152,27 @@ final class OptionalCapabilitiesGateTests: XCTestCase {
             contentsOf: repositoryRoot.appendingPathComponent("core/src/providers/self_hosted/mod.rs"),
             encoding: .utf8)
         let boundary = SelfHostedVerifiedBoundary.current
-        XCTAssertTrue(source.contains("\"\(boundary.model)\""), "the verified model")
+        let coreEntryCount = source.components(separatedBy: "\n")
+            .filter { $0.hasPrefix("        model: \"") }.count
+        XCTAssertEqual(boundary.models.count, coreEntryCount, "one element per SMOKE_EVIDENCE entry")
+        for verifiedModel in boundary.models {
+            XCTAssertTrue(source.contains("model: \"\(verifiedModel.model)\""), "the verified model")
+        }
+        let references = [boundary.workerProbe, boundary.phoneReachability] + boundary.models.map(\.adapterSmoke)
         XCTAssertEqual(
-            Set(boundary.evidence.map(\.kind)), Set(SelfHostedEvidenceKind.allCases), "one reference per kind")
-        for reference in boundary.evidence {
+            Set(references.map(\.kind)), Set(SelfHostedEvidenceKind.allCases), "one reference per kind")
+        for reference in references {
             for value in [reference.evidenceID, reference.artifactPath, reference.collectedAt] {
                 XCTAssertTrue(source.contains("\"\(value)\""), "\(reference.kind.rawValue): \(value)")
             }
             XCTAssertTrue(
                 FileManager.default.fileExists(atPath: repositoryRoot.appendingPathComponent(reference.artifactPath).path),
                 "the artifact for \(reference.kind.rawValue) is in the repository")
+        }
+        for verifiedModel in boundary.models {
+            XCTAssertTrue(
+                source.contains("model: \"\(verifiedModel.model)\",\n        id: \"\(verifiedModel.adapterSmoke.evidenceID)\""),
+                "\(verifiedModel.model) cites its own artifact")
         }
     }
 }
