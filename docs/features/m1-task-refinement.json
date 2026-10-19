@@ -3284,6 +3284,118 @@
         "ios/AppAssembly/Info.plist",
         "ios/scripts/check_project_config.py:44"
       ]
+    },
+    {
+      "key": "F23",
+      "parent": null,
+      "title": "Give abstention a single object shape on the provider wire",
+      "file_scope": [
+        "core/src/interpretation/instructions/",
+        "core/src/providers/self_hosted/mod.rs",
+        "core/tests/interpretation_instructions/",
+        "core/tests/interpretation_dispatch/main.rs",
+        "core/tests/providers_self_hosted/",
+        "core/tests/live_providers/",
+        "tools/evaluation/fixtures/recorded-responses.json",
+        "tools/evaluation/comparison/tests.rs",
+        "tools/evaluation/tests/"
+      ],
+      "intent": "Replace the string-or-object abstention union on the provider wire with one object shape, because Claude double-encodes the string arm and those replies are rejected; the domain type is unchanged.",
+      "acceptance": [
+        "See the F23 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/interpretation/instructions/text.rs:102",
+        "core/src/interpretation/instructions/mapping.rs:90",
+        "core/src/interpretation/contracts/mod.rs:211",
+        "core/tests/live_providers/main.rs:100"
+      ]
+    },
+    {
+      "key": "F24",
+      "parent": null,
+      "title": "Raise the Anthropic adapter's output cap so long captures are interpreted",
+      "file_scope": [
+        "core/src/providers/anthropic/",
+        "core/tests/providers_anthropic/"
+      ],
+      "intent": "Raise DEFAULT_MAX_OUTPUT_TOKENS from 1024 to 4096; truncation stays invalid output.",
+      "acceptance": [
+        "See the F24 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/providers/anthropic/mod.rs:34",
+        "core/src/providers/anthropic/wire.rs:311"
+      ]
+    },
+    {
+      "key": "F25",
+      "parent": null,
+      "title": "Make the live harness's oracle count only interpreted captures as matches",
+      "file_scope": [
+        "core/tests/live_providers/"
+      ],
+      "intent": "A capture matches the oracle only when its run applied or abstained and no facet is missing or wrong.",
+      "acceptance": [
+        "See the F25 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "F23"
+      ],
+      "source_pointers": [
+        "core/tests/live_providers/oracle.rs:92",
+        "core/tests/live_providers/main.rs:182"
+      ]
+    },
+    {
+      "key": "F26",
+      "parent": null,
+      "title": "Score a correctly stored reminder as correct in the evaluation suite",
+      "file_scope": [
+        "tools/evaluation/src/",
+        "tools/evaluation/tests/"
+      ],
+      "intent": "Stop the durable-stage scorer reporting missed_intent for a reminder whose instant matches the oracle.",
+      "acceptance": [
+        "See the F26 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "F23"
+      ],
+      "source_pointers": [
+        "tools/evaluation/src/score.rs:363",
+        "tools/evaluation/src/scratch.rs:93"
+      ]
+    },
+    {
+      "key": "F27",
+      "parent": null,
+      "title": "Find and fix the race behind the intermittent system-time-change test failure",
+      "file_scope": [
+        "ios/Tests/AppAssembly/AppServicesTests.swift",
+        "ios/Tests/TimeChangeCoordinator/",
+        "ios/Services/TimeChangeCoordinator/",
+        "ios/AppAssembly/AppServices.swift"
+      ],
+      "intent": "Find why a real time-zone change intermittently produces no lifecycle pass in AppServicesTests and fix the cause, without raising timeouts.",
+      "acceptance": [
+        "See the F27 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "DS04b"
+      ],
+      "source_pointers": [
+        "ios/Tests/AppAssembly/AppServicesTests.swift:117",
+        "ios/Services/TimeChangeCoordinator/TimeChangeCoordinator.swift",
+        "ios/AppAssembly/AppServices.swift:72"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -4022,7 +4134,18 @@
     "F20": [],
     "E02a": [],
     "F21": [],
-    "F22": []
+    "F22": [],
+    "F23": [],
+    "F24": [],
+    "F25": [
+      "F23"
+    ],
+    "F26": [
+      "F23"
+    ],
+    "F27": [
+      "DS04b"
+    ]
   },
   "retained_dependency_overrides": {
     "V06": [

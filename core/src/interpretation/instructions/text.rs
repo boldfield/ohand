@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 /// Content address of [`M1_INSTRUCTION_TEXT`]. Change it only together with the text, and keep
 /// the old text reproducible from history: stored proposals name the version that produced them.
 pub const M1_INSTRUCTION_VERSION: &str =
-    "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17";
+    "0b3a70bffc3baa70ea93a08958b11b6537aea52ca7d4844be8eea54effccb671";
 
 /// System instructions sent verbatim to every provider for M1 interpretation.
 pub const M1_INSTRUCTION_TEXT: &str = r#"You interpret one captured note for a personal capture app. Reply with a single JSON object and no text outside it.
@@ -28,10 +28,10 @@ Return only these keys, and omit every facet you have no evidence for. Do not re
 - `source_spans`: a list of `{"start": N, "end": M}` evidence spans for `item_type`. When a capture mixes intents, such as a note plus a to-do, choose the action and span only the action part.
 - `reminder_proposal`: only when the user explicitly asks to be reminded, and only together with `item_type` `action` whose span includes what to do, not just the time. Keys: `quality`, `instant`, `timezone_id`, `source_span`. `source_span` covers the time phrase only. `quality` is `explicit` when both the day and the hour are stated; give `instant` as RFC 3339 with its UTC offset and `timezone_id` as the IANA zone. A day without an hour, a hedged or garbled time, or a zone that conflicts with the device zone is `ambiguous`: then give neither `instant` nor `timezone_id`. Never invent an hour. A deadline or dated fact without a request to be reminded is not a reminder.
 - `session_topic_proposal`: `{"topic": "...", "source_span": {...}}` when the note names the session or appointment it belongs to, such as therapy or a weekly meeting. It is descriptive metadata only.
-- `abstention`: use it when no facet can be supported, and then return no facet. One of `"UncertainTarget"` (missing words or no usable content), `"Negated"` (the user says not to do something, such as "don't remind me"), `"Ambiguous"` (too incomplete to resolve), `"UnsupportedOperation"`, or `{"Other": "short reason"}` (for example quoted speech that is not the user's own intent).
+- `abstention`: use it when no facet can be supported, and then return no facet. Always a JSON object, never a bare string: `{"reason": R}` where `R` is one of `UncertainTarget` (missing words or no usable content), `Negated` (the user says not to do something, such as "don't remind me"), `Ambiguous` (too incomplete to resolve) or `UnsupportedOperation`; for these four give no `detail`. Use `Other` only for a reason none of those fits (for example quoted speech that is not the user's own intent) and then give a short non-empty `detail` string: `{"reason": "Other", "detail": "short reason"}`. Example for "Don't remind me about the dentist": `{"operation": {"kind": "annotate"}, "abstention": {"reason": "Negated"}}`. Example for quoted speech: `{"operation": {"kind": "annotate"}, "abstention": {"reason": "Other", "detail": "quoted speech"}}`.
 
 HARD LIMITS
-- Existing items cannot be changed by spoken request in this version. If the note asks to complete, reopen, delete, move, reschedule or edit an item that already exists (for example "done with the roofer call"), return operation annotate with abstention `"UnsupportedOperation"` and no facets.
+- Existing items cannot be changed by spoken request in this version. If the note asks to complete, reopen, delete, move, reschedule or edit an item that already exists (for example "done with the roofer call"), return operation annotate with abstention `{"reason": "UnsupportedOperation"}` and no facets.
 - You cannot grant, widen or change any permission or visibility. Never return scope, privacy, disclosure, sharing, route, destination, provider, credential or any other key not listed above, and never return identifiers or provenance (`proposal_id`, `item_id`, `capture_id`, `source_revision`, `schema_version`, `text_basis`, `request_version`). The app adds trusted provenance itself, and a response containing any other key is discarded.
 - Do not invent facts, targets, times or obligations. When unsure, abstain rather than guess.
 
@@ -60,7 +60,7 @@ fn source_span_schema() -> Value {
 
 /// JSON Schema of the provider response. It is the machine-readable form of the output
 /// contract in [`M1_INSTRUCTION_TEXT`] and uses only the keywords the shared structural check
-/// understands (plus `anyOf` for abstention). Unlike the I01 proposal it has no provenance
+/// understands. It contains no `anyOf` or `oneOf`: abstention is one object shape. Unlike the I01 proposal it has no provenance
 /// fields and cannot express an operation other than annotate; trusted fields are added by the
 /// mapping and everything else is still validated by the I01 boundary.
 pub fn output_schema() -> Value {
@@ -100,18 +100,22 @@ pub fn output_schema() -> Value {
                 "additionalProperties": false
             },
             "abstention": {
-                "anyOf": [
-                    {
+                "type": "object",
+                "required": ["reason"],
+                "properties": {
+                    "reason": {
                         "type": "string",
-                        "enum": ["UncertainTarget", "Negated", "Ambiguous", "UnsupportedOperation"]
+                        "enum": [
+                            "UncertainTarget",
+                            "Negated",
+                            "Ambiguous",
+                            "UnsupportedOperation",
+                            "Other"
+                        ]
                     },
-                    {
-                        "type": "object",
-                        "required": ["Other"],
-                        "properties": { "Other": { "type": "string" } },
-                        "additionalProperties": false
-                    }
-                ]
+                    "detail": { "type": "string" }
+                },
+                "additionalProperties": false
             }
         },
         "additionalProperties": false
@@ -128,6 +132,40 @@ mod tests {
             content_version(M1_INSTRUCTION_TEXT),
             M1_INSTRUCTION_VERSION,
             "instruction text changed: publish a new version constant deliberately"
+        );
+    }
+
+    fn contains_key_anywhere(value: &Value, keys: &[&str]) -> bool {
+        match value {
+            Value::Object(members) => members.iter().any(|(name, member)| {
+                keys.contains(&name.as_str()) || contains_key_anywhere(member, keys)
+            }),
+            Value::Array(elements) => elements.iter().any(|e| contains_key_anywhere(e, keys)),
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn output_schema_has_no_union_and_abstention_is_one_object() {
+        let schema = output_schema();
+        assert!(!contains_key_anywhere(&schema, &["anyOf", "oneOf"]));
+        let abstention = &schema["properties"]["abstention"];
+        assert_eq!(abstention["type"], "object");
+        assert_eq!(abstention["required"], json!(["reason"]));
+        assert_eq!(abstention["additionalProperties"], false);
+        assert_eq!(
+            abstention["properties"]["detail"],
+            json!({"type": "string"})
+        );
+        assert_eq!(
+            abstention["properties"]["reason"]["enum"],
+            json!([
+                "UncertainTarget",
+                "Negated",
+                "Ambiguous",
+                "UnsupportedOperation",
+                "Other"
+            ])
         );
     }
 

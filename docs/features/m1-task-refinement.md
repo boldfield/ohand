@@ -64,6 +64,11 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
 
 - UI chain restructured (coordinator, 2026-10-12, at the maintainer's direction). The original plan chained U02 through U08 in strict order, each waiting on its predecessor, with no shared-file reason recorded: each slice owns a distinct `app/` directory, and the contract assigns shell wiring to U01. Every link was checked against the slice specs. Kept as real couplings: U02a→U02b (search passes an opaque identifier to detail navigation); U02b→U03a (corrections are presented on source detail); U03a→U03b and U04a→U04b (same directory); U05a→U05b→U06a→U06b (onboarding selects configured provider profiles); U06b→U11; U08a→U08b. Removed as ordering-only links: U03b→U04a (U04a now depends on U02b and N06); U04b→U05a (now U01, V04, V06, V07); U06b→U07a (now U01, L03b, L04b, L05b); U07c→U08a (now U01, S03). U09 no longer serves as the "all UI done" gate and depends on U01, J03, D05, N04b and U11. The tasks that needed the whole UI now name every branch end: T09 depends on U03b, U04b, U07c, U08b, U09, U11, B03 and N07; U10 on U03b, U04b, U07c, U08b, U09 and C06; T03 on N06, S03, U09, U04b and U08b. The critical path drops from 30 to 20 tasks.
   - Shared host allowance (standing, for the tasks above and S04): the settings root and navigation in `app/` belong to U01, and the source-detail screen in `app/source-detail/` belongs to U02b. Each settings slice (U05a, U07a, U08a, U09, U11, S04) may add exactly one entry to U01's settings or navigation host for its own section. Each of U03a and U04a may add exactly one section entry to U02b's source-detail host. An entry is a single reference to a view in the task's own directory, in whatever form the host defines. Behaviour, layout and other entries in the host are not granted. A conflict with a concurrent slice's entry is resolved by rebasing, and the merger bounces the PR for rework on conflict. Host owners should keep their section lists one entry per line so that concurrent additions merge cleanly.
+  - **Source-detail section models (coordinator, 2026-10-19, after U04a's PR #300 was blocked in round 2).** A section on source detail needs its model supplied by the host, and nothing in `app/` lets a section get one without touching `SourceDetailModel`. No environment key carries the composition root, and `ios/AppAssembly/` is not owned by either task. So each of U03a and U04a may also make, in `app/source-detail/SourceDetailModel.swift`:
+    - one optional stored property holding its own section model (U03a: `itemControls: ItemControlsModel?`; U04a: `reminderEditor: ReminderEditModel?`);
+    - its construction in `assembled(itemID:root:)`. The construction may pass a closure that calls the host's existing `load()` after the section commits a change, so the detail refreshes.
+
+    Nothing else in the host is granted: no new loading, state, reads or behaviour, and no change to other properties. Both tasks reshape `assembled` the same way (`let model = …; model.<section> = …; return model`), so whichever lands second rebases and keeps both lines.
 
 - Test-target registration allowance (coordinator, 2026-10-12, after PR #178 round 2 blocked T02a on ownership alone). The verification tasks own top-level test directories that Cargo does not discover: it finds integration tests only in a package's own `tests/`, the root workspace lists its members explicitly, and a separate workspace would not run under `make test`. So a Rust suite in an owned directory can only run in `make test` and CI through a `[[test]]` entry in `core/Cargo.toml`. Standing allowance: each of T02a, T02b, T03, T04a and T04b may add exactly one `[[test]]` entry to `core/Cargo.toml`, containing only `name` and a `path` inside its own owned directory (for example, `name = "capture_processing_resilience"`, `path = "../tests/resilience/capture-processing/main.rs"`). Tasks that share a directory share one entry: T02b reuses T02a's entry and T04b reuses T04a's, and the later sibling only adds modules under the shared directory. If the earlier sibling has not landed, the first to land adds the entry and the other rebases. No other change to `core/Cargo.toml`, the root `Cargo.toml` or `Cargo.lock` is covered, including new dependencies, dev-dependencies, features or `harness = false`. A suite that needs one of those must block and name it. A suite that is not Rust (Swift or simulator tests) is not covered by this allowance.
 
@@ -181,6 +186,9 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
   - **Management context allowance (standing).** Each UI slice may add exactly one field to `ManagementContext` (`ios/AppAssembly/ManagementCatalog.swift`) and one line that builds it in `AppServices` (`ios/AppAssembly/AppServices.swift`). The field carries only seams that already exist on main or in the slice's dependencies. This supplements the shared host allowance. U07c may additionally add exactly one section entry to U02b's source-detail host, for its per-item delete control.
   - **E02 restructured (coordinator, 2026-10-18).** E02 blocked on missing credentials. The maintainer supplied an Anthropic key and the Spark configuration, but no harness can run E02's acceptance; see E02a. E02a builds the harness. The coordinator then runs it on the maintainer's machine against every model Spark serves and one Anthropic model, and commits the sanitized evidence under `docs/validation/evidence/live-providers/`. E02 then writes `docs/validation/live-providers.md` from that evidence and depends on E02a. E02's acceptance is unchanged. Spark's endpoint lists six models, but `ollama ls` on spark01 shows five; `glm-5.3-flash` is served from elsewhere, and the evidence records it separately.
   - **F22 added (coordinator, 2026-10-18).** The first install of current main on the maintainer's iPhone crashed at every launch. The crash report's termination namespace is TCC: "attempted to access privacy-sensitive data without a usage description … must contain an NSFaceIDUsageDescription key". DS03 (#278) made launch call `LAContext.evaluatePolicy` (`ios/Services/Authentication/ReadAuthenticationBoundary.swift:61`). The app's `Info.plist` has never declared the key, and `ios/scripts/check_project_config.py:44` does not require it. The simulator does not enforce the key, so CI passed. See F22.
+  - **F23 added (coordinator, 2026-10-19).** A paired benchmark of Claude Sonnet 5.5 and Haiku 5.5 on the synthetic corpus, run through the production request and mapping after XB12, found that Claude JSON-encodes string abstentions in 8 of 10 cases: `"abstention": "\"Negated\""` instead of `"Negated"`. The mapping rejects them, so "don't remind me" and noise captures fail as invalid output even though the model chose correctly. The cause is the wire schema's `anyOf` of a string enum and an `{"Other": …}` object (`core/src/interpretation/instructions/text.rs:102`). The maintainer chose to replace it with one object shape rather than unwrap the extra encoding. See F23.
+  - **F24, F25 and F26 added (coordinator, 2026-10-19).** The first live E02a run (evidence `fe58be5`) and a paired Anthropic benchmark found three more defects. The Anthropic adapter's 1024-token output cap truncates long captures (F24). The live harness's oracle counts a capture whose interpretation failed as a match (F25). The evaluation scorer marks a correct, stored reminder as a missed intent (F26). F25 and F26 edit test directories that F23 also edits, so both depend on F23.
+  - **F27 added (coordinator, 2026-10-19).** `AppServicesTests.testAStartedAppReconcilesOnceWhenASystemTimeZoneCallbackReportsARealChange` failed on two PRs that do not touch the code under test: U06b (run 39281367194) and F24 (run 39312148289, attempt 1, a Rust-only change). Both failed at `AppServicesTests.swift:139`: no lifecycle pass finished within 10 seconds. A reviewer rejected F24 on that red run. See F27.
   - **F21 added (coordinator, 2026-10-18).** A live replay on Spark found that the self-hosted adapter's strict schema suppresses every optional proposal, reminders included, on all five Ollama models. E02's evidence run also waits for F21, so it measures the fixed request. See F21.
   - **Walkthrough allowance (standing, coordinator, 2026-10-18).** DS08's walkthrough (`ios/UITests/Walkthrough/WalkthroughUITests.swift`) names each screen's controls and titles, so any UI task that changes a screen it visits breaks it. On 2026-10-18 this blocked DS04a, DS07 and U02b. Any UI task may update the walkthrough for the screens it builds or changes:
     - their entries in the screen tables (for example `settingsScreens`);
@@ -2993,3 +3001,106 @@ Acceptance:
 2. `check_project_config.py` requires the key for the app. Add `NSFaceIDUsageDescription` to `APP_USAGE_STRINGS`. Also add a rule so the omission cannot recur for another target: any target whose Swift sources call `evaluatePolicy` or create an `LAContext` must declare the key in its `Info.plist`. `test_check_project_config.py` covers both: a synthetic project whose app plist lacks the key fails with a message naming the key and the target, and a synthetic target that uses `LAContext` without the key fails the same way. `make check` runs the check, so a Linux worker can prove it before macOS CI.
 3. Link the exact-head macOS run, as with any native change. The device check is the coordinator's: after the task lands, the maintainer's install script installs main on the phone and the app must launch and stay running. The worker cannot do this and must not claim it.
 
+### F23
+
+Give abstention a single object shape on the provider wire
+
+The provider-facing output schema lets `abstention` be either a string enum or an `{"Other": "…"}` object (`core/src/interpretation/instructions/text.rs:102`). In a paired benchmark on the synthetic corpus, Claude Sonnet 5.5 and Haiku 5.5 sent 8 of 10 string abstentions JSON-encoded a second time (`"\"Negated\""`). The mapping correctly rejects them, so negations, noise and unsupported spoken updates come back from Anthropic as invalid output although the model's decision was right. The string-or-object union is the trigger. Replace it on the wire with one object shape. The maintainer chose this over unwrapping the extra encoding.
+
+Scope: the wire only. `AbstentionReason` in `core/src/interpretation/contracts/mod.rs`, its serde form, stored proposals, `fixtures/intent/`, the FFI and Swift are unchanged. The mapping translates the wire object into the existing domain value.
+
+Owned paths:
+- `core/src/interpretation/instructions/`;
+- `core/src/providers/self_hosted/mod.rs` (its strict-schema derivation and unit tests, only as the new shape requires);
+- `core/tests/interpretation_instructions/`, `core/tests/interpretation_dispatch/main.rs`, `core/tests/providers_self_hosted/`, `core/tests/live_providers/`;
+- `tools/evaluation/fixtures/recorded-responses.json`, `tools/evaluation/comparison/tests.rs`, `tools/evaluation/tests/`.
+
+Dependencies: none.
+
+Acceptance:
+
+1. **One shape.** In `output_schema()` the `abstention` property is an object: `reason` is required and is one of `UncertainTarget`, `Negated`, `Ambiguous`, `UnsupportedOperation`, `Other`; `detail` is an optional string; no other keys are allowed. `output_schema()` contains no `anyOf` or `oneOf` anywhere, and a test asserts that.
+2. **The instruction text matches.** `M1_INSTRUCTION_TEXT` describes the object form, with one example each for `Negated` and for `Other` with a detail. Following the rule in `text.rs`, `M1_INSTRUCTION_VERSION` is republished as the digest of the new text, and the pinning tests are updated deliberately.
+3. **The mapping translates exactly.** `{"reason": X}` for the four plain reasons maps to the existing `AbstentionReason` variant. `{"reason": "Other", "detail": D}` maps to `Other(D)`. `Other` with a missing, null or blank `detail` is invalid output. A `detail` on the four plain reasons is also invalid output, not ignored. The legacy string and `{"Other": …}` forms, and a JSON-encoded string such as `"\"Negated\""`, are invalid output: there is no fallback parsing. Each of these cases has a test through `map_output`.
+4. **Self-hosted strict mode stays correct.** The derived strict schema makes `detail` required-but-nullable. A null `detail` with a plain reason maps to that reason. The existing null-as-absent handling is unchanged, and the self-hosted tests cover both forms.
+5. **Callers that build replies are migrated.** Every test, the live-provider harness's synthetic reply builder (`core/tests/live_providers/main.rs:100` translates the fixture's domain `expected.abstention` into the wire object) and `tools/evaluation/fixtures/recorded-responses.json` use the new shape. The evaluation and comparison suites pass with unchanged results: an abstention recorded before still scores as the same abstention outcome.
+6. `make check` and `make test` pass. No live-provider claim is made: the coordinator reruns the paired Anthropic benchmark and the E02 harness locally after landing.
+
+### F24
+
+Raise the Anthropic adapter's output cap so long captures are interpreted
+
+`DEFAULT_MAX_OUTPUT_TOKENS` is 1024 (`core/src/providers/anthropic/mod.rs:34`). On the synthetic `very-long-transcript` fixture, Claude Sonnet 5.5 and Haiku 5.5 both reached the cap before finishing the `interpret` call. `stop_reason` was `max_tokens`, and the adapter correctly reports invalid output (`core/src/providers/anthropic/wire.rs:311`). So a long spoken capture is never interpreted through Anthropic. The self-hosted adapter already uses 4096.
+
+Owned paths: `core/src/providers/anthropic/`, `core/tests/providers_anthropic/`.
+
+Dependencies: none.
+
+Acceptance:
+
+1. `DEFAULT_MAX_OUTPUT_TOKENS` is 4096, and a test pins the value sent as `max_tokens` when no override is set. `with_max_output_tokens` keeps working and its validation is unchanged.
+2. A reply whose `stop_reason` is `max_tokens` still maps to non-retriable invalid output, with its usage observations attached. A fixture-server test covers this, so a future cap change cannot turn truncation into a silent partial proposal.
+3. No other request field changes. A test shows the request body is unchanged apart from `max_tokens`.
+4. `make check` and `make test` pass. The coordinator reruns the live Anthropic leg after landing; the worker makes no live claim.
+
+### F25
+
+Make the live harness's oracle count only interpreted captures as matches
+
+`SemanticOutcome::matches_oracle` (`core/tests/live_providers/oracle.rs:92`) only rejects facets scored `wrong`. A facet scored `missing` passes, and the run's terminal result is not consulted. So a capture whose interpretation failed (invalid output, a permanent failure) still counts as a match whenever its fixture expects no reminder, no topic and no abstention. In the first live run (`fe58be5`), `gpt-oss:20b` reported 22 of 33 matches although only 6 captures were applied. E02 cannot be certified on that number.
+
+Owned paths: `core/tests/live_providers/`.
+
+Dependencies: F23, which edits the same directory.
+
+Acceptance:
+
+1. A fixture matches the oracle only when its run ended `applied` or `abstained`, every facet is `match` or `none`, and there are no forbidden-rule hits. `missing` is a miss.
+2. A fixture expecting an abstention matches only when the run ended `abstained`. One expecting a proposal matches only when the run ended `applied`.
+3. The sanitized evidence reports, per backend: matched, applied, abstained, invalid output, other failures, and total. Each count comes from the run records, not from re-deriving the semantic outcome. The report states the scoring rule in one sentence.
+4. Tests show:
+   - a failed run with an all-`none` oracle is not a match;
+   - a `missing` facet is not a match;
+   - an applied run with every facet matching is a match;
+   - an expected abstention that ended `applied` is not a match.
+5. The networkless twin's assertion of at least 10 matches still holds under the new rule. If it cannot, fix the synthetic replies, not the threshold.
+6. `make check` and `make test` pass.
+
+### F26
+
+Score a correctly stored reminder as correct in the evaluation suite
+
+Against the durable stage, the evaluation scorer reports `missed_intent` ("a reminder without the instant the oracle has", `tools/evaluation/src/score.rs:363`) on `design-explicit-reminder`, `date-explicit-today` and `timezone-implicit-local`. It does so even when the candidate's instant equals the oracle's exactly. The paired benchmark found the oracle's own reference reply fails the same way. The likely cause is that the durable view reads the reminder's instant from stored state that applying a proposal does not resolve or schedule (`tools/evaluation/src/scratch.rs:93`). Confirm the cause before changing anything.
+
+Owned paths: `tools/evaluation/src/`, `tools/evaluation/tests/`.
+
+Dependencies: F23, which edits `tools/evaluation/tests/`.
+
+Acceptance:
+
+1. A test feeds the oracle's own expected proposal for each of the three fixtures through the suite. Each scores no defects at both the candidate and durable stages. The test fails on current main.
+2. The durable stage still detects real defects: an applied reminder whose stored instant differs from the oracle's is `missed_intent` or `unsupported_claim` as today, and a missing stored reminder is still `missed_intent`. Tests cover both.
+3. Fix the scorer's reading of durable state, not the oracle, the fixtures or core's apply path. If the evaluation genuinely needs a core seam it lacks, block with the exact need rather than reaching into `core/`.
+4. The recorded-response evaluation's report changes only where these false defects disappear. List the changed cases in the PR.
+5. `make check` and `make test` pass.
+
+### F27
+
+Find and fix the race behind the intermittent system-time-change test failure
+
+`testAStartedAppReconcilesOnceWhenASystemTimeZoneCallbackReportsARealChange` (`ios/Tests/AppAssembly/AppServicesTests.swift:117`) fails intermittently on the hosted macOS runner. It failed at line 139 on two PRs that change nothing it covers: U06b (run 39281367194) and F24 (run 39312148289, attempt 1, Rust only). After the zone changes and three callbacks arrive, no lifecycle pass finishes within 10 seconds, and `lastReport` is nil. Every native PR can be rejected on it.
+
+A pass that never happens is not a slow pass. Waiting longer is not the fix: find out why the request is lost or never runs. Candidates to rule in or out: the three callbacks coalescing before `sleeperCount` reaches 3; `releaseTimers()` running before the third sleeper registers; the coordinator comparing against a zone it already adopted; and the request being dropped because the app was started inactive.
+
+Owned paths: `ios/Tests/AppAssembly/AppServicesTests.swift`, `ios/Tests/TimeChangeCoordinator/`, `ios/Services/TimeChangeCoordinator/`, `ios/AppAssembly/AppServices.swift`.
+
+Dependencies: DS04b, which edits `AppServices.swift`.
+
+Acceptance:
+
+1. The PR names the cause, with evidence: a deterministic reproduction, such as a test that forces the interleaving and fails on main, or a logged trace from a failing run. "Could not reproduce" is not a fix. If the cause cannot be found, block with what was ruled out.
+2. **If the cause is a production race** (a real time-zone change can be missed or never reconciled), fix it in the coordinator or `AppServices`. Its regression test drives the bad interleaving explicitly. One real change still produces exactly one `.systemTimeChange` pass, and a callback that finds nothing changed still produces none.
+3. **If the cause is in the test** (it releases or observes before the state it waits on exists), fix the synchronisation so each step waits on an observable condition, not a fixed sleep. The `Task.sleep(300_000_000)` used to prove a negative is replaced by a deterministic check. The test keeps asserting everything it asserts today.
+4. No timeout in the test or `timeChangeWaitUntil` is raised, and no assertion is removed or weakened.
+5. Stability evidence: the test passes 50 times in a row in one exact-head run. Add a temporary repeat loop or `-test-iterations 50` to a CI step, link that run, then remove the loop and link the normal exact-head run.
+6. Exact-head macOS run linked, as with any native change.
