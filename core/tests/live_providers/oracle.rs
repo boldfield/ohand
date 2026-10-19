@@ -89,12 +89,24 @@ pub struct SemanticOutcome {
 }
 
 impl SemanticOutcome {
-    pub fn matches_oracle(&self) -> bool {
-        self.item_type != "wrong"
-            && self.reminder != "wrong"
-            && self.session_topic != "wrong"
-            && self.abstention != "wrong"
-            && self.forbidden_rule_hits.is_empty()
+    /// A fixture matches only when its run ended `applied` or `abstained`, every facet is
+    /// `match` or `none`, an abstention was expected exactly when the run abstained, and no
+    /// forbidden rule was hit; a `missing` facet or a failed run is a miss.
+    pub fn matches_oracle(&self, run_result: &str) -> bool {
+        let facets_hold = [
+            self.item_type,
+            self.reminder,
+            self.session_topic,
+            self.abstention,
+        ]
+        .iter()
+        .all(|facet| matches!(*facet, "match" | "none"));
+        let result_fits = match run_result {
+            "abstained" => self.abstention == "match",
+            "applied" => self.abstention == "none",
+            _ => false,
+        };
+        facets_hold && result_fits && self.forbidden_rule_hits.is_empty()
     }
 }
 
@@ -237,10 +249,46 @@ mod tests {
             item_type: Some("idea".into()),
             ..ObservedState::default()
         };
-        assert!(score(&fixture, &observed).matches_oracle());
+        assert!(score(&fixture, &observed).matches_oracle("applied"));
         observed.item_type = Some("action".into());
         let outcome = score(&fixture, &observed);
         assert_eq!(outcome.item_type, "wrong");
         assert_eq!(outcome.forbidden_rule_hits, vec!["item_type:action"]);
+    }
+
+    fn outcome(facet: &'static str, abstention: &'static str) -> SemanticOutcome {
+        SemanticOutcome {
+            item_type: facet,
+            reminder: "none",
+            session_topic: "none",
+            abstention,
+            forbidden_rule_hits: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_failed_run_with_an_all_none_oracle_is_not_a_match() {
+        let all_none = outcome("none", "none");
+        for result in ["failed", "backed_off", "retired", "not_run", "other"] {
+            assert!(!all_none.matches_oracle(result), "{result}");
+        }
+        assert!(all_none.matches_oracle("applied"));
+    }
+
+    #[test]
+    fn a_missing_facet_is_not_a_match() {
+        assert!(!outcome("missing", "none").matches_oracle("applied"));
+    }
+
+    #[test]
+    fn an_applied_run_with_every_facet_matching_is_a_match() {
+        assert!(outcome("match", "none").matches_oracle("applied"));
+    }
+
+    #[test]
+    fn an_expected_abstention_matches_only_when_the_run_abstained() {
+        assert!(!outcome("none", "match").matches_oracle("applied"));
+        assert!(outcome("none", "match").matches_oracle("abstained"));
+        assert!(!outcome("none", "none").matches_oracle("abstained"));
     }
 }
