@@ -39,7 +39,7 @@ final class ReminderEditRootIntegrationTests: XCTestCase {
         try super.tearDownWithError()
     }
 
-    @MainActor func testEditsLeaveOneInstalledRequestACancelRemovesItAndARestartKeepsTheReminder() async throws {
+    func testEditsLeaveOneInstalledRequestACancelRemovesItAndARestartKeepsTheReminder() async throws {
         let root = try makeRoot()
         let itemID = try await saveActionItem(root)
         let model = ReminderEditModel.assembled(itemID: itemID, root: root)
