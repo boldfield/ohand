@@ -105,7 +105,8 @@ final class AppServices {
             providerSettings: .assembled(root: root),
             promptSettings: PromptSettingsModel(controller: root.promptSchedule),
             sourceDetail: { [root] itemID in .assembled(itemID: itemID, root: root) },
-            suggestion: SuggestionScreenModel(responder: root.suggestionResponses))
+            suggestion: SuggestionScreenModel(responder: root.suggestionResponses),
+            privacySettings: .assembled(root: root))
         entrySession = CaptureEntrySession(
             handoff: handoff, defaultMode: defaultMode, access: access, notificationCenter: notificationCenter)
         entrySession.observeHandoffs { [weak self] presentation in self?.present(presentation) }
