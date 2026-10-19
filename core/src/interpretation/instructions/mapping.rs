@@ -98,6 +98,10 @@ impl InterpretationMapping {
             }
             proposal.insert(key.clone(), value.clone());
         }
+        if let Some(wire) = proposal.get("abstention") {
+            let domain = abstention_from_wire(wire)?;
+            proposal.insert("abstention".to_string(), domain);
+        }
         let source_revision = i32::try_from(self.request.source_revision()).map_err(|_| {
             InstructionError::SourceRevisionOutOfRange(self.request.source_revision())
         })?;
@@ -123,6 +127,37 @@ impl InterpretationMapping {
             &enriched,
             &self.item_id,
         )?)
+    }
+}
+
+/// Translate the wire abstention object into the serde form of `AbstentionReason`.
+///
+/// There is no fallback parsing: a bare string, the legacy `{"Other": ...}` form and a
+/// JSON-encoded string are all invalid output.
+fn abstention_from_wire(wire: &Value) -> Result<Value, InstructionError> {
+    let invalid = |problem: &'static str| InstructionError::InvalidAbstention { problem };
+    let Some(members) = wire.as_object() else {
+        return Err(invalid("must be an object"));
+    };
+    if members.keys().any(|key| key != "reason" && key != "detail") {
+        return Err(invalid("only reason and detail are allowed"));
+    }
+    let reason = members
+        .get("reason")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("reason must be a string"))?;
+    match reason {
+        "UncertainTarget" | "Negated" | "Ambiguous" | "UnsupportedOperation" => {
+            if members.contains_key("detail") {
+                return Err(invalid("detail is only allowed with reason Other"));
+            }
+            Ok(json!(reason))
+        }
+        "Other" => match members.get("detail").and_then(Value::as_str) {
+            Some(detail) if !detail.trim().is_empty() => Ok(json!({ "Other": detail })),
+            _ => Err(invalid("reason Other needs a non-blank detail string")),
+        },
+        _ => Err(invalid("unknown reason")),
     }
 }
 

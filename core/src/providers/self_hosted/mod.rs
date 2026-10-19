@@ -498,7 +498,7 @@ mod tests {
         let reply = json!({
             "operation": null,
             "reminder_proposal": {"quality": null, "source_span": null, "instant": 5},
-            "abstention": {"Other": null},
+            "abstention": {"reason": null, "detail": null},
             "unknown": null
         });
         let result = normalized(reply);
@@ -506,7 +506,8 @@ mod tests {
         assert!(result["reminder_proposal"]["quality"].is_null());
         assert!(result["reminder_proposal"]["source_span"].is_null());
         assert_eq!(result["reminder_proposal"]["instant"], json!(5));
-        assert!(result["abstention"]["Other"].is_null());
+        assert!(result["abstention"]["reason"].is_null());
+        assert!(result["abstention"].get("detail").is_none());
         assert!(
             result.get("unknown").is_some(),
             "unknown keys are not mine to drop"
