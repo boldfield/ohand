@@ -160,6 +160,13 @@ fn operations_block(out: &mut String, operations: &ArmOperations) {
         requests.retries,
         requests.reruns
     );
+    if !operations.rejections.is_empty() {
+        let _ = writeln!(
+            out,
+            "  provider rejections by error type: {}",
+            counts(&operations.rejections)
+        );
+    }
     let _ = writeln!(
         out,
         "  latency, matched pairs: {}",
@@ -298,6 +305,11 @@ pub(super) fn render_text(report: &BenchReport) -> String {
         out,
         "\nCOMPARABILITY (model identity as the only variable: {})",
         comparability.model_identity_only_variable
+    );
+    let _ = writeln!(
+        out,
+        "  requested temperature: {}",
+        comparability.requested_temperature
     );
     for arm in &comparability.arms {
         let requested = if arm.requested.is_empty() {
