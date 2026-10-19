@@ -2225,3 +2225,335 @@ fn usage_lists_the_report_command() {
     let help = execute(&["report", "--help"], &services_with(&[]));
     assert_eq!(help.status, EXIT_COMPLETED);
 }
+
+// ---- optional temperature and rejection detail ------------------------------------------------
+
+fn anthropic_error_reply(status: u16, error_type: &str, message: &str) -> Reply {
+    let body = json!({"type": "error", "error": {"type": error_type, "message": message}});
+    Reply::status(status, body.to_string().as_bytes())
+}
+
+fn openai_error_reply(status: u16, error_type: &str, message: &str) -> Reply {
+    let body = json!({
+        "error": {"message": message, "type": error_type, "param": "temperature", "code": "unsupported_value"}
+    });
+    Reply::status(status, body.to_string().as_bytes())
+}
+
+const DEPRECATION_MESSAGE: &str = "`temperature` is deprecated for this model.";
+
+fn body_has_temperature(request: &RecordedRequest) -> bool {
+    let body: Value = serde_json::from_slice(&request.body).unwrap();
+    body.get("temperature").is_some()
+}
+
+struct LiveFixtureRun {
+    outcome: Outcome,
+    requests: Vec<RecordedRequest>,
+    journal: PathBuf,
+    contents: String,
+    _directory: TempDir,
+}
+
+/// Run both arms of one protocol against a fixture that answers with `handler`.
+fn live_fixture_run(
+    protocol: &str,
+    extra: &[&str],
+    handler: impl Fn(&RecordedRequest) -> Reply + Send + Sync + 'static,
+) -> LiveFixtureRun {
+    let authority = TestAuthority::new();
+    let server = Fixture::start(authority.issue("localhost"), handler);
+    let dir = TempDir::new().unwrap();
+    let (journal, journal_text) = journal_in(&dir);
+    let mut services = services_with(&[
+        ("BENCH_TEST_KEY_A", SECRET_A),
+        ("BENCH_TEST_KEY_B", SECRET_B),
+    ]);
+    services.anthropic_endpoint = Some(server.url("/v1/messages"));
+    services.openai_endpoint = Some(server.url("/v1/chat/completions"));
+    services.extra_trust_roots = vec![authority.root_der()];
+    let profile_a = format!("{protocol}:model-a:ref-a");
+    let profile_b = format!("{protocol}:model-b:ref-b");
+    let mut words = vec![
+        "run",
+        "--corpus",
+        CORPUS,
+        "--profile-a",
+        &profile_a,
+        "--profile-b",
+        &profile_b,
+        "--mode",
+        "live",
+        "--journal",
+        &journal_text,
+        "--max-cases",
+        "2",
+        "--allow-destination",
+        protocol,
+        "--credential-env",
+        "ref-a=BENCH_TEST_KEY_A",
+        "--credential-env",
+        "ref-b=BENCH_TEST_KEY_B",
+        "--execute-network",
+        "--request-cap",
+        "4",
+    ];
+    words.extend_from_slice(extra);
+    let outcome = execute(&words, &services);
+    let contents = std::fs::read_to_string(&journal).unwrap_or_default();
+    LiveFixtureRun {
+        outcome,
+        requests: server.requests(),
+        journal,
+        contents,
+        _directory: dir,
+    }
+}
+
+fn reject_temperature(protocol: &'static str) -> impl Fn(&RecordedRequest) -> Reply + Send + Sync {
+    move |request| {
+        if body_has_temperature(request) {
+            match protocol {
+                "anthropic" => {
+                    anthropic_error_reply(400, "invalid_request_error", DEPRECATION_MESSAGE)
+                }
+                _ => openai_error_reply(
+                    400,
+                    "invalid_request_error",
+                    "Unsupported value: 'temperature' does not support 0 with this model.",
+                ),
+            }
+        } else if protocol == "anthropic" {
+            tool_use_reply(&request_model(request))
+        } else {
+            chat_completion_reply(&request_model(request))
+        }
+    }
+}
+
+#[test]
+fn a_default_run_requests_no_temperature_and_a_model_that_rejects_it_completes() {
+    for protocol in ["anthropic", "openai"] {
+        let run = live_fixture_run(protocol, &[], reject_temperature(protocol));
+        assert_eq!(
+            run.outcome.status, EXIT_COMPLETED,
+            "{protocol}: {}\n{}",
+            run.outcome.out, run.outcome.err
+        );
+        assert_eq!(run.requests.len(), 4);
+        for request in &run.requests {
+            assert!(
+                !body_has_temperature(request),
+                "{protocol} sent a temperature"
+            );
+        }
+        assert!(run
+            .contents
+            .contains("settings-temperature-provider-default-"));
+    }
+}
+
+#[test]
+fn an_explicit_temperature_is_sent_to_both_arms_and_a_rejection_is_recorded_with_its_reason() {
+    for (protocol, message_part) in [
+        ("anthropic", "deprecated for this model"),
+        ("openai", "does not support 0 with this model"),
+    ] {
+        let run = live_fixture_run(
+            protocol,
+            &["--temperature", "0"],
+            reject_temperature(protocol),
+        );
+        assert_eq!(run.outcome.status, EXIT_INCOMPLETE, "{protocol}");
+        assert_eq!(run.requests.len(), 4);
+        for request in &run.requests {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            assert_eq!(body["temperature"], json!(0.0), "{protocol}");
+        }
+        assert!(run.contents.contains("settings-temperature-0.000-"));
+        for surface in [&run.contents, &run.outcome.out] {
+            assert!(surface.contains("HTTP 400"), "{protocol}: {surface}");
+            assert!(surface.contains("invalid_request_error"));
+            assert!(surface.contains(message_part), "{protocol}: {surface}");
+        }
+    }
+}
+
+#[test]
+fn a_temperature_value_is_sent_exactly_and_out_of_range_values_are_refused() {
+    let run = live_fixture_run("anthropic", &["--temperature", "0.25"], |request| {
+        tool_use_reply(&request_model(request))
+    });
+    assert_eq!(run.outcome.status, EXIT_COMPLETED, "{}", run.outcome.err);
+    for request in &run.requests {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(body["temperature"], json!(0.25));
+    }
+    for bad in ["1.5", "-0.1", "abc", "", "0.1234", "1.001", ".5", "5"] {
+        let outcome = execute(
+            &[
+                "plan",
+                "--corpus",
+                CORPUS,
+                "--profile-a",
+                "anthropic:m-a",
+                "--profile-b",
+                "anthropic:m-b",
+                "--temperature",
+                bad,
+            ],
+            &services_with(&[]),
+        );
+        assert_eq!(outcome.status, EXIT_REFUSED, "{bad}");
+        assert!(
+            outcome.err.contains("--temperature"),
+            "{bad}: {}",
+            outcome.err
+        );
+    }
+}
+
+#[test]
+fn resuming_a_journal_under_different_temperature_settings_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let (journal, journal_text) = journal_in(&dir);
+    let services = services_with(&[]);
+    let first = execute(&fake_words(&journal_text, &[]), &services);
+    assert_eq!(first.status, EXIT_COMPLETED, "{}", first.err);
+    let before = std::fs::read(&journal).unwrap();
+    let second = execute(
+        &fake_words(&journal_text, &["--temperature", "0"]),
+        &services,
+    );
+    assert_eq!(second.status, EXIT_REFUSED, "{}", second.err);
+    assert_eq!(std::fs::read(&journal).unwrap(), before);
+    let same = execute(&fake_words(&journal_text, &[]), &services);
+    assert_eq!(same.status, EXIT_COMPLETED, "{}", same.err);
+}
+
+#[test]
+fn an_oversized_gateway_page_is_never_parsed_and_records_the_status_alone() {
+    for protocol in ["anthropic", "openai"] {
+        let run = live_fixture_run(protocol, &[], |_| {
+            // A well-formed error envelope that exceeds the response bound.
+            let padding = "x".repeat(80 * 1024);
+            match anthropic_error_reply(400, "invalid_request_error", &padding) {
+                Reply::Full { body, .. } => Reply::status(400, &body),
+                other => other,
+            }
+        });
+        assert_eq!(run.outcome.status, EXIT_INCOMPLETE, "{protocol}");
+        assert!(run.contents.contains("HTTP 400"), "{protocol}");
+        assert!(
+            !run.contents.contains("invalid_request_error"),
+            "{protocol}"
+        );
+        assert!(!run.contents.contains("xxxxxxxx"), "{protocol}");
+    }
+}
+
+#[test]
+fn a_rejection_message_is_cleaned_bounded_and_an_unknown_type_is_unrecognized() {
+    let message = format!("bad\u{7}\n request {}", "é".repeat(400));
+    for protocol in ["anthropic", "openai"] {
+        let message = message.clone();
+        let run = live_fixture_run(protocol, &[], move |_| match protocol {
+            "anthropic" => anthropic_error_reply(400, "made_up_error", &message),
+            _ => openai_error_reply(400, "made_up_error", &message),
+        });
+        assert_eq!(run.outcome.status, EXIT_INCOMPLETE, "{protocol}");
+        let reader = JournalReader::open(&run.journal).unwrap();
+        let reason = reader
+            .attempts()
+            .iter()
+            .filter_map(|attempt| attempt.failure_reason.clone())
+            .next()
+            .expect("a failed attempt");
+        assert!(
+            reason.contains("HTTP 400 unrecognized: bad request"),
+            "{reason}"
+        );
+        assert!(!reason.contains("made_up_error"));
+        assert!(!reason.contains('\u{7}') && !reason.contains('\n'));
+        let echoed = reason.split("bad request").nth(1).unwrap().trim();
+        assert!(
+            !echoed.is_empty() && echoed.len() <= 300,
+            "{}",
+            echoed.len()
+        );
+        assert!(echoed.chars().all(|c| c == 'é' || c == ' '));
+    }
+}
+
+#[test]
+fn a_rejection_that_echoes_the_credential_reaches_the_journal_and_output_masked() {
+    for protocol in ["anthropic", "openai"] {
+        let run = live_fixture_run(protocol, &[], move |request| {
+            // Each arm's transport masks the credential it resolved for that arm.
+            let model = request_model(request);
+            let own = if model == "model-a" {
+                SECRET_A
+            } else {
+                SECRET_B
+            };
+            let message = format!("invalid key {own} for {model}");
+            match protocol {
+                "anthropic" => anthropic_error_reply(400, "invalid_request_error", &message),
+                _ => openai_error_reply(400, "invalid_request_error", &message),
+            }
+        });
+        assert_eq!(run.outcome.status, EXIT_INCOMPLETE, "{protocol}");
+        for surface in [&run.contents, &run.outcome.out, &run.outcome.err] {
+            assert!(
+                !surface.contains(SECRET_A) && !surface.contains(SECRET_B),
+                "{protocol}: {surface}"
+            );
+        }
+        assert!(run.contents.contains("invalid key"), "{protocol}");
+        assert!(run.contents.contains("****"), "{protocol}");
+    }
+}
+
+#[test]
+fn the_report_counts_rejections_by_error_type_and_names_the_temperature() {
+    let run = live_fixture_run(
+        "anthropic",
+        &["--temperature", "0"],
+        reject_temperature("anthropic"),
+    );
+    assert_eq!(run.outcome.status, EXIT_INCOMPLETE);
+    let copy_text = run.journal.to_str().unwrap();
+    let services = services_with(&[]);
+    let text = execute(
+        &["report", "--corpus", CORPUS, "--journal", copy_text],
+        &services,
+    );
+    assert_eq!(text.status, EXIT_COMPLETED, "{}", text.err);
+    assert!(
+        text.out.contains("requested temperature: 0.000"),
+        "{}",
+        text.out
+    );
+    assert!(text.out.contains("invalid_request_error=2"), "{}", text.out);
+    let json_report = execute(
+        &[
+            "report",
+            "--corpus",
+            CORPUS,
+            "--journal",
+            copy_text,
+            "--format",
+            "json",
+        ],
+        &services,
+    );
+    let report: Value = serde_json::from_str(&json_report.out).unwrap();
+    assert_eq!(
+        report["comparability"]["requested_temperature"],
+        json!("0.000")
+    );
+    assert_eq!(
+        report["operations"][0]["rejections"]["invalid_request_error"],
+        json!(2)
+    );
+}

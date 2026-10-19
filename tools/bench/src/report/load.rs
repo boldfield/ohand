@@ -14,6 +14,13 @@ use crate::records::{Attempt, AttemptState, Experiment, UsageMetadata};
 /// The executor's record version inside `Attempt::provider_output`.
 const SUPPORTED_EXECUTOR_RECORD: u32 = 1;
 
+/// The status and error type of a provider rejection, as the executor journaled them.
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct RejectionRecord {
+    #[serde(default)]
+    pub error_type: Option<String>,
+}
+
 /// The parts of the executor's envelope a report reads. Unknown fields are ignored so a later
 /// executor can add some without breaking reports of older journals.
 #[derive(Debug, Clone, Deserialize)]
@@ -29,6 +36,8 @@ pub(super) struct Envelope {
     pub rerun_of: Option<String>,
     #[serde(default)]
     pub class: Option<String>,
+    #[serde(default)]
+    pub rejection: Option<RejectionRecord>,
     #[serde(default)]
     pub output: Option<serde_json::Map<String, serde_json::Value>>,
     #[serde(default)]
