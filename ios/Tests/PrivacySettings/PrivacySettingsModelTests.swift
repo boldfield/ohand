@@ -462,7 +462,7 @@ final class PrivacySettingsModelTests: XCTestCase {
         XCTAssertTrue(message.contains("More may still be waiting"), message)
     }
 
-    func testARouteRevocationReadsBackWhichWorkIsWaitingAndWhichWasSent() async throws {
+    func testARouteRevocationMakesNoCountOrDropClaimAboutWorkItCannotAttributeToTheRoute() async throws {
         let (model, controls) = makeModel(routes: [grantedRoute()])
         controls.pinned["hosted-v1"] = JobConfigurationPinnedJobs(
             jobs: [
@@ -474,7 +474,29 @@ final class PrivacySettingsModelTests: XCTestCase {
         controls.duringRevoke = { controls.routes = .success([privacyRoute(id: "route-personal", name: "Local capture", scope: "personal")]) }
         await model.confirmChange(try XCTUnwrap(model.change))
         guard case .changed(let message) = model.actionState else { return XCTFail("expected changed") }
-        XCTAssertTrue(message.contains("1 waiting (held, not sent) and 1 already sent"), message)
+        XCTAssertTrue(message.contains("Stopped"), message)
+        XCTAssertFalse(message.contains("already sent"), message)
+        XCTAssertFalse(message.contains("not applied"), message)
         XCTAssertEqual(model.routesHoldingWork, ["Personal route · Local capture"])
+    }
+
+    func testAFailedPreReadOfAffectedWorkStopsAProfileRevocationWithNothingChanged() async throws {
+        let (model, controls) = makeModel()
+        controls.pinned["hosted-v1"] = pinnedJobs(["job-1"])
+        await model.refresh()
+        model.proposeRevokeProfile(profileVersion: "hosted-v1")
+        let shown = try XCTUnwrap(model.change)
+        controls.pinnedFailure = JobConfigurationError.unreadable
+        await model.confirmChange(shown)
+        XCTAssertEqual(controls.profileRevocations, [], "no revocation without the list of jobs it would retire")
+        guard case .failed(let message) = model.actionState else { return XCTFail("expected failed") }
+        XCTAssertTrue(message.contains("not revoked"), message)
+        XCTAssertTrue(model.retiredWork.isEmpty)
+    }
+
+    func testHeldWorkNoticeDoesNotNameRoutesAsHoldingJobsItCannotAttributeToThem() {
+        let notice = PrivacySettingsText.heldWork(["Work notes · Work"])
+        XCTAssertTrue(notice.contains("by provider version, not by route"), notice)
+        XCTAssertFalse(notice.contains("Queued work for"), notice)
     }
 }

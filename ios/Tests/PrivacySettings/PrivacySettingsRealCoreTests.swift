@@ -337,8 +337,9 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         model.proposeRevoke(routeID: "route-personal", capability: "text_interpretation")
         await model.confirmChange(try XCTUnwrap(model.change))
         guard case .changed(let message) = model.actionState else { return XCTFail("expected changed, got \(String(describing: model.actionState))") }
-        XCTAssertTrue(message.contains("1 already sent"), message)
-        XCTAssertTrue(message.contains("A reply to a request already sent is not applied"), message)
+        XCTAssertTrue(message.contains("Stopped"), message)
+        XCTAssertFalse(message.contains("already sent"), "the message makes no per-job claim it cannot attribute: \(message)")
+        XCTAssertFalse(message.contains("not applied"), message)
 
         held.release()
         let settled = try await waitUntil { self.jobStatus() != "running" }

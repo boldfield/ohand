@@ -103,14 +103,6 @@ struct PrivacyRequeueProposal: Equatable {
     let toVersionLabel: String
 }
 
-/// Counts of listed jobs by what the core says happened to them: still waiting here, or already sent.
-struct PrivacyWorkTally: Equatable {
-    let waiting: Int
-    let sent: Int
-    /// True when the core listed fewer jobs than it holds, so the counts are lower bounds.
-    let truncated: Bool
-}
-
 /// Work queued or running behind one unrevoked stored profile version. Item and status only; no content.
 struct PrivacyQueuedVersion: Equatable {
     let profileID: String
@@ -368,7 +360,17 @@ final class PrivacySettingsModel: ObservableObject {
                 actionState = .changed(PrivacySettingsText.revokeResult(outcome, routeLabel: routeLabel, capability: capability))
             case .revokeProfileVersion(let profileVersion, let versionLabel):
                 // Read the work pinned to it before and after, so the message and the retry list come from the core.
-                let before = try? await controls.jobsPinned(toProfile: profileVersion, limit: nil)
+                // The read before is required: without it the retired jobs could not be offered for a move afterwards,
+                // so a failed read stops here with nothing revoked.
+                let before: JobConfigurationPinnedJobs
+                do {
+                    before = try await controls.jobsPinned(toProfile: profileVersion, limit: nil)
+                } catch {
+                    if isNotAuthenticated(error) { lock(); return }
+                    change = nil
+                    actionState = .failed(PrivacySettingsText.profileRevokeNotStarted(versionLabel))
+                    return
+                }
                 try await controls.revokeProfile(profileVersion)
                 let after = try? await controls.jobsPinned(toProfile: profileVersion, limit: nil)
                 actionState = .changed(retire(profileVersion, versionLabel: versionLabel, before: before, after: after))
@@ -390,27 +392,18 @@ final class PrivacySettingsModel: ObservableObject {
                 PrivacySettingsText.revokeResult(
                     revoked.outcome, routeLabel: revoked.routeLabel, capability: revoked.capability,
                     stillAllowed: phase == .loaded
-                        ? isGranted(routeID: revoked.routeID, capability: revoked.capability) : nil,
-                    work: phase == .loaded ? queuedWorkTally : nil))
+                        ? isGranted(routeID: revoked.routeID, capability: revoked.capability) : nil))
         }
-    }
-
-    /// How much of the work listed now is waiting and how much has already been sent, from the core's own statuses.
-    private var queuedWorkTally: PrivacyWorkTally {
-        let listed = queuedWork.flatMap(\.jobs.jobs)
-        return PrivacyWorkTally(
-            waiting: listed.filter { $0.status == "queued" }.count,
-            sent: listed.filter { $0.status == "running" }.count,
-            truncated: queuedWork.contains { $0.jobs.truncated })
     }
 
     /// Records the jobs a profile revocation retired and describes what the core now reports for the version.
     private func retire(
-        _ profileVersion: String, versionLabel: String, before: JobConfigurationPinnedJobs?,
+        _ profileVersion: String, versionLabel: String, before: JobConfigurationPinnedJobs,
         after: JobConfigurationPinnedJobs?
     ) -> String {
-        guard let before, let after else { return PrivacySettingsText.profileRevokedUnread(versionLabel) }
-        let stillListed = Set(after.jobs.map(\.jobID))
+        // Without the read after, every job seen before is kept open to a move; the core accepts a move only for work
+        // it still holds or retired for the revocation, and refuses the rest.
+        let stillListed = Set(after?.jobs.map(\.jobID) ?? [])
         let retired = before.jobs.filter { !stillListed.contains($0.jobID) }
             .map { JobConfigurationPinnedJob(jobID: $0.jobID, itemID: $0.itemID, status: "retired") }
         retiredWork.removeAll { $0.profileVersion == profileVersion }
@@ -418,6 +411,7 @@ final class PrivacySettingsModel: ObservableObject {
             retiredWork.append(
                 PrivacyRetiredVersion(profileVersion: profileVersion, versionLabel: versionLabel, jobs: retired))
         }
+        guard let after else { return PrivacySettingsText.profileRevokedUnread(versionLabel) }
         let wasSent = before.jobs.filter { $0.status == "running" && !stillListed.contains($0.jobID) }.count
         return PrivacySettingsText.profileRevoked(
             versionLabel, retired: retired.count, alreadySent: wasSent, stillPending: after.total)

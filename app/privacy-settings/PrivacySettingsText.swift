@@ -136,17 +136,14 @@ enum PrivacySettingsText {
 
     static func revokeResult(
         _ outcome: RoutePolicyChangeOutcome.Disposition, routeLabel: String, capability: String,
-        stillAllowed: Bool? = nil, work: PrivacyWorkTally? = nil
+        stillAllowed: Bool? = nil
     ) -> String {
         switch outcome {
         case .revoked:
             let stopped = "Stopped \(capabilityName(capability).lowercased()) on \(routeLabel)."
             if stillAllowed == true { return stopped + " The stored policy still lists it as allowed; check the route above." }
-            guard let work else { return stopped + " The queued work could not be read again." }
-            if work.waiting == 0 && work.sent == 0 { return stopped + " No queued or running work is listed." }
-            let atLeast = work.truncated ? "at least " : ""
-            return stopped + " Read back: \(atLeast)\(work.waiting) waiting (held, not sent) and \(atLeast)\(work.sent) "
-                + "already sent. A reply to a request already sent is not applied."
+            return stopped + " Queued work is listed below by provider version, not by route, with the core's own status "
+                + "for each job. Work this route no longer allows is not sent."
         case .unchanged: return "That was not allowed, so nothing changed."
         case .granted: return "Nothing changed."
         }
@@ -160,6 +157,10 @@ enum PrivacySettingsText {
         if stillPending > 0 { message += " The core still lists \(stillPending) as pending; check Queued work." }
         if retired > 0 { message += " Each can be moved on purpose below." }
         return message
+    }
+
+    static func profileRevokeNotStarted(_ versionLabel: String) -> String {
+        "The work queued for \(versionLabel) could not be read, so it was not revoked. Nothing was changed; try again."
     }
 
     static func profileRevokedUnread(_ versionLabel: String) -> String {
@@ -176,7 +177,9 @@ enum PrivacySettingsText {
         return "Queued \(notes) on \(routeLabel) with the provider selected now." + rest
     }
 
-    static let heldWorkNotice = "Queued work for a route that does not allow sorting text notes is held, not sent: "
+    static let heldWorkNotice =
+        "Queued work is listed by provider version, not by route. A route that does not allow sorting text notes "
+        + "holds its work instead of sending it: "
     static let retiredWorkTitle = "Retired work"
     static func heldWork(_ routeLabels: [String]) -> String { heldWorkNotice + routeLabels.joined(separator: ", ") + "." }
     static func retiredJob(_ job: JobConfigurationPinnedJob) -> String { "Job \(job.jobID) · retired (provider revoked)" }
