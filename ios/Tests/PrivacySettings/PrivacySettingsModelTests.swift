@@ -273,7 +273,8 @@ final class PrivacySettingsModelTests: XCTestCase {
         await model.confirmChange(try XCTUnwrap(model.change))
         XCTAssertEqual(controls.revocations, [["route-personal", "text_interpretation"]])
         guard case .changed(let message) = model.actionState else { return XCTFail("expected changed") }
-        XCTAssertTrue(message.contains("No queued or running work is listed"), message)
+        XCTAssertTrue(message.contains("Stopped sorting your text notes"), message)
+        XCTAssertTrue(message.contains("not by route"), message)
         XCTAssertFalse(model.isGranted(routeID: "route-personal", capability: "text_interpretation"))
         XCTAssertTrue(model.isLocalOnly, "with nothing allowed the app is still usable, local only")
         XCTAssertNil(model.change)
