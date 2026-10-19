@@ -29,7 +29,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-const PINNED_VERSION: &str = "89eff04b128f6e3b8a9ebff15186595bf6502f3aedf8fe2ecdecf048e9082f17";
+const PINNED_VERSION: &str = "0b3a70bffc3baa70ea93a08958b11b6537aea52ca7d4844be8eea54effccb671";
 const PROPOSAL_ID: &str = "550e8400-e29b-41d4-a716-446655440001";
 const ITEM_ID: &str = "550e8400-e29b-41d4-a716-446655440002";
 const CAPTURE_ID: &str = "550e8400-e29b-41d4-a716-446655440003";
@@ -194,6 +194,16 @@ fn provider_reply(fixture: &Value) -> Map<String, Value> {
     strip_oracle_text(&mut reply);
     let reply = reply.as_object_mut().expect("expected object");
     reply.insert("operation".to_string(), json!({ "kind": "annotate" }));
+    // The oracle holds the domain form; the provider wire carries one object shape.
+    if let Some(domain) = reply.get("abstention").cloned() {
+        reply.insert(
+            "abstention".to_string(),
+            match domain {
+                Value::String(reason) => json!({ "reason": reason }),
+                other => json!({ "reason": "Other", "detail": other["Other"] }),
+            },
+        );
+    }
     reply.clone()
 }
 
@@ -812,7 +822,7 @@ fn golden_negation_maps_to_an_abstention_without_a_reminder() {
         let (request, mapping) = mapping_for(fixture["input"].as_str().expect("input"));
         let obeying = json!({
             "operation": {"kind": "annotate"},
-            "abstention": "Negated",
+            "abstention": {"reason": "Negated"},
             "reminder_proposal": {"quality": "ambiguous", "source_span": {"start": 0, "end": 4}},
         });
         assert_eq!(
@@ -1117,7 +1127,7 @@ fn unsupported_existing_item_updates_are_rejected() {
     );
     let other_item = json!({
         "operation": {"kind": "update", "item_id": OTHER_ITEM_ID},
-        "abstention": "UnsupportedOperation",
+        "abstention": {"reason": "UnsupportedOperation"},
     });
     assert_eq!(
         proposal_error(map_reply(text, other_item).unwrap_err()),
@@ -1125,7 +1135,7 @@ fn unsupported_existing_item_updates_are_rejected() {
     );
     let wrong_reason = json!({
         "operation": {"kind": "update", "item_id": ITEM_ID},
-        "abstention": "Ambiguous",
+        "abstention": {"reason": "Ambiguous"},
     });
     assert_eq!(
         proposal_error(map_reply(text, wrong_reason).unwrap_err()),
@@ -1147,7 +1157,7 @@ fn unsupported_existing_item_updates_are_rejected() {
 fn an_update_that_abstains_carries_no_facet_that_could_change_anything() {
     let degenerate = json!({
         "operation": {"kind": "update", "item_id": ITEM_ID},
-        "abstention": "UnsupportedOperation",
+        "abstention": {"reason": "UnsupportedOperation"},
     });
     let proposal = map_reply("Done with the roofer call", degenerate).expect("legal abstention");
     assert_eq!(
@@ -1347,6 +1357,65 @@ mod anthropic_schema {
         assert_eq!(
             run(&fixture, nested).unwrap_err(),
             FailureKind::InvalidOutput
+        );
+    }
+}
+
+// ---- abstention wire shape ----
+
+fn abstention_reply(abstention: Value) -> Value {
+    json!({"operation": {"kind": "annotate"}, "abstention": abstention})
+}
+
+#[test]
+fn the_wire_abstention_object_maps_to_each_domain_reason() {
+    for (reason, expected) in [
+        ("UncertainTarget", AbstentionReason::UncertainTarget),
+        ("Negated", AbstentionReason::Negated),
+        ("Ambiguous", AbstentionReason::Ambiguous),
+        (
+            "UnsupportedOperation",
+            AbstentionReason::UnsupportedOperation,
+        ),
+    ] {
+        let proposal = map_reply("x", abstention_reply(json!({"reason": reason}))).expect(reason);
+        assert_eq!(proposal.abstention, Some(expected), "{reason}");
+    }
+    let other = map_reply(
+        "x",
+        abstention_reply(json!({"reason": "Other", "detail": "quoted speech"})),
+    )
+    .expect("other with detail");
+    assert_eq!(
+        other.abstention,
+        Some(AbstentionReason::Other("quoted speech".to_string()))
+    );
+}
+
+#[test]
+fn malformed_and_legacy_abstention_forms_are_invalid_output() {
+    let invalid = [
+        json!({"reason": "Other"}),
+        json!({"reason": "Other", "detail": null}),
+        json!({"reason": "Other", "detail": "   "}),
+        json!({"reason": "Other", "detail": 5}),
+        json!({"reason": "Negated", "detail": "why"}),
+        json!({"reason": "Negated", "detail": null}),
+        json!({"reason": "Unknown"}),
+        json!({"reason": null}),
+        json!({"detail": "x"}),
+        json!({"reason": "Negated", "extra": 1}),
+        json!("Negated"),
+        json!("\"Negated\""),
+        json!({"Other": "quoted speech"}),
+        json!(null),
+        json!(["Negated"]),
+    ];
+    for abstention in invalid {
+        let result = map_reply("x", abstention_reply(abstention.clone()));
+        assert!(
+            matches!(result, Err(InstructionError::InvalidAbstention { .. })),
+            "{abstention}: {result:?}"
         );
     }
 }
