@@ -33,6 +33,9 @@ final class AppServices {
     let entrySession: CaptureEntrySession
     let voice: VoiceCaptureServices
     let managementContext: ManagementContext
+    /// The home body's recent captures and lock states.
+    let homeRecents: HomeRecentsModel
+    private var acknowledgmentSubscription: AnyCancellable?
     private let notificationHooks: NotificationHooks
     private let lifecycleCenter: NotificationCenter
     private var lifecycleTokens: [NSObjectProtocol] = []
@@ -107,6 +110,20 @@ final class AppServices {
             sourceDetail: { [root] itemID in .assembled(itemID: itemID, root: root) },
             suggestion: SuggestionScreenModel(responder: root.suggestionResponses),
             privacySettings: .assembled(root: root))
+        let homeRecents = HomeRecentsModel(
+            source: RootHomeRecentsSource(
+                root: root,
+                unlock: { [weak root, weak captureEntry] in
+                    root?.authenticateReads(reason: "Show your recent captures.") { _ in
+                        captureEntry?.refreshAccess()
+                    }
+                }))
+        self.homeRecents = homeRecents
+        acknowledgmentSubscription = captureEntry.$acknowledgment.sink { [weak homeRecents] acknowledgment in
+            guard let acknowledgment, let itemID = acknowledgment.savedItemID else { return }
+            let isResolved = acknowledgment.progress.map { $0.interpretation != .pending } ?? false
+            homeRecents?.captureDidSave(itemID: itemID, interpretationIsResolved: isResolved)
+        }
         entrySession = CaptureEntrySession(
             handoff: handoff, defaultMode: defaultMode, access: access, notificationCenter: notificationCenter)
         entrySession.observeHandoffs { [weak self] presentation in self?.present(presentation) }
