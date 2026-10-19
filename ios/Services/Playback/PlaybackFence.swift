@@ -8,6 +8,8 @@ public enum PlaybackEndReason: Equatable, Sendable {
     case relocked
     /// A deletion of the item was requested.
     case deletionRequested
+    /// The clip played to its end.
+    case finished
 }
 
 /// A removal was refused because the file is open for playback.

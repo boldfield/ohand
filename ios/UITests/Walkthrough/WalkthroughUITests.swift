@@ -88,6 +88,20 @@ final class WalkthroughUITests: XCTestCase {
         let resultCount = app.staticTexts["retrieval.search.count"]
         XCTAssertTrue(resultCount.waitForExistence(timeout: screenTimeout), "search for \(searchQuery) found no synthetic capture")
         capture(prefix, "search")
+
+        // Source detail for the first result: pushed above Search at compact width, beside the results at regular width.
+        // The same width rule as the screenshot names: an iPad runs Search at regular width, with the item pane.
+        let isRegularWidth = UIDevice.current.userInterfaceIdiom == .pad
+        let firstResult = app.buttons.matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "retrieval.search.row.")).firstMatch
+        XCTAssertTrue(firstResult.waitForExistence(timeout: screenTimeout), "no search result to open")
+        firstResult.tap()
+        let detailText = app.descendants(matching: .any)["source-detail.current-text"]
+        XCTAssertTrue(detailText.waitForExistence(timeout: screenTimeout), "source detail did not open")
+        capture(prefix, "source detail")
+        if !isRegularWidth {
+            goBack(to: resultCount, "Search")
+        }
         goBack(to: homeLink(homeSearch), "home")
 
         // Settings and each settings screen. The home focuses its composer again when it comes back, and its header shows

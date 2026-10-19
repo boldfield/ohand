@@ -319,4 +319,57 @@ final class RetrievalSearchModelTests: XCTestCase {
         XCTAssertTrue(model.rows.isEmpty)
         XCTAssertEqual(model.query, "")
     }
+
+    func testInThePaneSelectingKeepsTheReferenceAndPushesNothing() throws {
+        let shown = try showOneResult()
+        model.presentsItemsInPane = true
+
+        model.select(shown)
+
+        XCTAssertTrue(selected.isEmpty, "nothing is pushed while the pane shows the item")
+        XCTAssertEqual(model.selectedReference, shown.reference)
+    }
+
+    func testInThePaneSelectingAfterARelockKeepsNothing() throws {
+        let shown = try showOneResult()
+        model.presentsItemsInPane = true
+        scope = .captureOnly
+
+        model.select(shown)
+
+        XCTAssertNil(model.selectedReference)
+        XCTAssertTrue(selected.isEmpty)
+        XCTAssertTrue(model.rows.isEmpty)
+    }
+
+    func testThePaneSelectionIsDroppedByANewSearchARelockLeavingOrLosingThePane() {
+        let shown = row(Self.firstID)
+        func showAndSelect() {
+            model.query = "roofer"
+            model.search()
+            deliver(.success(page([shown])), at: searcher.requests.count - 1)
+            model.presentsItemsInPane = true
+            model.select(shown)
+            XCTAssertEqual(model.selectedReference, shown.reference)
+        }
+
+        showAndSelect()
+        model.search()
+        XCTAssertNil(model.selectedReference, "a new search drops the selection")
+
+        showAndSelect()
+        scope = .captureOnly
+        model.revalidate()
+        XCTAssertNil(model.selectedReference, "a relock drops the selection")
+        scope = .authenticated
+
+        showAndSelect()
+        model.screenDidDisappear()
+        XCTAssertNil(model.selectedReference, "leaving the screen drops the selection")
+
+        showAndSelect()
+        model.presentsItemsInPane = false
+        XCTAssertNil(model.selectedReference, "losing the pane, at compact width, drops the selection")
+        XCTAssertTrue(selected.isEmpty)
+    }
 }

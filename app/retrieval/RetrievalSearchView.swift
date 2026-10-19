@@ -24,6 +24,18 @@ private extension View {
     }
 }
 
+private struct ItemPanePlacementKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    /// True for a view shown in the search screen's item pane, beside the results, rather than pushed on its own.
+    var isInItemPane: Bool {
+        get { self[ItemPanePlacementKey.self] }
+        set { self[ItemPanePlacementKey.self] = newValue }
+    }
+}
+
 /// The search screen: words, optional date, type and session-topic filters, and the results. Everything it shows comes
 /// from `RetrievalSearchModel`, which only fills in while the read session is authenticated.
 struct RetrievalSearchView: View {
@@ -47,6 +59,8 @@ struct RetrievalSearchView: View {
     static let untilDateIdentifier = "retrieval.search.sheet.until-date"
     static let onlyWithTopicIdentifier = "retrieval.search.sheet.only-with-topic"
     static let sheetDoneIdentifier = "retrieval.search.sheet.done"
+    static let itemPaneIdentifier = "retrieval.search.item-pane"
+    static let selectedRowIdentifier = "retrieval.search.selected-row"
 
     static let promptText = "Search runs on this device. Type words you captured, or choose a date, type or session topic."
     static let emptyText = "Nothing matches. Your captures are saved; try other words or fewer filters."
@@ -72,6 +86,8 @@ struct RetrievalSearchView: View {
     static let regularResultsColumnWidth: CGFloat = 274
 
     @ObservedObject var model: RetrievalSearchModel
+    /// Builds the item detail for the pane beside the results at regular width. Without it, a result is pushed.
+    var makeItemPane: ((String) -> AnyView)?
     var renderReporter: (([String: RetrievalRenderedElement]) -> Void)?
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.dismiss) private var dismiss
@@ -85,14 +101,19 @@ struct RetrievalSearchView: View {
 
     init(
         model: RetrievalSearchModel, filterPresentation: RetrievalFilterPresentation? = nil,
+        makeItemPane: ((String) -> AnyView)? = nil,
         renderReporter: (([String: RetrievalRenderedElement]) -> Void)? = nil
     ) {
         self.model = model
+        self.makeItemPane = makeItemPane
         self.renderReporter = renderReporter
         _filterPresentation = StateObject(wrappedValue: filterPresentation ?? RetrievalFilterPresentation())
     }
 
     private var sideMargin: CGFloat { DSSpacing.sideMargin(for: horizontalSizeClass) }
+
+    /// At regular width a selected result opens beside the results instead of on its own screen.
+    private var showsItemPane: Bool { horizontalSizeClass == .regular && makeItemPane != nil }
 
     var body: some View {
         VStack(alignment: .leading, spacing: DSSpacing.sm) {
@@ -102,7 +123,7 @@ struct RetrievalSearchView: View {
                 HStack(alignment: .top, spacing: DSSpacing.lg) {
                     resultsScroll
                         .frame(width: Self.regularResultsColumnWidth)
-                    itemPanePlaceholder
+                    itemPane
                 }
             } else {
                 resultsScroll
@@ -129,8 +150,10 @@ struct RetrievalSearchView: View {
         }
         .onAppear {
             model.revalidate()
+            model.presentsItemsInPane = showsItemPane
             queryIsFocused = true
         }
+        .onChange(of: showsItemPane) { shows in model.presentsItemsInPane = shows }
         .onDisappear { model.screenDidDisappear() }
         .onReceive(model.$phase) { phase in
             // A fresh search clears the rows; loading another page keeps them and runs the earlier words, not the draft.
@@ -138,11 +161,18 @@ struct RetrievalSearchView: View {
         }
     }
 
-    /// Room for the item detail on the right at regular width; the detail card fills it.
-    private var itemPanePlaceholder: some View {
-        Color.clear
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .accessibilityHidden(true)
+    /// The selected result's detail on the right at regular width, or empty room until one is selected.
+    @ViewBuilder private var itemPane: some View {
+        if let reference = model.selectedReference, let makeItemPane {
+            makeItemPane(reference.value)
+                .environment(\.isInItemPane, true)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .reportRendered(Self.itemPaneIdentifier, text: reference.value)
+        } else {
+            Color.clear
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .accessibilityHidden(true)
+        }
     }
 
     private var header: some View {
@@ -325,13 +355,15 @@ struct RetrievalSearchView: View {
     @ViewBuilder
     private var resultRows: some View {
         ForEach(model.rows) { row in
+            let isSelected = showsItemPane && model.selectedReference == row.reference
             Button {
                 model.select(row)
             } label: {
-                RetrievalResultRowView(row: row, highlightedQuery: searchedQuery)
+                RetrievalResultRowView(row: row, highlightedQuery: searchedQuery, isSelected: isSelected)
             }
             .buttonStyle(.plain)
             .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
             .accessibilityIdentifier(Self.rowIdentifier(row))
             .reportRendered(Self.rowIdentifier(row), text: row.text)
         }
@@ -476,6 +508,8 @@ struct RetrievalResultRowView: View {
     let row: RetrievalResultRow
     /// The searched words, to highlight inside a replaced original that the core matched but gave no span for.
     var highlightedQuery = ""
+    /// Outlined in `accent` while its detail is shown in the pane beside the results.
+    var isSelected = false
 
     var body: some View {
         DSCard {
@@ -510,6 +544,13 @@ struct RetrievalResultRowView: View {
                         .foregroundColor(DSColor.inkMuted.color)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+            }
+        }
+        .overlay {
+            if isSelected {
+                RoundedRectangle(cornerRadius: DSRadius.card, style: .continuous)
+                    .strokeBorder(DSColor.accent.color, lineWidth: 2)
+                    .reportRendered(RetrievalSearchView.selectedRowIdentifier, text: "\(row.id)")
             }
         }
         .frame(minHeight: DSLayout.minimumTouchTarget)

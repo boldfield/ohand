@@ -104,6 +104,7 @@ final class AppServices {
             retention: .assembled(root: root),
             providerSettings: .assembled(root: root),
             promptSettings: PromptSettingsModel(controller: root.promptSchedule),
+            sourceDetail: { [root] itemID in .assembled(itemID: itemID, root: root) },
             suggestion: SuggestionScreenModel(responder: root.suggestionResponses))
         entrySession = CaptureEntrySession(
             handoff: handoff, defaultMode: defaultMode, access: access, notificationCenter: notificationCenter)
