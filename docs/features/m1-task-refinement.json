@@ -3067,7 +3067,9 @@
         "ios/Capture/Entry/CaptureEntryView.swift",
         "ios/AppAssembly/AppRootView.swift",
         "ios/AppAssembly/AppServices.swift",
-        "ios/Services/Authentication/ReadAuthenticationSession.swift"
+        "ios/Services/Authentication/ReadAuthenticationSession.swift",
+        "ios/Services/Assembly/CompositionRoot.swift",
+        "ios/AppAssembly/AppLauncherView.swift"
       ],
       "intent": "Show recent captures and the lock states on the home per docs/features/m1-ui-design.md.",
       "acceptance": [

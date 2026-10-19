@@ -229,6 +229,12 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
     - `ios/Services/Authentication/ReadAuthenticationSession.swift`: publish a read-only `isQuietAttemptInFlight`, derived from the existing `attemptInFlight`. If relock is not already observable, add a relock observation.
 
     The read gate, relock policy, attempt rules and every gated read stay unchanged. A test under `ios/Tests/Authentication/` shows the flag rising and falling around a quiet attempt, and that observing it changes no scope. DS04b now also depends on U06a and U02b, which edit `AppServices.swift` in open PRs, so these edits are serialized rather than raced.
+
+    **Widened 2026-10-19, after both reviewers of PR #303 found two files missing.** DS04b may also edit:
+    - `ios/Services/Assembly/CompositionRoot.swift`: expose the quiet-attempt flag and the read-access observation through the public composition surface, because `ReadAuthenticationSession` is internal to `OhAndServices`. Only read-only accessors may be added. No existing signature, read gate or scope rule changes.
+    - `ios/AppAssembly/AppLauncherView.swift`: pass the home's recents into `AppRootView`. Nothing else in the launcher changes.
+
+    No open task owns either file.
   - **S04 deferred.** As scoped it cannot be built:
     - `PayloadKind` has only `Generic` (`core/src/reminders/reconcile/effects.rs:48`), and prompts hard-code it (`core/src/suggestions/schedule/apply.rs:178`).
     - The preview opt-in has no store, and `routes.preview_safe` is only ever written as 0 (`core/src/ffi/route_provisioning.rs:99`).
