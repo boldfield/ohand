@@ -47,7 +47,8 @@ struct ItemControlsView: View {
     var renderReporter: ((String, Bool) -> Void)?
 
     var body: some View {
-        Group {
+        // A container that always exists, so the load below runs even while there is nothing to show yet.
+        VStack(alignment: .leading, spacing: 0) {
             if model.snapshot != nil {
                 VStack(alignment: .leading, spacing: DSSpacing.md) {
                     Text("Correct this item")
