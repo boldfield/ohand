@@ -61,6 +61,8 @@ final class ReminderEditModel: ObservableObject {
     private let deviceTimeZone: () -> TimeZone
     private var itemRevision = 0
     private var loadGeneration = 0
+    /// Bumped only by `lock()`, so an edit in flight can tell the section locked while it waited.
+    private var lockGeneration = 0
     private var draftIsUserChoice = false
     private var pendingCommand: (id: String, choice: String)?
 
@@ -199,26 +201,33 @@ final class ReminderEditModel: ObservableObject {
     ) async {
         isWorking = true
         message = nil
+        let locks = lockGeneration
         defer { isWorking = false }
         do {
             let receipt = try await send()
+            guard locks == lockGeneration else { return }
             pendingCommand = nil
             draftIsUserChoice = false
             reminder = receipt.reminder
             message = outcome
             // Installation is the reminder pass's work. Ask for it, then show what the core now says.
-            if let observed = await reconcile() { permission = observed }
-            await refreshAfterStore()
+            let observed = await reconcile()
+            guard locks == lockGeneration else { return }
+            if let observed { permission = observed }
+            await refreshAfterStore(locks: locks)
         } catch let error as ReminderControlError {
+            guard locks == lockGeneration else { return }
             await handle(error)
         } catch {
+            guard locks == lockGeneration else { return }
             message = .notConfirmed
         }
     }
 
     /// Re-reads after a stored edit so the schedule state shown is the core's, not the one the edit returned.
-    @MainActor private func refreshAfterStore() async {
-        guard let answer = try? await editor.reminder(itemID: itemID), answer.itemType == "action" else { return }
+    @MainActor private func refreshAfterStore(locks: Int) async {
+        let answer = try? await editor.reminder(itemID: itemID)
+        guard locks == lockGeneration, let answer, answer.itemType == "action" else { return }
         itemRevision = answer.itemRevision
         reminder = answer.reminder
     }
@@ -255,6 +264,7 @@ final class ReminderEditModel: ObservableObject {
     /// Drops what is shown when the read session ends.
     @MainActor func lock() {
         loadGeneration += 1
+        lockGeneration += 1
         clear()
         unavailable = .locked
     }

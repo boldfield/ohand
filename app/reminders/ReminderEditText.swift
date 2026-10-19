@@ -115,7 +115,7 @@ enum ReminderStanding: Equatable {
         }
     }
 
-    /// Whether choosing a date and time here is something the person can usefully do.
+    /// Whether there is a reminder to cancel.
     var offersCancel: Bool {
         switch self {
         case .none, .cancelled: return false
@@ -137,7 +137,6 @@ enum ReminderEditMessage: Equatable {
     case itemClosed
     /// The answer was not confirmed. Trying again changes at most one reminder.
     case notConfirmed
-    case locked
     case invalidZone
 
     var text: String {
@@ -148,8 +147,22 @@ enum ReminderEditMessage: Equatable {
         case .changedElsewhere: return "This reminder changed since you opened it. It was reloaded; choose again."
         case .itemClosed: return "This item is closed, so its reminder can no longer be changed."
         case .notConfirmed: return "Could not confirm the change. Try again; it will not create a second reminder."
-        case .locked: return "Your saved items are locked. Open the item again to unlock it."
         case .invalidZone: return "That time zone is not recognised. Nothing was changed."
         }
+    }
+}
+
+/// The stored resolved time, separate from the draft being edited.
+enum ReminderStoredTime {
+    /// The stored instant written in its own zone, or nil when none is stored. A zone the system does not know is
+    /// named and the time is written in UTC, so the instant is never shifted silently.
+    static func text(for reminder: ReminderRecordAnswer?) -> String? {
+        guard let instant = reminder?.resolvedDate else { return nil }
+        let zone = reminder?.timezoneID.flatMap { TimeZone(identifier: $0) } ?? TimeZone(identifier: "UTC")!
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = zone
+        formatter.dateFormat = "yyyy-MM-dd HH:mm zzz"
+        return "Stored time: \(formatter.string(from: instant))"
     }
 }

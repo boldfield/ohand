@@ -10,11 +10,27 @@ struct ReminderEditSection: View {
     static let saveIdentifier = "reminder.save"
     static let cancelIdentifier = "reminder.cancel"
     static let unavailableIdentifier = "reminder.unavailable"
+    static let storedTimeIdentifier = "reminder.stored-time"
+
+    /// What each identified part of the section shows, collected so a hosted test can read the rendered words.
+    struct RenderedKey: PreferenceKey {
+        static var defaultValue: [String: String] { [:] }
+        static func reduce(value: inout [String: String], nextValue: () -> [String: String]) {
+            value.merge(nextValue()) { _, new in new }
+        }
+    }
 
     static let lockedText = "Your saved items are locked, so the reminder is hidden."
     static let unreadableText = "The reminder could not be read. Try again later."
 
     @ObservedObject var model: ReminderEditModel
+    /// Lets a hosted test see what the section renders; production leaves it unset.
+    var renderReporter: (([String: String]) -> Void)?
+
+    init(model: ReminderEditModel, renderReporter: (([String: String]) -> Void)? = nil) {
+        self.model = model
+        self.renderReporter = renderReporter
+    }
 
     var body: some View {
         if model.isShown {
@@ -28,6 +44,7 @@ struct ReminderEditSection: View {
             }
             .accessibilityIdentifier(Self.sectionIdentifier)
             .task { await model.load() }
+            .onPreferenceChange(RenderedKey.self) { renderReporter?($0) }
         } else {
             // An item that is not an action has no reminder section.
             Color.clear.frame(height: 0).task { await model.load() }
@@ -41,6 +58,7 @@ struct ReminderEditSection: View {
                 .foregroundColor(DSColor.inkMuted.color)
                 .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier(Self.unavailableIdentifier)
+                .reportReminderRendered(Self.unavailableIdentifier, text: unavailable == .locked ? Self.lockedText : Self.unreadableText)
         } else {
             VStack(alignment: .leading, spacing: DSSpacing.sm) {
                 standing
@@ -50,6 +68,16 @@ struct ReminderEditSection: View {
                         .foregroundColor(DSColor.inkMuted.color)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier(Self.zoneIdentifier)
+                        .reportReminderRendered(Self.zoneIdentifier, text: "Time zone of this reminder: \(zone)")
+                }
+                // The stored time, apart from the draft below: the draft is only what would be saved.
+                if let stored = ReminderStoredTime.text(for: model.reminder) {
+                    Text(stored)
+                        .font(DSFont.footer)
+                        .foregroundColor(DSColor.inkMuted.color)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier(Self.storedTimeIdentifier)
+                        .reportReminderRendered(Self.storedTimeIdentifier, text: stored)
                 }
                 DatePicker("Date and time", selection: $model.draftDate, displayedComponents: [.date, .hourAndMinute])
                     .environment(\.timeZone, TimeZone(identifier: model.draftTimeZoneID) ?? .current)
@@ -65,6 +93,7 @@ struct ReminderEditSection: View {
                         .foregroundColor(DSColor.inkMuted.color)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier(Self.messageIdentifier)
+                        .reportReminderRendered(Self.messageIdentifier, text: message.text)
                 }
                 actions
             }
@@ -84,6 +113,7 @@ struct ReminderEditSection: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier(Self.standingIdentifier)
+        .reportReminderRendered(Self.standingIdentifier, text: "\(standing.title) | \(standing.detail)")
     }
 
     private var actions: some View {
@@ -92,11 +122,13 @@ struct ReminderEditSection: View {
                 .buttonStyle(DSPillButtonStyle(style: .secondary))
                 .disabled(!model.canSave)
                 .accessibilityIdentifier(Self.saveIdentifier)
+                .reportReminderRendered(Self.saveIdentifier, text: "Save time")
             if model.standing.offersCancel {
                 Button { Task { await model.cancel() } } label: { Text("Cancel reminder") }
                     .buttonStyle(DSPillButtonStyle(style: .destructive))
                     .disabled(!model.canCancel)
                     .accessibilityIdentifier(Self.cancelIdentifier)
+                    .reportReminderRendered(Self.cancelIdentifier, text: "Cancel reminder")
             }
         }
     }
@@ -105,5 +137,25 @@ struct ReminderEditSection: View {
     private var zoneChoices: [String] {
         let known = TimeZone.knownTimeZoneIdentifiers
         return known.contains(model.draftTimeZoneID) ? known : [model.draftTimeZoneID] + known
+    }
+}
+
+private struct ReminderRenderedReport: ViewModifier {
+    let identifier: String
+    let text: String
+
+    func body(content: Content) -> some View {
+        content.background(
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: ReminderEditSection.RenderedKey.self,
+                    value: proxy.size.width > 0 && proxy.size.height > 0 ? [identifier: text] : [:])
+            })
+    }
+}
+
+extension View {
+    fileprivate func reportReminderRendered(_ identifier: String, text: String) -> some View {
+        modifier(ReminderRenderedReport(identifier: identifier, text: text))
     }
 }

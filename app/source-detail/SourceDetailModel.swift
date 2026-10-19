@@ -304,7 +304,6 @@ final class SourceDetailModel: ObservableObject {
     @MainActor private func dropText() {
         content = nil
         failure = .locked
-        reminderEditor?.lock()
     }
 
     private static func audioState(after error: Error) -> SourceAudioState {

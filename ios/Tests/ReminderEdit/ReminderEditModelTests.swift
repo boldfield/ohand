@@ -4,7 +4,7 @@ import XCTest
 @testable import OhAnd
 
 /// Scripted editor: answers reads from a stored reminder and records each command it was sent.
-private final class FakeReminderEditor: ReminderEditing, @unchecked Sendable {
+final class FakeReminderEditor: ReminderEditing, @unchecked Sendable {
     struct Sent: Equatable {
         let commandID: String
         let expectedRevision: Int
@@ -17,6 +17,9 @@ private final class FakeReminderEditor: ReminderEditing, @unchecked Sendable {
     private var storedRead: Result<ReminderReadAnswer, Error>
     private var commandResults: [Result<ReminderControlReceipt, Error>] = []
     private var sentCommands: [Sent] = []
+
+    /// Runs inside each command before it answers, so a test can hold a save in flight.
+    var beforeAnswer: (@Sendable () async -> Void)?
 
     init(read: Result<ReminderReadAnswer, Error>) { storedRead = read }
 
@@ -39,7 +42,8 @@ private final class FakeReminderEditor: ReminderEditing, @unchecked Sendable {
         commandID: String, itemID: String, expectedRevision: Int, expectedReminderVersion: Int, instant: Date,
         timeZoneID: String
     ) async throws -> ReminderControlReceipt {
-        try next(
+        await beforeAnswer?()
+        return try next(
             Sent(
                 commandID: commandID, expectedRevision: expectedRevision,
                 expectedReminderVersion: expectedReminderVersion, instant: instant, timeZoneID: timeZoneID))
@@ -265,5 +269,70 @@ final class ReminderEditModelTests: XCTestCase {
 
         XCTAssertEqual(model.unavailable, .locked)
         XCTAssertNil(model.reminder)
+    }
+
+    func testARelockWhileASaveIsInFlightDoesNotBringTheReminderBack() async {
+        let editor = FakeReminderEditor(read: .success(read(record(due: Self.clock.addingTimeInterval(3600)))))
+        editor.script([.success(receipt(record(due: Self.clock.addingTimeInterval(7200), version: 2)))])
+        let model = make(editor)
+        await model.load()
+        model.draftDate = Self.clock.addingTimeInterval(7200)
+        let reachedSend = expectation(description: "the save reached the editor")
+        let release = AsyncGate()
+        editor.beforeAnswer = {
+            reachedSend.fulfill()
+            await release.wait()
+        }
+
+        let saving = Task { @MainActor in await model.save() }
+        await fulfillment(of: [reachedSend], timeout: 5)
+        model.lock()
+        await release.open()
+        await saving.value
+
+        XCTAssertEqual(model.unavailable, .locked)
+        XCTAssertNil(model.reminder)
+        XCTAssertNil(model.message)
+        XCTAssertNil(model.permission)
+    }
+
+    func testAPassedStoredTimeAndAStaleReloadShowTheStoredInstantNotTheDraft() async {
+        let passed = Self.clock.addingTimeInterval(-3600)
+        let editor = FakeReminderEditor(
+            read: .success(read(record(state: "unschedulable", reason: "time_in_past", due: passed, zone: "Asia/Tokyo"))))
+        let model = make(editor)
+        await model.load()
+
+        XCTAssertTrue(ReminderStoredTime.text(for: model.reminder)?.hasPrefix("Stored time: 2027-01-15 16:00 ") == true)
+        XCTAssertGreaterThan(model.draftDate, Self.clock, "the draft is a later suggestion, not the stored time")
+
+        let seen = record(due: Self.clock.addingTimeInterval(3600), version: 1)
+        let newer = record(due: Self.clock.addingTimeInterval(5400), version: 2)
+        editor.setRead(.success(read(seen)))
+        await model.load()
+        model.draftDate = Self.clock.addingTimeInterval(7200)
+        editor.script([.failure(ReminderControlError.staleReminderVersion(currentVersion: 2))])
+        editor.setRead(.success(read(newer)))
+        await model.save()
+        XCTAssertEqual(model.reminder?.resolvedDate, Self.clock.addingTimeInterval(5400))
+        XCTAssertNotEqual(model.draftDate, model.reminder?.resolvedDate)
+        XCTAssertNotNil(ReminderStoredTime.text(for: model.reminder))
+    }
+}
+
+/// Holds a suspended call until the test opens it.
+actor AsyncGate {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func open() {
+        isOpen = true
+        waiters.forEach { $0.resume() }
+        waiters = []
     }
 }
