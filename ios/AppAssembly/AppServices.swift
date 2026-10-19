@@ -182,6 +182,7 @@ final class AppServices {
         lifecycleTokens.forEach { lifecycleCenter.removeObserver($0) }
         lifecycleTokens = []
         timeChange.stop()
+        homeRecents.shutDown()
         root.shutDown()
     }
 

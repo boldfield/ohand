@@ -64,7 +64,11 @@ final class HomeRecentsModel: ObservableObject {
     private var pollTask: Task<Void, Never>?
     private static let firstPollDelay: TimeInterval = 2
     private static let longestPollDelay: TimeInterval = 30
-    private static let pollAttemptLimit = 12
+    /// The reads in flight, kept so a shutdown or a relock can cancel them.
+    private var firstPageTask: Task<Void, Never>?
+    private var moreTask: Task<Void, Never>?
+    private var refreshTasks: [UUID: Task<Void, Never>] = [:]
+    private var isShutDown = false
 
     init(
         source: HomeRecentsSource, now: @escaping () -> Date = Date.init,
@@ -85,8 +89,28 @@ final class HomeRecentsModel: ObservableObject {
     }
 
     deinit {
-        pollTask?.cancel()
+        cancelReads()
         removeObserver?()
+    }
+
+    /// Ends the model: no read starts afterwards, every read in flight is cancelled and the observer is removed. Called
+    /// before the services behind the session shut down, so no read outlives them.
+    func shutDown() {
+        isShutDown = true
+        removeObserver?()
+        removeObserver = nil
+        dropHistory()
+    }
+
+    private func cancelReads() {
+        pollTask?.cancel()
+        pollTask = nil
+        firstPageTask?.cancel()
+        firstPageTask = nil
+        moreTask?.cancel()
+        moreTask = nil
+        refreshTasks.values.forEach { $0.cancel() }
+        refreshTasks = [:]
     }
 
     private static func state(for source: HomeRecentsSource) -> HomeBodyState {
@@ -113,8 +137,7 @@ final class HomeRecentsModel: ObservableObject {
 
     private func dropHistory() {
         generation += 1
-        pollTask?.cancel()
-        pollTask = nil
+        cancelReads()
         loadedItems = []
         justSaved = [:]
         nextCursor = nil
@@ -159,11 +182,11 @@ final class HomeRecentsModel: ObservableObject {
     var canLoadMore: Bool { nextCursor != nil }
 
     func loadFirstPage() {
-        guard source.isAuthenticated, !isLoadingFirstPage else { return }
+        guard !isShutDown, source.isAuthenticated, !isLoadingFirstPage else { return }
         isLoadingFirstPage = true
         loadFailed = false
         let startedIn = generation
-        Task { @MainActor [weak self] in
+        firstPageTask = Task { @MainActor [weak self] in
             await self?.performFirstPage(startedIn: startedIn)
         }
     }
@@ -189,10 +212,10 @@ final class HomeRecentsModel: ObservableObject {
     }
 
     func loadMore() {
-        guard source.isAuthenticated, !isLoadingMore, !isLoadingFirstPage, let cursor = nextCursor else { return }
+        guard !isShutDown, source.isAuthenticated, !isLoadingMore, !isLoadingFirstPage, let cursor = nextCursor else { return }
         isLoadingMore = true
         let startedIn = generation
-        Task { @MainActor [weak self] in
+        moreTask = Task { @MainActor [weak self] in
             await self?.performMore(cursor: cursor, startedIn: startedIn)
         }
     }
@@ -241,26 +264,29 @@ final class HomeRecentsModel: ObservableObject {
     /// Called with the acknowledgment's saved item. A new save is shown at the top as "Just now · sorting…" until it is
     /// interpreted; nothing is recorded unless reads are authenticated, because a locked home shows nothing of the kind.
     func captureDidSave(itemID: String, interpretationIsResolved: Bool) {
-        guard bodyState == .unlocked else { return }
+        guard !isShutDown, bodyState == .unlocked else { return }
         if justSaved[itemID] == nil, !interpretationIsResolved {
             justSaved[itemID] = now()
             loadFirstPage()
             startPollingForInterpretation()
         } else if interpretationIsResolved, justSaved[itemID] != nil {
-            Task { @MainActor [weak self] in
+            let taskID = UUID()
+            refreshTasks[taskID] = Task { @MainActor [weak self] in
                 await self?.refreshAfterInterpretation(itemID: itemID)
+                self?.refreshTasks[taskID] = nil
             }
         }
     }
 
     /// Nothing tells the home when an interpretation finishes, so while saved items are unsorted the first page is read
-    /// again with growing pauses. It stops when none are left, at the attempt limit, or on a relock.
+    /// again with pauses that grow to a longest pause and then repeat, so a slow interpretation still clears. It stops when
+    /// none are left, on a relock or at shutdown.
     private func startPollingForInterpretation() {
         guard pollTask == nil else { return }
         let startedIn = generation
         pollTask = Task { @MainActor [weak self] in
             var delay = Self.firstPollDelay
-            for _ in 0..<Self.pollAttemptLimit {
+            while true {
                 guard let pause = self?.pause else { return }
                 await pause(delay)
                 guard let self, !Task.isCancelled, startedIn == self.generation, !self.justSaved.isEmpty else { break }

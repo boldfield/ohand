@@ -231,6 +231,47 @@ final class HomeRecentsModelTests: XCTestCase {
         XCTAssertEqual(source.readCursors.count, readsAtRelock)
     }
 
+    func testPollingOutlastsManyAttemptsUntilTheItemIsInterpreted() async {
+        source.isAuthenticated = true
+        source.pages[nil] = CoreRecentItemsPage(items: [item("old")], nextCursor: nil)
+        let pauses = PollPauses()
+        let model = HomeRecentsModel(source: source, now: { [referenceNow] in referenceNow }, pause: { _ in await pauses.wait() })
+        await settle()
+        model.captureDidSave(itemID: "new", interpretationIsResolved: false)
+        source.pages[nil] = CoreRecentItemsPage(
+            items: [item("new", type: nil, capturedAt: "2026-10-19T11:59:00Z"), item("old")], nextCursor: nil)
+        await settle()
+        for _ in 0..<30 {
+            await pauses.releaseAll()
+            await settle()
+        }
+        XCTAssertTrue(model.entries[0].isSorting, "still pending after more attempts than the old limit")
+        let readsBefore = source.readCursors.count
+        source.pages[nil] = CoreRecentItemsPage(
+            items: [item("new", type: "idea", capturedAt: "2026-10-19T11:59:00Z"), item("old")], nextCursor: nil)
+        await pauses.releaseAll()
+        await settle()
+        XCTAssertGreaterThan(source.readCursors.count, readsBefore)
+        XCTAssertFalse(model.entries[0].isSorting)
+    }
+
+    func testShutDownCancelsReadsAndStartsNoMore() async {
+        source.isAuthenticated = true
+        source.holdsReads = true
+        let model = HomeRecentsModel(source: source, now: { [referenceNow] in referenceNow }, pause: { _ in await PollPauses().wait() })
+        await settle()
+        model.shutDown()
+        source.holdsReads = false
+        source.releaseHeldReads()
+        await settle()
+        let reads = source.readCursors.count
+        model.captureDidSave(itemID: "new", interpretationIsResolved: false)
+        model.loadFirstPage()
+        await settle()
+        XCTAssertEqual(source.readCursors.count, reads)
+        XCTAssertTrue(model.entries.isEmpty)
+    }
+
     func testASaveWhileLockedIsNotRecorded() async {
         let model = makeModel()
         model.captureDidSave(itemID: "new", interpretationIsResolved: false)
