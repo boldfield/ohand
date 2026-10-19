@@ -3372,6 +3372,30 @@
         "tools/evaluation/src/score.rs:363",
         "tools/evaluation/src/scratch.rs:93"
       ]
+    },
+    {
+      "key": "F27",
+      "parent": null,
+      "title": "Find and fix the race behind the intermittent system-time-change test failure",
+      "file_scope": [
+        "ios/Tests/AppAssembly/AppServicesTests.swift",
+        "ios/Tests/TimeChangeCoordinator/",
+        "ios/Services/TimeChangeCoordinator/",
+        "ios/AppAssembly/AppServices.swift"
+      ],
+      "intent": "Find why a real time-zone change intermittently produces no lifecycle pass in AppServicesTests and fix the cause, without raising timeouts.",
+      "acceptance": [
+        "See the F27 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "DS04b"
+      ],
+      "source_pointers": [
+        "ios/Tests/AppAssembly/AppServicesTests.swift:117",
+        "ios/Services/TimeChangeCoordinator/TimeChangeCoordinator.swift",
+        "ios/AppAssembly/AppServices.swift:72"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -4118,6 +4142,9 @@
     ],
     "F26": [
       "F23"
+    ],
+    "F27": [
+      "DS04b"
     ]
   },
   "retained_dependency_overrides": {

@@ -188,6 +188,7 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
   - **F22 added (coordinator, 2026-10-18).** The first install of current main on the maintainer's iPhone crashed at every launch. The crash report's termination namespace is TCC: "attempted to access privacy-sensitive data without a usage description … must contain an NSFaceIDUsageDescription key". DS03 (#278) made launch call `LAContext.evaluatePolicy` (`ios/Services/Authentication/ReadAuthenticationBoundary.swift:61`). The app's `Info.plist` has never declared the key, and `ios/scripts/check_project_config.py:44` does not require it. The simulator does not enforce the key, so CI passed. See F22.
   - **F23 added (coordinator, 2026-10-19).** A paired benchmark of Claude Sonnet 5.5 and Haiku 5.5 on the synthetic corpus, run through the production request and mapping after XB12, found that Claude JSON-encodes string abstentions in 8 of 10 cases: `"abstention": "\"Negated\""` instead of `"Negated"`. The mapping rejects them, so "don't remind me" and noise captures fail as invalid output even though the model chose correctly. The cause is the wire schema's `anyOf` of a string enum and an `{"Other": …}` object (`core/src/interpretation/instructions/text.rs:102`). The maintainer chose to replace it with one object shape rather than unwrap the extra encoding. See F23.
   - **F24, F25 and F26 added (coordinator, 2026-10-19).** The first live E02a run (evidence `fe58be5`) and a paired Anthropic benchmark found three more defects. The Anthropic adapter's 1024-token output cap truncates long captures (F24). The live harness's oracle counts a capture whose interpretation failed as a match (F25). The evaluation scorer marks a correct, stored reminder as a missed intent (F26). F25 and F26 edit test directories that F23 also edits, so both depend on F23.
+  - **F27 added (coordinator, 2026-10-19).** `AppServicesTests.testAStartedAppReconcilesOnceWhenASystemTimeZoneCallbackReportsARealChange` failed on two PRs that do not touch the code under test: U06b (run 39281367194) and F24 (run 39312148289, attempt 1, a Rust-only change). Both failed at `AppServicesTests.swift:139`: no lifecycle pass finished within 10 seconds. A reviewer rejected F24 on that red run. See F27.
   - **F21 added (coordinator, 2026-10-18).** A live replay on Spark found that the self-hosted adapter's strict schema suppresses every optional proposal, reminders included, on all five Ollama models. E02's evidence run also waits for F21, so it measures the fixed request. See F21.
   - **Walkthrough allowance (standing, coordinator, 2026-10-18).** DS08's walkthrough (`ios/UITests/Walkthrough/WalkthroughUITests.swift`) names each screen's controls and titles, so any UI task that changes a screen it visits breaks it. On 2026-10-18 this blocked DS04a, DS07 and U02b. Any UI task may update the walkthrough for the screens it builds or changes:
     - their entries in the screen tables (for example `settingsScreens`);
@@ -3082,3 +3083,24 @@ Acceptance:
 3. Fix the scorer's reading of durable state, not the oracle, the fixtures or core's apply path. If the evaluation genuinely needs a core seam it lacks, block with the exact need rather than reaching into `core/`.
 4. The recorded-response evaluation's report changes only where these false defects disappear. List the changed cases in the PR.
 5. `make check` and `make test` pass.
+
+### F27
+
+Find and fix the race behind the intermittent system-time-change test failure
+
+`testAStartedAppReconcilesOnceWhenASystemTimeZoneCallbackReportsARealChange` (`ios/Tests/AppAssembly/AppServicesTests.swift:117`) fails intermittently on the hosted macOS runner. It failed at line 139 on two PRs that change nothing it covers: U06b (run 39281367194) and F24 (run 39312148289, attempt 1, Rust only). After the zone changes and three callbacks arrive, no lifecycle pass finishes within 10 seconds, and `lastReport` is nil. Every native PR can be rejected on it.
+
+A pass that never happens is not a slow pass. Waiting longer is not the fix: find out why the request is lost or never runs. Candidates to rule in or out: the three callbacks coalescing before `sleeperCount` reaches 3; `releaseTimers()` running before the third sleeper registers; the coordinator comparing against a zone it already adopted; and the request being dropped because the app was started inactive.
+
+Owned paths: `ios/Tests/AppAssembly/AppServicesTests.swift`, `ios/Tests/TimeChangeCoordinator/`, `ios/Services/TimeChangeCoordinator/`, `ios/AppAssembly/AppServices.swift`.
+
+Dependencies: DS04b, which edits `AppServices.swift`.
+
+Acceptance:
+
+1. The PR names the cause, with evidence: a deterministic reproduction, such as a test that forces the interleaving and fails on main, or a logged trace from a failing run. "Could not reproduce" is not a fix. If the cause cannot be found, block with what was ruled out.
+2. **If the cause is a production race** (a real time-zone change can be missed or never reconciled), fix it in the coordinator or `AppServices`. Its regression test drives the bad interleaving explicitly. One real change still produces exactly one `.systemTimeChange` pass, and a callback that finds nothing changed still produces none.
+3. **If the cause is in the test** (it releases or observes before the state it waits on exists), fix the synchronisation so each step waits on an observable condition, not a fixed sleep. The `Task.sleep(300_000_000)` used to prove a negative is replaced by a deterministic check. The test keeps asserting everything it asserts today.
+4. No timeout in the test or `timeChangeWaitUntil` is raised, and no assertion is removed or weakened.
+5. Stability evidence: the test passes 50 times in a row in one exact-head run. Add a temporary repeat loop or `-test-iterations 50` to a CI step, link that run, then remove the loop and link the normal exact-head run.
+6. Exact-head macOS run linked, as with any native change.
