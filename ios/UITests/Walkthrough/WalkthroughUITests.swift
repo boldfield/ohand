@@ -22,7 +22,7 @@ final class WalkthroughUITests: XCTestCase {
     private let settingsScreens: [(label: String, title: String)] = [
         ("Daily prompt", "Daily prompt"),
         ("Unfinished recordings", "Unfinished recordings"),
-        ("Processing", "Providers"),
+        ("Processing", "Processing"),
         ("Audio", "Audio"),
         ("Export", "Export"),
     ]
@@ -107,6 +107,21 @@ final class WalkthroughUITests: XCTestCase {
             XCTAssertTrue(
                 waitForScreen(screen.title, leaving: settingsHeader, timeout: screenTimeout), "\(screen.title) did not open")
             capture(prefix, screen.label)
+            if screen.title == "Processing" {
+                // The two screens one level down hold the dense controls, so each is captured too.
+                for (identifier, title, slug) in [
+                    ("provider-settings.add-provider", "Add provider", "processing-add-provider"),
+                    ("provider-settings.advanced", "Advanced", "processing-advanced"),
+                ] {
+                    let link = app.buttons[identifier]
+                    XCTAssertTrue(link.waitForExistence(timeout: screenTimeout), "\(identifier) not found on Processing")
+                    link.tap()
+                    XCTAssertTrue(
+                        waitForScreen(title, leaving: link, timeout: screenTimeout), "\(title) did not open from Processing")
+                    capture(prefix, slug)
+                    goBack(to: app.staticTexts[screen.title], screen.title)
+                }
+            }
             if screen.title == "Audio" {
                 // Export is also linked from the audio screen, beside the other data settings. The link must open it.
                 let exportLink = app.buttons["data-settings.retention.export-link"]
