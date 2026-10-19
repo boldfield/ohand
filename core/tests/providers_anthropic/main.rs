@@ -333,15 +333,17 @@ fn default_output_cap_is_4096_and_only_max_tokens_differs_from_an_explicit_overr
 
     default_body.as_object_mut().unwrap().remove("max_tokens");
     tuned_body.as_object_mut().unwrap().remove("max_tokens");
-    // Request fields are compared apart from `max_tokens`; the system prompt and user message
-    // are generated per request but are identical here because the fixture note is fixed.
-    for field in ["model", "tools", "tool_choice", "system"] {
-        assert_eq!(default_body[field], tuned_body[field], "{field}");
+    // Each request carries freshly generated identifiers inside the user message; blank them so
+    // the complete remaining body can be compared.
+    for body in [&mut default_body, &mut tuned_body] {
+        let content = body["messages"][0]["content"].as_str().unwrap();
+        let mut user_message: serde_json::Value = serde_json::from_str(content).unwrap();
+        user_message["profile"]["profile_version"] = json!("normalized");
+        user_message["request"]["capture_id"] = json!("normalized");
+        user_message["request"]["request_version"] = json!("normalized");
+        body["messages"][0]["content"] = json!(user_message.to_string());
     }
-    assert_eq!(
-        default_body.as_object().unwrap().keys().collect::<Vec<_>>(),
-        tuned_body.as_object().unwrap().keys().collect::<Vec<_>>()
-    );
+    assert_eq!(default_body, tuned_body);
 }
 
 #[test]
