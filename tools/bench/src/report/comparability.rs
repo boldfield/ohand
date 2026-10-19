@@ -53,6 +53,9 @@ pub struct Flag {
 pub struct Comparability {
     /// Always `not_established`: no journal can show that model identity was the only variable.
     pub model_identity_only_variable: &'static str,
+    /// The temperature the run asked of both arms, from the experiment record: `provider
+    /// default` when none was requested, otherwise the value.
+    pub requested_temperature: String,
     pub arms: [ArmSettings; 2],
     pub flags: Vec<Flag>,
 }
@@ -115,6 +118,27 @@ fn arm_settings(journal: &Journal, arm: usize) -> ArmSettings {
         _ => Some("mixed".to_string()),
     };
     settings
+}
+
+/// The temperature the experiment record names (`settings-temperature-<value>-...`). A record
+/// that does not say, such as one written before the setting was optional, is reported as
+/// unknown rather than guessed.
+fn requested_temperature(source_context: &str) -> String {
+    let named = source_context
+        .split_whitespace()
+        .find_map(|token| token.strip_prefix("settings-temperature-"))
+        .and_then(|rest| rest.split("-max-output-tokens").next());
+    match named {
+        Some("provider-default") => "provider default".to_string(),
+        Some(value)
+            if !value.is_empty()
+                && value.len() <= 8
+                && value.bytes().all(|b| b.is_ascii_digit() || b == b'.') =>
+        {
+            value.to_string()
+        }
+        _ => "unknown".to_string(),
+    }
 }
 
 pub(super) fn assess(
@@ -282,6 +306,7 @@ pub(super) fn assess(
     );
     Comparability {
         model_identity_only_variable: "not_established",
+        requested_temperature: requested_temperature(&journal.experiment.source_context),
         arms,
         flags,
     }

@@ -175,7 +175,7 @@ mod tests {
             model: "model".to_string(),
             credential_ref: reference.to_string(),
         };
-        build_profile(&spec, 30, EndpointOverrides::default()).unwrap()
+        build_profile(&spec, 30, None, EndpointOverrides::default()).unwrap()
     }
 
     fn decision(authority: &ScratchAuthority, label: ArmLabel, version: &str) -> bool {

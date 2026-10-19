@@ -17,7 +17,6 @@ use super::profiles::derived_uuid;
 use crate::executor::PlannedCase;
 
 pub const ROUTE_ID: &str = "bench-route";
-const REQUESTED_TEMPERATURE_MILLI: u32 = 0;
 const REQUESTED_MAX_OUTPUT_TOKENS: u32 = 1024;
 
 pub struct PlannedCorpus {
@@ -31,11 +30,27 @@ pub struct PlannedCorpus {
     pub corpus_size: usize,
 }
 
-pub fn requested_settings() -> RequestedSettings {
-    RequestedSettings::new()
-        .with_temperature_milli(REQUESTED_TEMPERATURE_MILLI)
-        .and_then(|settings| settings.with_max_output_tokens(REQUESTED_MAX_OUTPUT_TOKENS))
+/// The settings both arms are asked for. Temperature is requested only when the operator named
+/// one; otherwise the field is left out and each provider's default applies.
+pub fn requested_settings(temperature_milli: Option<u32>) -> RequestedSettings {
+    let settings = RequestedSettings::new();
+    let settings = match temperature_milli {
+        Some(milli) => settings
+            .with_temperature_milli(milli)
+            .expect("the command line validates the temperature"),
+        None => settings,
+    };
+    settings
+        .with_max_output_tokens(REQUESTED_MAX_OUTPUT_TOKENS)
         .expect("fixed settings are valid")
+}
+
+/// How the requested temperature is written in records and reports.
+pub fn temperature_label(temperature_milli: Option<u32>) -> String {
+    match temperature_milli {
+        None => "provider default".to_string(),
+        Some(milli) => format!("{}.{:03}", milli / 1000, milli % 1000),
+    }
 }
 
 pub fn load(options: &Options) -> Result<PlannedCorpus, String> {
@@ -88,7 +103,7 @@ pub fn load(options: &Options) -> Result<PlannedCorpus, String> {
             ROUTE_ID,
             M1_INSTRUCTION_TEXT,
             instruction_version.clone(),
-            requested_settings(),
+            requested_settings(options.temperature_milli),
         )
         .map_err(|error| format!("fixture {}: {error}", fixture.id))?;
         let planned = PlannedCase::new(fixture.id.clone(), text.clone(), source)
