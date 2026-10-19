@@ -3284,6 +3284,34 @@
         "ios/AppAssembly/Info.plist",
         "ios/scripts/check_project_config.py:44"
       ]
+    },
+    {
+      "key": "F23",
+      "parent": null,
+      "title": "Give abstention a single object shape on the provider wire",
+      "file_scope": [
+        "core/src/interpretation/instructions/",
+        "core/src/providers/self_hosted/mod.rs",
+        "core/tests/interpretation_instructions/",
+        "core/tests/interpretation_dispatch/main.rs",
+        "core/tests/providers_self_hosted/",
+        "core/tests/live_providers/",
+        "tools/evaluation/fixtures/recorded-responses.json",
+        "tools/evaluation/comparison/tests.rs",
+        "tools/evaluation/tests/"
+      ],
+      "intent": "Replace the string-or-object abstention union on the provider wire with one object shape, because Claude double-encodes the string arm and those replies are rejected; the domain type is unchanged.",
+      "acceptance": [
+        "See the F23 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/interpretation/instructions/text.rs:102",
+        "core/src/interpretation/instructions/mapping.rs:90",
+        "core/src/interpretation/contracts/mod.rs:211",
+        "core/tests/live_providers/main.rs:100"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -4022,7 +4050,8 @@
     "F20": [],
     "E02a": [],
     "F21": [],
-    "F22": []
+    "F22": [],
+    "F23": []
   },
   "retained_dependency_overrides": {
     "V06": [
