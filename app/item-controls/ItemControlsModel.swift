@@ -112,7 +112,11 @@ final class ItemControlsModel: ObservableObject {
 
     /// Reads the stored values. Only the drafts named in `resetting` are replaced by what is stored, so saving one
     /// field never discards unsaved edits in the others, and a conflict (`resetting: []`) keeps everything typed.
-    @MainActor func load(resetting fields: Set<ItemControlsField> = [.text, .type, .sessionTopic]) async {
+    /// With `afterSubmit`, a failed read leaves the snapshot, drafts and the saved/conflict outcome as they were, so a
+    /// refresh failure never erases unsaved edits or hides the result of the correction that just happened.
+    @MainActor func load(
+        resetting fields: Set<ItemControlsField> = [.text, .type, .sessionTopic], afterSubmit: Bool = false
+    ) async {
         loadGeneration += 1
         let generation = loadGeneration
         do {
@@ -128,7 +132,7 @@ final class ItemControlsModel: ObservableObject {
             if fields.contains(.sessionTopic) { topicDraft = loaded.sessionTopic ?? "" }
             if fields.contains(.type) { pendingType = loaded.itemType }
         } catch {
-            guard generation == loadGeneration else { return }
+            guard generation == loadGeneration, !afterSubmit else { return }
             snapshot = nil
             textDraft = ""
             topicDraft = ""
@@ -189,7 +193,7 @@ final class ItemControlsModel: ObservableObject {
             heldCommand = nil
             outcome = receipt.reminderCancelled && field == .type ? .savedAndReminderCancelled : .saved(field)
             isWorking = false
-            await load(resetting: [field])
+            await load(resetting: [field], afterSubmit: true)
             onCorrected()
             return
         } catch let error as ItemCorrectionError {
@@ -199,7 +203,7 @@ final class ItemControlsModel: ObservableObject {
                 outcome = .conflict(field, currentRevision: current)
                 isWorking = false
                 // Show what is stored now but keep the draft the user typed.
-                await load(resetting: [])
+                await load(resetting: [], afterSubmit: true)
                 // The detail card above shows the same stored values, so it refreshes too.
                 onCorrected()
                 return

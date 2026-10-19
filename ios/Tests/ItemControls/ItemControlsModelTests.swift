@@ -5,8 +5,12 @@ import OhAndServices
 
 private final class StubDetailReader: SourceDetailReading, @unchecked Sendable {
     var detail: CoreItemDetail
+    var failure: ItemDetailError?
     init(_ detail: CoreItemDetail) { self.detail = detail }
-    func detail(itemID: String) async throws -> CoreItemDetail { detail }
+    func detail(itemID: String) async throws -> CoreItemDetail {
+        if let failure { throw failure }
+        return detail
+    }
 }
 
 private final class RecordingCorrector: ItemControlsCorrecting, @unchecked Sendable {
@@ -95,6 +99,34 @@ final class ItemControlsModelTests: XCTestCase {
         XCTAssertEqual(model.pendingType, .note, "the unapplied type pick survives saving the words")
         XCTAssertTrue(model.canSaveTopic)
         XCTAssertTrue(model.canApplyType)
+    }
+
+    func testAFailedRefreshAfterASaveKeepsOtherDraftsAndTheSavedOutcome() async {
+        let reader = StubDetailReader(detail(type: "idea", topic: "garage", text: "old"))
+        let model = make(reader, RecordingCorrector())
+        await model.load()
+        model.topicDraft = "kitchen"
+        model.pendingType = .note
+        model.textDraft = "new words"
+        reader.failure = .relocked
+        await model.saveText()
+        XCTAssertEqual(model.outcome, .saved(.text))
+        XCTAssertEqual(model.topicDraft, "kitchen")
+        XCTAssertEqual(model.pendingType, .note)
+        XCTAssertEqual(model.textDraft, "new words")
+    }
+
+    func testAFailedRefreshAfterAConflictKeepsTheRejectedDraftAndTheConflict() async {
+        let reader = StubDetailReader(detail())
+        let corrector = RecordingCorrector()
+        corrector.results = [.failure(.staleRevision(currentRevision: 5))]
+        let model = make(reader, corrector)
+        await model.load()
+        model.topicDraft = "kitchen"
+        reader.failure = .notAuthenticated
+        await model.saveSessionTopic()
+        XCTAssertEqual(model.outcome, .conflict(.sessionTopic, currentRevision: 5))
+        XCTAssertEqual(model.topicDraft, "kitchen")
     }
 
     func testAConflictRefreshesTheHostSoItAgreesWithTheNewerValues() async {
