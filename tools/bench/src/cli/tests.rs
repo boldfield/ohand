@@ -1612,7 +1612,7 @@ fn live_run_with_a_failing_provider_exits_incomplete_without_retrying_beyond_the
 const ENDPOINT_VARIABLE: &str = "BENCH_TEST_SPARK_URL";
 const SPARK_BASE: &str = "https://spark.tailnet.example:8443/v1";
 const VERIFIED_MODEL_SPEC: &str = "deepseek-flash-iq3@latest";
-const UNVERIFIED_MODEL_SPEC: &str = "qwen3.8@27b";
+const UNVERIFIED_MODEL_SPEC: &str = "qwen3.5@122b";
 
 fn self_hosted_words<'a>(command: &'a str, model_spec: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
     let mut words = vec![
@@ -1767,7 +1767,7 @@ fn the_plan_pins_model_and_endpoint_into_the_profile_version_and_never_prints_th
         assert!(!outcome.out.contains("tailnet") && !outcome.out.contains("8443"));
     }
     assert!(version_line(&base).contains("deepseek-flash-iq3:latest"));
-    assert!(version_line(&other_model).contains("qwen3.8:27b"));
+    assert!(version_line(&other_model).contains("qwen3.5:122b"));
     let versions = [&base, &other_endpoint, &other_path, &other_model].map(|outcome| {
         version_line(outcome)
             .rsplit("version ")

@@ -94,6 +94,7 @@ final class RetrievalSearchNavigationTests: XCTestCase {
             retention: services.managementContext.retention,
             providerSettings: services.managementContext.providerSettings,
             promptSettings: services.managementContext.promptSettings,
+            sourceDetail: services.managementContext.sourceDetail,
             suggestion: services.managementContext.suggestion,
             privacySettings: services.managementContext.privacySettings,
             retrievalRenderReporter: { [unowned self] in rendered = $0 })

@@ -25,32 +25,69 @@ public struct SelfHostedEvidenceReference: Equatable, Sendable {
     }
 }
 
-/// What the V08/V09 evidence establishes for the self-hosted provider: one model, with the artifacts that say so. The
-/// values mirror the constants of `core/src/providers/self_hosted/mod.rs`; a test compares them with that file so the
-/// two cannot drift apart.
-public struct SelfHostedVerifiedBoundary: Equatable, Sendable {
+/// One model the self-hosted provider is verified for, with the adapter semantic smoke artifact that says so. Another
+/// model's artifact does not verify it.
+public struct SelfHostedVerifiedModel: Equatable, Sendable {
     public let model: String
-    public let evidence: [SelfHostedEvidenceReference]
+    public let adapterSmoke: SelfHostedEvidenceReference
+
+    public init(model: String, adapterSmoke: SelfHostedEvidenceReference) {
+        self.model = model
+        self.adapterSmoke = adapterSmoke
+    }
+}
+
+/// What the V08/V09 evidence establishes for the self-hosted provider: one worker-probe reference and one
+/// phone-reachability reference shared by every model, and per model its own adapter smoke reference. The values mirror
+/// `SMOKE_EVIDENCE` and the constants of `core/src/providers/self_hosted/mod.rs`; a test compares them with that file so
+/// the two cannot drift apart.
+public struct SelfHostedVerifiedBoundary: Equatable, Sendable {
+    public let workerProbe: SelfHostedEvidenceReference
+    public let phoneReachability: SelfHostedEvidenceReference
+    /// Ordered as `SMOKE_EVIDENCE`. The first is the default verified model.
+    public let models: [SelfHostedVerifiedModel]
+
+    /// The default verified model.
+    public var model: String { models[0].model }
+
+    /// The references a registration for `model` must cite: the shared ones and, when `model` is verified, its own
+    /// adapter smoke reference.
+    public func evidence(forModel model: String) -> [SelfHostedEvidenceReference] {
+        var references = [workerProbe]
+        if let verified = models.first(where: { $0.model == model }) {
+            references.append(verified.adapterSmoke)
+        }
+        references.append(phoneReachability)
+        return references
+    }
+
+    private static let smokeDirectory = "docs/validation/evidence/spark-adapter-smoke/"
 
     public static let current = SelfHostedVerifiedBoundary(
-        model: "deepseek-flash-iq3:latest",
-        evidence: [
-            SelfHostedEvidenceReference(
-                kind: .workerProbe,
-                evidenceID: "spark-probe-20261008T093909Z-22c47772",
-                artifactPath: "docs/validation/evidence/spark-probe/spark-probe-20261008T093909Z-22c47772.json",
-                collectedAt: "2026-10-08T09:39:09Z"),
-            SelfHostedEvidenceReference(
-                kind: .adapterSmoke,
-                evidenceID: "self-hosted-adapter-smoke-20261009T145738Z-e45f02b4",
-                artifactPath:
-                    "docs/validation/evidence/spark-adapter-smoke/"
-                    + "self-hosted-adapter-smoke-20261009T145738Z-e45f02b4.json",
-                collectedAt: "2026-10-09T14:57:38Z"),
-            SelfHostedEvidenceReference(
-                kind: .phoneReachability,
-                evidenceID: "spark-phone-2026-10-08",
-                artifactPath: "docs/validation/evidence/spark-phone/2026-10-08-phone-reachability.json",
-                collectedAt: "2026-10-08T16:39:00Z"),
+        workerProbe: SelfHostedEvidenceReference(
+            kind: .workerProbe,
+            evidenceID: "spark-probe-20261008T093909Z-22c47772",
+            artifactPath: "docs/validation/evidence/spark-probe/spark-probe-20261008T093909Z-22c47772.json",
+            collectedAt: "2026-10-08T09:39:09Z"),
+        phoneReachability: SelfHostedEvidenceReference(
+            kind: .phoneReachability,
+            evidenceID: "spark-phone-2026-10-08",
+            artifactPath: "docs/validation/evidence/spark-phone/2026-10-08-phone-reachability.json",
+            collectedAt: "2026-10-08T16:39:00Z"),
+        models: [
+            SelfHostedVerifiedModel(
+                model: "deepseek-flash-iq3:latest",
+                adapterSmoke: SelfHostedEvidenceReference(
+                    kind: .adapterSmoke,
+                    evidenceID: "self-hosted-adapter-smoke-20261018T235846Z-511d119f",
+                    artifactPath: smokeDirectory + "self-hosted-adapter-smoke-20261018T235846Z-511d119f.json",
+                    collectedAt: "2026-10-18T23:58:46Z")),
+            SelfHostedVerifiedModel(
+                model: "qwen3.8:27b",
+                adapterSmoke: SelfHostedEvidenceReference(
+                    kind: .adapterSmoke,
+                    evidenceID: "self-hosted-adapter-smoke-20261019T000049Z-511d119f",
+                    artifactPath: smokeDirectory + "self-hosted-adapter-smoke-20261019T000049Z-511d119f.json",
+                    collectedAt: "2026-10-19T00:00:49Z")),
         ])
 }

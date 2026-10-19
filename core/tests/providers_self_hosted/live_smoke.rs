@@ -1,7 +1,7 @@
 //! Live smoke run of `SelfHostedAdapter` against the configured Spark endpoint (V09).
 //!
 //! Ignored by default: it needs the worker-mounted provider configuration and network access.
-//! Run it with
+//! Run it with `OHAND_SMOKE_MODEL` (default: the verified model) and
 //! `OHAND_SMOKE_EVIDENCE_DIR=docs/validation/evidence/spark-adapter-smoke \
 //!  cargo test --test providers_self_hosted live_endpoint_smoke -- --ignored --nocapture`.
 //!
@@ -22,6 +22,9 @@ use ohand_core::providers::contracts::{
     dispatch, CancelToken, Clock, DispatchLimits, ProviderProfile, ProviderProfileBuilder,
     ProviderProtocol, SystemClock, TransportError,
 };
+use ohand_core::providers::contracts::{
+    CapabilityMetadata, ProviderCapability, StructuredOutputMode,
+};
 use ohand_core::providers::openai::HttpTransport;
 use ohand_core::providers::self_hosted::{
     declared_capabilities, SelfHostedAdapter, CHAT_VERIFIED_MODEL, MAX_COMPLETION_TOKENS,
@@ -40,21 +43,75 @@ const EVIDENCE_DIR_ENV_VAR: &str = "OHAND_SMOKE_EVIDENCE_DIR";
 const PRIVATE_EVIDENCE_DIR_ENV_VAR: &str = "OHAND_PRIVATE_EVIDENCE_DIR";
 const DEFAULT_PRIVATE_EVIDENCE_DIRECTORY: &str = ".ohand-private-evidence";
 const CREDENTIAL_REF: &str = "credential-ref/spark-endpoint";
+const MODEL_ENV_VAR: &str = "OHAND_SMOKE_MODEL";
 const TIMEOUT_SECONDS: u32 = 300;
-const SYNTHETIC_CAPTURES: [(&str, &str); 3] = [
+/// The reminder capture's reference time is 2026-01-05T09:00 America/Chicago, so "tomorrow at
+/// 3pm" is 2026-01-06T15:00 America/Chicago (UTC-6), that is 21:00 UTC.
+const EXPECTED_REMINDER_INSTANT_UTC: &str = "2026-01-06T21:00:00Z";
+/// Whether a capture is expected to yield a `reminder_proposal`.
+const SYNTHETIC_CAPTURES: [(&str, &str, bool); 3] = [
     (
         "reminder-capture",
         "remind me to call the dentist tomorrow at 3pm",
+        true,
     ),
     (
         "idea-capture",
         "idea: build a small birdhouse from scrap wood",
+        false,
     ),
     (
         "plain-note-capture",
         "the garage door sticks when it is cold",
+        false,
     ),
 ];
+
+/// The model under test: `OHAND_SMOKE_MODEL`, defaulting to [`CHAT_VERIFIED_MODEL`].
+fn smoke_model() -> String {
+    std::env::var(MODEL_ENV_VAR).unwrap_or_else(|_| CHAT_VERIFIED_MODEL.to_string())
+}
+
+/// Meaning check of a reply, never its text: returns the semantic outcome and, when it fails,
+/// a short reason. A reminder capture needs an `explicit` reminder at the expected instant;
+/// the other captures need no reminder at all.
+fn semantic_outcome(
+    proposal: &serde_json::Map<String, Value>,
+    reminder_expected: bool,
+) -> (Value, Option<&'static str>) {
+    let reminder = proposal.get("reminder_proposal");
+    let quality = reminder.and_then(|reminder| reminder["quality"].as_str());
+    let instant_matches = reminder
+        .and_then(|reminder| reminder["instant"].as_str())
+        .and_then(|instant| chrono::DateTime::parse_from_rfc3339(instant).ok())
+        .is_some_and(|instant| {
+            instant
+                .with_timezone(&chrono::Utc)
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                == EXPECTED_REMINDER_INSTANT_UTC
+        });
+    let outcome = json!({
+        "reminder_proposal_present": reminder.is_some(),
+        "reminder_quality": quality,
+        "reminder_instant_matches_expected": instant_matches,
+    });
+    let failure = if reminder_expected {
+        if reminder.is_none() {
+            Some("reminder-missing")
+        } else if quality != Some("explicit") {
+            Some("reminder-not-explicit")
+        } else if !instant_matches {
+            Some("reminder-instant-wrong")
+        } else {
+            None
+        }
+    } else if reminder.is_some() {
+        Some("unexpected-reminder")
+    } else {
+        None
+    };
+    (outcome, failure)
+}
 
 #[derive(Debug, Clone, Default)]
 struct ObservedExchange {
@@ -210,14 +267,25 @@ fn origin_of(base_url: &str) -> String {
     base_url[..end].to_string()
 }
 
-fn smoke_profile(configuration: &EndpointConfiguration) -> ProviderProfile {
-    let mut builder =
-        ProviderProfileBuilder::new("spark", ProviderProtocol::SelfHosted, CHAT_VERIFIED_MODEL)
-            .endpoint(configuration.base_url.clone())
-            .credential_ref(CREDENTIAL_REF)
-            .timeout_seconds(TIMEOUT_SECONDS)
-            .authorized_destination(origin_of(&configuration.base_url));
-    for capability in declared_capabilities(CHAT_VERIFIED_MODEL, 2_000) {
+fn smoke_profile(configuration: &EndpointConfiguration, model: &str) -> ProviderProfile {
+    let mut builder = ProviderProfileBuilder::new("spark", ProviderProtocol::SelfHosted, model)
+        .endpoint(configuration.base_url.clone())
+        .credential_ref(CREDENTIAL_REF)
+        .timeout_seconds(TIMEOUT_SECONDS)
+        .authorized_destination(origin_of(&configuration.base_url));
+    for capability in declared_capabilities(model, 2_000) {
+        // The dispatcher refuses a model without a `Supported` claim. A candidate under test is
+        // claimed here only to be exercised; the library's claim stays what the artifacts prove.
+        let capability = if capability.capability == ProviderCapability::TextInterpretation {
+            CapabilityMetadata::supported(
+                ProviderCapability::TextInterpretation,
+                "candidate under live smoke test",
+            )
+            .with_input_size_limit(2_000)
+            .with_structured_output(StructuredOutputMode::JsonSchema)
+        } else {
+            capability
+        };
         builder = builder.capability(capability);
     }
     builder
@@ -296,7 +364,8 @@ fn live_endpoint_smoke_records_sanitized_evidence() {
         .next()
         .unwrap()
         .to_string();
-    let profile = smoke_profile(&configuration);
+    let model = smoke_model();
+    let profile = smoke_profile(&configuration, &model);
     let observed = Arc::new(Mutex::new(Vec::new()));
     let transport = CurlTransport {
         base_credential: configuration.credential.clone(),
@@ -309,7 +378,7 @@ fn live_endpoint_smoke_records_sanitized_evidence() {
     let mut request_records = Vec::new();
     let mut raw_records = Vec::new();
     let mut failures = Vec::new();
-    for (name, text) in SYNTHETIC_CAPTURES {
+    for (name, text, reminder_expected) in SYNTHETIC_CAPTURES {
         let request = request_for(&profile, text);
         let started_ms = clock.now_ms();
         let result = dispatch(
@@ -360,8 +429,15 @@ fn live_endpoint_smoke_records_sanitized_evidence() {
                 record["proposal_keys"] = json!(keys);
                 record["conforms_to_output_schema_top_level"] = json!(conforms);
                 record["mapped_to_validated_proposal"] = json!(validated);
+                let (semantic, semantic_failure) =
+                    semantic_outcome(&output.proposal, reminder_expected);
+                record["reminder_expected"] = json!(reminder_expected);
+                record["semantic"] = semantic;
                 if !conforms || !validated {
                     failures.push(format!("{name}: proposal-did-not-validate"));
+                }
+                if let Some(reason) = semantic_failure {
+                    failures.push(format!("{name}: {reason}"));
                 }
             }
             Err(failure) => {
@@ -430,9 +506,10 @@ fn live_endpoint_smoke_records_sanitized_evidence() {
         "adapter_revision": {"commit": commit, "dirty": dirty},
         "configured_scheme": scheme,
         "transport": "curl subprocess standing in for the native https transport; certificate validation on, redirects not followed",
-        "model": CHAT_VERIFIED_MODEL,
+        "model": model,
         "max_tokens": MAX_COMPLETION_TOKENS,
-        "request_shape": "adapter-built: interpretation prompt, strict json_schema response_format carrying output_schema()",
+        "request_shape": "adapter-built: interpretation prompt, strict json_schema response_format derived from output_schema() with every property required and optional ones nullable; optional nulls treated as absent",
+        "semantic_checks": "reminder capture: reminder_proposal with quality explicit and instant 2026-01-06T15:00 America/Chicago; idea and plain-note captures: no reminder_proposal",
         "synthetic_context_time": time_context().reference_time.to_rfc3339(),
         "requests": request_records,
         "private_raw_evidence": {

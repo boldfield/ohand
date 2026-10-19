@@ -3261,6 +3261,27 @@
         "core/tests/providers_self_hosted/live_smoke.rs",
         "core/src/interpretation/instructions/text.rs"
       ]
+    },
+    {
+      "key": "F22",
+      "parent": null,
+      "title": "Declare the Face ID usage description so the app stops crashing at launch",
+      "file_scope": [
+        "ios/AppAssembly/Info.plist",
+        "ios/scripts/check_project_config.py",
+        "ios/scripts/test_check_project_config.py"
+      ],
+      "intent": "Add NSFaceIDUsageDescription, whose absence makes iOS kill the app at its first quiet Face ID attempt, and make the project check require it.",
+      "acceptance": [
+        "See the F22 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/Services/Authentication/ReadAuthenticationBoundary.swift:61",
+        "ios/AppAssembly/Info.plist",
+        "ios/scripts/check_project_config.py:44"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -3998,7 +4019,8 @@
     ],
     "F20": [],
     "E02a": [],
-    "F21": []
+    "F21": [],
+    "F22": []
   },
   "retained_dependency_overrides": {
     "V06": [

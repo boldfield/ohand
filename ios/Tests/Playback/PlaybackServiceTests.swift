@@ -67,6 +67,34 @@ private final class RecordingPlayer: PlaybackPlayer, @unchecked Sendable {
     }
 }
 
+private final class FinishingPlayer: FinishNotifyingPlayer, @unchecked Sendable {
+    private let lock = NSLock()
+    private var handler: (() -> Void)?
+    private(set) var stopCalls = 0
+
+    func setFinishHandler(_ handler: @escaping () -> Void) {
+        lock.lock()
+        self.handler = handler
+        lock.unlock()
+    }
+
+    func finish() {
+        lock.lock()
+        let stored = handler
+        lock.unlock()
+        stored?()
+    }
+
+    func play() -> Bool { true }
+    func pause() {}
+
+    func stop() {
+        lock.lock()
+        stopCalls += 1
+        lock.unlock()
+    }
+}
+
 private struct UnplayableAudio: Error {}
 
 /// Lets a player factory reach the service that calls it.
@@ -304,6 +332,71 @@ final class PlaybackServiceTests: XCTestCase {
         let service = makeService()
         core.script(onRead: { service.endPlayback(itemID: "item-1") })
         await assertOpenFails(.itemDeleted, service)
+    }
+
+    // MARK: Completion
+
+    func testAClipThatPlaysToItsEndEndsTheSessionAndReleasesTheHoldOnce() async throws {
+        try retain(audio: "cap1.m4a")
+        let finishing = FinishingPlayer()
+        let service = PlaybackService(
+            core: core, session: session, layout: storage.layout, fence: fence, playerFactory: { _ in finishing })
+        let opened = try await service.open(itemID: "item-1")
+        let url = storage.audioURL("cap1.m4a")
+        XCTAssertTrue(fence.isHeld(url))
+
+        finishing.finish()
+
+        XCTAssertEqual(opened.endReason, .finished)
+        XCTAssertFalse(opened.isOpen)
+        XCTAssertFalse(fence.isHeld(url))
+        XCTAssertEqual(finishing.stopCalls, 1)
+
+        // A later close, finish, relock or shutdown changes nothing and stops nothing a second time.
+        opened.close()
+        finishing.finish()
+        session.relock(.explicit)
+        service.shutDown()
+        XCTAssertEqual(opened.endReason, .finished, "the first end reason stands")
+        XCTAssertEqual(finishing.stopCalls, 1)
+        XCTAssertFalse(fence.isHeld(url))
+    }
+
+    // MARK: Availability
+
+    func testAvailabilityReportsPresentNeverRecordedAndRemovedAudio() async throws {
+        let service = makeService()
+        let none = await service.availability(itemID: "item-1")
+        XCTAssertEqual(none, .noAudio)
+
+        try retain(audio: "cap1.m4a")
+        let present = await service.availability(itemID: "item-1")
+        XCTAssertEqual(present, .available)
+        XCTAssertFalse(fence.isHeld(storage.audioURL("cap1.m4a")), "asking takes no hold")
+        XCTAssertEqual(player.playCalls, 0)
+
+        try FileManager.default.removeItem(at: storage.audioURL("cap1.m4a"))
+        let removed = await service.availability(itemID: "item-1")
+        XCTAssertEqual(removed, .missing)
+
+        core.script(.success(RetentionAudioAnswer(itemID: "item-1", audioReference: "../escape.m4a", soleSource: false)))
+        let unresolvable = await service.availability(itemID: "item-1")
+        XCTAssertEqual(unresolvable, .unreadable)
+    }
+
+    func testAvailabilityNeedsAnAuthenticatedSessionAndNeverReachesTheCoreWhileLocked() async throws {
+        try retain(audio: "cap1.m4a")
+        session.relock(.explicit)
+        let locked = await makeService().availability(itemID: "item-1")
+        XCTAssertEqual(locked, .notAuthenticated)
+        XCTAssertEqual(core.reads, 0)
+    }
+
+    func testAnAvailabilityAnswerThatArrivesAfterARelockIsNotAuthenticated() async throws {
+        try retain(audio: "cap1.m4a")
+        core.script(onRead: { [session] in session?.relock(.explicit) })
+        let answer = await makeService().availability(itemID: "item-1")
+        XCTAssertEqual(answer, .notAuthenticated)
     }
 
     // MARK: Relock

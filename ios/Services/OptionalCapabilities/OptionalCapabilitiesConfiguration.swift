@@ -44,11 +44,11 @@ public struct SelfHostedRegistration: Equatable, Sendable {
     public init(
         profileVersion: String,
         model: String,
-        evidence: [SelfHostedEvidenceReference] = SelfHostedVerifiedBoundary.current.evidence
+        evidence: [SelfHostedEvidenceReference]? = nil
     ) {
         self.profileVersion = profileVersion
         self.model = model
-        self.evidence = evidence
+        self.evidence = evidence ?? SelfHostedVerifiedBoundary.current.evidence(forModel: model)
     }
 }
 
@@ -76,10 +76,13 @@ public enum OptionalCapabilityVerification {
         guard !registration.profileVersion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return .disabled(.missingProfileVersion)
         }
-        for expected in boundary.evidence where !registration.evidence.contains(expected) {
+        guard let verifiedModel = boundary.models.first(where: { $0.model == registration.model }) else {
+            return .disabled(.modelNotVerified)
+        }
+        let required = [boundary.workerProbe, verifiedModel.adapterSmoke, boundary.phoneReachability]
+        for expected in required where !registration.evidence.contains(expected) {
             return .disabled(.evidenceIncomplete)
         }
-        guard registration.model == boundary.model else { return .disabled(.modelNotVerified) }
         return .enabled
     }
 

@@ -23,6 +23,18 @@ public enum PlaybackError: Error, Equatable, Sendable {
     case core(CoreFailure)
 }
 
+/// Whether an item's audio can be played now, as `PlaybackService.availability(itemID:)` found it.
+public enum PlaybackAvailability: Equatable, Sendable {
+    case available
+    /// The item holds no audio, or its audio has been removed.
+    case noAudio
+    /// The core says the item has audio, but the file is not there.
+    case missing
+    /// The file cannot be checked, or the reference does not name a file in the finalized audio store.
+    case unreadable
+    case notAuthenticated
+}
+
 /// Opens an item's retained audio for playback without exposing protected storage.
 ///
 /// * **Authenticated.** `open` needs an authenticated session, and the audio reference is read through the private read
@@ -119,6 +131,33 @@ public final class PlaybackService: @unchecked Sendable {
             throw PlaybackError.itemDeleted
         }
         return opened
+    }
+
+    /// Whether the item's audio can be played now, by the checks `open` makes before the fence. Read-only: it takes no
+    /// lease, builds no player and reads no audio bytes. The core's reference can outlive a file that retention removed,
+    /// so the file is checked here. A removal after this answer is still caught by `open`.
+    public func availability(itemID: String) async -> PlaybackAvailability {
+        guard let authorization = session.currentAuthorization() else { return .notAuthenticated }
+        guard !itemID.isEmpty, !hasShutDown else { return .unreadable }
+        let answer: RetentionAudioAnswer
+        do {
+            answer = try await readAudio(itemID: itemID)
+        } catch PlaybackError.notAuthenticated {
+            return .notAuthenticated
+        } catch PlaybackError.itemNotFound {
+            return .noAudio
+        } catch {
+            return .unreadable
+        }
+        // An answer that arrives after a relock is not shown.
+        guard session.isCurrent(authorization) else { return .notAuthenticated }
+        guard let reference = answer.audioReference else { return .noAudio }
+        guard let url = staging.finalizedAudioURL(forReference: reference) else { return .unreadable }
+        do {
+            return try fileSystem.isPresent(at: url) ? .available : .missing
+        } catch {
+            return .unreadable
+        }
     }
 
     /// Ends the item's open playback and refuses opens already under way. Called when a deletion is requested.

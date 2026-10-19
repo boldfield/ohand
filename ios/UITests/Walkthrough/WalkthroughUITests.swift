@@ -22,7 +22,7 @@ final class WalkthroughUITests: XCTestCase {
     private let settingsScreens: [(label: String, title: String)] = [
         ("Daily prompt", "Daily prompt"),
         ("Unfinished recordings", "Unfinished recordings"),
-        ("Processing", "Providers"),
+        ("Processing", "Processing"),
         ("Privacy", "Privacy"),
         ("Audio", "Audio"),
         ("Export", "Export"),
@@ -89,6 +89,20 @@ final class WalkthroughUITests: XCTestCase {
         let resultCount = app.staticTexts["retrieval.search.count"]
         XCTAssertTrue(resultCount.waitForExistence(timeout: screenTimeout), "search for \(searchQuery) found no synthetic capture")
         capture(prefix, "search")
+
+        // Source detail for the first result: pushed above Search at compact width, beside the results at regular width.
+        // The same width rule as the screenshot names: an iPad runs Search at regular width, with the item pane.
+        let isRegularWidth = UIDevice.current.userInterfaceIdiom == .pad
+        let firstResult = app.buttons.matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "retrieval.search.row.")).firstMatch
+        XCTAssertTrue(firstResult.waitForExistence(timeout: screenTimeout), "no search result to open")
+        firstResult.tap()
+        let detailText = app.descendants(matching: .any)["source-detail.current-text"]
+        XCTAssertTrue(detailText.waitForExistence(timeout: screenTimeout), "source detail did not open")
+        capture(prefix, "source detail")
+        if !isRegularWidth {
+            goBack(to: resultCount, "Search")
+        }
         goBack(to: homeLink(homeSearch), "home")
 
         // Settings and each settings screen. The home focuses its composer again when it comes back, and its header shows
@@ -108,6 +122,21 @@ final class WalkthroughUITests: XCTestCase {
             XCTAssertTrue(
                 waitForScreen(screen.title, leaving: settingsHeader, timeout: screenTimeout), "\(screen.title) did not open")
             capture(prefix, screen.label)
+            if screen.title == "Processing" {
+                // The two screens one level down hold the dense controls, so each is captured too.
+                for (identifier, title, slug) in [
+                    ("provider-settings.add-provider", "Add provider", "processing-add-provider"),
+                    ("provider-settings.advanced", "Advanced", "processing-advanced"),
+                ] {
+                    let link = app.buttons[identifier]
+                    XCTAssertTrue(link.waitForExistence(timeout: screenTimeout), "\(identifier) not found on Processing")
+                    link.tap()
+                    XCTAssertTrue(
+                        waitForScreen(title, leaving: link, timeout: screenTimeout), "\(title) did not open from Processing")
+                    capture(prefix, slug)
+                    goBack(to: app.staticTexts[screen.title], screen.title)
+                }
+            }
             if screen.title == "Audio" {
                 // Export is also linked from the audio screen, beside the other data settings. The link must open it.
                 let exportLink = app.buttons["data-settings.retention.export-link"]
