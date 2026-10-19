@@ -170,10 +170,10 @@ struct ResetSettingsView: View {
             .frame(minHeight: 44)
         }
         .buttonStyle(.plain)
-        .disabled(model.isBusy || model.phase == .confirming)
         .accessibilityAddTraits(model.credentialChoice == value ? .isSelected : [])
         .accessibilityIdentifier(identifier)
         .reportDataSettingsRendered(identifier, text: title)
+        .disabled(model.isBusy || model.phase == .confirming)
     }
 
     @ViewBuilder
@@ -184,9 +184,9 @@ struct ResetSettingsView: View {
                 deletionNote(message, identifier: Self.stateIdentifier)
             }
             DSPillButton(title: DeletionText.resetHeading, style: .destructive) { model.beginConfirmation() }
-                .disabled(!model.canContinue)
                 .accessibilityIdentifier(Self.continueIdentifier)
                 .reportDataSettingsRendered(Self.continueIdentifier, text: DeletionText.resetHeading)
+                .disabled(!model.canContinue)
         case .confirming:
             DSPillButton(title: "Delete everything permanently", style: .destructive) {
                 Task { await model.confirmReset() }
@@ -202,9 +202,9 @@ struct ResetSettingsView: View {
         case .pending(let message):
             deletionNote(message, identifier: Self.stateIdentifier)
             DSPillButton(title: "Try again", style: .secondary) { Task { await model.retry() } }
-                .disabled(!model.canRetry)
                 .accessibilityIdentifier(Self.retryIdentifier)
                 .reportDataSettingsRendered(Self.retryIdentifier, text: "Try again")
+                .disabled(!model.canRetry)
         case .completed:
             deletionNote(DeletionText.completedText, identifier: Self.stateIdentifier)
         case .locked:

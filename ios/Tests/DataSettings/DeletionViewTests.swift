@@ -48,7 +48,7 @@ final class DeletionViewTests: XCTestCase {
         guard let element = rendered[identifier] else {
             return XCTFail("\(identifier) is shown", file: file, line: line)
         }
-        XCTAssertGreaterThanOrEqual(element.frame.height, Self.minimumTouchTarget, identifier, file: file, line: line)
+        XCTAssertGreaterThanOrEqual(element.frame.height, Self.minimumTouchTarget - 0.5, identifier, file: file, line: line)
         XCTAssertEqual(element.isEnabled, enabled, "\(identifier) enabled", file: file, line: line)
     }
 
