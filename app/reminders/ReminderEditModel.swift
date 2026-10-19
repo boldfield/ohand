@@ -45,6 +45,8 @@ final class ReminderEditModel: ObservableObject {
     @Published private(set) var unavailable: ReminderEditUnavailable?
     @Published private(set) var isLoading = false
     @Published private(set) var isWorking = false
+    /// The item is completed or cancelled. The core refuses every edit to it, so none is offered.
+    @Published private(set) var isClosed = false
     @Published private(set) var message: ReminderEditMessage?
     @Published private(set) var permission: NotificationPermissionState?
     @Published var draftDate: Date {
@@ -82,9 +84,11 @@ final class ReminderEditModel: ObservableObject {
     }
 
     var standing: ReminderStanding { .of(reminder, permission: permission, now: now()) }
-    var canSave: Bool { unavailable == nil && !isLoading && !isWorking }
+    var canSave: Bool { unavailable == nil && !isClosed && !isLoading && !isWorking }
     var canCancel: Bool { canSave && standing.offersCancel }
     var isShown: Bool { unavailable != .notAnAction }
+    /// The last edit's outcome, or the standing closed notice when the item can no longer carry a change.
+    var shownMessage: ReminderEditMessage? { message ?? (isClosed ? .itemClosed : nil) }
 
     // MARK: loading
 
@@ -98,10 +102,19 @@ final class ReminderEditModel: ObservableObject {
             let answer = try await editor.reminder(itemID: itemID)
             guard generation == loadGeneration else { return }
             adopt(answer)
+            await learnPermission(generation: generation)
         } catch {
             guard generation == loadGeneration else { return }
             reject(error)
         }
+    }
+
+    /// A stored time shows the notification permission from the first read, not only after an edit in this session.
+    @MainActor private func learnPermission(generation: Int) async {
+        guard permission == nil, reminder?.requestState == "resolved" else { return }
+        let observed = await reconcile()
+        guard generation == loadGeneration, let observed else { return }
+        permission = observed
     }
 
     @MainActor private func adopt(_ answer: ReminderReadAnswer) {
@@ -112,6 +125,7 @@ final class ReminderEditModel: ObservableObject {
         }
         unavailable = nil
         itemRevision = answer.itemRevision
+        isClosed = answer.lifecycleState != "active"
         reminder = answer.reminder
         if !draftIsUserChoice { seedDraft(from: answer.reminder) }
     }
@@ -129,6 +143,7 @@ final class ReminderEditModel: ObservableObject {
         reminder = nil
         message = nil
         permission = nil
+        isClosed = false
         pendingCommand = nil
         draftIsUserChoice = false
     }
@@ -229,6 +244,7 @@ final class ReminderEditModel: ObservableObject {
         let answer = try? await editor.reminder(itemID: itemID)
         guard locks == lockGeneration, let answer, answer.itemType == "action" else { return }
         itemRevision = answer.itemRevision
+        isClosed = answer.lifecycleState != "active"
         reminder = answer.reminder
     }
 

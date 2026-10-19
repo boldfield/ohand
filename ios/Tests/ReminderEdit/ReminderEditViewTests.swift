@@ -33,11 +33,11 @@ final class ReminderEditViewTests: XCTestCase {
             scheduleGeneration: 1, stateVersion: 1, updatedAt: "2026-10-01T09:30:00Z")
     }
 
-    private func host(_ reminder: ReminderRecordAnswer?) async {
+    private func host(_ reminder: ReminderRecordAnswer?, lifecycle: String = "active") async {
         let editor = FakeReminderEditor(
             read: .success(
                 ReminderReadAnswer(
-                    itemID: "item-1", itemRevision: 3, itemType: "action", lifecycleState: "active", reminder: reminder)))
+                    itemID: "item-1", itemRevision: 3, itemType: "action", lifecycleState: lifecycle, reminder: reminder)))
         let model = ReminderEditModel(
             itemID: "item-1", editor: editor, now: { Self.clock }, deviceTimeZone: { TimeZone(identifier: "UTC")! })
         let hosting = UIHostingController(
@@ -59,7 +59,7 @@ final class ReminderEditViewTests: XCTestCase {
         lastModel = model
     }
 
-    func testAPassedStoredTimeIsShownInItsZoneWithTheExpiredStateAndNoCancelOffer() async {
+    func testAPassedStoredTimeIsShownInItsZoneWithTheExpiredStateAndItsZone() async {
         await host(
             record(
                 state: "unschedulable", reason: "time_in_past", due: Self.clock.addingTimeInterval(-3600),
@@ -67,7 +67,18 @@ final class ReminderEditViewTests: XCTestCase {
 
         XCTAssertTrue(rendered[ReminderEditSection.storedTimeIdentifier]?.hasPrefix("Stored time: 2027-01-15 16:00 ") == true, diagnostics)
         XCTAssertTrue(rendered[ReminderEditSection.standingIdentifier]?.hasPrefix("Time has passed") == true, diagnostics)
+        XCTAssertEqual(rendered[ReminderEditSection.zoneIdentifier], "Time zone of this reminder: Asia/Tokyo", diagnostics)
         XCTAssertEqual(rendered[ReminderEditSection.saveIdentifier], "Save time", diagnostics)
+        XCTAssertEqual(rendered[ReminderEditSection.cancelIdentifier], "Cancel reminder", diagnostics)
+    }
+
+    func testAClosedItemShowsItsReminderButOffersNeitherSaveNorCancelAsUsable() async {
+        await host(record(state: "resolved", due: Self.clock.addingTimeInterval(7200), zone: "UTC"), lifecycle: "completed")
+
+        XCTAssertEqual(rendered[ReminderEditSection.messageIdentifier], ReminderEditMessage.itemClosed.text, diagnostics)
+        XCTAssertNil(rendered[ReminderEditSection.cancelIdentifier], diagnostics)
+        XCTAssertFalse(lastModel?.canSave ?? true)
+        XCTAssertTrue(rendered[ReminderEditSection.storedTimeIdentifier]?.hasPrefix("Stored time: 2027-01-15 10:00 ") == true, diagnostics)
     }
 
     func testAResolvedReminderShowsItsZoneStoredTimeAndHonestSavedStateWithCancel() async {

@@ -62,7 +62,7 @@ struct ReminderEditSection: View {
         } else {
             VStack(alignment: .leading, spacing: DSSpacing.sm) {
                 standing
-                if let zone = model.reminder?.timezoneID, model.reminder?.requestState == "resolved" {
+                if let zone = model.reminder?.timezoneID, model.reminder?.resolvedDate != nil {
                     Text("Time zone of this reminder: \(zone)")
                         .font(DSFont.footer)
                         .foregroundColor(DSColor.inkMuted.color)
@@ -87,7 +87,7 @@ struct ReminderEditSection: View {
                 }
                 .pickerStyle(.menu)
                 .disabled(!model.canSave)
-                if let message = model.message {
+                if let message = model.shownMessage {
                     Text(message.text)
                         .font(DSFont.footer)
                         .foregroundColor(DSColor.inkMuted.color)
@@ -123,7 +123,7 @@ struct ReminderEditSection: View {
                 .disabled(!model.canSave)
                 .accessibilityIdentifier(Self.saveIdentifier)
                 .reportReminderRendered(Self.saveIdentifier, text: "Save time")
-            if model.standing.offersCancel {
+            if model.standing.offersCancel && !model.isClosed {
                 Button { Task { await model.cancel() } } label: { Text("Cancel reminder") }
                     .buttonStyle(DSPillButtonStyle(style: .destructive))
                     .disabled(!model.canCancel)

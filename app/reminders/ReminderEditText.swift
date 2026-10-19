@@ -155,7 +155,7 @@ enum ReminderEditMessage: Equatable {
 /// The stored resolved time, separate from the draft being edited.
 enum ReminderStoredTime {
     /// The stored instant written in its own zone, or nil when none is stored. A zone the system does not know is
-    /// named and the time is written in UTC, so the instant is never shifted silently.
+    /// written in UTC, so the instant is never shifted silently; the zone line names the stored identifier.
     static func text(for reminder: ReminderRecordAnswer?) -> String? {
         guard let instant = reminder?.resolvedDate else { return nil }
         let zone = reminder?.timezoneID.flatMap { TimeZone(identifier: $0) } ?? TimeZone(identifier: "UTC")!

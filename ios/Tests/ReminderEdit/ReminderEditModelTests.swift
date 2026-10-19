@@ -88,9 +88,11 @@ final class ReminderEditModelTests: XCTestCase {
             scheduleGeneration: version, stateVersion: version, updatedAt: "2026-10-01T09:30:00Z")
     }
 
-    private func read(_ reminder: ReminderRecordAnswer?, type: String? = "action") -> ReminderReadAnswer {
+    private func read(
+        _ reminder: ReminderRecordAnswer?, type: String? = "action", lifecycle: String = "active"
+    ) -> ReminderReadAnswer {
         ReminderReadAnswer(
-            itemID: Self.itemID, itemRevision: 3, itemType: type, lifecycleState: "active", reminder: reminder)
+            itemID: Self.itemID, itemRevision: 3, itemType: type, lifecycleState: lifecycle, reminder: reminder)
     }
 
     private func receipt(_ reminder: ReminderRecordAnswer) -> ReminderControlReceipt {
@@ -180,7 +182,7 @@ final class ReminderEditModelTests: XCTestCase {
         XCTAssertEqual(sent.first?.expectedRevision, 3)
         XCTAssertEqual(sent.first?.expectedReminderVersion, 4, "the edit names the version the user saw")
         XCTAssertEqual(sent.first?.timeZoneID, "Europe/Paris")
-        XCTAssertEqual(passes.count, 1)
+        XCTAssertEqual(passes.count, 2, "one pass when the stored reminder was read, one after the edit")
         XCTAssertEqual(model.message, .saved)
         XCTAssertEqual(model.standing, .savedAwaitingInstall)
     }
@@ -316,7 +318,37 @@ final class ReminderEditModelTests: XCTestCase {
         await model.save()
         XCTAssertEqual(model.reminder?.resolvedDate, Self.clock.addingTimeInterval(5400))
         XCTAssertNotEqual(model.draftDate, model.reminder?.resolvedDate)
-        XCTAssertNotNil(ReminderStoredTime.text(for: model.reminder))
+        XCTAssertTrue(
+            ReminderStoredTime.text(for: model.reminder)?.hasPrefix("Stored time: 2027-01-15 09:30 ") == true,
+            "the newer stored instant, 90 minutes after the clock, is shown")
+    }
+
+    func testAClosedItemDisablesEditsAndStaysDisabledAfterTheCoreRefusesOne() async {
+        let editor = FakeReminderEditor(
+            read: .success(read(record(due: Self.clock.addingTimeInterval(3600)), lifecycle: "completed")))
+        let model = make(editor)
+        await model.load()
+        XCTAssertTrue(model.isClosed)
+        XCTAssertFalse(model.canSave)
+        XCTAssertFalse(model.canCancel)
+        XCTAssertEqual(model.shownMessage, .itemClosed)
+
+        let open = FakeReminderEditor(read: .success(read(record(due: Self.clock.addingTimeInterval(3600)))))
+        open.script([.failure(ReminderControlError.itemNotActive(lifecycleState: "cancelled"))])
+        let racing = make(open)
+        await racing.load()
+        XCTAssertTrue(racing.canSave)
+        open.setRead(.success(read(record(due: Self.clock.addingTimeInterval(3600)), lifecycle: "cancelled")))
+        await racing.save()
+        XCTAssertEqual(racing.message, .itemClosed)
+        XCTAssertFalse(racing.canSave, "the reloaded record is closed, so the refused command cannot be repeated")
+    }
+
+    func testAFreshOpenOfAResolvedReminderShowsThePermissionState() async {
+        let editor = FakeReminderEditor(read: .success(read(record(due: Self.clock.addingTimeInterval(3600)))))
+        let model = make(editor, reconcile: { .denied })
+        await model.load()
+        XCTAssertEqual(model.standing, .permissionBlocked(.denied))
     }
 }
 
