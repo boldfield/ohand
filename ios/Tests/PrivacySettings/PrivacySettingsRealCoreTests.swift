@@ -349,7 +349,7 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         XCTAssertNotEqual(scalar("SELECT processing_state FROM items LIMIT 1"), "processed")
 
         await model.refresh()
-        XCTAssertEqual(model.routesHoldingWork, ["Personal route · Local capture"])
+        XCTAssertEqual(model.routesHoldingWork, ["Personal route · route-personal"])
         XCTAssertFalse(
             model.queuedWork.flatMap(\.jobs.jobs).contains { $0.status == "running" }, "the screen shows no request as sent")
     }
