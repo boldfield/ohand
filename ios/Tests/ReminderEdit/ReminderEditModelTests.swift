@@ -286,7 +286,7 @@ final class ReminderEditModelTests: XCTestCase {
 
         let saving = Task { @MainActor in await model.save() }
         await fulfillment(of: [reachedSend], timeout: 5)
-        model.lock()
+        await model.lock()
         await release.open()
         await saving.value
 
