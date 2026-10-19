@@ -10,7 +10,9 @@ use chrono::{DateTime, Duration, TimeZone, Utc};
 use ohand_core::interpretation::dispatch::{
     AdapterRegistry, DispatchOutcome, InterpretationDispatcher, WaitReason,
 };
-use ohand_core::interpretation::instructions::{M1_INSTRUCTION_TEXT, M1_INSTRUCTION_VERSION};
+use ohand_core::interpretation::instructions::{
+    output_schema, InterpretationMapping, M1_INSTRUCTION_TEXT, M1_INSTRUCTION_VERSION,
+};
 use ohand_core::jobs::queue::{claim_job_with_lease, enqueue_job, Job};
 use ohand_core::privacy::routing::JOB_TYPE_INTERPRET;
 use ohand_core::providers::anthropic::fake::FakeAnthropicTransport;
@@ -23,11 +25,11 @@ use ohand_core::providers::contracts::{
 };
 use ohand_core::providers::openai::{HttpTransport, OpenAiAdapter};
 use ohand_core::providers::self_hosted::{
-    compatibility_boundary, declared_capabilities, text_interpretation_capability,
-    SelfHostedAdapter, CHAT_COMPLETIONS_PATH, CHAT_VERIFIED_MODEL, LISTED_MODELS,
-    MAX_COMPLETION_TOKENS, PHONE_EVIDENCE_ARTIFACT, PHONE_EVIDENCE_COLLECTED_AT, PHONE_EVIDENCE_ID,
-    SMOKE_ADAPTER_REVISION, SMOKE_EVIDENCE, WORKER_EVIDENCE_ARTIFACT, WORKER_EVIDENCE_COLLECTED_AT,
-    WORKER_EVIDENCE_ID, WORKER_PROBE_REVISION,
+    compatibility_boundary, declared_capabilities, required_nullable_schema,
+    text_interpretation_capability, SelfHostedAdapter, CHAT_COMPLETIONS_PATH, CHAT_VERIFIED_MODEL,
+    LISTED_MODELS, MAX_COMPLETION_TOKENS, PHONE_EVIDENCE_ARTIFACT, PHONE_EVIDENCE_COLLECTED_AT,
+    PHONE_EVIDENCE_ID, SMOKE_ADAPTER_REVISION, SMOKE_EVIDENCE, WORKER_EVIDENCE_ARTIFACT,
+    WORKER_EVIDENCE_COLLECTED_AT, WORKER_EVIDENCE_ID, WORKER_PROBE_REVISION,
 };
 use ohand_core::store::schema::{Clock as StoreClock, Database};
 use ohand_core::time::TimeContext;
@@ -508,7 +510,7 @@ fn compatibility_boundary_names_the_tailnet_base_url_and_the_unverified_areas() 
         "tailnet hostname",
         "302",
         "Tailscale disconnected",
-        "qwen3.5:122b, gpt-oss:120b and glm-5.3-flash",
+        "qwen3.5:122b, gpt-oss:20b, gpt-oss:120b and glm-5.3-flash",
         "Observed failure of the previous request shape",
         "adapter semantic smoke",
         "finish_reason",
@@ -526,7 +528,7 @@ fn smoke_verified_models_are_supported_and_cite_artifact_revision_and_time() {
         assert_eq!(capability.support, CapabilitySupport::Supported);
         assert_eq!(
             capability.structured_output,
-            StructuredOutputMode::JsonObject
+            StructuredOutputMode::JsonSchema
         );
         let evidence = capability
             .evidence
@@ -544,6 +546,22 @@ fn smoke_verified_models_are_supported_and_cite_artifact_revision_and_time() {
             assert!(evidence.contains(cited), "evidence cites {cited}");
         }
     }
+}
+
+#[test]
+fn a_model_whose_semantic_smoke_failed_is_not_supported() {
+    let failed = repository_json(
+        "docs/validation/evidence/spark-adapter-smoke/self-hosted-adapter-smoke-20261018T235922Z-511d119f.json",
+    );
+    assert_eq!(failed["model"], "gpt-oss:20b");
+    assert_eq!(failed["result"], "fail");
+    assert!(SMOKE_EVIDENCE
+        .iter()
+        .all(|evidence| evidence.model != "gpt-oss:20b"));
+    assert_eq!(
+        text_capability("gpt-oss:20b").support,
+        CapabilitySupport::Unverified
+    );
 }
 
 #[test]
@@ -687,20 +705,49 @@ fn request_body_has_the_verified_shape_with_the_interpretation_schema() {
     assert_eq!(body["temperature"], 0.0);
     assert_eq!(body["stream"], false);
     assert_eq!(body["max_tokens"], MAX_COMPLETION_TOKENS);
-    // A strict json_schema made Ollama suppress optional proposals, so the contract travels in
-    // the prompt and the reply is validated locally.
-    assert_eq!(body["response_format"], json!({"type": "json_object"}));
+    // Sending output_schema() itself made Ollama suppress optional proposals, so the wire schema
+    // is derived from it with every property required and the optional ones nullable.
+    assert_eq!(body["response_format"]["type"], "json_schema");
+    assert_eq!(body["response_format"]["json_schema"]["strict"], true);
+    assert_eq!(
+        body["response_format"]["json_schema"]["schema"],
+        required_nullable_schema(&output_schema())
+    );
     assert_eq!(body["messages"].as_array().unwrap().len(), 2);
     assert_eq!(body["messages"][0]["role"], "system");
     assert_eq!(body["messages"][0]["content"], M1_INSTRUCTION_TEXT);
     assert_eq!(body["messages"][1]["role"], "user");
 }
 
+/// Runs `content` as the model's reply through dispatch, mapping and validation, exactly as the
+/// interpretation job does, and reports whether it ends as a validated proposal.
+fn reply_becomes_a_validated_proposal(content: &str) -> bool {
+    let text = "call mom tomorrow";
+    let harness = Harness::new(vec![Step::ok(content)]);
+    let request = request_for(&harness.profile, text);
+    let output = dispatch(
+        &harness.adapter,
+        &harness.profile,
+        &request,
+        harness.clock.as_ref(),
+        &harness.cancel,
+        &DispatchLimits::default(),
+    );
+    let Ok(output) = output else { return false };
+    InterpretationMapping::new(
+        &request,
+        Uuid::new_v4().to_string(),
+        Uuid::new_v4().to_string(),
+    )
+    .expect("mapping binds the request")
+    .map_output(&output)
+    .is_ok_and(|proposal| proposal.validate(text).is_ok())
+}
+
 #[test]
-fn nulls_in_optional_positions_are_treated_as_absent_and_other_values_are_not_relaxed() {
-    let nulled = r#"{"operation":{"kind":"annotate"},"item_type":"action","reminder_proposal":{"quality":"ambiguous","instant":null,"timezone_id":null,"source_span":{"start":0,"end":3}},"session_topic_proposal":null,"abstention":null}"#;
-    let harness = Harness::new(vec![Step::ok(nulled)]);
-    let output = harness
+fn nulls_in_optional_positions_are_treated_as_absent() {
+    let nulled = r#"{"operation":{"kind":"annotate"},"item_type":"action","source_spans":[{"start":0,"end":3}],"reminder_proposal":{"quality":"ambiguous","instant":null,"timezone_id":null,"source_span":{"start":0,"end":3}},"session_topic_proposal":null,"abstention":null}"#;
+    let output = Harness::new(vec![Step::ok(nulled)])
         .run()
         .expect("nulls in optional positions are absent");
     assert!(!output.proposal.contains_key("session_topic_proposal"));
@@ -709,15 +756,88 @@ fn nulls_in_optional_positions_are_treated_as_absent_and_other_values_are_not_re
         output.proposal["reminder_proposal"],
         json!({"quality": "ambiguous", "source_span": {"start": 0, "end": 3}})
     );
+    assert!(reply_becomes_a_validated_proposal(nulled));
+}
 
-    let required_null = r#"{"operation":null,"item_type":"action"}"#;
-    let output = Harness::new(vec![Step::ok(required_null)])
-        .run()
-        .expect("dispatch hands the reply on; mapping validation rejects it");
-    assert!(
-        output.proposal["operation"].is_null(),
-        "a null in a required position is kept for validation to reject"
-    );
+#[test]
+fn replies_validation_rejects_are_still_rejected_after_normalization() {
+    let span = r#"{"start":0,"end":3}"#;
+    // A null in a required position is kept, so validation rejects it.
+    assert!(!reply_becomes_a_validated_proposal(
+        r#"{"operation":null,"item_type":"action"}"#
+    ));
+    // A non-null value of the wrong type is not touched and is rejected.
+    assert!(!reply_becomes_a_validated_proposal(&format!(
+        r#"{{"operation":{{"kind":"annotate"}},"item_type":"action","source_spans":[{span}],"reminder_proposal":{{"quality":"explicit","instant":5,"source_span":{span}}}}}"#
+    )));
+    // An abstention that comes with a proposal is rejected exactly as before, null siblings or not.
+    assert!(!reply_becomes_a_validated_proposal(&format!(
+        r#"{{"operation":{{"kind":"annotate"}},"item_type":"action","source_spans":[{span}],"reminder_proposal":{{"quality":"ambiguous","source_span":{span}}},"abstention":"Ambiguous","session_topic_proposal":null}}"#
+    )));
+    // The same reply without the abstention is accepted, so the rejections above are specific.
+    assert!(reply_becomes_a_validated_proposal(&format!(
+        r#"{{"operation":{{"kind":"annotate"}},"item_type":"action","source_spans":[{span}],"reminder_proposal":{{"quality":"ambiguous","source_span":{span}}},"abstention":null}}"#
+    )));
+}
+
+#[test]
+fn wire_schema_requires_every_property_at_every_depth_and_keeps_the_rest() {
+    fn walk(source: &Value, derived: &Value, visited: &mut usize) {
+        if let Some(properties) = source.get("properties").and_then(Value::as_object) {
+            *visited += 1;
+            let source_required: Vec<&str> = source
+                .get("required")
+                .and_then(Value::as_array)
+                .map(|keys| keys.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            let mut derived_required: Vec<&str> = derived["required"]
+                .as_array()
+                .expect("derived object lists required")
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            let mut names: Vec<&str> = properties.keys().map(String::as_str).collect();
+            derived_required.sort_unstable();
+            names.sort_unstable();
+            assert_eq!(derived_required, names, "every property is required");
+            assert_eq!(
+                source["additionalProperties"],
+                derived["additionalProperties"]
+            );
+            for (name, property) in properties {
+                let derived_property = &derived["properties"][name];
+                if source_required.contains(&name.as_str()) {
+                    walk(property, derived_property, visited);
+                } else {
+                    let branches = derived_property["anyOf"]
+                        .as_array()
+                        .unwrap_or_else(|| panic!("optional {name} is nullable"));
+                    assert_eq!(branches.last().unwrap(), &json!({"type": "null"}));
+                    assert_eq!(branches.len(), 2);
+                    walk(property, &branches[0], visited);
+                }
+            }
+        } else if let Some(items) = source.get("items") {
+            walk(items, &derived["items"], visited);
+        } else if let Some(branches) = source.get("anyOf").and_then(Value::as_array) {
+            for (index, branch) in branches.iter().enumerate() {
+                walk(branch, &derived["anyOf"][index], visited);
+            }
+        } else {
+            assert_eq!(
+                source, derived,
+                "leaf types, enums and formats are preserved"
+            );
+        }
+    }
+    let source = output_schema();
+    let derived = required_nullable_schema(&source);
+    let mut objects_visited = 0;
+    walk(&source, &derived, &mut objects_visited);
+    // root, operation, reminder_proposal, session_topic_proposal, their spans, source_spans
+    // items, and the abstention Other object.
+    assert!(objects_visited >= 8, "walked {objects_visited} objects");
+    assert_eq!(source["required"], json!(["operation"]), "source unchanged");
 }
 
 #[test]

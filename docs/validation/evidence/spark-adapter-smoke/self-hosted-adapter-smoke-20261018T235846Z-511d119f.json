@@ -1,31 +1,31 @@
 {
   "adapter_revision": {
-    "commit": "d2d81c46f9fa60ac97e8b92b267d152e0700aee1",
+    "commit": "511d119f44d8038cfed5d7ae35a57cbbf26825c9",
     "dirty": false
   },
-  "collected_at": "2026-10-18T19:01:08Z",
+  "collected_at": "2026-10-18T23:58:46Z",
   "collection_context": "odonian-worker",
   "configured_scheme": "https",
-  "evidence_id": "self-hosted-adapter-smoke-20261018T190108Z-d2d81c46",
+  "evidence_id": "self-hosted-adapter-smoke-20261018T235846Z-511d119f",
   "failures": [],
   "max_tokens": 4096,
   "model": "deepseek-flash-iq3:latest",
   "private_raw_evidence": {
-    "bytes": 27116,
+    "bytes": 32694,
     "contents": "request and response bodies of every exchange; no endpoint address or credential",
-    "file_name": "self-hosted-adapter-smoke-20261018T190108Z-d2d81c46.raw.json",
+    "file_name": "self-hosted-adapter-smoke-20261018T235846Z-511d119f.raw.json",
     "location": "private evidence directory of the collecting Odonian worker (OHAND_PRIVATE_EVIDENCE_DIR, default ~/.ohand-private-evidence), outside Git; mode 0600 in a 0700 directory",
-    "run_id": "self-hosted-adapter-smoke-20261018T190108Z-d2d81c46",
-    "sha256": "aa169ec95d7658d85f1f4180ce5e3a4c23141b1e062abe91f5468f90f910adb3"
+    "run_id": "self-hosted-adapter-smoke-20261018T235846Z-511d119f",
+    "sha256": "4d0875395a6c14441f54304528367a538e9d981064a5af26eb9a0caf0812372c"
   },
-  "request_shape": "adapter-built: interpretation prompt carrying the output contract, json_object response_format, reply validated locally; optional nulls treated as absent",
+  "request_shape": "adapter-built: interpretation prompt, strict json_schema response_format derived from output_schema() with every property required and optional ones nullable; optional nulls treated as absent",
   "requests": [
     {
       "conforms_to_output_schema_top_level": true,
-      "content_bytes": 292,
+      "content_bytes": 349,
       "curl_failure": null,
       "dispatch_result": "ok",
-      "elapsed_ms": 108092,
+      "elapsed_ms": 88240,
       "finish_reason": "stop",
       "http_status": 200,
       "mapped_to_validated_proposal": true,
@@ -38,7 +38,7 @@
         "source_spans"
       ],
       "reminder_expected": true,
-      "response_bytes": 5898,
+      "response_bytes": 4501,
       "semantic": {
         "reminder_instant_matches_expected": true,
         "reminder_proposal_present": true,
@@ -47,10 +47,10 @@
     },
     {
       "conforms_to_output_schema_top_level": true,
-      "content_bytes": 99,
+      "content_bytes": 178,
       "curl_failure": null,
       "dispatch_result": "ok",
-      "elapsed_ms": 9873,
+      "elapsed_ms": 18820,
       "finish_reason": "stop",
       "http_status": 200,
       "mapped_to_validated_proposal": true,
@@ -62,7 +62,7 @@
         "source_spans"
       ],
       "reminder_expected": false,
-      "response_bytes": 982,
+      "response_bytes": 1662,
       "semantic": {
         "reminder_instant_matches_expected": false,
         "reminder_proposal_present": false,
@@ -71,10 +71,10 @@
     },
     {
       "conforms_to_output_schema_top_level": true,
-      "content_bytes": 99,
+      "content_bytes": 178,
       "curl_failure": null,
       "dispatch_result": "ok",
-      "elapsed_ms": 7924,
+      "elapsed_ms": 9330,
       "finish_reason": "stop",
       "http_status": 200,
       "mapped_to_validated_proposal": true,
@@ -86,7 +86,7 @@
         "source_spans"
       ],
       "reminder_expected": false,
-      "response_bytes": 840,
+      "response_bytes": 933,
       "semantic": {
         "reminder_instant_matches_expected": false,
         "reminder_proposal_present": false,

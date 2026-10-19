@@ -6,10 +6,10 @@
 //!
 //! - The profile endpoint is the server's base URL, and the adapter posts to
 //!   `<base>/chat/completions`. The request carries `model`, `messages`, `temperature: 0`,
-//!   `max_tokens`, `stream: false` and a `json_object` `response_format`. The output contract travels in the prompt and
-//!   the reply is validated locally against `output_schema()`: a strict `json_schema` made Ollama
-//!   suppress optional proposals (see [`compatibility_boundary`]). A `null` in an optional
-//!   position is treated as absent before validation.
+//!   `max_tokens`, `stream: false` and a strict `json_schema` `response_format`. The schema is
+//!   derived from `output_schema()` by [`required_nullable_schema`]: sending `output_schema()`
+//!   itself made Ollama suppress optional proposals (see [`compatibility_boundary`]). A `null` in
+//!   an optional position of the reply is treated as absent before validation.
 //! - Transport is the shared [`HttpTransport`] seam, so the native layer keeps enforcing https,
 //!   certificate validation, the profile's authorized origin and secret handling. The adapter
 //!   never sees a credential and contacts only the profile's own endpoint: there is no default
@@ -48,7 +48,7 @@ pub const WORKER_PROBE_REVISION: &str = "22c47772849c77b3d3a5e2b03be87098690e738
 pub const WORKER_EVIDENCE_COLLECTED_AT: &str = "2026-10-08T09:39:09Z";
 
 /// Adapter build revision of the semantic smoke runs below.
-pub const SMOKE_ADAPTER_REVISION: &str = "d2d81c46f9fa60ac97e8b92b267d152e0700aee1";
+pub const SMOKE_ADAPTER_REVISION: &str = "511d119f44d8038cfed5d7ae35a57cbbf26825c9";
 
 /// One passing semantic smoke artifact for one model: the reminder capture yielded an `explicit`
 /// `reminder_proposal` at 2026-01-06T15:00 America/Chicago, and the idea and plain-note captures
@@ -62,24 +62,18 @@ pub struct SmokeEvidence {
 }
 
 /// Every model with a passing semantic smoke artifact, and so every `Supported` model.
-pub const SMOKE_EVIDENCE: [SmokeEvidence; 3] = [
+pub const SMOKE_EVIDENCE: [SmokeEvidence; 2] = [
     SmokeEvidence {
         model: "deepseek-flash-iq3:latest",
-        id: "self-hosted-adapter-smoke-20261018T190108Z-d2d81c46",
-        artifact: "docs/validation/evidence/spark-adapter-smoke/self-hosted-adapter-smoke-20261018T190108Z-d2d81c46.json",
-        collected_at: "2026-10-18T19:01:08Z",
-    },
-    SmokeEvidence {
-        model: "gpt-oss:20b",
-        id: "self-hosted-adapter-smoke-20261018T190141Z-d2d81c46",
-        artifact: "docs/validation/evidence/spark-adapter-smoke/self-hosted-adapter-smoke-20261018T190141Z-d2d81c46.json",
-        collected_at: "2026-10-18T19:01:41Z",
+        id: "self-hosted-adapter-smoke-20261018T235846Z-511d119f",
+        artifact: "docs/validation/evidence/spark-adapter-smoke/self-hosted-adapter-smoke-20261018T235846Z-511d119f.json",
+        collected_at: "2026-10-18T23:58:46Z",
     },
     SmokeEvidence {
         model: "qwen3.8:27b",
-        id: "self-hosted-adapter-smoke-20261018T190251Z-d2d81c46",
-        artifact: "docs/validation/evidence/spark-adapter-smoke/self-hosted-adapter-smoke-20261018T190251Z-d2d81c46.json",
-        collected_at: "2026-10-18T19:02:51Z",
+        id: "self-hosted-adapter-smoke-20261019T000049Z-511d119f",
+        artifact: "docs/validation/evidence/spark-adapter-smoke/self-hosted-adapter-smoke-20261019T000049Z-511d119f.json",
+        collected_at: "2026-10-19T00:00:49Z",
     },
 ];
 
@@ -116,12 +110,12 @@ pub fn compatibility_boundary() -> &'static [&'static str] {
         "Verified: https with certificate validation; GET /models and POST /chat/completions answer 200 in OpenAI-compatible form (worker context).",
         "Verified (probe): a strict json_schema response_format returned content matching a two-key schema for deepseek-flash-iq3:latest only.",
         "Observed failure of the previous request shape (strict json_schema carrying output_schema(), coordinator replay 2026-10-18): on deepseek-flash-iq3:latest, qwen3.8:27b, gpt-oss:20b, gpt-oss:120b and qwen3.5:122b, 10 of 10 tries on the reminder capture produced no reminder_proposal, because Ollama's grammar for the schema effectively never emits optional properties. The earlier smoke run passed only because each reply mapped to a valid proposal; it did not check that the reminder was present.",
-        "Observed failure of the derived required-but-nullable strict json_schema (artifacts self-hosted-adapter-smoke-20261018T184843Z-25b37d9c and -20261018T184927Z-25b37d9c, gpt-oss:20b): the reminder returned at the right instant, but the model filled abstention on every capture, and an abstention with a proposal fails validation, so no reply mapped to a validated proposal.",
-        "Verified (adapter semantic smoke, worker context, max_tokens 4096): with a json_object response_format, the output contract in the prompt and local validation, the reminder capture yielded an explicit reminder_proposal at 2026-01-06T15:00 America/Chicago and the idea and plain-note captures yielded none, each reply mapping to a validated proposal, for deepseek-flash-iq3:latest, gpt-oss:20b and qwen3.8:27b (SMOKE_EVIDENCE). A null in an optional position is treated as absent before validation. Calls took up to about 108 seconds; the smoke profile's timeout was 300 seconds.",
+        "Observed failure of the derived request shape on gpt-oss:20b (artifact self-hosted-adapter-smoke-20261018T235922Z-511d119f): the reminder returned at the right instant, but the model filled abstention on every capture, and an abstention with a proposal fails validation, so no reply mapped to a validated proposal. gpt-oss:20b is therefore not Supported; validation was not relaxed to admit it.",
+        "Verified (adapter semantic smoke, worker context, max_tokens 4096): with a strict json_schema derived from output_schema() (every property required, optional ones also accepting null) and local validation, the reminder capture yielded an explicit reminder_proposal at 2026-01-06T15:00 America/Chicago and the idea and plain-note captures yielded none, each reply mapping to a validated proposal, for deepseek-flash-iq3:latest and qwen3.8:27b (SMOKE_EVIDENCE). A null in an optional position is treated as absent before validation. Calls took up to about 90 seconds; the smoke profile's timeout was 300 seconds.",
         "Observed failure at max_tokens 1024 (artifacts self-hosted-adapter-smoke-20261009T145407Z-d1243e1f and -20261009T145540Z-d1243e1f): the reminder capture ended with finish_reason length and empty content because the model's separate reasoning output used the whole budget; the adapter reports InvalidOutput (not retriable). A request that needs more than the bound is therefore not interpreted; the capture itself stays durable.",
         "Not verified: session_topic_proposal output (no smoke capture produced it), ambiguous reminder phrasing, other finish_reason values, streaming, rate limits.",
         "Not verified: the credential is validated; the endpoint answered requests with and without it.",
-        "Not verified: chat requests from the phone context, and for qwen3.5:122b, gpt-oss:120b and glm-5.3-flash.",
+        "Not verified: chat requests from the phone context, and for qwen3.5:122b, gpt-oss:20b, gpt-oss:120b and glm-5.3-flash.",
         "Off the home network the configured hostname answers 302 (POST included) toward the tailnet name; the phone base URL must be the tailnet hostname with Tailscale connected.",
         "Not verified: behaviour with Tailscale disconnected; the endpoint is unreachable and captures stay queued.",
     ]
@@ -162,7 +156,7 @@ pub fn text_interpretation_capability(model: &str, input_size_limit: usize) -> C
     };
     capability
         .with_input_size_limit(input_size_limit)
-        .with_structured_output(StructuredOutputMode::JsonObject)
+        .with_structured_output(StructuredOutputMode::JsonSchema)
 }
 
 /// Every capability a self-hosted profile should declare: text interpretation for `model` plus
