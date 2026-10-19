@@ -58,7 +58,8 @@ final class SettingsRootViewTests: XCTestCase {
         let context = ManagementContext(
             voiceRecovery: current.voiceRecovery, retrieval: current.retrieval, retention: retention,
             providerSettings: providers, promptSettings: current.promptSettings,
-            sourceDetail: current.sourceDetail, suggestion: current.suggestion)
+            sourceDetail: current.sourceDetail, suggestion: current.suggestion,
+            privacySettings: current.privacySettings)
         let root = NavigationStack {
             SettingsRootView(
                 sections: ManagementCatalog.settingsSections, context: context,
@@ -97,7 +98,28 @@ final class SettingsRootViewTests: XCTestCase {
         XCTAssertEqual(ids(SettingsRootView.ordered(SettingsRootView.firstGroupEntryIDs, from: catalog)),
                        ["prompt-settings", "voice-recovery"])
         XCTAssertEqual(ids(SettingsRootView.ordered(SettingsRootView.secondGroupEntryIDs, from: catalog)),
-                       ["provider-settings", "audio-retention"])
+                       ["provider-settings", "privacy-settings", "audio-retention"])
         XCTAssertEqual(SettingsRootView.secondGroupEntryIDs.last, SettingsRootView.exportEntryID)
+    }
+
+    /// The privacy screen is reachable from the app shell: the settings root shows its row, and the catalog entry opens
+    /// the screen over the model `AppServices` assembled, which reads through the root's read gate (locked here, since
+    /// the session is not authenticated).
+    func testPrivacyRowOpensTheAssembledPrivacyScreen() throws {
+        host()
+        settle { rendered["privacy-settings"] != nil }
+        XCTAssertEqual(rendered["privacy-settings"], "Privacy")
+
+        let model = services.managementContext.privacySettings
+        XCTAssertEqual(model.phase, .idle)
+        let entry = try XCTUnwrap(ManagementCatalog.settingsSections.first { $0.id == "privacy-settings" })
+        let shown = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        shown.rootViewController = UIHostingController(rootView: NavigationStack { entry.makeView(services.managementContext) })
+        shown.makeKeyAndVisible()
+        window?.isHidden = true
+        window = shown
+        settle { model.phase == .locked }
+        XCTAssertEqual(model.phase, .locked)
+        XCTAssertTrue(model.routes.isEmpty)
     }
 }
