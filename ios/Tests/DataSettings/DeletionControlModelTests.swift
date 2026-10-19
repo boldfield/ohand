@@ -86,7 +86,8 @@ final class FakeReset: ResetControlling, @unchecked Sendable {
     }
 
     func progress() async throws -> ResetProgress? {
-        try progressResults.removeFirst().get()
+        if progressResults.isEmpty { return nil }
+        return try progressResults.removeFirst().get()
     }
 
     func hasUnfinishedNativeWork() async throws -> Bool { nativeWorkOwed }
@@ -351,8 +352,8 @@ final class ResetSettingsModelTests: XCTestCase {
         controls.resetResults = [
             .success(Self.outcome(
                 .pending, blockers: [.itemCleanupIncomplete], progress: Self.progress(phase: .pending, pending: 2))),
-            .success(Self.outcome(.completed, progress: Self.progress(phase: .completed))),
         ]
+        controls.finishResults = [.success(Self.outcome(.completed, progress: Self.progress(phase: .completed)))]
         let model = makeModel(controls)
         model.credentialChoice = .keep
         model.beginConfirmation()

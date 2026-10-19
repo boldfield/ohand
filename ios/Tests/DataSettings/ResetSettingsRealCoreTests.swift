@@ -162,13 +162,17 @@ final class ResetSettingsRealCoreTests: XCTestCase {
 
     func testAfterARestartAnUnfinishedRemovalIsShownAndRetryFinishesIt() throws {
         let reference = try world.addProfile(version: "profile-restart")
-        let first = try world.launch(wrapCredentials: { FlakyCredentials($0, failures: 1) })
-        let firstModel = try productionModel(first)
-        firstModel.credentialChoice = .remove
-        firstModel.beginConfirmation()
-        try runReset(firstModel, on: first)
-        XCTAssertTrue(firstModel.phase.isPending)
-        first.terminate()
+        // The first process's control holds its reset service, and with it the ingress writer lock, so it must be
+        // gone before the process "ends".
+        do {
+            let first = try world.launch(wrapCredentials: { FlakyCredentials($0, failures: 1) })
+            let firstModel = try productionModel(first)
+            firstModel.credentialChoice = .remove
+            firstModel.beginConfirmation()
+            try runReset(firstModel, on: first)
+            XCTAssertTrue(firstModel.phase.isPending)
+            first.terminate()
+        }
 
         // A new process: the core says the generation completed, but the native removal is still owed.
         let second = try world.launch()
