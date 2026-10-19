@@ -59,9 +59,20 @@ final class HomeRecentsModel: ObservableObject {
     private var generation = 0
     private var removeObserver: (() -> Void)?
 
-    init(source: HomeRecentsSource, now: @escaping () -> Date = Date.init) {
+    /// Waits before the given poll attempt; tests replace it so no real time passes.
+    private let pause: (TimeInterval) async -> Void
+    private var pollTask: Task<Void, Never>?
+    private static let firstPollDelay: TimeInterval = 2
+    private static let longestPollDelay: TimeInterval = 30
+    private static let pollAttemptLimit = 12
+
+    init(
+        source: HomeRecentsSource, now: @escaping () -> Date = Date.init,
+        pause: @escaping (TimeInterval) async -> Void = { try? await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000)) }
+    ) {
         self.source = source
         self.now = now
+        self.pause = pause
         bodyState = Self.state(for: source)
         removeObserver = source.observeAccess { [weak self] in
             if Thread.isMainThread {
@@ -74,6 +85,7 @@ final class HomeRecentsModel: ObservableObject {
     }
 
     deinit {
+        pollTask?.cancel()
         removeObserver?()
     }
 
@@ -101,6 +113,8 @@ final class HomeRecentsModel: ObservableObject {
 
     private func dropHistory() {
         generation += 1
+        pollTask?.cancel()
+        pollTask = nil
         loadedItems = []
         justSaved = [:]
         nextCursor = nil
@@ -231,10 +245,38 @@ final class HomeRecentsModel: ObservableObject {
         if justSaved[itemID] == nil, !interpretationIsResolved {
             justSaved[itemID] = now()
             loadFirstPage()
+            startPollingForInterpretation()
         } else if interpretationIsResolved, justSaved[itemID] != nil {
             Task { @MainActor [weak self] in
                 await self?.refreshAfterInterpretation(itemID: itemID)
             }
+        }
+    }
+
+    /// Nothing tells the home when an interpretation finishes, so while saved items are unsorted the first page is read
+    /// again with growing pauses. It stops when none are left, at the attempt limit, or on a relock.
+    private func startPollingForInterpretation() {
+        guard pollTask == nil else { return }
+        let startedIn = generation
+        pollTask = Task { @MainActor [weak self] in
+            var delay = Self.firstPollDelay
+            for _ in 0..<Self.pollAttemptLimit {
+                guard let pause = self?.pause else { return }
+                await pause(delay)
+                guard let self, !Task.isCancelled, startedIn == self.generation, !self.justSaved.isEmpty else { break }
+                delay = min(delay * 2, Self.longestPollDelay)
+                do {
+                    let page = try await self.source.readPage(cursor: nil)
+                    guard startedIn == self.generation, self.source.isAuthenticated else { break }
+                    self.merge(firstPage: page)
+                } catch {
+                    self.handleFailure(error, startedIn: startedIn)
+                    if startedIn != self.generation { break }
+                }
+                if self.justSaved.isEmpty { break }
+            }
+            guard let self, startedIn == self.generation else { return }
+            self.pollTask = nil
         }
     }
 

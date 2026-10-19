@@ -46,6 +46,21 @@ final class FakeHomeRecentsSource: HomeRecentsSource {
     }
 }
 
+/// Holds the model's poll pauses until a test releases them, so no real time passes.
+actor PollPauses {
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        await withCheckedContinuation { waiting.append($0) }
+    }
+
+    func releaseAll() {
+        let continuations = waiting
+        waiting = []
+        continuations.forEach { $0.resume() }
+    }
+}
+
 @MainActor
 final class HomeRecentsModelTests: XCTestCase {
     private var source: FakeHomeRecentsSource!
@@ -181,6 +196,38 @@ final class HomeRecentsModelTests: XCTestCase {
         await settle()
         XCTAssertEqual(model.entries.map(\.id), ["new", "old"])
         XCTAssertFalse(model.entries[0].isSorting)
+    }
+
+    func testSortingClearsOnItsOwnWhenAPollSeesTheInterpretedItem() async {
+        source.isAuthenticated = true
+        source.pages[nil] = CoreRecentItemsPage(items: [item("old")], nextCursor: nil)
+        let pauses = PollPauses()
+        let model = HomeRecentsModel(source: source, now: { [referenceNow] in referenceNow }, pause: { _ in await pauses.wait() })
+        await settle()
+        model.captureDidSave(itemID: "new", interpretationIsResolved: false)
+        source.pages[nil] = CoreRecentItemsPage(
+            items: [item("new", type: nil, capturedAt: "2026-10-19T11:59:00Z"), item("old")], nextCursor: nil)
+        await settle()
+        await pauses.releaseAll()
+        await settle()
+        XCTAssertTrue(model.entries[0].isSorting, "still unclassified after the first poll")
+        source.pages[nil] = CoreRecentItemsPage(
+            items: [item("new", type: "idea", capturedAt: "2026-10-19T11:59:00Z"), item("old")], nextCursor: nil)
+        await pauses.releaseAll()
+        await settle()
+        XCTAssertFalse(model.entries[0].isSorting)
+        XCTAssertTrue(model.justSaved.isEmpty)
+    }
+
+    func testARelockStopsThePolling() async {
+        source.isAuthenticated = true
+        let model = HomeRecentsModel(source: source, now: { [referenceNow] in referenceNow }, pause: { _ in await PollPauses().wait() })
+        await settle()
+        model.captureDidSave(itemID: "new", interpretationIsResolved: false)
+        source.setAccess(authenticated: false)
+        let readsAtRelock = source.readCursors.count
+        await settle()
+        XCTAssertEqual(source.readCursors.count, readsAtRelock)
     }
 
     func testASaveWhileLockedIsNotRecorded() async {
