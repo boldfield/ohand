@@ -59,6 +59,8 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
     private var keychain: FakeKeychain!
     private var credentialService: CredentialService!
     private var sender: PrivacyUnreachableSender!
+    /// When set, the root sends through this instead: it holds each request until released, then answers it validly.
+    private var heldSender: PrivacyHeldReplySender?
     private var searchModule: RetrievalSearchModule!
 
     override func setUpWithError() throws {
@@ -91,7 +93,7 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         let layoutPath = world.layout.rootDirectory.path
         let readSession = session!
         let credentials = credentialService!
-        let requestSender = sender!
+        let requestSender: ProviderRequestSender = (heldSender as ProviderRequestSender?) ?? sender!
         let built = try await Task.detached { () -> PrivacyBuiltRoot in
             let coordinator = LifecycleCoordinator(stepTimeoutSeconds: 30)
             var calendar = Calendar(identifier: .gregorian)
@@ -179,6 +181,32 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         return created.profileVersion
     }
 
+    private static func interpretationReply() throws -> Data {
+        let phraseStart = 10
+        let phraseEnd = phraseStart + "2099-01-15 11:00:00".count
+        let proposal: [String: Any] = [
+            "operation": ["kind": "annotate"],
+            "item_type": "action",
+            "source_spans": [["start": 0, "end": interpretableText.count]],
+            "reminder_proposal": [
+                "instant": "2099-01-15T11:00:00Z",
+                "timezone_id": "UTC",
+                "quality": "explicit",
+                "source_span": ["start": phraseStart, "end": phraseEnd],
+            ],
+        ]
+        let reply: [String: Any] = [
+            "id": "msg_privacy_settings_01",
+            "type": "message",
+            "role": "assistant",
+            "model": "synthetic-model",
+            "content": [["type": "tool_use", "id": "toolu_privacy_settings_01", "name": "interpret", "input": proposal]],
+            "stop_reason": "tool_use",
+            "usage": ["input_tokens": 42, "output_tokens": 17],
+        ]
+        return try JSONSerialization.data(withJSONObject: reply)
+    }
+
     private func saveCapture(_ text: String = "Synthetic capture text") async throws {
         let box = PrivacySaveOutcomeBox()
         root.saveText(captureID: UUID().uuidString.lowercased(), text: text, capturedAt: Date()) {
@@ -254,9 +282,10 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         XCTAssertTrue(model.isLocalOnly)
 
         startProcessing()
-        // The runner leaves the job queued (a retry is scheduled) or fails it at authorization; it never completes it.
-        _ = try await waitUntil(timeout: 10) { self.scalar("SELECT status FROM jobs LIMIT 1") == "completed" }
-        XCTAssertNotEqual(scalar("SELECT status FROM jobs LIMIT 1"), "completed")
+        // The core denies the job at authorization and holds it for configuration; wait for that stored reason.
+        let denied = try await waitUntil { self.scalar("SELECT failure_reason FROM jobs LIMIT 1") == "unauthorized" }
+        XCTAssertTrue(denied, "the job was denied: \(jobStatus())")
+        XCTAssertNotEqual(jobStatus(), "completed")
         XCTAssertEqual(sender.attemptCount, 0, "a revoked capability sends nothing, even for work queued before it")
 
         model = try await relaunch()
@@ -264,6 +293,159 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         XCTAssertEqual(model.phase, .loaded)
         XCTAssertTrue(model.isLocalOnly, "the revocation survives a relaunch")
         XCTAssertEqual(sender.attemptCount, 0)
+    }
+
+    private func jobStatus() -> String { scalar("SELECT status FROM jobs LIMIT 1") }
+
+    /// A dispatchable profile (credential bound), optionally the text-interpretation default.
+    private func createDispatchableProfile(_ name: String, makeDefault: Bool) async throws -> String {
+        let reference = try root.providerCredentials.addCredential(Data("synthetic-key-\(name)".utf8))
+        let created = try await root.providerConfiguration.createProfile(
+            ProviderProfileDraft(
+                profileID: name, providerProtocol: "anthropic", endpoint: nil, model: "synthetic-model",
+                credentialReference: reference, timeoutSeconds: 30))
+        if makeDefault {
+            try await root.providerConfiguration.setDefault(
+                capability: "text_interpretation", profileVersion: created.profileVersion)
+        }
+        return created.profileVersion
+    }
+
+    /// Grants, saves a capture and lets the runner send it, leaving the request held in flight.
+    private func startHeldRequest(_ held: PrivacyHeldReplySender) async throws -> (PrivacySettingsModel, String) {
+        let model = try await makeModel()
+        let version = try await createDispatchableDefault()
+        await model.refresh()
+        model.propose(routeID: "route-personal", capability: "text_interpretation", profileVersion: version)
+        await model.confirm(try XCTUnwrap(model.proposal))
+        try await saveCapture(Self.interpretableText)
+        startProcessing()
+        let sent = try await waitUntil { held.attemptCount == 1 }
+        XCTAssertTrue(sent, "the request left the device: \(jobStatus())")
+        XCTAssertEqual(jobStatus(), "running")
+        await model.refresh()
+        XCTAssertEqual(model.queuedWork.flatMap(\.jobs.jobs).map(\.status), ["running"], "the screen shows the sent request")
+        return (model, version)
+    }
+
+    func testARouteRevocationWhileARequestIsInFlightDiscardsTheLateReplyAndTheScreenSaysSo() async throws {
+        let held = PrivacyHeldReplySender(reply: try Self.interpretationReply())
+        heldSender = held
+        defer { held.release() }
+        let (model, _) = try await startHeldRequest(held)
+
+        model.proposeRevoke(routeID: "route-personal", capability: "text_interpretation")
+        await model.confirmChange(try XCTUnwrap(model.change))
+        guard case .changed(let message) = model.actionState else { return XCTFail("expected changed, got \(String(describing: model.actionState))") }
+        XCTAssertTrue(message.contains("1 already sent"), message)
+        XCTAssertTrue(message.contains("A reply to a request already sent is not applied"), message)
+
+        held.release()
+        let settled = try await waitUntil { self.jobStatus() != "running" }
+        XCTAssertTrue(settled, "the late reply was handled: \(jobStatus())")
+        XCTAssertNotEqual(jobStatus(), "completed", "a reply after the revocation does not complete the job")
+        XCTAssertEqual(scalar("SELECT failure_reason FROM jobs LIMIT 1"), "unauthorized", "the core denied the late reply")
+        XCTAssertEqual(scalar("SELECT COUNT(*) FROM proposals"), "0", "nothing was applied")
+        XCTAssertNotEqual(scalar("SELECT processing_state FROM items LIMIT 1"), "processed")
+
+        await model.refresh()
+        XCTAssertEqual(model.routesHoldingWork, ["Personal route · Local capture"])
+        XCTAssertFalse(
+            model.queuedWork.flatMap(\.jobs.jobs).contains { $0.status == "running" }, "the screen shows no request as sent")
+    }
+
+    func testAProfileRevocationWhileARequestIsInFlightRetiresTheJobAndTheLateReplyIsNotApplied() async throws {
+        let held = PrivacyHeldReplySender(reply: try Self.interpretationReply())
+        heldSender = held
+        defer { held.release() }
+        let (model, version) = try await startHeldRequest(held)
+        let jobID = scalar("SELECT job_id FROM jobs LIMIT 1")
+
+        model.proposeRevokeProfile(profileVersion: version)
+        await model.confirmChange(try XCTUnwrap(model.change))
+        guard case .changed(let message) = model.actionState else { return XCTFail("expected changed, got \(String(describing: model.actionState))") }
+        XCTAssertTrue(message.contains("1 job retired"), message)
+        XCTAssertTrue(message.contains("1 had already been sent"), message)
+        XCTAssertEqual(jobStatus(), "cancelled")
+        XCTAssertEqual(scalar("SELECT failure_reason FROM jobs LIMIT 1"), "profile_revoked")
+        XCTAssertEqual(model.retiredWork.first?.jobs.map(\.jobID), [jobID], "the retired job stays open to an explicit move")
+        XCTAssertTrue(model.queuedWork.isEmpty)
+
+        held.release()
+        let returned = try await waitUntil { held.returnedCount == 1 }
+        XCTAssertTrue(returned)
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+        XCTAssertEqual(jobStatus(), "cancelled", "a late reply cannot bring the job back")
+        XCTAssertEqual(scalar("SELECT COUNT(*) FROM proposals"), "0", "nothing was applied")
+        XCTAssertNotEqual(scalar("SELECT processing_state FROM items LIMIT 1"), "processed")
+    }
+
+    func testRetiredWorkIsMovedOnPurposeAndTheCoresLinkIsInspectableAndIdempotent() async throws {
+        let model = try await makeModel()
+        let version = try await createDispatchableDefault()
+        let other = try await createDispatchableProfile("other", makeDefault: false)
+        await model.refresh()
+        model.propose(routeID: "route-personal", capability: "text_interpretation", profileVersion: version)
+        await model.confirm(try XCTUnwrap(model.proposal))
+        try await saveCapture(Self.interpretableText)
+        let jobID = scalar("SELECT job_id FROM jobs LIMIT 1")
+        await model.refresh()
+        XCTAssertEqual(model.queuedWork.flatMap(\.jobs.jobs).map(\.jobID), [jobID])
+
+        model.proposeRevokeProfile(profileVersion: version)
+        await model.confirmChange(try XCTUnwrap(model.change))
+        guard case .changed(let message) = model.actionState else { return XCTFail("expected changed") }
+        XCTAssertTrue(message.contains("1 job retired"), message)
+        XCTAssertEqual(scalar("SELECT failure_reason FROM jobs WHERE job_id = '\(jobID)'"), "profile_revoked")
+        XCTAssertTrue(model.queuedWork.isEmpty)
+
+        model.proposeRequeue(jobID: jobID, toProfileVersion: other)
+        let shown = try XCTUnwrap(model.requeueProposal, "the retired job can be moved on purpose")
+        XCTAssertEqual(scalar("SELECT COUNT(*) FROM job_requeues"), "0", "opening the question moves nothing")
+        await model.confirmRequeue(shown)
+        guard case .changed = model.actionState else { return XCTFail("expected changed, got \(String(describing: model.actionState))") }
+        let record = try XCTUnwrap(model.lastRequeue, "the core's link is shown")
+        XCTAssertEqual(record.oldJobID, jobID)
+        XCTAssertEqual(record.fromProfileVersion, version)
+        XCTAssertEqual(record.toProfileVersion, other)
+        XCTAssertFalse(model.requeueRecordUnreadable)
+        XCTAssertEqual(
+            scalar("SELECT old_job_id || '|' || new_job_id || '|' || from_profile_version || '|' || to_profile_version FROM job_requeues"),
+            "\(jobID)|\(record.newJobID)|\(version)|\(other)", "the shown link is the core's stored row")
+        XCTAssertEqual(scalar("SELECT profile_version FROM jobs WHERE job_id = '\(record.newJobID)'"), other)
+
+        let repeated = try await root.jobConfiguration.requeue(jobID: jobID, newJobID: shown.newJobID, toProfileVersion: other)
+        XCTAssertEqual(repeated.jobID, record.newJobID, "repeating the same action answers the same replacement")
+        XCTAssertEqual(scalar("SELECT COUNT(*) FROM job_requeues"), "1")
+    }
+
+    func testRepinMovesNothingWithoutAnApprovedProviderThenMovesWaitingWorkOnceOneIsSelected() async throws {
+        let model = try await makeModel()
+        let version = try await createDispatchableProfile("hosted", makeDefault: false)
+        await model.refresh()
+        model.propose(routeID: "route-personal", capability: "text_interpretation", profileVersion: version)
+        await model.confirm(try XCTUnwrap(model.proposal))
+        try await saveCapture(Self.interpretableText)
+        startProcessing()
+        let waiting = try await waitUntil { self.jobStatus() == "failed" }
+        XCTAssertTrue(waiting, "with no default selected the job stops for configuration: \(jobStatus())")
+
+        model.proposeRepinWaitingWork(routeID: "route-personal")
+        await model.confirmChange(try XCTUnwrap(model.change))
+        guard case .changed(let none) = model.actionState else { return XCTFail("expected changed") }
+        XCTAssertTrue(none.hasPrefix("Nothing was moved"), none)
+        XCTAssertEqual(scalar("SELECT COUNT(*) FROM jobs"), "1")
+        XCTAssertEqual(model.phase, .loaded, "the app stays usable with no approved provider")
+        try await saveCapture("Synthetic second capture")
+
+        try await root.providerConfiguration.setDefault(capability: "text_interpretation", profileVersion: version)
+        await model.refresh()
+        model.proposeRepinWaitingWork(routeID: "route-personal")
+        await model.confirmChange(try XCTUnwrap(model.change))
+        guard case .changed(let moved) = model.actionState else { return XCTFail("expected changed") }
+        XCTAssertTrue(moved.hasPrefix("Queued"), moved)
+        XCTAssertGreaterThanOrEqual(Int(scalar("SELECT COUNT(*) FROM jobs WHERE profile_version = '\(version)'")) ?? 0, 1)
+        XCTAssertGreaterThanOrEqual(Int(scalar("SELECT COUNT(*) FROM job_requeues")) ?? 0, 1, "the core recorded the move")
     }
 
     func testProcessingACaptureCreatesNoGrantAndSendsNothingWithoutOne() async throws {
@@ -368,5 +550,32 @@ private final class PrivacyUnreachableSender: ProviderRequestSender, @unchecked 
         attempts += 1
         lock.unlock()
         throw ProviderTransportError.connectionFailed
+    }
+}
+
+/// Holds every request until released, then answers it with one valid reply, so a test controls when a late result
+/// arrives.
+private final class PrivacyHeldReplySender: ProviderRequestSender, @unchecked Sendable {
+    private let lock = NSLock()
+    private let reply: Data
+    private var released = false
+    private var attempts = 0
+    private var returned = 0
+
+    init(reply: Data) { self.reply = reply }
+
+    var attemptCount: Int { lock.withLock { attempts } }
+    var returnedCount: Int { lock.withLock { returned } }
+
+    func release() { lock.withLock { released = true } }
+
+    func send(_ request: ProviderHTTPRequest) async throws -> ProviderHTTPResponse {
+        lock.withLock { attempts += 1 }
+        while !lock.withLock({ released }) {
+            if Task.isCancelled { throw ProviderTransportError.cancelled }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        lock.withLock { returned += 1 }
+        return ProviderHTTPResponse(status: 200, headers: ["Content-Type": "application/json"], body: reply)
     }
 }

@@ -135,28 +135,53 @@ enum PrivacySettingsText {
     }
 
     static func revokeResult(
-        _ outcome: RoutePolicyChangeOutcome.Disposition, routeLabel: String, capability: String
+        _ outcome: RoutePolicyChangeOutcome.Disposition, routeLabel: String, capability: String,
+        stillAllowed: Bool? = nil, work: PrivacyWorkTally? = nil
     ) -> String {
         switch outcome {
         case .revoked:
-            return "Stopped \(capabilityName(capability).lowercased()) on \(routeLabel). Work still waiting for it "
-                + "will not be sent."
+            let stopped = "Stopped \(capabilityName(capability).lowercased()) on \(routeLabel)."
+            if stillAllowed == true { return stopped + " The stored policy still lists it as allowed; check the route above." }
+            guard let work else { return stopped + " The queued work could not be read again." }
+            if work.waiting == 0 && work.sent == 0 { return stopped + " No queued or running work is listed." }
+            let atLeast = work.truncated ? "at least " : ""
+            return stopped + " Read back: \(atLeast)\(work.waiting) waiting (held, not sent) and \(atLeast)\(work.sent) "
+                + "already sent. A reply to a request already sent is not applied."
         case .unchanged: return "That was not allowed, so nothing changed."
         case .granted: return "Nothing changed."
         }
     }
 
-    static func profileRevoked(_ versionLabel: String) -> String {
-        "Revoked \(versionLabel). Work queued for it was retired and was not moved to another provider."
+    static func profileRevoked(_ versionLabel: String, retired: Int, alreadySent: Int, stillPending: Int) -> String {
+        var message = "Revoked \(versionLabel). \(retired) job\(retired == 1 ? "" : "s") retired and not moved to another provider."
+        if alreadySent > 0 {
+            message += " \(alreadySent) had already been sent; a reply to it is not applied."
+        }
+        if stillPending > 0 { message += " The core still lists \(stillPending) as pending; check Queued work." }
+        if retired > 0 { message += " Each can be moved on purpose below." }
+        return message
     }
 
-    static func repinResult(moved: Int, routeLabel: String) -> String {
+    static func profileRevokedUnread(_ versionLabel: String) -> String {
+        "Revoked \(versionLabel). The work that was waiting for it could not be read back; its jobs are retired by "
+            + "the core and not moved."
+    }
+
+    static func repinResult(moved: Int, routeLabel: String, moreMayWait: Bool = false) -> String {
         if moved == 0 {
             return "Nothing was moved: no notes were waiting, or no allowed provider is selected for \(routeLabel)."
         }
         let notes = moved == 1 ? "1 waiting note" : "\(moved) waiting notes"
-        return "Queued \(notes) on \(routeLabel) with the provider selected now."
+        let rest = moreMayWait ? " More may still be waiting; run it again to queue them." : ""
+        return "Queued \(notes) on \(routeLabel) with the provider selected now." + rest
     }
+
+    static let heldWorkNotice = "Queued work for a route that does not allow sorting text notes is held, not sent: "
+    static let retiredWorkTitle = "Retired work"
+    static func heldWork(_ routeLabels: [String]) -> String { heldWorkNotice + routeLabels.joined(separator: ", ") + "." }
+    static func retiredJob(_ job: JobConfigurationPinnedJob) -> String { "Job \(job.jobID) · retired (provider revoked)" }
+    static let requeueRecordUnreadableNotice = "The record of that move could not be read. The move itself was accepted."
+    static let requeueRecordRetry = "Read the record again"
 
     static func queuedCount(_ jobs: JobConfigurationPinnedJobs) -> String {
         let noun = jobs.total == 1 ? "job" : "jobs"
@@ -164,15 +189,17 @@ enum PrivacySettingsText {
     }
 
     static func queuedJob(_ job: JobConfigurationPinnedJob) -> String {
-        "Job \(job.jobID) · \(job.status)"
+        let state = job.status == "running" ? "running (request already sent)" : job.status
+        return "Job \(job.jobID) · \(state)"
     }
 
     static func requeueQuestion(_ proposal: PrivacyRequeueProposal) -> String {
         "Move job \(proposal.jobID) from \(proposal.fromVersionLabel) to \(proposal.toVersionLabel)?"
     }
 
-    static func requeued(to versionLabel: String) -> String {
-        "Moved to \(versionLabel). The old job was retired and the link is recorded below."
+    static func requeued(to versionLabel: String, recorded: Bool) -> String {
+        "Moved to \(versionLabel). The old job was retired"
+            + (recorded ? " and the link is recorded below." : "; its link could not be read yet.")
     }
 
     static func requeueRecord(_ record: JobConfigurationRequeueRecord) -> String {

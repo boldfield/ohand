@@ -22,6 +22,12 @@ struct PrivacySettingsView: View {
     static let requeueQuestionIdentifier = "privacy-settings.requeue-question"
     static let requeueConfirmIdentifier = "privacy-settings.requeue-confirm"
     static let requeueRecordIdentifier = "privacy-settings.requeue-record"
+    static let requeueRecordUnreadableIdentifier = "privacy-settings.requeue-record-unreadable"
+    static let requeueRecordRetryIdentifier = "privacy-settings.requeue-record-retry"
+    static let heldWorkIdentifier = "privacy-settings.held-work"
+    static let retiredWorkIdentifier = "privacy-settings.retired-work"
+    static func queuedJobIdentifier(_ job: String) -> String { "privacy-settings.queued-job.\(job)" }
+    static func retiredJobIdentifier(_ job: String) -> String { "privacy-settings.retired-job.\(job)" }
     static func revokeIdentifier(_ route: String, _ capability: String) -> String {
         "privacy-settings.revoke.\(route).\(capability)"
     }
@@ -91,6 +97,14 @@ struct PrivacySettingsView: View {
             if let requeue = model.requeueProposal { requeueCard(requeue) }
             if let record = model.lastRequeue {
                 note(PrivacySettingsText.requeueRecord(record), identifier: Self.requeueRecordIdentifier)
+            }
+            if model.requeueRecordUnreadable {
+                note(PrivacySettingsText.requeueRecordUnreadableNotice, identifier: Self.requeueRecordUnreadableIdentifier)
+                DSPillButton(title: PrivacySettingsText.requeueRecordRetry, style: .secondary) {
+                    Task { await model.loadRequeueRecord() }
+                }
+                .reportPrivacyRendered(Self.requeueRecordRetryIdentifier, text: PrivacySettingsText.requeueRecordRetry)
+                .accessibilityIdentifier(Self.requeueRecordRetryIdentifier)
             }
             if let state = model.actionState {
                 note(state.message, identifier: Self.actionStateIdentifier)
@@ -171,6 +185,24 @@ struct PrivacySettingsView: View {
             }
             .accessibilityIdentifier(Self.queuedWorkIdentifier)
         }
+        if !model.queuedWork.isEmpty, !model.routesHoldingWork.isEmpty {
+            note(PrivacySettingsText.heldWork(model.routesHoldingWork), identifier: Self.heldWorkIdentifier)
+        }
+        if !model.retiredWork.isEmpty {
+            DSGroupedSection(title: PrivacySettingsText.retiredWorkTitle) {
+                ForEach(model.retiredWork, id: \.profileVersion) { retired in
+                    ForEach(retired.jobs, id: \.jobID) { job in
+                        let text = PrivacySettingsText.retiredJob(job)
+                        let identifier = Self.retiredJobIdentifier(job.jobID)
+                        DSRow(label: text, iconSystemName: "xmark.bin", showsChevron: false)
+                            .reportPrivacyRendered(identifier, text: text)
+                            .accessibilityIdentifier(identifier)
+                        moveOffers(jobID: job.jobID, from: retired.profileVersion)
+                    }
+                }
+            }
+            .accessibilityIdentifier(Self.retiredWorkIdentifier)
+        }
         if let listing = model.listing {
             let revocable = listing.profiles.flatMap { profile in
                 profile.versions.filter { !$0.revoked }.map { (profile.profileID, $0) }
@@ -201,17 +233,25 @@ struct PrivacySettingsView: View {
             .reportPrivacyRendered(identifier, text: heading)
             .accessibilityIdentifier(identifier)
         ForEach(queued.jobs.jobs, id: \.jobID) { job in
-            DSRow(label: PrivacySettingsText.queuedJob(job), iconSystemName: "clock", showsChevron: false)
-            ForEach(otherVersions(than: queued.version.profileVersion), id: \.version.profileVersion) { target in
-                let label = "Move to \(PrivacySettingsText.versionLabel(profileID: target.profileID, version: target.version))"
-                let offerIdentifier = Self.requeueOfferIdentifier(job.jobID, target.version.profileVersion)
-                DSRow(label: label, iconSystemName: "arrow.right", showsChevron: false) {
-                    model.proposeRequeue(jobID: job.jobID, toProfileVersion: target.version.profileVersion)
-                }
-                .reportPrivacyRendered(offerIdentifier, text: label)
-                .accessibilityIdentifier(offerIdentifier)
-                .disabled(model.isWorking)
+            let jobText = PrivacySettingsText.queuedJob(job)
+            DSRow(label: jobText, iconSystemName: "clock", showsChevron: false)
+                .reportPrivacyRendered(Self.queuedJobIdentifier(job.jobID), text: jobText)
+                .accessibilityIdentifier(Self.queuedJobIdentifier(job.jobID))
+            moveOffers(jobID: job.jobID, from: queued.version.profileVersion)
+        }
+    }
+
+    @ViewBuilder
+    private func moveOffers(jobID: String, from profileVersion: String) -> some View {
+        ForEach(otherVersions(than: profileVersion), id: \.version.profileVersion) { target in
+            let label = "Move to \(PrivacySettingsText.versionLabel(profileID: target.profileID, version: target.version))"
+            let offerIdentifier = Self.requeueOfferIdentifier(jobID, target.version.profileVersion)
+            DSRow(label: label, iconSystemName: "arrow.right", showsChevron: false) {
+                model.proposeRequeue(jobID: jobID, toProfileVersion: target.version.profileVersion)
             }
+            .reportPrivacyRendered(offerIdentifier, text: label)
+            .accessibilityIdentifier(offerIdentifier)
+            .disabled(model.isWorking)
         }
     }
 

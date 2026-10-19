@@ -39,6 +39,8 @@ final class FakePrivacySettingsControls: PrivacySettingsControlling, @unchecked 
     private(set) var repins: [String] = []
     /// Invoked in the middle of every revocation, so a test can change stored state while it is in flight.
     var duringRevoke: (() -> Void)?
+    /// Invoked in the middle of every profile revocation, so a test can change the pinned work as the core does.
+    var duringRevokeProfile: (() -> Void)?
 
     func revoke(routeID: String, capability: String) async throws -> RoutePolicyChangeOutcome.Disposition {
         revocations.append([routeID, capability])
@@ -48,6 +50,7 @@ final class FakePrivacySettingsControls: PrivacySettingsControlling, @unchecked 
 
     func revokeProfile(_ profileVersion: String) async throws {
         profileRevocations.append(profileVersion)
+        duringRevokeProfile?()
         try revokeProfileResult.get()
     }
 
@@ -270,7 +273,7 @@ final class PrivacySettingsModelTests: XCTestCase {
         await model.confirmChange(try XCTUnwrap(model.change))
         XCTAssertEqual(controls.revocations, [["route-personal", "text_interpretation"]])
         guard case .changed(let message) = model.actionState else { return XCTFail("expected changed") }
-        XCTAssertTrue(message.contains("will not be sent"))
+        XCTAssertTrue(message.contains("No queued or running work is listed"), message)
         XCTAssertFalse(model.isGranted(routeID: "route-personal", capability: "text_interpretation"))
         XCTAssertTrue(model.isLocalOnly, "with nothing allowed the app is still usable, local only")
         XCTAssertNil(model.change)
@@ -306,10 +309,13 @@ final class PrivacySettingsModelTests: XCTestCase {
         XCTAssertEqual(model.queuedWork.map(\.version.profileVersion), ["hosted-v1"])
         model.proposeRevokeProfile(profileVersion: "hosted-v1")
         controls.revokeProfileResult = .success(())
-        controls.pinned["hosted-v1"] = nil
+        controls.duringRevokeProfile = { controls.pinned["hosted-v1"] = nil }
         await model.confirmChange(try XCTUnwrap(model.change))
         XCTAssertEqual(controls.profileRevocations, ["hosted-v1"])
         XCTAssertTrue(model.queuedWork.isEmpty, "the queue shown is the one read back after the revocation")
+        guard case .changed(let message) = model.actionState else { return XCTFail("expected changed") }
+        XCTAssertTrue(message.contains("1 job retired"), message)
+        XCTAssertEqual(model.retiredWork.map(\.jobs.first?.jobID), ["job-1"], "the retired job stays open to a deliberate move")
         model.proposeRevokeProfile(profileVersion: "old-v1")
         XCTAssertNil(model.change, "an already revoked version is not offered")
     }
@@ -396,5 +402,79 @@ final class PrivacySettingsModelTests: XCTestCase {
         XCTAssertEqual(model.phase, .locked)
         XCTAssertNil(model.change)
         XCTAssertTrue(model.queuedWork.isEmpty)
+    }
+
+    func testARevokedVersionsRetiredWorkCanBeMovedOnPurposeAfterwards() async throws {
+        let (model, controls) = makeModel()
+        controls.pinned["hosted-v1"] = JobConfigurationPinnedJobs(
+            jobs: [
+                JobConfigurationPinnedJob(jobID: "job-1", itemID: "item-1", status: "queued"),
+                JobConfigurationPinnedJob(jobID: "job-2", itemID: "item-2", status: "running"),
+            ], total: 2, truncated: false)
+        await model.refresh()
+        model.proposeRevokeProfile(profileVersion: "hosted-v1")
+        controls.duringRevokeProfile = { controls.pinned["hosted-v1"] = nil }
+        await model.confirmChange(try XCTUnwrap(model.change))
+        guard case .changed(let message) = model.actionState else { return XCTFail("expected changed") }
+        XCTAssertTrue(message.contains("2 jobs retired"), message)
+        XCTAssertTrue(message.contains("1 had already been sent"), message)
+        XCTAssertEqual(model.retiredWork.first?.jobs.map(\.jobID), ["job-1", "job-2"])
+
+        model.proposeRequeue(jobID: "job-2", toProfileVersion: "private-v1")
+        let shown = try XCTUnwrap(model.requeueProposal)
+        XCTAssertEqual(shown.toProfileVersion, "private-v1")
+        XCTAssertTrue(controls.requeues.isEmpty, "opening the question moves nothing")
+        model.proposeRequeue(jobID: "job-2", toProfileVersion: "old-v1")
+        XCTAssertEqual(model.requeueProposal, shown, "a revoked target is not proposed")
+        await model.confirmRequeue(shown)
+        XCTAssertEqual(controls.requeues.last, ["job-2", shown.newJobID, "private-v1"])
+        XCTAssertEqual(model.retiredWork.first?.jobs.map(\.jobID), ["job-1"], "a moved job leaves the retired list")
+    }
+
+    func testAnUnreadableRequeueRecordIsShownAsUnreadableAndCanBeReadAgain() async throws {
+        let (model, controls) = makeModel()
+        controls.pinned["hosted-v1"] = pinnedJobs(["job-1"])
+        await model.refresh()
+        model.proposeRequeue(jobID: "job-1", toProfileVersion: "private-v1")
+        controls.recordResult = .failure(JobConfigurationError.unreadable)
+        await model.confirmRequeue(try XCTUnwrap(model.requeueProposal))
+        XCTAssertTrue(model.requeueRecordUnreadable)
+        XCTAssertNil(model.lastRequeue)
+        guard case .changed(let message) = model.actionState else { return XCTFail("expected changed") }
+        XCTAssertFalse(message.contains("recorded below"), message)
+
+        controls.recordResult = .success(
+            JobConfigurationRequeueRecord(
+                oldJobID: "job-1", newJobID: "job-new", fromProfileVersion: "hosted-v1", toProfileVersion: "private-v1",
+                requeuedAt: "2026-10-01T00:00:00Z"))
+        await model.loadRequeueRecord()
+        XCTAssertFalse(model.requeueRecordUnreadable)
+        XCTAssertEqual(model.lastRequeue?.oldJobID, "job-1")
+    }
+
+    func testAFullRepinBatchSaysMoreMayStillBeWaiting() async throws {
+        let (model, controls) = makeModel(routes: [grantedRoute()])
+        controls.repinResult = .success(PrivacySettingsModel.repinBatchLimit)
+        await model.refresh()
+        model.proposeRepinWaitingWork(routeID: "route-personal")
+        await model.confirmChange(try XCTUnwrap(model.change))
+        guard case .changed(let message) = model.actionState else { return XCTFail("expected changed") }
+        XCTAssertTrue(message.contains("More may still be waiting"), message)
+    }
+
+    func testARouteRevocationReadsBackWhichWorkIsWaitingAndWhichWasSent() async throws {
+        let (model, controls) = makeModel(routes: [grantedRoute()])
+        controls.pinned["hosted-v1"] = JobConfigurationPinnedJobs(
+            jobs: [
+                JobConfigurationPinnedJob(jobID: "job-1", itemID: "item-1", status: "queued"),
+                JobConfigurationPinnedJob(jobID: "job-2", itemID: "item-2", status: "running"),
+            ], total: 2, truncated: false)
+        await model.refresh()
+        model.proposeRevoke(routeID: "route-personal", capability: "text_interpretation")
+        controls.duringRevoke = { controls.routes = .success([privacyRoute(id: "route-personal", name: "Local capture", scope: "personal")]) }
+        await model.confirmChange(try XCTUnwrap(model.change))
+        guard case .changed(let message) = model.actionState else { return XCTFail("expected changed") }
+        XCTAssertTrue(message.contains("1 waiting (held, not sent) and 1 already sent"), message)
+        XCTAssertEqual(model.routesHoldingWork, ["Personal route · Local capture"])
     }
 }

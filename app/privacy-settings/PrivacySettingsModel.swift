@@ -103,11 +103,27 @@ struct PrivacyRequeueProposal: Equatable {
     let toVersionLabel: String
 }
 
+/// Counts of listed jobs by what the core says happened to them: still waiting here, or already sent.
+struct PrivacyWorkTally: Equatable {
+    let waiting: Int
+    let sent: Int
+    /// True when the core listed fewer jobs than it holds, so the counts are lower bounds.
+    let truncated: Bool
+}
+
 /// Work queued or running behind one unrevoked stored profile version. Item and status only; no content.
 struct PrivacyQueuedVersion: Equatable {
     let profileID: String
     let version: ProviderProfileListAnswer.Version
     let jobs: JobConfigurationPinnedJobs
+}
+
+/// Work a profile revocation retired, remembered from the moment before the revocation so the user can still move it
+/// deliberately. The core lists only queued and running jobs, so this is the only place retired work stays visible.
+struct PrivacyRetiredVersion: Equatable {
+    let profileVersion: String
+    let versionLabel: String
+    let jobs: [JobConfigurationPinnedJob]
 }
 
 enum PrivacySettingsPhase: Equatable {
@@ -166,12 +182,20 @@ final class PrivacySettingsModel: ObservableObject {
     @Published private(set) var queuedWorkUnreadable = false
     /// The link the core recorded for the most recent requeue, so the move can be inspected.
     @Published private(set) var lastRequeue: JobConfigurationRequeueRecord?
+    /// Whether the record of the most recent requeue could not be read; `loadRequeueRecord` reads it again.
+    @Published private(set) var requeueRecordUnreadable = false
+    /// Work retired by a profile revocation in this session, each job still open to an explicit move.
+    @Published private(set) var retiredWork: [PrivacyRetiredVersion] = []
+    private var lastReplacementJobID: String?
 
     /// The capabilities the core lets a user authorize for sending content.
     static let grantableCapabilities = ["text_interpretation", "review"]
 
     /// How many queued jobs are listed per version; the core reports the full count either way.
     static let queuedJobLimit = 20
+
+    /// The most waiting notes one repin moves; the core stops at this many, so a full batch may leave more waiting.
+    static let repinBatchLimit = 100
 
     private let controls: PrivacySettingsControlling
     private let readScope: () -> CompositionReadScope
@@ -205,6 +229,12 @@ final class PrivacySettingsModel: ObservableObject {
                 return PrivacyOfferedVersion(profileID: profile.profileID, version: version)
             }
         }
+    }
+
+    /// Labels of the routes that do not allow sorting text notes. Queued work for such a route is held, not sent.
+    var routesHoldingWork: [String] {
+        routes.filter { route in !route.grantedCapabilities.contains { $0.capability == "text_interpretation" } }
+            .map(PrivacySettingsText.routeLabel)
     }
 
     /// Reads routes and profiles again.
@@ -329,17 +359,24 @@ final class PrivacySettingsModel: ObservableObject {
         guard readScope() == .authenticated else { lock(); return }
         guard let current = change, current == shown, !isWorking else { return }
         actionState = .working
+        var routeRevoke: (outcome: RoutePolicyChangeOutcome.Disposition, routeID: String, routeLabel: String, capability: String)?
         do {
             switch current.target {
             case .revokeRouteCapability(let routeID, let routeLabel, let capability):
                 let outcome = try await controls.revoke(routeID: routeID, capability: capability)
+                routeRevoke = (outcome, routeID, routeLabel, capability)
                 actionState = .changed(PrivacySettingsText.revokeResult(outcome, routeLabel: routeLabel, capability: capability))
             case .revokeProfileVersion(let profileVersion, let versionLabel):
+                // Read the work pinned to it before and after, so the message and the retry list come from the core.
+                let before = try? await controls.jobsPinned(toProfile: profileVersion, limit: nil)
                 try await controls.revokeProfile(profileVersion)
-                actionState = .changed(PrivacySettingsText.profileRevoked(versionLabel))
+                let after = try? await controls.jobsPinned(toProfile: profileVersion, limit: nil)
+                actionState = .changed(retire(profileVersion, versionLabel: versionLabel, before: before, after: after))
             case .repinWaitingWork(let routeID, let routeLabel):
                 let moved = try await controls.repinWaitingWork(routeID: routeID)
-                actionState = .changed(PrivacySettingsText.repinResult(moved: moved, routeLabel: routeLabel))
+                actionState = .changed(
+                    PrivacySettingsText.repinResult(
+                        moved: moved, routeLabel: routeLabel, moreMayWait: moved >= Self.repinBatchLimit))
             }
             change = nil
         } catch {
@@ -348,14 +385,50 @@ final class PrivacySettingsModel: ObservableObject {
             actionState = .failed(PrivacySettingsText.changeFailure(error))
         }
         await refresh()
+        if let revoked = routeRevoke, case .changed = actionState {
+            actionState = .changed(
+                PrivacySettingsText.revokeResult(
+                    revoked.outcome, routeLabel: revoked.routeLabel, capability: revoked.capability,
+                    stillAllowed: phase == .loaded
+                        ? isGranted(routeID: revoked.routeID, capability: revoked.capability) : nil,
+                    work: phase == .loaded ? queuedWorkTally : nil))
+        }
+    }
+
+    /// How much of the work listed now is waiting and how much has already been sent, from the core's own statuses.
+    private var queuedWorkTally: PrivacyWorkTally {
+        let listed = queuedWork.flatMap(\.jobs.jobs)
+        return PrivacyWorkTally(
+            waiting: listed.filter { $0.status == "queued" }.count,
+            sent: listed.filter { $0.status == "running" }.count,
+            truncated: queuedWork.contains { $0.jobs.truncated })
+    }
+
+    /// Records the jobs a profile revocation retired and describes what the core now reports for the version.
+    private func retire(
+        _ profileVersion: String, versionLabel: String, before: JobConfigurationPinnedJobs?,
+        after: JobConfigurationPinnedJobs?
+    ) -> String {
+        guard let before, let after else { return PrivacySettingsText.profileRevokedUnread(versionLabel) }
+        let stillListed = Set(after.jobs.map(\.jobID))
+        let retired = before.jobs.filter { !stillListed.contains($0.jobID) }
+            .map { JobConfigurationPinnedJob(jobID: $0.jobID, itemID: $0.itemID, status: "retired") }
+        retiredWork.removeAll { $0.profileVersion == profileVersion }
+        if !retired.isEmpty {
+            retiredWork.append(
+                PrivacyRetiredVersion(profileVersion: profileVersion, versionLabel: versionLabel, jobs: retired))
+        }
+        let wasSent = before.jobs.filter { $0.status == "running" && !stillListed.contains($0.jobID) }.count
+        return PrivacySettingsText.profileRevoked(
+            versionLabel, retired: retired.count, alreadySent: wasSent, stillPending: after.total)
     }
 
     /// Opens the question for moving one queued job to another unrevoked stored version. Nothing is moved.
     func proposeRequeue(jobID: String, toProfileVersion: String) {
         guard readScope() == .authenticated else { lock(); return }
         guard phase == .loaded, !isWorking, let listing,
-            let from = queuedWork.first(where: { $0.jobs.jobs.contains { $0.jobID == jobID } }),
-            from.version.profileVersion != toProfileVersion
+            let from = pinnedOrigin(of: jobID),
+            from.profileVersion != toProfileVersion
         else { return }
         for profile in listing.profiles {
             if let target = profile.versions.first(where: { $0.profileVersion == toProfileVersion && !$0.revoked }) {
@@ -364,12 +437,26 @@ final class PrivacySettingsModel: ObservableObject {
                 change = nil
                 requeueProposal = PrivacyRequeueProposal(
                     jobID: jobID, newJobID: UUID().uuidString.lowercased(),
-                    fromVersionLabel: PrivacySettingsText.versionLabel(profileID: from.profileID, version: from.version),
+                    fromVersionLabel: from.label,
                     toProfileVersion: toProfileVersion,
                     toVersionLabel: PrivacySettingsText.versionLabel(profileID: profile.profileID, version: target))
                 return
             }
         }
+    }
+
+    /// The stored version a queued, running or revocation-retired job was pinned to, with its label.
+    private func pinnedOrigin(of jobID: String) -> (profileVersion: String, label: String)? {
+        if let queued = queuedWork.first(where: { $0.jobs.jobs.contains { $0.jobID == jobID } }) {
+            return (
+                queued.version.profileVersion,
+                PrivacySettingsText.versionLabel(profileID: queued.profileID, version: queued.version)
+            )
+        }
+        if let retired = retiredWork.first(where: { $0.jobs.contains { $0.jobID == jobID } }) {
+            return (retired.profileVersion, retired.versionLabel)
+        }
+        return nil
     }
 
     /// Moves exactly the shown job. The proposal's `newJobID` is reused when an unclear result is retried, so a repeat
@@ -382,8 +469,20 @@ final class PrivacySettingsModel: ObservableObject {
             let replacement = try await controls.requeue(
                 jobID: current.jobID, newJobID: current.newJobID, toProfileVersion: current.toProfileVersion)
             requeueProposal = nil
-            lastRequeue = try? await controls.requeueRecord(forJob: replacement.jobID)
-            actionState = .changed(PrivacySettingsText.requeued(to: current.toVersionLabel))
+            retiredWork = retiredWork.compactMap { retired in
+                let remaining = retired.jobs.filter { $0.jobID != current.jobID }
+                return remaining.isEmpty
+                    ? nil
+                    : PrivacyRetiredVersion(
+                        profileVersion: retired.profileVersion, versionLabel: retired.versionLabel, jobs: remaining)
+            }
+            lastReplacementJobID = replacement.jobID
+            lastRequeue = nil
+            requeueRecordUnreadable = false
+            await loadRequeueRecord()
+            guard readScope() == .authenticated else { lock(); return }
+            actionState = .changed(
+                PrivacySettingsText.requeued(to: current.toVersionLabel, recorded: lastRequeue != nil))
         } catch {
             if isNotAuthenticated(error) { lock(); return }
             // Only an answer that never arrived or was unclear can be repeated; a refusal ends the question.
@@ -396,6 +495,22 @@ final class PrivacySettingsModel: ObservableObject {
             actionState = .failed(PrivacySettingsText.changeFailure(error))
         }
         await refresh()
+    }
+
+    /// Reads the core's record of the most recent requeue. A failed or empty read is shown as unreadable, never as done.
+    func loadRequeueRecord() async {
+        guard readScope() == .authenticated else { lock(); return }
+        guard let replacementJobID = lastReplacementJobID else { return }
+        do {
+            let record = try await controls.requeueRecord(forJob: replacementJobID)
+            guard readScope() == .authenticated else { lock(); return }
+            lastRequeue = record
+            requeueRecordUnreadable = record == nil
+        } catch {
+            if isNotAuthenticated(error) { lock(); return }
+            lastRequeue = nil
+            requeueRecordUnreadable = true
+        }
     }
 
     private func isNotAuthenticated(_ error: Error) -> Bool {
@@ -430,6 +545,9 @@ final class PrivacySettingsModel: ObservableObject {
         change = nil
         requeueProposal = nil
         lastRequeue = nil
+        requeueRecordUnreadable = false
+        lastReplacementJobID = nil
+        retiredWork = []
         queuedWork = []
         queuedWorkUnreadable = false
         actionState = nil
@@ -444,6 +562,9 @@ final class PrivacySettingsModel: ObservableObject {
         change = nil
         requeueProposal = nil
         lastRequeue = nil
+        requeueRecordUnreadable = false
+        lastReplacementJobID = nil
+        retiredWork = []
         queuedWork = []
         queuedWorkUnreadable = false
         actionState = nil

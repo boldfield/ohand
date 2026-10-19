@@ -109,4 +109,125 @@ final class PrivacySettingsViewTests: XCTestCase {
         XCTAssertTrue(rendered[PrivacySettingsView.actionStateIdentifier]?.hasPrefix("Allowed ") ?? false)
         XCTAssertNil(rendered[Self.offer], "a granted capability is not offered again")
     }
+
+    // MARK: Revocation, queued work and requeue
+
+    private func grantedRoute() -> RoutePolicyRoute {
+        privacyRoute(
+            id: "route-personal", name: "Local capture", scope: "personal", grants: [("text_interpretation", ["cloud"])])
+    }
+
+    private func reload(_ routes: [RoutePolicyRoute]) async {
+        controls.routes = .success(routes)
+        await model.refresh()
+        settle()
+    }
+
+    func testAGrantedRouteShowsStopAndQueueWaitingNotesRowsAndTheConfirmationCardRevokesNothingUntilConfirmed() async throws {
+        await reload([grantedRoute()])
+        let stop = PrivacySettingsView.revokeIdentifier("route-personal", "text_interpretation")
+        XCTAssertEqual(rendered[stop], "Stop sorting your text notes")
+        XCTAssertEqual(
+            rendered[PrivacySettingsView.repinIdentifier("route-personal")],
+            "Queue waiting notes with the provider selected now")
+        XCTAssertEqual(
+            rendered[PrivacySettingsView.revokeProfileIdentifier("hosted-v1")]?.hasPrefix("Revoke hosted"), true)
+
+        model.proposeRevoke(routeID: "route-personal", capability: "text_interpretation")
+        settle()
+        let change = try XCTUnwrap(model.change)
+        XCTAssertEqual(rendered[PrivacySettingsView.changeQuestionIdentifier], PrivacySettingsText.changeQuestion(change))
+        XCTAssertEqual(rendered[PrivacySettingsView.changeConfirmIdentifier], "Confirm")
+        XCTAssertEqual(rendered[PrivacySettingsView.cancelIdentifier], "Not now")
+        XCTAssertTrue(controls.revocations.isEmpty, "showing the question revokes nothing")
+
+        let fake = controls!
+        fake.duringRevoke = {
+            fake.routes = .success([privacyRoute(id: "route-personal", name: "Local capture", scope: "personal")])
+        }
+        await model.confirmChange(change)
+        settle()
+        XCTAssertNil(rendered[PrivacySettingsView.changeQuestionIdentifier])
+        XCTAssertTrue(rendered[PrivacySettingsView.actionStateIdentifier]?.hasPrefix("Stopped sorting") ?? false)
+        XCTAssertEqual(
+            rendered[PrivacySettingsView.routeStatusIdentifier("route-personal")], PrivacySettingsText.routeLocalOnly)
+    }
+
+    func testQueuedWorkRowsShowTheStoredStatusTheHeldNoticeAndMoveOffers() async throws {
+        controls.pinned["hosted-v1"] = JobConfigurationPinnedJobs(
+            jobs: [
+                JobConfigurationPinnedJob(jobID: "job-1", itemID: "item-1", status: "queued"),
+                JobConfigurationPinnedJob(jobID: "job-2", itemID: "item-2", status: "running"),
+            ], total: 2, truncated: false)
+        controls.listing = .success(
+            providerListing(
+                versions: [
+                    (profile: "hosted", version: "hosted-v1", providerProtocol: "open_ai", revoked: false, supported: true),
+                    (profile: "private", version: "private-v1", providerProtocol: "self_hosted", revoked: false, supported: true),
+                ], defaultVersion: nil))
+        await reload([privacyRoute(id: "route-personal", name: "Local capture", scope: "personal")])
+
+        XCTAssertEqual(rendered[PrivacySettingsView.queuedJobIdentifier("job-1")], "Job job-1 · queued")
+        XCTAssertEqual(
+            rendered[PrivacySettingsView.queuedJobIdentifier("job-2")], "Job job-2 · running (request already sent)")
+        XCTAssertEqual(
+            rendered[PrivacySettingsView.heldWorkIdentifier],
+            PrivacySettingsText.heldWork(["Personal route · Local capture"]))
+        let offer = PrivacySettingsView.requeueOfferIdentifier("job-1", "private-v1")
+        XCTAssertTrue(rendered[offer]?.hasPrefix("Move to private") ?? false)
+
+        model.proposeRequeue(jobID: "job-1", toProfileVersion: "private-v1")
+        settle()
+        let proposal = try XCTUnwrap(model.requeueProposal)
+        XCTAssertEqual(rendered[PrivacySettingsView.requeueQuestionIdentifier], PrivacySettingsText.requeueQuestion(proposal))
+        XCTAssertEqual(rendered[PrivacySettingsView.requeueConfirmIdentifier], "Move")
+        XCTAssertTrue(controls.requeues.isEmpty, "showing the question moves nothing")
+    }
+
+    func testARevokedVersionsRetiredJobsAndTheRequeueRecordAreShown() async throws {
+        controls.pinned["hosted-v1"] = JobConfigurationPinnedJobs(
+            jobs: [JobConfigurationPinnedJob(jobID: "job-1", itemID: "item-1", status: "queued")], total: 1, truncated: false)
+        controls.listing = .success(
+            providerListing(
+                versions: [
+                    (profile: "hosted", version: "hosted-v1", providerProtocol: "open_ai", revoked: false, supported: true),
+                    (profile: "private", version: "private-v1", providerProtocol: "self_hosted", revoked: false, supported: true),
+                ], defaultVersion: nil))
+        await reload([grantedRoute()])
+        model.proposeRevokeProfile(profileVersion: "hosted-v1")
+        let fake = controls!
+        fake.duringRevokeProfile = {
+            fake.pinned["hosted-v1"] = nil
+            fake.listing = .success(
+                providerListing(
+                    versions: [
+                        (profile: "hosted", version: "hosted-v1", providerProtocol: "open_ai", revoked: true, supported: true),
+                        (profile: "private", version: "private-v1", providerProtocol: "self_hosted", revoked: false, supported: true),
+                    ], defaultVersion: nil))
+        }
+        await model.confirmChange(try XCTUnwrap(model.change))
+        settle()
+        XCTAssertEqual(rendered[PrivacySettingsView.retiredJobIdentifier("job-1")], "Job job-1 · retired (provider revoked)")
+        XCTAssertTrue(rendered[PrivacySettingsView.actionStateIdentifier]?.contains("1 job retired") ?? false)
+        let offer = PrivacySettingsView.requeueOfferIdentifier("job-1", "private-v1")
+        XCTAssertNotNil(rendered[offer], "the retired job can be moved on purpose")
+
+        controls.recordResult = .failure(JobConfigurationError.unreadable)
+        model.proposeRequeue(jobID: "job-1", toProfileVersion: "private-v1")
+        await model.confirmRequeue(try XCTUnwrap(model.requeueProposal))
+        settle()
+        XCTAssertEqual(
+            rendered[PrivacySettingsView.requeueRecordUnreadableIdentifier], PrivacySettingsText.requeueRecordUnreadableNotice)
+        XCTAssertEqual(rendered[PrivacySettingsView.requeueRecordRetryIdentifier], PrivacySettingsText.requeueRecordRetry)
+
+        controls.recordResult = .success(
+            JobConfigurationRequeueRecord(
+                oldJobID: "job-1", newJobID: "job-new", fromProfileVersion: "hosted-v1", toProfileVersion: "private-v1",
+                requeuedAt: "2026-10-01T00:00:00Z"))
+        await model.loadRequeueRecord()
+        settle()
+        XCTAssertNil(rendered[PrivacySettingsView.requeueRecordUnreadableIdentifier])
+        XCTAssertEqual(
+            rendered[PrivacySettingsView.requeueRecordIdentifier], PrivacySettingsText.requeueRecord(try XCTUnwrap(model.lastRequeue)))
+    }
 }
