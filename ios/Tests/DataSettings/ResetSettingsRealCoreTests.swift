@@ -47,7 +47,9 @@ final class ResetSettingsRealCoreTests: XCTestCase {
         super.tearDown()
     }
 
-    func testAConfirmedResetCompletesAndCaptureResumesUnderTheNewGeneration() async throws {
+    /// These tests are synchronous on purpose: the fixture waits for the core's events by pumping the main run loop, which
+    /// only delivers them from a synchronous test. The model's async calls run through the session's `run`.
+    func testAConfirmedResetCompletesAndCaptureResumesUnderTheNewGeneration() throws {
         let oldItem = try world.storage.importVoiceCapture(captureID: "cap-old")
         let runtime = try world.launch()
         let service = try XCTUnwrap(runtime.service)
@@ -57,7 +59,8 @@ final class ResetSettingsRealCoreTests: XCTestCase {
 
         model.credentialChoice = .keep
         model.beginConfirmation()
-        await model.confirmReset()
+        let confirming = ResetUncheckedBox(model)
+        try runtime.session.run { await confirming.value.confirmReset() }
 
         XCTAssertEqual(model.phase, .completed)
         XCTAssertEqual(world.storage.remnants(of: "cap-old"), [], "the earlier capture's files are gone")
@@ -68,13 +71,14 @@ final class ResetSettingsRealCoreTests: XCTestCase {
         runtime.terminate()
     }
 
-    func testAFreshModelOnAPristineStoreShowsNoPendingReset() async throws {
+    func testAFreshModelOnAPristineStoreShowsNoPendingReset() throws {
         let runtime = try world.launch()
         let service = try XCTUnwrap(runtime.service)
         let model = ResetSettingsModel(
             controls: ServiceControls(service: service, core: runtime.session.resetClient), readScope: { .authenticated })
 
-        await model.refresh()
+        let refreshing = ResetUncheckedBox(model)
+        try runtime.session.run { await refreshing.value.refresh() }
 
         XCTAssertEqual(model.phase, .idle)
         runtime.terminate()
