@@ -7,6 +7,7 @@ struct ManagementContext {
     let retention: RetentionSettingsModel
     let providerSettings: ProviderSettingsModel
     let promptSettings: PromptSettingsModel
+    let sourceDetail: (String) -> SourceDetailModel
     let suggestion: SuggestionScreenModel
     /// Lets a hosted test see what the search screen shows; production leaves it unset.
     var retrievalRenderReporter: (([String: RetrievalRenderedElement]) -> Void)?
@@ -83,7 +84,7 @@ enum ManagementCatalog {
 
     /// Screens the capture surface links to. They are secondary: capture is always the first screen.
     static let secondaryEntries: [ManagementEntry] = [
-        ManagementEntry(id: searchEntryID, title: "Search", systemImage: "magnifyingglass") { context in AnyView(RetrievalSearchView(model: context.retrieval, renderReporter: context.retrievalRenderReporter)) },
+        ManagementEntry(id: searchEntryID, title: "Search", systemImage: "magnifyingglass") { context in AnyView(RetrievalSearchView(model: context.retrieval, makeItemPane: { ManagementCatalog.destinations.view(for: .item($0), context: context) }, renderReporter: context.retrievalRenderReporter)) },
         ManagementEntry(id: settingsEntryID, title: "Settings", systemImage: "gearshape") { context in AnyView(SettingsRootView(sections: ManagementCatalog.settingsSections, context: context)) },
     ]
 
@@ -97,7 +98,7 @@ enum ManagementCatalog {
 
     /// Where a slice registers the screen for an item or the current suggestion. Set the slice's own line, nothing else.
     static let destinations = ManagementDestinations(
-        item: nil,
+        item: { context, itemID in AnyView(SourceDetailScreen(itemID: itemID, makeModel: context.sourceDetail).id(itemID)) },
         suggestion: { context in AnyView(SuggestionView(model: context.suggestion)) })
 
     static func entry(withID id: String) -> ManagementEntry? {

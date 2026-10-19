@@ -57,7 +57,8 @@ final class SettingsRootViewTests: XCTestCase {
             readScope: { .authenticated })
         let context = ManagementContext(
             voiceRecovery: current.voiceRecovery, retrieval: current.retrieval, retention: retention,
-            providerSettings: providers, promptSettings: current.promptSettings, suggestion: current.suggestion)
+            providerSettings: providers, promptSettings: current.promptSettings,
+            sourceDetail: current.sourceDetail, suggestion: current.suggestion)
         let root = NavigationStack {
             SettingsRootView(
                 sections: ManagementCatalog.settingsSections, context: context,

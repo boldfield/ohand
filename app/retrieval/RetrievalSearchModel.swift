@@ -22,7 +22,8 @@ enum RetrievalSearchPhase: Equatable {
 /// * Stored content appears only while the read session is authenticated. The scope is checked before a search is sent
 ///   and again when its answer arrives; a relock in between empties the screen instead of showing counts or snippets.
 /// * A search needs words or a filter. It never asks a provider or the network anything.
-/// * Selecting a result hands the host a validated `RetrievalItemReference`, never the row's text.
+/// * Selecting a result hands the host a validated `RetrievalItemReference`, never the row's text. Where the screen
+///   shows the item beside the results (regular width), the selection is kept here instead and nothing is pushed.
 /// * Leaving the screen, or losing the session, drops every result and the typed words. Opening a result's detail
 ///   while authenticated is the one exception: the search is still there on return.
 ///
@@ -40,6 +41,13 @@ final class RetrievalSearchModel: ObservableObject {
     @Published private(set) var totalAccessible = 0
     @Published private(set) var canLoadMore = false
     @Published private(set) var problem: String?
+    /// The result shown in the item pane beside the results. Only set while the session is authenticated and the row
+    /// is on screen; a new search, a relock or leaving the screen drops it.
+    @Published private(set) var selectedReference: RetrievalItemReference?
+    /// Set by the screen while it has room to show an item beside the results (regular width with a pane).
+    var presentsItemsInPane = false {
+        didSet { if !presentsItemsInPane { selectedReference = nil } }
+    }
 
     private let searcher: RetrievalSearching
     private let readScope: () -> CompositionReadScope
@@ -79,11 +87,15 @@ final class RetrievalSearchModel: ObservableObject {
         run(next, appending: true)
     }
 
-    /// Passes the row's validated identifier to detail navigation. Does nothing unless the session is authenticated and
-    /// the row is currently shown.
+    /// Passes the row's validated identifier to detail navigation, or, while the screen presents items in its pane, keeps
+    /// it as the item the pane shows. Does nothing unless the session is authenticated and the row is currently shown.
     func select(_ row: RetrievalResultRow) {
         guard readScope() == .authenticated, rows.contains(where: { $0.reference == row.reference }) else {
             clear()
+            return
+        }
+        if presentsItemsInPane {
+            selectedReference = row.reference
             return
         }
         handedOffToDetail = true
@@ -122,6 +134,7 @@ final class RetrievalSearchModel: ObservableObject {
         canLoadMore = false
         problem = nil
         lastRequest = nil
+        selectedReference = nil
     }
 
     private func run(_ request: RetrievalSearchRequest, appending: Bool = false) {
@@ -138,6 +151,7 @@ final class RetrievalSearchModel: ObservableObject {
         generation += 1
         let thisGeneration = generation
         if !appending {
+            selectedReference = nil
             rows = []
             totalAccessible = 0
             canLoadMore = false

@@ -103,7 +103,8 @@ final class SuggestionScreenHostedTests: XCTestCase {
         let current = services.managementContext
         let context = ManagementContext(
             voiceRecovery: current.voiceRecovery, retrieval: current.retrieval, retention: current.retention,
-            providerSettings: current.providerSettings, promptSettings: current.promptSettings, suggestion: model)
+            providerSettings: current.providerSettings, promptSettings: current.promptSettings,
+            sourceDetail: current.sourceDetail, suggestion: model)
         let rootView = AppRootView(
             navigation: navigation, captureEntry: services.captureEntry, context: context,
             destinations: ManagementCatalog.destinations, presentationReporter: { [unowned self] in events.append($0) })
