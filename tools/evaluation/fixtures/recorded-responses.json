@@ -141,7 +141,9 @@
       "behavior": {
         "kind": "respond",
         "body": {
-          "abstention": "UnsupportedOperation",
+          "abstention": {
+            "reason": "UnsupportedOperation"
+          },
           "operation": {
             "kind": "annotate"
           }
@@ -183,7 +185,9 @@
       "behavior": {
         "kind": "respond",
         "body": {
-          "abstention": "Negated",
+          "abstention": {
+            "reason": "Negated"
+          },
           "operation": {
             "kind": "annotate"
           }
@@ -201,7 +205,9 @@
       "behavior": {
         "kind": "respond",
         "body": {
-          "abstention": "Negated",
+          "abstention": {
+            "reason": "Negated"
+          },
           "operation": {
             "kind": "annotate"
           }
@@ -220,7 +226,8 @@
         "kind": "respond",
         "body": {
           "abstention": {
-            "Other": "quoted speech"
+            "reason": "Other",
+            "detail": "quoted speech"
           },
           "operation": {
             "kind": "annotate"
@@ -534,7 +541,9 @@
       "behavior": {
         "kind": "respond",
         "body": {
-          "abstention": "UncertainTarget",
+          "abstention": {
+            "reason": "UncertainTarget"
+          },
           "operation": {
             "kind": "annotate"
           }
@@ -808,7 +817,9 @@
       "behavior": {
         "kind": "respond",
         "body": {
-          "abstention": "UncertainTarget",
+          "abstention": {
+            "reason": "UncertainTarget"
+          },
           "operation": {
             "kind": "annotate"
           }
@@ -1133,7 +1144,9 @@
               "end": 18
             }
           ],
-          "abstention": "Ambiguous"
+          "abstention": {
+            "reason": "Ambiguous"
+          }
         }
       }
     },

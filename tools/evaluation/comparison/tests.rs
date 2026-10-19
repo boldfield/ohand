@@ -263,7 +263,7 @@ fn false_actions_missed_intent_and_abstentions_are_separate_counts() {
             }))),
             ArmOutcome::completed(object(json!({
                 "operation": { "kind": "annotate" },
-                "abstention": "UncertainTarget"
+                "abstention": { "reason": "UncertainTarget" }
             }))),
         )],
     ));
@@ -323,7 +323,7 @@ fn invalid_output_is_counted_apart_and_is_not_a_correct_abstention() {
             fixture,
             scripted("conforming/negation-do-not-remind"),
             ArmOutcome::completed(object(json!({
-                "abstention": "Negated",
+                "abstention": { "reason": "Negated" },
                 "operation": { "kind": "annotate" },
                 "item_id": "11111111-1111-4111-8111-111111111111"
             }))),
@@ -675,7 +675,10 @@ fn other_abstention(fixture_id: &str, reason: &str) -> ArmOutcome {
     let ArmOutcome::Completed { mut output } = scripted(&format!("conforming/{fixture_id}")) else {
         panic!("not a reply");
     };
-    output.insert("abstention".to_string(), json!({ "Other": reason }));
+    output.insert(
+        "abstention".to_string(),
+        json!({ "reason": "Other", "detail": reason }),
+    );
     ArmOutcome::completed(output)
 }
 
