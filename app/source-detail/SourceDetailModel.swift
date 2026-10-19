@@ -128,6 +128,8 @@ final class SourceDetailModel: ObservableObject {
     @Published private(set) var audio: SourceAudioState = .none
 
     let itemID: String
+    /// The reminder section's model, when the host provides one.
+    var reminderEditor: ReminderEditModel?
     private let reader: SourceDetailReading
     private let opener: SourceAudioOpening
     private let readScope: () -> CompositionReadScope
@@ -302,6 +304,7 @@ final class SourceDetailModel: ObservableObject {
     @MainActor private func dropText() {
         content = nil
         failure = .locked
+        reminderEditor?.lock()
     }
 
     private static func audioState(after error: Error) -> SourceAudioState {
@@ -379,8 +382,10 @@ final class SourceDetailModel: ObservableObject {
     }
 
     static func assembled(itemID: String, root: ServiceCompositionRoot) -> SourceDetailModel {
-        SourceDetailModel(
+        let model = SourceDetailModel(
             itemID: itemID, reader: root.itemDetails, opener: root.playback, readScope: { root.readScope })
+        model.reminderEditor = .assembled(itemID: itemID, root: root)
+        return model
     }
 }
 
