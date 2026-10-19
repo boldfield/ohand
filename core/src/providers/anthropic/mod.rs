@@ -31,7 +31,7 @@ mod wire;
 pub const ANTHROPIC_MESSAGES_ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
 /// Value of the `anthropic-version` header the documented protocol requires.
 pub const ANTHROPIC_API_VERSION: &str = "2023-06-01";
-pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 1024;
+pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 4096;
 /// Name of the single tool the model must call to return structured output.
 pub const INTERPRETATION_TOOL_NAME: &str = "interpret";
 /// Header the native layer fills with the secret behind the credential reference.
