@@ -772,7 +772,7 @@ fn replies_validation_rejects_are_still_rejected_after_normalization() {
     )));
     // An abstention that comes with a proposal is rejected exactly as before, null siblings or not.
     assert!(!reply_becomes_a_validated_proposal(&format!(
-        r#"{{"operation":{{"kind":"annotate"}},"item_type":"action","source_spans":[{span}],"reminder_proposal":{{"quality":"ambiguous","source_span":{span}}},"abstention":"Ambiguous","session_topic_proposal":null}}"#
+        r#"{{"operation":{{"kind":"annotate"}},"item_type":"action","source_spans":[{span}],"reminder_proposal":{{"quality":"ambiguous","source_span":{span}}},"abstention":{{"reason":"Ambiguous","detail":null}},"session_topic_proposal":null}}"#
     )));
     // The same reply without the abstention is accepted, so the rejections above are specific.
     assert!(reply_becomes_a_validated_proposal(&format!(
@@ -1438,4 +1438,22 @@ fn once_the_endpoint_is_reachable_the_queued_capture_is_interpreted() {
         "{outcome:?}"
     );
     assert_eq!(capture.row(&job.job_id).0, "completed");
+}
+
+#[test]
+fn a_null_abstention_detail_with_a_plain_reason_maps_to_that_reason() {
+    let reply =
+        r#"{"operation":{"kind":"annotate"},"abstention":{"reason":"Negated","detail":null}}"#;
+    let output = Harness::new(vec![Step::ok(reply)])
+        .run()
+        .expect("null detail is absent");
+    assert_eq!(output.proposal["abstention"], json!({"reason": "Negated"}));
+    assert!(reply_becomes_a_validated_proposal(reply));
+    // Other still needs a detail, so a null one is rejected after normalization.
+    assert!(!reply_becomes_a_validated_proposal(
+        r#"{"operation":{"kind":"annotate"},"abstention":{"reason":"Other","detail":null}}"#
+    ));
+    assert!(reply_becomes_a_validated_proposal(
+        r#"{"operation":{"kind":"annotate"},"abstention":{"reason":"Other","detail":"quoted speech"}}"#
+    ));
 }

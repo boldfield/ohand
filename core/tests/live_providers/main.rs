@@ -98,7 +98,10 @@ fn oracle_proposal(fixture: &OracleFixture) -> Value {
             json!({"topic": topic["topic"], "source_span": span(&topic["source_span"])});
     }
     if !fixture.expected["abstention"].is_null() {
-        proposal["abstention"] = fixture.expected["abstention"].clone();
+        proposal["abstention"] = match &fixture.expected["abstention"] {
+            Value::String(reason) => json!({"reason": reason}),
+            other => json!({"reason": "Other", "detail": other["Other"]}),
+        };
     }
     proposal
 }
