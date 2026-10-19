@@ -8,6 +8,10 @@ import OhAndServices
 protocol ResetControlling: AnyObject {
     func reset(credentialChoice: ResetCredentialChoice) async throws -> ResetOutcome
     func progress() async throws -> ResetProgress?
+    /// Whether native work (staged captures, cleanup, temporaries, a credential choice) is still owed.
+    func hasUnfinishedNativeWork() async throws -> Bool
+    /// Finishes a reset that has not finished, under the choice made when it started; starts no further reset.
+    func finishPending() async throws -> ResetOutcome
 }
 
 extension ResetControl: ResetControlling {}
@@ -32,7 +36,9 @@ enum ResetSettingsPhase: Equatable {
 ///   a default.
 /// * The reset is `completed` only when the service reports the core completed the generation and every native step
 ///   converged. Anything else stays `pending` with what is outstanding, and the user can retry; opening the section
-///   again reads the core's progress, so an interrupted reset is shown as pending, not forgotten.
+///   again reads the core's progress and the native markers, so an interrupted reset is shown as pending, not forgotten.
+/// * A retry finishes the pending reset under the credential choice made when it started. It never takes a new choice
+///   and never starts another reset, so a pending `remove` cannot be turned into `keep` (or the reverse) by retrying.
 /// * A reset that has started is not cancelled by leaving the screen or by a relock. Its outcome holds counts and fixed
 ///   words only, so it may be shown after a relock.
 /// * The section never claims that exported or backed-up copies were removed.
@@ -54,7 +60,7 @@ final class ResetSettingsModel: ObservableObject {
     /// Whether the user can go on to the confirmation step.
     var canContinue: Bool { credentialChoice != nil && (phase == .idle || isFailed) }
 
-    var canRetry: Bool { credentialChoice != nil && phase.isPending }
+    var canRetry: Bool { phase.isPending }
 
     private var isFailed: Bool {
         if case .failed = phase { return true }
@@ -77,10 +83,18 @@ final class ResetSettingsModel: ObservableObject {
         await run()
     }
 
-    /// Asks the service to finish a pending reset, with the credential option chosen again.
+    /// Asks the service to finish a pending reset under the choice it was started with.
     func retry() async {
         guard canRetry else { return }
-        await run()
+        guard readScope() == .authenticated else { lock(); return }
+        phase = .resetting
+        do {
+            apply(try await controls.finishPending())
+        } catch ResetControlError.notAuthenticated {
+            phase = .locked
+        } catch {
+            phase = .failed(DeletionText.unavailableResetText)
+        }
     }
 
     private func run() async {
@@ -107,15 +121,18 @@ final class ResetSettingsModel: ObservableObject {
         }
     }
 
-    /// Reads the core's progress, so a reset a previous run left unfinished is shown as pending.
+    /// Reads the core's progress and the native markers, so a reset a previous run left unfinished is shown as pending.
     func refresh() async {
         guard readScope() == .authenticated else { lock(); return }
         guard phase == .idle || phase == .locked || phase.isPending else { return }
         do {
-            guard let progress = try await controls.progress() else { return }
+            let progress = try await controls.progress()
+            let nativeOwed = try await controls.hasUnfinishedNativeWork()
             guard readScope() == .authenticated, phase == .idle || phase == .locked || phase.isPending else { return }
-            if progress.phase == .pending {
+            if progress?.phase == .pending {
                 phase = .pending(DeletionText.pendingDetail(blockers: [], progress: progress))
+            } else if nativeOwed {
+                phase = .pending(DeletionText.nativeWorkOwedText)
             } else if phase == .locked {
                 phase = .idle
             }

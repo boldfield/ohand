@@ -20,20 +20,28 @@ struct ItemDeletionSection: View {
     static let confirmIdentifier = "data-settings.delete-item.confirm"
     static let cancelIdentifier = "data-settings.delete-item.cancel"
     static let retryIdentifier = "data-settings.delete-item.retry"
+    static let checkProgressIdentifier = "data-settings.delete-item.check-progress"
     static let stateIdentifier = "data-settings.delete-item.state"
 
     @ObservedObject var model: ItemDeletionModel
-    /// The revision of the item as the screen showed it; deletion is applied against exactly this. Without one (the item
-    /// can no longer be read) no new deletion is offered, but progress of a recorded one still shows.
-    let revision: Int?
-    /// Told when the deletion has been recorded, so the host can read the item again and drop what it showed.
+    /// Told as soon as the deletion has been recorded, so the host can read the item again and drop what it showed.
     var onRecorded: () -> Void = {}
+    var renderReporter: (([String: RetentionRenderedElement]) -> Void)?
+
+    private var offersDeletion: Bool { model.revision != nil }
 
     var body: some View {
         VStack(alignment: .leading, spacing: DSSpacing.sm) {
             content
         }
-        .task { await model.refreshProgress() }
+        .onPreferenceChange(RetentionRenderedKey.self) { elements in
+            renderReporter?(elements)
+        }
+        .onReceive(model.$isRecorded.filter { $0 }) { _ in onRecorded() }
+        .task {
+            await model.prepare()
+            await model.refreshProgress()
+        }
         .onDisappear { model.clear() }
     }
 
@@ -41,16 +49,12 @@ struct ItemDeletionSection: View {
     private var content: some View {
         switch model.phase {
         case .idle:
-            if revision != nil { deleteButton }
+            if offersDeletion { deleteButton }
         case .confirming:
             deletionNote(DeletionText.itemExplanation, identifier: Self.explanationIdentifier)
             deletionNote(DeletionText.itemLimitsNote, identifier: Self.limitsIdentifier)
             DSPillButton(title: "Delete permanently", style: .destructive) {
-                guard let revision else { return }
-                Task {
-                    await model.confirmDeletion(revision: revision)
-                    onRecorded()
-                }
+                Task { await model.confirmDeletion() }
             }
             .accessibilityIdentifier(Self.confirmIdentifier)
             .reportDataSettingsRendered(Self.confirmIdentifier, text: "Delete permanently")
@@ -67,11 +71,16 @@ struct ItemDeletionSection: View {
                     .accessibilityIdentifier(Self.retryIdentifier)
                     .reportDataSettingsRendered(Self.retryIdentifier, text: "Retry cleanup")
             }
+            if model.canCheckProgress {
+                DSPillButton(title: "Check progress", style: .secondary) { Task { await model.refreshProgress() } }
+                    .accessibilityIdentifier(Self.checkProgressIdentifier)
+                    .reportDataSettingsRendered(Self.checkProgressIdentifier, text: "Check progress")
+            }
         case .complete:
             deletionNote(DeletionText.completeText, identifier: Self.stateIdentifier)
         case .failed(let message):
             deletionNote(message, identifier: Self.stateIdentifier)
-            if revision != nil { deleteButton }
+            if offersDeletion { deleteButton }
         case .locked:
             deletionNote(DeletionText.lockedText, identifier: Self.stateIdentifier)
         }
@@ -88,7 +97,7 @@ extension ItemDeletionModel {
     /// The model as the app assembles it: the root's deletion service, gated by the root's read scope.
     nonisolated static func assembled(itemID: String, root: ServiceCompositionRoot) -> ItemDeletionModel {
         ItemDeletionModel(
-            itemID: itemID, controls: root.itemDeletion, readScope: { [weak root] in root?.readScope ?? .captureOnly })
+            itemID: itemID, controls: root.itemDeletion, reader: root.itemDetails, readScope: { [weak root] in root?.readScope ?? .captureOnly })
     }
 }
 

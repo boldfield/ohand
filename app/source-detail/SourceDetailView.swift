@@ -72,7 +72,9 @@ struct SourceDetailView: View {
                             .accessibilityLabel("Loading")
                             .reported(Self.loadingIdentifier, renderReporter, layoutReporter)
                     }
-                    if let deletion = model.deletion { ItemDeletionSection(model: deletion, revision: model.itemRevision, onRecorded: { Task { await model.load() } }) }
+                    if let deletion = model.deletion {
+                        ItemDeletionSection(model: deletion, onRecorded: { Task { await model.load() } })
+                    }
                 }
                 .padding(.bottom, DSSpacing.lg)
             }

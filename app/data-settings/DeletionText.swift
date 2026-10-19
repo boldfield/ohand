@@ -79,6 +79,8 @@ enum DeletionText {
     static let pendingHeadline =
         "A reset is under way but has not finished. Your data stays hidden from reads while it finishes. Try again to "
         + "continue; it also resumes when the app opens."
+    static let nativeWorkOwedText =
+        "A reset has not finished cleaning up this device. Try again to continue; it also resumes when the app opens."
     static let notStartedText = "Nothing was deleted. Try again."
     static let unavailableResetText = "The reset could not be read. Try again later."
 

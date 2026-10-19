@@ -3,27 +3,82 @@ import XCTest
 @testable import OhAndServices
 @testable import OhAnd
 
-private final class FakeItemDeletion: ItemDeletionControlling, @unchecked Sendable {
+/// Lets a test hold a fake's call open until it chooses to let it finish.
+final class DeletionCallGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var waiting: CheckedContinuation<Void, Never>?
+    private var isOpen = false
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if isOpen {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                waiting = continuation
+                lock.unlock()
+            }
+        }
+    }
+
+    func open() {
+        lock.lock()
+        isOpen = true
+        let continuation = waiting
+        waiting = nil
+        lock.unlock()
+        continuation?.resume()
+    }
+}
+
+/// The detail read of one synthetic item, answering with a revision and a lifecycle state.
+final class DeletionFakeItemReader: SourceDetailReading, @unchecked Sendable {
+    var revision = 4
+    var lifecycleState = "active"
+    var failure: Error?
+    private(set) var reads = 0
+
+    func detail(itemID: String) async throws -> CoreItemDetail {
+        reads += 1
+        if let failure { throw failure }
+        return CoreItemDetail(
+            itemID: itemID, captureID: "capture-1", revision: revision, itemType: "task", scope: "personal",
+            sessionTopic: nil, lifecycleState: lifecycleState, capturedAt: "2026-10-01T09:30:00Z", text: nil,
+            textBasis: .original, originalText: nil, correctedText: nil, audioReference: nil, transcript: nil,
+            history: [], historyTruncated: false)
+    }
+}
+
+final class FakeItemDeletion: ItemDeletionControlling, @unchecked Sendable {
     var deleteResults: [Result<ItemDeletionReceipt, Error>] = []
     var progressResults: [Result<ItemDeletionProgress, Error>] = []
+    /// What a progress read answers once `progressResults` is used up.
+    var progressFallback: ItemDeletionProgress = .notRequested
+    var deleteGate: DeletionCallGate?
     private(set) var deleteCalls: [(itemID: String, revision: Int)] = []
     private(set) var progressCalls = 0
 
     func delete(itemID: String, expectedRevision: Int) async throws -> ItemDeletionReceipt {
         deleteCalls.append((itemID, expectedRevision))
+        await deleteGate?.wait()
         return try deleteResults.removeFirst().get()
     }
 
     func progress(itemID: String) async throws -> ItemDeletionProgress {
         progressCalls += 1
+        if progressResults.isEmpty { return progressFallback }
         return try progressResults.removeFirst().get()
     }
 }
 
-private final class FakeReset: ResetControlling, @unchecked Sendable {
+final class FakeReset: ResetControlling, @unchecked Sendable {
     var resetResults: [Result<ResetOutcome, Error>] = []
+    var finishResults: [Result<ResetOutcome, Error>] = []
     var progressResults: [Result<ResetProgress?, Error>] = []
+    var nativeWorkOwed = false
     private(set) var choices: [ResetCredentialChoice] = []
+    private(set) var finishCalls = 0
 
     func reset(credentialChoice: ResetCredentialChoice) async throws -> ResetOutcome {
         choices.append(credentialChoice)
@@ -32,6 +87,13 @@ private final class FakeReset: ResetControlling, @unchecked Sendable {
 
     func progress() async throws -> ResetProgress? {
         try progressResults.removeFirst().get()
+    }
+
+    func hasUnfinishedNativeWork() async throws -> Bool { nativeWorkOwed }
+
+    func finishPending() async throws -> ResetOutcome {
+        finishCalls += 1
+        return try finishResults.removeFirst().get()
     }
 }
 
@@ -43,15 +105,25 @@ private func receipt(_ progress: ItemDeletionProgress, settled: Bool) -> ItemDel
 final class ItemDeletionModelTests: XCTestCase {
     private var scope: CompositionReadScope = .authenticated
 
+    private let reader = DeletionFakeItemReader()
+
     private func makeModel(_ controls: FakeItemDeletion) -> ItemDeletionModel {
-        ItemDeletionModel(itemID: "item-1", controls: controls, readScope: { [unowned self] in scope })
+        ItemDeletionModel(itemID: "item-1", controls: controls, reader: reader, readScope: { [unowned self] in scope })
     }
 
-    func testNothingIsDeletedUntilTheUserConfirmsTheRevisionTheySaw() async {
-        let controls = FakeItemDeletion()
+    /// A model that has read the item, as the screen does when it opens.
+    private func preparedModel(_ controls: FakeItemDeletion) async -> ItemDeletionModel {
         let model = makeModel(controls)
+        await model.prepare()
+        return model
+    }
 
-        await model.confirmDeletion(revision: 4)
+    func testNothingIsDeletedUntilTheUserConfirmsTheRevisionTheyAreShown() async {
+        let controls = FakeItemDeletion()
+        let model = await preparedModel(controls)
+        XCTAssertEqual(model.revision, 4)
+
+        await model.confirmDeletion()
         XCTAssertEqual(model.phase, .idle)
         XCTAssertTrue(controls.deleteCalls.isEmpty)
 
@@ -62,16 +134,34 @@ final class ItemDeletionModelTests: XCTestCase {
         XCTAssertTrue(controls.deleteCalls.isEmpty)
     }
 
+    func testAnItemThatCannotBeReadOrIsAlreadyDeletedOffersNoDeletion() async {
+        let controls = FakeItemDeletion()
+        let model = makeModel(controls)
+        reader.failure = ItemDetailError.notFound
+        await model.prepare()
+        XCTAssertNil(model.revision)
+
+        reader.failure = nil
+        reader.lifecycleState = "deleted"
+        await model.prepare()
+        XCTAssertNil(model.revision)
+
+        model.requestDeletion()
+        await model.confirmDeletion()
+        XCTAssertTrue(controls.deleteCalls.isEmpty, "no revision was shown, so nothing is deleted")
+    }
+
     func testSettledCleanupIsComplete() async {
         let controls = FakeItemDeletion()
         controls.deleteResults = [.success(receipt(.complete, settled: true))]
-        let model = makeModel(controls)
+        let model = await preparedModel(controls)
 
         model.requestDeletion()
-        await model.confirmDeletion(revision: 4)
+        await model.confirmDeletion()
 
         XCTAssertEqual(model.phase, .complete)
         XCTAssertEqual(controls.deleteCalls.first?.revision, 4)
+        XCTAssertTrue(model.isRecorded)
     }
 
     func testOutstandingCleanupStaysPendingAndRetryReplaysTheSameRevision() async {
@@ -80,56 +170,94 @@ final class ItemDeletionModelTests: XCTestCase {
             .success(receipt(.inProgress(pending: [.removeAudio], failed: []), settled: false)),
             .success(receipt(.complete, settled: true)),
         ]
-        let model = makeModel(controls)
+        let model = await preparedModel(controls)
 
         model.requestDeletion()
-        await model.confirmDeletion(revision: 4)
+        await model.confirmDeletion()
 
         guard case .pending(let text) = model.phase else { return XCTFail("got \(model.phase)") }
         XCTAssertTrue(text.contains("the recording file"))
         XCTAssertTrue(model.canRetry)
+        XCTAssertFalse(model.canCheckProgress)
         XCTAssertNotEqual(model.phase, .complete)
+        XCTAssertTrue(model.isRecorded, "the item is deleted and hidden while cleanup is pending")
 
+        reader.revision = 9
+        await model.prepare()
         await model.retry()
 
         XCTAssertEqual(model.phase, .complete)
         XCTAssertEqual(controls.deleteCalls.map(\.revision), [4, 4], "a retry replays the recorded request")
     }
 
+    func testTheDeletionIsReportedAsRecordedBeforeItsCleanupFinishes() async throws {
+        let controls = FakeItemDeletion()
+        controls.deleteGate = DeletionCallGate()
+        controls.progressFallback = .inProgress(pending: [.removeAudio], failed: [])
+        controls.deleteResults = [.success(receipt(.complete, settled: true))]
+        let model = await preparedModel(controls)
+        model.requestDeletion()
+
+        let deleting = Task { await model.confirmDeletion() }
+        let deadline = Date().addingTimeInterval(5)
+        while !model.isRecorded && Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
+
+        XCTAssertTrue(model.isRecorded, "the host is told as soon as the core shows the intent")
+        XCTAssertEqual(model.phase, .deleting, "cleanup is still running")
+        controls.deleteGate?.open()
+        await deleting.value
+        XCTAssertEqual(model.phase, .complete)
+    }
+
     func testTerminallyFailedCleanupIsShownAndNotOfferedAsRetry() async {
         let controls = FakeItemDeletion()
         controls.deleteResults = [.success(receipt(.failed([.cancelNotifications]), settled: false))]
-        let model = makeModel(controls)
+        let model = await preparedModel(controls)
 
         model.requestDeletion()
-        await model.confirmDeletion(revision: 4)
+        await model.confirmDeletion()
 
         guard case .pending(let text) = model.phase else { return XCTFail("got \(model.phase)") }
         XCTAssertTrue(text.contains("will not be retried"))
         XCTAssertFalse(model.canRetry)
+        XCTAssertFalse(model.canCheckProgress)
     }
 
-    func testRefusedDeletionIsAnErrorNeverPendingOrComplete() async {
+    func testRefusedDeletionIsAnErrorNeverPendingOrCompleteAndAdoptsTheCurrentRevision() async {
         let controls = FakeItemDeletion()
         controls.deleteResults = [.failure(ItemDeletionError.staleRevision(currentRevision: 6))]
-        let model = makeModel(controls)
+        let model = await preparedModel(controls)
 
         model.requestDeletion()
-        await model.confirmDeletion(revision: 4)
+        await model.confirmDeletion()
 
         XCTAssertEqual(model.phase, .failed(DeletionText.staleText))
         XCTAssertFalse(model.canRetry)
+        XCTAssertFalse(model.isRecorded)
+        XCTAssertEqual(model.revision, 6, "the next confirmation is against the revision the core reported")
     }
 
-    func testARestartShowsTheActualProgressOfAnEarlierDeletion() async {
+    func testARestartShowsTheActualProgressOfAnEarlierDeletionAndOffersACheckNotARetry() async {
         let controls = FakeItemDeletion()
-        controls.progressResults = [.success(.inProgress(pending: [.clearIngress], failed: []))]
+        controls.progressResults = [
+            .success(.inProgress(pending: [.clearIngress], failed: [])), .success(.complete),
+        ]
         let model = makeModel(controls)
 
         await model.refreshProgress()
 
         guard case .pending(let text) = model.phase else { return XCTFail("got \(model.phase)") }
         XCTAssertTrue(text.contains("an unsent copy of the capture"))
+        XCTAssertTrue(model.isRecorded, "a reopened screen is told the item is deleted")
+        XCTAssertFalse(model.canRetry, "the revision of the earlier request is not known, so no replay is offered")
+        XCTAssertTrue(model.canCheckProgress)
+
+        await model.retry()
+        XCTAssertTrue(controls.deleteCalls.isEmpty, "a retry that cannot run asks nothing")
+
+        await model.refreshProgress()
+        XCTAssertEqual(model.phase, .complete, "checking again shows the finished cleanup")
+        XCTAssertFalse(model.canCheckProgress)
     }
 
     func testAnItemNeverDeletedStaysIdleAfterAProgressRead() async {
@@ -140,6 +268,7 @@ final class ItemDeletionModelTests: XCTestCase {
         await model.refreshProgress()
 
         XCTAssertEqual(model.phase, .idle)
+        XCTAssertFalse(model.isRecorded)
     }
 
     func testLockedSessionAsksNothingAndShowsLocked() async {
@@ -156,9 +285,9 @@ final class ItemDeletionModelTests: XCTestCase {
     func testARecordedDeletionKeepsItsProgressAcrossARelock() async {
         let controls = FakeItemDeletion()
         controls.deleteResults = [.success(receipt(.inProgress(pending: [.removeAudio], failed: []), settled: false))]
-        let model = makeModel(controls)
+        let model = await preparedModel(controls)
         model.requestDeletion()
-        await model.confirmDeletion(revision: 4)
+        await model.confirmDeletion()
 
         scope = .captureOnly
         await model.refreshProgress()
@@ -237,7 +366,28 @@ final class ResetSettingsModelTests: XCTestCase {
         await model.retry()
 
         XCTAssertEqual(model.phase, .completed)
-        XCTAssertEqual(controls.choices, [.keep, .keep])
+        XCTAssertEqual(controls.choices, [.keep], "a retry starts no further reset")
+        XCTAssertEqual(controls.finishCalls, 1)
+    }
+
+    func testARetryNeverTakesANewCredentialChoice() async {
+        let controls = FakeReset()
+        controls.resetResults = [
+            .success(Self.outcome(.pending, blockers: [.credentialRemovalIncomplete])),
+        ]
+        controls.finishResults = [.success(Self.outcome(.completed, progress: Self.progress(phase: .completed)))]
+        let model = makeModel(controls)
+        model.credentialChoice = .remove
+        model.beginConfirmation()
+        await model.confirmReset()
+        XCTAssertTrue(model.phase.isPending)
+
+        model.credentialChoice = .keep
+        await model.retry()
+
+        XCTAssertEqual(model.phase, .completed)
+        XCTAssertEqual(controls.choices, [.remove], "only the original choice was ever sent")
+        XCTAssertEqual(controls.finishCalls, 1)
     }
 
     func testAResetThatStartedNothingIsAnErrorWithItsReason() async {
@@ -260,9 +410,34 @@ final class ResetSettingsModelTests: XCTestCase {
         await model.refresh()
 
         XCTAssertTrue(model.phase.isPending)
-        XCTAssertFalse(model.canRetry, "the user states the credential choice again before retrying")
-        model.credentialChoice = .keep
+        XCTAssertTrue(model.canRetry, "a retry finishes the reset under its original choice")
+    }
+
+    func testARestartShowsNativeCleanupThatTheCoreDoesNotReport() async {
+        let controls = FakeReset()
+        controls.progressResults = [.success(Self.progress(phase: .completed))]
+        controls.nativeWorkOwed = true
+        controls.finishResults = [.success(Self.outcome(.completed, progress: Self.progress(phase: .completed)))]
+        let model = makeModel(controls)
+
+        await model.refresh()
+
+        XCTAssertEqual(model.phase, .pending(DeletionText.nativeWorkOwedText))
         XCTAssertTrue(model.canRetry)
+
+        await model.retry()
+        XCTAssertEqual(model.phase, .completed)
+    }
+
+    func testARecordedTapTheCoreNeverStartedIsShownAsPendingAfterARestart() async {
+        let controls = FakeReset()
+        controls.progressResults = [.success(nil)]
+        controls.nativeWorkOwed = true
+        let model = makeModel(controls)
+
+        await model.refresh()
+
+        XCTAssertEqual(model.phase, .pending(DeletionText.nativeWorkOwedText))
     }
 
     func testNoResetEverStartedLeavesTheSectionIdle() async {

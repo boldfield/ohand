@@ -126,8 +126,6 @@ final class SourceDetailModel: ObservableObject {
     @Published private(set) var failure: SourceDetailFailure?
     @Published private(set) var isLoading = false
     @Published private(set) var audio: SourceAudioState = .none
-    /// The revision of the item as last read, for the delete control.
-    @Published private(set) var itemRevision: Int?
 
     let itemID: String
     /// The per-item delete control, when the app assembles one.
@@ -185,7 +183,6 @@ final class SourceDetailModel: ObservableObject {
 
     @MainActor private func adopt(_ detail: CoreItemDetail, availability: PlaybackAvailability?) {
         failure = nil
-        itemRevision = detail.revision
         let built = makeContent(detail)
         content = built
         refreshAudio(afterRead: built, availability: availability)
@@ -195,7 +192,6 @@ final class SourceDetailModel: ObservableObject {
     @MainActor private func reject(_ error: Error) {
         endAudio()
         content = nil
-        itemRevision = nil
         audio = .none
         switch error as? ItemDetailError {
         case .some(.notAuthenticated), .some(.relocked): failure = .locked
