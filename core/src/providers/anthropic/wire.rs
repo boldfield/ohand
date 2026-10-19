@@ -164,6 +164,7 @@ const DOCUMENTED_ERROR_TYPES: &[&str] = &[
     "billing_error",
     "permission_error",
     "not_found_error",
+    "conflict_error",
     "request_too_large",
     "rate_limit_error",
     "timeout_error",

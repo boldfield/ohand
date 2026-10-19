@@ -643,6 +643,19 @@ fn a_rejection_keeps_the_status_the_error_type_and_the_providers_message() {
 }
 
 #[test]
+fn every_documented_error_type_is_kept_including_conflict_error() {
+    for (status, error_type) in [(409, "conflict_error"), (413, "request_too_large")] {
+        let harness = Harness::new(vec![error_step(status, error_type, "synthetic")]);
+        let detail = harness.diagnostic_failure().detail.expect("detail");
+        assert_eq!(
+            detail.error_type.as_deref(),
+            Some(error_type),
+            "{error_type}"
+        );
+    }
+}
+
+#[test]
 fn the_message_is_cleaned_and_bounded_and_an_unknown_type_is_unrecognized() {
     let long = format!("a\u{7}b\nc{}", "é".repeat(400));
     let harness = Harness::new(vec![error_step(400, "something_new_error", &long)]);

@@ -113,8 +113,9 @@ pub fn build_profile(
     let profile_id = format!("{protocol}-{}", spec.model);
     let timeout = timeout_seconds.to_string();
     // The requested temperature is part of what an arm pins: a different setting is a different
-    // profile revision, so a journal cannot silently mix them. The default keeps the original
-    // digest input, so only runs that request a temperature change version.
+    // profile revision, so a journal cannot silently mix them. The pin is always part of the
+    // digest, including "provider default", so journals written with the old fixed temperature 0
+    // are refused rather than resumed.
     let temperature_pin = format!("temperature-{}", temperature_label(temperature_milli));
     let mut version_parts = vec![
         "bench-profile-v1",
