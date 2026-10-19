@@ -9,7 +9,7 @@ use crate::interpretation::instructions::render_prompt;
 use crate::providers::contracts::{
     AdapterCall, CallObservations, CancelToken, Clock, DiagnosticAdapterCall, DiagnosticResponse,
     DiagnosticSetting, DiagnosticSupport, DiagnosticTransportFailure, ProviderAdapter,
-    ProviderProfile, SettingValue, TokenUsage, TransportError,
+    ProviderProfile, RejectionDetail, SettingValue, TokenUsage, TransportError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -67,7 +67,24 @@ struct OpenAiError {
 struct ErrorDetail {
     #[serde(default)]
     code: Option<String>,
+    #[serde(default, rename = "type")]
+    error_type: Option<Value>,
+    #[serde(default)]
+    message: Option<Value>,
 }
+
+/// Error types the Chat Completions API documents.
+const DOCUMENTED_ERROR_TYPES: &[&str] = &[
+    "invalid_request_error",
+    "authentication_error",
+    "permission_error",
+    "not_found_error",
+    "rate_limit_error",
+    "insufficient_quota",
+    "server_error",
+    "api_error",
+    "tokens_exceeded_error",
+];
 
 /// Native HTTP seam for one POST to the provider.
 ///
@@ -279,14 +296,31 @@ fn decode_response(
     within_bound: bool,
 ) -> Result<Completion, DiagnosticTransportFailure> {
     if !(200..300).contains(&status) {
-        let error_code = if within_bound {
+        let parsed = if within_bound {
             serde_json::from_slice::<OpenAiError>(response_bytes)
                 .ok()
-                .and_then(|parsed| parsed.error.code)
+                .map(|parsed| parsed.error)
         } else {
             None
         };
-        return Err(map_error(status, error_code.as_deref()).into());
+        let error = map_error(
+            status,
+            parsed.as_ref().and_then(|parsed| parsed.code.as_deref()),
+        );
+        let error_type = parsed
+            .as_ref()
+            .and_then(|parsed| parsed.error_type.as_ref())
+            .and_then(Value::as_str);
+        let detail = match (&parsed, error_type) {
+            (Some(parsed), Some(error_type)) => RejectionDetail::from_envelope(
+                status,
+                error_type,
+                parsed.message.as_ref().and_then(Value::as_str),
+                DOCUMENTED_ERROR_TYPES,
+            ),
+            _ => RejectionDetail::status_only(status),
+        };
+        return Err(DiagnosticTransportFailure::with_detail(error, Some(detail)));
     }
 
     let envelope: Value =

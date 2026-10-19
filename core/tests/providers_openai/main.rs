@@ -1597,3 +1597,118 @@ mod diagnostic {
         assert!(harness.calls().is_empty());
     }
 }
+
+mod rejection_detail {
+    use super::*;
+    use ohand_core::interpretation::instructions::render_prompt;
+    use ohand_core::providers::contracts::{
+        dispatch_diagnostic, DiagnosticFailure, DiagnosticFailureKind, DiagnosticRequest,
+        RequestedSettings,
+    };
+
+    fn error_step(status: u16, error_type: &str, message: &str, code: &str) -> Step {
+        let body =
+            json!({"error": {"message": message, "type": error_type, "param": null, "code": code}});
+        Step::http(status, serde_json::to_vec(&body).unwrap())
+    }
+
+    fn diagnose(harness: &Harness, limits: &DispatchLimits) -> DiagnosticFailure {
+        let prompt = render_prompt(&request_for(&harness.profile, "call mom tomorrow"))
+            .expect("published instructions render");
+        let request = DiagnosticRequest::new(
+            request_for(&harness.profile, "call mom tomorrow"),
+            prompt.system,
+            prompt.user,
+            RequestedSettings::new(),
+        )
+        .expect("valid diagnostic request");
+        dispatch_diagnostic(
+            &harness.adapter,
+            &harness.profile,
+            &request,
+            harness.clock.as_ref(),
+            &harness.cancel,
+            limits,
+        )
+        .expect_err("rejected")
+    }
+
+    #[test]
+    fn a_rejection_keeps_the_status_the_error_type_and_the_message() {
+        let harness = Harness::new(vec![error_step(
+            400,
+            "invalid_request_error",
+            "Unsupported value: 'temperature' does not support 0 with this model.",
+            "unsupported_value",
+        )]);
+        let detail = diagnose(&harness, &DispatchLimits::default())
+            .detail
+            .expect("detail");
+        assert_eq!(detail.status, 400);
+        assert_eq!(detail.error_type.as_deref(), Some("invalid_request_error"));
+        assert_eq!(
+            detail.message.as_deref(),
+            Some("Unsupported value: 'temperature' does not support 0 with this model.")
+        );
+    }
+
+    #[test]
+    fn the_message_is_cleaned_and_bounded_and_an_unknown_type_is_unrecognized() {
+        let long = format!("a\u{7}b\nc{}", "é".repeat(400));
+        let harness = Harness::new(vec![error_step(400, "brand_new_error", &long, "x")]);
+        let detail = diagnose(&harness, &DispatchLimits::default())
+            .detail
+            .expect("detail");
+        assert_eq!(detail.error_type.as_deref(), Some("unrecognized"));
+        let message = detail.message.expect("message");
+        assert!(message.starts_with("abc") && !message.chars().any(char::is_control));
+        assert_eq!(message.len(), 3 + 2 * 148);
+    }
+
+    #[test]
+    fn oversized_or_non_envelope_bodies_yield_the_status_alone() {
+        let harness = Harness::new(vec![error_step(502, "server_error", &"x".repeat(200), "x")]);
+        let detail = diagnose(
+            &harness,
+            &DispatchLimits {
+                max_response_bytes: 64,
+            },
+        )
+        .detail
+        .expect("status");
+        assert_eq!(
+            (detail.status, detail.error_type, detail.message),
+            (502, None, None)
+        );
+
+        let harness = Harness::new(vec![Step::http(404, b"<html>nope</html>".to_vec())]);
+        let detail = diagnose(&harness, &DispatchLimits::default())
+            .detail
+            .expect("status");
+        assert_eq!(
+            (detail.status, detail.error_type, detail.message),
+            (404, None, None)
+        );
+    }
+
+    #[test]
+    fn production_dispatch_fails_the_same_way_for_the_same_responses() {
+        let steps = || {
+            vec![
+                error_step(400, "invalid_request_error", "bad", "unsupported_value"),
+                error_step(429, "insufficient_quota", "no quota", "insufficient_quota"),
+                Step::http(404, b"<html>nope</html>".to_vec()),
+            ]
+        };
+        for (index, _) in steps().into_iter().enumerate() {
+            let production = Harness::new(vec![steps().remove(index)]);
+            let diagnostic = Harness::new(vec![steps().remove(index)]);
+            let expected = production.run().expect_err("fails");
+            let failure = diagnose(&diagnostic, &DispatchLimits::default());
+            assert_eq!(
+                failure.kind,
+                DiagnosticFailureKind::Provider { failure: expected }
+            );
+        }
+    }
+}

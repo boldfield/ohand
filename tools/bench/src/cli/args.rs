@@ -75,6 +75,11 @@ OPTIONS:
                            `plan` says so and `run` records each case as not eligible and
                            sends nothing, for either arm. Nothing falls back to another
                            profile or destination.
+    --temperature <0.0-1.0>
+                           Request this temperature from both arms alike. Without it no
+                           temperature is requested from either arm and each provider's own
+                           default applies; the experiment record says which. Some current
+                           models reject any temperature.
     --timeout-seconds <n>  Per-request timeout pinned into the profiles (1..=300, default 30).
     --build-revision <s>   Label recorded as the build revision (default: crate version).
 
@@ -197,6 +202,8 @@ pub struct Options {
     pub credential_env: Vec<(String, String)>,
     pub self_hosted_endpoint_env: Option<String>,
     pub timeout_seconds: u32,
+    /// Temperature requested from both arms, in thousandths; `None` leaves it to each provider.
+    pub temperature_milli: Option<u32>,
     pub build_revision: Option<String>,
 }
 
@@ -301,6 +308,7 @@ struct Collected {
     credential_env: Vec<String>,
     self_hosted_endpoint_env: Option<String>,
     timeout_seconds: Option<String>,
+    temperature: Option<String>,
     build_revision: Option<String>,
 }
 
@@ -347,6 +355,7 @@ fn collect(words: &[String]) -> Result<Collected, String> {
             "--credential-env",
             "--self-hosted-endpoint-env",
             "--timeout-seconds",
+            "--temperature",
             "--build-revision",
         ];
         if !known.contains(&flag) {
@@ -375,6 +384,7 @@ fn collect(words: &[String]) -> Result<Collected, String> {
                 set_once(&mut collected.self_hosted_endpoint_env, flag, value)?
             }
             "--timeout-seconds" => set_once(&mut collected.timeout_seconds, flag, value)?,
+            "--temperature" => set_once(&mut collected.temperature, flag, value)?,
             "--build-revision" => set_once(&mut collected.build_revision, flag, value)?,
             "--case" => collected.case_ids.push(value),
             "--rerun" => collected.reruns.push(value),
@@ -389,6 +399,32 @@ fn collect(words: &[String]) -> Result<Collected, String> {
 fn parse_number<T: std::str::FromStr>(flag: &str, text: &str) -> Result<T, String> {
     text.parse::<T>()
         .map_err(|_| format!("{flag} must be a whole number"))
+}
+
+/// A temperature of 0.0 to 1.0 with at most three decimals, in thousandths.
+fn parse_temperature(text: &str) -> Result<u32, String> {
+    const MESSAGE: &str =
+        "--temperature must be a number from 0.0 to 1.0 with at most three decimals";
+    let well_formed = !text.is_empty()
+        && text.chars().all(|c| c.is_ascii_digit() || c == '.')
+        && text.matches('.').count() <= 1
+        && !text.starts_with('.')
+        && !text.ends_with('.');
+    if !well_formed {
+        return Err(MESSAGE.to_string());
+    }
+    let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
+    if fraction.len() > 3 || whole.len() > 1 {
+        return Err(MESSAGE.to_string());
+    }
+    let milli = whole.parse::<u32>().map_err(|_| MESSAGE.to_string())? * 1000
+        + format!("{fraction:0<3}")
+            .parse::<u32>()
+            .map_err(|_| MESSAGE.to_string())?;
+    if milli > 1000 {
+        return Err(MESSAGE.to_string());
+    }
+    Ok(milli)
 }
 
 fn parse_rerun(text: &str) -> Result<SideKey, String> {
@@ -519,6 +555,11 @@ fn build_options(collected: Collected, is_run: bool) -> Result<Options, String> 
     if !(1..=300).contains(&timeout_seconds) {
         return Err("--timeout-seconds must be between 1 and 300".to_string());
     }
+    let temperature_milli = collected
+        .temperature
+        .as_deref()
+        .map(parse_temperature)
+        .transpose()?;
     let reruns = collected
         .reruns
         .iter()
@@ -613,6 +654,7 @@ fn build_options(collected: Collected, is_run: bool) -> Result<Options, String> 
         credential_env,
         self_hosted_endpoint_env,
         timeout_seconds,
+        temperature_milli,
         build_revision: collected.build_revision,
     })
 }

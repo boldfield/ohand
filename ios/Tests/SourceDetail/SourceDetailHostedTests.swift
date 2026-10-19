@@ -109,6 +109,7 @@ final class SourceDetailHostedTests: XCTestCase {
                 return built
             },
             suggestion: services.managementContext.suggestion,
+            privacySettings: services.managementContext.privacySettings,
             retrievalRenderReporter: { _ in })
         let rootView = AppRootView(
             navigation: navigation, captureEntry: services.captureEntry, context: context,

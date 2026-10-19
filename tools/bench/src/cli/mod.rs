@@ -185,10 +185,20 @@ fn prepare(options: &Options, services: &Services) -> Result<Prepared, Refusal> 
         openai: services.openai_endpoint.as_deref(),
         self_hosted: self_hosted.as_ref(),
     };
-    let arm_a = build_profile(&options.profile_a, options.timeout_seconds, overrides)
-        .map_err(|error| format!("profile a: {error}"))?;
-    let arm_b = build_profile(&options.profile_b, options.timeout_seconds, overrides)
-        .map_err(|error| format!("profile b: {error}"))?;
+    let arm_a = build_profile(
+        &options.profile_a,
+        options.timeout_seconds,
+        options.temperature_milli,
+        overrides,
+    )
+    .map_err(|error| format!("profile a: {error}"))?;
+    let arm_b = build_profile(
+        &options.profile_b,
+        options.timeout_seconds,
+        options.temperature_milli,
+        overrides,
+    )
+    .map_err(|error| format!("profile b: {error}"))?;
     if arm_a.profile.profile_version() == arm_b.profile.profile_version() {
         return Err(Refusal("the two profiles must differ".to_string()));
     }
@@ -198,8 +208,9 @@ fn prepare(options: &Options, services: &Services) -> Result<Prepared, Refusal> 
         .clone()
         .unwrap_or_else(default_build_revision);
     let source_context = format!(
-        "synthetic-corpus mode-{} settings-temperature-0-max-output-tokens-1024",
-        options.mode.label()
+        "synthetic-corpus mode-{} settings-temperature-{}-max-output-tokens-1024",
+        options.mode.label(),
+        corpus::temperature_label(options.temperature_milli).replace(' ', "-")
     );
     let mut experiment = Experiment::new(
         corpus.version.clone(),

@@ -23,6 +23,7 @@ final class WalkthroughUITests: XCTestCase {
         ("Daily prompt", "Daily prompt"),
         ("Unfinished recordings", "Unfinished recordings"),
         ("Processing", "Processing"),
+        ("Privacy", "Privacy"),
         ("Audio", "Audio"),
         ("Export", "Export"),
     ]

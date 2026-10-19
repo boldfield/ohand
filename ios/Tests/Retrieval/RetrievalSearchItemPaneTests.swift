@@ -170,6 +170,7 @@ final class RetrievalSearchItemPaneTests: XCTestCase {
                 return built
             },
             suggestion: services.managementContext.suggestion,
+            privacySettings: services.managementContext.privacySettings,
             retrievalRenderReporter: { [unowned self] in rendered = $0 })
         let rootView = AppRootView(
             navigation: navigation, captureEntry: services.captureEntry, context: context,

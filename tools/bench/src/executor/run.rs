@@ -5,11 +5,11 @@ use ohand_core::interpretation::instructions::content_version;
 use ohand_core::privacy::routing::{Authorization, AuthorizationDecision, ProcessingCapability};
 use ohand_core::providers::contracts::{
     dispatch_diagnostic, DiagnosticFailure, DiagnosticFailureKind, DiagnosticOutput, FailureKind,
-    ProviderProfile, UsageAvailability,
+    ProviderProfile, RejectionDetail, UsageAvailability,
 };
 use ohand_core::review::compare::{derive_pair, ArmInput, ArmLabel, PairedRequests};
 
-use super::envelope::{class, Envelope, Phase};
+use super::envelope::{class, Envelope, Phase, RejectionRecord};
 use super::error::{ConfigurationChange, ExecutorError};
 use super::plan::{
     ArmBinding, AuthorizationQuery, ExecutorLimits, PlannedCase, RunControls, RunRequest,
@@ -148,6 +148,30 @@ fn authorization_still_valid(
         return Err("authorized destinations changed since the pair was derived".to_string());
     }
     Ok(())
+}
+
+/// The provider's own words about a rejection follow the status and error type, so a bound on
+/// displayed text cuts the message and not the facts.
+fn with_rejection_detail(
+    base: &str,
+    rejection: Option<&RejectionDetail>,
+    include_message: bool,
+) -> String {
+    let Some(rejection) = rejection else {
+        return base.to_string();
+    };
+    let mut text = format!("{base}: HTTP {}", rejection.status);
+    if let Some(error_type) = &rejection.error_type {
+        text.push(' ');
+        text.push_str(error_type);
+    }
+    if include_message {
+        if let Some(message) = &rejection.message {
+            text.push_str(": ");
+            text.push_str(message);
+        }
+    }
+    text
 }
 
 fn failure_kind_key(kind: FailureKind) -> String {
@@ -586,12 +610,37 @@ impl Executor {
                         ),
                         kind => (
                             failure_kind_key(kind),
-                            provider.message.clone(),
+                            with_rejection_detail(&provider.message, failure.detail.as_ref(), true),
                             provider.retriable,
                         ),
                     },
                 };
-                self.fail_attempt(attempt, envelope, &failure_class, detail, Some(usage))?;
+                if let Some(rejection) = &failure.detail {
+                    envelope.rejection = Some(RejectionRecord {
+                        status: rejection.status,
+                        error_type: rejection.error_type.clone(),
+                    });
+                }
+                let retained = (attempt.clone(), envelope.clone());
+                match self.fail_attempt(attempt, envelope, &failure_class, detail, Some(usage)) {
+                    // The journal refuses text that looks like a credential or private endpoint.
+                    // The provider's wording is the only part it can object to, so keep the
+                    // status and error type and drop the message.
+                    Err(ExecutorError::Journal(JournalError::Validation(_)))
+                        if failure.detail.is_some() =>
+                    {
+                        let base = match &failure.kind {
+                            DiagnosticFailureKind::Provider { failure: provider } => {
+                                provider.message.clone()
+                            }
+                            _ => String::new(),
+                        };
+                        let detail = with_rejection_detail(&base, failure.detail.as_ref(), false);
+                        let (attempt, envelope) = retained;
+                        self.fail_attempt(attempt, envelope, &failure_class, detail, Some(usage))?;
+                    }
+                    other => other?,
+                }
                 Ok(retriable)
             }
         }

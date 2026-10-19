@@ -5,7 +5,7 @@
 //! dispatched attempt show what was spent. A missing figure is unknown and is never added as
 //! zero.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use evaluation::comparison::Label;
 use serde::Serialize;
@@ -89,6 +89,10 @@ pub enum CostSummary {
 pub struct ArmOperations {
     pub arm: &'static str,
     pub requests: RequestCounts,
+    /// Failed attempts the provider rejected with an error response, by the error type it
+    /// named (`unrecognized` for a type outside the protocol's documented set, `not_reported`
+    /// when the response carried no error envelope).
+    pub rejections: BTreeMap<String, u64>,
     /// Completed attempts of matched pairs only.
     pub latency_matched: LatencySummary,
     /// The side's final completed attempt in every case, matched or not.
@@ -136,12 +140,39 @@ pub(super) fn arm_operations(
     ArmOperations {
         arm: if arm == 0 { "a" } else { "b" },
         requests,
+        rejections: rejections(&dispatched),
         latency_matched: latency(&matched),
         latency_all_completed: latency(&all_completed),
         usage_matched: usage(&matched),
         usage_all_dispatched: usage(&dispatched),
         cost: cost(&dispatched, profile_version, rates),
     }
+}
+
+fn rejections(dispatched: &[&AttemptRecord]) -> BTreeMap<String, u64> {
+    let mut counts = BTreeMap::new();
+    for attempt in dispatched {
+        if attempt.state != AttemptState::Failed {
+            continue;
+        }
+        let Some(rejection) = &attempt.envelope.rejection else {
+            continue;
+        };
+        // The journal is read, not trusted: only a short snake_case word becomes a label.
+        let error_type = match rejection.error_type.as_deref() {
+            None => "not_reported",
+            Some(name)
+                if !name.is_empty()
+                    && name.len() <= 40
+                    && name.bytes().all(|b| b.is_ascii_lowercase() || b == b'_') =>
+            {
+                name
+            }
+            Some(_) => "unrecognized",
+        };
+        *counts.entry(error_type.to_string()).or_default() += 1;
+    }
+    counts
 }
 
 fn duration_of(attempt: &AttemptRecord) -> Option<u64> {

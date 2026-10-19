@@ -41,7 +41,9 @@ PROBE_USAGE_STRINGS = {
     "AudioProbe": ["NSMicrophoneUsageDescription"],
     "TranscriptionProbe": ["NSSpeechRecognitionUsageDescription"],
 }
-APP_USAGE_STRINGS = ["NSMicrophoneUsageDescription", "NSSpeechRecognitionUsageDescription"]
+APP_USAGE_STRINGS = ["NSMicrophoneUsageDescription", "NSSpeechRecognitionUsageDescription", "NSFaceIDUsageDescription"]
+FACE_ID_USAGE_KEY = "NSFaceIDUsageDescription"
+FACE_ID_API_PATTERN = re.compile(r"\bLAContext\b|\bevaluatePolicy\b")
 
 FORBIDDEN_COMMITTED_SUFFIXES = (".mobileprovision", ".p12", ".p8", ".cer", ".certSigningRequest")
 
@@ -228,6 +230,59 @@ def check_shared_intent(host_name, host, extension_name, extension, root=IOS_ROO
     return errors
 
 
+def target_uses_face_id(target, root):
+    for path in source_paths(target):
+        source_root = (root / path)
+        swift_files = [source_root] if source_root.is_file() else sorted(source_root.rglob("*.swift"))
+        if any(FACE_ID_API_PATTERN.search(swift.read_text(errors="ignore")) for swift in swift_files):
+            return True
+    return False
+
+
+def hosting_targets(targets, target_name):
+    """Names of targets that link target_name directly or transitively."""
+    hosts, pending = set(), [target_name]
+    while pending:
+        current = pending.pop()
+        for name, target in targets.items():
+            depends = any(dep.get("target") == current for dep in target.get("dependencies", []))
+            if depends and name not in hosts:
+                hosts.add(name)
+                pending.append(name)
+    return hosts
+
+
+def check_face_id_usage(project, root=IOS_ROOT):
+    """Any target whose Swift sources use LAContext must have NSFaceIDUsageDescription in its shipped Info.plist.
+
+    A target without its own INFOPLIST_FILE (a framework) is shipped by the targets that link it.
+    """
+    errors = []
+    targets = project["targets"]
+    for target_name, target in targets.items():
+        if not target_uses_face_id(target, root):
+            continue
+        own_plist = target.get("settings", {}).get("INFOPLIST_FILE")
+        if own_plist:
+            plist_paths = [own_plist]
+        else:
+            plist_paths = sorted(
+                {
+                    targets[host]["settings"]["INFOPLIST_FILE"]
+                    for host in hosting_targets(targets, target_name)
+                    if targets[host].get("settings", {}).get("INFOPLIST_FILE")
+                }
+            )
+            if not plist_paths:
+                errors.append(f"{target_name} uses LAContext but no Info.plist ships it; declare {FACE_ID_USAGE_KEY}")
+        for plist_path in plist_paths:
+            full_path = root / plist_path
+            plist = plistlib.loads(full_path.read_bytes()) if full_path.exists() else {}
+            if not plist.get(FACE_ID_USAGE_KEY):
+                errors.append(f"{target_name} uses LAContext but {plist_path} is missing {FACE_ID_USAGE_KEY}")
+    return errors
+
+
 def check_xcconfig(root=IOS_ROOT):
     errors = []
     base = (root / "Config/Base.xcconfig").read_text()
@@ -283,7 +338,7 @@ def check_no_signing_material(root=IOS_ROOT):
 
 def run_all_checks():
     project = load_project()
-    return check_project(project) + check_workflow_xcode_pin(project) + check_xcconfig() + check_plists() + check_no_signing_material()
+    return check_project(project) + check_workflow_xcode_pin(project) + check_xcconfig() + check_plists() + check_face_id_usage(project) + check_no_signing_material()
 
 
 if __name__ == "__main__":
