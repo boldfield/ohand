@@ -237,6 +237,37 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         XCTAssertEqual(after.grantedCapabilities.map(\.destinationClasses), [["cloud"]])
     }
 
+    func testARevocationWhileWorkIsQueuedStopsDispatchAndSurvivesARelaunch() async throws {
+        var model = try await makeModel()
+        let version = try await createDispatchableDefault()
+        await model.refresh()
+        model.propose(routeID: "route-personal", capability: "text_interpretation", profileVersion: version)
+        await model.confirm(try XCTUnwrap(model.proposal))
+        XCTAssertTrue(model.isGranted(routeID: "route-personal", capability: "text_interpretation"))
+
+        // Work is queued behind the grant; revoking before the runner starts means it cannot be sent.
+        try await saveCapture(Self.interpretableText)
+        model.proposeRevoke(routeID: "route-personal", capability: "text_interpretation")
+        await model.confirmChange(try XCTUnwrap(model.change))
+        guard case .changed = model.actionState else { return XCTFail("expected changed, got \(String(describing: model.actionState))") }
+        XCTAssertFalse(model.isGranted(routeID: "route-personal", capability: "text_interpretation"))
+        XCTAssertTrue(model.isLocalOnly)
+
+        startProcessing()
+        let settled = try await waitUntil {
+            let status = self.scalar("SELECT status FROM jobs LIMIT 1")
+            return status == "completed" || status == "failed" || status == "dead"
+        }
+        XCTAssertTrue(settled, "the job settled: \(scalar("SELECT status FROM jobs LIMIT 1"))")
+        XCTAssertEqual(sender.attemptCount, 0, "a revoked capability sends nothing, even for work queued before it")
+
+        model = try await relaunch()
+        await model.refresh()
+        XCTAssertEqual(model.phase, .loaded)
+        XCTAssertTrue(model.isLocalOnly, "the revocation survives a relaunch")
+        XCTAssertEqual(sender.attemptCount, 0)
+    }
+
     func testProcessingACaptureCreatesNoGrantAndSendsNothingWithoutOne() async throws {
         let model = try await makeModel()
         let version = try await createDispatchableDefault()

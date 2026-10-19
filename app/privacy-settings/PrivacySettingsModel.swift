@@ -3,16 +3,64 @@ import Foundation
 import OhAndCoreBridge
 import OhAndServices
 
-/// The route-policy and profile operations this screen uses. `ProviderConfigurationService` is the production
-/// implementation; the screen reuses its operations and adds none.
+/// The route-policy, profile and queued-work operations this screen uses. `PrivacySettingsServices` is the production
+/// implementation; it forwards to `ProviderConfigurationService` and `JobConfigurationService` and adds none.
 protocol PrivacySettingsControlling: AnyObject {
     func listRoutePolicy() async throws -> [RoutePolicyRoute]
     func listProfiles() async throws -> ProviderProfileListAnswer
     func grant(routeID: String, capability: String, profileVersion: String) async throws
         -> RoutePolicyChangeOutcome.Disposition
+    func revoke(routeID: String, capability: String) async throws -> RoutePolicyChangeOutcome.Disposition
+    func revokeProfile(_ profileVersion: String) async throws
+    func jobsPinned(toProfile profileVersion: String, limit: Int?) async throws -> JobConfigurationPinnedJobs
+    func requeue(jobID: String, newJobID: String, toProfileVersion: String) async throws
+        -> JobConfigurationRequeuedJob
+    func requeueRecord(forJob jobID: String) async throws -> JobConfigurationRequeueRecord?
+    func repinWaitingWork(routeID: String) async throws -> Int
 }
 
-extension ProviderConfigurationService: PrivacySettingsControlling {}
+/// The production controls: the root's provider configuration for routes and profiles, and its job configuration for
+/// work queued behind them.
+final class PrivacySettingsServices: PrivacySettingsControlling {
+    private let providers: ProviderConfigurationService
+    private let jobs: JobConfigurationService
+
+    init(providers: ProviderConfigurationService, jobs: JobConfigurationService) {
+        self.providers = providers
+        self.jobs = jobs
+    }
+
+    func listRoutePolicy() async throws -> [RoutePolicyRoute] { try await providers.listRoutePolicy() }
+    func listProfiles() async throws -> ProviderProfileListAnswer { try await providers.listProfiles() }
+
+    func grant(routeID: String, capability: String, profileVersion: String) async throws
+        -> RoutePolicyChangeOutcome.Disposition
+    {
+        try await providers.grant(routeID: routeID, capability: capability, profileVersion: profileVersion)
+    }
+
+    func revoke(routeID: String, capability: String) async throws -> RoutePolicyChangeOutcome.Disposition {
+        try await providers.revoke(routeID: routeID, capability: capability)
+    }
+
+    func revokeProfile(_ profileVersion: String) async throws { try await jobs.revokeProfile(profileVersion) }
+
+    func jobsPinned(toProfile profileVersion: String, limit: Int?) async throws -> JobConfigurationPinnedJobs {
+        try await jobs.jobsPinned(toProfile: profileVersion, limit: limit)
+    }
+
+    func requeue(jobID: String, newJobID: String, toProfileVersion: String) async throws
+        -> JobConfigurationRequeuedJob
+    {
+        try await jobs.requeue(jobID: jobID, newJobID: newJobID, toProfileVersion: toProfileVersion)
+    }
+
+    func requeueRecord(forJob jobID: String) async throws -> JobConfigurationRequeueRecord? {
+        try await jobs.requeueRecord(forJob: jobID)
+    }
+
+    func repinWaitingWork(routeID: String) async throws -> Int { try await jobs.repinWaitingWork(routeID: routeID) }
+}
 
 /// The one permission the user is being asked about: a single capability on a single route for the destinations of a
 /// single stored profile version. Confirming it grants exactly this and nothing else.
@@ -30,6 +78,38 @@ struct PrivacyOfferedVersion: Equatable {
     let version: ProviderProfileListAnswer.Version
 }
 
+/// One deliberate change that takes permission away or moves waiting work. Confirming it does exactly this and nothing
+/// else; none of them grants anything.
+struct PrivacyChangeProposal: Equatable {
+    enum Target: Equatable {
+        /// Stop sending `capability` from the route to any destination.
+        case revokeRouteCapability(routeID: String, routeLabel: String, capability: String)
+        /// Revoke a stored profile version; work queued for it is retired, not moved.
+        case revokeProfileVersion(profileVersion: String, versionLabel: String)
+        /// Queue the route's waiting, unpinned notes with the provider the core selects now, if it is authorized.
+        case repinWaitingWork(routeID: String, routeLabel: String)
+    }
+
+    let target: Target
+}
+
+/// One queued or running job, moved to another stored profile version only if the user confirms it. `newJobID` is the
+/// identity of this one user action: it is kept across retries so repeating the action answers the same replacement.
+struct PrivacyRequeueProposal: Equatable {
+    let jobID: String
+    let newJobID: String
+    let fromVersionLabel: String
+    let toProfileVersion: String
+    let toVersionLabel: String
+}
+
+/// Work queued or running behind one unrevoked stored profile version. Item and status only; no content.
+struct PrivacyQueuedVersion: Equatable {
+    let profileID: String
+    let version: ProviderProfileListAnswer.Version
+    let jobs: JobConfigurationPinnedJobs
+}
+
 enum PrivacySettingsPhase: Equatable {
     case idle
     case loading
@@ -42,6 +122,8 @@ enum PrivacySettingsPhase: Equatable {
 enum PrivacySettingsActionState: Equatable {
     case working
     case allowed(String)
+    /// A revocation or a queued-work choice the core accepted, with the state it actually left.
+    case changed(String)
     case cancelled
     case failed(String)
 
@@ -49,6 +131,7 @@ enum PrivacySettingsActionState: Equatable {
         switch self {
         case .working: return "Working…"
         case .allowed(let message): return message
+        case .changed(let message): return message
         case .cancelled: return PrivacySettingsText.cancelledNotice
         case .failed(let message): return message
         }
@@ -75,9 +158,20 @@ final class PrivacySettingsModel: ObservableObject {
     @Published private(set) var listing: ProviderProfileListAnswer?
     @Published private(set) var proposal: PrivacyGrantProposal?
     @Published private(set) var actionState: PrivacySettingsActionState?
+    @Published private(set) var change: PrivacyChangeProposal?
+    @Published private(set) var requeueProposal: PrivacyRequeueProposal?
+    /// Work waiting behind each unrevoked stored version, as the core reports it. Empty when nothing is queued.
+    @Published private(set) var queuedWork: [PrivacyQueuedVersion] = []
+    /// Whether queued work could not be read; the rest of the screen still works.
+    @Published private(set) var queuedWorkUnreadable = false
+    /// The link the core recorded for the most recent requeue, so the move can be inspected.
+    @Published private(set) var lastRequeue: JobConfigurationRequeueRecord?
 
     /// The capabilities the core lets a user authorize for sending content.
     static let grantableCapabilities = ["text_interpretation", "review"]
+
+    /// How many queued jobs are listed per version; the core reports the full count either way.
+    static let queuedJobLimit = 20
 
     private let controls: PrivacySettingsControlling
     private let readScope: () -> CompositionReadScope
@@ -124,8 +218,13 @@ final class PrivacySettingsModel: ObservableObject {
             let freshListing = try await controls.listProfiles()
             guard thisGeneration == generation else { return }
             guard readScope() == .authenticated else { lock(); return }
+            let freshQueued = try await readQueuedWork(freshListing)
+            guard thisGeneration == generation else { return }
+            guard readScope() == .authenticated else { lock(); return }
             routes = freshRoutes
             listing = freshListing
+            queuedWork = freshQueued.versions
+            queuedWorkUnreadable = freshQueued.unreadable
             phase = .loaded
         } catch {
             guard thisGeneration == generation else { return }
@@ -133,6 +232,28 @@ final class PrivacySettingsModel: ObservableObject {
             guard readScope() == .authenticated else { lock(); return }
             phase = .failed(PrivacySettingsText.loadFailure(error))
         }
+    }
+
+    private func readQueuedWork(_ freshListing: ProviderProfileListAnswer) async throws
+        -> (versions: [PrivacyQueuedVersion], unreadable: Bool)
+    {
+        var versions: [PrivacyQueuedVersion] = []
+        var unreadable = false
+        for profile in freshListing.profiles {
+            for version in profile.versions where !version.revoked {
+                do {
+                    let jobs = try await controls.jobsPinned(
+                        toProfile: version.profileVersion, limit: Self.queuedJobLimit)
+                    if jobs.total > 0 {
+                        versions.append(PrivacyQueuedVersion(profileID: profile.profileID, version: version, jobs: jobs))
+                    }
+                } catch {
+                    if case JobConfigurationError.notAuthenticated = error { throw ProviderConfigurationError.notAuthenticated }
+                    unreadable = true
+                }
+            }
+        }
+        return (versions, unreadable)
     }
 
     /// Opens the question for one capability, route and profile version. Nothing is granted.
@@ -144,6 +265,8 @@ final class PrivacySettingsModel: ObservableObject {
             let found = offeredVersions(for: capability).first(where: { $0.version.profileVersion == profileVersion })
         else { return }
         actionState = nil
+        change = nil
+        requeueProposal = nil
         proposal = PrivacyGrantProposal(
             routeID: route.routeID, routeLabel: PrivacySettingsText.routeLabel(route), capability: capability,
             profileVersion: profileVersion,
@@ -152,9 +275,133 @@ final class PrivacySettingsModel: ObservableObject {
 
     /// Closes the open question. Nothing is granted and nothing else changes.
     func cancel() {
-        guard proposal != nil, !isWorking else { return }
+        guard proposal != nil || change != nil || requeueProposal != nil, !isWorking else { return }
         proposal = nil
+        change = nil
+        requeueProposal = nil
         actionState = .cancelled
+    }
+
+    /// Opens the question for taking `capability` away from the route. Nothing is changed.
+    func proposeRevoke(routeID: String, capability: String) {
+        guard readScope() == .authenticated else { lock(); return }
+        guard phase == .loaded, !isWorking, isGranted(routeID: routeID, capability: capability),
+            let route = routes.first(where: { $0.routeID == routeID })
+        else { return }
+        open(.revokeRouteCapability(
+            routeID: routeID, routeLabel: PrivacySettingsText.routeLabel(route), capability: capability))
+    }
+
+    /// Opens the question for revoking one unrevoked stored profile version. Nothing is changed.
+    func proposeRevokeProfile(profileVersion: String) {
+        guard readScope() == .authenticated else { lock(); return }
+        guard phase == .loaded, !isWorking, let listing else { return }
+        for profile in listing.profiles {
+            if let version = profile.versions.first(where: { $0.profileVersion == profileVersion && !$0.revoked }) {
+                open(.revokeProfileVersion(
+                    profileVersion: profileVersion,
+                    versionLabel: PrivacySettingsText.versionLabel(profileID: profile.profileID, version: version)))
+                return
+            }
+        }
+    }
+
+    /// Opens the question for queueing the route's waiting notes with the provider selected now. Only offered where the
+    /// route already allows sorting text notes; the core still decides whether the selected provider is authorized.
+    func proposeRepinWaitingWork(routeID: String) {
+        guard readScope() == .authenticated else { lock(); return }
+        guard phase == .loaded, !isWorking, isGranted(routeID: routeID, capability: "text_interpretation"),
+            let route = routes.first(where: { $0.routeID == routeID })
+        else { return }
+        open(.repinWaitingWork(routeID: routeID, routeLabel: PrivacySettingsText.routeLabel(route)))
+    }
+
+    private func open(_ target: PrivacyChangeProposal.Target) {
+        actionState = nil
+        proposal = nil
+        requeueProposal = nil
+        change = PrivacyChangeProposal(target: target)
+    }
+
+    /// Applies exactly the shown change. `shown` must be the change on screen, so a stale confirmation does nothing.
+    /// The screen then reads the stored state again and shows that, not the expectation.
+    func confirmChange(_ shown: PrivacyChangeProposal) async {
+        guard readScope() == .authenticated else { lock(); return }
+        guard let current = change, current == shown, !isWorking else { return }
+        actionState = .working
+        do {
+            switch current.target {
+            case .revokeRouteCapability(let routeID, let routeLabel, let capability):
+                let outcome = try await controls.revoke(routeID: routeID, capability: capability)
+                actionState = .changed(PrivacySettingsText.revokeResult(outcome, routeLabel: routeLabel, capability: capability))
+            case .revokeProfileVersion(let profileVersion, let versionLabel):
+                try await controls.revokeProfile(profileVersion)
+                actionState = .changed(PrivacySettingsText.profileRevoked(versionLabel))
+            case .repinWaitingWork(let routeID, let routeLabel):
+                let moved = try await controls.repinWaitingWork(routeID: routeID)
+                actionState = .changed(PrivacySettingsText.repinResult(moved: moved, routeLabel: routeLabel))
+            }
+            change = nil
+        } catch {
+            if isNotAuthenticated(error) { lock(); return }
+            change = nil
+            actionState = .failed(PrivacySettingsText.changeFailure(error))
+        }
+        await refresh()
+    }
+
+    /// Opens the question for moving one queued job to another unrevoked stored version. Nothing is moved.
+    func proposeRequeue(jobID: String, toProfileVersion: String) {
+        guard readScope() == .authenticated else { lock(); return }
+        guard phase == .loaded, !isWorking, let listing,
+            let from = queuedWork.first(where: { $0.jobs.jobs.contains { $0.jobID == jobID } }),
+            from.version.profileVersion != toProfileVersion
+        else { return }
+        for profile in listing.profiles {
+            if let target = profile.versions.first(where: { $0.profileVersion == toProfileVersion && !$0.revoked }) {
+                actionState = nil
+                proposal = nil
+                change = nil
+                requeueProposal = PrivacyRequeueProposal(
+                    jobID: jobID, newJobID: UUID().uuidString.lowercased(),
+                    fromVersionLabel: PrivacySettingsText.versionLabel(profileID: from.profileID, version: from.version),
+                    toProfileVersion: toProfileVersion,
+                    toVersionLabel: PrivacySettingsText.versionLabel(profileID: profile.profileID, version: target))
+                return
+            }
+        }
+    }
+
+    /// Moves exactly the shown job. The proposal's `newJobID` is reused when an unclear result is retried, so a repeat
+    /// answers the same replacement instead of queueing another.
+    func confirmRequeue(_ shown: PrivacyRequeueProposal) async {
+        guard readScope() == .authenticated else { lock(); return }
+        guard let current = requeueProposal, current == shown, !isWorking else { return }
+        actionState = .working
+        do {
+            let replacement = try await controls.requeue(
+                jobID: current.jobID, newJobID: current.newJobID, toProfileVersion: current.toProfileVersion)
+            requeueProposal = nil
+            lastRequeue = try? await controls.requeueRecord(forJob: replacement.jobID)
+            actionState = .changed(PrivacySettingsText.requeued(to: current.toVersionLabel))
+        } catch {
+            if isNotAuthenticated(error) { lock(); return }
+            // Only an answer that never arrived or was unclear can be repeated; a refusal ends the question.
+            let retryable: Bool
+            switch error {
+            case JobConfigurationError.unreadable, JobConfigurationError.core: retryable = true
+            default: retryable = false
+            }
+            if !retryable { requeueProposal = nil }
+            actionState = .failed(PrivacySettingsText.changeFailure(error))
+        }
+        await refresh()
+    }
+
+    private func isNotAuthenticated(_ error: Error) -> Bool {
+        if case ProviderConfigurationError.notAuthenticated = error { return true }
+        if case JobConfigurationError.notAuthenticated = error { return true }
+        return false
     }
 
     /// Grants exactly the shown proposal. `shown` must be the proposal on screen, so a stale confirmation of an earlier
@@ -180,6 +427,11 @@ final class PrivacySettingsModel: ObservableObject {
     func clear() {
         generation += 1
         proposal = nil
+        change = nil
+        requeueProposal = nil
+        lastRequeue = nil
+        queuedWork = []
+        queuedWorkUnreadable = false
         actionState = nil
         routes = []
         listing = nil
@@ -189,6 +441,11 @@ final class PrivacySettingsModel: ObservableObject {
     private func lock() {
         generation += 1
         proposal = nil
+        change = nil
+        requeueProposal = nil
+        lastRequeue = nil
+        queuedWork = []
+        queuedWorkUnreadable = false
         actionState = nil
         routes = []
         listing = nil

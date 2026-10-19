@@ -15,6 +15,22 @@ struct PrivacySettingsView: View {
     static let allowIdentifier = "privacy-settings.allow"
     static let cancelIdentifier = "privacy-settings.cancel"
     static let actionStateIdentifier = "privacy-settings.action-state"
+    static let changeQuestionIdentifier = "privacy-settings.change-question"
+    static let changeConfirmIdentifier = "privacy-settings.change-confirm"
+    static let queuedWorkIdentifier = "privacy-settings.queued-work"
+    static let queuedWorkUnreadableIdentifier = "privacy-settings.queued-work-unreadable"
+    static let requeueQuestionIdentifier = "privacy-settings.requeue-question"
+    static let requeueConfirmIdentifier = "privacy-settings.requeue-confirm"
+    static let requeueRecordIdentifier = "privacy-settings.requeue-record"
+    static func revokeIdentifier(_ route: String, _ capability: String) -> String {
+        "privacy-settings.revoke.\(route).\(capability)"
+    }
+    static func repinIdentifier(_ route: String) -> String { "privacy-settings.repin.\(route)" }
+    static func revokeProfileIdentifier(_ version: String) -> String { "privacy-settings.revoke-profile.\(version)" }
+    static func queuedVersionIdentifier(_ version: String) -> String { "privacy-settings.queued.\(version)" }
+    static func requeueOfferIdentifier(_ job: String, _ version: String) -> String {
+        "privacy-settings.requeue.\(job).\(version)"
+    }
     static func routeIdentifier(_ route: String) -> String { "privacy-settings.route.\(route)" }
     static func routeStatusIdentifier(_ route: String) -> String { "privacy-settings.route-status.\(route)" }
     static func offerIdentifier(_ route: String, _ capability: String, _ version: String) -> String {
@@ -69,7 +85,13 @@ struct PrivacySettingsView: View {
             } else {
                 note(PrivacySettingsText.localFirstNotice, identifier: Self.noticeIdentifier)
             }
+            queuedWorkSection
             if let proposal = model.proposal { proposalCard(proposal) }
+            if let change = model.change { changeCard(change) }
+            if let requeue = model.requeueProposal { requeueCard(requeue) }
+            if let record = model.lastRequeue {
+                note(PrivacySettingsText.requeueRecord(record), identifier: Self.requeueRecordIdentifier)
+            }
             if let state = model.actionState {
                 note(state.message, identifier: Self.actionStateIdentifier)
             }
@@ -89,12 +111,16 @@ struct PrivacySettingsView: View {
                         DSRow(
                             label: PrivacySettingsText.grantSummary(grant), iconSystemName: "checkmark.shield",
                             showsChevron: false)
+                        revokeRow(route: route, capability: grant.capability)
                     }
                 }
                 .accessibilityIdentifier(Self.routeStatusIdentifier(route.routeID))
                 .reportPrivacyRendered(
                     Self.routeStatusIdentifier(route.routeID),
                     text: route.grantedCapabilities.map(PrivacySettingsText.grantSummary).joined(separator: "\n"))
+            }
+            if model.isGranted(routeID: route.routeID, capability: "text_interpretation") {
+                repinRow(route: route)
             }
             ForEach(PrivacySettingsModel.grantableCapabilities, id: \.self) { capability in
                 if !model.isGranted(routeID: route.routeID, capability: capability) {
@@ -106,6 +132,141 @@ struct PrivacySettingsView: View {
         }
         .accessibilityIdentifier(Self.routeIdentifier(route.routeID))
         .reportPrivacyRendered(Self.routeIdentifier(route.routeID), text: PrivacySettingsText.routeLabel(route))
+    }
+
+    private func revokeRow(route: RoutePolicyRoute, capability: String) -> some View {
+        let label = "Stop \(PrivacySettingsText.capabilityName(capability).lowercased())"
+        let identifier = Self.revokeIdentifier(route.routeID, capability)
+        return DSRow(label: label, iconSystemName: "xmark.shield", showsChevron: false) {
+            model.proposeRevoke(routeID: route.routeID, capability: capability)
+        }
+        .reportPrivacyRendered(identifier, text: label)
+        .accessibilityIdentifier(identifier)
+        .disabled(model.isWorking)
+    }
+
+    private func repinRow(route: RoutePolicyRoute) -> some View {
+        let label = "Queue waiting notes with the provider selected now"
+        let identifier = Self.repinIdentifier(route.routeID)
+        return DSRow(label: label, iconSystemName: "arrow.triangle.2.circlepath", showsChevron: false) {
+            model.proposeRepinWaitingWork(routeID: route.routeID)
+        }
+        .reportPrivacyRendered(identifier, text: label)
+        .accessibilityIdentifier(identifier)
+        .disabled(model.isWorking)
+    }
+
+    /// Per unrevoked stored version: how much work waits behind it, the option to revoke it, and a deliberate move for
+    /// each listed job to each other unrevoked version.
+    @ViewBuilder
+    private var queuedWorkSection: some View {
+        if model.queuedWorkUnreadable {
+            note(PrivacySettingsText.queuedWorkUnreadableNotice, identifier: Self.queuedWorkUnreadableIdentifier)
+        }
+        if !model.queuedWork.isEmpty {
+            DSGroupedSection(title: PrivacySettingsText.queuedWorkTitle) {
+                ForEach(model.queuedWork, id: \.version.profileVersion) { queued in
+                    queuedVersionRows(queued)
+                }
+            }
+            .accessibilityIdentifier(Self.queuedWorkIdentifier)
+        }
+        if let listing = model.listing {
+            let revocable = listing.profiles.flatMap { profile in
+                profile.versions.filter { !$0.revoked }.map { (profile.profileID, $0) }
+            }
+            if !revocable.isEmpty {
+                DSGroupedSection(title: "Provider versions") {
+                    ForEach(revocable, id: \.1.profileVersion) { profileID, version in
+                        let label = "Revoke \(PrivacySettingsText.versionLabel(profileID: profileID, version: version))"
+                        let identifier = Self.revokeProfileIdentifier(version.profileVersion)
+                        DSRow(label: label, iconSystemName: "trash", showsChevron: false) {
+                            model.proposeRevokeProfile(profileVersion: version.profileVersion)
+                        }
+                        .reportPrivacyRendered(identifier, text: label)
+                        .accessibilityIdentifier(identifier)
+                        .disabled(model.isWorking)
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func queuedVersionRows(_ queued: PrivacyQueuedVersion) -> some View {
+        let heading = PrivacySettingsText.versionLabel(profileID: queued.profileID, version: queued.version)
+            + " · " + PrivacySettingsText.queuedCount(queued.jobs)
+        let identifier = Self.queuedVersionIdentifier(queued.version.profileVersion)
+        DSRow(label: heading, iconSystemName: "tray.full", showsChevron: false)
+            .reportPrivacyRendered(identifier, text: heading)
+            .accessibilityIdentifier(identifier)
+        ForEach(queued.jobs.jobs, id: \.jobID) { job in
+            DSRow(label: PrivacySettingsText.queuedJob(job), iconSystemName: "clock", showsChevron: false)
+            ForEach(otherVersions(than: queued.version.profileVersion), id: \.version.profileVersion) { target in
+                let label = "Move to \(PrivacySettingsText.versionLabel(profileID: target.profileID, version: target.version))"
+                let offerIdentifier = Self.requeueOfferIdentifier(job.jobID, target.version.profileVersion)
+                DSRow(label: label, iconSystemName: "arrow.right", showsChevron: false) {
+                    model.proposeRequeue(jobID: job.jobID, toProfileVersion: target.version.profileVersion)
+                }
+                .reportPrivacyRendered(offerIdentifier, text: label)
+                .accessibilityIdentifier(offerIdentifier)
+                .disabled(model.isWorking)
+            }
+        }
+    }
+
+    private func otherVersions(than profileVersion: String) -> [PrivacyOfferedVersion] {
+        guard let listing = model.listing else { return [] }
+        return listing.profiles.flatMap { profile in
+            profile.versions.filter { !$0.revoked && $0.profileVersion != profileVersion }
+                .map { PrivacyOfferedVersion(profileID: profile.profileID, version: $0) }
+        }
+    }
+
+    private func changeCard(_ change: PrivacyChangeProposal) -> some View {
+        DSCard {
+            VStack(alignment: .leading, spacing: DSSpacing.sm) {
+                Text(PrivacySettingsText.changeQuestion(change))
+                    .font(DSFont.sectionTitle)
+                    .foregroundColor(DSColor.ink.color)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier(Self.changeQuestionIdentifier)
+                    .reportPrivacyRendered(Self.changeQuestionIdentifier, text: PrivacySettingsText.changeQuestion(change))
+                DSPillButton(title: "Confirm", style: .primary) { Task { await model.confirmChange(change) } }
+                    .frame(maxWidth: .infinity)
+                    .reportPrivacyRendered(Self.changeConfirmIdentifier, text: "Confirm")
+                    .accessibilityIdentifier(Self.changeConfirmIdentifier)
+                    .disabled(model.isWorking)
+                DSPillButton(title: "Not now", style: .plain) { model.cancel() }
+                    .frame(maxWidth: .infinity)
+                    .reportPrivacyRendered(Self.cancelIdentifier, text: "Not now")
+                    .accessibilityIdentifier(Self.cancelIdentifier)
+                    .disabled(model.isWorking)
+            }
+        }
+    }
+
+    private func requeueCard(_ proposal: PrivacyRequeueProposal) -> some View {
+        DSCard {
+            VStack(alignment: .leading, spacing: DSSpacing.sm) {
+                Text(PrivacySettingsText.requeueQuestion(proposal))
+                    .font(DSFont.sectionTitle)
+                    .foregroundColor(DSColor.ink.color)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier(Self.requeueQuestionIdentifier)
+                    .reportPrivacyRendered(Self.requeueQuestionIdentifier, text: PrivacySettingsText.requeueQuestion(proposal))
+                DSPillButton(title: "Move", style: .primary) { Task { await model.confirmRequeue(proposal) } }
+                    .frame(maxWidth: .infinity)
+                    .reportPrivacyRendered(Self.requeueConfirmIdentifier, text: "Move")
+                    .accessibilityIdentifier(Self.requeueConfirmIdentifier)
+                    .disabled(model.isWorking)
+                DSPillButton(title: "Not now", style: .plain) { model.cancel() }
+                    .frame(maxWidth: .infinity)
+                    .reportPrivacyRendered(Self.cancelIdentifier, text: "Not now")
+                    .accessibilityIdentifier(Self.cancelIdentifier)
+                    .disabled(model.isWorking)
+            }
+        }
     }
 
     private func offerRow(
@@ -193,6 +354,7 @@ extension PrivacySettingsModel {
     /// The model as the app assembles it: the root's provider configuration, gated by the root's read scope.
     nonisolated static func assembled(root: ServiceCompositionRoot) -> PrivacySettingsModel {
         PrivacySettingsModel(
-            controls: root.providerConfiguration, readScope: { [weak root] in root?.readScope ?? .captureOnly })
+            controls: PrivacySettingsServices(providers: root.providerConfiguration, jobs: root.jobConfiguration),
+            readScope: { [weak root] in root?.readScope ?? .captureOnly })
     }
 }
