@@ -59,6 +59,7 @@ struct SourceDetailView: View {
                 VStack(alignment: .leading, spacing: DSSpacing.lg) {
                     if let content = model.content {
                         detailCard(content)
+                        if let controls = model.itemControls { ItemControlsView(model: controls) }
                         history(content)
                     } else if let failure = model.failure {
                         emptyState(

@@ -128,6 +128,8 @@ final class SourceDetailModel: ObservableObject {
     @Published private(set) var audio: SourceAudioState = .none
 
     let itemID: String
+    /// The correction controls shown under the details; absent where no corrections are wired.
+    var itemControls: ItemControlsModel?
     private let reader: SourceDetailReading
     private let opener: SourceAudioOpening
     private let readScope: () -> CompositionReadScope
@@ -379,8 +381,11 @@ final class SourceDetailModel: ObservableObject {
     }
 
     static func assembled(itemID: String, root: ServiceCompositionRoot) -> SourceDetailModel {
-        SourceDetailModel(
+        let model = SourceDetailModel(
             itemID: itemID, reader: root.itemDetails, opener: root.playback, readScope: { root.readScope })
+        model.itemControls = ItemControlsModel.assembled(
+            itemID: itemID, root: root, onCorrected: { [weak model] in Task { await model?.load() } })
+        return model
     }
 }
 
