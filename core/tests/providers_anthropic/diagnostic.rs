@@ -614,3 +614,109 @@ fn destination_checks_apply_to_diagnostic_calls() {
     assert_eq!(provider_failure_kind(&failure), FailureKind::Rejected);
     assert!(unauthorized.transport.calls().is_empty());
 }
+
+// ---- why a request was rejected ----
+
+fn error_step(status: u16, error_type: &str, message: &str) -> FakeAnthropicStep {
+    FakeAnthropicStep::respond_json(
+        status,
+        &json!({ "type": "error", "error": { "type": error_type, "message": message } }),
+    )
+}
+
+#[test]
+fn a_rejection_keeps_the_status_the_error_type_and_the_providers_message() {
+    let harness = Harness::new(vec![error_step(
+        400,
+        "invalid_request_error",
+        "`temperature` is deprecated for this model.",
+    )]);
+    let failure = harness.diagnostic_failure();
+    assert_eq!(provider_failure_kind(&failure), FailureKind::Rejected);
+    let detail = failure.detail.expect("the envelope's reason is kept");
+    assert_eq!(detail.status, 400);
+    assert_eq!(detail.error_type.as_deref(), Some("invalid_request_error"));
+    assert_eq!(
+        detail.message.as_deref(),
+        Some("`temperature` is deprecated for this model.")
+    );
+}
+
+#[test]
+fn every_documented_error_type_is_kept_including_conflict_error() {
+    for (status, error_type) in [(409, "conflict_error"), (413, "request_too_large")] {
+        let harness = Harness::new(vec![error_step(status, error_type, "synthetic")]);
+        let detail = harness.diagnostic_failure().detail.expect("detail");
+        assert_eq!(
+            detail.error_type.as_deref(),
+            Some(error_type),
+            "{error_type}"
+        );
+    }
+}
+
+#[test]
+fn the_message_is_cleaned_and_bounded_and_an_unknown_type_is_unrecognized() {
+    let long = format!("a\u{7}b\nc{}", "é".repeat(400));
+    let harness = Harness::new(vec![error_step(400, "something_new_error", &long)]);
+    let detail = harness.diagnostic_failure().detail.expect("detail");
+    assert_eq!(detail.error_type.as_deref(), Some("unrecognized"));
+    let message = detail.message.expect("message");
+    assert!(message.starts_with("abc"));
+    assert!(!message.chars().any(char::is_control));
+    assert!(message.len() <= 300);
+    assert!(message.chars().skip(3).all(|c| c == 'é'));
+    assert_eq!(message.len(), 3 + 2 * 148, "cut at a character boundary");
+}
+
+#[test]
+fn oversized_or_non_envelope_error_bodies_yield_the_status_alone() {
+    let envelope = error_step(502, "api_error", &"x".repeat(200));
+    let harness = Harness::new(vec![envelope]);
+    let failure = harness
+        .diagnose_with(
+            RequestedSettings::new(),
+            &DispatchLimits {
+                max_response_bytes: 64,
+            },
+        )
+        .expect_err("rejected");
+    assert_eq!(provider_failure_kind(&failure), FailureKind::Unavailable);
+    let detail = failure.detail.expect("status");
+    assert_eq!(
+        (detail.status, detail.error_type, detail.message),
+        (502, None, None)
+    );
+
+    let harness = Harness::new(vec![FakeAnthropicStep::respond(404, "<html>nope</html>")]);
+    let detail = harness.diagnostic_failure().detail.expect("status");
+    assert_eq!(
+        (detail.status, detail.error_type, detail.message),
+        (404, None, None)
+    );
+}
+
+#[test]
+fn a_successful_or_locally_refused_call_carries_no_detail() {
+    let harness = Harness::new(vec![ok_reply(valid_proposal())]);
+    harness.cancel.cancel();
+    assert_eq!(harness.diagnostic_failure().detail, None);
+}
+
+#[test]
+fn production_dispatch_fails_the_same_way_for_the_same_responses() {
+    for step in [
+        error_step(400, "invalid_request_error", "`temperature` is deprecated."),
+        error_step(529, "overloaded_error", "busy"),
+        FakeAnthropicStep::respond(404, "<html>nope</html>"),
+    ] {
+        let production = Harness::new(vec![step.clone()]);
+        let diagnostic = Harness::new(vec![step]);
+        let expected = production.run().expect_err("fails");
+        let failure = diagnostic.diagnostic_failure();
+        assert_eq!(
+            failure.kind,
+            DiagnosticFailureKind::Provider { failure: expected }
+        );
+    }
+}

@@ -6,6 +6,8 @@
     <string>Oh And captures your voice input for recording thoughts and actions.</string>
     <key>NSSpeechRecognitionUsageDescription</key>
     <string>Oh And transcribes audio on your device to convert voice to text.</string>
+    <key>NSFaceIDUsageDescription</key>
+    <string>Oh And uses Face ID to unlock the things you've saved. You can always capture without it.</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>Oh And may communicate with local network services for processing.</string>
     <key>UIApplicationSceneManifest</key>

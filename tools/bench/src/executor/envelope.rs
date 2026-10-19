@@ -33,6 +33,15 @@ pub(super) mod class {
     pub const UNSUPPORTED: &str = "unsupported";
 }
 
+/// Why a provider rejected a request, without the provider's wording: the status and the
+/// protocol's error type, which a report can count. The message lives in `Envelope::detail`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct RejectionRecord {
+    pub status: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_type: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct Envelope {
     pub executor_record: u32,
@@ -61,6 +70,8 @@ pub(super) struct Envelope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejection: Option<RejectionRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<serde_json::Map<String, serde_json::Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<DiagnosticMetadata>,
@@ -83,6 +94,7 @@ impl Envelope {
             rerun_of: None,
             class: None,
             detail: None,
+            rejection: None,
             output: None,
             metadata: None,
             usage: None,
