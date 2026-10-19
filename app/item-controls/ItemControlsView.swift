@@ -13,6 +13,8 @@ struct ItemControlsView: View {
     static let sectionIdentifier = "item-controls.section"
     static let actionWarningIdentifier = "item-controls.type.action-warning"
     static let outcomeIdentifier = "item-controls.outcome"
+    static let refreshFailureIdentifier = "item-controls.refresh-failure"
+    static let reloadIdentifier = "item-controls.reload"
 
     static let actionWarning =
         "Applying this makes the item an action. Changing the type never happens on its own."
@@ -27,10 +29,14 @@ struct ItemControlsView: View {
         }
     }
 
-    static func message(for outcome: ItemControlsOutcome) -> String {
+    /// `newerValuesShown` is false when the stored values could not be read again after the attempt.
+    static func message(for outcome: ItemControlsOutcome, newerValuesShown: Bool = true) -> String {
         switch outcome {
         case .saved: return "Saved. Your original is kept."
         case .savedAndReminderCancelled: return "Saved. The reminder for this item was cancelled."
+        case .conflict where !newerValuesShown:
+            return "This item changed after you opened it, so nothing was saved. "
+                + "Your change is kept, but the newer values could not be loaded yet."
         case .conflict:
             return "This item changed after you opened it, so nothing was saved. "
                 + "The newer values are shown; check them and save again if you still want your change."
@@ -42,33 +48,58 @@ struct ItemControlsView: View {
         }
     }
 
+    static func message(for failure: ItemControlsRefreshFailure) -> String {
+        switch failure {
+        case .locked:
+            return "Your saved items are locked, so the latest values could not be loaded. "
+                + "Editing is paused; unlock and reload to continue."
+        case .itemGone: return "This item is no longer available. It may have been deleted."
+        case .unreadable:
+            return "The latest values could not be loaded, so editing is paused. Your unsaved changes are kept."
+        }
+    }
+
     @ObservedObject var model: ItemControlsModel
     /// Told when an identified element comes on or goes off the screen; tests use it to check what is rendered.
     var renderReporter: ((String, Bool) -> Void)?
 
     var body: some View {
         // A container that always exists, so the load below runs even while there is nothing to show yet.
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: DSSpacing.md) {
             if model.snapshot != nil {
-                VStack(alignment: .leading, spacing: DSSpacing.md) {
-                    Text("Correct this item")
-                        .font(DSFont.sectionTitle)
-                        .foregroundColor(DSColor.ink.color)
-                        .accessibilityAddTraits(.isHeader)
-                        .rendered(Self.sectionIdentifier, renderReporter)
-                    textControl
-                    typeControl
-                    topicControl
-                    if let outcome = model.outcome {
-                        Text(Self.message(for: outcome))
-                            .font(DSFont.footer)
-                            .foregroundColor(DSColor.inkMuted.color)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .accessibilityIdentifier(Self.outcomeIdentifier)
-                            .rendered(Self.outcomeIdentifier, renderReporter)
+                Text("Correct this item")
+                    .font(DSFont.sectionTitle)
+                    .foregroundColor(DSColor.ink.color)
+                    .accessibilityAddTraits(.isHeader)
+                    .rendered(Self.sectionIdentifier, renderReporter)
+                // While locked, the stored words and drafts stay off the screen; they come back after a reload.
+                if model.refreshFailure != .locked {
+                    Group {
+                        textControl
+                        typeControl
+                        topicControl
                     }
+                    .disabled(model.snapshot?.isDeleted == true)
                 }
-                .disabled(model.snapshot?.isDeleted == true)
+            }
+            if let outcome = model.outcome {
+                Text(Self.message(for: outcome, newerValuesShown: model.refreshFailure == nil))
+                    .font(DSFont.footer)
+                    .foregroundColor(DSColor.inkMuted.color)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .rendered(Self.outcomeIdentifier, renderReporter)
+            }
+            if let failure = model.refreshFailure {
+                Text(Self.message(for: failure))
+                    .font(DSFont.footer)
+                    .foregroundColor(DSColor.inkMuted.color)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .rendered(Self.refreshFailureIdentifier, renderReporter)
+                if model.canReload {
+                    Button("Reload") { Task { await model.reload() } }
+                        .buttonStyle(DSPillButtonStyle(style: .secondary))
+                        .rendered(Self.reloadIdentifier, renderReporter)
+                }
             }
         }
         .task { await model.load() }

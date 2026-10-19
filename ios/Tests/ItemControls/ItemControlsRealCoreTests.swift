@@ -12,6 +12,18 @@ private final class ControlsUnreachableSender: ProviderRequestSender, @unchecked
     }
 }
 
+/// Hands every read to the real core, first running `beforeRead`, so a test can relock the session between a stored
+/// correction and the read that follows it.
+private final class HookedDetailReader: SourceDetailReading, @unchecked Sendable {
+    let inner: SourceDetailReading
+    var beforeRead: (() -> Void)?
+    init(_ inner: SourceDetailReading) { self.inner = inner }
+    func detail(itemID: String) async throws -> CoreItemDetail {
+        beforeRead?()
+        return try await inner.detail(itemID: itemID)
+    }
+}
+
 /// Drives `ItemControlsModel.assembled` and the source-detail screen over the real composition root and Rust core on an
 /// on-disk store with synthetic data: what is stored, what survives a relaunch, and what the screen shows.
 final class ItemControlsRealCoreTests: XCTestCase {
@@ -136,7 +148,99 @@ final class ItemControlsRealCoreTests: XCTestCase {
         XCTAssertEqual(scalar("SELECT item_type FROM items WHERE item_id = '\(itemID)'"), "idea")
     }
 
+    func testARelockBeforeTheRefreshKeepsTheSaveAndDraftsButPausesEditingUntilAReload() throws {
+        let itemID = try saveCapture()
+        let reader = HookedDetailReader(root.itemDetails)
+        let controls = ItemControlsModel(itemID: itemID, reader: reader, corrector: root.itemCorrections)
+        hostControls(controls)
+        settle { controls.snapshot != nil && onScreen.contains(ItemControlsView.sectionIdentifier) }
+        let revisionBefore = try XCTUnwrap(controls.snapshot?.revision)
+
+        controls.topicDraft = "garage"
+        controls.textDraft = "call the roofer tomorrow"
+        reader.beforeRead = { [unowned self] in self.session.relock(.explicit) }
+        onMain { await controls.saveText() }
+        reader.beforeRead = nil
+
+        XCTAssertEqual(controls.outcome, .saved(.text))
+        XCTAssertEqual(controls.refreshFailure, .locked)
+        XCTAssertEqual(controls.snapshot?.revision, revisionBefore, "the newer revision was not read")
+        XCTAssertEqual(controls.topicDraft, "garage", "the unsaved topic is kept")
+        XCTAssertFalse(controls.canSaveTopic, "nothing can be sent against the old revision")
+        XCTAssertEqual(
+            scalar("SELECT COUNT(*) FROM events WHERE event_id LIKE 'user-correction:%'"), "1", "the save was stored")
+        settle {
+            onScreen.contains(ItemControlsView.outcomeIdentifier)
+                && onScreen.contains(ItemControlsView.refreshFailureIdentifier)
+                && onScreen.contains(ItemControlsView.reloadIdentifier)
+        }
+        XCTAssertTrue(onScreen.contains(ItemControlsView.outcomeIdentifier), "the saved message is on screen")
+        XCTAssertTrue(onScreen.contains(ItemControlsView.refreshFailureIdentifier), "the locked message is on screen")
+        XCTAssertTrue(onScreen.contains(ItemControlsView.reloadIdentifier))
+
+        XCTAssertEqual(authenticateAndWait(session), .authenticated)
+        onMain { await controls.reload() }
+        XCTAssertNil(controls.refreshFailure)
+        XCTAssertGreaterThan(controls.snapshot?.revision ?? 0, revisionBefore)
+        XCTAssertEqual(controls.snapshot?.text, "call the roofer tomorrow")
+        XCTAssertEqual(controls.topicDraft, "garage")
+        settle { !onScreen.contains(ItemControlsView.refreshFailureIdentifier) }
+        XCTAssertFalse(onScreen.contains(ItemControlsView.refreshFailureIdentifier))
+
+        onMain { await controls.saveSessionTopic() }
+        XCTAssertEqual(controls.outcome, .saved(.sessionTopic))
+        XCTAssertEqual(scalar("SELECT current_session_topic FROM items WHERE item_id = '\(itemID)'"), "garage")
+    }
+
+    func testARelockAfterAStaleSaveKeepsTheConflictAndDoesNotPretendNewerValuesLoaded() throws {
+        let itemID = try saveCapture()
+        let reader = HookedDetailReader(root.itemDetails)
+        let controls = ItemControlsModel(itemID: itemID, reader: reader, corrector: root.itemCorrections)
+        hostControls(controls)
+        settle { controls.snapshot != nil && onScreen.contains(ItemControlsView.sectionIdentifier) }
+        let revisionBefore = try XCTUnwrap(controls.snapshot?.revision)
+        try run { try await self.root.itemCorrections.correctText(
+            commandID: UUID().uuidString.lowercased(), itemID: itemID, expectedRevision: revisionBefore,
+            text: "someone else's words") }
+
+        controls.textDraft = "my words"
+        reader.beforeRead = { [unowned self] in self.session.relock(.explicit) }
+        onMain { await controls.saveText() }
+        reader.beforeRead = nil
+
+        guard case .conflict(.text, _)? = controls.outcome else {
+            return XCTFail("expected a conflict, got \(String(describing: controls.outcome))")
+        }
+        XCTAssertEqual(controls.refreshFailure, .locked)
+        XCTAssertEqual(controls.snapshot?.revision, revisionBefore)
+        XCTAssertEqual(controls.textDraft, "my words")
+        XCTAssertFalse(controls.canSaveText)
+        XCTAssertFalse(
+            ItemControlsView.message(for: controls.outcome!, newerValuesShown: controls.refreshFailure == nil)
+                .contains("newer values are shown"))
+        settle {
+            onScreen.contains(ItemControlsView.outcomeIdentifier)
+                && onScreen.contains(ItemControlsView.refreshFailureIdentifier)
+        }
+        XCTAssertTrue(onScreen.contains(ItemControlsView.outcomeIdentifier), "the conflict stays on screen")
+        XCTAssertTrue(onScreen.contains(ItemControlsView.refreshFailureIdentifier))
+        XCTAssertEqual(scalar("SELECT COUNT(*) FROM events WHERE event_id LIKE 'user-correction:%'"), "1")
+
+        XCTAssertEqual(authenticateAndWait(session), .authenticated)
+        onMain { await controls.reload() }
+        XCTAssertNil(controls.refreshFailure)
+        XCTAssertEqual(controls.snapshot?.text, "someone else's words", "the newer values are now loaded")
+        XCTAssertEqual(controls.textDraft, "my words", "the rejected draft is still kept")
+        XCTAssertTrue(controls.canSaveText)
+    }
+
     // MARK: helpers
+
+    private func hostControls(_ controls: ItemControlsModel) {
+        host(AnyView(ItemControlsView(model: controls, renderReporter: { [unowned self] id, shown in
+            if shown { onScreen.insert(id) } else { onScreen.remove(id) }
+        })))
+    }
 
     private func makeRoot() throws -> ServiceCompositionRoot {
         try ServiceCompositionRoot(

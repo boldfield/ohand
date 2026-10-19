@@ -6,8 +6,11 @@ import OhAndServices
 private final class StubDetailReader: SourceDetailReading, @unchecked Sendable {
     var detail: CoreItemDetail
     var failure: ItemDetailError?
+    /// Runs on every read before it answers, so a test can look at the model while a refresh is still pending.
+    var duringRead: (@MainActor () async -> Void)?
     init(_ detail: CoreItemDetail) { self.detail = detail }
     func detail(itemID: String) async throws -> CoreItemDetail {
+        if let duringRead { await duringRead() }
         if let failure { throw failure }
         return detail
     }
@@ -101,32 +104,118 @@ final class ItemControlsModelTests: XCTestCase {
         XCTAssertTrue(model.canApplyType)
     }
 
-    func testAFailedRefreshAfterASaveKeepsOtherDraftsAndTheSavedOutcome() async {
+    func testAFailedRefreshAfterASaveKeepsDraftsAndTheSavedOutcomeButPausesEditing() async {
         let reader = StubDetailReader(detail(type: "idea", topic: "garage", text: "old"))
-        let model = make(reader, RecordingCorrector())
+        let corrector = RecordingCorrector()
+        let model = make(reader, corrector)
         await model.load()
         model.topicDraft = "kitchen"
         model.pendingType = .note
         model.textDraft = "new words"
-        reader.failure = .relocked
+        reader.failure = .unreadable
         await model.saveText()
         XCTAssertEqual(model.outcome, .saved(.text))
+        XCTAssertEqual(model.refreshFailure, .unreadable)
         XCTAssertEqual(model.topicDraft, "kitchen")
         XCTAssertEqual(model.pendingType, .note)
         XCTAssertEqual(model.textDraft, "new words")
+        XCTAssertEqual(model.snapshot?.revision, 3, "the snapshot still names the revision from before the save")
+        XCTAssertFalse(model.canEdit)
+        XCTAssertFalse(model.canSaveText, "a second press cannot resend against the old revision")
+        XCTAssertFalse(model.canSaveTopic)
+        XCTAssertFalse(model.canApplyType)
+        XCTAssertTrue(model.canReload)
+        await model.saveText()
+        XCTAssertEqual(corrector.calls.count, 1, "nothing is sent while the snapshot is out of date")
+        XCTAssertEqual(ItemControlsView.message(for: model.outcome!, newerValuesShown: model.refreshFailure == nil),
+                       "Saved. Your original is kept.")
+
+        // Reading again picks up the new revision, keeps the unsaved drafts, and allows editing again.
+        reader.failure = nil
+        reader.detail = detail(revision: 4, type: "idea", topic: "garage", text: "new words")
+        await model.reload()
+        XCTAssertNil(model.refreshFailure)
+        XCTAssertEqual(model.outcome, .saved(.text), "the result of the save stays shown")
+        XCTAssertEqual(model.snapshot?.revision, 4)
+        XCTAssertEqual(model.topicDraft, "kitchen")
+        XCTAssertEqual(model.pendingType, .note)
+        XCTAssertFalse(model.canSaveText, "the saved words match what is stored")
+        XCTAssertTrue(model.canSaveTopic)
+        await model.saveSessionTopic()
+        XCTAssertEqual(corrector.calls.last, .topic(command: "command-2", revision: 4, topic: "kitchen"))
     }
 
-    func testAFailedRefreshAfterAConflictKeepsTheRejectedDraftAndTheConflict() async {
-        let reader = StubDetailReader(detail())
+    func testAFailedRefreshAfterAConflictKeepsTheDraftAndDoesNotClaimNewerValuesAreShown() async {
+        let reader = StubDetailReader(detail(revision: 3, text: "old"))
         let corrector = RecordingCorrector()
         corrector.results = [.failure(.staleRevision(currentRevision: 5))]
         let model = make(reader, corrector)
         await model.load()
         model.topicDraft = "kitchen"
-        reader.failure = .notAuthenticated
+        reader.failure = .relocked
         await model.saveSessionTopic()
         XCTAssertEqual(model.outcome, .conflict(.sessionTopic, currentRevision: 5))
+        XCTAssertEqual(model.refreshFailure, .locked)
         XCTAssertEqual(model.topicDraft, "kitchen")
+        XCTAssertEqual(model.snapshot?.revision, 3, "the newer values were not loaded")
+        XCTAssertFalse(model.canSaveTopic)
+        XCTAssertTrue(model.canReload)
+        let conflictMessage = ItemControlsView.message(
+            for: model.outcome!, newerValuesShown: model.refreshFailure == nil)
+        XCTAssertFalse(conflictMessage.contains("newer values are shown"))
+        XCTAssertTrue(conflictMessage.contains("could not be loaded"))
+        XCTAssertTrue(ItemControlsView.message(for: ItemControlsRefreshFailure.locked).contains("locked"))
+
+        // A reload that still fails keeps everything; one that succeeds shows the newer values under the conflict.
+        await model.reload()
+        XCTAssertEqual(model.refreshFailure, .locked)
+        XCTAssertEqual(model.topicDraft, "kitchen")
+        reader.failure = nil
+        reader.detail = detail(revision: 5, topic: "someone else's topic", text: "old")
+        await model.reload()
+        XCTAssertNil(model.refreshFailure)
+        XCTAssertEqual(model.snapshot?.revision, 5)
+        XCTAssertEqual(model.topicDraft, "kitchen", "the rejected draft is still kept after the reload")
+        XCTAssertEqual(model.outcome, .conflict(.sessionTopic, currentRevision: 5))
+        XCTAssertTrue(ItemControlsView.message(for: model.outcome!, newerValuesShown: true).contains("newer values are shown"))
+        await model.saveSessionTopic()
+        XCTAssertEqual(corrector.calls.last, .topic(command: "command-2", revision: 5, topic: "kitchen"))
+    }
+
+    func testAnItemGoneDuringTheRefreshOffersNoReload() async {
+        let reader = StubDetailReader(detail())
+        let model = make(reader, RecordingCorrector())
+        await model.load()
+        model.textDraft = "new words"
+        reader.failure = .notFound
+        await model.saveText()
+        XCTAssertEqual(model.refreshFailure, .itemGone)
+        XCTAssertFalse(model.canReload)
+        XCTAssertFalse(model.canEdit)
+    }
+
+    func testEditingStaysPausedWhileTheRefreshAfterASubmitIsPending() async {
+        for stale in [false, true] {
+            let reader = StubDetailReader(detail(revision: 3, text: "old"))
+            let corrector = RecordingCorrector()
+            if stale { corrector.results = [.failure(.staleRevision(currentRevision: 5))] }
+            let model = make(reader, corrector)
+            await model.load()
+            model.textDraft = "new words"
+            var observed: (isWorking: Bool, canSaveText: Bool)?
+            reader.duringRead = { [unowned model] in
+                reader.duringRead = nil
+                observed = (model.isWorking, model.canSaveText)
+                // A second press while the refresh is pending sends nothing.
+                await model.saveText()
+            }
+            reader.detail = detail(revision: stale ? 5 : 4, text: stale ? "someone else's words" : "new words")
+            await model.saveText()
+            XCTAssertEqual(observed?.isWorking, true, "stale=\(stale)")
+            XCTAssertEqual(observed?.canSaveText, false, "stale=\(stale)")
+            XCTAssertEqual(corrector.calls.count, 1, "stale=\(stale): only the first press was sent")
+            XCTAssertFalse(model.isWorking)
+        }
     }
 
     func testAConflictRefreshesTheHostSoItAgreesWithTheNewerValues() async {

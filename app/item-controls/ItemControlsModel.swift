@@ -46,6 +46,14 @@ enum ItemControlsOutcome: Equatable {
     case loadFailed
 }
 
+/// Why the stored values could not be read again after a correction was answered. The snapshot still names the
+/// revision from before the correction, so nothing can be edited until a reload succeeds.
+enum ItemControlsRefreshFailure: Equatable {
+    case locked
+    case itemGone
+    case unreadable
+}
+
 /// The correction controls for one item: edit the words, correct the type, set the session topic.
 ///
 /// A session topic is set or replaced here; the core refuses a blank topic, so clearing one is not offered.
@@ -58,6 +66,9 @@ enum ItemControlsOutcome: Equatable {
 /// * Every correction names the revision the user saw. A stale answer is shown as a conflict, the draft stays as typed
 ///   and the newer stored values are loaded; the correction is only sent again when the user presses the control again.
 /// * The command ID is kept across retries of the same change, so a repeat after an unknown outcome stores once.
+/// * After a correction is answered, editing stays paused until the stored values are read again. If that read fails,
+///   the drafts and the saved/conflict outcome are kept, `refreshFailure` says why, and editing stays paused until
+///   `reload()` succeeds, so a second press can never send a correction against the revision from before.
 /// * The original capture and transcript are never touched; the source-detail screen keeps showing them.
 /// Confined to the main queue.
 final class ItemControlsModel: ObservableObject {
@@ -68,6 +79,8 @@ final class ItemControlsModel: ObservableObject {
     @Published var topicDraft = ""
     /// The type the user has picked but not yet applied.
     @Published var pendingType: ItemCorrectionItemType?
+    /// Set when the read after a correction failed; the snapshot is then older than what is stored.
+    @Published private(set) var refreshFailure: ItemControlsRefreshFailure?
 
     let itemID: String
     private let reader: SourceDetailReading
@@ -76,6 +89,8 @@ final class ItemControlsModel: ObservableObject {
     private let onCorrected: @MainActor () -> Void
     private var heldCommand: (key: String, commandID: String)?
     private var loadGeneration = 0
+    /// The drafts a failed post-correction read would have replaced; `reload()` replaces them once it succeeds.
+    private var pendingRefreshResets: Set<ItemControlsField> = []
 
     init(
         itemID: String, reader: SourceDetailReading, corrector: ItemControlsCorrecting,
@@ -89,7 +104,10 @@ final class ItemControlsModel: ObservableObject {
         self.onCorrected = onCorrected
     }
 
-    var canEdit: Bool { snapshot != nil && snapshot?.isDeleted == false && !isWorking }
+    var canEdit: Bool { snapshot != nil && snapshot?.isDeleted == false && !isWorking && refreshFailure == nil }
+
+    /// Whether `reload()` is worth offering: the values could not be read again, but the item may still be readable.
+    var canReload: Bool { !isWorking && (refreshFailure == .locked || refreshFailure == .unreadable) }
 
     /// Whether applying the picked type would turn the item into an action, which also affects reminders.
     var pendingTypeMakesAction: Bool { pendingType == .action && snapshot?.itemType != .action }
@@ -112,8 +130,9 @@ final class ItemControlsModel: ObservableObject {
 
     /// Reads the stored values. Only the drafts named in `resetting` are replaced by what is stored, so saving one
     /// field never discards unsaved edits in the others, and a conflict (`resetting: []`) keeps everything typed.
-    /// With `afterSubmit`, a failed read leaves the snapshot, drafts and the saved/conflict outcome as they were, so a
-    /// refresh failure never erases unsaved edits or hides the result of the correction that just happened.
+    /// With `afterSubmit`, a failed read leaves the drafts and the saved/conflict outcome as they were, so a refresh
+    /// failure never erases unsaved edits or hides the result of the correction that just happened. It records the
+    /// failure in `refreshFailure` instead, which pauses editing because the snapshot is out of date.
     @MainActor func load(
         resetting fields: Set<ItemControlsField> = [.text, .type, .sessionTopic], afterSubmit: Bool = false
     ) async {
@@ -128,12 +147,25 @@ final class ItemControlsModel: ObservableObject {
                 sessionTopic: detail.sessionTopic, scope: detail.scope,
                 isDeleted: detail.lifecycleState == "deleted")
             snapshot = loaded
+            refreshFailure = nil
+            pendingRefreshResets = []
             if fields.contains(.text) { textDraft = loaded.text ?? "" }
             if fields.contains(.sessionTopic) { topicDraft = loaded.sessionTopic ?? "" }
             if fields.contains(.type) { pendingType = loaded.itemType }
         } catch {
-            guard generation == loadGeneration, !afterSubmit else { return }
+            guard generation == loadGeneration else { return }
+            if afterSubmit {
+                pendingRefreshResets.formUnion(fields)
+                switch error as? ItemDetailError {
+                case .some(.notAuthenticated), .some(.relocked): refreshFailure = .locked
+                case .some(.notFound), .some(.invalidItemID): refreshFailure = .itemGone
+                default: refreshFailure = .unreadable
+                }
+                return
+            }
             snapshot = nil
+            refreshFailure = nil
+            pendingRefreshResets = []
             textDraft = ""
             topicDraft = ""
             pendingType = nil
@@ -143,6 +175,14 @@ final class ItemControlsModel: ObservableObject {
             default: outcome = .loadFailed
             }
         }
+    }
+
+    /// Reads the stored values again after a failed post-correction read. Drafts the user has not saved are kept.
+    @MainActor func reload() async {
+        guard canReload else { return }
+        isWorking = true
+        await load(resetting: pendingRefreshResets, afterSubmit: true)
+        isWorking = false
     }
 
     // MARK: corrections
@@ -192,20 +232,21 @@ final class ItemControlsModel: ObservableObject {
             let receipt = try await send(commandID)
             heldCommand = nil
             outcome = receipt.reminderCancelled && field == .type ? .savedAndReminderCancelled : .saved(field)
-            isWorking = false
+            // Editing stays paused until the new revision is read, so no second press can name the old one.
             await load(resetting: [field], afterSubmit: true)
             onCorrected()
+            isWorking = false
             return
         } catch let error as ItemCorrectionError {
             switch error {
             case .staleRevision(let current):
                 heldCommand = nil
                 outcome = .conflict(field, currentRevision: current)
-                isWorking = false
                 // Show what is stored now but keep the draft the user typed.
                 await load(resetting: [], afterSubmit: true)
                 // The detail card above shows the same stored values, so it refreshes too.
                 onCorrected()
+                isWorking = false
                 return
             case .notAuthenticated:
                 outcome = .locked
