@@ -212,5 +212,67 @@ class ProjectConfigChecks(unittest.TestCase):
         self.assertTrue(any("UILaunchScreen" in e for e in errors), errors)
 
 
+class FaceIdUsageChecks(unittest.TestCase):
+    def write_project(self, directory, plist_has_key, source_text="import LocalAuthentication\nlet context = LAContext()\n"):
+        root = Path(directory)
+        (root / "Auth").mkdir()
+        (root / "Auth/Gate.swift").write_text(source_text)
+        (root / "Host").mkdir()
+        plist = {"NSFaceIDUsageDescription": "Unlock."} if plist_has_key else {}
+        (root / "Host/Info.plist").write_bytes(plistlib.dumps(plist))
+        project = {
+            "targets": {
+                "AuthFramework": {"type": "framework", "sources": [{"path": "Auth"}]},
+                "HostApp": {
+                    "type": "application",
+                    "settings": {"INFOPLIST_FILE": "Host/Info.plist"},
+                    "dependencies": [{"target": "AuthFramework"}],
+                },
+            }
+        }
+        return project, root
+
+    def test_committed_app_plist_declares_face_id(self):
+        with (checks.IOS_ROOT / "AppAssembly/Info.plist").open("rb") as handle:
+            self.assertTrue(plistlib.load(handle).get("NSFaceIDUsageDescription"))
+        self.assertIn("NSFaceIDUsageDescription", checks.APP_USAGE_STRINGS)
+
+    def test_app_plist_without_face_id_key_is_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for plist_path in checks.IOS_ROOT.glob("*/Info.plist"):
+                (root / plist_path.parent.name).mkdir()
+                (root / plist_path.parent.name / "Info.plist").write_bytes(plist_path.read_bytes())
+            app_path = root / "AppAssembly/Info.plist"
+            plist = plistlib.loads(app_path.read_bytes())
+            del plist["NSFaceIDUsageDescription"]
+            app_path.write_bytes(plistlib.dumps(plist))
+            errors = checks.check_plists(root)
+        self.assertTrue(any("AppAssembly" in e and "NSFaceIDUsageDescription" in e for e in errors))
+
+    def test_target_using_lacontext_without_key_is_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project, root = self.write_project(directory, plist_has_key=False)
+            errors = checks.check_face_id_usage(project, root)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("AuthFramework", errors[0])
+        self.assertIn("NSFaceIDUsageDescription", errors[0])
+
+    def test_evaluate_policy_without_key_is_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project, root = self.write_project(directory, False, "func go() { handle.evaluatePolicy(p) }\n")
+            self.assertEqual(len(checks.check_face_id_usage(project, root)), 1)
+
+    def test_target_using_lacontext_with_key_passes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project, root = self.write_project(directory, plist_has_key=True)
+            self.assertEqual(checks.check_face_id_usage(project, root), [])
+
+    def test_target_not_using_lacontext_passes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project, root = self.write_project(directory, False, "let value = 1\n")
+            self.assertEqual(checks.check_face_id_usage(project, root), [])
+
+
 if __name__ == "__main__":
     unittest.main()
