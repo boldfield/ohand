@@ -224,6 +224,7 @@ final class HomeRecentsModelTests: XCTestCase {
         let model = HomeRecentsModel(source: source, now: { [referenceNow] in referenceNow }, pause: { _ in await PollPauses().wait() })
         await settle()
         model.captureDidSave(itemID: "new", interpretationIsResolved: false)
+        await settle()
         source.setAccess(authenticated: false)
         let readsAtRelock = source.readCursors.count
         await settle()
