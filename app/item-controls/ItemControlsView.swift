@@ -1,4 +1,5 @@
 import SwiftUI
+import OhAndCoreBridge
 
 /// The correction controls on the source-detail screen: edit the words, correct the type, set the session topic.
 /// Everything it does goes through `ItemControlsModel`.
