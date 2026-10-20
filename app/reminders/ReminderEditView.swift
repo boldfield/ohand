@@ -11,6 +11,7 @@ struct ReminderEditSection: View {
     static let cancelIdentifier = "reminder.cancel"
     static let unavailableIdentifier = "reminder.unavailable"
     static let storedTimeIdentifier = "reminder.stored-time"
+    static let historyIdentifier = "reminder.history"
 
     /// What each identified part of the section shows, collected so a hosted test can read the rendered words.
     struct RenderedKey: PreferenceKey {
@@ -96,6 +97,7 @@ struct ReminderEditSection: View {
                         .reportReminderRendered(Self.messageIdentifier, text: message.text)
                 }
                 actions
+                if let history = model.history { ReminderHistoryList(model: history) }
             }
         }
     }
@@ -157,5 +159,44 @@ private struct ReminderRenderedReport: ViewModifier {
 extension View {
     fileprivate func reportReminderRendered(_ identifier: String, text: String) -> some View {
         modifier(ReminderRenderedReport(identifier: identifier, text: text))
+    }
+}
+
+/// The recorded events of a reminder, newest first, as `ReminderHistoryModel` words them.
+struct ReminderHistoryList: View {
+    @ObservedObject var model: ReminderHistoryModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: DSSpacing.xs) {
+            Text("History")
+                .font(DSFont.body)
+                .foregroundColor(DSColor.ink.color)
+                .accessibilityAddTraits(.isHeader)
+            if let unavailable = model.unavailable {
+                note(unavailable == .locked ? ReminderHistoryText.lockedText : ReminderHistoryText.unreadableText)
+            } else if model.rows.isEmpty {
+                note(ReminderHistoryText.emptyText)
+            } else {
+                ForEach(model.summaryLines, id: \.self) { note($0) }
+                ForEach(model.rows) { row in
+                    VStack(alignment: .leading, spacing: DSSpacing.xxs) {
+                        Text(row.occurred.isEmpty ? row.title : "\(row.title) · \(row.occurred)")
+                            .font(DSFont.footer)
+                            .foregroundColor(DSColor.ink.color)
+                        if let detail = row.detail, !detail.isEmpty { note(detail) }
+                    }
+                    .accessibilityElement(children: .combine)
+                }
+                if model.isTruncated { note(ReminderHistoryText.truncatedText) }
+            }
+        }
+        .accessibilityIdentifier(ReminderEditSection.historyIdentifier)
+    }
+
+    private func note(_ text: String) -> some View {
+        Text(text)
+            .font(DSFont.footer)
+            .foregroundColor(DSColor.inkMuted.color)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }

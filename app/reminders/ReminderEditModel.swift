@@ -57,6 +57,8 @@ final class ReminderEditModel: ObservableObject {
     }
 
     let itemID: String
+    /// The recorded history shown beside the reminder, when the host supplies a reader.
+    let history: ReminderHistoryModel?
     private let editor: ReminderEditing
     private let reconcile: () async -> NotificationPermissionState?
     private let now: () -> Date
@@ -72,9 +74,11 @@ final class ReminderEditModel: ObservableObject {
     /// not tell. It is the only route by which a stored edit reaches the system.
     init(
         itemID: String, editor: ReminderEditing, reconcile: @escaping () async -> NotificationPermissionState? = { nil },
-        now: @escaping () -> Date = Date.init, deviceTimeZone: @escaping () -> TimeZone = { TimeZone.current }
+        now: @escaping () -> Date = Date.init, deviceTimeZone: @escaping () -> TimeZone = { TimeZone.current },
+        history: ReminderHistoryModel? = nil
     ) {
         self.itemID = itemID
+        self.history = history
         self.editor = editor
         self.reconcile = reconcile
         self.now = now
@@ -98,6 +102,7 @@ final class ReminderEditModel: ObservableObject {
         let generation = loadGeneration
         isLoading = true
         defer { if generation == loadGeneration { isLoading = false } }
+        await history?.load()
         do {
             let answer = try await editor.reminder(itemID: itemID)
             guard generation == loadGeneration else { return }
@@ -230,6 +235,7 @@ final class ReminderEditModel: ObservableObject {
             guard locks == lockGeneration else { return }
             if let observed { permission = observed }
             await refreshAfterStore(locks: locks)
+            await history?.load()
         } catch let error as ReminderControlError {
             guard locks == lockGeneration else { return }
             await handle(error)
@@ -283,6 +289,7 @@ final class ReminderEditModel: ObservableObject {
         lockGeneration += 1
         clear()
         unavailable = .locked
+        history?.lock()
     }
 
     static func assembled(itemID: String, root: ServiceCompositionRoot) -> ReminderEditModel {
@@ -291,6 +298,7 @@ final class ReminderEditModel: ObservableObject {
             reconcile: { [weak root] in
                 guard let root, let report = try? await root.reconcileReminders() else { return nil }
                 return report.permission
-            })
+            },
+            history: ReminderHistoryModel(itemID: itemID, reader: root.reminderControls))
     }
 }
