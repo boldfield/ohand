@@ -1040,7 +1040,11 @@
       "parent": "U03",
       "title": "Add item completion and suggestion lifecycle controls",
       "file_scope": [
-        "app/item-controls/"
+        "app/item-controls/",
+        "core/src/ffi/item_detail.rs",
+        "core/src/ffi/item_detail/tests.rs",
+        "ios/OhAndCoreBridge/CoreHandle+ItemDetail.swift",
+        "ios/Tests/ItemDetail/ItemDetailServiceTests.swift"
       ],
       "intent": "Add completion/cancellation, not-now and stop-suggesting actions using existing domain lifecycle operations.",
       "acceptance": [
