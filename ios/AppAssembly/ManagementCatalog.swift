@@ -213,15 +213,21 @@ struct SettingsRootView: View {
                     group(firstGroup)
                     group(secondGroup)
                 }
-                // Presentation only: the erase action is wired by the reset task (U07c), so this card is not yet
-                // interactive.
-                DSCard {
-                    Text("Erase everything")
-                        .font(DSFont.button)
-                        .foregroundColor(DSColor.destructive.color)
-                        .frame(maxWidth: .infinity)
+                if let resetSettings = context.retention.resetSettings {
+                    NavigationLink {
+                        ResetSettingsView(model: resetSettings)
+                    } label: {
+                        DSCard {
+                            Text("Erase everything")
+                                .font(DSFont.button)
+                                .foregroundColor(DSColor.destructive.color)
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier(Self.eraseIdentifier)
+                    .preference(key: SettingsRootRenderedKey.self, value: [Self.eraseIdentifier: "Erase everything"])
                 }
-                .accessibilityIdentifier(Self.eraseIdentifier)
                 Text(versionText)
                     .font(DSFont.footer)
                     .foregroundColor(DSColor.inkMuted.color)

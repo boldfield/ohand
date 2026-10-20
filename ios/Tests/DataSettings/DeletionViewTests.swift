@@ -281,7 +281,7 @@ final class DeletionViewTests: XCTestCase {
         }
     }
 
-    func testTheResetScreenIsReachedFromTheAudioSettingsScreen() async {
+    func testTheAudioSettingsScreenNoLongerLinksToReset() async {
         let resetSettings = ResetSettingsModel(controls: FakeReset(), readScope: { .authenticated })
         let retention = RetentionSettingsModel(
             controls: FakeRetentionControls(
@@ -293,19 +293,6 @@ final class DeletionViewTests: XCTestCase {
             NavigationStack {
                 RetentionSettingsView(model: retention, renderReporter: { [unowned self] in rendered = $0 })
             })
-        XCTAssertEqual(text(RetentionSettingsView.resetLinkIdentifier), DeletionText.resetHeading)
-        assertTappable(RetentionSettingsView.resetLinkIdentifier)
-
-        let withoutReset = RetentionSettingsModel(
-            controls: FakeRetentionControls(
-                status: RetentionStatus(
-                    policy: RetentionPolicySetting(periodSeconds: 7 * 86_400, isDefault: true), storagePressure: .normal,
-                    unresolved: [])),
-            readScope: { .authenticated })
-        await show(
-            NavigationStack {
-                RetentionSettingsView(model: withoutReset, renderReporter: { [unowned self] in rendered = $0 })
-            })
-        XCTAssertNil(rendered[RetentionSettingsView.resetLinkIdentifier])
+        XCTAssertNil(rendered["data-settings.retention.reset-link"])
     }
 }

@@ -43,14 +43,14 @@ final class SettingsRootViewTests: XCTestCase {
         try? FileManager.default.removeItem(at: storageRoot)
     }
 
-    private func host() {
+    private func host(resetSettings: ResetSettingsModel? = nil) {
         let current = services.managementContext
         let status = RetentionStatus(
             policy: RetentionPolicySetting(periodSeconds: 7 * 86_400, isDefault: true),
             storagePressure: .normal, unresolved: [])
         let retention = RetentionSettingsModel(
             controls: FakeRetentionControls(status: status), readScope: { .authenticated },
-            exportSettings: current.retention.exportSettings)
+            exportSettings: current.retention.exportSettings, resetSettings: resetSettings)
         let providers = ProviderSettingsModel(
             controls: FakeProviderSettingsControls(listing: providerListing(versions: [], defaultVersion: nil)),
             credentials: FakeProviderSettingsCredentials(), sweep: FakeProviderSettingsSweep(),
@@ -90,6 +90,16 @@ final class SettingsRootViewTests: XCTestCase {
         XCTAssertEqual(rendered["provider-settings"], "Processing: On this phone")
         XCTAssertEqual(rendered["audio-retention"], "Audio: 7 days")
         XCTAssertEqual(rendered[SettingsRootView.exportEntryID], "Export")
+    }
+
+    func testEraseCardIsShownOnlyWhenAResetModelIsPresent() {
+        host()
+        settle { rendered["audio-retention"] != nil }
+        XCTAssertNil(rendered[SettingsRootView.eraseIdentifier])
+
+        host(resetSettings: ResetSettingsModel(controls: FakeReset(), readScope: { .authenticated }))
+        settle { rendered[SettingsRootView.eraseIdentifier] != nil }
+        XCTAssertEqual(rendered[SettingsRootView.eraseIdentifier], "Erase everything")
     }
 
     func testRowsFollowTheDesignOrderRegardlessOfCatalogOrder() {
