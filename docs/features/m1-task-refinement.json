@@ -3478,6 +3478,82 @@
         "core/src/ffi/job_configuration.rs:213",
         "core/src/jobs/configuration/mod.rs:13"
       ]
+    },
+    {
+      "key": "F31",
+      "parent": null,
+      "title": "Wire the Settings \"Erase everything\" card to reset, and take reset and export off the Audio screen",
+      "file_scope": [
+        "ios/AppAssembly/ManagementCatalog.swift",
+        "ios/Tests/AppAssembly/SettingsRootViewTests.swift",
+        "app/data-settings/RetentionSettingsView.swift",
+        "ios/Tests/DataSettings/RetentionSettingsViewTests.swift"
+      ],
+      "intent": "Make the design's Erase everything card open the existing reset screen and leave the Audio screen with only audio decisions.",
+      "acceptance": [
+        "See the F31 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/AppAssembly/ManagementCatalog.swift:216",
+        "app/data-settings/RetentionSettingsView.swift:98",
+        "docs/features/m1-ui-design.md:140"
+      ]
+    },
+    {
+      "key": "F32",
+      "parent": null,
+      "title": "Open a note's detail when its card on the home screen is tapped",
+      "file_scope": [
+        "app/home/",
+        "ios/Tests/HomeRecents/",
+        "ios/AppAssembly/AppRootView.swift"
+      ],
+      "intent": "Make each recent-capture card on the home screen open its item's source detail through the existing openItem route.",
+      "acceptance": [
+        "See the F32 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "app/home/HomeBodyView.swift",
+        "ios/AppAssembly/AppRootView.swift:26",
+        "ios/AppAssembly/ManagementNavigationModel.swift:92"
+      ]
+    },
+    {
+      "key": "F33",
+      "parent": null,
+      "title": "Refresh home and search after an item changes, so a deleted note disappears from both",
+      "file_scope": [
+        "ios/Services/Items/Changes/",
+        "ios/Services/Assembly/CompositionRoot.swift",
+        "ios/Services/Deletion/ItemDeletion/ItemDeletionService.swift",
+        "ios/Services/Items/Corrections/ItemCorrectionService.swift",
+        "ios/Services/Items/LifecycleControls/ItemLifecycleControlService.swift",
+        "ios/Services/Reminders/Controls/ReminderControlService.swift",
+        "ios/Services/Reset/ResetService.swift",
+        "app/home/",
+        "app/retrieval/RetrievalSearchModel.swift",
+        "app/source-detail/SourceDetailView.swift",
+        "ios/Tests/HomeRecents/",
+        "ios/Tests/Retrieval/",
+        "ios/Tests/ItemChanges/"
+      ],
+      "intent": "Publish a content-free item-changed signal after committed item mutations and refresh home and search from it.",
+      "acceptance": [
+        "See the F33 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "F32"
+      ],
+      "source_pointers": [
+        "app/retrieval/RetrievalSearchModel.swift:106",
+        "app/home/HomeRecentsModel.swift:131",
+        "core/src/lifecycle/delete_intent/mod.rs:339"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -4233,7 +4309,12 @@
     "F29": [
       "F28"
     ],
-    "F30": []
+    "F30": [],
+    "F31": [],
+    "F32": [],
+    "F33": [
+      "F32"
+    ]
   },
   "retained_dependency_overrides": {
     "V06": [
