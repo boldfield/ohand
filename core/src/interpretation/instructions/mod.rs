@@ -60,6 +60,8 @@ pub enum InstructionError {
     ProviderSuppliedProvenance { field: String },
     #[error("provider output contains {field}, which the output contract does not allow")]
     UnknownOutputField { field: String },
+    #[error("abstention must be {{\"reason\": R}} or {{\"reason\": \"Other\", \"detail\": D}}: {problem}")]
+    InvalidAbstention { problem: &'static str },
     #[error(transparent)]
     Proposal(#[from] ProposalError),
 }

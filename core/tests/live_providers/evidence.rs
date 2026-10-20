@@ -78,7 +78,7 @@ fn record_json(record: &FixtureRecord, rates: &Option<Value>) -> Value {
         "collected_at": record.collected_at,
         "outcome": record.run.outcome,
         "semantic_outcome": record.semantic,
-        "matches_oracle": record.semantic.matches_oracle(),
+        "matches_oracle": record.matches_oracle(),
         "forbidden_mutations": record.run.forbidden,
         "processing_state": record.run.state.processing_state,
         "provider_calls": record.run.exchanges.len(),
@@ -264,6 +264,7 @@ pub fn write_evidence(
             "label": b.label(), "protocol": b.protocol.label(), "model": b.model,
         })).collect::<Vec<_>>(),
         "fixture_count": inputs.fixtures.len(),
+        "scoring_rule": "A fixture matches the oracle only when its run ended applied or abstained, every facet is match or none, an abstention occurred only where expected, and no forbidden rule was hit; a missing facet or failed run is a miss.",
         "summary_by_backend": summarize_by_backend(&inputs.report.records),
         "records": inputs.report.records.iter().map(|r| record_json(r, &rates)).collect::<Vec<_>>(),
         "configure_failures": inputs.report.configure_failures.iter()

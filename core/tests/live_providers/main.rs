@@ -98,7 +98,10 @@ fn oracle_proposal(fixture: &OracleFixture) -> Value {
             json!({"topic": topic["topic"], "source_span": span(&topic["source_span"])});
     }
     if !fixture.expected["abstention"].is_null() {
-        proposal["abstention"] = fixture.expected["abstention"].clone();
+        proposal["abstention"] = match &fixture.expected["abstention"] {
+            Value::String(reason) => json!({"reason": reason}),
+            other => json!({"reason": "Other", "detail": other["Other"]}),
+        };
     }
     proposal
 }
@@ -179,7 +182,7 @@ fn no_network_proof_runs_the_whole_harness() {
             assert!(record.run.capture_text_durable);
         }
         // The oracle-following server produces matches the scorer recognizes.
-        assert!(own.iter().filter(|r| r.semantic.matches_oracle()).count() >= 10);
+        assert!(own.iter().filter(|r| r.matches_oracle()).count() >= 10);
     }
 
     // Switching: backend A's captures, results and attribution survive backend B.
