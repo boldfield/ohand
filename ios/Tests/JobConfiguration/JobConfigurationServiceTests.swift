@@ -50,6 +50,41 @@ final class JobConfigurationServiceTests: XCTestCase {
         CoreFailure(errorClass: .permanent, code: code, message: "fixed message")
     }
 
+    func testJobsRetiredByRevocationSendsTheCommandAndValidatesTheRequest() async throws {
+        let page = JobConfigurationRetiredJobs(
+            jobs: [JobConfigurationRetiredJob(jobID: "job-1", itemID: "item-1", retiredAt: "t", requeuedTo: "job-2")],
+            total: 1, truncated: false, nextCursor: nil)
+        let core = ScriptedJobConfigurationCore([.success(.retiredJobs(page))])
+        let service = JobConfigurationService(core: core, session: makeSession(authenticated: true))
+
+        let result = try await service.jobsRetired(byRevocationOf: "profile-a", limit: 5, after: "job-0")
+
+        XCTAssertEqual(result, page)
+        XCTAssertEqual(
+            core.commands, [.jobsRetiredByRevocation(profileVersion: "profile-a", limit: 5, after: "job-0")])
+        for invalid in [("", nil, nil), ("p", 0, nil), ("p", nil, "")] as [(String, Int?, String?)] {
+            do {
+                _ = try await service.jobsRetired(byRevocationOf: invalid.0, limit: invalid.1, after: invalid.2)
+                XCTFail("expected invalidRequest")
+            } catch {
+                XCTAssertEqual(error as? JobConfigurationError, .invalidRequest)
+            }
+        }
+        XCTAssertEqual(core.commands.count, 1)
+    }
+
+    func testAnUnauthenticatedRetiredJobsReadNeverReachesTheCore() async {
+        let core = ScriptedJobConfigurationCore([])
+        let service = JobConfigurationService(core: core, session: makeSession(authenticated: false))
+        do {
+            _ = try await service.jobsRetired(byRevocationOf: "profile-a")
+            XCTFail("expected notAuthenticated")
+        } catch {
+            XCTAssertEqual(error as? JobConfigurationError, .notAuthenticated)
+        }
+        XCTAssertTrue(core.commands.isEmpty)
+    }
+
     func testEachControlSendsItsCommandAndReturnsTheTypedAnswer() async throws {
         let pinned = JobConfigurationPinnedJobs(
             jobs: [JobConfigurationPinnedJob(jobID: "job-1", itemID: "item-1", status: "queued")], total: 1,
@@ -284,9 +319,10 @@ final class CoreJobConfigurationClientGateTests: XCTestCase {
 
         client.submit(.jobsPinnedToProfile(profileVersion: "p", limit: nil)) { results.append($0) }
         client.submit(.requeueRecord(jobID: "j")) { results.append($0) }
+        client.submit(.jobsRetiredByRevocation(profileVersion: "p", limit: nil, after: nil)) { results.append($0) }
 
         XCTAssertTrue(source.reads.isEmpty)
-        XCTAssertEqual(results.values.count, 2)
+        XCTAssertEqual(results.values.count, 3)
         for result in results.values {
             guard case .failure(let refusal) = result else { return XCTFail("expected a refusal") }
             XCTAssertEqual(refusal.code, "read_not_authenticated")
@@ -330,5 +366,45 @@ final class CoreJobConfigurationClientGateTests: XCTestCase {
         XCTAssertEqual(results.values.count, 1)
         guard case .success(let answer) = results.values[0] else { return XCTFail("expected the answer") }
         XCTAssertEqual(answer, .requeueRecord(nil))
+    }
+
+    func testARetiredJobsReadGoesThroughTheGateAndDecodes() throws {
+        let source = RecordingJobConfigurationReadSource()
+        let (client, _) = makeClient(authenticated: true, source: source)
+        let results = ClientResults()
+        let command = JobConfigurationCommand.jobsRetiredByRevocation(profileVersion: "p", limit: 2, after: "job-1")
+        client.submit(command) { results.append($0) }
+        XCTAssertEqual(source.reads.map(\.command), [command])
+        let operationID = try XCTUnwrap(source.reads.first?.operationID)
+        let payload = Data(
+            #"{"operation_id":1,"jobs":[{"job_id":"job-2","item_id":"item-1","retired_at":"2026-10-20T10:00:00Z","requeued_to":null}],"total":2,"truncated":false,"next_cursor":null}"#
+                .utf8)
+
+        XCTAssertTrue(client.handle(CoreEvent(operationID: operationID, outcome: .success(payload))))
+
+        guard case .success(let answer) = try XCTUnwrap(results.values.first) else { return XCTFail("expected the answer") }
+        XCTAssertEqual(
+            answer,
+            .retiredJobs(
+                JobConfigurationRetiredJobs(
+                    jobs: [
+                        JobConfigurationRetiredJob(
+                            jobID: "job-2", itemID: "item-1", retiredAt: "2026-10-20T10:00:00Z", requeuedTo: nil)
+                    ], total: 2, truncated: false, nextCursor: nil)))
+    }
+
+    func testARetiredJobsAnswerAfterARelockIsDropped() throws {
+        let source = RecordingJobConfigurationReadSource()
+        let (client, session) = makeClient(authenticated: true, source: source)
+        let results = ClientResults()
+        client.submit(.jobsRetiredByRevocation(profileVersion: "p", limit: nil, after: nil)) { results.append($0) }
+        let operationID = try XCTUnwrap(source.reads.first?.operationID)
+
+        session.relock(.explicit)
+        let payload = Data(#"{"operation_id":1,"jobs":[],"total":0,"truncated":false,"next_cursor":null}"#.utf8)
+        XCTAssertTrue(client.handle(CoreEvent(operationID: operationID, outcome: .success(payload))))
+
+        guard case .failure(let refusal) = try XCTUnwrap(results.values.first) else { return XCTFail("must be dropped") }
+        XCTAssertEqual(refusal.code, "read_relocked")
     }
 }
