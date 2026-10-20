@@ -78,22 +78,6 @@ jobs:
             -resultBundlePath .evidence/OhAndTests.xcresult \
             CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= 2>&1 | tee .evidence/OhAndTests.log
 
-      - name: F27 temporary repeat loop
-        if: always()
-        timeout-minutes: 25
-        shell: bash
-        env:
-          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
-        run: |
-          cd ios
-          mkdir -p .evidence
-          for i in 1 2 3; do (yes > /dev/null &) ; done
-          xcodebuild test -project OhAnd.xcodeproj -scheme OhAndTests -configuration Debug -sdk iphonesimulator \
-            -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" -derivedDataPath .derived \
-            -only-testing:OhAndTests/AppServicesTests \
-            -test-iterations 8 CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= 2>&1 | tee .evidence/f27-loop.log | grep -E "F27DIAG|error:|TEST (SUCCEEDED|FAILED)|ReportsARealChange" | tail -120 || true
-          pkill yes || true
-
       - name: Run credential cross-process relaunch check
         shell: bash
         env:
@@ -296,7 +280,6 @@ jobs:
 
       - name: Upload evidence
         if: always()
-        timeout-minutes: 25
         uses: actions/upload-artifact@v4
         with:
           name: ios-evidence
@@ -364,7 +347,6 @@ jobs:
 
       - name: Upload screenshots
         if: always()
-        timeout-minutes: 25
         uses: actions/upload-artifact@v4
         with:
           name: ios-walkthrough
@@ -564,7 +546,6 @@ jobs:
 
       - name: Upload evidence
         if: always()
-        timeout-minutes: 25
         uses: actions/upload-artifact@v4
         with:
           name: tauri-probe-evidence
