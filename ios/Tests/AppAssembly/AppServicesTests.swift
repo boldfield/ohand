@@ -178,8 +178,8 @@ final class AppServicesTests: XCTestCase {
         XCTAssertEqual(services.lifecycle.lastReport?.triggers, [.systemTimeChange])
         XCTAssertEqual(services.timeChange.reportedChangeCount, 1)
         XCTAssertEqual(
-            passLog.entries.map(\.step.rawValue).sorted(), ["promptEligibility", "reminders"],
-            "each time-dependent step ran once; reset is not one of them")
+            passLog.entries.map(\.step.rawValue).sorted(), ["promptEligibility", "reminders", "reset"],
+            "each recorded step ran once; the reminders step waits on the reset resume, so it runs too")
         XCTAssertTrue(passLog.entries.allSatisfy { $0.triggers == [.systemTimeChange] })
     }
 
