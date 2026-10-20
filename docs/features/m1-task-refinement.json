@@ -1040,7 +1040,11 @@
       "parent": "U03",
       "title": "Add item completion and suggestion lifecycle controls",
       "file_scope": [
-        "app/item-controls/"
+        "app/item-controls/",
+        "core/src/ffi/item_detail.rs",
+        "core/src/ffi/item_detail/tests.rs",
+        "ios/OhAndCoreBridge/CoreHandle+ItemDetail.swift",
+        "ios/Tests/ItemDetail/ItemDetailServiceTests.swift"
       ],
       "intent": "Add completion/cancellation, not-now and stop-suggesting actions using existing domain lifecycle operations.",
       "acceptance": [
@@ -1226,8 +1230,9 @@
         2
       ],
       "depends_on": [
-        "U06a",
-        "A07"
+        "A07",
+        "F30",
+        "U06a"
       ],
       "source_pointers": [
         "docs/architecture/m1-contracts.md:139",
@@ -3384,7 +3389,8 @@
         "ios/Tests/AppAssembly/AppServicesTests.swift",
         "ios/Tests/TimeChangeCoordinator/",
         "ios/Services/TimeChangeCoordinator/",
-        "ios/AppAssembly/AppServices.swift"
+        "ios/AppAssembly/AppServices.swift",
+        "ios/Services/Assembly/LifecycleCoordinator.swift"
       ],
       "intent": "Find why a real time-zone change intermittently produces no lifecycle pass in AppServicesTests and fix the cause, without raising timeouts.",
       "acceptance": [
@@ -3445,6 +3451,252 @@
       "source_pointers": [
         "core/src/interpretation/apply/mod.rs:2350",
         "core/src/interpretation/apply/mod.rs:1439"
+      ]
+    },
+    {
+      "key": "F30",
+      "parent": null,
+      "title": "Report every job a profile revocation retires, durably",
+      "file_scope": [
+        "core/src/jobs/configuration/",
+        "core/tests/job_configuration/",
+        "core/src/ffi/job_configuration.rs",
+        "core/src/ffi/job_configuration/tests.rs",
+        "ios/OhAndCoreBridge/CoreHandle+JobConfiguration.swift",
+        "ios/Services/JobConfiguration/",
+        "ios/Services/Authentication/PrivateReadGate.swift",
+        "ios/Tests/JobConfiguration/"
+      ],
+      "intent": "Add a durable, gated read of the jobs a profile revocation retired so the revocation screen shows exactly what was retired and can requeue it after relaunch.",
+      "acceptance": [
+        "See the F30 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/interpretation/enqueue/mod.rs:51",
+        "core/src/ffi/job_configuration.rs:213",
+        "core/src/jobs/configuration/mod.rs:13"
+      ]
+    },
+    {
+      "key": "F31",
+      "parent": null,
+      "title": "Wire the Settings \"Erase everything\" card to reset, and take reset and export off the Audio screen",
+      "file_scope": [
+        "ios/AppAssembly/ManagementCatalog.swift",
+        "ios/Tests/AppAssembly/SettingsRootViewTests.swift",
+        "app/data-settings/RetentionSettingsView.swift",
+        "ios/Tests/DataSettings/RetentionSettingsViewTests.swift"
+      ],
+      "intent": "Make the design's Erase everything card open the existing reset screen and leave the Audio screen with only audio decisions.",
+      "acceptance": [
+        "See the F31 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/AppAssembly/ManagementCatalog.swift:216",
+        "app/data-settings/RetentionSettingsView.swift:98",
+        "docs/features/m1-ui-design.md:140"
+      ]
+    },
+    {
+      "key": "F32",
+      "parent": null,
+      "title": "Open a note's detail when its card on the home screen is tapped",
+      "file_scope": [
+        "app/home/",
+        "ios/Tests/HomeRecents/",
+        "ios/AppAssembly/AppRootView.swift"
+      ],
+      "intent": "Make each recent-capture card on the home screen open its item's source detail through the existing openItem route.",
+      "acceptance": [
+        "See the F32 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "app/home/HomeBodyView.swift",
+        "ios/AppAssembly/AppRootView.swift:26",
+        "ios/AppAssembly/ManagementNavigationModel.swift:92"
+      ]
+    },
+    {
+      "key": "F33",
+      "parent": null,
+      "title": "Refresh home and search after an item changes, so a deleted note disappears from both",
+      "file_scope": [
+        "ios/Services/Items/Changes/",
+        "ios/Services/Assembly/CompositionRoot.swift",
+        "ios/Services/Deletion/ItemDeletion/ItemDeletionService.swift",
+        "ios/Services/Items/Corrections/ItemCorrectionService.swift",
+        "ios/Services/Items/LifecycleControls/ItemLifecycleControlService.swift",
+        "ios/Services/Reminders/Controls/ReminderControlService.swift",
+        "ios/Services/Reset/ResetService.swift",
+        "app/home/",
+        "app/retrieval/RetrievalSearchModel.swift",
+        "app/source-detail/SourceDetailView.swift",
+        "ios/Tests/HomeRecents/",
+        "ios/Tests/Retrieval/",
+        "ios/Tests/ItemChanges/"
+      ],
+      "intent": "Publish a content-free item-changed signal after committed item mutations and refresh home and search from it.",
+      "acceptance": [
+        "See the F33 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "F32",
+        "F35"
+      ],
+      "source_pointers": [
+        "app/retrieval/RetrievalSearchModel.swift:106",
+        "app/home/HomeRecentsModel.swift:131",
+        "core/src/lifecycle/delete_intent/mod.rs:339"
+      ]
+    },
+    {
+      "key": "F34",
+      "parent": null,
+      "title": "Let the person send notes that are waiting to be sorted to a provider they have just allowed",
+      "file_scope": [
+        "app/privacy-settings/"
+      ],
+      "intent": "Expose A07's explicit re-pin of waiting work on the Privacy screen so notes captured without a provider can be sorted after one is allowed.",
+      "acceptance": [
+        "See the F34 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "U06b"
+      ],
+      "source_pointers": [
+        "ios/Services/JobConfiguration/JobConfigurationService.swift:89",
+        "core/src/jobs/configuration/repin.rs"
+      ]
+    },
+    {
+      "key": "F35",
+      "parent": null,
+      "title": "Start processing a capture as soon as it is saved, and finish briefly in the background",
+      "file_scope": [
+        "ios/AppAssembly/AppServices.swift",
+        "ios/Services/Assembly/CompositionRoot.swift",
+        "ios/Services/BackgroundCompletion/",
+        "ios/Services/JobRunner/JobRunnerService.swift",
+        "ios/Tests/BackgroundCompletion/",
+        "ios/Tests/JobRunner/",
+        "ios/Tests/AppAssembly/AppRealServicesTests.swift"
+      ],
+      "intent": "Request a drain on every durable save and wire B04's background completion in production without displacing the reminder-pass drain observer.",
+      "acceptance": [
+        "See the F35 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "F27"
+      ],
+      "source_pointers": [
+        "ios/Services/Assembly/CompositionRoot.swift:1397",
+        "ios/Capture/Entry/CaptureEntryModel.swift:66",
+        "ios/Services/BackgroundCompletion/BackgroundCompletionService.swift:52"
+      ]
+    },
+    {
+      "key": "F36",
+      "parent": null,
+      "title": "Cover the app in the app switcher",
+      "file_scope": [
+        "ios/AppAssembly/SceneDelegate.swift",
+        "ios/Services/Authentication/AppSwitcherRedaction.swift",
+        "ios/Tests/Authentication/"
+      ],
+      "intent": "Install C01b's app-switcher cover in production; the relock stays as it is.",
+      "acceptance": [
+        "See the F36 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/Services/Authentication/AppSwitcherRedaction.swift:12",
+        "ios/Services/Assembly/CompositionRoot.swift:1280"
+      ]
+    },
+    {
+      "key": "F37",
+      "parent": null,
+      "title": "Record delivered notifications, unlock for a locked notification tap, and refresh home when processing lands",
+      "file_scope": [
+        "ios/Services/Assembly/CompositionRoot.swift",
+        "ios/Services/Assembly/LifecycleCoordinator.swift",
+        "ios/Services/Notifications/NotificationBridge.swift",
+        "ios/Services/NotificationActions/",
+        "ios/AppAssembly/AppServices.swift",
+        "ios/AppAssembly/ManagementNavigationModel.swift",
+        "ios/Tests/NotificationActions/",
+        "ios/Tests/Notifications/",
+        "ios/Tests/AppAssembly/"
+      ],
+      "intent": "Ingest delivered notifications at launch and foreground, ask to unlock for a locked reminder tap, and publish item changes when processing results land.",
+      "acceptance": [
+        "See the F37 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "F33",
+        "U11"
+      ],
+      "source_pointers": [
+        "ios/Services/Notifications/NotificationBridge.swift:259",
+        "ios/Services/NotificationActions/ActionHandler.swift:225",
+        "app/home/HomeRecentsModel.swift:317"
+      ]
+    },
+    {
+      "key": "F38",
+      "parent": null,
+      "title": "Keep the source-detail sections consistent after a change, and tidy the detail form",
+      "file_scope": [
+        "app/source-detail/SourceDetailModel.swift",
+        "app/reminders/",
+        "app/item-controls/ItemControlsView.swift",
+        "ios/Tests/SourceDetail/",
+        "ios/Tests/ReminderEdit/",
+        "ios/Tests/ReminderHistory/",
+        "ios/Tests/ItemControls/"
+      ],
+      "intent": "Reload the reminder section after every committed change on detail and fix the detail form's flash, duplicate heading and field styling.",
+      "acceptance": [
+        "See the F38 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "app/source-detail/SourceDetailModel.swift:390",
+        "app/reminders/ReminderEditView.swift:37",
+        "app/item-controls/ItemControlsView.swift:152"
+      ]
+    },
+    {
+      "key": "F39",
+      "parent": null,
+      "title": "Make adding Anthropic on the Processing screen lead to notes actually being sorted, and hide own-server until it works",
+      "file_scope": [
+        "app/provider-settings/",
+        "ios/Tests/ProviderSettings/"
+      ],
+      "intent": "Hide the unusable self-hosted option, tell the person a cloud default still needs the Privacy grant, and fix the misleading type label and form copy.",
+      "acceptance": [
+        "See the F39 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/AppAssembly/AppServices.swift:52",
+        "app/provider-settings/ProviderSettingsModel.swift:165",
+        "app/provider-settings/ProviderSettingsText.swift:99",
+        "app/provider-settings/ProviderSettingsView.swift:585"
       ]
     }
   ],
@@ -3879,12 +4131,14 @@
     "U06b": [
       "A07",
       "DS01",
+      "F30",
       "U06a"
     ],
     "U11": [
       "A10",
       "C06",
       "DS01",
+      "F35",
       "U06b"
     ],
     "L05a": [
@@ -4199,7 +4453,27 @@
     "F28": [],
     "F29": [
       "F28"
-    ]
+    ],
+    "F30": [],
+    "F31": [],
+    "F32": [],
+    "F33": [
+      "F32",
+      "F35"
+    ],
+    "F34": [
+      "U06b"
+    ],
+    "F35": [
+      "F27"
+    ],
+    "F36": [],
+    "F37": [
+      "F33",
+      "U11"
+    ],
+    "F38": [],
+    "F39": []
   },
   "retained_dependency_overrides": {
     "V06": [

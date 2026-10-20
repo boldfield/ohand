@@ -434,3 +434,57 @@ fn malformed_commands_are_refused_before_anything_is_queued() {
     });
     assert_eq!(too_large.code(), "request_too_large");
 }
+
+#[test]
+fn the_retired_listing_follows_the_revoke_pages_and_rejects_unknown_versions() {
+    let _guard = serial();
+    let store = Store::new("retired");
+    let profile_version = store.configure("primary");
+    store.waiting_capture(1);
+    store.waiting_capture(2);
+    store.waiting_capture(3);
+    let mut session = Session::over(&store.path);
+    let list = |after: Option<&str>| {
+        let mut request = json!({"command": "jobs_retired_by_revocation",
+                                 "profile_version": profile_version, "limit": 2});
+        if let Some(after) = after {
+            request["after"] = json!(after);
+        }
+        request
+    };
+
+    let before = session.succeed(&list(None));
+    assert_eq!(
+        before["jobs"],
+        json!([]),
+        "nothing is retired before a revoke"
+    );
+    assert_eq!(before["truncated"], false);
+
+    session.succeed(&json!({"command": "revoke_profile", "profile_version": profile_version}));
+    let first = session.succeed(&list(None));
+    assert_eq!(first["total"], 3);
+    assert_eq!(first["truncated"], true);
+    let first_jobs = first["jobs"].as_array().unwrap();
+    assert_eq!(first_jobs.len(), 2);
+    for job in first_jobs {
+        let mut keys: Vec<_> = job.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, ["item_id", "job_id", "requeued_to", "retired_at"]);
+        assert_eq!(job["requeued_to"], Value::Null);
+    }
+    let cursor = first["next_cursor"].as_str().unwrap().to_string();
+    let second = session.succeed(&list(Some(&cursor)));
+    assert_eq!(second["jobs"].as_array().unwrap().len(), 1);
+    assert_eq!(second["truncated"], false);
+    assert_eq!(second["next_cursor"], Value::Null);
+
+    let unknown = session.fail(&json!({"command": "jobs_retired_by_revocation",
+                                       "profile_version": "secret-profile"}));
+    assert!(unknown.contains("not_found"), "{unknown}");
+    assert!(!unknown.contains("secret-profile"));
+    session.refuse(&json!({"command": "jobs_retired_by_revocation",
+                           "profile_version": profile_version, "limit": 0}));
+    session.refuse(&json!({"command": "jobs_retired_by_revocation",
+                           "profile_version": profile_version, "after": ""}));
+}

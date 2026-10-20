@@ -132,6 +132,8 @@ final class SourceDetailModel: ObservableObject {
     var itemControls: ItemControlsModel?
     /// The reminder section's model, when the host provides one.
     var reminderEditor: ReminderEditModel?
+    /// The per-item delete control, when the app assembles one.
+    var deletion: ItemDeletionModel?
     private let reader: SourceDetailReading
     private let opener: SourceAudioOpening
     private let readScope: () -> CompositionReadScope
@@ -388,6 +390,7 @@ final class SourceDetailModel: ObservableObject {
         model.itemControls = ItemControlsModel.assembled(
             itemID: itemID, root: root, onCorrected: { [weak model] in Task { await model?.load() } })
         model.reminderEditor = .assembled(itemID: itemID, root: root)
+        model.deletion = .assembled(itemID: itemID, root: root)
         return model
     }
 }

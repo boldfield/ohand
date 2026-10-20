@@ -69,6 +69,8 @@ final class RetentionSettingsModel: ObservableObject {
 
     /// The export section reached from this screen, when the app assembles one.
     let exportSettings: ExportSettingsModel?
+    /// The delete-all section reached from this screen, when the app assembles one.
+    let resetSettings: ResetSettingsModel?
 
     private let controls: RetentionControlling
     private let readScope: () -> CompositionReadScope
@@ -80,9 +82,10 @@ final class RetentionSettingsModel: ObservableObject {
 
     nonisolated init(
         controls: RetentionControlling, readScope: @escaping () -> CompositionReadScope,
-        exportSettings: ExportSettingsModel? = nil
+        exportSettings: ExportSettingsModel? = nil, resetSettings: ResetSettingsModel? = nil
     ) {
         self.exportSettings = exportSettings
+        self.resetSettings = resetSettings
         self.controls = controls
         self.readScope = readScope
     }

@@ -55,6 +55,7 @@ struct RetentionSettingsView: View {
     static let loadingIdentifier = "data-settings.retention.loading"
     static let tryAgainIdentifier = "data-settings.retention.try-again"
     static let exportLinkIdentifier = "data-settings.retention.export-link"
+    static let resetLinkIdentifier = "data-settings.retention.reset-link"
 
     static func caseIdentifier(_ itemID: String) -> String { "data-settings.retention.case.\(itemID)" }
     static func retryIdentifier(_ itemID: String) -> String { "data-settings.retention.retry.\(itemID)" }
@@ -94,6 +95,17 @@ struct RetentionSettingsView: View {
                 .background(RoundedRectangle(cornerRadius: DSRadius.card, style: .continuous).fill(DSColor.surface1.color))
                 .accessibilityIdentifier(Self.exportLinkIdentifier)
                 .reportDataSettingsRendered(Self.exportLinkIdentifier, text: "Export a copy of your notes")
+            }
+            if let resetSettings = model.resetSettings {
+                NavigationLink {
+                    ResetSettingsView(model: resetSettings, renderReporter: renderReporter)
+                } label: {
+                    DSRow(label: DeletionText.resetHeading, iconSystemName: "trash")
+                }
+                .buttonStyle(.plain)
+                .background(RoundedRectangle(cornerRadius: DSRadius.card, style: .continuous).fill(DSColor.surface1.color))
+                .accessibilityIdentifier(Self.resetLinkIdentifier)
+                .reportDataSettingsRendered(Self.resetLinkIdentifier, text: DeletionText.resetHeading)
             }
         }
         .onPreferenceChange(RetentionRenderedKey.self) { elements in
@@ -251,6 +263,6 @@ extension RetentionSettingsModel {
     nonisolated static func assembled(root: ServiceCompositionRoot) -> RetentionSettingsModel {
         RetentionSettingsModel(
             controls: root.retentionControls, readScope: { [weak root] in root?.readScope ?? .captureOnly },
-            exportSettings: .assembled(root: root))
+            exportSettings: .assembled(root: root), resetSettings: .assembled(root: root))
     }
 }

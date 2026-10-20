@@ -238,6 +238,14 @@ final class PrivateReadGate {
         }
     }
 
+    func startJobsRetiredByRevocation(operationID: UInt64, profileVersion: String, limit: Int?, after: String?) throws {
+        try issue(operationID: operationID) {
+            try source.startJobConfigurationRead(
+                operationID: operationID,
+                command: .jobsRetiredByRevocation(profileVersion: profileVersion, limit: limit, after: after))
+        }
+    }
+
     func startRequeueRecord(operationID: UInt64, jobID: String) throws {
         try issue(operationID: operationID) {
             try source.startJobConfigurationRead(operationID: operationID, command: .requeueRecord(jobID: jobID))

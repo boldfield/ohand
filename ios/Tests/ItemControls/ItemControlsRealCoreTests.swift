@@ -289,6 +289,109 @@ final class ItemControlsRealCoreTests: XCTestCase {
         XCTAssertTrue(onScreen.contains(ItemControlsView.editableIdentifier), "editing resumes once the new values are read")
     }
 
+    func testStopSuggestingMarksPullOnlyAndKeepsTheItemSearchableAndOpen() throws {
+        let itemID = try saveCapture()
+        let controls = ItemControlsModel.assembled(itemID: itemID, root: root, onCorrected: {})
+        onMain { await controls.load() }
+        onMain { await controls.stopSuggesting() }
+        XCTAssertEqual(controls.outcome, .actionDone(.stopSuggesting))
+        XCTAssertEqual(scalar("SELECT pull_only FROM suggestion_eligibility WHERE item_id = '\(itemID)'"), "1")
+        XCTAssertEqual(scalar("SELECT lifecycle_state FROM items WHERE item_id = '\(itemID)'"), "active")
+        XCTAssertTrue(controls.canAct, "the item stays open, so completing and cancelling stay available")
+        XCTAssertEqual(controls.snapshot?.suggestionsStopped, true)
+        XCTAssertFalse(controls.canQuietSuggestions, "Not now is not offered once suggestions are stopped")
+        onMain { await controls.notNow() }
+        XCTAssertEqual(controls.outcome, .actionDone(.stopSuggesting), "a refused Not now writes nothing new")
+        XCTAssertEqual(scalar("SELECT COALESCE(snoozed_until, '') FROM suggestion_eligibility WHERE item_id = '\(itemID)'"), "")
+        XCTAssertNotNil(try readDetail(itemID), "the item is still retrievable")
+
+        root.shutDown()
+        root = try makeRoot()
+        XCTAssertEqual(scalar("SELECT pull_only FROM suggestion_eligibility WHERE item_id = '\(itemID)'"), "1", "survives relaunch")
+        let relaunched = ItemControlsModel.assembled(itemID: itemID, root: root, onCorrected: {})
+        onMain { await relaunched.load() }
+        XCTAssertFalse(relaunched.canQuietSuggestions, "the stopped state is read back after a relaunch")
+        XCTAssertTrue(relaunched.canAct)
+    }
+
+    func testStoppedSuggestionsStayStoppedAfterLaterEventsTruncateTheHistory() throws {
+        let itemID = try saveCapture()
+        let controls = ItemControlsModel.assembled(itemID: itemID, root: root, onCorrected: {})
+        onMain { await controls.load() }
+        onMain { await controls.stopSuggesting() }
+        for index in 0..<55 {
+            onMain {
+                controls.topicDraft = "topic-\(index)"
+                await controls.saveSessionTopic()
+            }
+        }
+        let relaunched = ItemControlsModel.assembled(itemID: itemID, root: root, onCorrected: {})
+        onMain { await relaunched.load() }
+        XCTAssertEqual(relaunched.snapshot?.suggestionsStopped, true, "read from the durable pull-only state, not the capped history")
+        XCTAssertFalse(relaunched.canQuietSuggestions)
+        XCTAssertTrue(relaunched.canAct)
+    }
+
+    func testTheActionsAndTheirExplanationRenderAndAnEndedItemOffersNoneOfThem() throws {
+        let itemID = try saveCapture()
+        let controls = ItemControlsModel.assembled(itemID: itemID, root: root, onCorrected: {})
+        hostControls(controls)
+        settle {
+            controls.snapshot != nil && onScreen.contains(ItemControlsView.actionsIdentifier)
+                && onScreen.contains(ItemControlsView.actionsFooterIdentifier)
+        }
+        XCTAssertTrue(onScreen.contains(ItemControlsView.actionsIdentifier), "the actions section renders")
+        XCTAssertTrue(onScreen.contains(ItemControlsView.actionsFooterIdentifier), "the cooldown/pull-only explanation renders")
+        XCTAssertFalse(onScreen.contains(ItemControlsView.endedNoticeIdentifier))
+        XCTAssertTrue(controls.canAct)
+        XCTAssertTrue(controls.canQuietSuggestions)
+
+        onMain { await controls.complete() }
+        settle { onScreen.contains(ItemControlsView.endedNoticeIdentifier) }
+        XCTAssertTrue(onScreen.contains(ItemControlsView.endedNoticeIdentifier), "the ended notice renders")
+        XCTAssertFalse(controls.canAct)
+        XCTAssertFalse(controls.canQuietSuggestions)
+        XCTAssertEqual(ItemControlsView.message(for: .actionDone(.complete)), "Completed. Any reminder for it was cancelled.")
+    }
+
+    func testNotNowRecordsACooldownThatIsNotPullOnly() throws {
+        let itemID = try saveCapture()
+        let controls = ItemControlsModel.assembled(itemID: itemID, root: root, onCorrected: {})
+        onMain { await controls.load() }
+        onMain { await controls.notNow() }
+        XCTAssertEqual(controls.outcome, .actionDone(.notNow))
+        XCTAssertNotEqual(scalar("SELECT COALESCE(snoozed_until, '') FROM suggestion_eligibility WHERE item_id = '\(itemID)'"), "")
+        XCTAssertEqual(scalar("SELECT pull_only FROM suggestion_eligibility WHERE item_id = '\(itemID)'"), "0")
+    }
+
+    func testCompletingEndsTheItemAndALaterActionIsRefusedWithoutWriting() throws {
+        let itemID = try saveCapture()
+        let controls = ItemControlsModel.assembled(itemID: itemID, root: root, onCorrected: {})
+        onMain { await controls.load() }
+        onMain { await controls.complete() }
+        XCTAssertEqual(controls.outcome, .actionDone(.complete))
+        XCTAssertEqual(scalar("SELECT lifecycle_state FROM items WHERE item_id = '\(itemID)'"), "completed")
+        XCTAssertFalse(controls.canAct, "an ended item offers no further actions")
+        onMain { await controls.cancel() }
+        XCTAssertEqual(scalar("SELECT lifecycle_state FROM items WHERE item_id = '\(itemID)'"), "completed")
+    }
+
+    func testAnActionOnAnItemThatMovedOnIsAConflictAndWritesNothing() throws {
+        let itemID = try saveCapture()
+        let controls = ItemControlsModel.assembled(itemID: itemID, root: root, onCorrected: {})
+        onMain { await controls.load() }
+        let revision = try XCTUnwrap(controls.snapshot?.revision)
+        try run { try await self.root.itemCorrections.correctText(
+            commandID: UUID().uuidString.lowercased(), itemID: itemID, expectedRevision: revision,
+            text: "someone else's words") }
+        onMain { await controls.complete() }
+        guard case .actionConflict(.complete, _)? = controls.outcome else {
+            return XCTFail("expected a conflict, got \(String(describing: controls.outcome))")
+        }
+        XCTAssertEqual(scalar("SELECT lifecycle_state FROM items WHERE item_id = '\(itemID)'"), "active")
+        XCTAssertGreaterThan(controls.snapshot?.revision ?? 0, revision, "the newer revision is loaded")
+    }
+
     // MARK: helpers
 
     private func hostControls(_ controls: ItemControlsModel) {
