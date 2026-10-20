@@ -79,6 +79,7 @@ jobs:
             CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= 2>&1 | tee .evidence/OhAndTests.log
 
       - name: F27 temporary repeat loop
+        if: always()
         timeout-minutes: 25
         shell: bash
         env:

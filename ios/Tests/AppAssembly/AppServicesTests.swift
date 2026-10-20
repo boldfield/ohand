@@ -142,9 +142,11 @@ final class AppServicesTests: XCTestCase {
         let callbacks = NotificationCenter()
         let time = ManualTime(wall: Date(), zone: TimeZone(identifier: "America/New_York")!)
         let services = try makeServices(notificationCenter: callbacks, timeSources: time.sources)
-        // This test checks the wiring from the callback to one `.systemTimeChange` pass. Recording actions replace the
-        // real effectful steps (reset resume, the notification adapter, prompt eligibility), so the pass does not depend
-        // on runner speed; `TimeChangeRealCoreTests` and `LifecycleCoordinatorTests` cover the real steps.
+        services.start(isActive: false)
+        // This test checks the wiring from the callback to one `.systemTimeChange` pass. Starting connects the real
+        // effectful steps (reset resume, the notification adapter, prompt eligibility), so recording actions replace them
+        // afterwards and the pass does not depend on runner speed. `TimeChangeRealCoreTests` and
+        // `LifecycleCoordinatorTests` cover the real steps.
         let passLog = TimeChangePassLog()
         for step in [LifecycleStep.reset, .reminders, .promptEligibility] {
             services.lifecycle.setAction({ triggers in
@@ -152,7 +154,6 @@ final class AppServicesTests: XCTestCase {
                 return .completed
             }, for: step)
         }
-        services.start(isActive: false)
         XCTAssertEqual(services.lifecycle.finishedPassCount, 0, "starting inactive runs no pass")
 
         // A callback that finds nothing changed requests nothing.
