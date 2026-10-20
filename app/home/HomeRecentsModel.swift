@@ -7,6 +7,9 @@ protocol HomeRecentsSource: AnyObject {
     var isAuthenticated: Bool { get }
     var isQuietAttemptInFlight: Bool { get }
     func readPage(cursor: String?) async throws -> CoreRecentItemsPage
+    /// Whether the saved item's interpretation has reached an end: processed, abstained or uninterpreted. An end need not
+    /// assign a type, so the type alone cannot tell the home that sorting is over.
+    func interpretationIsFinished(itemID: String) async throws -> Bool
     /// Runs the explicit authentication (biometrics, passcode fallback).
     func unlock()
     /// Calls the handler after every scope change and every change of the quiet-attempt flag, on any thread. Returns the
@@ -192,6 +195,23 @@ final class HomeRecentsModel: ObservableObject {
         return try await source.readPage(cursor: cursor)
     }
 
+    private func interpretationIsFinished(itemID: String) async throws -> Bool {
+        readsInFlight += 1
+        defer { readsInFlight -= 1 }
+        return try await source.interpretationIsFinished(itemID: itemID)
+    }
+
+    /// Reads the status of each saved item still unsorted and drops the ones whose interpretation ended without a type.
+    @MainActor
+    private func clearFinishedInterpretations(startedIn: Int) async throws {
+        for itemID in justSaved.keys.sorted() {
+            guard !Task.isCancelled, startedIn == generation else { return }
+            let finished = try await interpretationIsFinished(itemID: itemID)
+            guard startedIn == generation, source.isAuthenticated else { return }
+            if finished { justSaved.removeValue(forKey: itemID) }
+        }
+    }
+
     var canLoadMore: Bool { nextCursor != nil }
 
     func loadFirstPage() {
@@ -295,7 +315,8 @@ final class HomeRecentsModel: ObservableObject {
     }
 
     /// Nothing tells the home when an interpretation finishes, so while saved items are unsorted the first page is read
-    /// again with pauses that grow to a longest pause and then repeat, so a slow interpretation still clears. It stops when
+    /// again, followed by the status of each saved item it does not show as typed (an interpretation can end without a
+    /// type). The pauses grow to a longest pause and then repeat, so a slow interpretation still clears. It stops when
     /// none are left, on a relock or at shutdown.
     private func startPollingForInterpretation() {
         guard pollTask == nil else { return }
@@ -311,6 +332,7 @@ final class HomeRecentsModel: ObservableObject {
                     let page = try await self.readPage(cursor: nil)
                     guard startedIn == self.generation, self.source.isAuthenticated else { break }
                     self.merge(firstPage: page)
+                    try await self.clearFinishedInterpretations(startedIn: startedIn)
                 } catch {
                     self.handleFailure(error, startedIn: startedIn)
                     if startedIn != self.generation { break }

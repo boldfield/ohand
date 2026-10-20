@@ -11,6 +11,9 @@ final class FakeHomeRecentsSource: HomeRecentsSource {
     private(set) var unlockCount = 0
     var pages: [String?: CoreRecentItemsPage] = [:]
     var failure: Error?
+    /// Saved items whose interpretation has ended, typed or not; every other status read answers still pending.
+    var finishedInterpretations: Set<String> = []
+    private(set) var statusReadItemIDs: [String] = []
     /// When set, a read waits until `releaseHeldReads()`, so a test can relock while it is outstanding.
     var holdsReads = false
     private var heldReads: [CheckedContinuation<Void, Never>] = []
@@ -23,6 +26,12 @@ final class FakeHomeRecentsSource: HomeRecentsSource {
         }
         if let failure { throw failure }
         return pages[cursor] ?? CoreRecentItemsPage(items: [], nextCursor: nil)
+    }
+
+    func interpretationIsFinished(itemID: String) async throws -> Bool {
+        statusReadItemIDs.append(itemID)
+        if let failure { throw failure }
+        return finishedInterpretations.contains(itemID)
     }
 
     func releaseHeldReads() {
@@ -227,8 +236,84 @@ final class HomeRecentsModelTests: XCTestCase {
         await settle()
         source.setAccess(authenticated: false)
         let readsAtRelock = source.readCursors.count
+        let statusReadsAtRelock = source.statusReadItemIDs.count
         await settle()
         XCTAssertEqual(source.readCursors.count, readsAtRelock)
+        XCTAssertEqual(source.statusReadItemIDs.count, statusReadsAtRelock)
+    }
+
+    func testSortingClearsWhenInterpretationEndsWithoutAType() async {
+        source.isAuthenticated = true
+        source.pages[nil] = CoreRecentItemsPage(items: [item("old")], nextCursor: nil)
+        let pauses = PollPauses()
+        let model = HomeRecentsModel(source: source, now: { [referenceNow] in referenceNow }, pause: { _ in await pauses.wait() })
+        await settle()
+        model.captureDidSave(itemID: "new", interpretationIsResolved: false)
+        source.pages[nil] = CoreRecentItemsPage(
+            items: [item("new", type: nil, capturedAt: "2026-10-19T11:59:00Z"), item("old")], nextCursor: nil)
+        await settle()
+        await pauses.releaseAll()
+        await settle()
+        XCTAssertTrue(model.entries[0].isSorting, "still pending while the status says so")
+        XCTAssertEqual(source.statusReadItemIDs, ["new"])
+
+        // Abstained, uninterpreted or a topic-only result: finished, and the page still carries no type.
+        source.finishedInterpretations = ["new"]
+        await pauses.releaseAll()
+        await settle()
+        XCTAssertEqual(model.entries.map(\.id), ["new", "old"])
+        XCTAssertFalse(model.entries[0].isSorting)
+        XCTAssertNil(model.entries[0].itemType)
+        XCTAssertTrue(model.justSaved.isEmpty)
+        XCTAssertTrue(
+            HomeBodyView.caption(for: model.entries[0], now: referenceNow)
+                .hasPrefix(HomeBodyView.unsortedTypeTitle + " \u{00B7} "))
+
+        let readsAfterClearing = source.readCursors.count
+        let statusReadsAfterClearing = source.statusReadItemIDs.count
+        await pauses.releaseAll()
+        await settle()
+        XCTAssertEqual(source.readCursors.count, readsAfterClearing, "polling stops once nothing is sorting")
+        XCTAssertEqual(source.statusReadItemIDs.count, statusReadsAfterClearing)
+    }
+
+    func testATypedPageNeedsNoStatusRead() async {
+        source.isAuthenticated = true
+        let pauses = PollPauses()
+        let model = HomeRecentsModel(source: source, now: { [referenceNow] in referenceNow }, pause: { _ in await pauses.wait() })
+        await settle()
+        model.captureDidSave(itemID: "new", interpretationIsResolved: false)
+        source.pages[nil] = CoreRecentItemsPage(
+            items: [item("new", type: "idea", capturedAt: "2026-10-19T11:59:00Z")], nextCursor: nil)
+        await settle()
+        await pauses.releaseAll()
+        await settle()
+        XCTAssertTrue(model.justSaved.isEmpty)
+        XCTAssertTrue(source.statusReadItemIDs.isEmpty)
+    }
+
+    func testTheProductionSourceTreatsEveryEndedInterpretationAsFinished() throws {
+        for state in ["processed", "abstained", "uninterpreted"] {
+            XCTAssertEqual(
+                RootHomeRecentsSource.interpretationIsFinished(.success(try Self.statusReport(processing: state))), true,
+                state)
+        }
+        for state in ["unprocessed", "processing"] {
+            XCTAssertEqual(
+                RootHomeRecentsSource.interpretationIsFinished(.success(try Self.statusReport(processing: state))), false,
+                state)
+        }
+        XCTAssertNil(RootHomeRecentsSource.interpretationIsFinished(.failure(.handleClosed)))
+    }
+
+    private static func statusReport(processing: String) throws -> ItemStatusReport {
+        let document = """
+            {"operation_id":1,"item_id":"item-1","save_state":"saved","sync_state":"synced",
+            "processing_state":"\(processing)","transcription_state":"not_applicable",
+            "processing_job_status":null,"reminder_request_state":null,"reminder_schedule_state":null,
+            "reminder_delivery_state":null,"reminder_acknowledgment_state":null,"unschedulable_reason":null}
+            """
+        return try JSONDecoder().decode(ItemStatusReport.self, from: Data(document.utf8))
     }
 
     func testPollingOutlastsManyAttemptsUntilTheItemIsInterpreted() async {
