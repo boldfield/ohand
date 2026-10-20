@@ -73,6 +73,15 @@ final class FakePrivacySettingsControls: PrivacySettingsControlling, @unchecked 
         return try repinResult.get()
     }
 
+    /// The core's processing facts per item; an item not listed reads as unprocessed with no stopped job.
+    var processing: [String: Result<PrivacyItemProcessing, Error>] = [:]
+    private(set) var processingReads: [String] = []
+
+    func itemProcessing(itemID: String) async throws -> PrivacyItemProcessing {
+        processingReads.append(itemID)
+        return try (processing[itemID] ?? .success(PrivacyItemProcessing(processingState: "unprocessed", processingJobStatus: nil))).get()
+    }
+
     func listRoutePolicy() async throws -> [RoutePolicyRoute] { try routes.get() }
     func listProfiles() async throws -> ProviderProfileListAnswer { try listing.get() }
 
@@ -274,7 +283,8 @@ final class PrivacySettingsModelTests: XCTestCase {
         XCTAssertEqual(controls.revocations, [["route-personal", "text_interpretation"]])
         guard case .changed(let message) = model.actionState else { return XCTFail("expected changed") }
         XCTAssertTrue(message.contains("Stopped sorting your text notes"), message)
-        XCTAssertTrue(message.contains("not by route"), message)
+        XCTAssertTrue(message.contains("A request already sent cannot be recalled"), message)
+        XCTAssertTrue(model.followedWork.isEmpty, "nothing was pending, so nothing is followed")
         XCTAssertFalse(model.isGranted(routeID: "route-personal", capability: "text_interpretation"))
         XCTAssertTrue(model.isLocalOnly, "with nothing allowed the app is still usable, local only")
         XCTAssertNil(model.change)
@@ -463,22 +473,96 @@ final class PrivacySettingsModelTests: XCTestCase {
         XCTAssertTrue(message.contains("More may still be waiting"), message)
     }
 
-    func testARouteRevocationMakesNoCountOrDropClaimAboutWorkItCannotAttributeToTheRoute() async throws {
+    func testARouteRevocationClaimsNoOutcomeAndFollowsEachPendingJobToTheStateTheCoreReports() async throws {
         let (model, controls) = makeModel(routes: [grantedRoute()])
         controls.pinned["hosted-v1"] = JobConfigurationPinnedJobs(
             jobs: [
                 JobConfigurationPinnedJob(jobID: "job-1", itemID: "item-1", status: "queued"),
                 JobConfigurationPinnedJob(jobID: "job-2", itemID: "item-2", status: "running"),
-            ], total: 2, truncated: false)
+                JobConfigurationPinnedJob(jobID: "job-3", itemID: "item-3", status: "running"),
+            ], total: 3, truncated: false)
         await model.refresh()
         model.proposeRevoke(routeID: "route-personal", capability: "text_interpretation")
         controls.duringRevoke = { controls.routes = .success([privacyRoute(id: "route-personal", name: "Local capture", scope: "personal")]) }
         await model.confirmChange(try XCTUnwrap(model.change))
         guard case .changed(let message) = model.actionState else { return XCTFail("expected changed") }
         XCTAssertTrue(message.contains("Stopped"), message)
-        XCTAssertFalse(message.contains("already sent"), message)
-        XCTAssertFalse(message.contains("not applied"), message)
-        XCTAssertEqual(model.routesHoldingWork, ["Personal route · Local capture"])
+        XCTAssertTrue(message.contains("A request already sent cannot be recalled"), message)
+        XCTAssertFalse(message.contains("is not sent"), "a request already in flight was sent: \(message)")
+        XCTAssertFalse(message.contains("not applied"), "the change cannot say which reply it drops: \(message)")
+        XCTAssertTrue(message.contains("3 jobs pending"), message)
+        XCTAssertEqual(
+            model.followedWork.map(\.state), [.listed("queued"), .listed("running"), .listed("running")],
+            "while the core still lists them, each job shows its listed status")
+        XCTAssertTrue(controls.processingReads.isEmpty, "a listed job needs no item read")
+        XCTAssertFalse(model.followedWorkIncomplete)
+
+        // The core settles them: one late reply refused, one applied (another route or purpose still allowed it), and
+        // one unreadable just now.
+        controls.pinned["hosted-v1"] = nil
+        controls.processing["item-1"] = .failure(JobConfigurationError.unreadable)
+        controls.processing["item-2"] = .success(
+            PrivacyItemProcessing(processingState: "unprocessed", processingJobStatus: "awaiting_configuration"))
+        controls.processing["item-3"] = .success(PrivacyItemProcessing(processingState: "processed", processingJobStatus: nil))
+        await model.refresh()
+        XCTAssertEqual(model.followedWork.map(\.jobID), ["job-1", "job-2", "job-3"])
+        XCTAssertEqual(model.followedWork[0].state, .unreadable)
+        XCTAssertEqual(
+            model.followedWork[1].state,
+            .settled(PrivacyItemProcessing(processingState: "unprocessed", processingJobStatus: "awaiting_configuration")))
+        XCTAssertEqual(
+            model.followedWork[2].state, .settled(PrivacyItemProcessing(processingState: "processed", processingJobStatus: nil)))
+        XCTAssertTrue(PrivacySettingsText.followedJob(model.followedWork[1]).contains("refused"))
+        XCTAssertTrue(PrivacySettingsText.followedJob(model.followedWork[1]).contains("Nothing was applied"))
+        XCTAssertTrue(PrivacySettingsText.followedJob(model.followedWork[2]).contains("a reply was applied"))
+        XCTAssertTrue(PrivacySettingsText.followedJob(model.followedWork[0]).contains("could not be read"))
+
+        // Reading again answers the unreadable one.
+        controls.processing["item-1"] = .success(
+            PrivacyItemProcessing(processingState: "unprocessed", processingJobStatus: "awaiting_configuration"))
+        await model.refresh()
+        XCTAssertEqual(
+            model.followedWork[0].state,
+            .settled(PrivacyItemProcessing(processingState: "unprocessed", processingJobStatus: "awaiting_configuration")))
+    }
+
+    func testFollowedWorkIsIncompleteWhenThePendingListingIsTruncatedAndIsDroppedOnRelock() async throws {
+        let (model, controls) = makeModel(routes: [grantedRoute()])
+        controls.pinned["hosted-v1"] = JobConfigurationPinnedJobs(
+            jobs: [JobConfigurationPinnedJob(jobID: "job-1", itemID: "item-1", status: "running")], total: 40, truncated: true)
+        await model.refresh()
+        model.proposeRevoke(routeID: "route-personal", capability: "text_interpretation")
+        await model.confirmChange(try XCTUnwrap(model.change))
+        XCTAssertEqual(model.followedWork.map(\.jobID), ["job-1"])
+        XCTAssertTrue(model.followedWorkIncomplete, "jobs beyond the listing are not followed, and the screen says so")
+
+        scope = .captureOnly
+        await model.refresh()
+        XCTAssertTrue(model.followedWork.isEmpty)
+        XCTAssertFalse(model.followedWorkIncomplete)
+    }
+
+    func testAnUnchangedRouteRevocationFollowsNothing() async throws {
+        let (model, controls) = makeModel(routes: [grantedRoute()])
+        controls.pinned["hosted-v1"] = pinnedJobs(["job-1"])
+        controls.revokeResult = .success(.unchanged)
+        await model.refresh()
+        model.proposeRevoke(routeID: "route-personal", capability: "text_interpretation")
+        await model.confirmChange(try XCTUnwrap(model.change))
+        XCTAssertTrue(model.followedWork.isEmpty)
+    }
+
+    func testARelockedItemReadLocksTheScreen() async throws {
+        let (model, controls) = makeModel(routes: [grantedRoute()])
+        controls.pinned["hosted-v1"] = pinnedJobs(["job-1"])
+        await model.refresh()
+        model.proposeRevoke(routeID: "route-personal", capability: "text_interpretation")
+        await model.confirmChange(try XCTUnwrap(model.change))
+        controls.pinned["hosted-v1"] = nil
+        controls.processing["item-job-1"] = .failure(JobConfigurationError.notAuthenticated)
+        await model.refresh()
+        XCTAssertEqual(model.phase, .locked)
+        XCTAssertTrue(model.followedWork.isEmpty)
     }
 
     func testAFailedPreReadOfAffectedWorkStopsAProfileRevocationWithNothingChanged() async throws {

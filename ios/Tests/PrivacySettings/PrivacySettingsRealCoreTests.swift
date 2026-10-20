@@ -287,6 +287,11 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         XCTAssertTrue(denied, "the job was denied: \(jobStatus())")
         XCTAssertNotEqual(jobStatus(), "completed")
         XCTAssertEqual(sender.attemptCount, 0, "a revoked capability sends nothing, even for work queued before it")
+        await model.refresh()
+        XCTAssertEqual(
+            model.followedWork.map(\.state),
+            [.settled(PrivacyItemProcessing(processingState: "unprocessed", processingJobStatus: "awaiting_configuration"))],
+            "the screen shows the core's refusal of the work that was queued at the change")
 
         model = try await relaunch()
         await model.refresh()
@@ -338,8 +343,14 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         await model.confirmChange(try XCTUnwrap(model.change))
         guard case .changed(let message) = model.actionState else { return XCTFail("expected changed, got \(String(describing: model.actionState))") }
         XCTAssertTrue(message.contains("Stopped"), message)
-        XCTAssertFalse(message.contains("already sent"), "the message makes no per-job claim it cannot attribute: \(message)")
-        XCTAssertFalse(message.contains("not applied"), message)
+        XCTAssertTrue(message.contains("A request already sent cannot be recalled"), message)
+        XCTAssertFalse(message.contains("is not sent"), "the request already left the device: \(message)")
+        XCTAssertFalse(message.contains("not applied"), "the message makes no per-job claim it cannot attribute: \(message)")
+        let jobID = scalar("SELECT job_id FROM jobs LIMIT 1")
+        XCTAssertEqual(model.followedWork.map(\.jobID), [jobID], "the request in flight is followed")
+        XCTAssertEqual(model.followedWork.first?.state, .listed("running"))
+        XCTAssertTrue(
+            PrivacySettingsText.followedJob(try XCTUnwrap(model.followedWork.first)).contains("request already sent"))
 
         held.release()
         let settled = try await waitUntil { self.jobStatus() != "running" }
@@ -353,6 +364,15 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         XCTAssertEqual(model.routesHoldingWork, ["Personal route · route-personal"])
         XCTAssertFalse(
             model.queuedWork.flatMap(\.jobs.jobs).contains { $0.status == "running" }, "the screen shows no request as sent")
+        // The screen reads the settled job back through the core's own item status: refused, nothing applied.
+        let followed = try XCTUnwrap(model.followedWork.first)
+        XCTAssertEqual(followed.jobID, jobID)
+        XCTAssertEqual(
+            followed.state,
+            .settled(PrivacyItemProcessing(processingState: "unprocessed", processingJobStatus: "awaiting_configuration")))
+        let shown = PrivacySettingsText.followedJob(followed)
+        XCTAssertTrue(shown.contains("refused"), shown)
+        XCTAssertTrue(shown.contains("Nothing was applied"), shown)
     }
 
     func testAProfileRevocationWhileARequestIsInFlightRetiresTheJobAndTheLateReplyIsNotApplied() async throws {

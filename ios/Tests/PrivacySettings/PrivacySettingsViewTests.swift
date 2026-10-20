@@ -153,6 +153,42 @@ final class PrivacySettingsViewTests: XCTestCase {
             rendered[PrivacySettingsView.routeStatusIdentifier("route-personal")], PrivacySettingsText.routeLocalOnly)
     }
 
+    func testARouteRevocationWithARequestInFlightShowsItAsSentThenTheRefusedStateTheCoreReports() async throws {
+        controls.pinned["hosted-v1"] = JobConfigurationPinnedJobs(
+            jobs: [JobConfigurationPinnedJob(jobID: "job-2", itemID: "item-2", status: "running")], total: 1, truncated: false)
+        await reload([grantedRoute()])
+        model.proposeRevoke(routeID: "route-personal", capability: "text_interpretation")
+        let fake = controls!
+        fake.duringRevoke = {
+            fake.routes = .success([privacyRoute(id: "route-personal", name: "Local capture", scope: "personal")])
+        }
+        await model.confirmChange(try XCTUnwrap(model.change))
+        settle()
+
+        let result = try XCTUnwrap(rendered[PrivacySettingsView.actionStateIdentifier])
+        XCTAssertTrue(result.contains("A request already sent cannot be recalled"), result)
+        XCTAssertFalse(result.contains("is not sent"), result)
+        let row = PrivacySettingsView.followedJobIdentifier("job-2")
+        XCTAssertEqual(
+            rendered[row],
+            "Job job-2 · request already sent, waiting for its reply. The reply is applied only if the permissions in "
+                + "force when it arrives allow it.")
+        XCTAssertEqual(rendered[PrivacySettingsView.followedWorkCheckAgainIdentifier], PrivacySettingsText.followedWorkCheckAgain)
+
+        // The late reply arrives and the core refuses it; the settled job leaves the core's listing.
+        fake.pinned["hosted-v1"] = nil
+        fake.processing["item-2"] = .success(
+            PrivacyItemProcessing(processingState: "unprocessed", processingJobStatus: "awaiting_configuration"))
+        await model.refresh()
+        settle()
+        XCTAssertNil(rendered[PrivacySettingsView.queuedJobIdentifier("job-2")], "the core no longer lists it as pending")
+        XCTAssertEqual(
+            rendered[row],
+            "Job job-2 · refused: the current permissions do not allow it. Nothing was applied; the note waits on this "
+                + "device until a permission allows it.")
+        XCTAssertNil(rendered[PrivacySettingsView.followedWorkIncompleteIdentifier])
+    }
+
     func testQueuedWorkRowsShowTheStoredStatusTheHeldNoticeAndMoveOffers() async throws {
         controls.pinned["hosted-v1"] = JobConfigurationPinnedJobs(
             jobs: [

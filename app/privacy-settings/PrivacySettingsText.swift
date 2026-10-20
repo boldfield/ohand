@@ -134,18 +134,60 @@ enum PrivacySettingsText {
         }
     }
 
+    /// The result of taking a route permission away. It states the core's guarantee, not a per-job outcome: which
+    /// pending job the change affects is not known here, so each one's actual state is listed under `followedWorkTitle`.
     static func revokeResult(
         _ outcome: RoutePolicyChangeOutcome.Disposition, routeLabel: String, capability: String,
-        stillAllowed: Bool? = nil
+        stillAllowed: Bool? = nil, followed: Int = 0
     ) -> String {
         switch outcome {
         case .revoked:
             let stopped = "Stopped \(capabilityName(capability).lowercased()) on \(routeLabel)."
             if stillAllowed == true { return stopped + " The stored policy still lists it as allowed; check the route above." }
-            return stopped + " Queued work is listed below by provider version, not by route, with the core's own status "
-                + "for each job. Work this route no longer allows is not sent."
+            let guarantee = stopped + " Work not yet sent is checked against the permissions now in force before it "
+                + "leaves the device. A request already sent cannot be recalled; its reply is checked the same way "
+                + "before anything is applied."
+            guard followed > 0 else { return guarantee }
+            return guarantee + " What became of the \(followed) job\(followed == 1 ? "" : "s") pending at this change is "
+                + "shown under \"\(followedWorkTitle)\"."
         case .unchanged: return "That was not allowed, so nothing changed."
         case .granted: return "Nothing changed."
+        }
+    }
+
+    static let followedWorkTitle = "Pending at your last change"
+    static let followedWorkIncompleteNotice =
+        "Some work pending at that change could not be listed here. The core checks it the same way."
+    static let followedWorkCheckAgain = "Check again"
+
+    /// One job pending when a route permission was taken away, described from what the core reports for it now.
+    static func followedJob(_ job: PrivacyFollowedJob) -> String {
+        let prefix = "Job \(job.jobID) · "
+        switch job.state {
+        case .listed("running"):
+            return prefix + "request already sent, waiting for its reply. The reply is applied only if the "
+                + "permissions in force when it arrives allow it."
+        case .listed(let status):
+            return prefix + "\(status), not sent. It is sent only if the permissions in force then allow it."
+        case .settled(let processing):
+            return prefix + settledProcessing(processing)
+        case .unreadable:
+            return prefix + "its state could not be read. Check again."
+        }
+    }
+
+    private static func settledProcessing(_ processing: PrivacyItemProcessing) -> String {
+        switch (processing.processingState, processing.processingJobStatus) {
+        case ("processed", _): return "a reply was applied: the note was sorted while a permission allowed it."
+        case ("abstained", _): return "answered with no change to the note."
+        case ("uninterpreted", _): return "ended without a usable result. Nothing was applied."
+        case (_, "awaiting_configuration"):
+            return "refused: the current permissions do not allow it. Nothing was applied; the note waits on this "
+                + "device until a permission allows it."
+        case (_, "retrying_after_transient"):
+            return "waiting to retry. It is sent only if the permissions in force then allow it."
+        case ("processing", _): return "still in progress."
+        default: return "nothing applied; the note waits on this device (\(processing.processingState))."
         }
     }
 

@@ -17,17 +17,23 @@ protocol PrivacySettingsControlling: AnyObject {
         -> JobConfigurationRequeuedJob
     func requeueRecord(forJob jobID: String) async throws -> JobConfigurationRequeueRecord?
     func repinWaitingWork(routeID: String) async throws -> Int
+    /// The core's processing facts for one note: whether a reply was applied, or why its processing stopped.
+    func itemProcessing(itemID: String) async throws -> PrivacyItemProcessing
 }
 
-/// The production controls: the root's provider configuration for routes and profiles, and its job configuration for
-/// work queued behind them.
+/// The production controls: the root's provider configuration for routes and profiles, its job configuration for
+/// work queued behind them, and its gated item status read for what became of that work.
 final class PrivacySettingsServices: PrivacySettingsControlling {
+    typealias ItemStatusRead = (String, @escaping (Result<ItemStatusReport, CoreFailure>) -> Void) -> Void
+
     private let providers: ProviderConfigurationService
     private let jobs: JobConfigurationService
+    private let itemStatus: ItemStatusRead
 
-    init(providers: ProviderConfigurationService, jobs: JobConfigurationService) {
+    init(providers: ProviderConfigurationService, jobs: JobConfigurationService, itemStatus: @escaping ItemStatusRead) {
         self.providers = providers
         self.jobs = jobs
+        self.itemStatus = itemStatus
     }
 
     func listRoutePolicy() async throws -> [RoutePolicyRoute] { try await providers.listRoutePolicy() }
@@ -60,6 +66,45 @@ final class PrivacySettingsServices: PrivacySettingsControlling {
     }
 
     func repinWaitingWork(routeID: String) async throws -> Int { try await jobs.repinWaitingWork(routeID: routeID) }
+
+    func itemProcessing(itemID: String) async throws -> PrivacyItemProcessing {
+        let result = await withCheckedContinuation { continuation in
+            itemStatus(itemID) { continuation.resume(returning: $0) }
+        }
+        switch result {
+        case .success(let report):
+            return PrivacyItemProcessing(
+                processingState: report.processingState, processingJobStatus: report.processingJobStatus)
+        case .failure(let failure):
+            // A read refused for the session is a lock, like every other read on this screen.
+            if failure.errorClass == .unauthorized { throw JobConfigurationError.notAuthenticated }
+            throw JobConfigurationError.core(failure)
+        }
+    }
+}
+
+/// What the core reports about one note's processing: `processed` once a reply was applied, and for work that stopped,
+/// why (`awaiting_configuration` when the core refused it under the current permissions). Core strings, shown as read.
+struct PrivacyItemProcessing: Equatable {
+    let processingState: String
+    let processingJobStatus: String?
+}
+
+/// A job that was queued or running when the user last took a route permission away. It is followed by reading the core
+/// again, so the screen shows what actually became of it rather than what the change was expected to do.
+struct PrivacyFollowedJob: Equatable {
+    enum State: Equatable {
+        /// The core still lists it as `queued` or `running` (a request already sent and not yet answered).
+        case listed(String)
+        /// It is no longer listed; this is its note's processing as the core reports it now.
+        case settled(PrivacyItemProcessing)
+        /// Neither listed nor readable just now; reading again may answer.
+        case unreadable
+    }
+
+    let jobID: String
+    let itemID: String
+    let state: State
 }
 
 /// The one permission the user is being asked about: a single capability on a single route for the destinations of a
@@ -178,6 +223,12 @@ final class PrivacySettingsModel: ObservableObject {
     @Published private(set) var requeueRecordUnreadable = false
     /// Work retired by a profile revocation in this session, each job still open to an explicit move.
     @Published private(set) var retiredWork: [PrivacyRetiredVersion] = []
+    /// The work that was pending when a route permission was last taken away, with what the core reports for each job
+    /// now. Every refresh reads it again. It spans all routes, as the core's listing does, and claims nothing per route.
+    @Published private(set) var followedWork: [PrivacyFollowedJob] = []
+    /// Whether some work pending at that change could not be listed (a truncated or unreadable listing), so is not
+    /// followed here. The core applies the same check to it.
+    @Published private(set) var followedWorkIncomplete = false
     private var lastReplacementJobID: String?
 
     /// The capabilities the core lets a user authorize for sending content.
@@ -243,10 +294,14 @@ final class PrivacySettingsModel: ObservableObject {
             let freshQueued = try await readQueuedWork(freshListing)
             guard thisGeneration == generation else { return }
             guard readScope() == .authenticated else { lock(); return }
+            let freshFollowed = try await readFollowedWork(listed: freshQueued.versions)
+            guard thisGeneration == generation else { return }
+            guard readScope() == .authenticated else { lock(); return }
             routes = freshRoutes
             listing = freshListing
             queuedWork = freshQueued.versions
             queuedWorkUnreadable = freshQueued.unreadable
+            followedWork = freshFollowed
             phase = .loaded
         } catch {
             guard thisGeneration == generation else { return }
@@ -254,6 +309,28 @@ final class PrivacySettingsModel: ObservableObject {
             guard readScope() == .authenticated else { lock(); return }
             phase = .failed(PrivacySettingsText.loadFailure(error))
         }
+    }
+
+    /// Reads again what became of each followed job: its listed status while the core still lists it, otherwise its
+    /// note's processing. A job beyond the listing limit is read by its note too, which still reports it in progress.
+    private func readFollowedWork(listed versions: [PrivacyQueuedVersion]) async throws -> [PrivacyFollowedJob] {
+        let listedStatus = Dictionary(
+            versions.flatMap(\.jobs.jobs).map { ($0.jobID, $0.status) }, uniquingKeysWith: { first, _ in first })
+        var followed: [PrivacyFollowedJob] = []
+        for job in followedWork {
+            if let status = listedStatus[job.jobID] {
+                followed.append(PrivacyFollowedJob(jobID: job.jobID, itemID: job.itemID, state: .listed(status)))
+                continue
+            }
+            do {
+                let processing = try await controls.itemProcessing(itemID: job.itemID)
+                followed.append(PrivacyFollowedJob(jobID: job.jobID, itemID: job.itemID, state: .settled(processing)))
+            } catch {
+                if isNotAuthenticated(error) { throw ProviderConfigurationError.notAuthenticated }
+                followed.append(PrivacyFollowedJob(jobID: job.jobID, itemID: job.itemID, state: .unreadable))
+            }
+        }
+        return followed
     }
 
     private func readQueuedWork(_ freshListing: ProviderProfileListAnswer) async throws
@@ -355,8 +432,18 @@ final class PrivacySettingsModel: ObservableObject {
         do {
             switch current.target {
             case .revokeRouteCapability(let routeID, let routeLabel, let capability):
+                // Read the pending work just before the change, so what became of each job, including a request
+                // already sent, can be read back afterwards. A failed read does not hold back taking permission away.
+                var pending: (versions: [PrivacyQueuedVersion], unreadable: Bool) = ([], true)
+                if let listing { pending = try await readQueuedWork(listing) }
                 let outcome = try await controls.revoke(routeID: routeID, capability: capability)
                 routeRevoke = (outcome, routeID, routeLabel, capability)
+                if outcome == .revoked {
+                    followedWork = pending.versions.flatMap(\.jobs.jobs).map {
+                        PrivacyFollowedJob(jobID: $0.jobID, itemID: $0.itemID, state: .listed($0.status))
+                    }
+                    followedWorkIncomplete = pending.unreadable || pending.versions.contains { $0.jobs.truncated }
+                }
                 actionState = .changed(PrivacySettingsText.revokeResult(outcome, routeLabel: routeLabel, capability: capability))
             case .revokeProfileVersion(let profileVersion, let versionLabel):
                 // Read the work pinned to it before and after, so the message and the retry list come from the core.
@@ -392,7 +479,8 @@ final class PrivacySettingsModel: ObservableObject {
                 PrivacySettingsText.revokeResult(
                     revoked.outcome, routeLabel: revoked.routeLabel, capability: revoked.capability,
                     stillAllowed: phase == .loaded
-                        ? isGranted(routeID: revoked.routeID, capability: revoked.capability) : nil))
+                        ? isGranted(routeID: revoked.routeID, capability: revoked.capability) : nil,
+                    followed: followedWork.count))
         }
     }
 
@@ -542,6 +630,8 @@ final class PrivacySettingsModel: ObservableObject {
         requeueRecordUnreadable = false
         lastReplacementJobID = nil
         retiredWork = []
+        followedWork = []
+        followedWorkIncomplete = false
         queuedWork = []
         queuedWorkUnreadable = false
         actionState = nil
@@ -559,6 +649,8 @@ final class PrivacySettingsModel: ObservableObject {
         requeueRecordUnreadable = false
         lastReplacementJobID = nil
         retiredWork = []
+        followedWork = []
+        followedWorkIncomplete = false
         queuedWork = []
         queuedWorkUnreadable = false
         actionState = nil

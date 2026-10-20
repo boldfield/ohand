@@ -26,6 +26,10 @@ struct PrivacySettingsView: View {
     static let requeueRecordRetryIdentifier = "privacy-settings.requeue-record-retry"
     static let heldWorkIdentifier = "privacy-settings.held-work"
     static let retiredWorkIdentifier = "privacy-settings.retired-work"
+    static let followedWorkIdentifier = "privacy-settings.followed-work"
+    static let followedWorkIncompleteIdentifier = "privacy-settings.followed-work-incomplete"
+    static let followedWorkCheckAgainIdentifier = "privacy-settings.followed-work-check-again"
+    static func followedJobIdentifier(_ job: String) -> String { "privacy-settings.followed-job.\(job)" }
     static func queuedJobIdentifier(_ job: String) -> String { "privacy-settings.queued-job.\(job)" }
     static func retiredJobIdentifier(_ job: String) -> String { "privacy-settings.retired-job.\(job)" }
     static func revokeIdentifier(_ route: String, _ capability: String) -> String {
@@ -203,6 +207,7 @@ struct PrivacySettingsView: View {
             }
             .accessibilityIdentifier(Self.retiredWorkIdentifier)
         }
+        followedWorkSection
         if let listing = model.listing {
             let revocable = listing.profiles.flatMap { profile in
                 profile.versions.filter { !$0.revoked }.map { (profile.profileID, $0) }
@@ -221,6 +226,33 @@ struct PrivacySettingsView: View {
                     }
                 }
             }
+        }
+    }
+
+    /// What became of the work pending at the last route revocation, as the core reports it now, with a way to read it
+    /// again while a request already sent is still waiting for its reply.
+    @ViewBuilder
+    private var followedWorkSection: some View {
+        if !model.followedWork.isEmpty {
+            DSGroupedSection(title: PrivacySettingsText.followedWorkTitle) {
+                ForEach(model.followedWork, id: \.jobID) { job in
+                    let text = PrivacySettingsText.followedJob(job)
+                    let identifier = Self.followedJobIdentifier(job.jobID)
+                    DSRow(label: text, iconSystemName: "arrow.uturn.backward", showsChevron: false)
+                        .reportPrivacyRendered(identifier, text: text)
+                        .accessibilityIdentifier(identifier)
+                }
+                DSRow(label: PrivacySettingsText.followedWorkCheckAgain, iconSystemName: "arrow.clockwise", showsChevron: false) {
+                    Task { await model.refresh() }
+                }
+                .reportPrivacyRendered(Self.followedWorkCheckAgainIdentifier, text: PrivacySettingsText.followedWorkCheckAgain)
+                .accessibilityIdentifier(Self.followedWorkCheckAgainIdentifier)
+                .disabled(model.isWorking)
+            }
+            .accessibilityIdentifier(Self.followedWorkIdentifier)
+        }
+        if model.followedWorkIncomplete {
+            note(PrivacySettingsText.followedWorkIncompleteNotice, identifier: Self.followedWorkIncompleteIdentifier)
         }
     }
 
@@ -391,10 +423,20 @@ extension View {
 }
 
 extension PrivacySettingsModel {
-    /// The model as the app assembles it: the root's provider configuration, gated by the root's read scope.
+    /// The model as the app assembles it: the root's provider and job configuration and its gated item status read,
+    /// gated by the root's read scope.
     nonisolated static func assembled(root: ServiceCompositionRoot) -> PrivacySettingsModel {
         PrivacySettingsModel(
-            controls: PrivacySettingsServices(providers: root.providerConfiguration, jobs: root.jobConfiguration),
+            controls: PrivacySettingsServices(
+                providers: root.providerConfiguration, jobs: root.jobConfiguration,
+                itemStatus: { [weak root] itemID, completion in
+                    guard let root else {
+                        completion(.failure(CoreFailure(
+                            errorClass: .unauthorized, code: "read_not_authenticated", message: "the app has closed")))
+                        return
+                    }
+                    root.itemStatus(itemID: itemID, completion: completion)
+                }),
             readScope: { [weak root] in root?.readScope ?? .captureOnly })
     }
 }
