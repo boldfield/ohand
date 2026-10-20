@@ -44,6 +44,7 @@ use crate::reminders::state::{
 use crate::store::events::current_transcript;
 use crate::store::schema::{Clock, Database};
 use crate::time::resolver::{TimeContext, TimeResolver};
+use crate::time::span_covers_time_expression;
 use chrono::{DateTime, Utc};
 use rusqlite::{OptionalExtension, Transaction};
 use thiserror::Error;
@@ -817,7 +818,9 @@ fn record_reminder(
     }
 
     let phrase = quoted_phrase(candidate, basis_text);
-    if let Some(contradiction) = candidate_contradiction(candidate, &phrase, &source.time_context) {
+    if let Some(contradiction) =
+        candidate_contradiction(candidate, &phrase, basis_text, &source.time_context)
+    {
         return Ok(ReminderDisposition::CandidateRejected(contradiction));
     }
 
@@ -874,10 +877,16 @@ fn quoted_phrase(candidate: &ReminderProposal, basis_text: &str) -> String {
 fn candidate_contradiction(
     candidate: &ReminderProposal,
     phrase: &str,
+    basis_text: &str,
     time_context: &TimeContext,
 ) -> Option<&'static str> {
     let resolution = TimeResolver::resolve(phrase, time_context).ok()?;
     let resolved = resolution.resolved_time?;
+    if let Some(span) = candidate.source_span {
+        if !span_covers_time_expression(basis_text, span.start, span.end) {
+            return Some("the proposed instant is not what the source phrase resolves to");
+        }
+    }
     if candidate.quality == TimeResolutionQuality::Ambiguous {
         return Some("the interpreter reported the time as ambiguous");
     }

@@ -1009,24 +1009,74 @@ fn explicit_future_datetime_resolves_to_a_pending_one_shot_reminder() {
     assert_eq!(fixture.eligibility(), EligibilityReason::HasReminder);
 }
 
-/// Apply a clock-time reminder proposal for "Remind me Friday at 3 p.m. to call the roofer",
-/// captured 2026-10-08T14:00:00Z (10:00 EDT) in America/New_York.
-fn apply_friday_three_pm(instant: &str) -> (Fixture, ReminderDisposition) {
-    let text = "Remind me Friday at 3 p.m. to call the roofer";
+/// Apply a clock-time reminder proposal for `text` (captured 2026-10-08T14:00:00Z, 10:00 EDT, in
+/// America/New_York) whose source span quotes `quoted`.
+fn apply_clock_proposal(text: &str, quoted: &str, instant: &str) -> (Fixture, ReminderDisposition) {
     let mut fixture = Fixture::captured(text, "2026-10-08T14:00:00Z", "America/New_York", -240);
     let lease = fixture.claim_job(0, capture_instant());
     let proposal = fixture
         .proposal_for(&lease, 0)
         .with_item_type(Some(ItemType::Action))
-        .with_source_spans(Some(vec![span_of(text, "call the roofer")]))
+        .with_source_spans(Some(vec![span_of(text, "join the call")]))
         .with_reminder_proposal(Some(ReminderProposal {
             instant: Some(instant.to_string()),
             timezone_id: Some("America/New_York".to_string()),
             quality: TimeResolutionQuality::Explicit,
-            source_span: Some(span_of(text, "Friday at 3 p.m.")),
+            source_span: Some(span_of(text, quoted)),
         }));
     let outcome = fixture.apply(&lease, &proposal).unwrap();
     (fixture, applied_reminder(outcome))
+}
+
+fn apply_friday_three_pm(instant: &str) -> (Fixture, ReminderDisposition) {
+    apply_clock_proposal(
+        "Remind me Friday at 3 p.m. to join the call",
+        "Friday at 3 p.m.",
+        instant,
+    )
+}
+
+fn assert_rejected_and_unscheduled(fixture: &Fixture, disposition: ReminderDisposition) {
+    assert!(matches!(
+        disposition,
+        ReminderDisposition::CandidateRejected(_)
+    ));
+    assert_eq!(fixture.durable().reminders, 0);
+    assert_eq!(fixture.reminder_effects(), None);
+}
+
+#[test]
+fn a_span_missing_the_zone_qualifier_is_rejected() {
+    let (fixture, disposition) = apply_clock_proposal(
+        "Remind me tomorrow at 9 a.m. Tokyo time to join the call",
+        "tomorrow at 9 a.m.",
+        "2026-10-09T09:00:00-04:00",
+    );
+    assert_rejected_and_unscheduled(&fixture, disposition);
+}
+
+#[test]
+fn a_span_missing_the_day_is_rejected() {
+    let (fixture, disposition) = apply_clock_proposal(
+        "Remind me tomorrow at 5 p.m. to join the call",
+        "at 5 p.m.",
+        "2026-10-08T17:00:00-04:00",
+    );
+    assert_rejected_and_unscheduled(&fixture, disposition);
+}
+
+#[test]
+fn the_full_span_still_schedules_and_trailing_words_are_not_truncation() {
+    let (fixture, disposition) = apply_clock_proposal(
+        "Remind me tomorrow at 5 p.m. to join the call",
+        "tomorrow at 5 p.m.",
+        "2026-10-09T17:00:00-04:00",
+    );
+    assert_eq!(
+        disposition,
+        ReminderDisposition::Recorded(ReminderRequestState::Resolved)
+    );
+    assert_eq!(fixture.reminder_row().request_state, "resolved");
 }
 
 #[test]
@@ -1052,12 +1102,7 @@ fn a_clock_time_phrase_resolves_to_a_scheduled_reminder() {
 fn a_clock_time_proposal_with_the_wrong_instant_contradicts_the_source() {
     let (fixture, disposition) = apply_friday_three_pm("2026-10-09T16:00:00-04:00");
 
-    assert!(matches!(
-        disposition,
-        ReminderDisposition::CandidateRejected(_)
-    ));
-    assert_eq!(fixture.durable().reminders, 0);
-    assert_eq!(fixture.reminder_effects(), None);
+    assert_rejected_and_unscheduled(&fixture, disposition);
 }
 
 #[test]
