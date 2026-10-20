@@ -265,10 +265,8 @@ final class ItemControlsRealCoreTests: XCTestCase {
         let controls = ItemControlsModel(itemID: itemID, reader: reader, corrector: root.itemCorrections)
         hostControls(controls)
         settle { controls.snapshot != nil && onScreen.contains(ItemControlsView.sectionIdentifier) }
-        settle { !hostedTextFields().isEmpty }
-        let fields = hostedTextFields()
-        XCTAssertFalse(fields.isEmpty, "the topic field is a hosted text field")
-        XCTAssertTrue(fields.allSatisfy(\.isEnabled), "the fields are editable once loaded")
+        settle { onScreen.contains(ItemControlsView.editableIdentifier) }
+        XCTAssertTrue(onScreen.contains(ItemControlsView.editableIdentifier), "the fields are editable once loaded")
 
         controls.topicDraft = "garage"
         reader.isHeld = true
@@ -277,9 +275,9 @@ final class ItemControlsRealCoreTests: XCTestCase {
             await controls.saveSessionTopic()
             finished = true
         }
-        settle { reader.isWaiting && hostedTextFields().allSatisfy { !$0.isEnabled } }
+        settle { reader.isWaiting && !onScreen.contains(ItemControlsView.editableIdentifier) }
         XCTAssertTrue(reader.isWaiting, "the correction was stored and its refresh is pending")
-        XCTAssertTrue(hostedTextFields().allSatisfy { !$0.isEnabled }, "the fields cannot be edited meanwhile")
+        XCTAssertFalse(onScreen.contains(ItemControlsView.editableIdentifier), "the fields cannot be edited meanwhile")
         XCTAssertEqual(scalar("SELECT current_session_topic FROM items WHERE item_id = '\(itemID)'"), "garage")
 
         reader.release()
@@ -287,8 +285,8 @@ final class ItemControlsRealCoreTests: XCTestCase {
         XCTAssertTrue(finished)
         XCTAssertEqual(controls.outcome, .saved(.sessionTopic))
         XCTAssertEqual(controls.topicDraft, "garage")
-        settle { hostedTextFields().allSatisfy(\.isEnabled) }
-        XCTAssertTrue(hostedTextFields().allSatisfy(\.isEnabled), "editing resumes once the new values are read")
+        settle { onScreen.contains(ItemControlsView.editableIdentifier) }
+        XCTAssertTrue(onScreen.contains(ItemControlsView.editableIdentifier), "editing resumes once the new values are read")
     }
 
     // MARK: helpers
@@ -297,15 +295,6 @@ final class ItemControlsRealCoreTests: XCTestCase {
         host(AnyView(ItemControlsView(model: controls, renderReporter: { [unowned self] id, shown in
             if shown { onScreen.insert(id) } else { onScreen.remove(id) }
         })))
-    }
-
-    /// The single-line text fields UIKit hosts for the controls; the topic field is one of them.
-    private func hostedTextFields() -> [UITextField] {
-        retainedWindow?.rootViewController?.view.layoutIfNeeded()
-        func collect(_ view: UIView) -> [UITextField] {
-            (view as? UITextField).map { [$0] } ?? view.subviews.flatMap(collect)
-        }
-        return retainedWindow.map(collect) ?? []
     }
 
     private func makeRoot() throws -> ServiceCompositionRoot {

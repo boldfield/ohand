@@ -15,6 +15,8 @@ struct ItemControlsView: View {
     static let outcomeIdentifier = "item-controls.outcome"
     static let refreshFailureIdentifier = "item-controls.refresh-failure"
     static let reloadIdentifier = "item-controls.reload"
+    /// Reported as shown while the fields can be edited and as gone while they are disabled.
+    static let editableIdentifier = "item-controls.editable"
 
     static let actionWarning =
         "Applying this makes the item an action. Changing the type never happens on its own."
@@ -74,11 +76,12 @@ struct ItemControlsView: View {
                     .rendered(Self.sectionIdentifier, renderReporter)
                 // While locked, the stored words and drafts stay off the screen; they come back after a reload.
                 if model.refreshFailure != .locked {
-                    Group {
+                    VStack(alignment: .leading, spacing: DSSpacing.md) {
                         textControl
                         typeControl
                         topicControl
                     }
+                    .modifier(EnabledReporting(identifier: Self.editableIdentifier, reporter: renderReporter))
                     // Paused while a correction or its refresh is in flight, so nothing typed then can be replaced.
                     .disabled(!model.canEdit)
                 }
@@ -166,6 +169,20 @@ struct ItemControlsView: View {
                 .disabled(!model.canSaveTopic)
                 .accessibilityIdentifier(Self.topicSaveIdentifier)
         }
+    }
+}
+
+/// Reports whether the controls it wraps are enabled, read from the same environment that disables them.
+private struct EnabledReporting: ViewModifier {
+    @Environment(\.isEnabled) private var isEnabled
+    let identifier: String
+    let reporter: ((String, Bool) -> Void)?
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear { reporter?(identifier, isEnabled) }
+            .onChange(of: isEnabled) { enabled in reporter?(identifier, enabled) }
+            .onDisappear { reporter?(identifier, false) }
     }
 }
 
