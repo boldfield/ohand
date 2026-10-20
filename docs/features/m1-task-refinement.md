@@ -197,6 +197,7 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
   - **F27 added (coordinator, 2026-10-19).** `AppServicesTests.testAStartedAppReconcilesOnceWhenASystemTimeZoneCallbackReportsARealChange` failed on two PRs that do not touch the code under test: U06b (run 39281367194) and F24 (run 39312148289, attempt 1, a Rust-only change). Both failed at `AppServicesTests.swift:139`: no lifecycle pass finished within 10 seconds. A reviewer rejected F24 on that red run. See F27.
   - **F28 added; F26 withdrawn (coordinator, 2026-10-19).** F26's worker confirmed the scorer was right. Core never schedules a reminder that has a clock time. `TimeResolver::resolve` (`core/src/time/resolver.rs:96`) parses only ISO dates and date-only phrases (today, tomorrow, weekday names). So "Friday at 3 p.m." returns `InvalidDateFormat`, `resolve_phrase` (`core/src/reminders/state/mod.rs:535`) stores `not_scheduled_yet` with "the time phrase could not be understood", and the interpreter's correct instant is discarded. The guard's cross-check (`candidate_contradiction`, `core/src/interpretation/apply/mod.rs:874`) treats the resolver error as "no opinion", so it never compares the model's instant either. The fix belongs in the deterministic resolver, not in trusting the model's instant: the resolver is what stops model output from setting a reminder time the source does not state. F28 extends the resolver, and F26's acceptance test moves into F28.
   - **Explicit-zone reminders deferred until after the trial (maintainer, 2026-10-19).** Phrases that name a zone ("tomorrow at 9 a.m. Tokyo time") stay ambiguous after F28 and need correction by hand. Supporting them needs the resolver to return a zone, `resolve_phrase` to store it, and the guard's capture-zone check (`core/src/interpretation/apply/mod.rs:892`) to accept it. The `timezone-conflicting` fixture stays a known miss until then. Re-decompose after T08.
+  - **F29 added (coordinator, 2026-10-20).** An Anthropic-only pre-check of the live harness after F23, F24 and F25 found that both Claude models return exactly the oracle's proposal for `date-ambiguous-maybe-friday` ("Maybe remind me Friday to water the plants?": an ambiguous reminder on "Friday"). Core records no reminder at all. `is_present_first_person_request` (`core/src/interpretation/apply/mod.rs:2350`) does not recognise a hedge, so `["maybe"]` falls to `_ => false` and the request is judged not to state reminder intent (`NoExplicitIntent`). It fails safe, but the person's hedged request vanishes instead of being kept for correction. See F29.
   - **F21 added (coordinator, 2026-10-18).** A live replay on Spark found that the self-hosted adapter's strict schema suppresses every optional proposal, reminders included, on all five Ollama models. E02's evidence run also waits for F21, so it measures the fixed request. See F21.
   - **Walkthrough allowance (standing, coordinator, 2026-10-18).** DS08's walkthrough (`ios/UITests/Walkthrough/WalkthroughUITests.swift`) names each screen's controls and titles, so any UI task that changes a screen it visits breaks it. On 2026-10-18 this blocked DS04a, DS07 and U02b. Any UI task may update the walkthrough for the screens it builds or changes:
     - their entries in the screen tables (for example `settingsScreens`);
@@ -3150,3 +3151,27 @@ Acceptance:
 - Tests cover both cases above. They also check that the full span still schedules, and that a time phrase followed by unrelated words ("tomorrow at 5 p.m. to call Sam") is not counted as truncated.
 - Existing tests in `tools/bench/src/report/tests.rs` and `tools/evaluation/comparison/tests.rs` whose asserted outcome changes only because a clock phrase now resolves may be updated under the same rule as `core/tests/`. List each in the PR.
 - CI: the iOS simulator job runs on every PR, including this one, which has no native edits. Its known intermittent failures (`AppServicesTests…SystemTimeZoneCallbackReportsARealChange`, which F27 fixes, and `ManagementPresentationTests`) are not this task's to fix. Rerunning the failed jobs of the exact-head run (`gh run rerun <id> --failed`) is allowed. Nothing may be skipped or disabled. Link the green exact-head run.
+
+### F29
+
+Keep a hedged reminder request as one that needs correction instead of dropping it
+
+"Maybe remind me Friday to water the plants?" is a reminder request with a hedge. The fixture `date-ambiguous-maybe-friday` expects an action with an **ambiguous** reminder on "Friday": kept, with no instant, needing correction. Core instead decides the capture states no reminder intent. `is_present_first_person_request` (`core/src/interpretation/apply/mod.rs:2350`) skips only `POLITENESS_WORDS` (`apply/mod.rs:1439`), so a leading "maybe" makes it return false, and the reminder is not recorded at all.
+
+A hedge must not do the opposite either: with F28's clock grammar, "Maybe remind me Friday at 3 p.m." must not schedule 15:00. A hedge makes the request real but its timing unconfirmed.
+
+Owned paths: `core/src/interpretation/apply/`, `core/tests/proposal_application/` and `core/src/reminders/state/`. The last is only for storing a hedged request as needing correction, if `apply/` cannot express that through the existing path.
+
+Dependencies: F28, which edits `core/src/interpretation/apply/`.
+
+Acceptance:
+
+1. A closed list of hedge words (`maybe`, `perhaps`, `possibly`) directly before an otherwise valid first-person request counts as that request for reminder intent. "Maybe remind me Friday…", "perhaps remind me tomorrow…" and "maybe please remind me…" all state intent. A hedge does not turn a non-request into one: "maybe Bob will remind me Friday" and "maybe I reminded him Friday" still do not.
+2. A hedged request is never scheduled. Whatever the time phrase resolves to, and whatever quality and instant the proposal claims, the stored reminder needs correction, with a reason naming the hedge ("the request is hedged"). It reaches the same stored state the existing ambiguous path produces. A proposal claiming `explicit` with an instant for a hedged request is not scheduled. Rejecting it as a contradiction through the existing guard path is equally acceptable; say which in the PR.
+3. Tests in `core/tests/proposal_application/` cover:
+   - the fixture's own oracle proposal stored as an ambiguous reminder needing correction;
+   - "Maybe remind me Friday at 3 p.m. to call Sam" not scheduled;
+   - the two non-requests above recording no reminder;
+   - an unhedged "Remind me Friday at 3 p.m." still scheduling.
+4. No other intent rule changes. Every existing apply and fast-path test passes unchanged.
+5. `make check` and `make test` pass. The coordinator's live rerun must show `date-ambiguous-maybe-friday` matching for both Claude models.
