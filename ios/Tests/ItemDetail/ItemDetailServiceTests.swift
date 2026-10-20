@@ -168,7 +168,7 @@ final class ItemDetailServiceTests: XCTestCase {
             "item_type": NSNull(), "scope": "personal", "session_topic": NSNull(), "lifecycle_state": "active",
             "captured_at": "2026-10-08T09:30:00Z", "text": "water the ferns", "text_basis": "original",
             "original_text": "water the ferns", "corrected_text": NSNull(), "audio_reference": NSNull(),
-            "transcript": transcript, "history": [], "history_truncated": false,
+            "transcript": transcript, "history": [], "history_truncated": false, "suggestions_stopped": false,
         ]
         return CoreEvent(operationID: operationID, outcome: .success(try JSONSerialization.data(withJSONObject: payload)))
     }

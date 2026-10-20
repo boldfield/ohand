@@ -314,6 +314,24 @@ final class ItemControlsRealCoreTests: XCTestCase {
         XCTAssertTrue(relaunched.canAct)
     }
 
+    func testStoppedSuggestionsStayStoppedAfterLaterEventsTruncateTheHistory() throws {
+        let itemID = try saveCapture()
+        let controls = ItemControlsModel.assembled(itemID: itemID, root: root, onCorrected: {})
+        onMain { await controls.load() }
+        onMain { await controls.stopSuggesting() }
+        for index in 0..<55 {
+            onMain {
+                controls.topicDraft = "topic-\(index)"
+                await controls.saveSessionTopic()
+            }
+        }
+        let relaunched = ItemControlsModel.assembled(itemID: itemID, root: root, onCorrected: {})
+        onMain { await relaunched.load() }
+        XCTAssertEqual(relaunched.snapshot?.suggestionsStopped, true, "read from the durable pull-only state, not the capped history")
+        XCTAssertFalse(relaunched.canQuietSuggestions)
+        XCTAssertTrue(relaunched.canAct)
+    }
+
     func testTheActionsAndTheirExplanationRenderAndAnEndedItemOffersNoneOfThem() throws {
         let itemID = try saveCapture()
         let controls = ItemControlsModel.assembled(itemID: itemID, root: root, onCorrected: {})

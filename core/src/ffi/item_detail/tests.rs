@@ -369,6 +369,7 @@ fn a_typed_item_reports_its_original_text_and_no_history() {
     assert_eq!(body["transcript"], Value::Null);
     assert_eq!(body["history"], json!([]));
     assert_eq!(body["history_truncated"], false);
+    assert_eq!(body["suggestions_stopped"], false);
 }
 
 #[test]
@@ -519,6 +520,44 @@ fn history_is_bounded_and_says_when_older_events_were_left_out() {
         history[OHAND_CORE_ITEM_DETAIL_HISTORY_LIMIT - 1]["revision"],
         2
     );
+}
+
+#[test]
+fn suggestions_stopped_is_authoritative_even_when_history_is_truncated() {
+    let _guard = serial();
+    let fixture = Fixture::new();
+    {
+        let mut database = Fixture::open(&fixture.path);
+        let mut session = Session::over(&fixture.path);
+        let before = session.read(&fixture.typed_item, &BOTH);
+        assert_eq!(before["suggestions_stopped"], false);
+        let transaction = database.transaction().unwrap();
+        crate::suggestions::eligibility::set_pull_only(
+            &transaction,
+            &fixture.typed_item,
+            Utc::now(),
+        )
+        .unwrap();
+        transaction.commit().unwrap();
+        for index in 0..=OHAND_CORE_ITEM_DETAIL_HISTORY_LIMIT {
+            let old_value = (index > 0).then(|| format!("topic-{}", index - 1));
+            Fixture::correct(
+                &mut database,
+                &fixture.typed_item,
+                &format!("topic-correction-{index}"),
+                CorrectionKind::SessionTopic,
+                old_value.as_deref(),
+                &format!("topic-{index}"),
+                "2026-10-08T12:00:00Z",
+            );
+        }
+    }
+    let mut session = Session::over(&fixture.path);
+
+    let body = session.read(&fixture.typed_item, &BOTH);
+
+    assert_eq!(body["history_truncated"], true);
+    assert_eq!(body["suggestions_stopped"], true);
 }
 
 #[test]

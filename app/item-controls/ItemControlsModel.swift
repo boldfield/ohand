@@ -191,7 +191,7 @@ final class ItemControlsModel: ObservableObject {
                 itemType: detail.itemType.flatMap(ItemCorrectionItemType.init(rawValue:)),
                 sessionTopic: detail.sessionTopic, scope: detail.scope,
                 isDeleted: detail.lifecycleState == "deleted", lifecycleState: detail.lifecycleState,
-                suggestionsStopped: detail.history.contains { $0.suggestionControl == "stop_suggesting" })
+                suggestionsStopped: detail.suggestionsStopped)
             let resets = fields.filter { field in
                 guard let sentDraft, sentDraft.field == field else { return true }
                 return draftValue(field) == sentDraft.value
