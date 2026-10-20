@@ -232,6 +232,56 @@ final class ItemDeletionModelTests: XCTestCase {
         await deleting.value
     }
 
+    func testTheDeletionIsReportedAsRecordedWhenTheItemReadAnswersNotFoundAsTheProductionReadDoes() async throws {
+        let controls = FakeItemDeletion()
+        controls.deleteGate = DeletionCallGate()
+        controls.progressFailure = ItemDeletionError.unreadable
+        controls.deleteResults = [.success(receipt(.complete, settled: true))]
+        let model = await preparedModel(controls)
+        model.requestDeletion()
+
+        let deleting = Task { await model.confirmDeletion() }
+        reader.failure = ItemDetailError.notFound
+        let deadline = Date().addingTimeInterval(5)
+        while !model.isRecorded && Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
+
+        XCTAssertTrue(model.isRecorded, "a tombstoned item reads as not found, which means the intent is recorded")
+        XCTAssertEqual(model.phase, .deleting, "cleanup is still running")
+        controls.deleteGate?.open()
+        await deleting.value
+        XCTAssertEqual(model.phase, .complete)
+    }
+
+    func testAFailedItemReadIsNotTakenAsARecordedDeletion() async throws {
+        let controls = FakeItemDeletion()
+        controls.deleteGate = DeletionCallGate()
+        controls.progressFailure = ItemDeletionError.unreadable
+        controls.deleteResults = [.success(receipt(.complete, settled: true))]
+        let model = await preparedModel(controls)
+        model.requestDeletion()
+
+        let deleting = Task { await model.confirmDeletion() }
+        reader.failure = ItemDetailError.relocked
+        try await Task.sleep(nanoseconds: 4 * ItemDeletionModel.recordedPollNanoseconds)
+
+        XCTAssertFalse(model.isRecorded, "only a tombstone or not found answer shows the intent")
+        controls.deleteGate?.open()
+        await deleting.value
+        XCTAssertTrue(model.isRecorded, "the delete call's own answer still reports it")
+    }
+
+    func testALiveItemWhoseReadFailedShowsNoDeletionWhenProgressIsUnreadable() async {
+        let controls = FakeItemDeletion()
+        controls.progressFailure = ItemDeletionError.unreadable
+        reader.failure = ItemDetailError.core(.handleClosed)
+        let model = await preparedModel(controls)
+
+        await model.refreshProgress()
+
+        XCTAssertEqual(model.phase, .idle, "no deletion is known to exist, so none is implied")
+        XCTAssertFalse(model.canCheckProgress)
+    }
+
     func testAnUnreadableProgressForAnUnreadableItemIsShownAndCanBeChecked() async {
         let controls = FakeItemDeletion()
         controls.progressFailure = ItemDeletionError.unreadable
@@ -403,6 +453,26 @@ final class ResetSettingsModelTests: XCTestCase {
 
         XCTAssertEqual(model.phase, .completed)
         XCTAssertEqual(controls.choices, [.keep], "a retry starts no further reset")
+        XCTAssertEqual(controls.finishCalls, 1)
+    }
+
+    func testARelockDuringARetryKeepsThePendingResetVisible() async {
+        let controls = FakeReset()
+        controls.resetResults = [
+            .success(Self.outcome(
+                .pending, blockers: [.itemCleanupIncomplete], progress: Self.progress(phase: .pending, pending: 2))),
+        ]
+        controls.finishResults = [.failure(ResetControlError.notAuthenticated)]
+        let model = makeModel(controls)
+        model.credentialChoice = .keep
+        model.beginConfirmation()
+        await model.confirmReset()
+        let pending = model.phase
+
+        await model.retry()
+
+        XCTAssertEqual(model.phase, pending, "the started reset is not hidden behind a locked note")
+        XCTAssertTrue(model.canRetry)
         XCTAssertEqual(controls.finishCalls, 1)
     }
 

@@ -87,11 +87,13 @@ final class ResetSettingsModel: ObservableObject {
     func retry() async {
         guard canRetry else { return }
         guard readScope() == .authenticated else { lock(); return }
+        let pending = phase
         phase = .resetting
         do {
             apply(try await controls.finishPending())
         } catch ResetControlError.notAuthenticated {
-            phase = .locked
+            // A relock keeps the pending reset's progress visible, as `lock()` does; it holds no private content.
+            phase = pending
         } catch {
             phase = .failed(DeletionText.unavailableResetText)
         }

@@ -52,6 +52,9 @@ final class ItemDeletionModel: ObservableObject {
     private let readScope: () -> CompositionReadScope
     /// The revision the recorded deletion was applied against, kept so a retry replays it.
     private var appliedRevision: Int?
+    /// True when this control's own read found the item tombstoned or gone, so a deletion may have been recorded
+    /// before the screen opened. A read that failed for another reason says nothing about a deletion.
+    private var itemReadAsGone = false
     private var session = 0
 
     /// How often the control asks the core whether the deletion is recorded while the delete call is still running.
@@ -107,9 +110,11 @@ final class ItemDeletionModel: ObservableObject {
         do {
             let detail = try await reader.detail(itemID: itemID)
             guard thisSession == session, readScope() == .authenticated, phase != .deleting else { return }
-            revision = detail.lifecycleState == "deleted" ? nil : detail.revision
+            itemReadAsGone = detail.lifecycleState == "deleted"
+            revision = itemReadAsGone ? nil : detail.revision
         } catch {
             guard thisSession == session, phase != .deleting else { return }
+            itemReadAsGone = Self.isNotFound(error)
             revision = nil
         }
     }
@@ -142,8 +147,9 @@ final class ItemDeletionModel: ObservableObject {
         } catch {
             guard thisSession == session else { return }
             if Self.isLocked(error) { lock(); return }
-            // A tombstoned item cannot be read, so an unreadable progress is shown as such rather than as nothing.
-            if phase == .idle, revision == nil {
+            // A tombstoned item cannot be read, so an unreadable progress is shown as such rather than as nothing. A
+            // live item whose read merely failed shows nothing, because no deletion is known to exist.
+            if phase == .idle, revision == nil, itemReadAsGone {
                 canRetryPending = true
                 phase = .pending(DeletionText.progressUnreadableItemText)
             }
@@ -186,10 +192,16 @@ final class ItemDeletionModel: ObservableObject {
         }
     }
 
+    /// Whether the item's own read shows the deletion. The production read filters a tombstoned item and answers not
+    /// found. This is asked only while the delete call for an item this control read as live is running, so a not
+    /// found answer there means the intent is recorded.
     private func itemReadsAsDeleted() async -> Bool {
         guard readScope() == .authenticated else { return false }
-        guard let detail = try? await reader.detail(itemID: itemID) else { return false }
-        return detail.lifecycleState == "deleted"
+        do {
+            return try await reader.detail(itemID: itemID).lifecycleState == "deleted"
+        } catch {
+            return Self.isNotFound(error)
+        }
     }
 
     private func adopt(_ progress: ItemDeletionProgress, settled: Bool = true) {
@@ -223,6 +235,11 @@ final class ItemDeletionModel: ObservableObject {
         case .invalidRequest: phase = .failed(DeletionText.invalidText)
         case .core, .unreadable: phase = .failed(DeletionText.unavailableText)
         }
+    }
+
+    private static func isNotFound(_ error: Error) -> Bool {
+        if case .some(.notFound) = error as? ItemDetailError { return true }
+        return false
     }
 
     private static func isLocked(_ error: Error) -> Bool {

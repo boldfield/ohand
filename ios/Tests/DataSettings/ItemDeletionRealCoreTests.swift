@@ -1,4 +1,6 @@
 import SQLite3
+import SwiftUI
+import UIKit
 import XCTest
 @testable import OhAndCoreBridge
 @testable import OhAndServices
@@ -16,6 +18,7 @@ final class ItemDeletionRealCoreTests: XCTestCase {
     private var storageRoot: URL!
     private var baselineHandles = 0
     private var baselineBuffers = 0
+    private var retainedWindow: UIWindow?
 
     override func setUpWithError() throws {
         try super.setUpWithError()
@@ -27,6 +30,8 @@ final class ItemDeletionRealCoreTests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
+        retainedWindow?.isHidden = true
+        retainedWindow = nil
         XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
         XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
         try? FileManager.default.removeItem(at: storageRoot)
@@ -117,7 +122,78 @@ final class ItemDeletionRealCoreTests: XCTestCase {
         assertNothingOfTheItemIsShown(source)
     }
 
+    func testTheAssembledScreenDropsTheSourceBeforeHeldCleanupSettlesWhileProgressCannotBeRead() throws {
+        let center = FakeNotificationCenter()
+        let coordinator = LifecycleCoordinator(stepTimeoutSeconds: 30)
+        let root = try makeRoot(modules: [coordinator], center: center)
+        defer { root.shutDown() }
+        let (itemID, captureID) = try saveCapture(root)
+        let audioURL = try seedAudioAndReminder(itemID: itemID, captureID: captureID, center: center)
+        try coordinator.connect(to: root)
+        // The production cleanup runs only once the test releases it, so the delete call stays open meanwhile.
+        let held = HeldItemCleanup(forward: try XCTUnwrap(coordinator.deletionCleanup))
+        root.itemDeletion.setCleanupProvider { held }
+
+        let source = SourceDetailModel.assembled(itemID: itemID, root: root)
+        XCTAssertNotNil(source.deletion, "the production assembly puts the delete control on the screen")
+        // The same production service, except that every progress read fails.
+        let deletion = ItemDeletionModel(
+            itemID: itemID, controls: ProgressUnavailableItemDeletion(root.itemDeletion), reader: root.itemDetails,
+            readScope: { [weak root] in root?.readScope ?? .captureOnly })
+        source.deletion = deletion
+        var onScreen = Set<String>()
+        host(AnyView(NavigationStack {
+            SourceDetailView(model: source, renderReporter: { id, shown in
+                if shown { onScreen.insert(id) } else { onScreen.remove(id) }
+            })
+        }))
+        XCTAssertTrue(pump(until: {
+            onScreen.contains(SourceDetailView.currentTextIdentifier) && deletion.revision != nil
+        }), "the live item and its delete control are shown")
+        XCTAssertEqual(source.content?.currentText, Self.captureText)
+        XCTAssertEqual(deletion.phase, .idle, "an unreadable progress implies no deletion for a live item")
+
+        deletion.requestDeletion()
+        let deleting = DeletionRealCoreBox<Bool>()
+        Task { @MainActor in
+            await deletion.confirmDeletion()
+            deleting.set(true)
+        }
+        XCTAssertTrue(pump(until: { held.hasEntered }), "the intent is recorded and cleanup has started")
+        XCTAssertTrue(pump(until: {
+            !onScreen.contains(SourceDetailView.currentTextIdentifier) && source.content == nil
+                && source.failure != nil
+        }), "the visible source is dropped while cleanup is still held")
+
+        XCTAssertFalse(held.hasFinished, "cleanup has not settled")
+        XCTAssertNil(deleting.value, "the delete call is still running")
+        XCTAssertEqual(deletion.phase, .deleting)
+        XCTAssertTrue(deletion.isRecorded)
+        assertNothingOfTheItemIsShown(source)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: audioURL.path), "nothing is claimed removed yet")
+
+        held.release()
+        XCTAssertTrue(pump(until: { deleting.value != nil }), "the delete call returns once cleanup runs")
+        XCTAssertTrue(held.hasFinished)
+        XCTAssertEqual(deletion.phase, .complete)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: audioURL.path))
+        XCTAssertFalse(onScreen.contains(SourceDetailView.currentTextIdentifier))
+        assertNothingOfTheItemIsShown(source)
+
+        // Opening the screen again never shows the source.
+        let reopened = SourceDetailModel.assembled(itemID: itemID, root: root)
+        try drive { await reopened.load() }
+        assertNothingOfTheItemIsShown(reopened)
+    }
+
     // MARK: helpers
+
+    private func host(_ view: AnyView) {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        window.rootViewController = UIHostingController(rootView: view)
+        window.makeKeyAndVisible()
+        retainedWindow = window
+    }
 
     private func assertNothingOfTheItemIsShown(
         _ source: SourceDetailModel, file: StaticString = #filePath, line: UInt = #line
@@ -207,6 +283,7 @@ final class ItemDeletionRealCoreTests: XCTestCase {
     private func pump(until condition: () -> Bool, timeout: TimeInterval = 30) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
+            retainedWindow?.rootViewController?.view.layoutIfNeeded()
             if condition() { return true }
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
         }
@@ -239,6 +316,66 @@ final class ItemDeletionRealCoreTests: XCTestCase {
 private final class DeletionUnreachableProviderSender: ProviderRequestSender, @unchecked Sendable {
     func send(_ request: ProviderHTTPRequest) async throws -> ProviderHTTPResponse {
         throw URLError(.notConnectedToInternet)
+    }
+}
+
+/// Production item deletion whose progress reads all fail, as when the progress read is unavailable.
+private final class ProgressUnavailableItemDeletion: ItemDeletionControlling, @unchecked Sendable {
+    private let service: ItemDeletionService
+
+    init(_ service: ItemDeletionService) { self.service = service }
+
+    func delete(itemID: String, expectedRevision: Int) async throws -> ItemDeletionReceipt {
+        try await service.delete(itemID: itemID, expectedRevision: expectedRevision)
+    }
+
+    func progress(itemID: String) async throws -> ItemDeletionProgress {
+        throw ItemDeletionError.unreadable
+    }
+}
+
+/// The production cleanup, held until the test releases it.
+private final class HeldItemCleanup: ItemDeletionCleanup, @unchecked Sendable {
+    private let forward: ItemDeletionCleanup
+    private let lock = NSLock()
+    private var entered = false
+    private var finished = false
+    private var released = false
+    private var waiting: CheckedContinuation<Void, Never>?
+
+    init(forward: ItemDeletionCleanup) { self.forward = forward }
+
+    var hasEntered: Bool { locked { entered } }
+    var hasFinished: Bool { locked { finished } }
+
+    func release() {
+        let resumed: CheckedContinuation<Void, Never>? = locked {
+            released = true
+            defer { waiting = nil }
+            return waiting
+        }
+        resumed?.resume()
+    }
+
+    func cleanUp(itemID: String) async -> DeletionItemResult {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let resumeNow: Bool = locked {
+                entered = true
+                if released { return true }
+                waiting = continuation
+                return false
+            }
+            if resumeNow { continuation.resume() }
+        }
+        let result = await forward.cleanUp(itemID: itemID)
+        locked { finished = true }
+        return result
+    }
+
+    private func locked<Value>(_ body: () -> Value) -> Value {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
     }
 }
 
