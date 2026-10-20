@@ -78,6 +78,18 @@ jobs:
             -resultBundlePath .evidence/OhAndTests.xcresult \
             CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= 2>&1 | tee .evidence/OhAndTests.log
 
+      - name: F27 temporary repeat loop
+        timeout-minutes: 25
+        shell: bash
+        env:
+          SIMULATOR_UDID: ${{ steps.simulator.outputs.udid }}
+        run: |
+          cd ios
+          xcodebuild test -project OhAnd.xcodeproj -scheme OhAndTests -configuration Debug -sdk iphonesimulator \
+            -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" -derivedDataPath .derived \
+            -only-testing:OhAndTests/AppServicesTests/testAStartedAppReconcilesOnceWhenASystemTimeZoneCallbackReportsARealChange \
+            -test-iterations 50 CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM=
+
       - name: Run credential cross-process relaunch check
         shell: bash
         env:
