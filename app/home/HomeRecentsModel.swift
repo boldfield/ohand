@@ -166,6 +166,9 @@ final class HomeRecentsModel: ObservableObject {
         return pending + leadingSorting + loaded.filter { !$0.isSorting }
     }
 
+    /// The time relative dates are measured from; the same clock the sections use.
+    var currentDate: Date { now() }
+
     func section(for entry: HomeRecentEntry, calendar: Calendar = .current) -> HomeRecentsSection {
         entry.isSorting || calendar.isDate(entry.capturedAt, inSameDayAs: now()) ? .today : .earlier
     }

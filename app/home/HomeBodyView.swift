@@ -1,11 +1,45 @@
 import SwiftUI
 
+/// Where a part of the home body landed and the words it shows, so a hosted test can see what is on screen. A button
+/// also carries the action its tap runs; the action is not compared.
+struct HomeRenderedElement: Equatable {
+    let frame: CGRect
+    let text: String?
+    let tap: (() -> Void)?
+
+    static func == (lhs: HomeRenderedElement, rhs: HomeRenderedElement) -> Bool {
+        lhs.frame == rhs.frame && lhs.text == rhs.text && (lhs.tap == nil) == (rhs.tap == nil)
+    }
+}
+
+struct HomeRenderedKey: PreferenceKey {
+    static var defaultValue: [String: HomeRenderedElement] = [:]
+
+    static func reduce(value: inout [String: HomeRenderedElement], nextValue: () -> [String: HomeRenderedElement]) {
+        value.merge(nextValue()) { _, latest in latest }
+    }
+}
+
+extension View {
+    /// Reports this part of the home body to a hosted test: where it is, what it says and, for a button, its action.
+    func reportHomeRendered(_ identifier: String, text: String?, tap: (() -> Void)? = nil) -> some View {
+        background(GeometryReader { proxy in
+            Color.clear.preference(
+                key: HomeRenderedKey.self,
+                value: [identifier: HomeRenderedElement(frame: proxy.frame(in: .global), text: text, tap: tap)])
+        })
+    }
+}
+
 /// The body of the composer home: recent captures when reads are authenticated, placeholder cards while a quiet attempt
 /// is in flight, and the locked card otherwise. Nothing derived from stored history is drawn outside the unlocked state.
 struct HomeBodyView: View {
     static let listIdentifier = "home.recents.list"
     static let cardIdentifierPrefix = "home.recents.card."
     static let placeholderIdentifier = "home.recents.placeholder"
+    static let placeholderCardIdentifierPrefix = "home.recents.placeholder."
+    static let cardCaptionIdentifierPrefix = "home.recents.caption."
+    static let cardDotIdentifierPrefix = "home.recents.dot."
     static let lockedCardIdentifier = "home.recents.locked"
     static let unlockButtonIdentifier = "home.recents.unlock"
     static let todayHeadingIdentifier = "home.recents.today"
@@ -20,6 +54,8 @@ struct HomeBodyView: View {
     static let placeholderCount = 3
 
     @ObservedObject var model: HomeRecentsModel
+    /// Test seam: receives every reported part of the body each time it is drawn.
+    var renderReporter: (([String: HomeRenderedElement]) -> Void)?
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     var body: some View {
@@ -29,6 +65,7 @@ struct HomeBodyView: View {
                 .padding(.vertical, DSSpacing.sm)
                 .frame(maxWidth: .infinity)
         }
+        .onPreferenceChange(HomeRenderedKey.self) { elements in renderReporter?(elements) }
     }
 
     private var isRegularWidth: Bool { horizontalSizeClass == .regular }
@@ -44,7 +81,8 @@ struct HomeBodyView: View {
     // MARK: Locked and unlocking
 
     private var lockedCard: some View {
-        DSCard {
+        let unlock = { model.unlock() }
+        return DSCard {
             VStack(alignment: .leading, spacing: DSSpacing.sm) {
                 DSIconTile(systemName: "lock")
                 Text(Self.lockedTitle)
@@ -54,17 +92,19 @@ struct HomeBodyView: View {
                     .font(DSFont.footer)
                     .foregroundColor(DSColor.inkMuted.color)
                     .fixedSize(horizontal: false, vertical: true)
-                DSPillButton(title: Self.unlockTitle, style: .primary, action: { model.unlock() })
+                DSPillButton(title: Self.unlockTitle, style: .primary, action: unlock)
                     .accessibilityIdentifier(Self.unlockButtonIdentifier)
+                    .reportHomeRendered(Self.unlockButtonIdentifier, text: Self.unlockTitle, tap: unlock)
             }
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(Self.lockedCardIdentifier)
+        .reportHomeRendered(Self.lockedCardIdentifier, text: Self.lockedTitle + "\n" + Self.lockedDetail)
     }
 
     private var placeholders: some View {
         LazyVGrid(columns: columns, spacing: DSSpacing.sm) {
-            ForEach(0..<Self.placeholderCount, id: \.self) { _ in
+            ForEach(0..<Self.placeholderCount, id: \.self) { index in
                 DSCard {
                     VStack(alignment: .leading, spacing: DSSpacing.xs) {
                         placeholderBar(width: 96)
@@ -72,10 +112,12 @@ struct HomeBodyView: View {
                         placeholderBar(width: 160)
                     }
                 }
+                .reportHomeRendered(Self.placeholderCardIdentifierPrefix + String(index), text: nil)
             }
         }
         .accessibilityElement(children: .ignore)
         .accessibilityIdentifier(Self.placeholderIdentifier)
+        .reportHomeRendered(Self.placeholderIdentifier, text: nil)
     }
 
     private func placeholderBar(width: CGFloat?) -> some View {
@@ -106,11 +148,13 @@ struct HomeBodyView: View {
                 cards(earlier)
             }
             if model.loadFailed {
-                DSPillButton(title: "Try again", style: .secondary, action: { reload() })
+                DSPillButton(title: "Try again", style: .secondary, action: reload)
                     .accessibilityIdentifier(Self.retryIdentifier)
+                    .reportHomeRendered(Self.retryIdentifier, text: "Try again", tap: reload)
             }
         }
         .accessibilityIdentifier(Self.listIdentifier)
+        .reportHomeRendered(Self.listIdentifier, text: nil)
     }
 
     private func reload() {
@@ -123,6 +167,7 @@ struct HomeBodyView: View {
             .foregroundColor(large ? DSColor.ink.color : DSColor.inkMuted.color)
             .accessibilityAddTraits(.isHeader)
             .accessibilityIdentifier(identifier)
+            .reportHomeRendered(identifier, text: title)
     }
 
     private func cards(_ entries: [HomeRecentEntry]) -> some View {
@@ -135,16 +180,19 @@ struct HomeBodyView: View {
     }
 
     private func card(for entry: HomeRecentEntry) -> some View {
-        DSCard {
+        let caption = Self.caption(for: entry, now: model.currentDate)
+        return DSCard {
             VStack(alignment: .leading, spacing: DSSpacing.xs) {
                 HStack(spacing: DSSpacing.xs) {
                     Circle()
                         .fill(Self.dotColor(forItemType: entry.itemType).color)
                         .frame(width: 8, height: 8)
                         .accessibilityHidden(true)
-                    Text(Self.caption(for: entry))
+                        .reportHomeRendered(Self.cardDotIdentifierPrefix + entry.id, text: entry.itemType)
+                    Text(caption)
                         .font(DSFont.groupHeading)
                         .foregroundColor(DSColor.inkMuted.color)
+                        .reportHomeRendered(Self.cardCaptionIdentifierPrefix + entry.id, text: caption)
                 }
                 Text(Self.text(for: entry))
                     .font(DSFont.body)
@@ -155,6 +203,7 @@ struct HomeBodyView: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier(Self.cardIdentifierPrefix + entry.id)
+        .reportHomeRendered(Self.cardIdentifierPrefix + entry.id, text: Self.text(for: entry))
     }
 
     // MARK: Wording
