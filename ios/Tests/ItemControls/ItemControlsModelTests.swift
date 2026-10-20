@@ -218,6 +218,78 @@ final class ItemControlsModelTests: XCTestCase {
         }
     }
 
+    func testAnEditMadeWhileItsSaveIsInFlightIsNotReplacedByTheStoredValue() async {
+        for field in [ItemControlsField.text, .type, .sessionTopic] {
+            let reader = StubDetailReader(detail(revision: 3, type: "idea", topic: "garage", text: "old"))
+            let corrector = RecordingCorrector()
+            let model = make(reader, corrector)
+            await model.load()
+            reader.detail = detail(revision: 4, type: field == .type ? "note" : "idea",
+                                   topic: field == .sessionTopic ? "kitchen" : "garage",
+                                   text: field == .text ? "first words" : "old")
+            var pausedDuringRead: Bool?
+            reader.duringRead = { [unowned model] in
+                reader.duringRead = nil
+                pausedDuringRead = !model.canEdit
+                // A change that reaches the draft while the save is answered, as typing would if it got through.
+                switch field {
+                case .text: model.textDraft = "second words"
+                case .type: model.pendingType = .broadIntention
+                case .sessionTopic: model.topicDraft = "attic"
+                }
+            }
+            switch field {
+            case .text:
+                model.textDraft = "first words"
+                await model.saveText()
+                XCTAssertEqual(model.textDraft, "second words")
+            case .type:
+                model.pendingType = .note
+                await model.applyType()
+                XCTAssertEqual(model.pendingType, .broadIntention)
+            case .sessionTopic:
+                model.topicDraft = "kitchen"
+                await model.saveSessionTopic()
+                XCTAssertEqual(model.topicDraft, "attic")
+            }
+            XCTAssertEqual(pausedDuringRead, true, "\(field): the controls are disabled while the save is answered")
+            XCTAssertEqual(model.outcome, .saved(field))
+            XCTAssertEqual(model.snapshot?.revision, 4)
+            XCTAssertEqual(corrector.calls.count, 1, "\(field): only the first value was sent")
+        }
+    }
+
+    func testAnEditMadeBeforeAFailedRefreshSurvivesTheReload() async {
+        let reader = StubDetailReader(detail(revision: 3, text: "old"))
+        let corrector = RecordingCorrector()
+        let model = make(reader, corrector)
+        await model.load()
+        reader.duringRead = { [unowned model] in
+            reader.duringRead = nil
+            model.textDraft = "second words"
+        }
+        reader.failure = .relocked
+        model.textDraft = "first words"
+        await model.saveText()
+        XCTAssertEqual(model.refreshFailure, .locked)
+        reader.failure = nil
+        reader.detail = detail(revision: 4, text: "first words")
+        await model.reload()
+        XCTAssertNil(model.refreshFailure)
+        XCTAssertEqual(model.textDraft, "second words", "the later edit is kept after the reload")
+    }
+
+    func testAnUnchangedDraftIsStillReplacedByTheStoredValueAfterASave() async {
+        let reader = StubDetailReader(detail(revision: 3, text: "old"))
+        let model = make(reader, RecordingCorrector())
+        await model.load()
+        reader.detail = detail(revision: 4, text: "first words (stored)")
+        model.textDraft = "first words"
+        await model.saveText()
+        XCTAssertEqual(model.textDraft, "first words (stored)")
+        XCTAssertFalse(model.canSaveText)
+    }
+
     func testAConflictRefreshesTheHostSoItAgreesWithTheNewerValues() async {
         let corrector = RecordingCorrector()
         corrector.results = [.failure(.staleRevision(currentRevision: 5))]

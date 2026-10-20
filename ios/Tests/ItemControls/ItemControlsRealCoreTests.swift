@@ -24,6 +24,31 @@ private final class HookedDetailReader: SourceDetailReading, @unchecked Sendable
     }
 }
 
+/// Hands every read to the real core, but while `isHeld` it waits for `release()`, so a test can look at the screen
+/// while a correction is stored and its refresh is still pending.
+private final class GatedDetailReader: SourceDetailReading, @unchecked Sendable {
+    let inner: SourceDetailReading
+    var isHeld = false
+    private(set) var isWaiting = false
+    private var waiter: CheckedContinuation<Void, Never>?
+    init(_ inner: SourceDetailReading) { self.inner = inner }
+    func detail(itemID: String) async throws -> CoreItemDetail {
+        if isHeld {
+            await withCheckedContinuation { continuation in
+                waiter = continuation
+                isWaiting = true
+            }
+        }
+        return try await inner.detail(itemID: itemID)
+    }
+    func release() {
+        isHeld = false
+        isWaiting = false
+        waiter?.resume()
+        waiter = nil
+    }
+}
+
 /// Drives `ItemControlsModel.assembled` and the source-detail screen over the real composition root and Rust core on an
 /// on-disk store with synthetic data: what is stored, what survives a relaunch, and what the screen shows.
 final class ItemControlsRealCoreTests: XCTestCase {
@@ -234,12 +259,53 @@ final class ItemControlsRealCoreTests: XCTestCase {
         XCTAssertTrue(controls.canSaveText)
     }
 
+    func testTheFieldsAreDisabledWhileASaveIsInFlightSoNothingTypedThenIsLost() throws {
+        let itemID = try saveCapture()
+        let reader = GatedDetailReader(root.itemDetails)
+        let controls = ItemControlsModel(itemID: itemID, reader: reader, corrector: root.itemCorrections)
+        hostControls(controls)
+        settle { controls.snapshot != nil && onScreen.contains(ItemControlsView.sectionIdentifier) }
+        settle { !hostedTextFields().isEmpty }
+        let fields = hostedTextFields()
+        XCTAssertFalse(fields.isEmpty, "the topic field is a hosted text field")
+        XCTAssertTrue(fields.allSatisfy(\.isEnabled), "the fields are editable once loaded")
+
+        controls.topicDraft = "garage"
+        reader.isHeld = true
+        var finished = false
+        Task { @MainActor in
+            await controls.saveSessionTopic()
+            finished = true
+        }
+        settle { reader.isWaiting && hostedTextFields().allSatisfy { !$0.isEnabled } }
+        XCTAssertTrue(reader.isWaiting, "the correction was stored and its refresh is pending")
+        XCTAssertTrue(hostedTextFields().allSatisfy { !$0.isEnabled }, "the fields cannot be edited meanwhile")
+        XCTAssertEqual(scalar("SELECT current_session_topic FROM items WHERE item_id = '\(itemID)'"), "garage")
+
+        reader.release()
+        settle { finished }
+        XCTAssertTrue(finished)
+        XCTAssertEqual(controls.outcome, .saved(.sessionTopic))
+        XCTAssertEqual(controls.topicDraft, "garage")
+        settle { hostedTextFields().allSatisfy(\.isEnabled) }
+        XCTAssertTrue(hostedTextFields().allSatisfy(\.isEnabled), "editing resumes once the new values are read")
+    }
+
     // MARK: helpers
 
     private func hostControls(_ controls: ItemControlsModel) {
         host(AnyView(ItemControlsView(model: controls, renderReporter: { [unowned self] id, shown in
             if shown { onScreen.insert(id) } else { onScreen.remove(id) }
         })))
+    }
+
+    /// The single-line text fields UIKit hosts for the controls; the topic field is one of them.
+    private func hostedTextFields() -> [UITextField] {
+        retainedWindow?.rootViewController?.view.layoutIfNeeded()
+        func collect(_ view: UIView) -> [UITextField] {
+            (view as? UITextField).map { [$0] } ?? view.subviews.flatMap(collect)
+        }
+        return retainedWindow.map(collect) ?? []
     }
 
     private func makeRoot() throws -> ServiceCompositionRoot {

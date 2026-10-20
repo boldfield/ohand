@@ -68,7 +68,9 @@ enum ItemControlsRefreshFailure: Equatable {
 /// * The command ID is kept across retries of the same change, so a repeat after an unknown outcome stores once.
 /// * After a correction is answered, editing stays paused until the stored values are read again. If that read fails,
 ///   the drafts and the saved/conflict outcome are kept, `refreshFailure` says why, and editing stays paused until
-///   `reload()` succeeds, so a second press can never send a correction against the revision from before.
+///   `reload()` succeeds, so a second press can never send a correction against the revision from before. The view
+///   disables the controls meanwhile, and a draft changed after its correction was sent is never replaced by the
+///   stored value, so nothing typed during a save can be lost.
 /// * The original capture and transcript are never touched; the source-detail screen keeps showing them.
 /// Confined to the main queue.
 final class ItemControlsModel: ObservableObject {
@@ -91,6 +93,8 @@ final class ItemControlsModel: ObservableObject {
     private var loadGeneration = 0
     /// The drafts a failed post-correction read would have replaced; `reload()` replaces them once it succeeds.
     private var pendingRefreshResets: Set<ItemControlsField> = []
+    /// The draft sent with the last answered correction. If the user changed that draft since, it is not replaced.
+    private var sentDraft: (field: ItemControlsField, value: String)?
 
     init(
         itemID: String, reader: SourceDetailReading, corrector: ItemControlsCorrecting,
@@ -146,12 +150,17 @@ final class ItemControlsModel: ObservableObject {
                 itemType: detail.itemType.flatMap(ItemCorrectionItemType.init(rawValue:)),
                 sessionTopic: detail.sessionTopic, scope: detail.scope,
                 isDeleted: detail.lifecycleState == "deleted")
+            let resets = fields.filter { field in
+                guard let sentDraft, sentDraft.field == field else { return true }
+                return draftValue(field) == sentDraft.value
+            }
             snapshot = loaded
             refreshFailure = nil
             pendingRefreshResets = []
-            if fields.contains(.text) { textDraft = loaded.text ?? "" }
-            if fields.contains(.sessionTopic) { topicDraft = loaded.sessionTopic ?? "" }
-            if fields.contains(.type) { pendingType = loaded.itemType }
+            sentDraft = nil
+            if resets.contains(.text) { textDraft = loaded.text ?? "" }
+            if resets.contains(.sessionTopic) { topicDraft = loaded.sessionTopic ?? "" }
+            if resets.contains(.type) { pendingType = loaded.itemType }
         } catch {
             guard generation == loadGeneration else { return }
             if afterSubmit {
@@ -166,6 +175,7 @@ final class ItemControlsModel: ObservableObject {
             snapshot = nil
             refreshFailure = nil
             pendingRefreshResets = []
+            sentDraft = nil
             textDraft = ""
             topicDraft = ""
             pendingType = nil
@@ -174,6 +184,14 @@ final class ItemControlsModel: ObservableObject {
             case .some(.notFound), .some(.invalidItemID): outcome = .itemGone
             default: outcome = .loadFailed
             }
+        }
+    }
+
+    private func draftValue(_ field: ItemControlsField) -> String {
+        switch field {
+        case .text: return textDraft
+        case .sessionTopic: return topicDraft
+        case .type: return pendingType?.rawValue ?? ""
         }
     }
 
@@ -190,7 +208,7 @@ final class ItemControlsModel: ObservableObject {
     @MainActor func saveText() async {
         guard canSaveText, let snapshot else { return }
         let text = textDraft
-        await submit(.text, key: "text:\(text)") { commandID in
+        await submit(.text, key: "text:\(text)", draft: text) { commandID in
             try await self.corrector.correctText(
                 commandID: commandID, itemID: self.itemID, expectedRevision: snapshot.revision, text: text)
         }
@@ -198,7 +216,7 @@ final class ItemControlsModel: ObservableObject {
 
     @MainActor func applyType() async {
         guard canApplyType, let snapshot, let type = pendingType else { return }
-        await submit(.type, key: "type:\(type.rawValue)") { commandID in
+        await submit(.type, key: "type:\(type.rawValue)", draft: type.rawValue) { commandID in
             try await self.corrector.correctType(
                 commandID: commandID, itemID: self.itemID, expectedRevision: snapshot.revision, itemType: type)
         }
@@ -207,14 +225,14 @@ final class ItemControlsModel: ObservableObject {
     @MainActor func saveSessionTopic() async {
         guard canSaveTopic, let snapshot else { return }
         let topic = topicDraft
-        await submit(.sessionTopic, key: "topic:\(topic)") { commandID in
+        await submit(.sessionTopic, key: "topic:\(topic)", draft: topic) { commandID in
             try await self.corrector.correctSessionTopic(
                 commandID: commandID, itemID: self.itemID, expectedRevision: snapshot.revision, sessionTopic: topic)
         }
     }
 
     @MainActor private func submit(
-        _ field: ItemControlsField, key: String,
+        _ field: ItemControlsField, key: String, draft: String,
         _ send: (String) async throws -> ItemCorrectionReceipt
     ) async {
         guard !isWorking else { return }
@@ -232,6 +250,7 @@ final class ItemControlsModel: ObservableObject {
             let receipt = try await send(commandID)
             heldCommand = nil
             outcome = receipt.reminderCancelled && field == .type ? .savedAndReminderCancelled : .saved(field)
+            sentDraft = (field, draft)
             // Editing stays paused until the new revision is read, so no second press can name the old one.
             await load(resetting: [field], afterSubmit: true)
             onCorrected()

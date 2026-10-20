@@ -79,7 +79,8 @@ struct ItemControlsView: View {
                         typeControl
                         topicControl
                     }
-                    .disabled(model.snapshot?.isDeleted == true)
+                    // Paused while a correction or its refresh is in flight, so nothing typed then can be replaced.
+                    .disabled(!model.canEdit)
                 }
             }
             if let outcome = model.outcome {
