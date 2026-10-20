@@ -336,6 +336,21 @@ final class AppServicesTests: XCTestCase {
         XCTAssertTrue(refreshed, "the capture surface learns of the success")
     }
 
+    func testShuttingDownRightAfterAuthenticatingLeavesNoHomeReadBehind() async throws {
+        let boundary = FakeReadAuthenticationBoundary()
+        let center = NotificationCenter()
+        let services = try makeQuietServices(boundary: boundary, lifecycleCenter: center)
+        services.start(isActive: false)
+        center.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        XCTAssertEqual(services.root.readScope, .authenticated)
+
+        services.shutDown()
+        for _ in 0..<200 { await Task.yield() }
+
+        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no home read outlives the shutdown")
+        XCTAssertTrue(services.homeRecents.entries.isEmpty)
+    }
+
     func testEachForegroundAfterABackgroundMakesOneAttemptAndTheRelockDoesNotCancelIt() throws {
         let boundary = FakeReadAuthenticationBoundary()
         boundary.nextOutcome = .denied

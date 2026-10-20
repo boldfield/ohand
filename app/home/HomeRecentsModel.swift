@@ -193,6 +193,8 @@ final class HomeRecentsModel: ObservableObject {
 
     @MainActor
     private func performFirstPage(startedIn: Int) async {
+        // The task may have been cancelled before it first ran; no read starts then.
+        guard !Task.isCancelled, startedIn == generation else { return }
         do {
             let page = try await source.readPage(cursor: nil)
             guard startedIn == generation, source.isAuthenticated else { return }
@@ -222,6 +224,7 @@ final class HomeRecentsModel: ObservableObject {
 
     @MainActor
     private func performMore(cursor: String, startedIn: Int) async {
+        guard !Task.isCancelled, startedIn == generation else { return }
         do {
             let page = try await source.readPage(cursor: cursor)
             guard startedIn == generation, source.isAuthenticated else { return }
@@ -309,6 +312,7 @@ final class HomeRecentsModel: ObservableObject {
     @MainActor
     private func refreshAfterInterpretation(itemID: String) async {
         let startedIn = generation
+        guard !Task.isCancelled else { return }
         do {
             let page = try await source.readPage(cursor: nil)
             guard startedIn == generation, source.isAuthenticated else { return }
