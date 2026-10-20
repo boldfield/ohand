@@ -404,11 +404,11 @@ fn pair_counts_objective_results_and_disagreement_come_from_the_journal() {
 
     assert_eq!(report.paired_objective.matched_pairs, 2);
     assert_eq!(report.paired_objective.both_clean, 1);
-    // The guard drops the wrong instant for both arms, so neither is objectively clean even
-    // though only arm b proposed a wrong deadline.
-    assert_eq!(report.paired_objective.only_a_clean, 0);
+    // The resolver now schedules the correct instant, so only arm a is objectively clean while
+    // arm b's wrong deadline is rejected.
+    assert_eq!(report.paired_objective.only_a_clean, 1);
     assert_eq!(report.paired_objective.only_b_clean, 0);
-    assert_eq!(report.paired_objective.neither_clean, 1);
+    assert_eq!(report.paired_objective.neither_clean, 0);
     assert_eq!(
         report.arms[1].totals.candidate_defects[&DefectKind::FalseDeadline],
         1

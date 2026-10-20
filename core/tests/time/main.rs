@@ -523,3 +523,214 @@ fn test_ambiguity_kinds_for_missing_hour_and_past() {
     assert_eq!(past.ambiguity_kind, Some(AmbiguityKind::Past));
     assert!(past.resolved_time.is_some());
 }
+
+// ---- clock times ----
+
+const NY: &str = "America/New_York";
+// Thursday 2026-10-08 10:00 in New York (EDT).
+const NY_THURSDAY: &str = "2026-10-08T14:00:00Z";
+
+fn resolved_utc(tz: &str, ref_time: &str, phrase: &str) -> String {
+    let context = make_context(tz, ref_time);
+    let result = TimeResolver::resolve(phrase, &context).unwrap();
+    assert!(
+        !result.is_ambiguous,
+        "{phrase:?} should resolve: {:?}",
+        result.ambiguity_reason
+    );
+    result.resolved_time.unwrap().to_rfc3339()
+}
+
+fn assert_ambiguous_without_instant(tz: &str, ref_time: &str, phrase: &str) {
+    let context = make_context(tz, ref_time);
+    let result = TimeResolver::resolve(phrase, &context).unwrap();
+    assert!(result.is_ambiguous, "{phrase:?} must be ambiguous");
+    assert!(
+        result.resolved_time.is_none(),
+        "{phrase:?} must not resolve"
+    );
+    assert!(result.candidates.is_empty() || result.ambiguity_kind == Some(AmbiguityKind::DstFold));
+}
+
+#[test]
+fn clock_grammar_forms_resolve_table() {
+    // Friday 2026-10-09 15:00 EDT == 19:00Z.
+    let friday_three_pm = "2026-10-09T19:00:00+00:00";
+    let cases = [
+        ("Friday at 3 p.m.", friday_three_pm),
+        ("friday at 3pm", friday_three_pm),
+        ("FRIDAY AT 3 PM", friday_three_pm),
+        ("Friday 3 p.m", friday_three_pm),
+        ("on Friday at 3:00 pm", friday_three_pm),
+        ("Friday at 15:00", friday_three_pm),
+        ("at 3 p.m. on Friday", friday_three_pm),
+        ("3 p.m. Friday", friday_three_pm),
+        ("3pm friday", friday_three_pm),
+        ("Friday 3:00 p.m.", friday_three_pm),
+        ("2026-10-09 at 3 p.m.", friday_three_pm),
+        ("2026-10-09 15:00", friday_three_pm),
+        ("tomorrow at 9 a.m.", "2026-10-09T13:00:00+00:00"),
+        ("tomorrow at 9:30 am", "2026-10-09T13:30:00+00:00"),
+        ("today at 5 p.m.", "2026-10-08T21:00:00+00:00"),
+        ("today at noon", "2026-10-08T16:00:00+00:00"),
+        ("tomorrow at midnight", "2026-10-09T04:00:00+00:00"),
+        ("tomorrow at 12 a.m.", "2026-10-09T04:00:00+00:00"),
+        ("tomorrow at 12 p.m.", "2026-10-09T16:00:00+00:00"),
+        ("tomorrow at 00:00", "2026-10-09T04:00:00+00:00"),
+        ("tomorrow at 23:59", "2026-10-10T03:59:00+00:00"),
+        ("at 5 p.m.", "2026-10-08T21:00:00+00:00"),
+        ("5pm", "2026-10-08T21:00:00+00:00"),
+        ("next monday at 8 a.m.", "2026-10-12T12:00:00+00:00"),
+    ];
+    for (phrase, expected) in cases {
+        assert_eq!(resolved_utc(NY, NY_THURSDAY, phrase), expected, "{phrase}");
+    }
+}
+
+#[test]
+fn clock_phrase_resolves_with_local_fields() {
+    let context = make_context(NY, NY_THURSDAY);
+    let result = TimeResolver::resolve("Friday at 3 p.m.", &context).unwrap();
+    assert_eq!(
+        result.resolved_local.unwrap().to_string(),
+        "2026-10-09 15:00:00"
+    );
+    assert_eq!(result.original_phrase, "Friday at 3 p.m.");
+    assert!(!result.is_past);
+}
+
+#[test]
+fn clock_without_day_is_today_only_when_later() {
+    // 10:00 local: 5 p.m. is later today, 9 a.m. is not, and 10 a.m. is not later.
+    assert_eq!(
+        resolved_utc(NY, NY_THURSDAY, "at 5 p.m."),
+        "2026-10-08T21:00:00+00:00"
+    );
+    for phrase in ["at 9 a.m.", "at 10 a.m.", "9am", "at midnight"] {
+        let context = make_context(NY, NY_THURSDAY);
+        let result = TimeResolver::resolve(phrase, &context).unwrap();
+        assert!(result.is_ambiguous, "{phrase}");
+        assert!(result.resolved_time.is_none(), "{phrase}");
+        assert!(
+            !result.is_past,
+            "{phrase} is a missing day, not a past time"
+        );
+        assert_eq!(result.ambiguity_kind, Some(AmbiguityKind::MissingHour));
+    }
+}
+
+#[test]
+fn bare_hour_and_unsupported_clock_forms_are_ambiguous_or_rejected() {
+    for phrase in ["Friday at 3", "tomorrow at 9", "at 3", "tomorrow at 3:30"] {
+        assert_ambiguous_without_instant(NY, NY_THURSDAY, phrase);
+    }
+    let context = make_context(NY, NY_THURSDAY);
+    for phrase in [
+        "Friday at 13 pm",
+        "Friday at 0 am",
+        "Friday at 24:00",
+        "Friday at 9:60 am",
+        "Friday at 25:00",
+        "Friday at",
+        "at 3 p.m.",
+    ]
+    .iter()
+    .take(6)
+    {
+        let outcome = TimeResolver::resolve(phrase, &context);
+        match outcome {
+            Err(ResolutionError::InvalidDateFormat(_)) => {}
+            Ok(result) => assert!(result.resolved_time.is_none(), "{phrase}"),
+            Err(other) => panic!("{phrase}: {other}"),
+        }
+    }
+}
+
+#[test]
+fn zone_qualifiers_never_resolve_in_the_capture_zone() {
+    for phrase in [
+        "tomorrow at 9 a.m. EST",
+        "tomorrow at 9 a.m. Tokyo time",
+        "tomorrow at 9 a.m. UTC+9",
+        "Friday at 3 p.m. PST",
+        "tomorrow at 9am UTC",
+        "9 a.m. tomorrow EST",
+    ] {
+        assert_ambiguous_without_instant(NY, NY_THURSDAY, phrase);
+    }
+}
+
+#[test]
+fn past_clock_times_are_reported_as_past() {
+    let context = make_context(NY, NY_THURSDAY);
+    for phrase in [
+        "today at 9 a.m.",
+        "2026-10-07 at 3 p.m.",
+        "since monday at 8 a.m.",
+    ] {
+        let result = TimeResolver::resolve(phrase, &context).unwrap();
+        assert!(result.is_past, "{phrase}");
+        assert_eq!(result.ambiguity_kind, Some(AmbiguityKind::Past), "{phrase}");
+        assert!(result.resolved_time.is_some(), "{phrase}");
+    }
+}
+
+#[test]
+fn spring_forward_gap_is_ambiguous() {
+    // 2027-03-14 02:30 does not exist in New York.
+    let context = make_context(NY, "2027-03-10T15:00:00Z");
+    let result = TimeResolver::resolve("2027-03-14 at 2:30 a.m.", &context).unwrap();
+    assert!(result.is_ambiguous);
+    assert_eq!(result.ambiguity_kind, Some(AmbiguityKind::DstGap));
+    assert!(result.resolved_time.is_none());
+    // Either side of the gap is fine.
+    assert_eq!(
+        resolved_utc(NY, "2027-03-10T15:00:00Z", "2027-03-14 at 3:30 a.m."),
+        "2027-03-14T07:30:00+00:00"
+    );
+    assert_eq!(
+        resolved_utc(NY, "2027-03-10T15:00:00Z", "2027-03-14 at 1:30 a.m."),
+        "2027-03-14T06:30:00+00:00"
+    );
+}
+
+#[test]
+fn fall_back_fold_is_ambiguous_with_both_candidates() {
+    // 2026-11-01 01:30 happens twice in New York.
+    let context = make_context(NY, "2026-10-28T15:00:00Z");
+    let result = TimeResolver::resolve("2026-11-01 at 1:30 a.m.", &context).unwrap();
+    assert!(result.is_ambiguous);
+    assert_eq!(result.ambiguity_kind, Some(AmbiguityKind::DstFold));
+    assert!(result.resolved_time.is_none());
+    assert_eq!(result.candidates.len(), 2);
+    assert_eq!(
+        resolved_utc(NY, "2026-10-28T15:00:00Z", "2026-11-01 at 3:30 a.m."),
+        "2026-11-01T08:30:00+00:00"
+    );
+}
+
+#[test]
+fn a_day_part_missing_or_unknown_is_not_resolved() {
+    let context = make_context(NY, NY_THURSDAY);
+    // Day only keeps its date-only behaviour.
+    let date_only = TimeResolver::resolve("Friday", &context).unwrap();
+    assert!(date_only.resolved_time.is_none());
+    assert_eq!(date_only.ambiguity_kind, Some(AmbiguityKind::MissingHour));
+    // A bare "today" is still not a phrase on its own.
+    assert!(matches!(
+        TimeResolver::resolve("today", &context),
+        Err(ResolutionError::InvalidDateFormat(_))
+    ));
+    // Unknown day words do not resolve.
+    let unknown = TimeResolver::resolve("someday at 3 p.m.", &context);
+    assert!(unknown.map_or(true, |result| result.resolved_time.is_none()));
+}
+
+#[test]
+fn repeats_with_a_clock_are_still_unsupported() {
+    let context = make_context(NY, NY_THURSDAY);
+    assert!(matches!(
+        TimeResolver::resolve("every day at 9 a.m.", &context),
+        Err(ResolutionError::UnsupportedRepeat(_))
+    ));
+}

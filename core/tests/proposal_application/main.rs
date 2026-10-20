@@ -71,6 +71,15 @@ fn open(path: &str) -> Database {
 
 impl Fixture {
     fn new(capture_text: &str) -> Fixture {
+        Fixture::captured(capture_text, CAPTURE_INSTANT, "UTC", 0)
+    }
+
+    fn captured(
+        capture_text: &str,
+        capture_instant: &str,
+        timezone_id: &str,
+        utc_offset_minutes: i32,
+    ) -> Fixture {
         let path = format!(
             "{}/test_proposal_application_{}.db",
             std::env::temp_dir().display(),
@@ -83,8 +92,15 @@ impl Fixture {
             .execute(
                 "INSERT INTO captures (capture_id, text, capture_instant, timezone_id, \
                  utc_offset_minutes, locale, calendar, item_scope, route_id, entry_locked, created_at) \
-                 VALUES (?, ?, ?, 'UTC', 0, 'en', 'gregorian', 'personal', 'route-1', 0, ?)",
-                rusqlite::params![capture_id, capture_text, CAPTURE_INSTANT, CAPTURE_INSTANT],
+                 VALUES (?, ?, ?, ?, ?, 'en', 'gregorian', 'personal', 'route-1', 0, ?)",
+                rusqlite::params![
+                    capture_id,
+                    capture_text,
+                    capture_instant,
+                    timezone_id,
+                    utc_offset_minutes,
+                    capture_instant
+                ],
             )
             .unwrap();
         db.conn()
@@ -991,6 +1007,57 @@ fn explicit_future_datetime_resolves_to_a_pending_one_shot_reminder() {
         Some(ReminderScheduleState::PendingSchedule)
     );
     assert_eq!(fixture.eligibility(), EligibilityReason::HasReminder);
+}
+
+/// Apply a clock-time reminder proposal for "Remind me Friday at 3 p.m. to call the roofer",
+/// captured 2026-10-08T14:00:00Z (10:00 EDT) in America/New_York.
+fn apply_friday_three_pm(instant: &str) -> (Fixture, ReminderDisposition) {
+    let text = "Remind me Friday at 3 p.m. to call the roofer";
+    let mut fixture = Fixture::captured(text, "2026-10-08T14:00:00Z", "America/New_York", -240);
+    let lease = fixture.claim_job(0, capture_instant());
+    let proposal = fixture
+        .proposal_for(&lease, 0)
+        .with_item_type(Some(ItemType::Action))
+        .with_source_spans(Some(vec![span_of(text, "call the roofer")]))
+        .with_reminder_proposal(Some(ReminderProposal {
+            instant: Some(instant.to_string()),
+            timezone_id: Some("America/New_York".to_string()),
+            quality: TimeResolutionQuality::Explicit,
+            source_span: Some(span_of(text, "Friday at 3 p.m.")),
+        }));
+    let outcome = fixture.apply(&lease, &proposal).unwrap();
+    (fixture, applied_reminder(outcome))
+}
+
+#[test]
+fn a_clock_time_phrase_resolves_to_a_scheduled_reminder() {
+    let (fixture, disposition) = apply_friday_three_pm("2026-10-09T15:00:00-04:00");
+
+    assert_eq!(
+        disposition,
+        ReminderDisposition::Recorded(ReminderRequestState::Resolved)
+    );
+    let reminder = fixture.reminder_row();
+    assert_eq!(reminder.request_state, "resolved");
+    assert_eq!(reminder.schedule_state, "pending_schedule");
+    let stored = DateTime::parse_from_rfc3339(reminder.resolved_instant.as_deref().unwrap())
+        .expect("stored instant is RFC 3339");
+    assert_eq!(
+        stored,
+        DateTime::parse_from_rfc3339("2026-10-09T15:00:00-04:00").unwrap()
+    );
+}
+
+#[test]
+fn a_clock_time_proposal_with_the_wrong_instant_contradicts_the_source() {
+    let (fixture, disposition) = apply_friday_three_pm("2026-10-09T16:00:00-04:00");
+
+    assert!(matches!(
+        disposition,
+        ReminderDisposition::CandidateRejected(_)
+    ));
+    assert_eq!(fixture.durable().reminders, 0);
+    assert_eq!(fixture.reminder_effects(), None);
 }
 
 #[test]

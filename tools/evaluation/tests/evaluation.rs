@@ -878,3 +878,60 @@ fn a_stored_reminder_without_an_instant_makes_no_timezone_claim() {
         .iter()
         .any(|defect| defect.kind == DefectKind::MissedIntent));
 }
+
+#[test]
+fn the_oracles_explicit_clock_time_reminders_score_no_defects_at_either_stage() {
+    let corpus = corpus();
+    let responses = repository_responses(&corpus);
+    let report = evaluate(&corpus, Some(&responses)).expect("report");
+    let fake = report.run(ExecutionKind::Fake).expect("fake");
+
+    for fixture_id in [
+        "design-explicit-reminder",
+        "date-explicit-today",
+        "timezone-implicit-local",
+        "correction-user-edit",
+    ] {
+        let case = fake
+            .cases
+            .iter()
+            .find(|case| case.case_id == format!("conforming/{fixture_id}"))
+            .unwrap_or_else(|| panic!("{fixture_id} runs as a conforming scenario"));
+        assert!(
+            case.candidate_defects.is_empty(),
+            "{fixture_id} candidate defects: {:?}",
+            case.candidate_defects
+        );
+        assert!(
+            case.authoritative_defects.is_empty(),
+            "{fixture_id} durable defects: {:?}",
+            case.authoritative_defects
+        );
+        let stored = case
+            .authoritative_state
+            .reminder
+            .as_ref()
+            .unwrap_or_else(|| panic!("{fixture_id} stores a scheduled reminder"));
+        assert!(
+            stored.resolved_instant.is_some(),
+            "{fixture_id} stores an instant"
+        );
+    }
+
+    // Explicit-zone phrases stay unresolved: "EST" is ambiguous by oracle, and the Tokyo
+    // follow-up is a known gap out of scope here.
+    for fixture_id in ["timezone-explicit", "timezone-conflicting"] {
+        let stored = fake
+            .cases
+            .iter()
+            .filter(|case| case.fixture_id == fixture_id)
+            .filter_map(|case| case.authoritative_state.reminder.as_ref())
+            .next();
+        if let Some(stored) = stored {
+            assert!(
+                stored.resolved_instant.is_none(),
+                "{fixture_id} must not store an instant"
+            );
+        }
+    }
+}
