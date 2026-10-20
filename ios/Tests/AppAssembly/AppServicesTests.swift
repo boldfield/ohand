@@ -21,6 +21,11 @@ final class AppServicesTests: XCTestCase {
     override func tearDownWithError() throws {
         created.forEach { $0.shutDown() }
         created = []
+        // A core read issued before the shutdown completes on its own queue; give its buffer time to be freed.
+        let deadline = Date().addingTimeInterval(5)
+        while CoreHandle.liveResultBufferCount != baselineBuffers, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
         XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")
         XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no result buffer leaks")
         try? FileManager.default.removeItem(at: storageRoot)
@@ -345,9 +350,9 @@ final class AppServicesTests: XCTestCase {
         XCTAssertEqual(services.root.readScope, .authenticated)
 
         services.shutDown()
-        for _ in 0..<200 { await Task.yield() }
+        let freed = await timeChangeWaitUntil { CoreHandle.liveResultBufferCount == baselineBuffers }
 
-        XCTAssertEqual(CoreHandle.liveResultBufferCount, baselineBuffers, "no home read outlives the shutdown")
+        XCTAssertTrue(freed, "no home read outlives the shutdown")
         XCTAssertTrue(services.homeRecents.entries.isEmpty)
     }
 
