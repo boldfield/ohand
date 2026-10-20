@@ -3500,6 +3500,27 @@
         "app/data-settings/RetentionSettingsView.swift:98",
         "docs/features/m1-ui-design.md:140"
       ]
+    },
+    {
+      "key": "F32",
+      "parent": null,
+      "title": "Open a note's detail when its card on the home screen is tapped",
+      "file_scope": [
+        "app/home/",
+        "ios/Tests/HomeRecents/",
+        "ios/AppAssembly/AppRootView.swift"
+      ],
+      "intent": "Make each recent-capture card on the home screen open its item's source detail through the existing openItem route.",
+      "acceptance": [
+        "See the F32 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "app/home/HomeBodyView.swift",
+        "ios/AppAssembly/AppRootView.swift:26",
+        "ios/AppAssembly/ManagementNavigationModel.swift:92"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -4256,7 +4277,8 @@
       "F28"
     ],
     "F30": [],
-    "F31": []
+    "F31": [],
+    "F32": []
   },
   "retained_dependency_overrides": {
     "V06": [

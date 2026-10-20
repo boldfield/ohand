@@ -3229,3 +3229,21 @@ Acceptance:
 3. Reset behaviour, confirmation and the credential choice are unchanged. This task moves the entry point only.
 4. Hosted view tests: the root card navigates to the reset screen when a reset model is present and is absent when it is not; the Audio screen no longer renders either link. Remove or update the existing tests that asserted those links on the Audio screen; do not weaken any other assertion.
 5. Exact-head macOS run linked. If the DS08 screenshot walkthrough shows the Audio screen, its expected content may change only by the two removed links.
+
+### F32
+
+Open a note's detail when its card on the home screen is tapped
+
+The home screen lists recent captures as cards (DS04b, `app/home/HomeBodyView.swift`), but a card has no action, so tapping a note does nothing. Neither the UI design nor DS04b said a card opens its item, so DS04b was built to spec. It is still a gap: on the maintainer's phone, the home screen is where a person sees a note, and there is no way from there to its detail, correction or deletion. The route already exists. `ManagementNavigationModel.openItem(itemID:)` presents the registered item destination (`SourceDetailScreen`), and asks for authentication first when the session is locked. Notification taps already use it.
+
+Owned paths: `app/home/` and `ios/Tests/HomeRecents/`, plus one closure argument in `ios/AppAssembly/AppRootView.swift`, where `HomeBodyView` is built.
+
+Dependencies: none beyond landed work (DS04b).
+
+Acceptance:
+
+1. Tapping a recent-capture card opens that item's source detail through `navigation.openItem(itemID:)`, passed into `HomeBodyView` as a closure. `app/home/` does not import or reach the navigation model directly. Back returns to the home screen.
+2. The whole card is the tap target. It is one accessibility element with the button trait, and VoiceOver reads its type, date and text. A "Just now · sorting…" card opens the same way.
+3. Placeholder cards and the locked card open nothing. A card does not navigate after a relock has cleared the list.
+4. The UI design's Home section already says a card opens its item (recorded by the coordinator); the task does not edit the design doc.
+5. Hosted view tests: tapping a card calls the closure with that card's item identifier; placeholder and locked states expose no tappable card. Exact-head macOS run linked.

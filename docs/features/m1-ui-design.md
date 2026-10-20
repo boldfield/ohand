@@ -103,7 +103,7 @@ There's one screen, compact and regular.
   - Search, a GlassButton. On regular width it's a wide GlassPill instead.
   - The wordmark, a GlassPill holding the Mark and "Oh And".
   - Settings, a GlassButton. While the keyboard is up, this becomes Done, which dismisses the keyboard.
-- **Body:** recent captures as Cards, newest first, grouped under "Today" and "Earlier" (13 semibold, `inkMuted`). Each card shows a small type dot, the type and a relative date, then the item's text. On regular width the cards form two columns under a `displayXL` "Today".
+- **Body:** recent captures as Cards, newest first, grouped under "Today" and "Earlier" (13 semibold, `inkMuted`). Each card shows a small type dot, the type and a relative date, then the item's text. Tapping a card opens that item's source detail (added 2026-10-20, F32). On regular width the cards form two columns under a `displayXL` "Today".
 - **Composer** at the bottom, above the safe area or the keyboard. It is never covered.
 - **Saving:** Save clears the composer, keeps the keyboard up and shows the SavedPill. The new item appears at the top of the list as "Just now · sorting…" until it's interpreted.
 
