@@ -3360,7 +3360,7 @@
         "tools/evaluation/src/",
         "tools/evaluation/tests/"
       ],
-      "intent": "Stop the durable-stage scorer reporting missed_intent for a reminder whose instant matches the oracle.",
+      "intent": "Withdrawn 2026-10-19: the scorer was correct; the defect is in core's time resolver, fixed by F28, which carries this acceptance test.",
       "acceptance": [
         "See the F26 section of m1-task-refinement.md."
       ],
@@ -3395,6 +3395,27 @@
         "ios/Tests/AppAssembly/AppServicesTests.swift:117",
         "ios/Services/TimeChangeCoordinator/TimeChangeCoordinator.swift",
         "ios/AppAssembly/AppServices.swift:72"
+      ]
+    },
+    {
+      "key": "F28",
+      "parent": null,
+      "title": "Resolve clock times in reminder phrases so explicit reminders are scheduled",
+      "file_scope": [
+        "core/src/time/",
+        "core/tests/time/",
+        "tools/evaluation/tests/"
+      ],
+      "intent": "Teach the deterministic time resolver clock times so 'Friday at 3 p.m.' resolves and schedules instead of being stored as needing correction.",
+      "acceptance": [
+        "See the F28 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/time/resolver.rs:96",
+        "core/src/reminders/state/mod.rs:535",
+        "core/src/interpretation/apply/mod.rs:874"
       ]
     }
   ],
@@ -4145,7 +4166,8 @@
     ],
     "F27": [
       "DS04b"
-    ]
+    ],
+    "F28": []
   },
   "retained_dependency_overrides": {
     "V06": [
