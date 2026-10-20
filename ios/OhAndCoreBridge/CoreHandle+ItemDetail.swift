@@ -125,12 +125,15 @@ public struct CoreItemDetail: Decodable, Equatable, Sendable {
     public let history: [CoreItemDetailEvent]
     /// Whether older events were left out of `history`.
     public let historyTruncated: Bool
+    /// The authoritative durable stop-suggesting (pull-only) state; unlike `history` it is never truncated.
+    public let suggestionsStopped: Bool
 
     public init(
         itemID: String, captureID: String, revision: Int, itemType: String?, scope: String, sessionTopic: String?,
         lifecycleState: String, capturedAt: String, text: String?, textBasis: CoreRetrievalTextBasis,
         originalText: String?, correctedText: String?, audioReference: String?,
-        transcript: CoreItemDetailTranscript?, history: [CoreItemDetailEvent], historyTruncated: Bool
+        transcript: CoreItemDetailTranscript?, history: [CoreItemDetailEvent], historyTruncated: Bool,
+        suggestionsStopped: Bool = false
     ) {
         self.itemID = itemID
         self.captureID = captureID
@@ -148,6 +151,7 @@ public struct CoreItemDetail: Decodable, Equatable, Sendable {
         self.transcript = transcript
         self.history = history
         self.historyTruncated = historyTruncated
+        self.suggestionsStopped = suggestionsStopped
     }
 
     enum CodingKeys: String, CodingKey {
@@ -167,6 +171,7 @@ public struct CoreItemDetail: Decodable, Equatable, Sendable {
         case transcript
         case history
         case historyTruncated = "history_truncated"
+        case suggestionsStopped = "suggestions_stopped"
     }
 }
 

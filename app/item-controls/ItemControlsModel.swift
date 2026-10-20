@@ -16,6 +16,23 @@ protocol ItemControlsCorrecting: AnyObject, Sendable {
 
 extension ItemCorrectionService: ItemControlsCorrecting {}
 
+/// Completes, cancels or quiets the item. `ItemLifecycleControlService` is the production implementation: it needs an
+/// authenticated read session and stores each action through the core's compare-and-set path.
+protocol ItemControlsLifecycleActing: AnyObject, Sendable {
+    func complete(commandID: String, itemID: String, expectedRevision: Int) async throws -> ItemLifecycleControlReceipt
+    func cancel(commandID: String, itemID: String, expectedRevision: Int) async throws -> ItemLifecycleControlReceipt
+    func notNow(commandID: String, itemID: String, expectedRevision: Int) async throws -> ItemLifecycleControlReceipt
+    func stopSuggesting(commandID: String, itemID: String, expectedRevision: Int) async throws
+        -> ItemLifecycleControlReceipt
+}
+
+extension ItemLifecycleControlService: ItemControlsLifecycleActing {}
+
+/// The lifecycle and suggestion actions the controls offer.
+enum ItemLifecycleAction: Equatable, Hashable {
+    case complete, cancel, notNow, stopSuggesting
+}
+
 /// What the controls know about the item: the stored values they edit and the revision every correction names.
 struct ItemControlsSnapshot: Equatable {
     let revision: Int
@@ -24,6 +41,10 @@ struct ItemControlsSnapshot: Equatable {
     let sessionTopic: String?
     let scope: String
     let isDeleted: Bool
+    /// The stored lifecycle: `active`, `completed`, `cancelled` or `deleted`.
+    var lifecycleState: String = "active"
+    /// Whether the item's history records Stop suggesting. That state is permanent, so a later Not now changes nothing.
+    var suggestionsStopped: Bool = false
 }
 
 /// Which correction a message or pending state is about.
@@ -44,6 +65,13 @@ enum ItemControlsOutcome: Equatable {
     case failed(ItemControlsField)
     /// The stored values could not be read, so nothing is offered to edit.
     case loadFailed
+    /// A lifecycle or suggestion action was stored. A repeat of an earlier identical action reads the same.
+    case actionDone(ItemLifecycleAction)
+    /// The item changed since the user looked. Nothing was written; the newer values are shown.
+    case actionConflict(ItemLifecycleAction, currentRevision: Int)
+    /// The item was already completed or cancelled, so nothing was written.
+    case actionItemEnded(lifecycle: String)
+    case actionFailed(ItemLifecycleAction)
 }
 
 /// Why the stored values could not be read again after a correction was answered. The snapshot still names the
@@ -87,9 +115,11 @@ final class ItemControlsModel: ObservableObject {
     let itemID: String
     private let reader: SourceDetailReading
     private let corrector: ItemControlsCorrecting
+    private let lifecycle: ItemControlsLifecycleActing?
     private let makeCommandID: () -> String
     private let onCorrected: @MainActor () -> Void
     private var heldCommand: (key: String, commandID: String)?
+    private var heldActionCommand: (action: ItemLifecycleAction, commandID: String)?
     private var loadGeneration = 0
     /// The drafts a failed post-correction read would have replaced; `reload()` replaces them once it succeeds.
     private var pendingRefreshResets: Set<ItemControlsField> = []
@@ -98,17 +128,28 @@ final class ItemControlsModel: ObservableObject {
 
     init(
         itemID: String, reader: SourceDetailReading, corrector: ItemControlsCorrecting,
+        lifecycle: ItemControlsLifecycleActing? = nil,
         makeCommandID: @escaping () -> String = { UUID().uuidString },
         onCorrected: @escaping @MainActor () -> Void = {}
     ) {
         self.itemID = itemID
         self.reader = reader
         self.corrector = corrector
+        self.lifecycle = lifecycle
         self.makeCommandID = makeCommandID
         self.onCorrected = onCorrected
     }
 
     var canEdit: Bool { snapshot != nil && snapshot?.isDeleted == false && !isWorking && refreshFailure == nil }
+
+    /// Whether the completion and suggestion actions are offered: the item is still open and nothing is in flight.
+    var canAct: Bool {
+        guard lifecycle != nil, canEdit, let snapshot else { return false }
+        return snapshot.lifecycleState == "active"
+    }
+
+    /// Whether Not now and Stop suggesting are offered: the item is open and suggestions are not already stopped.
+    var canQuietSuggestions: Bool { canAct && snapshot?.suggestionsStopped == false }
 
     /// Whether `reload()` is worth offering: the values could not be read again, but the item may still be readable.
     var canReload: Bool { !isWorking && (refreshFailure == .locked || refreshFailure == .unreadable) }
@@ -149,7 +190,8 @@ final class ItemControlsModel: ObservableObject {
                 revision: detail.revision, text: detail.text,
                 itemType: detail.itemType.flatMap(ItemCorrectionItemType.init(rawValue:)),
                 sessionTopic: detail.sessionTopic, scope: detail.scope,
-                isDeleted: detail.lifecycleState == "deleted")
+                isDeleted: detail.lifecycleState == "deleted", lifecycleState: detail.lifecycleState,
+                suggestionsStopped: detail.suggestionsStopped)
             let resets = fields.filter { field in
                 guard let sentDraft, sentDraft.field == field else { return true }
                 return draftValue(field) == sentDraft.value
@@ -283,10 +325,81 @@ final class ItemControlsModel: ObservableObject {
         isWorking = false
     }
 
+    // MARK: lifecycle and suggestion actions
+
+    @MainActor func complete() async { await perform(.complete) }
+    @MainActor func cancel() async { await perform(.cancel) }
+    @MainActor func notNow() async { await perform(.notNow) }
+    @MainActor func stopSuggesting() async { await perform(.stopSuggesting) }
+
+    /// Sends one action against the revision the user saw. Drafts are never touched. The command ID is kept across
+    /// retries of the same action, so a repeat after an unknown outcome stores once.
+    @MainActor private func perform(_ action: ItemLifecycleAction) async {
+        guard canAct, let lifecycle, let snapshot else { return }
+        if action == .notNow || action == .stopSuggesting, snapshot.suggestionsStopped { return }
+        isWorking = true
+        outcome = nil
+        let commandID: String
+        if let held = heldActionCommand, held.action == action {
+            commandID = held.commandID
+        } else {
+            commandID = makeCommandID()
+            heldActionCommand = (action, commandID)
+        }
+        let revision = snapshot.revision
+        do {
+            let receipt: ItemLifecycleControlReceipt
+            switch action {
+            case .complete: receipt = try await lifecycle.complete(commandID: commandID, itemID: itemID, expectedRevision: revision)
+            case .cancel: receipt = try await lifecycle.cancel(commandID: commandID, itemID: itemID, expectedRevision: revision)
+            case .notNow: receipt = try await lifecycle.notNow(commandID: commandID, itemID: itemID, expectedRevision: revision)
+            case .stopSuggesting:
+                receipt = try await lifecycle.stopSuggesting(commandID: commandID, itemID: itemID, expectedRevision: revision)
+            }
+            _ = receipt
+            heldActionCommand = nil
+            outcome = .actionDone(action)
+        } catch let error as ItemLifecycleControlError {
+            switch error {
+            case .staleRevision(let current):
+                heldActionCommand = nil
+                outcome = .actionConflict(action, currentRevision: current)
+            case .itemEnded(let ended):
+                heldActionCommand = nil
+                outcome = .actionItemEnded(lifecycle: ended)
+            case .notAuthenticated:
+                outcome = .locked
+                isWorking = false
+                return
+            case .itemDeleted, .itemNotFound:
+                heldActionCommand = nil
+                outcome = .itemGone
+            case .invalidRequest, .commandConflict:
+                heldActionCommand = nil
+                outcome = .actionFailed(action)
+                isWorking = false
+                return
+            case .core, .unreadable:
+                outcome = .actionFailed(action)
+                isWorking = false
+                return
+            }
+        } catch {
+            outcome = .actionFailed(action)
+            isWorking = false
+            return
+        }
+        // Read what is stored now, keeping every unsaved draft, and refresh the detail card above.
+        await load(resetting: [], afterSubmit: true)
+        onCorrected()
+        isWorking = false
+    }
+
     static func assembled(
         itemID: String, root: ServiceCompositionRoot, onCorrected: @escaping @MainActor () -> Void
     ) -> ItemControlsModel {
         ItemControlsModel(
-            itemID: itemID, reader: root.itemDetails, corrector: root.itemCorrections, onCorrected: onCorrected)
+            itemID: itemID, reader: root.itemDetails, corrector: root.itemCorrections,
+            lifecycle: root.itemLifecycleControls, onCorrected: onCorrected)
     }
 }

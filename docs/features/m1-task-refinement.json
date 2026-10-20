@@ -1230,8 +1230,9 @@
         2
       ],
       "depends_on": [
-        "U06a",
-        "A07"
+        "A07",
+        "F30",
+        "U06a"
       ],
       "source_pointers": [
         "docs/architecture/m1-contracts.md:139",
@@ -3388,7 +3389,8 @@
         "ios/Tests/AppAssembly/AppServicesTests.swift",
         "ios/Tests/TimeChangeCoordinator/",
         "ios/Services/TimeChangeCoordinator/",
-        "ios/AppAssembly/AppServices.swift"
+        "ios/AppAssembly/AppServices.swift",
+        "ios/Services/Assembly/LifecycleCoordinator.swift"
       ],
       "intent": "Find why a real time-zone change intermittently produces no lifecycle pass in AppServicesTests and fix the cause, without raising timeouts.",
       "acceptance": [
@@ -3449,6 +3451,32 @@
       "source_pointers": [
         "core/src/interpretation/apply/mod.rs:2350",
         "core/src/interpretation/apply/mod.rs:1439"
+      ]
+    },
+    {
+      "key": "F30",
+      "parent": null,
+      "title": "Report every job a profile revocation retires, durably",
+      "file_scope": [
+        "core/src/jobs/configuration/",
+        "core/tests/job_configuration/",
+        "core/src/ffi/job_configuration.rs",
+        "core/src/ffi/job_configuration/tests.rs",
+        "ios/OhAndCoreBridge/CoreHandle+JobConfiguration.swift",
+        "ios/Services/JobConfiguration/",
+        "ios/Services/Authentication/PrivateReadGate.swift",
+        "ios/Tests/JobConfiguration/"
+      ],
+      "intent": "Add a durable, gated read of the jobs a profile revocation retired so the revocation screen shows exactly what was retired and can requeue it after relaunch.",
+      "acceptance": [
+        "See the F30 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "core/src/interpretation/enqueue/mod.rs:51",
+        "core/src/ffi/job_configuration.rs:213",
+        "core/src/jobs/configuration/mod.rs:13"
       ]
     }
   ],
@@ -3883,6 +3911,7 @@
     "U06b": [
       "A07",
       "DS01",
+      "F30",
       "U06a"
     ],
     "U11": [
@@ -4203,7 +4232,8 @@
     "F28": [],
     "F29": [
       "F28"
-    ]
+    ],
+    "F30": []
   },
   "retained_dependency_overrides": {
     "V06": [

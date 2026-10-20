@@ -12,7 +12,7 @@
 //! The outcome event is the item as `load_item_state` resolves it, read in one transaction:
 //! `{"operation_id", "item_id", "capture_id", "revision", "item_type", "scope", "session_topic",
 //! "lifecycle_state", "captured_at", "text", "text_basis", "original_text", "corrected_text",
-//! "audio_reference", "transcript", "history", "history_truncated"}`.
+//! "audio_reference", "transcript", "history", "history_truncated", "suggestions_stopped"}`.
 //!
 //! * `text` is the current text to show (`null` for an audio capture with no transcript yet) and
 //!   `text_basis` says where it comes from: `original` (typed at capture), `transcribed`
@@ -33,6 +33,8 @@
 //!   to, `correction` is `{"kind", "old_value", "new_value"}` for a correction event, and
 //!   `suggestion_control` is `not_now` or `stop_suggesting` for that event type; both are `null`
 //!   otherwise.
+//! * `suggestions_stopped` is the authoritative durable stop-suggesting (`pull_only`) state, so it stays
+//!   true however many later events push the control event out of `history`.
 //!
 //! An unknown item, a deleted item and an item outside `read_scopes` all fail as the same fixed
 //! `not_found`, so a caller cannot tell them apart. Failures are normalized and never echo
@@ -180,6 +182,16 @@ fn read_item_detail(database: &mut Database, request: &Validated) -> Result<Valu
         .map(event_json)
         .collect();
 
+    let suggestions_stopped = transaction
+        .query_row(
+            "SELECT pull_only FROM suggestion_eligibility WHERE item_id = ?",
+            [&request.item_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(sqlite_failure)?
+        == Some(1);
+
     Ok(json!({
         "item_id": state.item_id,
         "capture_id": state.capture_id,
@@ -197,6 +209,7 @@ fn read_item_detail(database: &mut Database, request: &Validated) -> Result<Valu
         "transcript": transcript,
         "history": history,
         "history_truncated": history_truncated,
+        "suggestions_stopped": suggestions_stopped,
     }))
 }
 
