@@ -182,7 +182,7 @@ fn no_network_proof_runs_the_whole_harness() {
             assert!(record.run.capture_text_durable);
         }
         // The oracle-following server produces matches the scorer recognizes.
-        assert!(own.iter().filter(|r| r.semantic.matches_oracle()).count() >= 10);
+        assert!(own.iter().filter(|r| r.matches_oracle()).count() >= 10);
     }
 
     // Switching: backend A's captures, results and attribution survive backend B.
