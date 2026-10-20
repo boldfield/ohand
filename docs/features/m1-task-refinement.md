@@ -3247,3 +3247,30 @@ Acceptance:
 3. Placeholder cards and the locked card open nothing. A card does not navigate after a relock has cleared the list.
 4. The UI design's Home section already says a card opens its item (recorded by the coordinator); the task does not edit the design doc.
 5. Hosted view tests: tapping a card calls the closure with that card's item identifier; placeholder and locked states expose no tappable card. Exact-head macOS run linked.
+
+### F33
+
+Refresh home and search after an item changes, so a deleted note disappears from both
+
+Found on the maintainer's phone (2026-10-20). They opened a note from Search and deleted it, and the detail confirmed "Deleted. Nothing of this item remains on this device." Back on the search screen, the same three results were still listed, including the deleted note. On the home screen the deleted note was still listed until something else reloaded the list. Core is correct: the deletion transaction removes the item's readable content and its search-index entry (`core/src/lifecycle/delete_intent/mod.rs`). The screens are stale:
+
+- `RetrievalSearchModel` keeps its rows when the person returns from a result's detail (`screenDidDisappear` / `revalidate`, `app/retrieval/RetrievalSearchModel.swift`). That is deliberate ("coming back finds it"), but nothing re-runs the query when an item changed in the meantime.
+- `HomeRecentsModel` (`app/home/HomeRecentsModel.swift`) reloads only on an access change, a save, an interpretation finishing, "Try again" or paging. A deletion, correction, completion, cancellation or reminder edit made from detail never reaches it.
+
+No signal in the app says that an item changed. `ItemDeletionService.setIntentObserver` exists, but only playback uses it.
+
+The same gap leaves home and search showing old text after a text correction, and an item still active after it was completed or cancelled. This task fixes the whole class, not only deletion.
+
+The detail screen after a deletion also shows two messages: the generic "Not here — This item is not available. It may have been deleted." and the deletion result "Deleted. Nothing of this item remains on this device." Once the person has deleted the item, the screen shows the deletion result only.
+
+Owned paths: a new `ios/Services/Items/Changes/` (the signal), `ios/Services/Assembly/CompositionRoot.swift` (construct it, expose it read-only and connect publishers), and publishing calls only in `ios/Services/Deletion/ItemDeletion/ItemDeletionService.swift`, `ios/Services/Items/Corrections/ItemCorrectionService.swift`, `ios/Services/Items/LifecycleControls/ItemLifecycleControlService.swift`, `ios/Services/Reminders/Controls/ReminderControlService.swift` and `ios/Services/Reset/ResetService.swift`; `app/home/`, `app/retrieval/RetrievalSearchModel.swift`, `app/source-detail/SourceDetailView.swift`; tests under `ios/Tests/HomeRecents/`, `ios/Tests/Retrieval/`, `ios/Tests/ItemChanges/` (new) and the existing tests of those services.
+
+Dependencies: F32, which also edits `app/home/`.
+
+Acceptance:
+
+1. One in-process signal that an item changed. It carries only the item identifier, or "all items" after a completed reset: no text, type or other stored content. It is published after the core reports the outcome as committed, never on a failure or a stale-revision refusal. Every successful item deletion, correction, lifecycle control (complete, cancel, not now, stop suggesting), reminder correction or cancellation, and completed reset publishes it, including changes started from a notification action. Subscribers get it on the main thread.
+2. Home: a deleted item leaves the list as soon as its deletion is recorded, and a changed item is reloaded, so its text, type and state are current when the person returns. A change that arrives while home is locked loads nothing, and the list stays empty until the next unlock, as now. "All items" clears the list and reloads the first page.
+3. Search: when the person returns from a result's detail and an item changed in the meantime, the same query and filters are re-run, so a deleted item is gone and a changed item shows its current text. When nothing changed, the kept results come back unchanged, without a new query, as now. A deleted item is never shown as a result, even while the re-run is in flight. The regular-width item pane behaves the same way.
+4. Detail: after the person deletes the item, the screen shows the deletion result and the back button only, not the "Not here" message as well. Opening an item that was deleted earlier still shows "Not here".
+5. Tests, real core where the read path matters: delete from detail, then home and search no longer list the item; correct text from detail, then home and search show the new text; a stale-revision refusal publishes nothing; a change while locked loads nothing; the signal never carries content. Exact-head macOS run linked.

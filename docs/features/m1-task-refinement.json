@@ -3521,6 +3521,39 @@
         "ios/AppAssembly/AppRootView.swift:26",
         "ios/AppAssembly/ManagementNavigationModel.swift:92"
       ]
+    },
+    {
+      "key": "F33",
+      "parent": null,
+      "title": "Refresh home and search after an item changes, so a deleted note disappears from both",
+      "file_scope": [
+        "ios/Services/Items/Changes/",
+        "ios/Services/Assembly/CompositionRoot.swift",
+        "ios/Services/Deletion/ItemDeletion/ItemDeletionService.swift",
+        "ios/Services/Items/Corrections/ItemCorrectionService.swift",
+        "ios/Services/Items/LifecycleControls/ItemLifecycleControlService.swift",
+        "ios/Services/Reminders/Controls/ReminderControlService.swift",
+        "ios/Services/Reset/ResetService.swift",
+        "app/home/",
+        "app/retrieval/RetrievalSearchModel.swift",
+        "app/source-detail/SourceDetailView.swift",
+        "ios/Tests/HomeRecents/",
+        "ios/Tests/Retrieval/",
+        "ios/Tests/ItemChanges/"
+      ],
+      "intent": "Publish a content-free item-changed signal after committed item mutations and refresh home and search from it.",
+      "acceptance": [
+        "See the F33 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "F32"
+      ],
+      "source_pointers": [
+        "app/retrieval/RetrievalSearchModel.swift:106",
+        "app/home/HomeRecentsModel.swift:131",
+        "core/src/lifecycle/delete_intent/mod.rs:339"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -4278,7 +4311,10 @@
     ],
     "F30": [],
     "F31": [],
-    "F32": []
+    "F32": [],
+    "F33": [
+      "F32"
+    ]
   },
   "retained_dependency_overrides": {
     "V06": [
