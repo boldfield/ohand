@@ -61,6 +61,7 @@ struct SourceDetailView: View {
                         detailCard(content)
                         if let controls = model.itemControls { ItemControlsView(model: controls, renderReporter: renderReporter) }
                         history(content)
+                        if let reminderEditor = model.reminderEditor { ReminderEditSection(model: reminderEditor) }
                     } else if let failure = model.failure {
                         emptyState(
                             title: Self.title(for: failure), message: Self.text(for: failure),

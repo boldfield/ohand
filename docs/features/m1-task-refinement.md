@@ -189,6 +189,8 @@ Run current `make check` and `make test` as applicable, plus focused behavior te
   - **F23 added (coordinator, 2026-10-19).** A paired benchmark of Claude Sonnet 5.5 and Haiku 5.5 on the synthetic corpus, run through the production request and mapping after XB12, found that Claude JSON-encodes string abstentions in 8 of 10 cases: `"abstention": "\"Negated\""` instead of `"Negated"`. The mapping rejects them, so "don't remind me" and noise captures fail as invalid output even though the model chose correctly. The cause is the wire schema's `anyOf` of a string enum and an `{"Other": …}` object (`core/src/interpretation/instructions/text.rs:102`). The maintainer chose to replace it with one object shape rather than unwrap the extra encoding. See F23.
   - **F24, F25 and F26 added (coordinator, 2026-10-19).** The first live E02a run (evidence `fe58be5`) and a paired Anthropic benchmark found three more defects. The Anthropic adapter's 1024-token output cap truncates long captures (F24). The live harness's oracle counts a capture whose interpretation failed as a match (F25). The evaluation scorer marks a correct, stored reminder as a missed intent (F26). F25 and F26 edit test directories that F23 also edits, so both depend on F23.
   - **F27 added (coordinator, 2026-10-19).** `AppServicesTests.testAStartedAppReconcilesOnceWhenASystemTimeZoneCallbackReportsARealChange` failed on two PRs that do not touch the code under test: U06b (run 39281367194) and F24 (run 39312148289, attempt 1, a Rust-only change). Both failed at `AppServicesTests.swift:139`: no lifecycle pass finished within 10 seconds. A reviewer rejected F24 on that red run. See F27.
+  - **F28 added; F26 withdrawn (coordinator, 2026-10-19).** F26's worker confirmed the scorer was right. Core never schedules a reminder that has a clock time. `TimeResolver::resolve` (`core/src/time/resolver.rs:96`) parses only ISO dates and date-only phrases (today, tomorrow, weekday names). So "Friday at 3 p.m." returns `InvalidDateFormat`, `resolve_phrase` (`core/src/reminders/state/mod.rs:535`) stores `not_scheduled_yet` with "the time phrase could not be understood", and the interpreter's correct instant is discarded. The guard's cross-check (`candidate_contradiction`, `core/src/interpretation/apply/mod.rs:874`) treats the resolver error as "no opinion", so it never compares the model's instant either. The fix belongs in the deterministic resolver, not in trusting the model's instant: the resolver is what stops model output from setting a reminder time the source does not state. F28 extends the resolver, and F26's acceptance test moves into F28.
+  - **Explicit-zone reminders deferred until after the trial (maintainer, 2026-10-19).** Phrases that name a zone ("tomorrow at 9 a.m. Tokyo time") stay ambiguous after F28 and need correction by hand. Supporting them needs the resolver to return a zone, `resolve_phrase` to store it, and the guard's capture-zone check (`core/src/interpretation/apply/mod.rs:892`) to accept it. The `timezone-conflicting` fixture stays a known miss until then. Re-decompose after T08.
   - **F21 added (coordinator, 2026-10-18).** A live replay on Spark found that the self-hosted adapter's strict schema suppresses every optional proposal, reminders included, on all five Ollama models. E02's evidence run also waits for F21, so it measures the fixed request. See F21.
   - **Walkthrough allowance (standing, coordinator, 2026-10-18).** DS08's walkthrough (`ios/UITests/Walkthrough/WalkthroughUITests.swift`) names each screen's controls and titles, so any UI task that changes a screen it visits breaks it. On 2026-10-18 this blocked DS04a, DS07 and U02b. Any UI task may update the walkthrough for the screens it builds or changes:
     - their entries in the screen tables (for example `settingsScreens`);
@@ -3104,3 +3106,33 @@ Acceptance:
 4. No timeout in the test or `timeChangeWaitUntil` is raised, and no assertion is removed or weakened.
 5. Stability evidence: the test passes 50 times in a row in one exact-head run. Add a temporary repeat loop or `-test-iterations 50` to a CI step, link that run, then remove the loop and link the normal exact-head run.
 6. Exact-head macOS run linked, as with any native change.
+
+### F28
+
+Resolve clock times in reminder phrases so explicit reminders are scheduled
+
+`TimeResolver::resolve` (`core/src/time/resolver.rs:96`) has no clock-time grammar. Every reminder phrase with a time of day ("Friday at 3 p.m.", "today at 5 p.m.", "tomorrow at 9 a.m.") fails with `InvalidDateFormat`. `resolve_phrase` (`core/src/reminders/state/mod.rs:535`) then stores it as `not_scheduled_yet`, needing correction, so no timed reminder is ever scheduled, whatever the interpreter proposed. Because the resolver errs, the guard (`core/src/interpretation/apply/mod.rs:874`) also never checks the model's instant against the source. Fix it in the resolver; the model's instant stays a proposal that the resolver must agree with.
+
+Owned paths:
+- `core/src/time/` and `core/tests/time/`;
+- `tools/evaluation/tests/`;
+- existing tests elsewhere under `core/tests/` whose asserted outcome changes only because a clock-time phrase now resolves. Update such a test to the new correct outcome and list each one in the PR. Do not change what it tests.
+
+Dependencies: none.
+
+Acceptance:
+
+1. **Grammar.** The resolver accepts a day part and a clock part, in either order, with an optional `at` before the clock and an optional `on` before a weekday. Matching ignores case.
+   - The day part is anything the resolver already accepts for a date: `today`, `tomorrow`, a weekday name, an ISO date. It keeps today's rules. If the date alone is ambiguous under existing rules, for a reason other than having no time, the result stays ambiguous.
+   - The clock part is `H` or `H:MM`, 1–12, followed by a meridiem written as `a.m.`, `a.m`, `am`, `p.m.`, `p.m` or `pm`, with or without a space before it. It may also be `noon`, `midnight`, or 24-hour `HH:MM` (00:00–23:59).
+   - A bare hour with no meridiem, such as "at 3", is ambiguous. Never guess a.m. or p.m.
+   - A clock with no day part ("at 5 p.m.") resolves to today when that is later than the capture instant. Otherwise it is ambiguous: never silently tomorrow.
+2. **Zones.** The resolver works in the capture's time zone from `TimeContext`.
+   - A phrase that names a zone or offset after the clock ("EST", "Tokyo time", "UTC+9") is ambiguous for now. It must never resolve in the capture's zone as if the qualifier were absent.
+   - A local time that does not exist (spring-forward) or happens twice (fall-back) is ambiguous. Never shift it silently.
+3. **Past times.** A resolved instant before the capture instant is reported as past, through the existing past handling.
+4. **Unchanged.** Repeat detection, date-only phrases, ISO forms and every existing resolver test pass unchanged.
+5. **End-to-end.** A core test applies an interpreter proposal for "Remind me Friday at 3 p.m. to call the roofer", captured 2026-10-08T14:00:00Z in America/New_York. The stored reminder is `resolved` at 2026-10-09T15:00:00-04:00. The same proposal with a wrong instant (16:00) is rejected by the guard as contradicting the source; before this change it was accepted.
+6. **Evaluation (F26's test).** A test in `tools/evaluation/tests/` feeds the oracle's own expected proposal for `design-explicit-reminder`, `date-explicit-today`, `timezone-implicit-local` and `correction-user-edit` through the suite. Each scores no defects at both the candidate and durable stages; on current main it fails. `timezone-explicit` still stores no instant, as its oracle requires. `timezone-conflicting` (Tokyo) still stores no instant: an explicit-zone follow-up is out of scope here, and the PR names it as a known gap.
+7. Table-driven unit tests cover every grammar form above, each ambiguity rule, both DST transitions in America/New_York, and a phrase whose day part is missing.
+8. `make check` and `make test` pass. The coordinator reruns the live harness and the benchmark after landing.

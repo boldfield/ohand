@@ -130,6 +130,8 @@ final class SourceDetailModel: ObservableObject {
     let itemID: String
     /// The correction controls shown under the details; absent where no corrections are wired.
     var itemControls: ItemControlsModel?
+    /// The reminder section's model, when the host provides one.
+    var reminderEditor: ReminderEditModel?
     private let reader: SourceDetailReading
     private let opener: SourceAudioOpening
     private let readScope: () -> CompositionReadScope
@@ -385,6 +387,7 @@ final class SourceDetailModel: ObservableObject {
             itemID: itemID, reader: root.itemDetails, opener: root.playback, readScope: { root.readScope })
         model.itemControls = ItemControlsModel.assembled(
             itemID: itemID, root: root, onCorrected: { [weak model] in Task { await model?.load() } })
+        model.reminderEditor = .assembled(itemID: itemID, root: root)
         return model
     }
 }
