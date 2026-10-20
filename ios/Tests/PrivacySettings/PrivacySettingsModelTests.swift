@@ -492,60 +492,89 @@ final class PrivacySettingsModelTests: XCTestCase {
         XCTAssertFalse(message.contains("not applied"), "the change cannot say which reply it drops: \(message)")
         XCTAssertTrue(message.contains("3 jobs pending"), message)
         XCTAssertEqual(
-            model.followedWork.map(\.state), [.listed("queued"), .listed("running"), .listed("running")],
+            model.followedWork.map(\.listing), [.listed("queued"), .listed("running"), .listed("running")],
             "while the core still lists them, each job shows its listed status")
+        XCTAssertEqual(model.followedWork.map(\.profileVersion), ["hosted-v1", "hosted-v1", "hosted-v1"])
         XCTAssertEqual(controls.processingReads, ["item-1"], "a request in flight needs no item read; a queued job does")
         XCTAssertFalse(model.followedWorkIncomplete)
 
-        // The core settles them: one late reply refused, one applied (another route or purpose still allowed it), and
-        // one unreadable just now.
+        // The core settles them and they leave its listing. Their notes report refused, sorted and unreadable; none of
+        // that is the job's own result, because the listing does not say what kind of job each was.
         controls.pinned["hosted-v1"] = nil
         controls.processing["item-1"] = .failure(JobConfigurationError.unreadable)
-        controls.processing["item-2"] = .success(
-            PrivacyItemProcessing(processingState: "unprocessed", processingJobStatus: "awaiting_configuration"))
-        controls.processing["item-3"] = .success(PrivacyItemProcessing(processingState: "processed", processingJobStatus: nil))
+        let refused = PrivacyItemProcessing(processingState: "unprocessed", processingJobStatus: "awaiting_configuration")
+        controls.processing["item-2"] = .success(refused)
+        let sorted = PrivacyItemProcessing(processingState: "processed", processingJobStatus: nil)
+        controls.processing["item-3"] = .success(sorted)
         await model.refresh()
         XCTAssertEqual(model.followedWork.map(\.jobID), ["job-1", "job-2", "job-3"])
-        XCTAssertEqual(model.followedWork[0].state, .unreadable)
-        XCTAssertEqual(
-            model.followedWork[1].state,
-            .reported(PrivacyItemProcessing(processingState: "unprocessed", processingJobStatus: "awaiting_configuration")))
-        XCTAssertEqual(
-            model.followedWork[2].state, .reported(PrivacyItemProcessing(processingState: "processed", processingJobStatus: nil)))
-        XCTAssertTrue(PrivacySettingsText.followedJob(model.followedWork[1]).contains("refused"))
-        XCTAssertTrue(PrivacySettingsText.followedJob(model.followedWork[1]).contains("Nothing was applied"))
-        XCTAssertTrue(PrivacySettingsText.followedJob(model.followedWork[2]).contains("a reply was applied"))
-        XCTAssertTrue(PrivacySettingsText.followedJob(model.followedWork[0]).contains("could not be read"))
+        XCTAssertEqual(model.followedWork.map(\.listing), [.notListed, .notListed, .notListed])
+        XCTAssertEqual(model.followedWork.map(\.note), [.unreadable, .reported(refused), .reported(sorted)])
+        XCTAssertEqual(model.followedWork.map(\.requestSent), [false, true, true])
+        let shown = model.followedWork.map(PrivacySettingsText.followedJob)
+        XCTAssertTrue(shown[0].contains("no longer queued or running. What this job itself returned is not shown"), shown[0])
+        XCTAssertTrue(shown[0].contains("text sorting (which may be other work on it): could not be read"), shown[0])
+        XCTAssertTrue(shown[1].contains("its request had been sent"), shown[1])
+        XCTAssertTrue(shown[1].contains("text sorting (which may be other work on it): refused"), shown[1])
+        XCTAssertTrue(shown[2].hasSuffix("text sorting (which may be other work on it): sorted."), shown[2])
+        for text in shown {
+            XCTAssertFalse(text.contains("reply was applied"), text)
+            XCTAssertFalse(text.contains("Nothing was applied"), text)
+        }
 
-        // Reading again answers the unreadable one.
-        controls.processing["item-1"] = .success(
-            PrivacyItemProcessing(processingState: "unprocessed", processingJobStatus: "awaiting_configuration"))
+        // Reading again answers the unreadable note.
+        controls.processing["item-1"] = .success(refused)
         await model.refresh()
-        XCTAssertEqual(
-            model.followedWork[0].state,
-            .reported(PrivacyItemProcessing(processingState: "unprocessed", processingJobStatus: "awaiting_configuration")))
+        XCTAssertEqual(model.followedWork[0].note, .reported(refused))
     }
 
-    func testAJobTheCoreStillListsAsQueuedButRefusedShowsTheRefusal() async throws {
+    func testAQueuedJobKeepsItsListedStatusAndItsNotesRefusalIsShownAsTheNotes() async throws {
         let (model, controls) = makeModel(routes: [grantedRoute()])
         controls.pinned["hosted-v1"] = pinnedJobs(["job-1"])
         await model.refresh()
         model.proposeRevoke(routeID: "route-personal", capability: "text_interpretation")
         await model.confirmChange(try XCTUnwrap(model.change))
-        XCTAssertEqual(model.followedWork.map(\.state), [.listed("queued")], "nothing stops it yet")
+        XCTAssertEqual(model.followedWork.map(\.listing), [.listed("queued")])
 
-        // The core refused it at dispatch and keeps it queued, held for configuration.
+        // The note's sorting is held for configuration while the core still lists the job as queued. The listing
+        // does not say the two are the same work, so the job keeps its listed status and the note's state follows.
         let refused = PrivacyItemProcessing(processingState: "unprocessed", processingJobStatus: "awaiting_configuration")
         controls.processing["item-job-1"] = .success(refused)
         await model.refresh()
-        XCTAssertEqual(model.queuedWork.flatMap(\.jobs.jobs).map(\.status), ["queued"])
-        XCTAssertEqual(model.followedWork.map(\.state), [.reported(refused)])
-        XCTAssertTrue(PrivacySettingsText.followedJob(model.followedWork[0]).contains("refused"))
+        XCTAssertEqual(model.followedWork.map(\.listing), [.listed("queued")])
+        XCTAssertEqual(model.followedWork.map(\.note), [.reported(refused)])
+        let shown = PrivacySettingsText.followedJob(model.followedWork[0])
+        XCTAssertTrue(shown.hasPrefix("Job job-1 · listed queued."), shown)
+        XCTAssertTrue(shown.contains("text sorting (which may be other work on it): refused"), shown)
 
-        // A listed job whose note cannot be read keeps its listed status rather than appearing unreadable.
         controls.processing["item-job-1"] = .failure(JobConfigurationError.unreadable)
         await model.refresh()
-        XCTAssertEqual(model.followedWork.map(\.state), [.listed("queued")])
+        XCTAssertEqual(model.followedWork.map(\.listing), [.listed("queued")])
+        XCTAssertEqual(model.followedWork.map(\.note), [.unreadable])
+    }
+
+    func testAFollowedJobWhoseListingCannotBeReadIsUnknownNotSettled() async throws {
+        let (model, controls) = makeModel(routes: [grantedRoute()])
+        controls.pinned["hosted-v1"] = JobConfigurationPinnedJobs(
+            jobs: [JobConfigurationPinnedJob(jobID: "job-1", itemID: "item-1", status: "running")], total: 1, truncated: false)
+        await model.refresh()
+        model.proposeRevoke(routeID: "route-personal", capability: "text_interpretation")
+        await model.confirmChange(try XCTUnwrap(model.change))
+
+        controls.pinnedFailure = JobConfigurationError.unreadable
+        await model.refresh()
+        XCTAssertEqual(model.followedWork.map(\.listing), [.unknown])
+        XCTAssertEqual(model.followedWork.map(\.requestSent), [true])
+        let shown = PrivacySettingsText.followedJob(model.followedWork[0])
+        XCTAssertTrue(shown.contains("request already sent; its current listing could not be read"), shown)
+
+        // A truncated listing that does not show the job does not prove it ended either.
+        controls.pinnedFailure = nil
+        controls.pinned["hosted-v1"] = JobConfigurationPinnedJobs(
+            jobs: [JobConfigurationPinnedJob(jobID: "job-other", itemID: "item-9", status: "queued")], total: 101,
+            truncated: true)
+        await model.refresh()
+        XCTAssertEqual(model.followedWork.map(\.listing), [.unknown])
     }
 
     func testARequestSeenSentNeverReadsAsNotSentWhenTheCoreRequeuesItAndItsNoteIsUnreadable() async throws {
@@ -555,7 +584,7 @@ final class PrivacySettingsModelTests: XCTestCase {
         await model.refresh()
         model.proposeRevoke(routeID: "route-personal", capability: "text_interpretation")
         await model.confirmChange(try XCTUnwrap(model.change))
-        XCTAssertEqual(model.followedWork.map(\.state), [.listed("running")])
+        XCTAssertEqual(model.followedWork.map(\.listing), [.listed("running")])
         XCTAssertEqual(model.followedWork.map(\.requestSent), [true])
 
         // The core refuses the late reply and backs the job off to queued; its note cannot be read just now.
@@ -564,16 +593,17 @@ final class PrivacySettingsModelTests: XCTestCase {
         controls.processing["item-1"] = .failure(JobConfigurationError.unreadable)
         await model.refresh()
         XCTAssertEqual(model.queuedWork.flatMap(\.jobs.jobs).map(\.status), ["queued"])
-        XCTAssertEqual(model.followedWork.map(\.state), [.unreadable], "a sent request is not shown as a listed queued job")
+        XCTAssertEqual(model.followedWork.map(\.listing), [.listed("queued")])
+        XCTAssertEqual(model.followedWork.map(\.note), [.unreadable])
+        XCTAssertEqual(model.followedWork.map(\.requestSent), [true])
         var shown = PrivacySettingsText.followedJob(model.followedWork[0])
         XCTAssertFalse(shown.contains("not sent"), shown)
-        XCTAssertTrue(shown.contains("request already sent"), shown)
+        XCTAssertTrue(shown.contains("request already sent; listed queued again"), shown)
         XCTAssertTrue(shown.contains("could not be read"), shown)
 
-        // Readable again with nothing stopping it: still listed queued, and still known to have been sent.
+        // Readable again: still listed queued, and still known to have been sent.
         controls.processing["item-1"] = .success(PrivacyItemProcessing(processingState: "unprocessed", processingJobStatus: nil))
         await model.refresh()
-        XCTAssertEqual(model.followedWork.map(\.state), [.listed("queued")])
         XCTAssertEqual(model.followedWork.map(\.requestSent), [true])
         shown = PrivacySettingsText.followedJob(model.followedWork[0])
         XCTAssertFalse(shown.contains("not sent"), shown)

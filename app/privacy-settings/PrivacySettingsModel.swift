@@ -92,13 +92,23 @@ struct PrivacyItemProcessing: Equatable {
 
 /// A job that was queued or running when the user last took a route permission away. It is followed by reading the core
 /// again, so the screen shows what actually became of it rather than what the change was expected to do.
+///
+/// The core's pinned-job listing carries no job type, and its item status describes only a note's text sorting. So the
+/// job's own state comes only from the listing, and the note's sorting is kept apart as a fact about the note: a job
+/// that is not interpretation (a shadow review, say) is never described by its note's sorting.
 struct PrivacyFollowedJob: Equatable {
-    enum State: Equatable {
-        /// The core lists it as `running` (a request already sent and not yet answered), or as `queued` with nothing
-        /// stopping it.
+    enum Listing: Equatable {
+        /// The core lists it as `running` (a request already sent and not yet answered) or `queued`.
         case listed(String)
-        /// Its note's processing as the core reports it now: settled, or stopped (for example refused and held for
-        /// configuration while the core still lists the job as `queued`).
+        /// The core's full listing for its profile version no longer has it as queued or running: it ended or was
+        /// retired. The listing does not say how.
+        case notListed
+        /// Its profile version's listing could not be read in full just now; reading again may answer.
+        case unknown
+    }
+
+    enum Note: Equatable {
+        /// The note's text sorting as the core reports it now. It may describe other work on the same note.
         case reported(PrivacyItemProcessing)
         /// Not readable just now; reading again may answer.
         case unreadable
@@ -106,7 +116,10 @@ struct PrivacyFollowedJob: Equatable {
 
     let jobID: String
     let itemID: String
-    let state: State
+    let profileVersion: String
+    let listing: Listing
+    /// The note's text sorting, read for every job not listed as running.
+    let note: Note?
     /// Whether the screen has seen the core list this job as `running`. Once its request has left the device, a later
     /// `queued` listing (the core backing off a refused reply) never makes it a request that was not sent.
     let requestSent: Bool
@@ -299,7 +312,7 @@ final class PrivacySettingsModel: ObservableObject {
             let freshQueued = try await readQueuedWork(freshListing)
             guard thisGeneration == generation else { return }
             guard readScope() == .authenticated else { lock(); return }
-            let freshFollowed = try await readFollowedWork(listed: freshQueued.versions)
+            let freshFollowed = try await readFollowedWork()
             guard thisGeneration == generation else { return }
             guard readScope() == .authenticated else { lock(); return }
             routes = freshRoutes
@@ -316,37 +329,45 @@ final class PrivacySettingsModel: ObservableObject {
         }
     }
 
-    /// Reads again what became of each followed job. A running job is a request in flight, shown as listed. Any other
-    /// job is read by its note's processing, because the core keeps a refused job listed as `queued` while it waits for
-    /// configuration; the listed status is shown only when the core reports nothing stopping it. A job beyond the
-    /// listing limit is read by its note too. When the note cannot be read, a listed status stands in only for a job
-    /// never seen running; a job whose request was sent is shown as unreadable rather than as a queued job not sent.
-    private func readFollowedWork(listed versions: [PrivacyQueuedVersion]) async throws -> [PrivacyFollowedJob] {
-        let listedStatus = Dictionary(
-            versions.flatMap(\.jobs.jobs).map { ($0.jobID, $0.status) }, uniquingKeysWith: { first, _ in first })
-        var followed: [PrivacyFollowedJob] = []
-        for job in followedWork {
-            let status = listedStatus[job.jobID]
-            let requestSent = job.requestSent || status == "running"
-            if status == "running" {
-                followed.append(
-                    PrivacyFollowedJob(jobID: job.jobID, itemID: job.itemID, state: .listed("running"), requestSent: true))
-                continue
-            }
-            let state: PrivacyFollowedJob.State
+    /// Reads again what became of each followed job: its own state from the core's full listing for its profile
+    /// version, and, unless a request is in flight, its note's text sorting as a separate fact about the note.
+    private func readFollowedWork() async throws -> [PrivacyFollowedJob] {
+        // A version whose listing could not be read is left out, so its jobs read as unknown.
+        var listings: [String: JobConfigurationPinnedJobs] = [:]
+        for profileVersion in Set(followedWork.map(\.profileVersion)) {
             do {
-                let processing = try await controls.itemProcessing(itemID: job.itemID)
-                if let status, processing.processingJobStatus == nil {
-                    state = .listed(status)
-                } else {
-                    state = .reported(processing)
-                }
+                listings[profileVersion] = try await controls.jobsPinned(toProfile: profileVersion, limit: nil)
             } catch {
                 if isNotAuthenticated(error) { throw ProviderConfigurationError.notAuthenticated }
-                state = requestSent ? .unreadable : status.map { .listed($0) } ?? .unreadable
+            }
+        }
+        var followed: [PrivacyFollowedJob] = []
+        for job in followedWork {
+            let listing: PrivacyFollowedJob.Listing
+            if let jobs = listings[job.profileVersion] {
+                if let listed = jobs.jobs.first(where: { $0.jobID == job.jobID }) {
+                    listing = .listed(listed.status)
+                } else {
+                    listing = jobs.truncated ? .unknown : .notListed
+                }
+            } else {
+                listing = .unknown
+            }
+            let requestSent = job.requestSent || listing == .listed("running")
+            var note: PrivacyFollowedJob.Note?
+            if listing != .listed("running") {
+                do {
+                    let processing = try await controls.itemProcessing(itemID: job.itemID)
+                    note = .reported(processing)
+                } catch {
+                    if isNotAuthenticated(error) { throw ProviderConfigurationError.notAuthenticated }
+                    note = .unreadable
+                }
             }
             followed.append(
-                PrivacyFollowedJob(jobID: job.jobID, itemID: job.itemID, state: state, requestSent: requestSent))
+                PrivacyFollowedJob(
+                    jobID: job.jobID, itemID: job.itemID, profileVersion: job.profileVersion, listing: listing, note: note,
+                    requestSent: requestSent))
         }
         return followed
     }
@@ -457,10 +478,12 @@ final class PrivacySettingsModel: ObservableObject {
                 let outcome = try await controls.revoke(routeID: routeID, capability: capability)
                 routeRevoke = (outcome, routeID, routeLabel, capability)
                 if outcome == .revoked {
-                    followedWork = pending.versions.flatMap(\.jobs.jobs).map {
-                        PrivacyFollowedJob(
-                            jobID: $0.jobID, itemID: $0.itemID, state: .listed($0.status),
-                            requestSent: $0.status == "running")
+                    followedWork = pending.versions.flatMap { version in
+                        version.jobs.jobs.map {
+                            PrivacyFollowedJob(
+                                jobID: $0.jobID, itemID: $0.itemID, profileVersion: version.version.profileVersion,
+                                listing: .listed($0.status), note: nil, requestSent: $0.status == "running")
+                        }
                     }
                     followedWorkIncomplete = pending.unreadable || pending.versions.contains { $0.jobs.truncated }
                 }

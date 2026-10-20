@@ -145,8 +145,8 @@ enum PrivacySettingsText {
             let stopped = "Stopped \(capabilityName(capability).lowercased()) on \(routeLabel)."
             if stillAllowed == true { return stopped + " The stored policy still lists it as allowed; check the route above." }
             let guarantee = stopped + " Work not yet sent is checked against the permissions now in force before it "
-                + "leaves the device. A request already sent cannot be recalled; its reply is checked the same way "
-                + "before anything is applied."
+                + "leaves the device. A request already sent cannot be recalled; a reply to it changes a note only if "
+                + "the permissions in force when it arrives allow it."
             guard followed > 0 else { return guarantee }
             return guarantee + " What became of the \(followed) job\(followed == 1 ? "" : "s") pending at this change is "
                 + "shown under \"\(followedWorkTitle)\"."
@@ -160,46 +160,57 @@ enum PrivacySettingsText {
         "Some work pending at that change could not be listed here. The core checks it the same way."
     static let followedWorkCheckAgain = "Check again"
 
-    /// One job pending when a route permission was taken away, described from what the core reports for it now.
+    /// One job pending when a route permission was taken away. The job's own state comes from the core's listing;
+    /// the note's text sorting follows as a separate fact about the note, because it may describe other work on it.
     static func followedJob(_ job: PrivacyFollowedJob) -> String {
-        let prefix = "Job \(job.jobID) · "
-        switch job.state {
+        var text = "Job \(job.jobID) · " + followedListing(job)
+        if let note = job.note { text += " " + noteSorting(note) }
+        return text
+    }
+
+    private static func followedListing(_ job: PrivacyFollowedJob) -> String {
+        switch job.listing {
         case .listed("running"):
-            return prefix + "request already sent, waiting for its reply. The reply is applied only if the "
-                + "permissions in force when it arrives allow it."
+            return "request already sent, waiting for its reply. A reply changes the note only if the permissions in "
+                + "force when it arrives allow it."
         case .listed(let status) where job.requestSent:
-            return prefix + "request already sent; now \(status). A reply is applied, and the job is sent again, only "
+            return "request already sent; listed \(status) again. It is sent again, and a reply changes the note, only "
                 + "if the permissions in force then allow it."
         case .listed(let status):
-            return prefix + "\(status), not sent. It is sent only if the permissions in force then allow it."
-        case .reported(let processing):
-            return prefix + reportedProcessing(processing)
-        case .unreadable where job.requestSent:
-            return prefix + "request already sent; what became of it could not be read. Check again."
-        case .unreadable:
-            return prefix + "its state could not be read. Check again."
+            return "listed \(status). It is sent only if the permissions in force then allow it."
+        case .notListed where job.requestSent:
+            return "no longer queued or running; its request had been sent. What this job itself returned is not "
+                + "shown here; a reply changes the note only if the permissions in force when it arrived allowed it."
+        case .notListed:
+            return "no longer queued or running. What this job itself returned is not shown here."
+        case .unknown where job.requestSent:
+            return "request already sent; its current listing could not be read. Check again."
+        case .unknown:
+            return "its current listing could not be read. Check again."
         }
     }
 
-    private static func reportedProcessing(_ processing: PrivacyItemProcessing) -> String {
+    /// The note's text sorting, worded as the note's, never as the outcome of the followed job.
+    private static func noteSorting(_ note: PrivacyFollowedJob.Note) -> String {
+        let prefix = "The note's text sorting (which may be other work on it): "
+        guard case .reported(let processing) = note else { return prefix + "could not be read." }
         switch (processing.processingState, processing.processingJobStatus) {
-        case ("processed", _): return "a reply was applied: the note was sorted while a permission allowed it."
-        case ("abstained", _): return "answered with no change to the note."
-        case ("uninterpreted", _): return "ended without a usable result. Nothing was applied."
+        case ("processed", _): return prefix + "sorted."
+        case ("abstained", _): return prefix + "answered with no change."
+        case ("uninterpreted", _): return prefix + "ended without a usable result."
         case (_, "awaiting_configuration"):
-            return "refused: the current permissions do not allow it. Nothing was applied; the note waits on this "
-                + "device until a permission allows it."
-        case (_, "retrying_after_transient"):
-            return "waiting to retry. It is sent only if the permissions in force then allow it."
-        case ("processing", _): return "still in progress."
-        default: return "nothing applied; the note waits on this device (\(processing.processingState))."
+            return prefix + "refused under the current permissions; the note waits on this device until a permission "
+                + "allows it."
+        case (_, "retrying_after_transient"): return prefix + "waiting to retry."
+        case ("processing", _): return prefix + "in progress."
+        default: return prefix + "not sorted (\(processing.processingState))."
         }
     }
 
     static func profileRevoked(_ versionLabel: String, retired: Int, alreadySent: Int, stillPending: Int) -> String {
         var message = "Revoked \(versionLabel). \(retired) job\(retired == 1 ? "" : "s") retired and not moved to another provider."
         if alreadySent > 0 {
-            message += " \(alreadySent) had already been sent; a reply to it is not applied."
+            message += " \(alreadySent) had already been sent; a reply to it does not change the note."
         }
         if stillPending > 0 { message += " The core still lists \(stillPending) as pending; check Queued work." }
         if retired > 0 { message += " Each can be moved on purpose below." }

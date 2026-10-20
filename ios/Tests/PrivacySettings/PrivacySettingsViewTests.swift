@@ -112,9 +112,8 @@ final class PrivacySettingsViewTests: XCTestCase {
 
     // MARK: Revocation, queued work and requeue
 
-    private func grantedRoute() -> RoutePolicyRoute {
-        privacyRoute(
-            id: "route-personal", name: "Local capture", scope: "personal", grants: [("text_interpretation", ["cloud"])])
+    private func grantedRoute(capability: String = "text_interpretation") -> RoutePolicyRoute {
+        privacyRoute(id: "route-personal", name: "Local capture", scope: "personal", grants: [(capability, ["cloud"])])
     }
 
     private func reload(_ routes: [RoutePolicyRoute]) async {
@@ -171,8 +170,8 @@ final class PrivacySettingsViewTests: XCTestCase {
         let row = PrivacySettingsView.followedJobIdentifier("job-2")
         XCTAssertEqual(
             rendered[row],
-            "Job job-2 · request already sent, waiting for its reply. The reply is applied only if the permissions in "
-                + "force when it arrives allow it.")
+            "Job job-2 · request already sent, waiting for its reply. A reply changes the note only if the permissions "
+                + "in force when it arrives allow it.")
         XCTAssertEqual(rendered[PrivacySettingsView.followedWorkCheckAgainIdentifier], PrivacySettingsText.followedWorkCheckAgain)
 
         // The late reply arrives and the core refuses it; the settled job leaves the core's listing.
@@ -184,9 +183,39 @@ final class PrivacySettingsViewTests: XCTestCase {
         XCTAssertNil(rendered[PrivacySettingsView.queuedJobIdentifier("job-2")], "the core no longer lists it as pending")
         XCTAssertEqual(
             rendered[row],
-            "Job job-2 · refused: the current permissions do not allow it. Nothing was applied; the note waits on this "
-                + "device until a permission allows it.")
+            "Job job-2 · no longer queued or running; its request had been sent. What this job itself returned is not "
+                + "shown here; a reply changes the note only if the permissions in force when it arrived allowed it. "
+                + "The note's text sorting (which may be other work on it): refused under the current permissions; the "
+                + "note waits on this device until a permission allows it.")
         XCTAssertNil(rendered[PrivacySettingsView.followedWorkIncompleteIdentifier])
+    }
+
+    func testAFollowedJobThatLeavesTheListingIsNeverShownAsTheNotesSortingResult() async throws {
+        // The listing carries no job type: this job may be a review of a note that was sorted long before.
+        controls.pinned["review-v1"] = JobConfigurationPinnedJobs(
+            jobs: [JobConfigurationPinnedJob(jobID: "job-review", itemID: "item-2", status: "running")], total: 1,
+            truncated: false)
+        controls.listing = .success(
+            providerListing(
+                versions: [
+                    (profile: "hosted", version: "hosted-v1", providerProtocol: "open_ai", revoked: false, supported: true),
+                    (profile: "review", version: "review-v1", providerProtocol: "open_ai", revoked: false, supported: true),
+                ], defaultVersion: nil))
+        await reload([grantedRoute(capability: "review")])
+        model.proposeRevoke(routeID: "route-personal", capability: "review")
+        await model.confirmChange(try XCTUnwrap(model.change))
+        settle()
+
+        controls.pinned["review-v1"] = nil
+        controls.processing["item-2"] = .success(PrivacyItemProcessing(processingState: "processed", processingJobStatus: nil))
+        await model.refresh()
+        settle()
+        let row = try XCTUnwrap(rendered[PrivacySettingsView.followedJobIdentifier("job-review")])
+        XCTAssertTrue(row.hasPrefix("Job job-review · no longer queued or running; its request had been sent."), row)
+        XCTAssertTrue(row.contains("What this job itself returned is not shown here"), row)
+        XCTAssertTrue(row.hasSuffix("The note's text sorting (which may be other work on it): sorted."), row)
+        XCTAssertFalse(row.contains("reply was applied"), row)
+        XCTAssertFalse(row.contains("was sorted while"), row)
     }
 
     func testARequestShownAsSentNeverRendersAsNotSentWhenTheCoreRequeuesItAndItsNoteIsUnreadable() async throws {
@@ -206,7 +235,10 @@ final class PrivacySettingsViewTests: XCTestCase {
         await model.refresh()
         settle()
         XCTAssertEqual(
-            rendered[row], "Job job-2 · request already sent; what became of it could not be read. Check again.")
+            rendered[row],
+            "Job job-2 · request already sent; listed queued again. It is sent again, and a reply changes the note, "
+                + "only if the permissions in force then allow it. The note's text sorting (which may be other work on "
+                + "it): could not be read.")
         XCTAssertFalse(rendered[row]?.contains("not sent") ?? true)
         XCTAssertEqual(rendered[PrivacySettingsView.followedWorkCheckAgainIdentifier], PrivacySettingsText.followedWorkCheckAgain)
     }
