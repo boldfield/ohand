@@ -548,6 +548,38 @@ final class PrivacySettingsModelTests: XCTestCase {
         XCTAssertEqual(model.followedWork.map(\.state), [.listed("queued")])
     }
 
+    func testARequestSeenSentNeverReadsAsNotSentWhenTheCoreRequeuesItAndItsNoteIsUnreadable() async throws {
+        let (model, controls) = makeModel(routes: [grantedRoute()])
+        controls.pinned["hosted-v1"] = JobConfigurationPinnedJobs(
+            jobs: [JobConfigurationPinnedJob(jobID: "job-1", itemID: "item-1", status: "running")], total: 1, truncated: false)
+        await model.refresh()
+        model.proposeRevoke(routeID: "route-personal", capability: "text_interpretation")
+        await model.confirmChange(try XCTUnwrap(model.change))
+        XCTAssertEqual(model.followedWork.map(\.state), [.listed("running")])
+        XCTAssertEqual(model.followedWork.map(\.requestSent), [true])
+
+        // The core refuses the late reply and backs the job off to queued; its note cannot be read just now.
+        controls.pinned["hosted-v1"] = JobConfigurationPinnedJobs(
+            jobs: [JobConfigurationPinnedJob(jobID: "job-1", itemID: "item-1", status: "queued")], total: 1, truncated: false)
+        controls.processing["item-1"] = .failure(JobConfigurationError.unreadable)
+        await model.refresh()
+        XCTAssertEqual(model.queuedWork.flatMap(\.jobs.jobs).map(\.status), ["queued"])
+        XCTAssertEqual(model.followedWork.map(\.state), [.unreadable], "a sent request is not shown as a listed queued job")
+        var shown = PrivacySettingsText.followedJob(model.followedWork[0])
+        XCTAssertFalse(shown.contains("not sent"), shown)
+        XCTAssertTrue(shown.contains("request already sent"), shown)
+        XCTAssertTrue(shown.contains("could not be read"), shown)
+
+        // Readable again with nothing stopping it: still listed queued, and still known to have been sent.
+        controls.processing["item-1"] = .success(PrivacyItemProcessing(processingState: "unprocessed", processingJobStatus: nil))
+        await model.refresh()
+        XCTAssertEqual(model.followedWork.map(\.state), [.listed("queued")])
+        XCTAssertEqual(model.followedWork.map(\.requestSent), [true])
+        shown = PrivacySettingsText.followedJob(model.followedWork[0])
+        XCTAssertFalse(shown.contains("not sent"), shown)
+        XCTAssertTrue(shown.contains("request already sent"), shown)
+    }
+
     func testFollowedWorkIsIncompleteWhenThePendingListingIsTruncatedAndIsDroppedOnRelock() async throws {
         let (model, controls) = makeModel(routes: [grantedRoute()])
         controls.pinned["hosted-v1"] = JobConfigurationPinnedJobs(

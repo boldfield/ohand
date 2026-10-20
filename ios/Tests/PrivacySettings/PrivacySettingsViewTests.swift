@@ -189,6 +189,28 @@ final class PrivacySettingsViewTests: XCTestCase {
         XCTAssertNil(rendered[PrivacySettingsView.followedWorkIncompleteIdentifier])
     }
 
+    func testARequestShownAsSentNeverRendersAsNotSentWhenTheCoreRequeuesItAndItsNoteIsUnreadable() async throws {
+        controls.pinned["hosted-v1"] = JobConfigurationPinnedJobs(
+            jobs: [JobConfigurationPinnedJob(jobID: "job-2", itemID: "item-2", status: "running")], total: 1, truncated: false)
+        await reload([grantedRoute()])
+        model.proposeRevoke(routeID: "route-personal", capability: "text_interpretation")
+        await model.confirmChange(try XCTUnwrap(model.change))
+        settle()
+        let row = PrivacySettingsView.followedJobIdentifier("job-2")
+        XCTAssertTrue(rendered[row]?.contains("request already sent") ?? false, rendered[row] ?? "missing")
+
+        // The core backs the refused job off to queued, and its note cannot be read just now.
+        controls.pinned["hosted-v1"] = JobConfigurationPinnedJobs(
+            jobs: [JobConfigurationPinnedJob(jobID: "job-2", itemID: "item-2", status: "queued")], total: 1, truncated: false)
+        controls.processing["item-2"] = .failure(JobConfigurationError.unreadable)
+        await model.refresh()
+        settle()
+        XCTAssertEqual(
+            rendered[row], "Job job-2 · request already sent; what became of it could not be read. Check again.")
+        XCTAssertFalse(rendered[row]?.contains("not sent") ?? true)
+        XCTAssertEqual(rendered[PrivacySettingsView.followedWorkCheckAgainIdentifier], PrivacySettingsText.followedWorkCheckAgain)
+    }
+
     func testQueuedWorkRowsShowTheStoredStatusTheHeldNoticeAndMoveOffers() async throws {
         controls.pinned["hosted-v1"] = JobConfigurationPinnedJobs(
             jobs: [

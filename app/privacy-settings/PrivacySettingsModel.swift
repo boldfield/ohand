@@ -100,13 +100,16 @@ struct PrivacyFollowedJob: Equatable {
         /// Its note's processing as the core reports it now: settled, or stopped (for example refused and held for
         /// configuration while the core still lists the job as `queued`).
         case reported(PrivacyItemProcessing)
-        /// Not listed and not readable just now; reading again may answer.
+        /// Not readable just now; reading again may answer.
         case unreadable
     }
 
     let jobID: String
     let itemID: String
     let state: State
+    /// Whether the screen has seen the core list this job as `running`. Once its request has left the device, a later
+    /// `queued` listing (the core backing off a refused reply) never makes it a request that was not sent.
+    let requestSent: Bool
 }
 
 /// The one permission the user is being asked about: a single capability on a single route for the destinations of a
@@ -316,15 +319,18 @@ final class PrivacySettingsModel: ObservableObject {
     /// Reads again what became of each followed job. A running job is a request in flight, shown as listed. Any other
     /// job is read by its note's processing, because the core keeps a refused job listed as `queued` while it waits for
     /// configuration; the listed status is shown only when the core reports nothing stopping it. A job beyond the
-    /// listing limit is read by its note too.
+    /// listing limit is read by its note too. When the note cannot be read, a listed status stands in only for a job
+    /// never seen running; a job whose request was sent is shown as unreadable rather than as a queued job not sent.
     private func readFollowedWork(listed versions: [PrivacyQueuedVersion]) async throws -> [PrivacyFollowedJob] {
         let listedStatus = Dictionary(
             versions.flatMap(\.jobs.jobs).map { ($0.jobID, $0.status) }, uniquingKeysWith: { first, _ in first })
         var followed: [PrivacyFollowedJob] = []
         for job in followedWork {
             let status = listedStatus[job.jobID]
+            let requestSent = job.requestSent || status == "running"
             if status == "running" {
-                followed.append(PrivacyFollowedJob(jobID: job.jobID, itemID: job.itemID, state: .listed("running")))
+                followed.append(
+                    PrivacyFollowedJob(jobID: job.jobID, itemID: job.itemID, state: .listed("running"), requestSent: true))
                 continue
             }
             let state: PrivacyFollowedJob.State
@@ -337,9 +343,10 @@ final class PrivacySettingsModel: ObservableObject {
                 }
             } catch {
                 if isNotAuthenticated(error) { throw ProviderConfigurationError.notAuthenticated }
-                state = status.map { .listed($0) } ?? .unreadable
+                state = requestSent ? .unreadable : status.map { .listed($0) } ?? .unreadable
             }
-            followed.append(PrivacyFollowedJob(jobID: job.jobID, itemID: job.itemID, state: state))
+            followed.append(
+                PrivacyFollowedJob(jobID: job.jobID, itemID: job.itemID, state: state, requestSent: requestSent))
         }
         return followed
     }
@@ -451,7 +458,9 @@ final class PrivacySettingsModel: ObservableObject {
                 routeRevoke = (outcome, routeID, routeLabel, capability)
                 if outcome == .revoked {
                     followedWork = pending.versions.flatMap(\.jobs.jobs).map {
-                        PrivacyFollowedJob(jobID: $0.jobID, itemID: $0.itemID, state: .listed($0.status))
+                        PrivacyFollowedJob(
+                            jobID: $0.jobID, itemID: $0.itemID, state: .listed($0.status),
+                            requestSent: $0.status == "running")
                     }
                     followedWorkIncomplete = pending.unreadable || pending.versions.contains { $0.jobs.truncated }
                 }

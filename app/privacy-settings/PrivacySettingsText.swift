@@ -167,10 +167,15 @@ enum PrivacySettingsText {
         case .listed("running"):
             return prefix + "request already sent, waiting for its reply. The reply is applied only if the "
                 + "permissions in force when it arrives allow it."
+        case .listed(let status) where job.requestSent:
+            return prefix + "request already sent; now \(status). A reply is applied, and the job is sent again, only "
+                + "if the permissions in force then allow it."
         case .listed(let status):
             return prefix + "\(status), not sent. It is sent only if the permissions in force then allow it."
         case .reported(let processing):
             return prefix + reportedProcessing(processing)
+        case .unreadable where job.requestSent:
+            return prefix + "request already sent; what became of it could not be read. Check again."
         case .unreadable:
             return prefix + "its state could not be read. Check again."
         }
