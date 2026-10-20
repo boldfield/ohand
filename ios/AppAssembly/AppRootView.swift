@@ -8,6 +8,8 @@ struct AppRootView: View {
     @ObservedObject var navigation: ManagementNavigationModel
     let captureEntry: CaptureEntryModel
     let context: ManagementContext
+    /// The recent captures and lock states shown as the home body; nil leaves the body empty.
+    var homeRecents: HomeRecentsModel?
     var destinations = ManagementCatalog.destinations
     var presentationReporter: ((ManagementPresentationEvent) -> Void)?
     var placeholderFrameReporter: (([String: CGRect]) -> Void)?
@@ -19,7 +21,10 @@ struct AppRootView: View {
                 model: captureEntry,
                 actionsAreDisabled: navigation.isAuthenticating,
                 open: { navigation.open(entryID: $0) },
-                notice: navigation.notice)
+                notice: navigation.notice,
+                homeBody: {
+                    homeRecents.map { AnyView(HomeBodyView(model: $0)) } ?? AnyView(Color.clear)
+                })
                 .toolbar(.hidden, for: .navigationBar)
                 .navigationDestination(for: String.self) { pathComponent in
                     destinationView(for: ManagementRoute(pathComponent: pathComponent))
