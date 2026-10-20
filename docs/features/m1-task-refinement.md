@@ -3374,3 +3374,27 @@ Acceptance:
 3. One "History" heading per history list, each naming what it lists (for example "Item history" and "Reminder history").
 4. The text fields use design-system tokens (surface, ink, radius) in both appearances.
 5. Tests for 1–3 with the real core where state matters. Hosted screenshots of detail in both appearances. Exact-head macOS run linked.
+
+### F39
+
+Make adding Anthropic on the Processing screen lead to notes actually being sorted, and hide own-server until it works
+
+The maintainer will use Anthropic for the trial (decided 2026-10-20). The pre-trial audit found that the provider screens let the person finish setup in a state where nothing is ever sent, and offer an option that cannot work in this build:
+
+- **Own server is a dead end.** Production composes no `OptionalCapabilitiesModule` (`ios/AppAssembly/AppServices.swift:52-56`), so `self_hosted` is not enabled. Even if it were, a self-hosted send needs a `(profile_version, model)` registration fixed at assembly, and the UI mints a new version on every save. Choosing "With my own server" pins new captures to a profile that is put back forever as `protocol_not_enabled`, so they sit at "sorting…" indefinitely, worse than "On this phone". Enabling self-hosted for UI-created profiles is out of scope here and is deferred until after the trial.
+- **Choosing a cloud provider is not enough.** Making a profile the default changes nothing else (`ProviderSettingsModel.swift:165-166`). A new capture is pinned only when the capture route has also been granted on the Privacy screen (`core/src/interpretation/enqueue/mod.rs:45-64`). The only hint is in the info sheet. So the root reads "Processing: Anthropic" while every new note is handled on the phone only.
+- **"OpenAI-compatible" is misleading.** It takes no address and always sends to api.openai.com (`core/src/providers/profiles/mod.rs:230-233`), yet it is the type picker's default (`ProviderSettingsModel.swift:130`).
+- **The empty Add provider form lists every problem at once** ("Give the profile a name. Enter the model name. Store the secret…", `ProviderSettingsView.swift:585-589`), which is a status paragraph under the design's copy rules.
+
+Owned paths: `app/provider-settings/` and `ios/Tests/ProviderSettings/`.
+
+Dependencies: none beyond landed work.
+
+Acceptance:
+
+1. "With my own server" and the "Private server" type are not offered in this build. Hide them behind one named switch in `app/provider-settings/`, with a comment that names this section, so turning them back on later is a one-line change. A self-hosted profile already saved is still listed, but cannot be made the default, and says why in one line. Nothing in core or Services changes.
+2. After a cloud profile becomes the default, the Processing screen shows one footer line while that destination is not yet allowed for the person's captures: "Allow it under Privacy to start sending notes." The line names the Privacy screen; a navigation link is optional, and only if `app/provider-settings/` can reach it without editing another directory. The line disappears once the route is granted. The read used to tell whether the route is granted is an existing read, not a new one.
+3. The `open_ai` type is labelled "OpenAI". The type picker has no preselected type, or preselects Anthropic, so the person chooses deliberately.
+4. The Add provider form shows each field's problem only after the first Save attempt, or once that field has been edited, never on an untouched form.
+5. The model field has a placeholder showing the expected form of a model identifier (a generic example, not a recommendation). The info sheet says the identifier must match the provider's exactly.
+6. Hosted view tests for 1–4 in both appearances. Exact-head macOS run linked, with walkthrough screenshots of the Processing and Add provider screens.

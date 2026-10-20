@@ -3677,6 +3677,27 @@
         "app/reminders/ReminderEditView.swift:37",
         "app/item-controls/ItemControlsView.swift:152"
       ]
+    },
+    {
+      "key": "F39",
+      "parent": null,
+      "title": "Make adding Anthropic on the Processing screen lead to notes actually being sorted, and hide own-server until it works",
+      "file_scope": [
+        "app/provider-settings/",
+        "ios/Tests/ProviderSettings/"
+      ],
+      "intent": "Hide the unusable self-hosted option, tell the person a cloud default still needs the Privacy grant, and fix the misleading type label and form copy.",
+      "acceptance": [
+        "See the F39 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/AppAssembly/AppServices.swift:52",
+        "app/provider-settings/ProviderSettingsModel.swift:165",
+        "app/provider-settings/ProviderSettingsText.swift:99",
+        "app/provider-settings/ProviderSettingsView.swift:585"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -4451,7 +4472,8 @@
       "F33",
       "U11"
     ],
-    "F38": []
+    "F38": [],
+    "F39": []
   },
   "retained_dependency_overrides": {
     "V06": [
