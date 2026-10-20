@@ -621,7 +621,15 @@ fn clock_without_day_is_today_only_when_later() {
 
 #[test]
 fn bare_hour_and_unsupported_clock_forms_are_ambiguous_or_rejected() {
-    for phrase in ["Friday at 3", "tomorrow at 9", "at 3", "tomorrow at 3:30"] {
+    for phrase in [
+        "Friday at 3",
+        "Friday 3",
+        "3 Friday",
+        "on Friday 3",
+        "tomorrow 9",
+        "at 3",
+        "tomorrow at 3:30",
+    ] {
         assert_ambiguous_without_instant(NY, NY_THURSDAY, phrase);
     }
     let context = make_context(NY, NY_THURSDAY);
@@ -632,11 +640,7 @@ fn bare_hour_and_unsupported_clock_forms_are_ambiguous_or_rejected() {
         "Friday at 9:60 am",
         "Friday at 25:00",
         "Friday at",
-        "at 3 p.m.",
-    ]
-    .iter()
-    .take(6)
-    {
+    ] {
         let outcome = TimeResolver::resolve(phrase, &context);
         match outcome {
             Err(ResolutionError::InvalidDateFormat(_)) => {}

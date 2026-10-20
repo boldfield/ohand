@@ -456,18 +456,22 @@ impl TimeResolver {
         // Day first: <day> [at] <clock> [rest]
         for split in 1..tokens.len() {
             if let Some(date) = Self::parse_day_part(&tokens[..split], context, tz) {
-                if let Some((clock, used)) = Self::parse_clock_tokens(&tokens[split..]) {
+                if let Some((clock, used)) = Self::parse_clock_tokens(&tokens[split..], true) {
                     return Some((Some(date), clock, tokens[split + used..].to_vec()));
                 }
             }
         }
         // Clock first: [at] <clock> [day] [rest]
-        let (clock, used) = Self::parse_clock_tokens(tokens)?;
+        let (clock, used) = Self::parse_clock_tokens(tokens, true)?;
         let after = &tokens[used..];
         for take in (1..=after.len()).rev() {
             if let Some(date) = Self::parse_day_part(&after[..take], context, tz) {
                 return Some((Some(date), clock, after[take..].to_vec()));
             }
+        }
+        // A bare number with neither `at` nor a day part is not a clock ("3 days").
+        if matches!(clock, ClockPart::MissingMeridiem) && tokens.first() != Some(&"at") {
+            return None;
         }
         Some((None, clock, after.to_vec()))
     }
@@ -497,7 +501,7 @@ impl TimeResolver {
 
     /// Parse a clock at the start of `tokens`, with an optional leading `at`. Returns the clock
     /// and the number of tokens consumed.
-    fn parse_clock_tokens(tokens: &[&str]) -> Option<(ClockPart, usize)> {
+    fn parse_clock_tokens(tokens: &[&str], allow_bare_hour: bool) -> Option<(ClockPart, usize)> {
         let (has_at, tokens) = match tokens.first() {
             Some(&"at") => (true, &tokens[1..]),
             _ => (false, tokens),
@@ -561,7 +565,7 @@ impl TimeResolver {
                 }
                 return Some((ClockPart::Time { hour, minute }, at_len + 1));
             }
-            if minute_text.is_none() && !has_at {
+            if minute_text.is_none() && !has_at && !allow_bare_hour {
                 return None;
             }
             return Some((ClockPart::MissingMeridiem, at_len + 1));

@@ -921,17 +921,20 @@ fn the_oracles_explicit_clock_time_reminders_score_no_defects_at_either_stage() 
     // Explicit-zone phrases stay unresolved: "EST" is ambiguous by oracle, and the Tokyo
     // follow-up is a known gap out of scope here.
     for fixture_id in ["timezone-explicit", "timezone-conflicting"] {
-        let stored = fake
+        let cases: Vec<_> = fake
             .cases
             .iter()
             .filter(|case| case.fixture_id == fixture_id)
-            .filter_map(|case| case.authoritative_state.reminder.as_ref())
-            .next();
-        if let Some(stored) = stored {
-            assert!(
-                stored.resolved_instant.is_none(),
-                "{fixture_id} must not store an instant"
-            );
+            .collect();
+        assert!(!cases.is_empty(), "{fixture_id} has cases");
+        for case in cases {
+            if let Some(stored) = case.authoritative_state.reminder.as_ref() {
+                assert!(
+                    stored.resolved_instant.is_none(),
+                    "{} must not store an instant",
+                    case.case_id
+                );
+            }
         }
     }
 }
