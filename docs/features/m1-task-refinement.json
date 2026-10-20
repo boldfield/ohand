@@ -3478,6 +3478,28 @@
         "core/src/ffi/job_configuration.rs:213",
         "core/src/jobs/configuration/mod.rs:13"
       ]
+    },
+    {
+      "key": "F31",
+      "parent": null,
+      "title": "Wire the Settings \"Erase everything\" card to reset, and take reset and export off the Audio screen",
+      "file_scope": [
+        "ios/AppAssembly/ManagementCatalog.swift",
+        "ios/Tests/AppAssembly/SettingsRootViewTests.swift",
+        "app/data-settings/RetentionSettingsView.swift",
+        "ios/Tests/DataSettings/RetentionSettingsViewTests.swift"
+      ],
+      "intent": "Make the design's Erase everything card open the existing reset screen and leave the Audio screen with only audio decisions.",
+      "acceptance": [
+        "See the F31 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [],
+      "source_pointers": [
+        "ios/AppAssembly/ManagementCatalog.swift:216",
+        "app/data-settings/RetentionSettingsView.swift:98",
+        "docs/features/m1-ui-design.md:140"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -4233,7 +4255,8 @@
     "F29": [
       "F28"
     ],
-    "F30": []
+    "F30": [],
+    "F31": []
   },
   "retained_dependency_overrides": {
     "V06": [

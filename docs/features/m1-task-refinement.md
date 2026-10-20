@@ -3211,3 +3211,21 @@ Acceptance:
 2. FFI and bridge: a new gated stored-state command with that request and answer, documented in the module comment, with failures normalized like the existing commands. `revoke_profile`'s answer does not change.
 3. Services: `JobConfigurationService` exposes the read. `CoreJobConfigurationClient` counts it as a stored-state read, and `PrivateReadGate` issues it like `startJobsPinnedToProfile`. Tests: an unauthenticated read is refused at the gate, and in a real-core integration test a job queued in the window between a pre-read and the revoke appears in the post-revoke list.
 4. `make check`, `make test` and an exact-head macOS run linked.
+
+### F31
+
+Wire the Settings "Erase everything" card to reset, and take reset and export off the Audio screen
+
+The UI design puts "Erase everything" on the Settings root as its own centred `destructive` card, and Export as a row in the second group (`docs/features/m1-ui-design.md`, Settings). The card is on the root (`SettingsRootView`, `ios/AppAssembly/ManagementCatalog.swift`), but it does nothing. Its comment says the reset task (U07c) would wire it, but U07c did not own that file. U07c put "Delete all data" at the bottom of the Audio screen instead (`app/data-settings/RetentionSettingsView.swift`), next to a second "Export a copy of your notes" link. On the maintainer's phone, the card someone would tap to erase everything does nothing, and the working control sits where nobody would look for it.
+
+Owned paths: `ios/AppAssembly/ManagementCatalog.swift`, `ios/Tests/AppAssembly/SettingsRootViewTests.swift`, `app/data-settings/RetentionSettingsView.swift`, `ios/Tests/DataSettings/RetentionSettingsViewTests.swift`.
+
+Dependencies: none beyond landed work (U07c).
+
+Acceptance:
+
+1. Tapping "Erase everything" on the Settings root opens the existing `ResetSettingsView` with `context.retention.resetSettings`, the same way the Export row opens `ExportSettingsView`. When `resetSettings` is nil, the card is not shown, so no control is ever dead. The card keeps the design's look (its own card, centred, `destructive`), and its accessibility identifier stays `management.settings.erase`.
+2. The Audio screen holds only its audio decisions, as the design specifies. The "Delete all data" and "Export a copy of your notes" links are removed from it. Reset and export stay reachable from the Settings root only. `RetentionSettingsModel` keeps its `resetSettings` and `exportSettings` properties, because the root reads them.
+3. Reset behaviour, confirmation and the credential choice are unchanged. This task moves the entry point only.
+4. Hosted view tests: the root card navigates to the reset screen when a reset model is present and is absent when it is not; the Audio screen no longer renders either link. Remove or update the existing tests that asserted those links on the Audio screen; do not weaken any other assertion.
+5. Exact-head macOS run linked. If the DS08 screenshot walkthrough shows the Audio screen, its expected content may change only by the two removed links.
