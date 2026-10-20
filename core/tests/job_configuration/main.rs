@@ -3,6 +3,7 @@
 use anyhow::Result;
 use chrono::Duration;
 use chrono::Utc;
+use ohand_core::interpretation::enqueue::{enqueue_default_interpretation, plan_interpretation};
 use ohand_core::jobs::configuration::{
     get_item_jobs_for_profile, get_jobs_pinned_to_profile, get_requeue_record,
     is_job_profile_revoked, is_profile_available, jobs_retired_by_revocation,
@@ -12,7 +13,8 @@ use ohand_core::jobs::configuration::{
 use ohand_core::jobs::queue::{
     claim_job_with_lease, complete_job, complete_job_in_tx, enqueue_job, JobStatus,
 };
-use ohand_core::privacy::routing::DenialReason;
+use ohand_core::privacy::routing::{grant_route_capability, DenialReason, ProcessingCapability};
+use ohand_core::providers::profiles::set_default_profile;
 use ohand_core::store::schema::{Clock, Database};
 use std::sync::{Arc, RwLock};
 
@@ -1502,13 +1504,39 @@ fn test_jobs_retired_by_revocation_is_durable_and_exact() -> Result<()> {
     assert!(before.jobs.is_empty());
     assert_eq!(before.total, 0);
 
+    // The revoked version is the stored default with a route grant, so before the revoke a new
+    // capture would really pin to it.
+    set_default_profile(
+        &mut db,
+        ProcessingCapability::TextInterpretation,
+        revoked,
+        now,
+    )
+    .map_err(|failure| anyhow::anyhow!("{failure:?}"))?;
+    grant_route_capability(
+        &mut db,
+        "route-1",
+        ProcessingCapability::TextInterpretation,
+        revoked,
+        "2026-01-01T00:00:00Z",
+    )
+    .map_err(|failure| anyhow::anyhow!("{failure:?}"))?;
+    let probe = db.immediate_transaction()?;
+    let planned = plan_interpretation(&probe, &item_id, 20)?;
+    drop(probe);
+    assert_eq!(planned.profile_version.as_deref(), Some(revoked));
+
     // One job is running at the revoke.
     let running = claim_job_with_lease(&mut db, Duration::minutes(5), now)?.expect("a job");
     assert_eq!(running.profile_version.as_deref(), Some(revoked));
     revoke_profile(&mut db, revoked, now)?;
 
-    // Work enqueued after the revoke is pinned to the live profile and is not listed.
-    enqueue_revision(&mut db, "job-after", &item_id, live, 9, now)?;
+    // A capture enqueued after the revoke goes through the real pin resolution, is not pinned
+    // to the revoked version and is not listed.
+    let after_tx = db.immediate_transaction()?;
+    let after_job = enqueue_default_interpretation(&after_tx, &item_id, 20, now)?;
+    after_tx.commit()?;
+    assert_ne!(after_job.profile_version.as_deref(), Some(revoked));
 
     // One retired job is requeued to the live profile.
     requeue_job_to_new_profile(
