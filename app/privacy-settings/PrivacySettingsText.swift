@@ -169,14 +169,14 @@ enum PrivacySettingsText {
                 + "permissions in force when it arrives allow it."
         case .listed(let status):
             return prefix + "\(status), not sent. It is sent only if the permissions in force then allow it."
-        case .settled(let processing):
-            return prefix + settledProcessing(processing)
+        case .reported(let processing):
+            return prefix + reportedProcessing(processing)
         case .unreadable:
             return prefix + "its state could not be read. Check again."
         }
     }
 
-    private static func settledProcessing(_ processing: PrivacyItemProcessing) -> String {
+    private static func reportedProcessing(_ processing: PrivacyItemProcessing) -> String {
         switch (processing.processingState, processing.processingJobStatus) {
         case ("processed", _): return "a reply was applied: the note was sorted while a permission allowed it."
         case ("abstained", _): return "answered with no change to the note."

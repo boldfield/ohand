@@ -290,7 +290,7 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         await model.refresh()
         XCTAssertEqual(
             model.followedWork.map(\.state),
-            [.settled(PrivacyItemProcessing(processingState: "unprocessed", processingJobStatus: "awaiting_configuration"))],
+            [.reported(PrivacyItemProcessing(processingState: "unprocessed", processingJobStatus: "awaiting_configuration"))],
             "the screen shows the core's refusal of the work that was queued at the change")
 
         model = try await relaunch()
@@ -369,7 +369,7 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         XCTAssertEqual(followed.jobID, jobID)
         XCTAssertEqual(
             followed.state,
-            .settled(PrivacyItemProcessing(processingState: "unprocessed", processingJobStatus: "awaiting_configuration")))
+            .reported(PrivacyItemProcessing(processingState: "unprocessed", processingJobStatus: "awaiting_configuration")))
         let shown = PrivacySettingsText.followedJob(followed)
         XCTAssertTrue(shown.contains("refused"), shown)
         XCTAssertTrue(shown.contains("Nothing was applied"), shown)

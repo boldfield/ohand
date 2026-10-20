@@ -494,7 +494,7 @@ final class PrivacySettingsModelTests: XCTestCase {
         XCTAssertEqual(
             model.followedWork.map(\.state), [.listed("queued"), .listed("running"), .listed("running")],
             "while the core still lists them, each job shows its listed status")
-        XCTAssertTrue(controls.processingReads.isEmpty, "a listed job needs no item read")
+        XCTAssertEqual(controls.processingReads, ["item-1"], "a request in flight needs no item read; a queued job does")
         XCTAssertFalse(model.followedWorkIncomplete)
 
         // The core settles them: one late reply refused, one applied (another route or purpose still allowed it), and
@@ -509,9 +509,9 @@ final class PrivacySettingsModelTests: XCTestCase {
         XCTAssertEqual(model.followedWork[0].state, .unreadable)
         XCTAssertEqual(
             model.followedWork[1].state,
-            .settled(PrivacyItemProcessing(processingState: "unprocessed", processingJobStatus: "awaiting_configuration")))
+            .reported(PrivacyItemProcessing(processingState: "unprocessed", processingJobStatus: "awaiting_configuration")))
         XCTAssertEqual(
-            model.followedWork[2].state, .settled(PrivacyItemProcessing(processingState: "processed", processingJobStatus: nil)))
+            model.followedWork[2].state, .reported(PrivacyItemProcessing(processingState: "processed", processingJobStatus: nil)))
         XCTAssertTrue(PrivacySettingsText.followedJob(model.followedWork[1]).contains("refused"))
         XCTAssertTrue(PrivacySettingsText.followedJob(model.followedWork[1]).contains("Nothing was applied"))
         XCTAssertTrue(PrivacySettingsText.followedJob(model.followedWork[2]).contains("a reply was applied"))
@@ -523,7 +523,29 @@ final class PrivacySettingsModelTests: XCTestCase {
         await model.refresh()
         XCTAssertEqual(
             model.followedWork[0].state,
-            .settled(PrivacyItemProcessing(processingState: "unprocessed", processingJobStatus: "awaiting_configuration")))
+            .reported(PrivacyItemProcessing(processingState: "unprocessed", processingJobStatus: "awaiting_configuration")))
+    }
+
+    func testAJobTheCoreStillListsAsQueuedButRefusedShowsTheRefusal() async throws {
+        let (model, controls) = makeModel(routes: [grantedRoute()])
+        controls.pinned["hosted-v1"] = pinnedJobs(["job-1"])
+        await model.refresh()
+        model.proposeRevoke(routeID: "route-personal", capability: "text_interpretation")
+        await model.confirmChange(try XCTUnwrap(model.change))
+        XCTAssertEqual(model.followedWork.map(\.state), [.listed("queued")], "nothing stops it yet")
+
+        // The core refused it at dispatch and keeps it queued, held for configuration.
+        let refused = PrivacyItemProcessing(processingState: "unprocessed", processingJobStatus: "awaiting_configuration")
+        controls.processing["item-job-1"] = .success(refused)
+        await model.refresh()
+        XCTAssertEqual(model.queuedWork.flatMap(\.jobs.jobs).map(\.status), ["queued"])
+        XCTAssertEqual(model.followedWork.map(\.state), [.reported(refused)])
+        XCTAssertTrue(PrivacySettingsText.followedJob(model.followedWork[0]).contains("refused"))
+
+        // A listed job whose note cannot be read keeps its listed status rather than appearing unreadable.
+        controls.processing["item-job-1"] = .failure(JobConfigurationError.unreadable)
+        await model.refresh()
+        XCTAssertEqual(model.followedWork.map(\.state), [.listed("queued")])
     }
 
     func testFollowedWorkIsIncompleteWhenThePendingListingIsTruncatedAndIsDroppedOnRelock() async throws {

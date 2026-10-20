@@ -94,11 +94,13 @@ struct PrivacyItemProcessing: Equatable {
 /// again, so the screen shows what actually became of it rather than what the change was expected to do.
 struct PrivacyFollowedJob: Equatable {
     enum State: Equatable {
-        /// The core still lists it as `queued` or `running` (a request already sent and not yet answered).
+        /// The core lists it as `running` (a request already sent and not yet answered), or as `queued` with nothing
+        /// stopping it.
         case listed(String)
-        /// It is no longer listed; this is its note's processing as the core reports it now.
-        case settled(PrivacyItemProcessing)
-        /// Neither listed nor readable just now; reading again may answer.
+        /// Its note's processing as the core reports it now: settled, or stopped (for example refused and held for
+        /// configuration while the core still lists the job as `queued`).
+        case reported(PrivacyItemProcessing)
+        /// Not listed and not readable just now; reading again may answer.
         case unreadable
     }
 
@@ -311,24 +313,33 @@ final class PrivacySettingsModel: ObservableObject {
         }
     }
 
-    /// Reads again what became of each followed job: its listed status while the core still lists it, otherwise its
-    /// note's processing. A job beyond the listing limit is read by its note too, which still reports it in progress.
+    /// Reads again what became of each followed job. A running job is a request in flight, shown as listed. Any other
+    /// job is read by its note's processing, because the core keeps a refused job listed as `queued` while it waits for
+    /// configuration; the listed status is shown only when the core reports nothing stopping it. A job beyond the
+    /// listing limit is read by its note too.
     private func readFollowedWork(listed versions: [PrivacyQueuedVersion]) async throws -> [PrivacyFollowedJob] {
         let listedStatus = Dictionary(
             versions.flatMap(\.jobs.jobs).map { ($0.jobID, $0.status) }, uniquingKeysWith: { first, _ in first })
         var followed: [PrivacyFollowedJob] = []
         for job in followedWork {
-            if let status = listedStatus[job.jobID] {
-                followed.append(PrivacyFollowedJob(jobID: job.jobID, itemID: job.itemID, state: .listed(status)))
+            let status = listedStatus[job.jobID]
+            if status == "running" {
+                followed.append(PrivacyFollowedJob(jobID: job.jobID, itemID: job.itemID, state: .listed("running")))
                 continue
             }
+            let state: PrivacyFollowedJob.State
             do {
                 let processing = try await controls.itemProcessing(itemID: job.itemID)
-                followed.append(PrivacyFollowedJob(jobID: job.jobID, itemID: job.itemID, state: .settled(processing)))
+                if let status, processing.processingJobStatus == nil {
+                    state = .listed(status)
+                } else {
+                    state = .reported(processing)
+                }
             } catch {
                 if isNotAuthenticated(error) { throw ProviderConfigurationError.notAuthenticated }
-                followed.append(PrivacyFollowedJob(jobID: job.jobID, itemID: job.itemID, state: .unreadable))
+                state = status.map { .listed($0) } ?? .unreadable
             }
+            followed.append(PrivacyFollowedJob(jobID: job.jobID, itemID: job.itemID, state: state))
         }
         return followed
     }
