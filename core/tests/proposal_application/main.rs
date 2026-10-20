@@ -1163,9 +1163,76 @@ fn a_span_holding_one_of_two_alternative_times_is_rejected() {
             "Saturday at 4 p.m.",
             "2026-10-10T16:00:00-04:00",
         ),
+        (
+            "Remind me Friday or maybe Saturday at 4 p.m. to call the roofer",
+            "Saturday at 4 p.m.",
+            "2026-10-10T16:00:00-04:00",
+        ),
     ] {
         let (fixture, disposition) = apply_clock_proposal(text, quoted, instant, "call the roofer");
         assert_rejected_and_unscheduled(&fixture, disposition);
+    }
+}
+
+#[test]
+fn a_dayless_span_after_a_day_earlier_in_the_sentence_is_rejected() {
+    for (text, instant) in [
+        (
+            "Friday, remind me at 3 p.m. to call the roofer",
+            "2026-10-08T15:00:00-04:00",
+        ),
+        (
+            "On Friday, remind me at 3 p.m. to call the roofer",
+            "2026-10-08T15:00:00-04:00",
+        ),
+        (
+            "Tomorrow, remind me at 5 p.m. to call the roofer",
+            "2026-10-08T17:00:00-04:00",
+        ),
+        (
+            "On October 15, remind me at 3 p.m. to call the roofer",
+            "2026-10-08T15:00:00-04:00",
+        ),
+        (
+            "In two days, remind me at 3 p.m. to call the roofer",
+            "2026-10-08T15:00:00-04:00",
+        ),
+    ] {
+        let quoted = if text.contains("5 p.m.") {
+            "at 5 p.m."
+        } else {
+            "at 3 p.m."
+        };
+        let (fixture, disposition) = apply_clock_proposal(text, quoted, instant, "call the roofer");
+        assert_rejected_and_unscheduled(&fixture, disposition);
+    }
+}
+
+#[test]
+fn a_dayless_span_with_a_day_in_the_task_text_is_rejected_not_anchored_to_today() {
+    let (fixture, disposition) = apply_clock_proposal(
+        "Remind me at 5 p.m. to call the roofer tomorrow",
+        "at 5 p.m.",
+        "2026-10-08T17:00:00-04:00",
+        "call the roofer",
+    );
+    assert_rejected_and_unscheduled(&fixture, disposition);
+}
+
+#[test]
+fn a_dayless_span_after_only_request_words_still_schedules() {
+    for text in [
+        "Remind me at 5 p.m. to call Sam",
+        "Set a reminder at 5 p.m. to call Sam",
+    ] {
+        let (fixture, disposition) =
+            apply_clock_proposal(text, "at 5 p.m.", "2026-10-08T17:00:00-04:00", "call Sam");
+        assert_eq!(
+            disposition,
+            ReminderDisposition::Recorded(ReminderRequestState::Resolved),
+            "{text}"
+        );
+        assert_eq!(fixture.reminder_row().request_state, "resolved");
     }
 }
 
