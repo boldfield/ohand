@@ -1350,7 +1350,10 @@
       "parent": "U07",
       "title": "Add deletion and reset progress controls",
       "file_scope": [
-        "app/data-settings/"
+        "app/data-settings/",
+        "app/source-detail/SourceDetailModel.swift",
+        "ios/Services/Reset/ResetControl.swift",
+        "ios/Services/Reset/ResetService.swift"
       ],
       "intent": "Connect explicit per-item deletion and delete-all/reset choices to the existing durable cleanup services.",
       "acceptance": [
@@ -3404,7 +3407,11 @@
       "file_scope": [
         "core/src/time/",
         "core/tests/time/",
-        "tools/evaluation/tests/"
+        "tools/evaluation/tests/",
+        "core/src/interpretation/apply/",
+        "core/tests/proposal_application/",
+        "tools/bench/src/report/tests.rs",
+        "tools/evaluation/comparison/tests.rs"
       ],
       "intent": "Teach the deterministic time resolver clock times so 'Friday at 3 p.m.' resolves and schedules instead of being stored as needing correction.",
       "acceptance": [

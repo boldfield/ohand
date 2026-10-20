@@ -487,6 +487,30 @@ fn unusable_content_keeps_the_usage_the_same_response_reported() {
 }
 
 #[test]
+fn truncation_by_max_tokens_is_permanent_invalid_output_with_usage_attached() {
+    let harness = Harness::new(vec![reply_with(|reply| {
+        reply["stop_reason"] = json!("max_tokens");
+    })]);
+    let failure = harness.diagnostic_failure();
+    match &failure.kind {
+        DiagnosticFailureKind::Provider { failure } => {
+            assert_eq!(failure.kind, FailureKind::InvalidOutput);
+            assert!(!failure.retriable);
+        }
+        other => panic!("expected a provider failure, got {other:?}"),
+    }
+    assert_eq!(
+        failure.usage,
+        UsageAvailability::Reported {
+            usage: TokenUsage {
+                input_tokens: Some(42),
+                output_tokens: Some(17),
+            }
+        }
+    );
+}
+
+#[test]
 fn refusal_is_rejected_and_keeps_the_usage_the_same_response_reported() {
     let harness = Harness::new(vec![FakeAnthropicStep::respond_json(
         200,

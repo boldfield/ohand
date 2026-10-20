@@ -60,6 +60,7 @@ struct SourceDetailView: View {
                     if let content = model.content {
                         detailCard(content)
                         history(content)
+                        if let reminderEditor = model.reminderEditor { ReminderEditSection(model: reminderEditor) }
                     } else if let failure = model.failure {
                         emptyState(
                             title: Self.title(for: failure), message: Self.text(for: failure),
