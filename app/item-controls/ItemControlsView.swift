@@ -15,12 +15,34 @@ struct ItemControlsView: View {
     static let outcomeIdentifier = "item-controls.outcome"
     static let refreshFailureIdentifier = "item-controls.refresh-failure"
     static let reloadIdentifier = "item-controls.reload"
+    static let completeIdentifier = "item-controls.action.complete"
+    static let cancelIdentifier = "item-controls.action.cancel"
+    static let notNowIdentifier = "item-controls.action.not-now"
+    static let stopSuggestingIdentifier = "item-controls.action.stop-suggesting"
+    static let actionsIdentifier = "item-controls.actions"
+    static let actionsFooterIdentifier = "item-controls.actions.footer"
+    static let endedNoticeIdentifier = "item-controls.ended"
     /// Reported as shown while the fields can be edited and as gone while they are disabled.
     static let editableIdentifier = "item-controls.editable"
 
     static let actionWarning =
         "Applying this makes the item an action. Changing the type never happens on its own."
     static let topicFooter = "The session topic is a label. It does not change whether the item is personal or work."
+
+    static let notNowExplanation =
+        "Not now keeps this item out of suggestions for an hour. After that it can be suggested again."
+    static let stopSuggestingExplanation =
+        "Stop suggesting means this item is only shown when you search or open it. "
+        + "It stays searchable and any reminder you set for it is kept."
+    static let suggestionsStoppedNotice =
+        "Suggestions are stopped for this item. It is only shown when you search or open it, "
+        + "and any reminder you set for it is kept."
+    static let completeCancelExplanation =
+        "Completing or cancelling ends the item and cancels any reminder for it. Your original is kept."
+
+    static func endedNotice(_ lifecycleState: String) -> String {
+        lifecycleState == "completed" ? "This item is completed." : "This item is cancelled."
+    }
 
     static func typeTitle(_ type: ItemCorrectionItemType) -> String {
         switch type {
@@ -47,6 +69,18 @@ struct ItemControlsView: View {
         case .invalid: return "That change could not be saved. Check it and try again."
         case .failed: return "That change could not be saved right now. Try again."
         case .loadFailed: return "This item could not be read right now."
+        case .actionDone(.complete): return "Completed. Any reminder for it was cancelled."
+        case .actionDone(.cancel): return "Cancelled. Any reminder for it was cancelled."
+        case .actionDone(.notNow): return "Okay. This item will not be suggested for an hour."
+        case .actionDone(.stopSuggesting):
+            return "Okay. This item will not be suggested again. You can still search for it, and any reminder is kept."
+        case .actionConflict where !newerValuesShown:
+            return "This item changed after you opened it, so nothing was done. The newer values could not be loaded yet."
+        case .actionConflict:
+            return "This item changed after you opened it, so nothing was done. "
+                + "The newer values are shown; choose again if you still want to."
+        case .actionItemEnded(let lifecycle): return Self.endedNotice(lifecycle) + " Nothing was changed."
+        case .actionFailed: return "That could not be done right now. Try again."
         }
     }
 
@@ -80,6 +114,7 @@ struct ItemControlsView: View {
                         textControl
                         typeControl
                         topicControl
+                        actionsControl
                     }
                     .modifier(EnabledReporting(identifier: Self.editableIdentifier, reporter: renderReporter))
                     // Paused while a correction or its refresh is in flight, so nothing typed then can be replaced.
@@ -150,6 +185,47 @@ struct ItemControlsView: View {
                 .disabled(!model.canApplyType)
                 .accessibilityIdentifier(Self.typeApplyIdentifier)
         }
+    }
+
+    @ViewBuilder private var actionsControl: some View {
+        if let snapshot = model.snapshot, snapshot.lifecycleState != "active", snapshot.lifecycleState != "deleted" {
+            Text(Self.endedNotice(snapshot.lifecycleState))
+                .font(DSFont.footer)
+                .foregroundColor(DSColor.inkMuted.color)
+                .rendered(Self.endedNoticeIdentifier, renderReporter)
+        }
+        VStack(alignment: .leading, spacing: DSSpacing.xs) {
+            Text("Finish or quiet")
+                .font(DSFont.groupHeading)
+                .foregroundColor(DSColor.inkMuted.color)
+            Button("Complete") { Task { await model.complete() } }
+                .buttonStyle(DSPillButtonStyle(style: .secondary))
+                .disabled(!model.canAct)
+                .accessibilityIdentifier(Self.completeIdentifier)
+            Button("Cancel item") { Task { await model.cancel() } }
+                .buttonStyle(DSPillButtonStyle(style: .secondary))
+                .disabled(!model.canAct)
+                .accessibilityIdentifier(Self.cancelIdentifier)
+            Text(Self.completeCancelExplanation)
+                .font(DSFont.footer)
+                .foregroundColor(DSColor.inkMuted.color)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Not now") { Task { await model.notNow() } }
+                .buttonStyle(DSPillButtonStyle(style: .secondary))
+                .disabled(!model.canQuietSuggestions)
+                .accessibilityIdentifier(Self.notNowIdentifier)
+            Button("Stop suggesting") { Task { await model.stopSuggesting() } }
+                .buttonStyle(DSPillButtonStyle(style: .secondary))
+                .disabled(!model.canQuietSuggestions)
+                .accessibilityIdentifier(Self.stopSuggestingIdentifier)
+            Text(model.snapshot?.suggestionsStopped == true
+                ? Self.suggestionsStoppedNotice : Self.notNowExplanation + " " + Self.stopSuggestingExplanation)
+                .font(DSFont.footer)
+                .foregroundColor(DSColor.inkMuted.color)
+                .fixedSize(horizontal: false, vertical: true)
+                .rendered(Self.actionsFooterIdentifier, renderReporter)
+        }
+        .rendered(Self.actionsIdentifier, renderReporter)
     }
 
     private var topicControl: some View {

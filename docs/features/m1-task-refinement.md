@@ -2253,6 +2253,8 @@ Acceptance:
 
 Source pointers (baseline above): `docs/architecture/m1-contracts.md:139`, `AGENTS.md:45`, `core/src/providers/contracts/mod.rs:1`, `core/src/providers/contracts/dispatch.rs:154`, `core/src/providers/contracts/request.rs:197`.
 
+**Amended (coordinator, 2026-10-20, after PR #317 round 1).** U06b now also depends on F30. Revocation must not trust a pre-read: a capture committed between the pre-read and the revoke is retired without ever being shown (review thread r4326522427). After the revoke, the screen shows the jobs that F30's `jobs_retired_by_revocation` lists for that version, and offers requeue from that list. The list is durable, so it is the same after a relaunch, and it pages instead of refusing more than 100 jobs. The pre-read may stay as a preview before the person confirms, but the result shown afterwards comes from the durable list. Add a real-core regression that queues a capture in the existing `beforeRevokeProfile` seam and shows that job in the result. U06b's owned paths do not change.
+
 Contributes to original U06 criteria: 1, 2.
 
 ### L05a
@@ -3121,6 +3123,14 @@ Acceptance:
 5. Stability evidence: the test passes 50 times in a row in one exact-head run. Add a temporary repeat loop or `-test-iterations 50` to a CI step, link that run, then remove the loop and link the normal exact-head run.
 6. Exact-head macOS run linked, as with any native change.
 
+
+**Amended (coordinator, 2026-10-20, after the first attempt blocked).** The worker could not make the test fail: 50 of 50 runs of the test alone, 40 runs of the class and 3 full-suite runs all passed, and it ruled out the four candidates above by reading the code. What the test does differently from the coordinator tests is that its pass runs the app's real effectful steps (reset resume, reminders through the real notification adapter, prompt eligibility). The product bounds each step at 30 seconds (`LifecycleCoordinator.runBounded`), and the test waits 10 seconds for the whole pass. In the failing run, earlier stages had already stalled for about 3.7 seconds. A slow step under runner load leaves `finishedPassCount` at 0 and `lastReport` nil when the 10 seconds run out, which is exactly the failure that was recorded. That is the leading cause, and it is a test-design cause (acceptance 3), not a lost request. Acceptance 1 still needs evidence, and the following is enough:
+
+- On a diagnostic branch, show that one slow effectful step (an injected action that takes longer than the wait) reproduces the recorded signature: the wait at the `reconciled` line fails, `finishedPassCount` is 0 and `lastReport` is nil. Link the run.
+- Measure what the real steps cost in this test: time each effectful step across the 50-iteration run and report the distribution (median, max). Wrapping the real actions through `setAction` is enough. If the durations cannot be observed that way, F27 may add one additive, read-only field to `LifecyclePassReport` in `ios/Services/Assembly/LifecycleCoordinator.swift` holding per-step elapsed time. Nothing else in that file changes.
+
+The fix: this test checks that `AppServices` wires the time-zone callback to one `.systemTimeChange` pass. It installs recording actions for `.reset`, `.reminders` and `.promptEligibility` with `lifecycle.setAction`, as `TimeChangeCoordinatorTests` does, so the pass no longer depends on how fast the runner is. Every assertion it makes today stays, and the recorded steps are also asserted (each ran once, for `.systemTimeChange`). The PR names the tests that still cover the real steps on the time-change path (for example `TimeChangeRealCoreTests` and `LifecycleCoordinatorTests`). If something is not covered, it adds that coverage under `ios/Tests/TimeChangeCoordinator/`. Acceptance 3 (no fixed sleep proving a negative), 4 (no raised timeout) and 5 (50 in a row on the fixed test) are unchanged.
+
 ### F28
 
 Resolve clock times in reminder phrases so explicit reminders are scheduled
@@ -3182,3 +3192,22 @@ Acceptance:
    - an unhedged "Remind me Friday at 3 p.m." still scheduling.
 4. No other intent rule changes. Every existing apply and fast-path test passes unchanged.
 5. `make check` and `make test` pass. The coordinator's live rerun must show `date-ambiguous-maybe-friday` matching for both Claude models.
+
+### F30
+
+Report every job a profile revocation retires, durably
+
+U06b's revocation screen read the jobs pinned to a profile version, then revoked it, as two separate core commands. A capture committed between them is pinned to that version (`resolve_profile_pin`, `core/src/interpretation/enqueue/mod.rs:51`). The revoke transaction then retires it as `profile_revoked`, but no read can show it: `jobs_pinned_to_profile` lists only queued and running work (`core/src/jobs/configuration/mod.rs`), the `revoke_profile` answer carries only `profile_version` (`core/src/ffi/job_configuration.rs:213`), and nothing lists cancelled jobs by reason. The screen can therefore say no work was pending while it retired a real job, and that job has no visible requeue path, which breaks U06b acceptance 1 and 2 (PR #317, review thread r4326522427).
+
+The fix is one durable read of what a revocation retired. It needs no change to the revoke answer. Once revocation commits, `resolve_profile_pin` refuses a revoked version in the same transaction as the enqueue, so after the revoke the set of jobs retired by revoking version V is final. Reading it after the revoke is exact, and it survives a relaunch.
+
+Owned paths: `core/src/jobs/configuration/`, `core/tests/job_configuration/`, `core/src/ffi/job_configuration.rs` and its `tests.rs`, `ios/OhAndCoreBridge/CoreHandle+JobConfiguration.swift`, `ios/Services/JobConfiguration/`, `ios/Services/Authentication/PrivateReadGate.swift` (one gate entry for the new read), `ios/Tests/JobConfiguration/`.
+
+Dependencies: none beyond landed work (A07).
+
+Acceptance:
+
+1. Core: a read-only `jobs_retired_by_revocation(profile_version, limit, after)` that lists jobs pinned to that version and retired with failure reason `profile_revoked`, in a stable order. Each entry has `job_id`, `item_id`, `retired_at` and `requeued_to` (the replacement job from `job_requeues`, or null). The answer includes `total`, `truncated` and a cursor for the next page, and `limit` is capped at `MAX_LISTED_JOBS`. An unknown version fails with the existing normalized `not_found`. A version that is not revoked answers an empty list. Core tests: a job queued before the revoke and a job running at the revoke are both listed; a capture enqueued after the revoke is not pinned to that version and is not listed; a requeue shows its `requeued_to` link; the list is the same after the database is closed and reopened; paging over more than one page returns each job exactly once.
+2. FFI and bridge: a new gated stored-state command with that request and answer, documented in the module comment, with failures normalized like the existing commands. `revoke_profile`'s answer does not change.
+3. Services: `JobConfigurationService` exposes the read. `CoreJobConfigurationClient` counts it as a stored-state read, and `PrivateReadGate` issues it like `startJobsPinnedToProfile`. Tests: an unauthenticated read is refused at the gate, and in a real-core integration test a job queued in the window between a pre-read and the revoke appears in the post-revoke list.
+4. `make check`, `make test` and an exact-head macOS run linked.
