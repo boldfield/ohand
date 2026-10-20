@@ -20,10 +20,12 @@ final class AppServicesTests: XCTestCase {
 
     override func tearDownWithError() throws {
         created.forEach { $0.shutDown() }
+        // A core read issued before the shutdown completes on its own queue; wait for it and for its buffer to be freed.
+        let pending = created
         created = []
-        // A core read issued before the shutdown completes on its own queue; give its buffer time to be freed.
         let deadline = Date().addingTimeInterval(5)
-        while CoreHandle.liveResultBufferCount != baselineBuffers, Date() < deadline {
+        while pending.contains(where: { $0.homeRecents.readsInFlight > 0 })
+            || CoreHandle.liveResultBufferCount != baselineBuffers, Date() < deadline {
             RunLoop.current.run(until: Date().addingTimeInterval(0.01))
         }
         XCTAssertEqual(CoreHandle.liveHandleCount, baselineHandles, "every core handle is closed")

@@ -179,6 +179,16 @@ final class HomeRecentsModel: ObservableObject {
 
     // MARK: Reads
 
+    /// Reads started and not yet returned. A cancelled task still waits for the core's answer, so shutdown cannot end
+    /// them at once; tests wait for this to reach zero before checking that nothing leaked.
+    private(set) var readsInFlight = 0
+
+    private func readPage(cursor: String?) async throws -> CoreRecentItemsPage {
+        readsInFlight += 1
+        defer { readsInFlight -= 1 }
+        return try await source.readPage(cursor: cursor)
+    }
+
     var canLoadMore: Bool { nextCursor != nil }
 
     func loadFirstPage() {
@@ -196,7 +206,7 @@ final class HomeRecentsModel: ObservableObject {
         // The task may have been cancelled before it first ran; no read starts then.
         guard !Task.isCancelled, startedIn == generation else { return }
         do {
-            let page = try await source.readPage(cursor: nil)
+            let page = try await readPage(cursor: nil)
             guard startedIn == generation, source.isAuthenticated else { return }
             merge(firstPage: page)
             isLoadingFirstPage = false
@@ -226,7 +236,7 @@ final class HomeRecentsModel: ObservableObject {
     private func performMore(cursor: String, startedIn: Int) async {
         guard !Task.isCancelled, startedIn == generation else { return }
         do {
-            let page = try await source.readPage(cursor: cursor)
+            let page = try await readPage(cursor: cursor)
             guard startedIn == generation, source.isAuthenticated else { return }
             let known = Set(loadedItems.map(\.itemID))
             loadedItems += page.items.filter { !known.contains($0.itemID) }
@@ -295,7 +305,7 @@ final class HomeRecentsModel: ObservableObject {
                 guard let self, !Task.isCancelled, startedIn == self.generation, !self.justSaved.isEmpty else { break }
                 delay = min(delay * 2, Self.longestPollDelay)
                 do {
-                    let page = try await self.source.readPage(cursor: nil)
+                    let page = try await self.readPage(cursor: nil)
                     guard startedIn == self.generation, self.source.isAuthenticated else { break }
                     self.merge(firstPage: page)
                 } catch {
@@ -314,7 +324,7 @@ final class HomeRecentsModel: ObservableObject {
         let startedIn = generation
         guard !Task.isCancelled else { return }
         do {
-            let page = try await source.readPage(cursor: nil)
+            let page = try await readPage(cursor: nil)
             guard startedIn == generation, source.isAuthenticated else { return }
             merge(firstPage: page)
             justSaved.removeValue(forKey: itemID)
