@@ -206,6 +206,17 @@ actor ResetService {
         return await finish(from: progress)
     }
 
+    /// Whether the native side still owes reset work: a tap whose request is recorded, or cleanup, temporaries or a
+    /// credential choice marked outstanding. A marker that cannot be read counts as owed. Starts and changes nothing.
+    func hasUnfinishedNativeWork() -> Bool {
+        do {
+            if try markers.request() != nil { return true }
+        } catch {
+            return true
+        }
+        return (try? markers.isCleanupOutstanding()) ?? true
+    }
+
     /// Steps 4 to 11 for a recorded request, with the boundary held. The request stays recorded, and the boundary held,
     /// until the core has started a generation for it and the choice is carried over.
     private func performRequestedReset(_ recorded: ResetRequest) async -> ResetReport {

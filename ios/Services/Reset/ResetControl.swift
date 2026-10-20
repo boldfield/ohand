@@ -54,6 +54,20 @@ public final class ResetControl: @unchecked Sendable {
         return latest
     }
 
+    /// Whether a reset that has started still owes native work (staged captures, cleanup, export temporaries, a
+    /// credential choice), which the core's own progress does not show. Needs an authenticated read session.
+    public func hasUnfinishedNativeWork() async throws -> Bool {
+        guard session.currentAuthorization() != nil else { throw ResetControlError.notAuthenticated }
+        return await service.hasUnfinishedNativeWork()
+    }
+
+    /// Finishes a reset that has not finished, with the credential choice the user made when starting it and nothing
+    /// new: it starts no further reset. Needs an authenticated read session when called from the screen.
+    public func finishPending() async throws -> ResetOutcome {
+        guard session.currentAuthorization() != nil else { throw ResetControlError.notAuthenticated }
+        return await resumeInterrupted()
+    }
+
     /// Finishes an interrupted reset. Needs no session: it only completes what the user already confirmed.
     func resumeInterrupted() async -> ResetOutcome {
         Self.outcome(of: await service.resume())
