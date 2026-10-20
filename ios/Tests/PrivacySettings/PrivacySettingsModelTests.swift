@@ -325,8 +325,8 @@ final class PrivacySettingsModelTests: XCTestCase {
         XCTAssertEqual(controls.profileRevocations, ["hosted-v1"])
         XCTAssertTrue(model.queuedWork.isEmpty, "the queue shown is the one read back after the revocation")
         guard case .changed(let message) = model.actionState else { return XCTFail("expected changed") }
-        XCTAssertTrue(message.contains("1 job retired"), message)
-        XCTAssertEqual(model.retiredWork.map(\.jobs.first?.jobID), ["job-1"], "the retired job stays open to a deliberate move")
+        XCTAssertTrue(message.contains("1 job was pending just before and is no longer listed"), message)
+        XCTAssertEqual(model.unlistedWork.map(\.jobs.first?.jobID), ["job-1"], "the unlisted job stays open to a deliberate move")
         model.proposeRevokeProfile(profileVersion: "old-v1")
         XCTAssertNil(model.change, "an already revoked version is not offered")
     }
@@ -415,7 +415,7 @@ final class PrivacySettingsModelTests: XCTestCase {
         XCTAssertTrue(model.queuedWork.isEmpty)
     }
 
-    func testARevokedVersionsRetiredWorkCanBeMovedOnPurposeAfterwards() async throws {
+    func testARevokedVersionsUnlistedWorkCanBeMovedOnPurposeAfterwards() async throws {
         let (model, controls) = makeModel()
         controls.pinned["hosted-v1"] = JobConfigurationPinnedJobs(
             jobs: [
@@ -427,9 +427,10 @@ final class PrivacySettingsModelTests: XCTestCase {
         controls.duringRevokeProfile = { controls.pinned["hosted-v1"] = nil }
         await model.confirmChange(try XCTUnwrap(model.change))
         guard case .changed(let message) = model.actionState else { return XCTFail("expected changed") }
-        XCTAssertTrue(message.contains("2 jobs retired"), message)
-        XCTAssertTrue(message.contains("1 had already been sent"), message)
-        XCTAssertEqual(model.retiredWork.first?.jobs.map(\.jobID), ["job-1", "job-2"])
+        XCTAssertTrue(message.contains("2 jobs were pending just before and are no longer listed"), message)
+        XCTAssertTrue(message.contains("1 had already been sent; a reply that arrives after the revocation is not applied"), message)
+        XCTAssertEqual(model.unlistedWork.first?.jobs.map(\.jobID), ["job-1", "job-2"])
+        XCTAssertEqual(model.unlistedWork.first?.jobs.map(\.requestSent), [false, true])
 
         model.proposeRequeue(jobID: "job-2", toProfileVersion: "private-v1")
         let shown = try XCTUnwrap(model.requeueProposal)
@@ -439,7 +440,7 @@ final class PrivacySettingsModelTests: XCTestCase {
         XCTAssertEqual(model.requeueProposal, shown, "a revoked target is not proposed")
         await model.confirmRequeue(shown)
         XCTAssertEqual(controls.requeues.last, ["job-2", shown.newJobID, "private-v1"])
-        XCTAssertEqual(model.retiredWork.first?.jobs.map(\.jobID), ["job-1"], "a moved job leaves the retired list")
+        XCTAssertEqual(model.unlistedWork.first?.jobs.map(\.jobID), ["job-1"], "a moved job leaves the unlisted work")
     }
 
     func testAnUnreadableRequeueRecordIsShownAsUnreadableAndCanBeReadAgain() async throws {
@@ -660,7 +661,73 @@ final class PrivacySettingsModelTests: XCTestCase {
         XCTAssertEqual(controls.profileRevocations, [], "no revocation without the list of jobs it would retire")
         guard case .failed(let message) = model.actionState else { return XCTFail("expected failed") }
         XCTAssertTrue(message.contains("not revoked"), message)
-        XCTAssertTrue(model.retiredWork.isEmpty)
+        XCTAssertTrue(model.unlistedWork.isEmpty)
+    }
+
+    func testACappedPreReadStopsAProfileRevocationWithNothingChanged() async throws {
+        let (model, controls) = makeModel()
+        // The core lists at most 100 jobs; this version has one more than that.
+        controls.pinned["hosted-v1"] = JobConfigurationPinnedJobs(
+            jobs: [JobConfigurationPinnedJob(jobID: "job-1", itemID: "item-1", status: "queued")],
+            total: PrivacySettingsModel.listedJobLimit + 1, truncated: true)
+        await model.refresh()
+        model.proposeRevokeProfile(profileVersion: "hosted-v1")
+        await model.confirmChange(try XCTUnwrap(model.change))
+        XCTAssertEqual(controls.profileRevocations, [], "no revocation while some of the work it would retire cannot be listed")
+        guard case .failed(let message) = model.actionState else { return XCTFail("expected failed, got \(String(describing: model.actionState))") }
+        XCTAssertTrue(message.contains("101 jobs pending"), message)
+        XCTAssertTrue(message.contains("at most 100"), message)
+        XCTAssertTrue(message.contains("was not revoked"), message)
+        XCTAssertTrue(model.unlistedWork.isEmpty)
+        XCTAssertNil(model.change)
+        XCTAssertEqual(model.phase, .loaded)
+        XCTAssertEqual(model.queuedWork.map(\.version.profileVersion), ["hosted-v1"], "the version and its work stay on screen")
+        model.proposeRevokeProfile(profileVersion: "hosted-v1")
+        XCTAssertNotNil(model.change, "the version is still unrevoked and can be asked about again")
+    }
+
+    func testAJobThatEndedBetweenTheTwoReadsIsNotCalledRetiredAndTheCoresRefusalOfItsMoveIsShown() async throws {
+        let (model, controls) = makeModel()
+        controls.pinned["hosted-v1"] = JobConfigurationPinnedJobs(
+            jobs: [
+                JobConfigurationPinnedJob(jobID: "job-1", itemID: "item-1", status: "queued"),
+                JobConfigurationPinnedJob(jobID: "job-2", itemID: "item-2", status: "running"),
+            ], total: 2, truncated: false)
+        await model.refresh()
+        model.proposeRevokeProfile(profileVersion: "hosted-v1")
+        // job-2's reply is applied in the moment before the revocation runs, so the core retires only job-1. Its
+        // listing afterwards shows neither and does not say which was which.
+        controls.duringRevokeProfile = { controls.pinned["hosted-v1"] = nil }
+        await model.confirmChange(try XCTUnwrap(model.change))
+        guard case .changed(let message) = model.actionState else { return XCTFail("expected changed") }
+        XCTAssertTrue(message.contains("2 jobs were pending just before and are no longer listed"), message)
+        XCTAssertTrue(message.contains("keeps its own outcome"), message)
+        XCTAssertFalse(message.contains("jobs retired"), "the screen does not call a job retired that may have ended: \(message)")
+        XCTAssertFalse(message.contains("does not change the note"), "a reply applied before the revocation changed it: \(message)")
+        XCTAssertEqual(
+            model.unlistedWork.first?.jobs,
+            [
+                PrivacyUnlistedJob(jobID: "job-1", itemID: "item-1", requestSent: false),
+                PrivacyUnlistedJob(jobID: "job-2", itemID: "item-2", requestSent: true),
+            ])
+        let rows = (model.unlistedWork.first?.jobs ?? []).map(PrivacySettingsText.unlistedJob)
+        for row in rows {
+            XCTAssertTrue(row.contains("no longer listed"), row)
+            XCTAssertTrue(row.contains("unless it ended in that moment"), row)
+            XCTAssertFalse(row.contains("retired (provider revoked)"), row)
+        }
+        XCTAssertTrue(rows[1].contains("was running (request already sent) just before"), rows[1])
+
+        // Only the core knows which it was: it refuses to move a job that had ended, and the screen shows that refusal.
+        model.proposeRequeue(jobID: "job-2", toProfileVersion: "private-v1")
+        controls.requeueResult = .failure(JobConfigurationError.refused)
+        await model.confirmRequeue(try XCTUnwrap(model.requeueProposal))
+        guard case .failed(let refusal) = model.actionState else { return XCTFail("expected failed") }
+        XCTAssertTrue(refusal.contains("had already ended"), refusal)
+        XCTAssertNil(model.requeueProposal, "a refusal ends the question")
+        XCTAssertEqual(
+            model.unlistedWork.first?.jobs.map(\.jobID), ["job-1", "job-2"],
+            "the core did not say why it refused, so the job is not dropped as if it had been moved")
     }
 
     func testHeldWorkNoticeDoesNotNameRoutesAsHoldingJobsItCannotAttributeToThem() {

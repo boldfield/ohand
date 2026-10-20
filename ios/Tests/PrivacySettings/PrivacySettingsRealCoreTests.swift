@@ -61,6 +61,9 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
     private var sender: PrivacyUnreachableSender!
     /// When set, the root sends through this instead: it holds each request until released, then answers it validly.
     private var heldSender: PrivacyHeldReplySender?
+    /// When set, the model's controls run this just before the core's profile revocation, so a test can put a real
+    /// completion in the moment between the screen's pre-read and the revocation.
+    private var beforeRevokeProfile: (@MainActor () async -> Void)?
     private var searchModule: RetrievalSearchModule!
 
     override func setUpWithError() throws {
@@ -115,7 +118,22 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         root = built.root
         coordinator = built.coordinator
         searchModule = built.search
-        return PrivacySettingsModel.assembled(root: root)
+        guard let beforeRevokeProfile else { return PrivacySettingsModel.assembled(root: root) }
+        // The production controls over the real root, with the one seam the test needs.
+        let liveRoot: ServiceCompositionRoot = root
+        let services = PrivacySettingsServices(
+            providers: liveRoot.providerConfiguration, jobs: liveRoot.jobConfiguration,
+            itemStatus: { [weak liveRoot] itemID, completion in
+                guard let liveRoot else {
+                    completion(.failure(CoreFailure(
+                        errorClass: .unauthorized, code: "read_not_authenticated", message: "the app has closed")))
+                    return
+                }
+                liveRoot.itemStatus(itemID: itemID, completion: completion)
+            })
+        return PrivacySettingsModel(
+            controls: PrivacyInterposedControls(real: services, beforeRevokeProfile: beforeRevokeProfile),
+            readScope: { [weak liveRoot] in liveRoot?.readScope ?? .captureOnly })
     }
 
     private func execute(_ statement: String) {
@@ -396,11 +414,12 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         model.proposeRevokeProfile(profileVersion: version)
         await model.confirmChange(try XCTUnwrap(model.change))
         guard case .changed(let message) = model.actionState else { return XCTFail("expected changed, got \(String(describing: model.actionState))") }
-        XCTAssertTrue(message.contains("1 job retired"), message)
-        XCTAssertTrue(message.contains("1 had already been sent"), message)
+        XCTAssertTrue(message.contains("1 job was pending just before and is no longer listed"), message)
+        XCTAssertTrue(message.contains("1 had already been sent; a reply that arrives after the revocation is not applied"), message)
         XCTAssertEqual(jobStatus(), "cancelled")
         XCTAssertEqual(scalar("SELECT failure_reason FROM jobs LIMIT 1"), "profile_revoked")
-        XCTAssertEqual(model.retiredWork.first?.jobs.map(\.jobID), [jobID], "the retired job stays open to an explicit move")
+        XCTAssertEqual(model.unlistedWork.first?.jobs.map(\.jobID), [jobID], "the retired job stays open to an explicit move")
+        XCTAssertEqual(model.unlistedWork.first?.jobs.map(\.requestSent), [true])
         XCTAssertTrue(model.queuedWork.isEmpty)
 
         held.release()
@@ -427,7 +446,7 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         model.proposeRevokeProfile(profileVersion: version)
         await model.confirmChange(try XCTUnwrap(model.change))
         guard case .changed(let message) = model.actionState else { return XCTFail("expected changed") }
-        XCTAssertTrue(message.contains("1 job retired"), message)
+        XCTAssertTrue(message.contains("1 job was pending just before and is no longer listed"), message)
         XCTAssertEqual(scalar("SELECT failure_reason FROM jobs WHERE job_id = '\(jobID)'"), "profile_revoked")
         XCTAssertTrue(model.queuedWork.isEmpty)
 
@@ -449,6 +468,118 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         let repeated = try await root.jobConfiguration.requeue(jobID: jobID, newJobID: shown.newJobID, toProfileVersion: other)
         XCTAssertEqual(repeated.jobID, record.newJobID, "repeating the same action answers the same replacement")
         XCTAssertEqual(scalar("SELECT COUNT(*) FROM job_requeues"), "1")
+    }
+
+    func testAVersionWithMorePendingWorkThanTheCoreListsIsNotRevokedFromTheScreen() async throws {
+        let model = try await makeModel()
+        let version = try await createDispatchableDefault()
+        await model.refresh()
+        model.propose(routeID: "route-personal", capability: "text_interpretation", profileVersion: version)
+        await model.confirm(try XCTUnwrap(model.proposal))
+        try await saveCapture(Self.interpretableText)
+        let jobID = scalar("SELECT job_id FROM jobs LIMIT 1")
+        XCTAssertEqual(scalar("SELECT profile_version || '/' || status FROM jobs WHERE job_id = '\(jobID)'"), "\(version)/queued")
+        // One hundred more queued jobs pinned to the same version, shaped like the real one: one past what the core
+        // lists in any read.
+        let copies = (1...PrivacySettingsModel.listedJobLimit).map { index in
+            "INSERT INTO jobs (job_id, job_schema_version, item_id, job_type, source_revision, profile_version, "
+                + "request_version, status, attempt_count, created_at) SELECT 'synthetic-pending-\(index)', "
+                + "job_schema_version, item_id, job_type, source_revision, profile_version, request_version, 'queued', 0, "
+                + "created_at FROM jobs WHERE job_id = '\(jobID)'"
+        }
+        execute("BEGIN; " + copies.joined(separator: "; ") + "; COMMIT")
+        let listed = try await root.jobConfiguration.jobsPinned(toProfile: version)
+        XCTAssertEqual(listed.total, PrivacySettingsModel.listedJobLimit + 1)
+        XCTAssertTrue(listed.truncated, "the core's listing is capped below the pending work")
+        XCTAssertEqual(listed.jobs.count, PrivacySettingsModel.listedJobLimit)
+
+        await model.refresh()
+        model.proposeRevokeProfile(profileVersion: version)
+        await model.confirmChange(try XCTUnwrap(model.change))
+        guard case .failed(let message) = model.actionState else {
+            return XCTFail("expected failed, got \(String(describing: model.actionState))")
+        }
+        XCTAssertTrue(message.contains("101 jobs pending"), message)
+        XCTAssertTrue(message.contains("at most 100"), message)
+        XCTAssertTrue(message.contains("was not revoked"), message)
+        XCTAssertEqual(
+            scalar("SELECT COUNT(*) FROM provider_profiles WHERE profile_version = '\(version)' AND revoked_at IS NULL"), "1",
+            "the version is not revoked")
+        XCTAssertEqual(
+            scalar("SELECT COUNT(*) FROM jobs WHERE status = 'queued' AND profile_version = '\(version)'"), "101",
+            "no job was retired")
+        XCTAssertTrue(model.unlistedWork.isEmpty)
+        XCTAssertNil(model.change)
+        XCTAssertEqual(model.phase, .loaded, "the app stays usable")
+        XCTAssertEqual(model.queuedWork.first?.jobs.total, 101, "the screen still shows the version's pending work")
+        XCTAssertEqual(try XCTUnwrap(model.listing?.profiles.first?.versions.first).revoked, false)
+
+        // Once the pending work fits the core's listing, the same revocation goes through and every job it retires is
+        // listed and stays movable.
+        execute("DELETE FROM jobs WHERE job_id LIKE 'synthetic-pending-%' AND job_id <> 'synthetic-pending-1'")
+        model.proposeRevokeProfile(profileVersion: version)
+        await model.confirmChange(try XCTUnwrap(model.change))
+        guard case .changed(let changed) = model.actionState else {
+            return XCTFail("expected changed, got \(String(describing: model.actionState))")
+        }
+        XCTAssertTrue(changed.contains("2 jobs were pending just before and are no longer listed"), changed)
+        XCTAssertEqual(scalar("SELECT COUNT(*) FROM jobs WHERE failure_reason = 'profile_revoked'"), "2")
+        XCTAssertEqual(Set(model.unlistedWork.first?.jobs.map(\.jobID) ?? []), [jobID, "synthetic-pending-1"])
+    }
+
+    func testAJobThatCompletedBetweenTheTwoReadsIsNotCalledRetiredAndTheCoreRefusesItsMove() async throws {
+        let held = PrivacyHeldReplySender(reply: try Self.interpretationReply())
+        heldSender = held
+        defer { held.release() }
+        // In the moment between the screen's pre-read and the core's revocation, the held reply arrives and the core
+        // applies it: the job completes before the revocation runs.
+        beforeRevokeProfile = { [unowned self] in
+            held.release()
+            let completed = (try? await self.waitUntil { self.jobStatus() == "completed" }) ?? false
+            XCTAssertTrue(completed, "the reply was applied before the revocation: \(self.jobStatus())")
+        }
+        let (model, version) = try await startHeldRequest(held)
+        let jobID = scalar("SELECT job_id FROM jobs LIMIT 1")
+        let other = try await createDispatchableProfile("other", makeDefault: false)
+        await model.refresh()
+
+        model.proposeRevokeProfile(profileVersion: version)
+        await model.confirmChange(try XCTUnwrap(model.change))
+        guard case .changed(let message) = model.actionState else {
+            return XCTFail("expected changed, got \(String(describing: model.actionState))")
+        }
+        XCTAssertEqual(jobStatus(), "completed", "the core left the completed job alone")
+        XCTAssertEqual(scalar("SELECT COUNT(*) FROM jobs WHERE failure_reason = 'profile_revoked'"), "0")
+        XCTAssertNotEqual(scalar("SELECT COUNT(*) FROM proposals"), "0", "the reply that arrived before the revocation was applied")
+        XCTAssertEqual(scalar("SELECT processing_state FROM items LIMIT 1"), "processed")
+        XCTAssertEqual(
+            scalar("SELECT COUNT(*) FROM provider_profiles WHERE profile_version = '\(version)' AND revoked_at IS NOT NULL"), "1")
+        // The screen's two listings cannot tell a job the revocation retired from one that ended in that moment, and
+        // the screen says neither.
+        XCTAssertTrue(message.contains("1 job was pending just before and is no longer listed"), message)
+        XCTAssertTrue(message.contains("keeps its own outcome"), message)
+        XCTAssertTrue(message.contains("1 had already been sent"), message)
+        XCTAssertFalse(message.contains("job retired"), "the screen does not call a completed job retired: \(message)")
+        XCTAssertFalse(message.contains("does not change the note"), "its reply did change the note: \(message)")
+        let unlisted = try XCTUnwrap(model.unlistedWork.first?.jobs.first)
+        XCTAssertEqual(unlisted.jobID, jobID)
+        XCTAssertTrue(unlisted.requestSent)
+        let row = PrivacySettingsText.unlistedJob(unlisted)
+        XCTAssertTrue(row.contains("was running (request already sent) just before the revocation and is no longer listed"), row)
+        XCTAssertTrue(row.contains("unless it ended in that moment"), row)
+        XCTAssertFalse(row.contains("retired (provider revoked)"), row)
+
+        // The core is the only authority on which it was: it refuses to move a job that had ended, and the screen
+        // shows that refusal instead of a move.
+        model.proposeRequeue(jobID: jobID, toProfileVersion: other)
+        await model.confirmRequeue(try XCTUnwrap(model.requeueProposal, "the unlisted job is offered a move"))
+        guard case .failed(let refusal) = model.actionState else {
+            return XCTFail("expected the core's refusal, got \(String(describing: model.actionState))")
+        }
+        XCTAssertTrue(refusal.contains("had already ended"), refusal)
+        XCTAssertEqual(scalar("SELECT COUNT(*) FROM job_requeues"), "0", "nothing was moved")
+        XCTAssertEqual(jobStatus(), "completed")
+        XCTAssertNil(model.requeueProposal, "a refusal ends the question")
     }
 
     func testRepinMovesNothingWithoutAnApprovedProviderThenMovesWaitingWorkOnceOneIsSelected() async throws {
@@ -564,6 +695,54 @@ final class PrivacySettingsRealCoreTests: XCTestCase {
         let work = try XCTUnwrap(model.routes.first { $0.routeID == "route-work" })
         XCTAssertTrue(work.grantedCapabilities.isEmpty)
     }
+}
+
+/// The production controls over the real root with one seam: work run just before the core's profile revocation, so a
+/// test can put a real completion in the moment between the screen's pre-read and the revocation. Every call reaches
+/// the real core unchanged.
+private final class PrivacyInterposedControls: PrivacySettingsControlling, @unchecked Sendable {
+    private let real: PrivacySettingsServices
+    private let beforeRevokeProfile: @MainActor () async -> Void
+
+    init(real: PrivacySettingsServices, beforeRevokeProfile: @escaping @MainActor () async -> Void) {
+        self.real = real
+        self.beforeRevokeProfile = beforeRevokeProfile
+    }
+
+    func listRoutePolicy() async throws -> [RoutePolicyRoute] { try await real.listRoutePolicy() }
+    func listProfiles() async throws -> ProviderProfileListAnswer { try await real.listProfiles() }
+
+    func grant(routeID: String, capability: String, profileVersion: String) async throws
+        -> RoutePolicyChangeOutcome.Disposition
+    {
+        try await real.grant(routeID: routeID, capability: capability, profileVersion: profileVersion)
+    }
+
+    func revoke(routeID: String, capability: String) async throws -> RoutePolicyChangeOutcome.Disposition {
+        try await real.revoke(routeID: routeID, capability: capability)
+    }
+
+    func revokeProfile(_ profileVersion: String) async throws {
+        await beforeRevokeProfile()
+        try await real.revokeProfile(profileVersion)
+    }
+
+    func jobsPinned(toProfile profileVersion: String, limit: Int?) async throws -> JobConfigurationPinnedJobs {
+        try await real.jobsPinned(toProfile: profileVersion, limit: limit)
+    }
+
+    func requeue(jobID: String, newJobID: String, toProfileVersion: String) async throws
+        -> JobConfigurationRequeuedJob
+    {
+        try await real.requeue(jobID: jobID, newJobID: newJobID, toProfileVersion: toProfileVersion)
+    }
+
+    func requeueRecord(forJob jobID: String) async throws -> JobConfigurationRequeueRecord? {
+        try await real.requeueRecord(forJob: jobID)
+    }
+
+    func repinWaitingWork(routeID: String) async throws -> Int { try await real.repinWaitingWork(routeID: routeID) }
+    func itemProcessing(itemID: String) async throws -> PrivacyItemProcessing { try await real.itemProcessing(itemID: itemID) }
 }
 
 /// No request ever leaves the test.

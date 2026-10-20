@@ -25,13 +25,13 @@ struct PrivacySettingsView: View {
     static let requeueRecordUnreadableIdentifier = "privacy-settings.requeue-record-unreadable"
     static let requeueRecordRetryIdentifier = "privacy-settings.requeue-record-retry"
     static let heldWorkIdentifier = "privacy-settings.held-work"
-    static let retiredWorkIdentifier = "privacy-settings.retired-work"
+    static let unlistedWorkIdentifier = "privacy-settings.unlisted-work"
     static let followedWorkIdentifier = "privacy-settings.followed-work"
     static let followedWorkIncompleteIdentifier = "privacy-settings.followed-work-incomplete"
     static let followedWorkCheckAgainIdentifier = "privacy-settings.followed-work-check-again"
     static func followedJobIdentifier(_ job: String) -> String { "privacy-settings.followed-job.\(job)" }
     static func queuedJobIdentifier(_ job: String) -> String { "privacy-settings.queued-job.\(job)" }
-    static func retiredJobIdentifier(_ job: String) -> String { "privacy-settings.retired-job.\(job)" }
+    static func unlistedJobIdentifier(_ job: String) -> String { "privacy-settings.unlisted-job.\(job)" }
     static func revokeIdentifier(_ route: String, _ capability: String) -> String {
         "privacy-settings.revoke.\(route).\(capability)"
     }
@@ -175,7 +175,7 @@ struct PrivacySettingsView: View {
     }
 
     /// Per unrevoked stored version: how much work waits behind it, the option to revoke it, and a deliberate move for
-    /// each listed job to each other unrevoked version.
+    /// each listed job, and each job unlisted since a revocation, to each other unrevoked version.
     @ViewBuilder
     private var queuedWorkSection: some View {
         if model.queuedWorkUnreadable {
@@ -192,20 +192,20 @@ struct PrivacySettingsView: View {
         if !model.queuedWork.isEmpty, !model.routesHoldingWork.isEmpty {
             note(PrivacySettingsText.heldWork(model.routesHoldingWork), identifier: Self.heldWorkIdentifier)
         }
-        if !model.retiredWork.isEmpty {
-            DSGroupedSection(title: PrivacySettingsText.retiredWorkTitle) {
-                ForEach(model.retiredWork, id: \.profileVersion) { retired in
-                    ForEach(retired.jobs, id: \.jobID) { job in
-                        let text = PrivacySettingsText.retiredJob(job)
-                        let identifier = Self.retiredJobIdentifier(job.jobID)
+        if !model.unlistedWork.isEmpty {
+            DSGroupedSection(title: PrivacySettingsText.unlistedWorkTitle) {
+                ForEach(model.unlistedWork, id: \.profileVersion) { unlisted in
+                    ForEach(unlisted.jobs, id: \.jobID) { job in
+                        let text = PrivacySettingsText.unlistedJob(job)
+                        let identifier = Self.unlistedJobIdentifier(job.jobID)
                         DSRow(label: text, iconSystemName: "xmark.bin", showsChevron: false)
                             .reportPrivacyRendered(identifier, text: text)
                             .accessibilityIdentifier(identifier)
-                        moveOffers(jobID: job.jobID, from: retired.profileVersion)
+                        moveOffers(jobID: job.jobID, from: unlisted.profileVersion)
                     }
                 }
             }
-            .accessibilityIdentifier(Self.retiredWorkIdentifier)
+            .accessibilityIdentifier(Self.unlistedWorkIdentifier)
         }
         followedWorkSection
         if let listing = model.listing {

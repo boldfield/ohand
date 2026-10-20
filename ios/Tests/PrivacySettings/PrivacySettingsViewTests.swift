@@ -274,7 +274,7 @@ final class PrivacySettingsViewTests: XCTestCase {
         XCTAssertTrue(controls.requeues.isEmpty, "showing the question moves nothing")
     }
 
-    func testARevokedVersionsRetiredJobsAndTheRequeueRecordAreShown() async throws {
+    func testARevokedVersionsUnlistedJobsAndTheRequeueRecordAreShown() async throws {
         controls.pinned["hosted-v1"] = JobConfigurationPinnedJobs(
             jobs: [JobConfigurationPinnedJob(jobID: "job-1", itemID: "item-1", status: "queued")], total: 1, truncated: false)
         controls.listing = .success(
@@ -297,10 +297,16 @@ final class PrivacySettingsViewTests: XCTestCase {
         }
         await model.confirmChange(try XCTUnwrap(model.change))
         settle()
-        XCTAssertEqual(rendered[PrivacySettingsView.retiredJobIdentifier("job-1")], "Job job-1 · retired (provider revoked)")
-        XCTAssertTrue(rendered[PrivacySettingsView.actionStateIdentifier]?.contains("1 job retired") ?? false)
+        let row = try XCTUnwrap(rendered[PrivacySettingsView.unlistedJobIdentifier("job-1")])
+        XCTAssertEqual(
+            row, PrivacySettingsText.unlistedJob(PrivacyUnlistedJob(jobID: "job-1", itemID: "item-1", requestSent: false)))
+        XCTAssertTrue(row.hasPrefix("Job job-1 · was queued just before the revocation and is no longer listed."), row)
+        XCTAssertTrue(row.contains("retired it unless it ended in that moment"), row)
+        let result = try XCTUnwrap(rendered[PrivacySettingsView.actionStateIdentifier])
+        XCTAssertTrue(result.contains("1 job was pending just before and is no longer listed"), result)
+        XCTAssertFalse(result.contains("job retired"), result)
         let offer = PrivacySettingsView.requeueOfferIdentifier("job-1", "private-v1")
-        XCTAssertNotNil(rendered[offer], "the retired job can be moved on purpose")
+        XCTAssertNotNil(rendered[offer], "the unlisted job can be moved on purpose")
 
         controls.recordResult = .failure(JobConfigurationError.unreadable)
         model.proposeRequeue(jobID: "job-1", toProfileVersion: "private-v1")
@@ -319,5 +325,29 @@ final class PrivacySettingsViewTests: XCTestCase {
         XCTAssertNil(rendered[PrivacySettingsView.requeueRecordUnreadableIdentifier])
         XCTAssertEqual(
             rendered[PrivacySettingsView.requeueRecordIdentifier], PrivacySettingsText.requeueRecord(try XCTUnwrap(model.lastRequeue)))
+    }
+
+    func testACappedPendingListingShowsTheVersionWasNotRevokedAndKeepsItsRow() async throws {
+        controls.pinned["hosted-v1"] = JobConfigurationPinnedJobs(
+            jobs: [JobConfigurationPinnedJob(jobID: "job-1", itemID: "item-1", status: "queued")],
+            total: PrivacySettingsModel.listedJobLimit + 1, truncated: true)
+        await reload([grantedRoute()])
+        XCTAssertEqual(
+            rendered[PrivacySettingsView.queuedVersionIdentifier("hosted-v1")],
+            "hosted · OpenAI · synthetic-model · 101 jobs (showing 1)")
+
+        model.proposeRevokeProfile(profileVersion: "hosted-v1")
+        await model.confirmChange(try XCTUnwrap(model.change))
+        settle()
+        XCTAssertTrue(controls.profileRevocations.isEmpty, "nothing was revoked")
+        let result = try XCTUnwrap(rendered[PrivacySettingsView.actionStateIdentifier])
+        XCTAssertTrue(result.contains("101 jobs pending"), result)
+        XCTAssertTrue(result.contains("was not revoked"), result)
+        XCTAssertNil(rendered[PrivacySettingsView.changeQuestionIdentifier])
+        XCTAssertNil(rendered[PrivacySettingsView.unlistedJobIdentifier("job-1")], "nothing is shown as unlisted")
+        XCTAssertEqual(rendered[PrivacySettingsView.queuedJobIdentifier("job-1")], "Job job-1 · queued")
+        XCTAssertEqual(
+            rendered[PrivacySettingsView.revokeProfileIdentifier("hosted-v1")]?.hasPrefix("Revoke hosted"), true,
+            "the version is still unrevoked and its row stays")
     }
 }

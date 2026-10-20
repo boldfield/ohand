@@ -207,13 +207,28 @@ enum PrivacySettingsText {
         }
     }
 
-    static func profileRevoked(_ versionLabel: String, retired: Int, alreadySent: Int, stillPending: Int) -> String {
-        var message = "Revoked \(versionLabel). \(retired) job\(retired == 1 ? "" : "s") retired and not moved to another provider."
+    /// The result of a profile revocation, from the two listings around it. `unlisted` jobs were pending just before
+    /// and are not listed after: the revocation retired each one still pending when it ran, and one that ended in
+    /// that moment kept its own outcome. The listing does not say which, so this says neither.
+    static func profileRevoked(_ versionLabel: String, unlisted: Int, alreadySent: Int, stillPending: Int) -> String {
+        var message = "Revoked \(versionLabel)."
+        if unlisted == 0 {
+            message += " No work was pending for it."
+        } else if unlisted == 1 {
+            message += " 1 job was pending just before and is no longer listed: the revocation retired it unless it "
+                + "ended in that moment, in which case it keeps its own outcome. Nothing was moved to another provider."
+        } else {
+            message += " \(unlisted) jobs were pending just before and are no longer listed: the revocation retired "
+                + "each one still pending when it ran; one that ended in that moment keeps its own outcome. Nothing "
+                + "was moved to another provider."
+        }
         if alreadySent > 0 {
-            message += " \(alreadySent) had already been sent; a reply to it does not change the note."
+            message += " \(alreadySent) had already been sent; a reply that arrives after the revocation is not applied."
         }
         if stillPending > 0 { message += " The core still lists \(stillPending) as pending; check Queued work." }
-        if retired > 0 { message += " Each can be moved on purpose below." }
+        if unlisted > 0 {
+            message += " Each can be moved on purpose below; the core refuses a move for a job that had ended."
+        }
         return message
     }
 
@@ -221,9 +236,18 @@ enum PrivacySettingsText {
         "The work queued for \(versionLabel) could not be read, so it was not revoked. Nothing was changed; try again."
     }
 
-    static func profileRevokedUnread(_ versionLabel: String) -> String {
-        "Revoked \(versionLabel). The work that was waiting for it could not be read back; its jobs are retired by "
-            + "the core and not moved."
+    /// A pre-read the core capped: the work beyond the listing could not be shown or moved after a revocation.
+    static func profileRevokeNotListed(_ versionLabel: String, pending: Int) -> String {
+        "\(versionLabel) has \(pending) jobs pending, and this screen can list at most "
+            + "\(PrivacySettingsModel.listedJobLimit) of them. Revoking it now would retire work that could not be "
+            + "shown or moved afterwards, so it was not revoked. Nothing was changed. Move some of that work to another "
+            + "provider, or let it finish, then try again."
+    }
+
+    static func profileRevokedUnread(_ versionLabel: String, pendingBefore: Int) -> String {
+        "Revoked \(versionLabel). The work that was waiting for it could not be read back. The core retired every job "
+            + "still pending when the revocation ran; the \(pendingBefore) listed just before \(pendingBefore == 1 ? "is" : "are") "
+            + "offered a move below, which the core refuses for a job it did not retire."
     }
 
     static func repinResult(moved: Int, routeLabel: String, moreMayWait: Bool = false) -> String {
@@ -238,9 +262,16 @@ enum PrivacySettingsText {
     static let heldWorkNotice =
         "Queued work is listed by provider version, not by route. A route that does not allow sorting text notes "
         + "holds its work instead of sending it: "
-    static let retiredWorkTitle = "Retired work"
+    static let unlistedWorkTitle = "No longer listed since a revocation"
     static func heldWork(_ routeLabels: [String]) -> String { heldWorkNotice + routeLabels.joined(separator: ", ") + "." }
-    static func retiredJob(_ job: JobConfigurationPinnedJob) -> String { "Job \(job.jobID) · retired (provider revoked)" }
+
+    /// One job pending just before a profile revocation and not listed after it. Whether the revocation retired it or
+    /// it ended in that moment is known only to the core, which accepts a move only for a job it retired.
+    static func unlistedJob(_ job: PrivacyUnlistedJob) -> String {
+        let before = job.requestSent ? "running (request already sent)" : "queued"
+        return "Job \(job.jobID) · was \(before) just before the revocation and is no longer listed. The revocation "
+            + "retired it unless it ended in that moment; the core accepts a move only for a job it retired."
+    }
     static let requeueRecordUnreadableNotice = "The record of that move could not be read. The move itself was accepted."
     static let requeueRecordRetry = "Read the record again"
 
@@ -275,7 +306,9 @@ enum PrivacySettingsText {
             case .notAuthenticated: return lockedText
             case .invalidRequest: return "That choice is not valid. Nothing was changed."
             case .notFound: return "That job or profile version no longer exists. Nothing was changed."
-            case .refused: return "The change was refused, for example because the target is revoked or not allowed. Nothing was changed."
+            case .refused:
+                return "The change was refused, for example because the target is revoked or not allowed, or because "
+                    + "the job had already ended. Nothing was changed."
             case .core, .unreadable: return "The result was unclear. Check the lists below before trying again."
             }
         }
