@@ -43,6 +43,8 @@ struct ItemControlsSnapshot: Equatable {
     let isDeleted: Bool
     /// The stored lifecycle: `active`, `completed`, `cancelled` or `deleted`.
     var lifecycleState: String = "active"
+    /// Whether the item's history records Stop suggesting. That state is permanent, so a later Not now changes nothing.
+    var suggestionsStopped: Bool = false
 }
 
 /// Which correction a message or pending state is about.
@@ -146,6 +148,9 @@ final class ItemControlsModel: ObservableObject {
         return snapshot.lifecycleState == "active"
     }
 
+    /// Whether Not now and Stop suggesting are offered: the item is open and suggestions are not already stopped.
+    var canQuietSuggestions: Bool { canAct && snapshot?.suggestionsStopped == false }
+
     /// Whether `reload()` is worth offering: the values could not be read again, but the item may still be readable.
     var canReload: Bool { !isWorking && (refreshFailure == .locked || refreshFailure == .unreadable) }
 
@@ -185,7 +190,8 @@ final class ItemControlsModel: ObservableObject {
                 revision: detail.revision, text: detail.text,
                 itemType: detail.itemType.flatMap(ItemCorrectionItemType.init(rawValue:)),
                 sessionTopic: detail.sessionTopic, scope: detail.scope,
-                isDeleted: detail.lifecycleState == "deleted", lifecycleState: detail.lifecycleState)
+                isDeleted: detail.lifecycleState == "deleted", lifecycleState: detail.lifecycleState,
+                suggestionsStopped: detail.history.contains { $0.suggestionControl == "stop_suggesting" })
             let resets = fields.filter { field in
                 guard let sentDraft, sentDraft.field == field else { return true }
                 return draftValue(field) == sentDraft.value
@@ -327,9 +333,10 @@ final class ItemControlsModel: ObservableObject {
     @MainActor func stopSuggesting() async { await perform(.stopSuggesting) }
 
     /// Sends one action against the revision the user saw. Drafts are never touched. The command ID is kept across
-    /// retries of the same action on the same revision, so a repeat after an unknown outcome stores once.
+    /// retries of the same action, so a repeat after an unknown outcome stores once.
     @MainActor private func perform(_ action: ItemLifecycleAction) async {
         guard canAct, let lifecycle, let snapshot else { return }
+        if action == .notNow || action == .stopSuggesting, snapshot.suggestionsStopped { return }
         isWorking = true
         outcome = nil
         let commandID: String

@@ -297,12 +297,43 @@ final class ItemControlsRealCoreTests: XCTestCase {
         XCTAssertEqual(controls.outcome, .actionDone(.stopSuggesting))
         XCTAssertEqual(scalar("SELECT pull_only FROM suggestion_eligibility WHERE item_id = '\(itemID)'"), "1")
         XCTAssertEqual(scalar("SELECT lifecycle_state FROM items WHERE item_id = '\(itemID)'"), "active")
-        XCTAssertTrue(controls.canAct, "the item stays open, so the controls stay available")
+        XCTAssertTrue(controls.canAct, "the item stays open, so completing and cancelling stay available")
+        XCTAssertEqual(controls.snapshot?.suggestionsStopped, true)
+        XCTAssertFalse(controls.canQuietSuggestions, "Not now is not offered once suggestions are stopped")
+        onMain { await controls.notNow() }
+        XCTAssertEqual(controls.outcome, .actionDone(.stopSuggesting), "a refused Not now writes nothing new")
+        XCTAssertEqual(scalar("SELECT COALESCE(snoozed_until, '') FROM suggestion_eligibility WHERE item_id = '\(itemID)'"), "")
         XCTAssertNotNil(try readDetail(itemID), "the item is still retrievable")
 
         root.shutDown()
         root = try makeRoot()
         XCTAssertEqual(scalar("SELECT pull_only FROM suggestion_eligibility WHERE item_id = '\(itemID)'"), "1", "survives relaunch")
+        let relaunched = ItemControlsModel.assembled(itemID: itemID, root: root, onCorrected: {})
+        onMain { await relaunched.load() }
+        XCTAssertFalse(relaunched.canQuietSuggestions, "the stopped state is read back after a relaunch")
+        XCTAssertTrue(relaunched.canAct)
+    }
+
+    func testTheActionsAndTheirExplanationRenderAndAnEndedItemOffersNoneOfThem() throws {
+        let itemID = try saveCapture()
+        let controls = ItemControlsModel.assembled(itemID: itemID, root: root, onCorrected: {})
+        hostControls(controls)
+        settle {
+            controls.snapshot != nil && onScreen.contains(ItemControlsView.actionsIdentifier)
+                && onScreen.contains(ItemControlsView.actionsFooterIdentifier)
+        }
+        XCTAssertTrue(onScreen.contains(ItemControlsView.actionsIdentifier), "the actions section renders")
+        XCTAssertTrue(onScreen.contains(ItemControlsView.actionsFooterIdentifier), "the cooldown/pull-only explanation renders")
+        XCTAssertFalse(onScreen.contains(ItemControlsView.endedNoticeIdentifier))
+        XCTAssertTrue(controls.canAct)
+        XCTAssertTrue(controls.canQuietSuggestions)
+
+        onMain { await controls.complete() }
+        settle { onScreen.contains(ItemControlsView.endedNoticeIdentifier) }
+        XCTAssertTrue(onScreen.contains(ItemControlsView.endedNoticeIdentifier), "the ended notice renders")
+        XCTAssertFalse(controls.canAct)
+        XCTAssertFalse(controls.canQuietSuggestions)
+        XCTAssertEqual(ItemControlsView.message(for: .actionDone(.complete)), "Completed. Any reminder for it was cancelled.")
     }
 
     func testNotNowRecordsACooldownThatIsNotPullOnly() throws {

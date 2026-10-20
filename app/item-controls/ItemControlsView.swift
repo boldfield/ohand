@@ -34,8 +34,11 @@ struct ItemControlsView: View {
     static let stopSuggestingExplanation =
         "Stop suggesting means this item is only shown when you search or open it. "
         + "It stays searchable and any reminder you set for it is kept."
+    static let suggestionsStoppedNotice =
+        "Suggestions are stopped for this item. It is only shown when you search or open it, "
+        + "and any reminder you set for it is kept."
     static let completeCancelExplanation =
-        "Completing or cancelling ends the item and cancels its reminder. Your original is kept."
+        "Completing or cancelling ends the item and cancels any reminder for it. Your original is kept."
 
     static func endedNotice(_ lifecycleState: String) -> String {
         lifecycleState == "completed" ? "This item is completed." : "This item is cancelled."
@@ -66,8 +69,8 @@ struct ItemControlsView: View {
         case .invalid: return "That change could not be saved. Check it and try again."
         case .failed: return "That change could not be saved right now. Try again."
         case .loadFailed: return "This item could not be read right now."
-        case .actionDone(.complete): return "Completed. Its reminder was cancelled."
-        case .actionDone(.cancel): return "Cancelled. Its reminder was cancelled."
+        case .actionDone(.complete): return "Completed. Any reminder for it was cancelled."
+        case .actionDone(.cancel): return "Cancelled. Any reminder for it was cancelled."
         case .actionDone(.notNow): return "Okay. This item will not be suggested for an hour."
         case .actionDone(.stopSuggesting):
             return "Okay. This item will not be suggested again. You can still search for it, and any reminder is kept."
@@ -209,13 +212,14 @@ struct ItemControlsView: View {
                 .fixedSize(horizontal: false, vertical: true)
             Button("Not now") { Task { await model.notNow() } }
                 .buttonStyle(DSPillButtonStyle(style: .secondary))
-                .disabled(!model.canAct)
+                .disabled(!model.canQuietSuggestions)
                 .accessibilityIdentifier(Self.notNowIdentifier)
             Button("Stop suggesting") { Task { await model.stopSuggesting() } }
                 .buttonStyle(DSPillButtonStyle(style: .secondary))
-                .disabled(!model.canAct)
+                .disabled(!model.canQuietSuggestions)
                 .accessibilityIdentifier(Self.stopSuggestingIdentifier)
-            Text(Self.notNowExplanation + " " + Self.stopSuggestingExplanation)
+            Text(model.snapshot?.suggestionsStopped == true
+                ? Self.suggestionsStoppedNotice : Self.notNowExplanation + " " + Self.stopSuggestingExplanation)
                 .font(DSFont.footer)
                 .foregroundColor(DSColor.inkMuted.color)
                 .fixedSize(horizontal: false, vertical: true)
