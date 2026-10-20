@@ -3424,6 +3424,28 @@
         "core/src/reminders/state/mod.rs:535",
         "core/src/interpretation/apply/mod.rs:874"
       ]
+    },
+    {
+      "key": "F29",
+      "parent": null,
+      "title": "Keep a hedged reminder request as one that needs correction instead of dropping it",
+      "file_scope": [
+        "core/src/interpretation/apply/",
+        "core/tests/proposal_application/",
+        "core/src/reminders/state/"
+      ],
+      "intent": "Recognise maybe/perhaps/possibly before a first-person reminder request so it is kept needing correction, never dropped and never scheduled.",
+      "acceptance": [
+        "See the F29 section of m1-task-refinement.md."
+      ],
+      "covers_parent_criteria": [],
+      "depends_on": [
+        "F28"
+      ],
+      "source_pointers": [
+        "core/src/interpretation/apply/mod.rs:2350",
+        "core/src/interpretation/apply/mod.rs:1439"
+      ]
     }
   ],
   "effective_dependencies": {
@@ -4174,7 +4196,10 @@
     "F27": [
       "DS04b"
     ],
-    "F28": []
+    "F28": [],
+    "F29": [
+      "F28"
+    ]
   },
   "retained_dependency_overrides": {
     "V06": [
