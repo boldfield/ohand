@@ -3175,6 +3175,14 @@ Acceptance:
 - Existing tests in `tools/bench/src/report/tests.rs` and `tools/evaluation/comparison/tests.rs` whose asserted outcome changes only because a clock phrase now resolves may be updated under the same rule as `core/tests/`. List each in the PR.
 - CI: the iOS simulator job runs on every PR, including this one, which has no native edits. Its known intermittent failures (`AppServicesTests…SystemTimeZoneCallbackReportsARealChange`, which F27 fixes, and `ManagementPresentationTests`) are not this task's to fix. Rerunning the failed jobs of the exact-head run (`gh run rerun <id> --failed`) is allowed. Nothing may be skipped or disabled. Link the green exact-head run.
 
+
+**Closed by allowlist (coordinator, 2026-10-20, after the Fable round-2 review of PR #323).** Review keeps finding another aside that names a place or zone next to the time, the latest being "Remind me tomorrow at 9 a.m., I will be in Tokyo, to call the roofer". Extending a list of zone and place words cannot converge, because places are unbounded. The guard is closed the same way the offline grammar is (`core/src/interpretation/fast_path/mod.rs`, "Both open ends of the command are closed by allowlists, not by deny-lists"):
+
+- Between the end of the time expression and the start of the task content, only these may appear: nothing, a single comma, `to`, or the closed filler words the fast path already accepts ("please", "thanks"). The same applies in the other order (task first, then the time), between the content and the time expression.
+- Anything else adjacent to the time expression makes the timing ambiguous: kept, needing correction, and never scheduled. That includes a comma clause, a parenthetical, a dash aside, a second clause or any unlisted word, whether or not it names a place. The same holds for text after the time expression when the time comes last.
+- Remove the zone and place word lists that only served to detect asides. Zone qualifiers directly attached to the clock ("EST", "Tokyo time", "UTC+9", acceptance 2) stay ambiguous as before.
+- Tests: the Tokyo aside above, a parenthetical "(I'll be in Lisbon)", a dash aside, an aside with no place ("…, after the meeting, …") — all ambiguous; "tomorrow at 9 a.m. to call the roofer", "tomorrow at 9 a.m., to call the roofer" and "to call the roofer tomorrow at 9 a.m." still schedule. Reviewers should probe the allowlist's boundary, not enumerate places.
+
 ### F29
 
 Keep a hedged reminder request as one that needs correction instead of dropping it
