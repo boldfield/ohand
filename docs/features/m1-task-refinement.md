@@ -3211,3 +3211,66 @@ Acceptance:
 2. FFI and bridge: a new gated stored-state command with that request and answer, documented in the module comment, with failures normalized like the existing commands. `revoke_profile`'s answer does not change.
 3. Services: `JobConfigurationService` exposes the read. `CoreJobConfigurationClient` counts it as a stored-state read, and `PrivateReadGate` issues it like `startJobsPinnedToProfile`. Tests: an unauthenticated read is refused at the gate, and in a real-core integration test a job queued in the window between a pre-read and the revoke appears in the post-revoke list.
 4. `make check`, `make test` and an exact-head macOS run linked.
+
+### F31
+
+Wire the Settings "Erase everything" card to reset, and take reset and export off the Audio screen
+
+The UI design puts "Erase everything" on the Settings root as its own centred `destructive` card, and Export as a row in the second group (`docs/features/m1-ui-design.md`, Settings). The card is on the root (`SettingsRootView`, `ios/AppAssembly/ManagementCatalog.swift`), but it does nothing. Its comment says the reset task (U07c) would wire it, but U07c did not own that file. U07c put "Delete all data" at the bottom of the Audio screen instead (`app/data-settings/RetentionSettingsView.swift`), next to a second "Export a copy of your notes" link. On the maintainer's phone, the card someone would tap to erase everything does nothing, and the working control sits where nobody would look for it.
+
+Owned paths: `ios/AppAssembly/ManagementCatalog.swift`, `ios/Tests/AppAssembly/SettingsRootViewTests.swift`, `app/data-settings/RetentionSettingsView.swift`, `ios/Tests/DataSettings/RetentionSettingsViewTests.swift`.
+
+Dependencies: none beyond landed work (U07c).
+
+Acceptance:
+
+1. Tapping "Erase everything" on the Settings root opens the existing `ResetSettingsView` with `context.retention.resetSettings`, the same way the Export row opens `ExportSettingsView`. When `resetSettings` is nil, the card is not shown, so no control is ever dead. The card keeps the design's look (its own card, centred, `destructive`), and its accessibility identifier stays `management.settings.erase`.
+2. The Audio screen holds only its audio decisions, as the design specifies. The "Delete all data" and "Export a copy of your notes" links are removed from it. Reset and export stay reachable from the Settings root only. `RetentionSettingsModel` keeps its `resetSettings` and `exportSettings` properties, because the root reads them.
+3. Reset behaviour, confirmation and the credential choice are unchanged. This task moves the entry point only.
+4. Hosted view tests: the root card navigates to the reset screen when a reset model is present and is absent when it is not; the Audio screen no longer renders either link. Remove or update the existing tests that asserted those links on the Audio screen; do not weaken any other assertion.
+5. Exact-head macOS run linked. If the DS08 screenshot walkthrough shows the Audio screen, its expected content may change only by the two removed links.
+
+### F32
+
+Open a note's detail when its card on the home screen is tapped
+
+The home screen lists recent captures as cards (DS04b, `app/home/HomeBodyView.swift`), but a card has no action, so tapping a note does nothing. Neither the UI design nor DS04b said a card opens its item, so DS04b was built to spec. It is still a gap: on the maintainer's phone, the home screen is where a person sees a note, and there is no way from there to its detail, correction or deletion. The route already exists. `ManagementNavigationModel.openItem(itemID:)` presents the registered item destination (`SourceDetailScreen`), and asks for authentication first when the session is locked. Notification taps already use it.
+
+Owned paths: `app/home/` and `ios/Tests/HomeRecents/`, plus one closure argument in `ios/AppAssembly/AppRootView.swift`, where `HomeBodyView` is built.
+
+Dependencies: none beyond landed work (DS04b).
+
+Acceptance:
+
+1. Tapping a recent-capture card opens that item's source detail through `navigation.openItem(itemID:)`, passed into `HomeBodyView` as a closure. `app/home/` does not import or reach the navigation model directly. Back returns to the home screen.
+2. The whole card is the tap target. It is one accessibility element with the button trait, and VoiceOver reads its type, date and text. A "Just now · sorting…" card opens the same way.
+3. Placeholder cards and the locked card open nothing. A card does not navigate after a relock has cleared the list.
+4. The UI design's Home section already says a card opens its item (recorded by the coordinator); the task does not edit the design doc.
+5. Hosted view tests: tapping a card calls the closure with that card's item identifier; placeholder and locked states expose no tappable card. Exact-head macOS run linked.
+
+### F33
+
+Refresh home and search after an item changes, so a deleted note disappears from both
+
+Found on the maintainer's phone (2026-10-20). They opened a note from Search and deleted it, and the detail confirmed "Deleted. Nothing of this item remains on this device." Back on the search screen, the same three results were still listed, including the deleted note. On the home screen the deleted note was still listed until something else reloaded the list. Core is correct: the deletion transaction removes the item's readable content and its search-index entry (`core/src/lifecycle/delete_intent/mod.rs`). The screens are stale:
+
+- `RetrievalSearchModel` keeps its rows when the person returns from a result's detail (`screenDidDisappear` / `revalidate`, `app/retrieval/RetrievalSearchModel.swift`). That is deliberate ("coming back finds it"), but nothing re-runs the query when an item changed in the meantime.
+- `HomeRecentsModel` (`app/home/HomeRecentsModel.swift`) reloads only on an access change, a save, an interpretation finishing, "Try again" or paging. A deletion, correction, completion, cancellation or reminder edit made from detail never reaches it.
+
+No signal in the app says that an item changed. `ItemDeletionService.setIntentObserver` exists, but only playback uses it.
+
+The same gap leaves home and search showing old text after a text correction, and an item still active after it was completed or cancelled. This task fixes the whole class, not only deletion.
+
+The detail screen after a deletion also shows two messages: the generic "Not here — This item is not available. It may have been deleted." and the deletion result "Deleted. Nothing of this item remains on this device." Once the person has deleted the item, the screen shows the deletion result only.
+
+Owned paths: a new `ios/Services/Items/Changes/` (the signal), `ios/Services/Assembly/CompositionRoot.swift` (construct it, expose it read-only and connect publishers), and publishing calls only in `ios/Services/Deletion/ItemDeletion/ItemDeletionService.swift`, `ios/Services/Items/Corrections/ItemCorrectionService.swift`, `ios/Services/Items/LifecycleControls/ItemLifecycleControlService.swift`, `ios/Services/Reminders/Controls/ReminderControlService.swift` and `ios/Services/Reset/ResetService.swift`; `app/home/`, `app/retrieval/RetrievalSearchModel.swift`, `app/source-detail/SourceDetailView.swift`; tests under `ios/Tests/HomeRecents/`, `ios/Tests/Retrieval/`, `ios/Tests/ItemChanges/` (new) and the existing tests of those services.
+
+Dependencies: F32, which also edits `app/home/`.
+
+Acceptance:
+
+1. One in-process signal that an item changed. It carries only the item identifier, or "all items" after a completed reset: no text, type or other stored content. It is published after the core reports the outcome as committed, never on a failure or a stale-revision refusal. Every successful item deletion, correction, lifecycle control (complete, cancel, not now, stop suggesting), reminder correction or cancellation, and completed reset publishes it, including changes started from a notification action. Subscribers get it on the main thread.
+2. Home: a deleted item leaves the list as soon as its deletion is recorded, and a changed item is reloaded, so its text, type and state are current when the person returns. A change that arrives while home is locked loads nothing, and the list stays empty until the next unlock, as now. "All items" clears the list and reloads the first page.
+3. Search: when the person returns from a result's detail and an item changed in the meantime, the same query and filters are re-run, so a deleted item is gone and a changed item shows its current text. When nothing changed, the kept results come back unchanged, without a new query, as now. A deleted item is never shown as a result, even while the re-run is in flight. The regular-width item pane behaves the same way.
+4. Detail: after the person deletes the item, the screen shows the deletion result and the back button only, not the "Not here" message as well. Opening an item that was deleted earlier still shows "Not here".
+5. Tests, real core where the read path matters: delete from detail, then home and search no longer list the item; correct text from detail, then home and search show the new text; a stale-revision refusal publishes nothing; a change while locked loads nothing; the signal never carries content. Exact-head macOS run linked.

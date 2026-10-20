@@ -11,8 +11,8 @@ protocol JobConfigurationCore: Sendable {
         completion: @escaping @Sendable (Result<JobConfigurationAnswer, CoreFailure>) -> Void)
 }
 
-/// Runs job-configuration requests over a `CoreHandle`: the production `JobConfigurationCore`. The two reads of stored
-/// state (`jobsPinnedToProfile`, `requeueRecord`) go only through the `PrivateReadGate`, so a capture-only session never
+/// Runs job-configuration requests over a `CoreHandle`: the production `JobConfigurationCore`. The reads of stored
+/// state (`jobsPinnedToProfile`, `jobsRetiredByRevocation`, `requeueRecord`) go only through the `PrivateReadGate`, so a capture-only session never
 /// reaches the core and an answer that arrives after a relock is dropped undecoded. Mutations go straight to the core;
 /// `JobConfigurationService` requires an authenticated session before it sends one. The core answers on its
 /// single event handler, so the owner of that handler must forward every event to `handle(_:)`; it returns `true` when
@@ -63,6 +63,9 @@ final class CoreJobConfigurationClient: JobConfigurationCore, @unchecked Sendabl
             switch command {
             case .jobsPinnedToProfile(let profileVersion, let limit):
                 try gate.startJobsPinnedToProfile(operationID: operationID, profileVersion: profileVersion, limit: limit)
+            case .jobsRetiredByRevocation(let profileVersion, let limit, let after):
+                try gate.startJobsRetiredByRevocation(
+                    operationID: operationID, profileVersion: profileVersion, limit: limit, after: after)
             case .requeueRecord(let jobID):
                 try gate.startRequeueRecord(operationID: operationID, jobID: jobID)
             case .requeueJob, .revokeProfile, .repinWaitingWork:
@@ -82,7 +85,7 @@ final class CoreJobConfigurationClient: JobConfigurationCore, @unchecked Sendabl
 
     private static func isStoredStateRead(_ command: JobConfigurationCommand) -> Bool {
         switch command {
-        case .jobsPinnedToProfile, .requeueRecord: return true
+        case .jobsPinnedToProfile, .jobsRetiredByRevocation, .requeueRecord: return true
         case .requeueJob, .revokeProfile, .repinWaitingWork: return false
         }
     }

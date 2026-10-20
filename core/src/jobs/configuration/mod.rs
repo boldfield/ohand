@@ -79,6 +79,110 @@ pub fn get_jobs_pinned_to_profile(conn: &Connection, profile_version: &str) -> R
     Ok(job_ids)
 }
 
+/// Most jobs one [`jobs_retired_by_revocation`] page returns.
+pub const MAX_LISTED_JOBS: usize = 100;
+
+/// One job a revocation retired. `requeued_to` is the replacement job from `job_requeues`, if the
+/// retired job was requeued afterwards.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RetiredJob {
+    pub job_id: String,
+    pub item_id: String,
+    pub retired_at: String,
+    pub requeued_to: Option<String>,
+}
+
+/// One page of the jobs a revocation retired, with the full count and the cursor of the next page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RetiredJobsPage {
+    pub jobs: Vec<RetiredJob>,
+    pub total: usize,
+    /// Pass as `after` to read the next page; `None` when this page is the last.
+    pub next_cursor: Option<String>,
+}
+
+/// Read-only list of the jobs pinned to `profile_version` and retired with failure reason
+/// `profile_revoked`, ordered by `job_id`. `after` is the cursor of a previous page (the last
+/// `job_id` it returned) and `limit` is capped at [`MAX_LISTED_JOBS`]. `retired_at` is the
+/// profile's `revoked_at`. A version that is unknown or not revoked has an empty list.
+///
+/// Once a profile is revoked no new job is pinned to it, so reading after the revoke is exact and
+/// durable: the set does not change and survives a restart.
+pub fn jobs_retired_by_revocation(
+    conn: &Connection,
+    profile_version: &str,
+    limit: usize,
+    after: Option<&str>,
+) -> Result<RetiredJobsPage> {
+    let limit = limit.clamp(1, MAX_LISTED_JOBS);
+    let revoked_at: Option<String> = conn
+        .query_row(
+            "SELECT revoked_at FROM provider_profiles WHERE profile_version = ?",
+            [profile_version],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("reading profile revocation")?
+        .flatten();
+    let Some(revoked_at) = revoked_at else {
+        return Ok(RetiredJobsPage {
+            jobs: Vec::new(),
+            total: 0,
+            next_cursor: None,
+        });
+    };
+
+    let total: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM jobs WHERE profile_version = ?1 AND status = 'cancelled' \
+             AND failure_reason = ?2",
+            rusqlite::params![profile_version, PROFILE_REVOKED_REASON],
+            |row| row.get(0),
+        )
+        .context("counting jobs retired by revocation")?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT jobs.job_id, jobs.item_id, \
+                    (SELECT new_job_id FROM job_requeues WHERE old_job_id = jobs.job_id) \
+             FROM jobs WHERE profile_version = ?1 AND status = 'cancelled' \
+             AND failure_reason = ?2 AND job_id > ?3 ORDER BY job_id ASC LIMIT ?4",
+        )
+        .context("preparing retired jobs listing")?;
+    let mut jobs = stmt
+        .query_map(
+            rusqlite::params![
+                profile_version,
+                PROFILE_REVOKED_REASON,
+                after.unwrap_or(""),
+                i64::try_from(limit + 1).unwrap_or(i64::MAX)
+            ],
+            |row| {
+                Ok(RetiredJob {
+                    job_id: row.get(0)?,
+                    item_id: row.get(1)?,
+                    retired_at: revoked_at.clone(),
+                    requeued_to: row.get(2)?,
+                })
+            },
+        )
+        .context("listing jobs retired by revocation")?
+        .collect::<Result<Vec<RetiredJob>, _>>()
+        .context("collecting retired jobs")?;
+
+    let next_cursor = if jobs.len() > limit {
+        jobs.truncate(limit);
+        jobs.last().map(|job| job.job_id.clone())
+    } else {
+        None
+    };
+    Ok(RetiredJobsPage {
+        jobs,
+        total: usize::try_from(total).unwrap_or(0),
+        next_cursor,
+    })
+}
+
 /// Get all jobs for a given item that are pinned to a specific profile_version.
 /// Used to check if an item's queued work should be requeued after profile change.
 pub fn get_item_jobs_for_profile(

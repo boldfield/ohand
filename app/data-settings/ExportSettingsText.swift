@@ -15,6 +15,14 @@ enum ExportSettingsText {
     static let audioNote =
         "Audio is left out unless you turn this on. Recordings that no longer exist on this device cannot be included, "
         + "and the export will say how many were left out."
+    static let audioOffFooter = "Audio is left out unless you turn it on."
+    static let audioOnFooter = "Recordings still on this device are included."
+
+    /// The one line under the areas: the missing-choice prompt, or what the audio switch currently means.
+    static func footer(hasScope: Bool, includeAudio: Bool) -> String {
+        guard hasScope else { return noScopeNote }
+        return includeAudio ? audioOnFooter : audioOffFooter
+    }
     static let noScopeNote = "Pick at least one area to export."
     static let lockedText = "Your saved items are locked. Go back and open Settings again to unlock them."
     static let preparingText = "Preparing the export…"
