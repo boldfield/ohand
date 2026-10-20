@@ -300,7 +300,7 @@ fn defect_classes_are_counted_separately_at_both_stages() {
                 "unexpected-abstention",
                 "design-undated-action",
                 synthetic(),
-                json!({ "operation": { "kind": "annotate" }, "abstention": "Ambiguous" }),
+                json!({ "operation": { "kind": "annotate" }, "abstention": { "reason": "Ambiguous" } }),
             ),
         ],
     );

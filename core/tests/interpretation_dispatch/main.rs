@@ -802,7 +802,7 @@ fn a_provider_abstention_is_recorded_as_abstained() {
     fixture.set_up_provider(&profile, ANTHROPIC_ORIGIN);
     let providers = Providers::anthropic(vec![anthropic_reply(json!({
         "operation": { "kind": "annotate" },
-        "abstention": "Ambiguous",
+        "abstention": {"reason": "Ambiguous"},
     }))]);
     let job = fixture.enqueue_and_claim(Some(&profile));
 

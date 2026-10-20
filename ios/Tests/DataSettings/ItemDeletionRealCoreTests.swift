@@ -140,9 +140,11 @@ final class ItemDeletionRealCoreTests: XCTestCase {
     private func makeSourceModel(
         _ root: ServiceCompositionRoot, itemID: String, deletion: ItemDeletionModel
     ) -> SourceDetailModel {
-        SourceDetailModel(
+        let model = SourceDetailModel(
             itemID: itemID, reader: root.itemDetails, opener: root.playback,
-            readScope: { [weak root] in root?.readScope ?? .captureOnly }, deletion: deletion)
+            readScope: { [weak root] in root?.readScope ?? .captureOnly })
+        model.deletion = deletion
+        return model
     }
 
     private var layout: ProtectedStorageLayout { ProtectedStorageLayout(rootDirectory: storageRoot) }

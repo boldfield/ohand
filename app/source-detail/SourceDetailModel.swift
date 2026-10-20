@@ -128,8 +128,10 @@ final class SourceDetailModel: ObservableObject {
     @Published private(set) var audio: SourceAudioState = .none
 
     let itemID: String
+    /// The reminder section's model, when the host provides one.
+    var reminderEditor: ReminderEditModel?
     /// The per-item delete control, when the app assembles one.
-    let deletion: ItemDeletionModel?
+    var deletion: ItemDeletionModel?
     private let reader: SourceDetailReading
     private let opener: SourceAudioOpening
     private let readScope: () -> CompositionReadScope
@@ -141,10 +143,9 @@ final class SourceDetailModel: ObservableObject {
 
     init(
         itemID: String, reader: SourceDetailReading, opener: SourceAudioOpening,
-        readScope: @escaping () -> CompositionReadScope = { .authenticated }, deletion: ItemDeletionModel? = nil
+        readScope: @escaping () -> CompositionReadScope = { .authenticated }
     ) {
         self.itemID = itemID
-        self.deletion = deletion
         self.reader = reader
         self.opener = opener
         self.readScope = readScope
@@ -382,9 +383,11 @@ final class SourceDetailModel: ObservableObject {
     }
 
     static func assembled(itemID: String, root: ServiceCompositionRoot) -> SourceDetailModel {
-        SourceDetailModel(
-            itemID: itemID, reader: root.itemDetails, opener: root.playback, readScope: { root.readScope },
-            deletion: .assembled(itemID: itemID, root: root))
+        let model = SourceDetailModel(
+            itemID: itemID, reader: root.itemDetails, opener: root.playback, readScope: { root.readScope })
+        model.reminderEditor = .assembled(itemID: itemID, root: root)
+        model.deletion = .assembled(itemID: itemID, root: root)
+        return model
     }
 }
 
